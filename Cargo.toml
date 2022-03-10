@@ -1,8 +1,22 @@
 [package]
+authors = ['Piotr Olszewski <asmie@asmie.pl>']
 name = "stamp-suite"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+categories = [
+    "network-programming",
+    "development-tools",
+    "command-line-utilities",
+]
+
+license = "MIT"
+
+homepage = "https://github.com/asmie/stamp-suite"
+repository = "https://github.com/asmie/stamp-suite"
+
+description = "Simple Two-Way Active Measurement Protocol (STAMP) (RFC 8762 and 8972)"
+
+readme = "readme.md"
 
 [dependencies]
