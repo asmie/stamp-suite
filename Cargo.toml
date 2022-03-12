@@ -19,4 +19,8 @@ description = "Simple Two-Way Active Measurement Protocol (STAMP) (RFC 8762 and 
 
 readme = "readme.md"
 
+[[bin]]
+name = "stamp"
+path = "src/main.rs"
+
 [dependencies]
