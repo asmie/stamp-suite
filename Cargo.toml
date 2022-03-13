@@ -24,3 +24,4 @@ name = "stamp"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "3.1.6", features = ["derive"] }

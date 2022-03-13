@@ -1,16 +1,27 @@
 
-use crate::configuration::ConfigurationErr;
 
-
-pub fn configure() -> Result<(), ConfigurationErr>
+struct SenderState
 {
+    seq_number : u32,
 
-    
-    Ok(())
+
 }
 
-pub fn generate_message()
+
+pub fn generate_message() //-> Result<Vec<u8>, std::io::Error>
 {
 
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_message_test() {
+
+    }
+}
+
 

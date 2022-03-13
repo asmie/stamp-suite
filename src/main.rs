@@ -1,11 +1,17 @@
+mod configuration;
+mod packets;
+mod sender;
+
+use crate::configuration::*;
+use configuration::Configuration;
+
 
 fn main()
 {
+    let args = Configuration::parse();
 
-}
+    let s = args.count;
 
-
-fn print_help() -> ()
-{
+    println!("Hello {} {}!", args.remote_addr, s as u8);
 
 }

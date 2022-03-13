@@ -1,24 +1,106 @@
-pub enum ConfigurationErr {
-    InvalidConfiguration
+pub use clap::Parser;
+use std::str::FromStr;
+use std::fmt;
+use std::error::Error;
+use std::net::IpAddr;
 
+#[derive(Debug)]
+pub struct ConfigurationError {
+    details: String
 }
 
-enum StampModes {
+impl ConfigurationError {
+    fn new(msg: &str) -> ConfigurationError {
+        ConfigurationError{details: msg.to_string()}
+    }
+}
+
+impl fmt::Display for ConfigurationError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,"{}",self.details)
+    }
+}
+
+impl Error for ConfigurationError {
+    fn description(&self) -> &str {
+        &self.details
+    }
+}
+
+
+pub enum StampModes {
     Unauthenticated,
     Authenticated,
 }
 
-enum StampReflectorModes {
+pub enum StampReflectorModes {
     Stateless,
     Stateful,
 }
 
-enum ClockSource {
+pub enum ClockSource {
     NTP,
     PTP,
 }
 
-struct Configuration
+
+impl FromStr for ClockSource {
+    type Err = ConfigurationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err>
+    {
+        match s {
+            "NTP" => Ok(ClockSource::NTP),
+            "PTP" => Ok(ClockSource::PTP),
+            _ => Err(ConfigurationError::new("Invalid clock source"))
+        }
+    }
+}
+
+impl fmt::Display for ClockSource {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            ClockSource::NTP => write!(f, "NTP"),
+            ClockSource::PTP => write!(f, "PTP"),
+        }
+    }
+}
+
+impl fmt::Debug for ClockSource {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            ClockSource::NTP => write!(f, "NTP"),
+            ClockSource::PTP => write!(f, "PTP"),
+        }
+    }
+}
+
+
+#[derive(Parser, Debug)]
+#[clap(author = "Piotr Olszewski", version, about, long_about = None)]
+pub struct Configuration {
+    /// Remote address for Session Reflector
+    #[clap(short, long)]
+    pub remote_addr: std::net::IpAddr,
+    /// Local address to bind for
+    #[clap(short, long, default_value = "0.0.0.0")]
+    pub local_addr: std::net::IpAddr,
+    /// UDP port number for outgoing packets
+    #[clap(short = 'p', long, default_value_t = 852)]
+    pub remote_port: u16,
+    /// UDP port number for incoming packets
+    #[clap(short = 'o', long, default_value_t = 852)]
+    pub local_port: u16,
+    /// Clock source to be used
+    #[clap(short, long, default_value = "NTP")]
+    pub count: ClockSource,
+    // The path to the file to read
+    //#[clap(parse(from_os_str))]
+    //pub configuration_file: std::path::PathBuf,
+}
+
+pub fn validate_configuration() -> Result<(), ConfigurationError>
 {
 
+    Ok(())
 }
