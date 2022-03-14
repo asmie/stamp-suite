@@ -4,6 +4,7 @@ use std::net::UdpSocket;
 use std::io;
 
 pub fn sender_worker(conf :Arc<Configuration>) {
+    // Binding to whatever OS will like as this is send-only socket.
     let socket = UdpSocket::bind("0.0.0.0:0").expect("Cannot bind to address");
     socket.connect((conf.remote_addr.unwrap(), conf.remote_port)).expect("Cannot connect to address");
 

@@ -27,13 +27,13 @@ impl Error for ConfigurationError {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum)]
+#[derive(Copy, Clone)]
 pub enum StampModes {
     Unauthenticated,
     Authenticated,
 }
 
-
+#[derive(Copy, Clone)]
 pub enum StampReflectorModes {
     Stateless,
     Stateful,
@@ -44,7 +44,6 @@ pub enum ClockSource {
     NTP,
     PTP,
 }
-
 
 impl FromStr for ClockSource {
     type Err = ConfigurationError;
@@ -78,12 +77,9 @@ impl fmt::Debug for ClockSource {
 }
 
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[clap(author = "Piotr Olszewski", version, about, long_about = None)]
 pub struct Configuration {
-    /// STAMP mode
-    #[clap(short,long, arg_enum)]
-    pub mode : StampModes,
     /// Remote address for Session Reflector
     #[clap(short, long)]
     pub remote_addr: Option<std::net::IpAddr>,
@@ -98,7 +94,7 @@ pub struct Configuration {
     pub local_port: u16,
     /// Clock source to be used
     #[clap(short, long, default_value = "NTP")]
-    pub count: ClockSource,
+    pub clock_source: ClockSource,
     // The path to the file to read
     //#[clap(parse(from_os_str))]
     //pub configuration_file: std::path::PathBuf,
