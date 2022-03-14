@@ -107,3 +107,28 @@ impl Configuration {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::ToSocketAddrs;
+    use super::*;
+
+    #[test]
+    fn validate_configuration_correct_test() {
+        let conf = Configuration {
+            remote_port: 123,
+            remote_addr: Some(IpAddr::from_str("127.0.0.1").unwrap()),
+            clock_source: ClockSource::NTP,
+            local_port: 123,
+            local_addr: IpAddr::from_str("127.0.0.1").unwrap(),
+        };
+
+        let res = conf.validate();
+        
+    }
+
+    #[test]
+    fn validate_configuration_incorrect_test() {
+
+    }
+}
