@@ -12,6 +12,6 @@ fn main()
 
     let s = args.count;
 
-    println!("Hello {} {}!", args.remote_addr, s as u8);
+    println!("Hello {} {}!", args.remote_addr.unwrap(), s as u8);
 
 }

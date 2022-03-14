@@ -1,4 +1,4 @@
-pub use clap::Parser;
+pub use clap::{ArgEnum, Parser};
 use std::str::FromStr;
 use std::fmt;
 use std::error::Error;
@@ -27,11 +27,12 @@ impl Error for ConfigurationError {
     }
 }
 
-
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ArgEnum)]
 pub enum StampModes {
     Unauthenticated,
     Authenticated,
 }
+
 
 pub enum StampReflectorModes {
     Stateless,
@@ -76,12 +77,15 @@ impl fmt::Debug for ClockSource {
 }
 
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[clap(author = "Piotr Olszewski", version, about, long_about = None)]
 pub struct Configuration {
+    /// STAMP mode
+    #[clap(short,long, arg_enum)]
+    pub mode : StampModes,
     /// Remote address for Session Reflector
     #[clap(short, long)]
-    pub remote_addr: std::net::IpAddr,
+    pub remote_addr: Option<std::net::IpAddr>,
     /// Local address to bind for
     #[clap(short, long, default_value = "0.0.0.0")]
     pub local_addr: std::net::IpAddr,
