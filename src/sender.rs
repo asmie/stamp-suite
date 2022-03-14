@@ -1,15 +1,7 @@
+use crate::configuration::*;
+use std::sync::Arc;
 
-
-struct SenderState
-{
-    seq_number : u32,
-
-
-}
-
-
-pub fn generate_message() //-> Result<Vec<u8>, std::io::Error>
-{
+pub fn sender_worker(conf :Arc<Configuration>) {
 
 }
 

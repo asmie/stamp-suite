@@ -39,6 +39,7 @@ pub enum StampReflectorModes {
     Stateful,
 }
 
+#[derive(Copy, Clone)]
 pub enum ClockSource {
     NTP,
     PTP,
@@ -103,8 +104,10 @@ pub struct Configuration {
     //pub configuration_file: std::path::PathBuf,
 }
 
-pub fn validate_configuration() -> Result<(), ConfigurationError>
-{
+impl Configuration {
+    pub fn validate(&self) -> Result<(), ConfigurationError>
+    {
 
-    Ok(())
+        Ok(())
+    }
 }
