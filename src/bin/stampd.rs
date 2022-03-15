@@ -1,10 +1,10 @@
 #[macro_use]
 extern crate log;
 
-mod configuration;
-mod packets;
-mod sender;
-mod receiver;
+use stamp_suite::configuration;
+use stamp_suite::packets;
+use stamp_suite::sender;
+use stamp_suite::receiver;
 
 use crate::configuration::*;
 use std::thread;
@@ -17,6 +17,7 @@ fn main()
 
     let receiver;
     let sender;
+
 
     let args = Configuration::parse();
     args.validate().expect("Configuration is broken!");           // Panic if configuration is messed up!
