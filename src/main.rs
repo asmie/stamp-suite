@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate log;
+
 mod configuration;
 mod packets;
 mod sender;
@@ -10,11 +13,15 @@ use std::sync::Arc;
 
 fn main()
 {
+    env_logger::init();
+
     let receiver;
     let sender;
 
     let args = Configuration::parse();
     args.validate().expect("Configuration is broken!");           // Panic if configuration is messed up!
+
+    info!("Configuration valid. Starting up...");
 
     let args_ptr = Arc::new(args);
 

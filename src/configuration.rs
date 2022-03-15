@@ -123,8 +123,7 @@ mod tests {
             local_addr: IpAddr::from_str("127.0.0.1").unwrap(),
         };
 
-        let res = conf.validate();
-        
+        assert_eq!((), conf.validate().unwrap());
     }
 
     #[test]
