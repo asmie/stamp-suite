@@ -100,3 +100,14 @@ impl fmt::Debug for ClockSource {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::configuration::ClockSource;
+
+    #[test]
+    fn clock_source_test() {
+        let cs = ClockSource::NTP;
+
+    }
+}
