@@ -33,10 +33,35 @@ pub enum StampModes {
     Authenticated,
 }
 
-#[derive(Copy, Clone)]
-pub enum StampReflectorModes {
-    Stateless,
-    Stateful,
+impl FromStr for StampModes {
+    type Err = ConfigurationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err>
+    {
+        match s {
+            "u" => Ok(StampModes::Unauthenticated),
+            "a" => Ok(StampModes::Authenticated),
+            _ => Err(ConfigurationError::new("Invalid STAMP mode"))
+        }
+    }
+}
+
+impl fmt::Display for StampModes {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            StampModes::Unauthenticated => write!(f, "u"),
+            StampModes::Authenticated => write!(f, "a"),
+        }
+    }
+}
+
+impl fmt::Debug for StampModes {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            StampModes::Unauthenticated => write!(f, "u"),
+            StampModes::Authenticated => write!(f, "a"),
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -75,8 +100,3 @@ impl fmt::Debug for ClockSource {
         }
     }
 }
-
-
-
-
-
