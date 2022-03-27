@@ -58,7 +58,7 @@ pub struct Configuration {
     pub local_port: u16,
     /// Clock source to be used
     #[clap(short, long, default_value = "NTP")]
-    pub clock_source: ClockSource,
+    pub clock_source: ClockFormat,
     // The path to the file to read
     //#[clap(parse(from_os_str))]
     //pub configuration_file: std::path::PathBuf,
@@ -74,16 +74,15 @@ impl Configuration {
 
 #[cfg(test)]
 mod tests {
-    use std::net::ToSocketAddrs;
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
     use super::*;
 
     #[test]
     fn validate_configuration_correct_test() {
         let conf = Configuration {
-            clock_source: ClockSource::NTP,
+            clock_source: ClockFormat::NTP,
             local_port: 123,
-            local_addr: IpAddr::from_str("127.0.0.1").unwrap(),
+            local_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         };
 
         assert_eq!((), conf.validate().unwrap());

@@ -65,49 +65,49 @@ impl fmt::Debug for StampModes {
 }
 
 #[derive(Copy, Clone)]
-pub enum ClockSource {
+pub enum ClockFormat {
     NTP,
     PTP,
 }
 
-impl FromStr for ClockSource {
+impl FromStr for ClockFormat {
     type Err = ConfigurationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err>
     {
         match s {
-            "NTP" => Ok(ClockSource::NTP),
-            "PTP" => Ok(ClockSource::PTP),
+            "NTP" => Ok(ClockFormat::NTP),
+            "PTP" => Ok(ClockFormat::PTP),
             _ => Err(ConfigurationError::new("Invalid clock source"))
         }
     }
 }
 
-impl fmt::Display for ClockSource {
+impl fmt::Display for ClockFormat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            ClockSource::NTP => write!(f, "NTP"),
-            ClockSource::PTP => write!(f, "PTP"),
+            ClockFormat::NTP => write!(f, "NTP"),
+            ClockFormat::PTP => write!(f, "PTP"),
         }
     }
 }
 
-impl fmt::Debug for ClockSource {
+impl fmt::Debug for ClockFormat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            ClockSource::NTP => write!(f, "NTP"),
-            ClockSource::PTP => write!(f, "PTP"),
+            ClockFormat::NTP => write!(f, "NTP"),
+            ClockFormat::PTP => write!(f, "PTP"),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::configuration::ClockSource;
+    use crate::configuration::ClockFormat;
 
     #[test]
     fn clock_source_test() {
-        let cs = ClockSource::NTP;
+        let cs = ClockFormat::NTP;
 
     }
 }

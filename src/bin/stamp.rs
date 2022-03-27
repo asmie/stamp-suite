@@ -56,7 +56,7 @@ pub struct Configuration {
     pub local_port: u16,
     /// Clock source to be used
     #[clap(short, long, default_value = "NTP")]
-    pub clock_source: ClockSource,
+    pub clock_source: ClockFormat,
     // The path to the file to read
     //#[clap(parse(from_os_str))]
     //pub configuration_file: std::path::PathBuf,
