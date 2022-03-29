@@ -4,6 +4,17 @@ use chrono::{Date, DateTime, Timelike, Utc};
 
 const NTP_UNIX_OFFSET : i64 = 2208988800;
 
+/// Generates timestamp with specified clock format.
+///
+/// generate_timestamp generates timestamp of the current date and time not taking into account
+/// any timezones. Timestamp is generated for UTC.
+///
+/// ```
+/// use stamp_suite::configuration::ClockFormat;
+/// use stamp_suite::time::generate_timestamp;
+/// let timestamp = generate_timestamp(ClockFormat::NTP);
+/// println!("Timestamp is {}", timestamp);
+/// ```
 pub fn generate_timestamp(cs : ClockFormat) -> u64 {
     let now = Utc::now();
 
