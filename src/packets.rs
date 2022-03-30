@@ -1,6 +1,7 @@
 
-#[repr(packed)]
-struct PacketUnauthenticated
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+pub struct PacketUnauthenticated
 {
     sequence_number: u32,
     timestamp: u64,
@@ -8,8 +9,9 @@ struct PacketUnauthenticated
     mbz: [u8; 30],
 }
 
-#[repr(packed)]
-struct ReflectedPacketUnauthenticated
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+pub struct ReflectedPacketUnauthenticated
 {
     sequence_number: u32,
     timestamp: u64,
@@ -25,7 +27,8 @@ struct ReflectedPacketUnauthenticated
     mbz3b : u16,
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
 struct PacketAuthenticated
 {
     sequence_number: u32,
@@ -36,7 +39,8 @@ struct PacketAuthenticated
     hmac: [u8; 16],
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
 struct ReflectedPacketAuthenticated
 {
     sequence_number: u32,

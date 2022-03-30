@@ -1,15 +1,17 @@
 #[macro_use]
 extern crate log;
 
-use stamp_suite::configuration;
-use stamp_suite::packets;
-use stamp_suite::sender;
-use stamp_suite::receiver;
-
+use stamp_suite::{configuration, packets, sender, receiver, packets::*};
 use crate::configuration::*;
 
 use std::thread;
 use std::net::UdpSocket;
+use std::io::Read;
+use std::mem;
+use std::slice;
+use std::io;
+
+
 
 fn main()
 {
@@ -27,6 +29,25 @@ fn main()
     worker.join();
 }
 
+
+
+fn read_struct<T, R: Read>(mut read: R) -> io::Result<T> {
+    let num_bytes = ::std::mem::size_of::<T>();
+    unsafe {
+        let mut s = ::std::mem::zeroed();
+        let buffer = slice::from_raw_parts_mut(&mut s as *mut T as *mut u8, num_bytes);
+        match read.read_exact(buffer) {
+            Ok(()) => Ok(s),
+            Err(e) => {
+                ::std::mem::forget(s);
+                Err(e)
+            }
+        }
+    }
+}
+
+type BufferType = [u8; 65535];
+
 fn worker(conf : Configuration)
 {
     let socket = UdpSocket::bind((conf.local_addr, conf.local_port)).expect("Cannot bind to address");
@@ -41,6 +62,7 @@ fn worker(conf : Configuration)
             }
         };
 
+        let mut packet = read_struct::<PacketUnauthenticated, &[u8]>(&mut buf);
 
 
         //println!("bytes: {:?}", &buf[..num_bytes_read]);
@@ -50,7 +72,7 @@ fn worker(conf : Configuration)
 #[derive(Parser, Debug)]
 #[clap(author = "Piotr Olszewski", version, about, long_about = None)]
 pub struct Configuration {
-    /// Local address to bind for
+    /// Local address to bind
     #[clap(short, long, default_value = "0.0.0.0")]
     pub local_addr: std::net::IpAddr,
     /// UDP port number for incoming packets
