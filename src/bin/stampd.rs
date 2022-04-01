@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 
+use std::borrow::Borrow;
 use stamp_suite::{configuration, packets, sender, receiver, packets::*};
 use crate::configuration::*;
 
@@ -31,20 +32,7 @@ fn main()
 
 
 
-fn read_struct<T, R: Read>(mut read: R) -> io::Result<T> {
-    let num_bytes = ::std::mem::size_of::<T>();
-    unsafe {
-        let mut s = ::std::mem::zeroed();
-        let buffer = slice::from_raw_parts_mut(&mut s as *mut T as *mut u8, num_bytes);
-        match read.read_exact(buffer) {
-            Ok(()) => Ok(s),
-            Err(e) => {
-                ::std::mem::forget(s);
-                Err(e)
-            }
-        }
-    }
-}
+
 
 type BufferType = [u8; 65535];
 
@@ -53,7 +41,8 @@ fn worker(conf : Configuration)
     let socket = UdpSocket::bind((conf.local_addr, conf.local_port)).expect("Cannot bind to address");
 
     loop {
-        let mut buf = [0u8; 65535];
+        let mut buf : BufferType
+            = [0u8; 65535];
 
         let (num_bytes_read, _) = loop {
             match socket.recv_from(&mut buf) {
@@ -62,8 +51,9 @@ fn worker(conf : Configuration)
             }
         };
 
-        let mut packet = read_struct::<PacketUnauthenticated, &[u8]>(&mut buf);
+        let mut packet = read_struct::<PacketUnauthenticated, &[u8]>(&mut buf).unwrap();
 
+        let seq = packet.sequence_number;
 
         //println!("bytes: {:?}", &buf[..num_bytes_read]);
     }
