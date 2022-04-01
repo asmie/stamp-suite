@@ -1,40 +1,52 @@
 #[macro_use]
 extern crate log;
 
-use stamp_suite::configuration;
-use stamp_suite::packets;
-use stamp_suite::sender;
-use stamp_suite::receiver;
 
+use stamp_suite::{configuration, packets, sender, receiver, time, packets::*};
 use crate::configuration::*;
 
+use std::thread;
 use std::net::UdpSocket;
-use std::{io, thread};
-use std::time::Duration;
+use std::io::Read;
+use std::mem;
+use std::slice;
+use std::io;
 
-use std::sync::Arc;
+use stamp_suite::configuration::ClockFormat::NTP;
+use stamp_suite::time::generate_timestamp;
 
 fn main()
 {
     env_logger::init();
 
-    let args = Configuration::parse();
-    args.validate().expect("Configuration is broken!");           // Panic if configuration is messed up!
+    let arg = Configuration::parse();
+    arg.validate().expect("Configuration is broken!");           // Panic if configuration is messed up!
 
     info!("Configuration valid. Starting up...");
 
     // Now we need to set up the communication channels and implement high-level logic.
 
     // Binding to whatever OS will like as this is send-only socket.
-    //let socket = UdpSocket::bind("0.0.0.0:0").expect("Cannot bind to address");
-    //socket.connect((conf.remote_addr.unwrap(), conf.remote_port)).expect("Cannot connect to address");
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("Cannot bind to address");
+    socket.connect((arg.remote_addr.unwrap(), arg.remote_port)).expect("Cannot connect to address");
 
-    let curr_seq = 0;
+    let mut curr_seq = 0;
 
     loop {
 
+        let mut packet = PacketUnauthenticated {
+            timestamp: generate_timestamp(NTP),
+            error_estimate: 0,
+            sequence_number: curr_seq,
+            mbz: [0u8; 30],
+        };
 
-        thread::sleep(Duration::from_secs(1));
+        let buf = unsafe { any_as_u8_slice::<PacketUnauthenticated>(&packet) };
+        socket.send(buf);
+
+        curr_seq += 1;
+
+        thread::sleep(std::time::Duration::from_secs(3));
     }
 
 }

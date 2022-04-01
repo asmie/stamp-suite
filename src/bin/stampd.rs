@@ -31,9 +31,6 @@ fn main()
 }
 
 
-
-
-
 type BufferType = [u8; 65535];
 
 fn worker(conf : Configuration)
@@ -41,21 +38,40 @@ fn worker(conf : Configuration)
     let socket = UdpSocket::bind((conf.local_addr, conf.local_port)).expect("Cannot bind to address");
 
     loop {
-        let mut buf : BufferType
-            = [0u8; 65535];
+        let mut buf : BufferType = [0u8; 65535];
 
-        let (num_bytes_read, _) = loop {
+        let (num_bytes_read, src_addr) = loop {
             match socket.recv_from(&mut buf) {
                 Ok(n) => break n,
                 Err(e) => panic!("encountered IO error: {}", e),
             }
         };
 
+        println!("bytes: {:?}", &buf[..num_bytes_read]);
+
         let mut packet = read_struct::<PacketUnauthenticated, &[u8]>(&mut buf).unwrap();
 
-        let seq = packet.sequence_number;
+        let mut packet_resp = ReflectedPacketUnauthenticated {
+            sess_sender_timestamp: packet.timestamp,
+            sess_sender_err_estimate: packet.error_estimate,
+            sess_sender_seq_number: packet.sequence_number,
+            sess_sender_ttl: 0,
+            sequence_number: packet.sequence_number,
+            error_estimate: packet.error_estimate,
+            timestamp:0,
+            receive_timestamp: 0,
+            mbz1: 0,
+            mbz2: 0,
+            mbz3a: 0,
+            mbz3b: 0,
+        };
 
-        //println!("bytes: {:?}", &buf[..num_bytes_read]);
+        let buf_resp = unsafe { any_as_u8_slice::<ReflectedPacketUnauthenticated>(&packet_resp) };
+
+        socket.send_to(buf_resp, src_addr);
+
+
+
     }
 }
 
