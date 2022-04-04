@@ -123,6 +123,11 @@ mod tests {
             clock_source: ClockFormat::NTP,
             local_port: 123,
             local_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            print_stats: false,
+            auth_mode: String::from("AEO"),
+            timeout: 5,
+            force_ipv4: false,
+            force_ipv6: false,
         };
 
         assert_eq!((), conf.validate().unwrap());

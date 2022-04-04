@@ -22,12 +22,11 @@ fn main()
     env_logger::init();
 
     let conf = Configuration::parse();
-    conf.validate().expect("Configuration is broken!");           // Panic if configuration is messed up!
+    conf.validate().expect("Configuration is broken!");
 
     info!("Configuration valid. Starting up...");
 
-    // Binding to whatever OS will like as this is send-only socket.
-    let socket = UdpSocket::bind("0.0.0.0:0").expect("Cannot bind to address");
+    let socket = UdpSocket::bind((conf.local_addr, conf.local_port)).expect("Cannot bind to address");
     socket.connect((conf.remote_addr, conf.remote_port)).expect("Cannot connect to address");
 
     let sess = Session::new(0);         // Client has no multi-sess right now.
