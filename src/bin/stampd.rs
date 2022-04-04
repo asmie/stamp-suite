@@ -78,18 +78,30 @@ fn worker(conf : Configuration)
 #[derive(Parser, Debug)]
 #[clap(author = "Piotr Olszewski", version, about, long_about = None)]
 pub struct Configuration {
-    /// Local address to bind
-    #[clap(short, long, default_value = "0.0.0.0")]
+    /// Local address to bind for
+    #[clap(short = 'S', long, default_value = "0.0.0.0")]
     pub local_addr: std::net::IpAddr,
     /// UDP port number for incoming packets
     #[clap(short = 'o', long, default_value_t = 852)]
     pub local_port: u16,
     /// Clock source to be used
-    #[clap(short, long, default_value = "NTP")]
+    #[clap(short = 'K', long, default_value = "NTP")]
     pub clock_source: ClockFormat,
-    // The path to the file to read
-    //#[clap(parse(from_os_str))]
-    //pub configuration_file: std::path::PathBuf,
+    /// Amount of time to wait for packet until consider it lost [s].
+    #[clap(short = 'L', default_value_t = 5)]
+    pub timeout : u8,
+    /// Force IPv4 addresses.
+    #[clap(short = '4')]
+    pub force_ipv4 : bool,
+    /// Force IPv6 addresses.
+    #[clap(short = '6')]
+    pub force_ipv6 : bool,
+    /// Specify work mode - A for auth, E for encryped and O for open mode -  default "AEO".
+    #[clap(short = 'A', long, default_value = "AEO")]
+    pub auth_mode : String,
+    /// Print individual statistics for each packet.
+    #[clap(short = 'R')]
+    pub print_stats : bool,
 }
 
 impl Configuration {

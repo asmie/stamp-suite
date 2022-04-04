@@ -24,6 +24,7 @@ pub fn generate_timestamp(cs : ClockFormat) -> u64 {
     }
 }
 
+
 fn convert_dt_to_ntp(date : DateTime<Utc>) -> u64 {
     let secs = (date.timestamp() + NTP_UNIX_OFFSET) as u32;
     let fraction = ((date.timestamp_subsec_millis() as u64) * u32::MAX as u64 / 1000u64) as u32;
