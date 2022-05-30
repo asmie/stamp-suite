@@ -15,6 +15,12 @@ STAMP is simple protocol where configuration and sessions handling is out of the
 
 Usage of both client and server is given below. Where it was possible it has been tried to be as much compatible with OWAMP/TWAMP as it is possible to increase usage comfort for those who know such packages.
 
+## Current state
+Project is still under development.
+Current work is done towards:
+- TTL field handling using Rust net lib
+- authenticated mode
+
 ## stampd - usage
 Basic usage is just to call the binary with the correct options. Anytime you can use -h for help.
 
