@@ -24,5 +24,5 @@ clap = { version = "3.1.6", features = ["derive"] }
 log = "0.4.0"
 env_logger = "0.9.0"
 chrono = "0.4"
-nix = "0.23"
+nix = "0.24"
 #libc = "0.2"
