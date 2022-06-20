@@ -2,17 +2,12 @@
 extern crate log;
 
 
-use stamp_suite::{configuration, packets, sender, receiver, time, packets::*};
+use stamp_suite::{configuration, packets::*};
 use crate::configuration::*;
 
 use std::thread;
 use std::net::UdpSocket;
-use std::io::Read;
-use std::mem;
-use std::slice;
-use std::io;
 
-use stamp_suite::configuration::ClockFormat::NTP;
 use stamp_suite::sender::{assemble_auth_packet, assemble_unauth_packet};
 use stamp_suite::session::Session;
 use stamp_suite::time::generate_timestamp;
@@ -37,14 +32,14 @@ fn main()
             packet.sequence_number = sess.generate_sequence_number();
             packet.timestamp = generate_timestamp(conf.clock_source);
             let buf = unsafe { any_as_u8_slice::<PacketAuthenticated>(&packet) };
-            socket.send(buf);
+            socket.send(buf).unwrap();
         }
         else {
             let mut packet = assemble_unauth_packet();
             packet.sequence_number = sess.generate_sequence_number();
             packet.timestamp = generate_timestamp(conf.clock_source);
             let buf = unsafe { any_as_u8_slice::<PacketUnauthenticated>(&packet) };
-            socket.send(buf);
+            socket.send(buf).unwrap();
         }
 
         thread::sleep(std::time::Duration::from_millis(conf.send_delay as u64));

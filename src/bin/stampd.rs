@@ -1,16 +1,12 @@
 #[macro_use]
 extern crate log;
 
-use std::borrow::Borrow;
-use stamp_suite::{configuration, packets, sender, receiver::*, packets::*};
+use stamp_suite::{configuration, receiver::*, packets::*};
 use crate::configuration::*;
 
 use std::thread;
 use std::net::UdpSocket;
-use std::io::Read;
-use std::mem;
-use std::slice;
-use std::io;
+
 use stamp_suite::time::generate_timestamp;
 //use std::os::unix::io::AsRawFd;
 //use nix::sys::socket;
@@ -28,7 +24,7 @@ fn main()
 
     let worker = thread::spawn(move || worker(args));
 
-    worker.join();
+    worker.join().unwrap();
 
     info!("Exiting...");
 }
@@ -53,13 +49,14 @@ fn worker(conf : Configuration)
 
         println!("bytes: {:?}", &buf[..num_bytes_read]);
 
-        let mut packet = read_struct::<PacketUnauthenticated, &[u8]>(&mut buf).unwrap();
+        let packet = read_struct::<PacketUnauthenticated, &[u8]>(&mut buf).unwrap();
 
-        let mut packet_resp = assemble_unauth_answer(&packet, conf.clock_source, rcv_timestamp);
+        let packet_resp = assemble_unauth_answer(&packet, conf.clock_source, rcv_timestamp);
 
         let buf_resp = unsafe { any_as_u8_slice::<ReflectedPacketUnauthenticated>(&packet_resp) };
 
-        socket.send_to(buf_resp, src_addr);
+        socket.send_to(buf_resp, src_addr).unwrap();
+
     }
 }
 

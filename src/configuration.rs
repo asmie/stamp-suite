@@ -2,7 +2,6 @@ pub use clap::{ArgEnum, Parser};
 use std::str::FromStr;
 use std::fmt;
 use std::error::Error;
-use std::net::IpAddr;
 
 #[derive(Debug)]
 pub struct ConfigurationError {

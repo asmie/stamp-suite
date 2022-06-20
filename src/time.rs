@@ -1,6 +1,5 @@
-use std::alloc::System;
 use crate::configuration::ClockFormat;
-use chrono::{Date, DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 
 const NTP_UNIX_OFFSET : i64 = 2208988800;
 
