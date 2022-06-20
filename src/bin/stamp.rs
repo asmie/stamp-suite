@@ -13,7 +13,7 @@ use std::slice;
 use std::io;
 
 use stamp_suite::configuration::ClockFormat::NTP;
-use stamp_suite::sender::assemble_unauth_packet;
+use stamp_suite::sender::{assemble_auth_packet, assemble_unauth_packet};
 use stamp_suite::session::Session;
 use stamp_suite::time::generate_timestamp;
 
@@ -32,13 +32,20 @@ fn main()
     let sess = Session::new(0);         // Client has no multi-sess right now.
 
     loop {
-
-        let mut packet = assemble_unauth_packet();
-
-        packet.sequence_number = sess.generate_sequence_number();
-        packet.timestamp = generate_timestamp(conf.clock_source);
-        let buf = unsafe { any_as_u8_slice::<PacketUnauthenticated>(&packet) };
-        socket.send(buf);
+        if is_auth(&conf.auth_mode) {
+            let mut packet = assemble_auth_packet();
+            packet.sequence_number = sess.generate_sequence_number();
+            packet.timestamp = generate_timestamp(conf.clock_source);
+            let buf = unsafe { any_as_u8_slice::<PacketAuthenticated>(&packet) };
+            socket.send(buf);
+        }
+        else {
+            let mut packet = assemble_unauth_packet();
+            packet.sequence_number = sess.generate_sequence_number();
+            packet.timestamp = generate_timestamp(conf.clock_source);
+            let buf = unsafe { any_as_u8_slice::<PacketUnauthenticated>(&packet) };
+            socket.send(buf);
+        }
 
         thread::sleep(std::time::Duration::from_millis(conf.send_delay as u64));
     }

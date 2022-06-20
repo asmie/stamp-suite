@@ -101,6 +101,30 @@ impl fmt::Debug for ClockFormat {
     }
 }
 
+pub fn is_auth(mode_str : &String) -> bool {
+    let mut res = false;
+    if mode_str.find("A").is_some() {
+        res = true;
+    }
+    res
+}
+
+pub fn is_enc(mode_str : &String) -> bool {
+    let mut res = false;
+    if mode_str.find("E").is_some() {
+        res = true;
+    }
+    res
+}
+
+pub fn is_open(mode_str : &String) -> bool {
+    let mut res = false;
+    if mode_str.find("O").is_some() {
+        res = true;
+    }
+    res
+}
+
 #[cfg(test)]
 mod tests {
     use crate::configuration::ClockFormat;

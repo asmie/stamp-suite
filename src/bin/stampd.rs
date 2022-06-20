@@ -29,6 +29,8 @@ fn main()
     let worker = thread::spawn(move || worker(args));
 
     worker.join();
+
+    info!("Exiting...");
 }
 
 

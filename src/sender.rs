@@ -16,3 +16,16 @@ pub fn assemble_unauth_packet() -> PacketUnauthenticated {
     packet
 }
 
+pub fn assemble_auth_packet() -> PacketAuthenticated {
+    let mut packet = PacketAuthenticated {
+        timestamp: 0,
+        mbz0: [0u8; 12],
+        error_estimate: 0,
+        sequence_number: 0,
+        hmac : [0u8; 16],
+        mbz1 : [0u8; 70],
+    };
+
+    packet
+}
+
