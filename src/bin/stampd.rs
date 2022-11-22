@@ -1,11 +1,11 @@
 #[macro_use]
 extern crate log;
 
-use stamp_suite::{configuration, receiver::*, packets::*};
 use crate::configuration::*;
+use stamp_suite::{configuration, packets::*, receiver::*};
 
-use std::thread;
 use std::net::UdpSocket;
+use std::thread;
 
 use stamp_suite::time::generate_timestamp;
 //use std::os::unix::io::AsRawFd;
@@ -13,12 +13,11 @@ use stamp_suite::time::generate_timestamp;
 //use nix::sys::socket::setsockopt;
 //use nix::sys::socket::sockopt;
 
-fn main()
-{
+fn main() {
     env_logger::init();
 
     let args = Configuration::parse();
-    args.validate().expect("Configuration is broken!");           // Panic if configuration is messed up!
+    args.validate().expect("Configuration is broken!"); // Panic if configuration is messed up!
 
     info!("Configuration valid. Starting up...");
 
@@ -29,12 +28,11 @@ fn main()
     info!("Exiting...");
 }
 
-
 type BufferType = [u8; 65535];
 
-fn worker(conf : Configuration)
-{
-    let socket = UdpSocket::bind((conf.local_addr, conf.local_port)).expect("Cannot bind to address");
+fn worker(conf: Configuration) {
+    let socket =
+        UdpSocket::bind((conf.local_addr, conf.local_port)).expect("Cannot bind to address");
     //let raw_fd: RawFd = socket.as_raw_fd();
 
     //setsockopt(raw_fd, sockopt::IpRecvErr, &true).expect("sockopt failed");
@@ -42,21 +40,20 @@ fn worker(conf : Configuration)
     //setsockopt(raw_fd, sockopt::IpMtuDiscover, &true).expect("sockopt failed");
 
     loop {
-        let mut buf : BufferType = [0u8; 65535];
+        let mut buf: BufferType = [0u8; 65535];
 
         let (num_bytes_read, src_addr) = socket.recv_from(&mut buf).expect("socket error!");
         let rcv_timestamp = generate_timestamp(conf.clock_source);
 
         println!("bytes: {:?}", &buf[..num_bytes_read]);
 
-        let packet = read_struct::<PacketUnauthenticated, &[u8]>(&mut buf).unwrap();
+        let packet: PacketUnauthenticated = read_struct(&buf).unwrap();
 
         let packet_resp = assemble_unauth_answer(&packet, conf.clock_source, rcv_timestamp);
 
-        let buf_resp = unsafe { any_as_u8_slice::<ReflectedPacketUnauthenticated>(&packet_resp) };
+        let buf_resp = any_as_u8_slice(&packet_resp).unwrap();
 
-        socket.send_to(buf_resp, src_addr).unwrap();
-
+        socket.send_to(&buf_resp, src_addr).unwrap();
     }
 }
 
@@ -74,33 +71,31 @@ pub struct Configuration {
     pub clock_source: ClockFormat,
     /// Amount of time to wait for packet until consider it lost [s].
     #[clap(short = 'L', default_value_t = 5)]
-    pub timeout : u8,
+    pub timeout: u8,
     /// Force IPv4 addresses.
     #[clap(short = '4')]
-    pub force_ipv4 : bool,
+    pub force_ipv4: bool,
     /// Force IPv6 addresses.
     #[clap(short = '6')]
-    pub force_ipv6 : bool,
+    pub force_ipv6: bool,
     /// Specify work mode - A for auth, E for encryped and O for open mode -  default "AEO".
     #[clap(short = 'A', long, default_value = "AEO")]
-    pub auth_mode : String,
+    pub auth_mode: String,
     /// Print individual statistics for each packet.
     #[clap(short = 'R')]
-    pub print_stats : bool,
+    pub print_stats: bool,
 }
 
 impl Configuration {
-    pub fn validate(&self) -> Result<(), ConfigurationError>
-    {
-
+    pub fn validate(&self) -> Result<(), ConfigurationError> {
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 
     #[test]
     fn validate_configuration_correct_test() {
@@ -119,7 +114,5 @@ mod tests {
     }
 
     #[test]
-    fn validate_configuration_incorrect_test() {
-
-    }
+    fn validate_configuration_incorrect_test() {}
 }
