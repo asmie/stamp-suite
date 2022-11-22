@@ -25,7 +25,7 @@ pub fn generate_timestamp(cs: ClockFormat) -> u64 {
 
 fn convert_dt_to_ntp(date: DateTime<Utc>) -> u64 {
     let secs = (date.timestamp() + NTP_UNIX_OFFSET) as u32;
-    let fraction = ((date.timestamp_subsec_micros() as u64) * u32::MAX as u64 / 1000u64) as u32;
+    let fraction = ((date.timestamp_subsec_micros() as u64) * u32::MAX as u64 / 1000000) as u32;
 
     ((secs as u64) << 32) | fraction as u64
 }
@@ -72,7 +72,7 @@ mod tests {
         );
         assert_eq!(
             sample.timestamp_subsec_micros(),
-            ((test_val as u32) as u64 * 1000u64 / u32::MAX as u64) as u32 + 1
+            ((test_val as u32) as u64 * 1000000u64 / u32::MAX as u64) as u32 + 1
         );
     }
 
