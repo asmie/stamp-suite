@@ -17,10 +17,11 @@ pub fn assemble_auth_packet() -> PacketAuthenticated {
         mbz0: [0u8; 12],
         error_estimate: 0,
         sequence_number: 0,
-        hmac : [0u8; 16],
-        mbz1 : [0u8; 70],
+        hmac: [0u8; 16],
+        mbz1a: [0u8; 32],
+        mbz1b: [0u8; 32],
+        mbz1c: [0u8; 6],
     };
 
     packet
 }
-
