@@ -26,7 +26,7 @@ pub fn assemble_unauth_answer(
     cs: ClockFormat,
     rcvt: u64,
 ) -> ReflectedPacketUnauthenticated {
-    let packet_resp = ReflectedPacketUnauthenticated {
+    ReflectedPacketUnauthenticated {
         sess_sender_timestamp: packet.timestamp,
         sess_sender_err_estimate: packet.error_estimate,
         sess_sender_seq_number: packet.sequence_number,
@@ -39,7 +39,5 @@ pub fn assemble_unauth_answer(
         mbz2: 0,
         mbz3a: 0,
         mbz3b: 0,
-    };
-
-    packet_resp
+    }
 }
