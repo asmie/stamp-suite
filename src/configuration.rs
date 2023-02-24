@@ -1,4 +1,4 @@
-pub use clap::{ArgEnum, Parser};
+pub use clap::{Parser};
 use std::str::FromStr;
 use std::fmt;
 use std::error::Error;
