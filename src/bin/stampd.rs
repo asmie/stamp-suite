@@ -1,13 +1,11 @@
 #[macro_use]
 extern crate log;
 
+use std::{net::UdpSocket, thread};
+
+use stamp_suite::{configuration, packets::*, receiver::*, time::generate_timestamp};
+
 use crate::configuration::*;
-use stamp_suite::{configuration, packets::*, receiver::*};
-
-use std::net::UdpSocket;
-use std::thread;
-
-use stamp_suite::time::generate_timestamp;
 //use std::os::unix::io::AsRawFd;
 //use nix::sys::socket;
 //use nix::sys::socket::setsockopt;
@@ -94,8 +92,9 @@ impl Configuration {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+
+    use super::*;
 
     #[test]
     fn validate_configuration_correct_test() {

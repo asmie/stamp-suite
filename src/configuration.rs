@@ -1,7 +1,6 @@
+use std::{error::Error, fmt, str::FromStr};
+
 pub use clap::Parser;
-use std::error::Error;
-use std::fmt;
-use std::str::FromStr;
 
 #[derive(Debug)]
 pub struct ConfigurationError {

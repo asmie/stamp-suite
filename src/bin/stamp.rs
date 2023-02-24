@@ -1,15 +1,17 @@
 #[macro_use]
 extern crate log;
 
+use std::{net::UdpSocket, thread};
+
+use stamp_suite::{
+    configuration,
+    packets::*,
+    sender::{assemble_auth_packet, assemble_unauth_packet},
+    session::Session,
+    time::generate_timestamp,
+};
+
 use crate::configuration::*;
-use stamp_suite::{configuration, packets::*};
-
-use std::net::UdpSocket;
-use std::thread;
-
-use stamp_suite::sender::{assemble_auth_packet, assemble_unauth_packet};
-use stamp_suite::session::Session;
-use stamp_suite::time::generate_timestamp;
 
 fn main() {
     env_logger::init();

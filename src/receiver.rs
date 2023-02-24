@@ -1,6 +1,8 @@
-use crate::configuration::*;
-use crate::packets::{PacketUnauthenticated, ReflectedPacketUnauthenticated};
-use crate::time::generate_timestamp;
+use crate::{
+    configuration::*,
+    packets::{PacketUnauthenticated, ReflectedPacketUnauthenticated},
+    time::generate_timestamp,
+};
 
 /*
 pub struct HopResult {

@@ -1,5 +1,6 @@
-use crate::configuration::ClockFormat;
 use chrono::{DateTime, Utc};
+
+use crate::configuration::ClockFormat;
 
 const NTP_UNIX_OFFSET: i64 = 2208988800;
 
@@ -36,9 +37,10 @@ fn convert_dt_to_ptp(date: DateTime<Utc>) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+
     use super::*;
     use crate::time::convert_dt_to_ntp;
-    use chrono::{DateTime, NaiveDateTime, Utc};
 
     #[test]
     fn convert_dt_to_ntp_test() {
