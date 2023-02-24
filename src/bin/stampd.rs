@@ -92,7 +92,7 @@ impl Configuration {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+    use std::net::{IpAddr, Ipv4Addr};
 
     use super::*;
 

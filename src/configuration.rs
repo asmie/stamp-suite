@@ -113,10 +113,9 @@ pub fn is_open(mode_str: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::configuration::ClockFormat;
 
     #[test]
     fn clock_source_test() {
-        let cs = ClockFormat::NTP;
+
     }
 }
