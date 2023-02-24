@@ -115,7 +115,5 @@ pub fn is_open(mode_str: &str) -> bool {
 mod tests {
 
     #[test]
-    fn clock_source_test() {
-
-    }
+    fn clock_source_test() {}
 }

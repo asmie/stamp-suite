@@ -44,7 +44,8 @@ mod tests {
 
     #[test]
     fn convert_dt_to_ntp_test() {
-        let mut sample = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(1525987, 0).unwrap(), Utc);
+        let mut sample =
+            DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(1525987, 0).unwrap(), Utc);
         let mut test_val = convert_dt_to_ntp(sample);
         assert_eq!(
             sample.timestamp(),
@@ -66,7 +67,10 @@ mod tests {
             (test_val as u32) / u32::MAX * 1000
         );
 
-        sample = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(2584229, 151000000).unwrap(), Utc);
+        sample = DateTime::<Utc>::from_utc(
+            NaiveDateTime::from_timestamp_opt(2584229, 151000000).unwrap(),
+            Utc,
+        );
         test_val = convert_dt_to_ntp(sample);
         assert_eq!(
             sample.timestamp(),
@@ -80,7 +84,8 @@ mod tests {
 
     #[test]
     fn convert_dt_to_ptp_test() {
-        let mut sample = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(1525987, 0).unwrap(), Utc);
+        let mut sample =
+            DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(1525987, 0).unwrap(), Utc);
         let mut test_val = convert_dt_to_ptp(sample);
         assert_eq!(sample.timestamp(), (test_val >> 32) as i64);
         assert_eq!(sample.timestamp_subsec_nanos(), test_val as u32);
@@ -90,7 +95,10 @@ mod tests {
         assert_eq!(sample.timestamp(), (test_val >> 32) as i64);
         assert_eq!(sample.timestamp_subsec_nanos(), test_val as u32);
 
-        sample = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(2584229, 25003600).unwrap(), Utc);
+        sample = DateTime::<Utc>::from_utc(
+            NaiveDateTime::from_timestamp_opt(2584229, 25003600).unwrap(),
+            Utc,
+        );
         test_val = convert_dt_to_ptp(sample);
         assert_eq!(sample.timestamp(), (test_val >> 32) as i64);
         assert_eq!(sample.timestamp_subsec_nanos(), test_val as u32);
