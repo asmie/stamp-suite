@@ -109,7 +109,7 @@ mod tests {
             force_ipv6: false,
         };
 
-        assert_eq!((), conf.validate().unwrap());
+        assert!(conf.validate().is_ok());
     }
 
     #[test]
