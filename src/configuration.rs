@@ -1,22 +1,24 @@
-pub use clap::{Parser};
-use std::str::FromStr;
-use std::fmt;
+pub use clap::Parser;
 use std::error::Error;
+use std::fmt;
+use std::str::FromStr;
 
 #[derive(Debug)]
 pub struct ConfigurationError {
-    details: String
+    details: String,
 }
 
 impl ConfigurationError {
     fn new(msg: &str) -> ConfigurationError {
-        ConfigurationError{details: msg.to_string()}
+        ConfigurationError {
+            details: msg.to_string(),
+        }
     }
 }
 
 impl fmt::Display for ConfigurationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,"{}",self.details)
+        write!(f, "{}", self.details)
     }
 }
 
@@ -35,12 +37,11 @@ pub enum StampModes {
 impl FromStr for StampModes {
     type Err = ConfigurationError;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err>
-    {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "u" => Ok(StampModes::Unauthenticated),
             "a" => Ok(StampModes::Authenticated),
-            _ => Err(ConfigurationError::new("Invalid STAMP mode"))
+            _ => Err(ConfigurationError::new("Invalid STAMP mode")),
         }
     }
 }
@@ -72,12 +73,11 @@ pub enum ClockFormat {
 impl FromStr for ClockFormat {
     type Err = ConfigurationError;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err>
-    {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "NTP" => Ok(ClockFormat::NTP),
             "PTP" => Ok(ClockFormat::PTP),
-            _ => Err(ConfigurationError::new("Invalid clock source"))
+            _ => Err(ConfigurationError::new("Invalid clock source")),
         }
     }
 }
@@ -100,7 +100,7 @@ impl fmt::Debug for ClockFormat {
     }
 }
 
-pub fn is_auth(mode_str : &String) -> bool {
+pub fn is_auth(mode_str: &String) -> bool {
     let mut res = false;
     if mode_str.find("A").is_some() {
         res = true;
@@ -108,7 +108,7 @@ pub fn is_auth(mode_str : &String) -> bool {
     res
 }
 
-pub fn is_enc(mode_str : &String) -> bool {
+pub fn is_enc(mode_str: &String) -> bool {
     let mut res = false;
     if mode_str.find("E").is_some() {
         res = true;
@@ -116,7 +116,7 @@ pub fn is_enc(mode_str : &String) -> bool {
     res
 }
 
-pub fn is_open(mode_str : &String) -> bool {
+pub fn is_open(mode_str: &String) -> bool {
     let mut res = false;
     if mode_str.find("O").is_some() {
         res = true;
@@ -131,6 +131,5 @@ mod tests {
     #[test]
     fn clock_source_test() {
         let cs = ClockFormat::NTP;
-
     }
 }

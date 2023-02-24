@@ -1,7 +1,6 @@
-
 use crate::configuration::*;
-use crate::time::generate_timestamp;
 use crate::packets::{PacketUnauthenticated, ReflectedPacketUnauthenticated};
+use crate::time::generate_timestamp;
 
 /*
 pub struct HopResult {
@@ -22,7 +21,11 @@ pub fn recv_message(sock: &UdpSocket) -> Result<Box<HopResult>, io::Error>
     Ok()
 }
 */
-pub fn assemble_unauth_answer(packet: &PacketUnauthenticated, cs: ClockFormat, rcvt: u64) -> ReflectedPacketUnauthenticated {
+pub fn assemble_unauth_answer(
+    packet: &PacketUnauthenticated,
+    cs: ClockFormat,
+    rcvt: u64,
+) -> ReflectedPacketUnauthenticated {
     let packet_resp = ReflectedPacketUnauthenticated {
         sess_sender_timestamp: packet.timestamp,
         sess_sender_err_estimate: packet.error_estimate,

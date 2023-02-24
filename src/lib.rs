@@ -1,6 +1,6 @@
 pub mod configuration;
 pub mod packets;
-pub mod sender;
 pub mod receiver;
-pub mod time;
+pub mod sender;
 pub mod session;
+pub mod time;

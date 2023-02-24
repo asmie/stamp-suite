@@ -7,7 +7,10 @@ pub struct Session {
 
 impl Session {
     pub fn new(id: u32) -> Session {
-        Session { sess_id: id, curr_seq: AtomicU32::new(0), }
+        Session {
+            sess_id: id,
+            curr_seq: AtomicU32::new(0),
+        }
     }
 
     pub fn get_id(&self) -> u32 {
