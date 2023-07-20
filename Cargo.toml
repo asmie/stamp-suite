@@ -17,14 +17,18 @@ repository = "https://github.com/asmie/stamp-suite"
 
 description = "Simple Two-Way Active Measurement Protocol (STAMP) (RFC 8762 and 8972)"
 
-readme = "readme.md"
+readme = "README.md"
 
 [dependencies]
-clap = { version = "4.1.4", features = ["derive"] }
-log = "0.4.0"
+clap = { version = "4.3.17", features = ["derive"] }
+log = "0.4.19"
 env_logger = "0.10.0"
-chrono = "0.4.23"
-nix = "0.26"
+chrono = "0.4.26"
+nix = "0.26.2"
 #libc = "0.2"
 bincode = "1.3.3"
-serde = { version = "1.0.147", features = ["derive"] }
+serde = { version = "1.0.173", features = ["derive"] }
+
+[dependencies.tokio]
+version = "1.29.1"
+features = ["full"]
