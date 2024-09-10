@@ -4,25 +4,35 @@ use crate::{
     time::generate_timestamp,
 };
 
-/*
-pub struct HopResult {
-    src_addr: Option<IpAddr>,
-    ttl: Option<u8>,
-    data: Vec<u8>,
-}
-*/
+pub async fn run_receiver(conf: Configuration) {
+    let socket = UdpSocket::bind((conf.local_addr, conf.local_port)).expect("Cannot bind to address");
 
-//type BufferType = [u8; 65535];
-/*
-pub fn recv_message(sock: &UdpSocket) -> Result<Box<HopResult>, io::Error>
-{
-    let raw_fd: RawFd = sock.as_raw_fd();
-    let mut buf : BufferType = [0u8; 65535];
+    let mut buf = [0; 1024];
+    loop {
+        let (amt, src) = socket.recv_from(&mut buf).expect("Cannot receive data");
+        let packet = any_as_u8_slice(&buf[..amt]).unwrap();
+        let packet = match conf.auth_mode {
+            AuthMode::Unauthenticated => {
+                let packet: PacketUnauthenticated = bincode::deserialize(&packet).unwrap();
+                packet
+            }
+            AuthMode::Authenticated => {
+                let packet: PacketAuthenticated = bincode::deserialize(&packet).unwrap();
+                packet
+            }
+        };
 
-    let mut packet = HopResult { 0; 0; 0;};
-    Ok()
+        let rcvt = generate_timestamp(conf.clock_source);
+        let answer = match conf.auth_mode {
+            AuthMode::Unauthenticated => assemble_unauth_answer(&packet, conf.clock_source, rcvt),
+            AuthMode::Authenticated => assemble_auth_answer(&packet, conf.clock_source, rcvt),
+        };
+
+        let buf = any_as_u8_slice(&answer).unwrap();
+        socket.send_to(&buf, src).expect("Cannot send data");
+    }
 }
-*/
+
 pub fn assemble_unauth_answer(
     packet: &PacketUnauthenticated,
     cs: ClockFormat,
