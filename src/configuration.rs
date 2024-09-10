@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, str::FromStr};
+use std::{error::Error, str::FromStr};
 
 use clap::Parser;
 use thiserror::Error;
@@ -44,7 +44,7 @@ pub struct Configuration {
     /// Print individual statistics for each packet.
     #[clap(short = 'R')]
     pub print_stats: bool,
-    #[clap(short = 'd', long, default_value = false)]
+    #[clap(short = 'd', long, default_value_t = false)]
     pub is_reflector: bool,
 }
 

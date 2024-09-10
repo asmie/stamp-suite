@@ -13,6 +13,7 @@ pub mod time;
 use std::{net::UdpSocket, thread};
 
 use crate::{configuration::*, session::Session};
+use clap::Parser;
 
 #[tokio::main]
 async fn main() {
@@ -23,7 +24,7 @@ async fn main() {
 
     info!("Configuration valid. Starting up...");
 
-    if conf.is_reflector {
+    /*if conf.is_reflector {
         receiver::run_receiver(conf);
     } else {
         sender::run_sender(conf);
@@ -53,5 +54,5 @@ async fn main() {
         }
 
         thread::sleep(std::time::Duration::from_millis(conf.send_delay as u64));
-    }
+    }*/
 }
