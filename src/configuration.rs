@@ -1,6 +1,9 @@
 use std::{error::Error, fmt, str::FromStr};
 
-pub use clap::Parser;
+use clap::Parser;
+use thiserror::Error;
+
+pub use crate::{clock_format::ClockFormat, stamp_modes::StampModes};
 
 #[derive(Parser, Debug)]
 #[clap(author = "Piotr Olszewski", version, about, long_about = None)]
@@ -51,101 +54,10 @@ impl Configuration {
     }
 }
 
-#[derive(Debug)]
-pub struct ConfigurationError {
-    details: String,
-}
-
-impl ConfigurationError {
-    fn new(msg: &str) -> ConfigurationError {
-        ConfigurationError {
-            details: msg.to_string(),
-        }
-    }
-}
-
-impl fmt::Display for ConfigurationError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.details)
-    }
-}
-
-impl Error for ConfigurationError {
-    fn description(&self) -> &str {
-        &self.details
-    }
-}
-
-#[derive(Copy, Clone)]
-pub enum StampModes {
-    Unauthenticated,
-    Authenticated,
-}
-
-impl FromStr for StampModes {
-    type Err = ConfigurationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "u" => Ok(StampModes::Unauthenticated),
-            "a" => Ok(StampModes::Authenticated),
-            _ => Err(ConfigurationError::new("Invalid STAMP mode")),
-        }
-    }
-}
-
-impl fmt::Display for StampModes {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            StampModes::Unauthenticated => write!(f, "u"),
-            StampModes::Authenticated => write!(f, "a"),
-        }
-    }
-}
-
-impl fmt::Debug for StampModes {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            StampModes::Unauthenticated => write!(f, "u"),
-            StampModes::Authenticated => write!(f, "a"),
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-pub enum ClockFormat {
-    NTP,
-    PTP,
-}
-
-impl FromStr for ClockFormat {
-    type Err = ConfigurationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "NTP" => Ok(ClockFormat::NTP),
-            "PTP" => Ok(ClockFormat::PTP),
-            _ => Err(ConfigurationError::new("Invalid clock source")),
-        }
-    }
-}
-
-impl fmt::Display for ClockFormat {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            ClockFormat::NTP => write!(f, "NTP"),
-            ClockFormat::PTP => write!(f, "PTP"),
-        }
-    }
-}
-
-impl fmt::Debug for ClockFormat {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            ClockFormat::NTP => write!(f, "NTP"),
-            ClockFormat::PTP => write!(f, "PTP"),
-        }
-    }
+#[derive(Error, Debug)]
+pub enum ConfigurationError {
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 pub fn is_auth(mode_str: &str) -> bool {
@@ -162,7 +74,69 @@ pub fn is_open(mode_str: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
+    use super::*;
 
     #[test]
-    fn clock_source_test() {}
+    fn test_valid_configuration_parsing() {
+        let args = vec![
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--local-addr",
+            "0.0.0.0",
+            "--remote-port",
+            "862",
+            "--local-port",
+            "862",
+            "--clock-source",
+            "NTP",
+            "--send-delay",
+            "1000",
+            "--count",
+            "1000",
+            "--timeout",
+            "5",
+            "--auth-mode",
+            "AEO",
+            "--is-reflector",
+        ];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.remote_addr, "127.0.0.1".parse().unwrap());
+        assert_eq!(conf.local_addr, "0.0.0.0".parse().unwrap());
+        assert_eq!(conf.remote_port, 862);
+        assert_eq!(conf.local_port, 862);
+        assert_eq!(conf.clock_source, ClockFormat::NTP);
+        assert_eq!(conf.send_delay, 1000);
+        assert_eq!(conf.count, 1000);
+        assert_eq!(conf.timeout, 5);
+        assert_eq!(conf.auth_mode, "AEO");
+        assert!(conf.is_reflector);
+    }
+
+    #[test]
+    fn test_invalid_configuration_parsing() {
+        let args = vec!["test", "--remote-addr", "invalid_addr"];
+        let conf = Configuration::try_parse_from(args);
+        assert!(conf.is_err());
+    }
+
+    #[test]
+    fn test_is_auth() {
+        assert!(is_auth("AEO"));
+        assert!(!is_auth("EO"));
+    }
+
+    #[test]
+    fn test_is_enc() {
+        assert!(is_enc("AEO"));
+        assert!(!is_enc("AO"));
+    }
+
+    #[test]
+    fn test_is_open() {
+        assert!(is_open("AEO"));
+        assert!(!is_open("AE"));
+    }
 }

@@ -1,17 +1,18 @@
 #[macro_use]
 extern crate log;
 
+pub mod clock_format;
 pub mod configuration;
 pub mod packets;
 pub mod receiver;
 pub mod sender;
 pub mod session;
+pub mod stamp_modes;
 pub mod time;
 
 use std::{net::UdpSocket, thread};
 
-use crate::configuration::*;
-use crate::session::Session;
+use crate::{configuration::*, session::Session};
 
 #[tokio::main]
 async fn main() {
@@ -54,5 +55,3 @@ async fn main() {
         thread::sleep(std::time::Duration::from_millis(conf.send_delay as u64));
     }
 }
-
-
