@@ -24,10 +24,10 @@ async fn main() {
 
     info!("Configuration valid. Starting up...");
 
-    /*if conf.is_reflector {
-        receiver::run_receiver(conf);
+    if conf.is_reflector {
+        receiver::run_receiver(&conf).await;
     } else {
-        sender::run_sender(conf);
+        //sender::run_sender(conf).await;
     }
 
     let socket =
@@ -40,19 +40,19 @@ async fn main() {
 
     loop {
         if is_auth(&conf.auth_mode) {
-            let mut packet = assemble_auth_packet();
+            let mut packet = sender::assemble_auth_packet();
             packet.sequence_number = sess.generate_sequence_number();
-            packet.timestamp = generate_timestamp(conf.clock_source);
-            let buf = any_as_u8_slice(&packet).unwrap();
+            packet.timestamp = time::generate_timestamp(conf.clock_source);
+            let buf = packets::any_as_u8_slice(&packet).unwrap();
             socket.send(&buf).unwrap();
         } else {
-            let mut packet = assemble_unauth_packet();
+            let mut packet = sender::assemble_unauth_packet();
             packet.sequence_number = sess.generate_sequence_number();
-            packet.timestamp = generate_timestamp(conf.clock_source);
-            let buf = any_as_u8_slice(&packet).unwrap();
+            packet.timestamp = time::generate_timestamp(conf.clock_source);
+            let buf = packets::any_as_u8_slice(&packet).unwrap();
             socket.send(&buf).unwrap();
         }
 
         thread::sleep(std::time::Duration::from_millis(conf.send_delay as u64));
-    }*/
+    }
 }

@@ -19,7 +19,7 @@ use crate::{
     time::generate_timestamp,
 };
 
-pub async fn run_receiver(conf: Configuration) {
+pub async fn run_receiver(conf: &Configuration) {
     let interface_ip_match =
         |iface: &NetworkInterface| iface.ips.iter().any(|ip| ip.ip() == conf.local_addr);
 
@@ -191,6 +191,7 @@ fn handle_udp_packet(interface_name: &str, source: IpAddr, destination: IpAddr, 
     let udp = UdpPacket::new(packet);
 
     if let Some(udp) = udp {
+
         println!(
             "[{}]: UDP Packet: {}:{} > {}:{}; length: {}",
             interface_name,

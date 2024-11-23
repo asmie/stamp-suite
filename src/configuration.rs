@@ -9,7 +9,7 @@ pub use crate::{clock_format::ClockFormat, stamp_modes::StampModes};
 #[clap(author = "Piotr Olszewski", version, about, long_about = None)]
 pub struct Configuration {
     /// Remote address for Session Reflector
-    #[clap(short, long)]
+    #[clap(short, long, default_value = "0.0.0.0")]
     pub remote_addr: std::net::IpAddr,
     /// Local address to bind for
     #[clap(short = 'S', long, default_value = "0.0.0.0")]
@@ -44,7 +44,7 @@ pub struct Configuration {
     /// Print individual statistics for each packet.
     #[clap(short = 'R')]
     pub print_stats: bool,
-    #[clap(short = 'd', long, default_value_t = false)]
+    #[clap(short = 'i', long, default_value_t = false)]
     pub is_reflector: bool,
 }
 
