@@ -72,6 +72,7 @@ pub fn is_open(mode_str: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
     use clap::Parser;
 
     use super::*;
@@ -101,8 +102,8 @@ mod tests {
             "--is-reflector",
         ];
         let conf = Configuration::parse_from(args);
-        assert_eq!(conf.remote_addr, "127.0.0.1".parse().unwrap());
-        assert_eq!(conf.local_addr, "0.0.0.0".parse().unwrap());
+        assert_eq!(conf.remote_addr, "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(conf.local_addr, "0.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(conf.remote_port, 862);
         assert_eq!(conf.local_port, 862);
         assert_eq!(conf.clock_source, ClockFormat::NTP);

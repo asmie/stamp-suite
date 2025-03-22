@@ -80,8 +80,6 @@ pub fn any_as_u8_slice<S: ?Sized + Serialize>(t: &S) -> bincode::Result<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
-    use bincode;
-
     use super::*;
 
     #[test]
