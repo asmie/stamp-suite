@@ -72,8 +72,8 @@ pub fn is_open(mode_str: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
     use clap::Parser;
+    use std::net::IpAddr;
 
     use super::*;
 
