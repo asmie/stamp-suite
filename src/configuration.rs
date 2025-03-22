@@ -28,7 +28,7 @@ pub struct Configuration {
     #[clap(short = 'c', long, default_value_t = 1000)]
     pub count: u16,
     /// Amount of time to wait for packet until consider it lost [s].
-    #[clap(short = 'L', default_value_t = 5)]
+    #[clap(short = 'L', long, default_value_t = 5)]
     pub timeout: u8,
     /// Force IPv4 addresses.
     #[clap(short = '4')]

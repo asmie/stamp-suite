@@ -37,70 +37,49 @@ fn convert_dt_to_ptp(date: DateTime<Utc>) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, NaiveDateTime, Utc};
-
     use super::*;
     use crate::time::convert_dt_to_ntp;
 
     #[test]
     fn convert_dt_to_ntp_test() {
-        let mut sample =
-            DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(1525987, 0).unwrap(), Utc);
-        let mut test_val = convert_dt_to_ntp(sample);
-        assert_eq!(
-            sample.timestamp(),
-            (test_val >> 32) as i64 - NTP_UNIX_OFFSET
-        );
-        assert_eq!(
-            sample.timestamp_subsec_micros(),
-            (test_val as u32) / u32::MAX * 1000
-        );
+        use chrono::{DateTime, Utc};
 
-        sample = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(0, 0).unwrap(), Utc);
-        test_val = convert_dt_to_ntp(sample);
-        assert_eq!(
-            sample.timestamp(),
-            (test_val >> 32) as i64 - NTP_UNIX_OFFSET
-        );
-        assert_eq!(
-            sample.timestamp_subsec_micros(),
-            (test_val as u32) / u32::MAX * 1000
-        );
+        const TEST_CASES: &[(i64, u32)] = &[(1_525_987, 0), (0, 0), (2_584_229, 151_000_000)];
 
-        sample = DateTime::<Utc>::from_utc(
-            NaiveDateTime::from_timestamp_opt(2584229, 151000000).unwrap(),
-            Utc,
-        );
-        test_val = convert_dt_to_ntp(sample);
-        assert_eq!(
-            sample.timestamp(),
-            (test_val >> 32) as i64 - NTP_UNIX_OFFSET
-        );
-        assert_eq!(
-            sample.timestamp_subsec_micros(),
-            ((test_val as u32) as u64 * 1000000u64 / u32::MAX as u64) as u32 + 1
-        );
+        for &(secs, nanos) in TEST_CASES {
+            let sample = DateTime::<Utc>::from_timestamp(secs, nanos).expect("Invalid timestamp");
+            let test_val = convert_dt_to_ntp(sample);
+
+            let expected_secs = secs + NTP_UNIX_OFFSET;
+            let actual_secs = (test_val >> 32) as i64;
+            assert_eq!(actual_secs, expected_secs, "Mismatch in seconds field");
+
+            let ntp_frac = test_val as u32;
+            let expected_micros = sample.timestamp_subsec_micros();
+            let actual_micros = ((ntp_frac as u64) * 1_000_000 / (1u64 << 32)) as u32;
+            assert!(
+                (expected_micros as i32 - actual_micros as i32).abs() <= 1,
+                "Mismatch in fractional micros: expected {}, got {}",
+                expected_micros,
+                actual_micros
+            );
+        }
     }
 
     #[test]
     fn convert_dt_to_ptp_test() {
-        let mut sample =
-            DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(1525987, 0).unwrap(), Utc);
-        let mut test_val = convert_dt_to_ptp(sample);
-        assert_eq!(sample.timestamp(), (test_val >> 32) as i64);
-        assert_eq!(sample.timestamp_subsec_nanos(), test_val as u32);
+        use chrono::Utc;
 
-        sample = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp_opt(0, 0).unwrap(), Utc);
-        test_val = convert_dt_to_ptp(sample);
-        assert_eq!(sample.timestamp(), (test_val >> 32) as i64);
-        assert_eq!(sample.timestamp_subsec_nanos(), test_val as u32);
+        fn assert_conversion(secs: i64, nanos: u32) {
+            let datetime =
+                chrono::DateTime::<Utc>::from_timestamp(secs, nanos).expect("Invalid timestamp");
+            let ptp_val = convert_dt_to_ptp(datetime);
+            assert_eq!(secs, (ptp_val >> 32) as i64);
+            assert_eq!(nanos, ptp_val as u32);
+        }
 
-        sample = DateTime::<Utc>::from_utc(
-            NaiveDateTime::from_timestamp_opt(2584229, 25003600).unwrap(),
-            Utc,
-        );
-        test_val = convert_dt_to_ptp(sample);
-        assert_eq!(sample.timestamp(), (test_val >> 32) as i64);
-        assert_eq!(sample.timestamp_subsec_nanos(), test_val as u32);
+        assert_conversion(1_525_987, 0);
+        assert_conversion(0, 0);
+        assert_conversion(2_584_229, 25_003_600);
     }
 }
