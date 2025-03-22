@@ -27,8 +27,7 @@ pub async fn run_receiver(conf: &Configuration) {
     let interfaces = datalink::interfaces();
     let interface = interfaces
         .into_iter()
-        .filter(interface_ip_match)
-        .next()
+        .find(interface_ip_match)
         .unwrap_or_else(|| panic!("No interface found with IP address {}", conf.local_addr));
 
     // Create a channel to receive on
@@ -189,9 +188,7 @@ fn handle_transport_protocol(
 
 fn handle_udp_packet(interface_name: &str, source: IpAddr, destination: IpAddr, packet: &[u8]) {
     let udp = UdpPacket::new(packet);
-
     if let Some(udp) = udp {
-
         println!(
             "[{}]: UDP Packet: {}:{} > {}:{}; length: {}",
             interface_name,
