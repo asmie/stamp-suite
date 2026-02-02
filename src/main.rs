@@ -10,9 +10,7 @@ pub mod session;
 pub mod stamp_modes;
 pub mod time;
 
-use std::{net::UdpSocket, thread};
-
-use crate::{configuration::*, session::Session};
+use crate::configuration::*;
 use clap::Parser;
 
 #[tokio::main]
@@ -27,32 +25,27 @@ async fn main() {
     if conf.is_reflector {
         receiver::run_receiver(&conf).await;
     } else {
-        //sender::run_sender(conf).await;
-    }
-
-    let socket =
-        UdpSocket::bind((conf.local_addr, conf.local_port)).expect("Cannot bind to address");
-    socket
-        .connect((conf.remote_addr, conf.remote_port))
-        .expect("Cannot connect to address");
-
-    let sess = Session::new(0); // Client has no multi-sess right now.
-
-    loop {
-        if is_auth(&conf.auth_mode) {
-            let mut packet = sender::assemble_auth_packet();
-            packet.sequence_number = sess.generate_sequence_number();
-            packet.timestamp = time::generate_timestamp(conf.clock_source);
-            let buf = packets::any_as_u8_slice(&packet).unwrap();
-            socket.send(&buf).unwrap();
-        } else {
-            let mut packet = sender::assemble_unauth_packet();
-            packet.sequence_number = sess.generate_sequence_number();
-            packet.timestamp = time::generate_timestamp(conf.clock_source);
-            let buf = packets::any_as_u8_slice(&packet).unwrap();
-            socket.send(&buf).unwrap();
+        let stats = sender::run_sender(&conf).await;
+        println!("\n--- STAMP Statistics ---");
+        println!("Packets sent: {}", stats.packets_sent);
+        println!("Packets received: {}", stats.packets_received);
+        println!(
+            "Packets lost: {} ({:.1}%)",
+            stats.packets_lost,
+            if stats.packets_sent > 0 {
+                (stats.packets_lost as f64 / stats.packets_sent as f64) * 100.0
+            } else {
+                0.0
+            }
+        );
+        if let Some(min_rtt) = stats.min_rtt_ns {
+            println!("Min RTT: {:.3} ms", min_rtt as f64 / 1_000_000.0);
         }
-
-        thread::sleep(std::time::Duration::from_millis(conf.send_delay as u64));
+        if let Some(max_rtt) = stats.max_rtt_ns {
+            println!("Max RTT: {:.3} ms", max_rtt as f64 / 1_000_000.0);
+        }
+        if let Some(avg_rtt) = stats.avg_rtt_ns {
+            println!("Avg RTT: {:.3} ms", avg_rtt as f64 / 1_000_000.0);
+        }
     }
 }
