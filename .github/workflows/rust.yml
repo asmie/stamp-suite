@@ -27,10 +27,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        features:
-          - ""
-          - "ttl-nix"
-          - "ttl-pnet"
+        include:
+          - features: ""
+            name: default
+          - features: ttl-nix
+            name: ttl-nix
+          - features: ttl-pnet
+            name: ttl-pnet
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,9 +41,15 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          key: clippy-${{ matrix.features }}
-      - name: Clippy (features: ${{ matrix.features || 'default' }})
-        run: cargo clippy --all --tests ${{ matrix.features && format('--features {0}', matrix.features) }} -- -D warnings
+          key: clippy-${{ matrix.name }}
+      - name: Clippy (${{ matrix.name }})
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo clippy --all --tests --features ${{ matrix.features }} -- -D warnings
+          else
+            cargo clippy --all --tests -- -D warnings
+          fi
+        shell: bash
 
   test:
     name: Test (${{ matrix.os }}, ${{ matrix.rust }})
@@ -77,21 +86,30 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        features:
-          - ""
-          - "ttl-nix"
-          - "ttl-pnet"
+        include:
+          - features: ""
+            name: default
+          - features: ttl-nix
+            name: ttl-nix
+          - features: ttl-pnet
+            name: ttl-pnet
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: test-features-${{ matrix.features }}
-      - name: Test (features: ${{ matrix.features || 'default' }})
-        run: cargo test --verbose ${{ matrix.features && format('--features {0}', matrix.features) }}
+          key: test-features-${{ matrix.name }}
+      - name: Test (${{ matrix.name }})
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo test --verbose --features ${{ matrix.features }}
+          else
+            cargo test --verbose
+          fi
+        shell: bash
 
   build-release:
-    name: Build Release
+    name: Build Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
