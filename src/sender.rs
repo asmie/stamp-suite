@@ -257,3 +257,127 @@ pub fn assemble_auth_packet() -> PacketAuthenticated {
         mbz1c: [0u8; 6],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_stats_default() {
+        let stats = SessionStats::default();
+        assert_eq!(stats.packets_sent, 0);
+        assert_eq!(stats.packets_received, 0);
+        assert_eq!(stats.packets_lost, 0);
+        assert!(stats.min_rtt_ns.is_none());
+        assert!(stats.max_rtt_ns.is_none());
+        assert!(stats.avg_rtt_ns.is_none());
+    }
+
+    #[test]
+    fn test_session_stats_with_values() {
+        let stats = SessionStats {
+            packets_sent: 100,
+            packets_received: 95,
+            packets_lost: 5,
+            min_rtt_ns: Some(1_000_000),
+            max_rtt_ns: Some(10_000_000),
+            avg_rtt_ns: Some(5_000_000),
+        };
+        assert_eq!(stats.packets_sent, 100);
+        assert_eq!(stats.packets_received, 95);
+        assert_eq!(stats.packets_lost, 5);
+        assert_eq!(stats.min_rtt_ns, Some(1_000_000));
+        assert_eq!(stats.max_rtt_ns, Some(10_000_000));
+        assert_eq!(stats.avg_rtt_ns, Some(5_000_000));
+    }
+
+    #[test]
+    fn test_assemble_unauth_packet_defaults() {
+        let packet = assemble_unauth_packet();
+        assert_eq!(packet.sequence_number, 0);
+        assert_eq!(packet.timestamp, 0);
+        assert_eq!(packet.error_estimate, 0);
+        assert_eq!(packet.mbz, [0u8; 30]);
+    }
+
+    #[test]
+    fn test_assemble_auth_packet_defaults() {
+        let packet = assemble_auth_packet();
+        assert_eq!(packet.sequence_number, 0);
+        assert_eq!(packet.timestamp, 0);
+        assert_eq!(packet.error_estimate, 0);
+        assert_eq!(packet.mbz0, [0u8; 12]);
+        assert_eq!(packet.mbz1a, [0u8; 32]);
+        assert_eq!(packet.mbz1b, [0u8; 32]);
+        assert_eq!(packet.mbz1c, [0u8; 6]);
+        assert_eq!(packet.hmac, [0u8; 16]);
+    }
+
+    #[test]
+    fn test_session_stats_loss_calculation() {
+        // Simulate a scenario where we can verify loss calculation
+        let stats = SessionStats {
+            packets_sent: 100,
+            packets_received: 90,
+            packets_lost: 10,
+            min_rtt_ns: None,
+            max_rtt_ns: None,
+            avg_rtt_ns: None,
+        };
+
+        // Verify loss percentage calculation
+        let loss_pct = (stats.packets_lost as f64 / stats.packets_sent as f64) * 100.0;
+        assert!((loss_pct - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_session_stats_rtt_bounds() {
+        let stats = SessionStats {
+            packets_sent: 10,
+            packets_received: 10,
+            packets_lost: 0,
+            min_rtt_ns: Some(100),
+            max_rtt_ns: Some(1000),
+            avg_rtt_ns: Some(500),
+        };
+
+        // Min should be <= avg <= max
+        assert!(stats.min_rtt_ns.unwrap() <= stats.avg_rtt_ns.unwrap());
+        assert!(stats.avg_rtt_ns.unwrap() <= stats.max_rtt_ns.unwrap());
+    }
+
+    #[test]
+    fn test_session_stats_all_packets_lost() {
+        let stats = SessionStats {
+            packets_sent: 100,
+            packets_received: 0,
+            packets_lost: 100,
+            min_rtt_ns: None,
+            max_rtt_ns: None,
+            avg_rtt_ns: None,
+        };
+
+        assert_eq!(stats.packets_sent, stats.packets_lost);
+        assert_eq!(stats.packets_received, 0);
+        // RTT stats should be None when no packets received
+        assert!(stats.min_rtt_ns.is_none());
+        assert!(stats.max_rtt_ns.is_none());
+        assert!(stats.avg_rtt_ns.is_none());
+    }
+
+    #[test]
+    fn test_session_stats_zero_packets() {
+        let stats = SessionStats {
+            packets_sent: 0,
+            packets_received: 0,
+            packets_lost: 0,
+            min_rtt_ns: None,
+            max_rtt_ns: None,
+            avg_rtt_ns: None,
+        };
+
+        assert_eq!(stats.packets_sent, 0);
+        assert_eq!(stats.packets_received, 0);
+        assert_eq!(stats.packets_lost, 0);
+    }
+}

@@ -55,4 +55,45 @@ mod tests {
         assert_eq!(ClockFormat::NTP.to_string(), "NTP");
         assert_eq!(ClockFormat::PTP.to_string(), "PTP");
     }
+
+    #[test]
+    fn test_clock_format_case_sensitive() {
+        // Lowercase should fail
+        assert!("ntp".parse::<ClockFormat>().is_err());
+        assert!("ptp".parse::<ClockFormat>().is_err());
+        assert!("Ntp".parse::<ClockFormat>().is_err());
+        assert!("Ptp".parse::<ClockFormat>().is_err());
+    }
+
+    #[test]
+    fn test_clock_format_empty_string() {
+        assert!("".parse::<ClockFormat>().is_err());
+    }
+
+    #[test]
+    fn test_clock_format_whitespace() {
+        assert!(" NTP".parse::<ClockFormat>().is_err());
+        assert!("NTP ".parse::<ClockFormat>().is_err());
+        assert!(" NTP ".parse::<ClockFormat>().is_err());
+    }
+
+    #[test]
+    fn test_clock_format_error_message() {
+        let err = "invalid".parse::<ClockFormat>().unwrap_err();
+        assert_eq!(err.to_string(), "Invalid clock source");
+    }
+
+    #[test]
+    fn test_clock_format_roundtrip() {
+        // Parse -> Display -> Parse should give same result
+        let ntp = "NTP".parse::<ClockFormat>().unwrap();
+        let ntp_str = ntp.to_string();
+        let ntp_again = ntp_str.parse::<ClockFormat>().unwrap();
+        assert_eq!(ntp, ntp_again);
+
+        let ptp = "PTP".parse::<ClockFormat>().unwrap();
+        let ptp_str = ptp.to_string();
+        let ptp_again = ptp_str.parse::<ClockFormat>().unwrap();
+        assert_eq!(ptp, ptp_again);
+    }
 }

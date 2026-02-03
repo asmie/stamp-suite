@@ -83,4 +83,39 @@ mod tests {
         assert_conversion(0, 0);
         assert_conversion(2_584_229, 25_003_600);
     }
+
+    #[test]
+    fn test_ntp_timestamp_at_unix_epoch() {
+        let unix_epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let ntp_ts = convert_dt_to_ntp(unix_epoch);
+        let ntp_secs = ntp_ts >> 32;
+        // At Unix epoch, NTP seconds should equal the offset
+        assert_eq!(ntp_secs as i64, NTP_UNIX_OFFSET);
+    }
+
+    #[test]
+    fn test_ptp_timestamp_at_unix_epoch() {
+        let unix_epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let ptp_ts = convert_dt_to_ptp(unix_epoch);
+        // At Unix epoch, PTP timestamp should be 0
+        assert_eq!(ptp_ts, 0);
+    }
+
+    #[test]
+    fn test_timestamps_are_monotonic() {
+        // Generate multiple timestamps and verify they're non-decreasing
+        let mut prev_ntp = 0u64;
+        let mut prev_ptp = 0u64;
+
+        for _ in 0..100 {
+            let ntp = generate_timestamp(ClockFormat::NTP);
+            let ptp = generate_timestamp(ClockFormat::PTP);
+
+            assert!(ntp >= prev_ntp, "NTP timestamps should be monotonic");
+            assert!(ptp >= prev_ptp, "PTP timestamps should be monotonic");
+
+            prev_ntp = ntp;
+            prev_ptp = ptp;
+        }
+    }
 }

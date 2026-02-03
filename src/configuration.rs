@@ -157,4 +157,145 @@ mod tests {
         assert!(is_open("AEO"));
         assert!(!is_open("AE"));
     }
+
+    #[test]
+    fn test_default_configuration() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(conf.remote_addr, "0.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(conf.local_addr, "0.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(conf.remote_port, 862);
+        assert_eq!(conf.local_port, 862);
+        assert_eq!(conf.clock_source, ClockFormat::NTP);
+        assert_eq!(conf.send_delay, 1000);
+        assert_eq!(conf.count, 1000);
+        assert_eq!(conf.timeout, 5);
+        assert_eq!(conf.auth_mode, "AEO");
+        assert!(!conf.force_ipv4);
+        assert!(!conf.force_ipv6);
+        assert!(!conf.print_stats);
+        assert!(!conf.is_reflector);
+    }
+
+    #[test]
+    fn test_ipv6_address_parsing() {
+        let args = vec!["test", "--remote-addr", "::1", "--local-addr", "fe80::1"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.remote_addr, "::1".parse::<IpAddr>().unwrap());
+        assert_eq!(conf.local_addr, "fe80::1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_short_flags() {
+        let args = vec!["test", "-4", "-6", "-R", "-i"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.force_ipv4);
+        assert!(conf.force_ipv6);
+        assert!(conf.print_stats);
+        assert!(conf.is_reflector);
+    }
+
+    #[test]
+    fn test_timeout_values() {
+        let args = vec!["test", "--timeout", "0"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.timeout, 0);
+
+        let args = vec!["test", "--timeout", "255"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.timeout, 255);
+    }
+
+    #[test]
+    fn test_send_delay_values() {
+        let args = vec!["test", "--send-delay", "0"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.send_delay, 0);
+
+        let args = vec!["test", "--send-delay", "65535"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.send_delay, 65535);
+    }
+
+    #[test]
+    fn test_clock_source_ptp() {
+        let args = vec!["test", "--clock-source", "PTP"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.clock_source, ClockFormat::PTP);
+    }
+
+    #[test]
+    fn test_invalid_clock_source() {
+        let args = vec!["test", "--clock-source", "INVALID"];
+        let result = Configuration::try_parse_from(args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auth_mode_variations() {
+        // Single modes
+        let args = vec!["test", "--auth-mode", "A"];
+        let conf = Configuration::parse_from(args);
+        assert!(is_auth(&conf.auth_mode));
+        assert!(!is_enc(&conf.auth_mode));
+        assert!(!is_open(&conf.auth_mode));
+
+        let args = vec!["test", "--auth-mode", "E"];
+        let conf = Configuration::parse_from(args);
+        assert!(!is_auth(&conf.auth_mode));
+        assert!(is_enc(&conf.auth_mode));
+        assert!(!is_open(&conf.auth_mode));
+
+        let args = vec!["test", "--auth-mode", "O"];
+        let conf = Configuration::parse_from(args);
+        assert!(!is_auth(&conf.auth_mode));
+        assert!(!is_enc(&conf.auth_mode));
+        assert!(is_open(&conf.auth_mode));
+    }
+
+    #[test]
+    fn test_auth_mode_combinations() {
+        let args = vec!["test", "--auth-mode", "AE"];
+        let conf = Configuration::parse_from(args);
+        assert!(is_auth(&conf.auth_mode));
+        assert!(is_enc(&conf.auth_mode));
+        assert!(!is_open(&conf.auth_mode));
+
+        let args = vec!["test", "--auth-mode", "AO"];
+        let conf = Configuration::parse_from(args);
+        assert!(is_auth(&conf.auth_mode));
+        assert!(!is_enc(&conf.auth_mode));
+        assert!(is_open(&conf.auth_mode));
+
+        let args = vec!["test", "--auth-mode", "EO"];
+        let conf = Configuration::parse_from(args);
+        assert!(!is_auth(&conf.auth_mode));
+        assert!(is_enc(&conf.auth_mode));
+        assert!(is_open(&conf.auth_mode));
+    }
+
+    #[test]
+    fn test_auth_mode_empty() {
+        let args = vec!["test", "--auth-mode", ""];
+        let conf = Configuration::parse_from(args);
+        assert!(!is_auth(&conf.auth_mode));
+        assert!(!is_enc(&conf.auth_mode));
+        assert!(!is_open(&conf.auth_mode));
+    }
+
+    #[test]
+    fn test_auth_mode_case_sensitive() {
+        // Lowercase should not match
+        assert!(!is_auth("aeo"));
+        assert!(!is_enc("aeo"));
+        assert!(!is_open("aeo"));
+    }
+
+    #[test]
+    fn test_invalid_port_number() {
+        let args = vec!["test", "--remote-port", "99999"];
+        let result = Configuration::try_parse_from(args);
+        assert!(result.is_err());
+    }
 }

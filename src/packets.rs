@@ -276,4 +276,123 @@ mod tests {
         let restored: PacketUnauthenticated = read_struct(&bytes).unwrap();
         assert_eq!(packet, restored);
     }
+
+    #[test]
+    fn test_read_struct_buffer_too_small() {
+        let small_buffer = [0u8; 4];
+        let result = read_struct::<PacketUnauthenticated>(&small_buffer);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Buffer too small");
+    }
+
+    #[test]
+    fn test_read_struct_empty_buffer() {
+        let empty_buffer: [u8; 0] = [];
+        let result = read_struct::<PacketUnauthenticated>(&empty_buffer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_packet_unauth_buffer_too_small() {
+        let small_buffer = [0u8; 10];
+        let result = read_packet_unauth(&small_buffer);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_read_packet_auth_buffer_too_small() {
+        let small_buffer = [0u8; 50];
+        let result = read_packet_auth(&small_buffer);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_read_reflected_unauth_buffer_too_small() {
+        let small_buffer = [0u8; 20];
+        let result = read_reflected_packet_unauth(&small_buffer);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_read_reflected_auth_buffer_too_small() {
+        let small_buffer = [0u8; 100];
+        let result = read_reflected_packet_auth(&small_buffer);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_packet_field_values_preserved() {
+        // Test specific field values are correctly preserved
+        let packet = PacketUnauthenticated {
+            sequence_number: 0x12345678,
+            timestamp: 0xDEADBEEFCAFEBABE,
+            error_estimate: 0xABCD,
+            mbz: [0x42; 30],
+        };
+        let serialized = write_packet_unauth(&packet).unwrap();
+        let deserialized = read_packet_unauth(&serialized).unwrap();
+
+        assert_eq!(deserialized.sequence_number, 0x12345678);
+        assert_eq!(deserialized.timestamp, 0xDEADBEEFCAFEBABE);
+        assert_eq!(deserialized.error_estimate, 0xABCD);
+        assert_eq!(deserialized.mbz, [0x42; 30]);
+    }
+
+    #[test]
+    fn test_reflected_packet_echoed_fields() {
+        // Verify reflected packet can store echoed sender fields
+        let packet = ReflectedPacketUnauthenticated {
+            sequence_number: 100,
+            timestamp: 200,
+            error_estimate: 300,
+            mbz1: 0,
+            receive_timestamp: 400,
+            sess_sender_seq_number: 500,
+            sess_sender_timestamp: 600,
+            sess_sender_err_estimate: 700,
+            mbz2: 0,
+            sess_sender_ttl: 64,
+            mbz3a: 0,
+            mbz3b: 0,
+        };
+        let serialized = write_reflected_packet_unauth(&packet).unwrap();
+        let deserialized = read_reflected_packet_unauth(&serialized).unwrap();
+
+        // Verify echoed fields
+        assert_eq!(deserialized.sess_sender_seq_number, 500);
+        assert_eq!(deserialized.sess_sender_timestamp, 600);
+        assert_eq!(deserialized.sess_sender_err_estimate, 700);
+        assert_eq!(deserialized.sess_sender_ttl, 64);
+    }
+
+    #[test]
+    fn test_any_as_u8_slice_size() {
+        let packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 2,
+            error_estimate: 3,
+            mbz: [0; 30],
+        };
+        let bytes = any_as_u8_slice(&packet).unwrap();
+        assert_eq!(bytes.len(), core::mem::size_of::<PacketUnauthenticated>());
+    }
+
+    #[test]
+    fn test_buffer_larger_than_needed() {
+        // Create a packet and serialize it
+        let packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 2,
+            error_estimate: 3,
+            mbz: [0; 30],
+        };
+        let mut bytes = any_as_u8_slice(&packet).unwrap();
+
+        // Add extra bytes at the end
+        bytes.extend_from_slice(&[0xff; 100]);
+
+        // Should still deserialize correctly (reads only what it needs)
+        let restored: PacketUnauthenticated = read_struct(&bytes).unwrap();
+        assert_eq!(packet, restored);
+    }
 }

@@ -63,4 +63,44 @@ mod tests {
         assert_eq!(StampModes::Unauthenticated.to_string(), "u");
         assert_eq!(StampModes::Authenticated.to_string(), "a");
     }
+
+    #[test]
+    fn test_stamp_modes_case_sensitive() {
+        // Uppercase should fail
+        assert!("U".parse::<StampModes>().is_err());
+        assert!("A".parse::<StampModes>().is_err());
+    }
+
+    #[test]
+    fn test_stamp_modes_empty_string() {
+        assert!("".parse::<StampModes>().is_err());
+    }
+
+    #[test]
+    fn test_stamp_modes_whitespace() {
+        assert!(" u".parse::<StampModes>().is_err());
+        assert!("u ".parse::<StampModes>().is_err());
+        assert!(" a ".parse::<StampModes>().is_err());
+    }
+
+    #[test]
+    fn test_stamp_modes_multiple_chars() {
+        // Multiple characters should fail
+        assert!("ua".parse::<StampModes>().is_err());
+        assert!("au".parse::<StampModes>().is_err());
+        assert!("uu".parse::<StampModes>().is_err());
+    }
+
+    #[test]
+    fn test_stamp_modes_roundtrip() {
+        let unauth = "u".parse::<StampModes>().unwrap();
+        let unauth_str = unauth.to_string();
+        let unauth_again = unauth_str.parse::<StampModes>().unwrap();
+        assert_eq!(unauth, unauth_again);
+
+        let auth = "a".parse::<StampModes>().unwrap();
+        let auth_str = auth.to_string();
+        let auth_again = auth_str.parse::<StampModes>().unwrap();
+        assert_eq!(auth, auth_again);
+    }
 }
