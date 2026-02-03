@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 
 use crate::configuration::ClockFormat;
 
+/// Offset in seconds between NTP epoch (1900-01-01) and Unix epoch (1970-01-01).
 const NTP_UNIX_OFFSET: i64 = 2208988800;
 
 /// Generates timestamp with specified clock format.

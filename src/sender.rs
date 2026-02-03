@@ -13,22 +13,38 @@ use crate::{
     time::generate_timestamp,
 };
 
+/// Statistics collected during a STAMP sender session.
+///
+/// Contains counters for sent/received/lost packets and RTT measurements.
 #[derive(Debug, Default)]
 pub struct SessionStats {
+    /// Total number of packets sent during the session.
     pub packets_sent: u32,
+    /// Total number of response packets received.
     pub packets_received: u32,
+    /// Number of packets that were not acknowledged (lost or timed out).
     pub packets_lost: u32,
+    /// Minimum round-trip time observed in nanoseconds.
     pub min_rtt_ns: Option<u64>,
+    /// Maximum round-trip time observed in nanoseconds.
     pub max_rtt_ns: Option<u64>,
+    /// Average round-trip time in nanoseconds.
     pub avg_rtt_ns: Option<u64>,
 }
 
+/// Internal structure to track packets awaiting responses.
 struct PendingPacket {
+    /// Wall-clock time when the packet was sent.
     send_time: Instant,
+    /// STAMP timestamp embedded in the sent packet.
     #[allow(dead_code)]
     send_timestamp: u64,
 }
 
+/// Runs the STAMP sender, transmitting test packets and collecting statistics.
+///
+/// Sends packets to the configured remote address and waits for reflected responses.
+/// Returns statistics about the measurement session including RTT and packet loss.
 pub async fn run_sender(conf: &Configuration) -> SessionStats {
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let remote_addr: SocketAddr = (conf.remote_addr, conf.remote_port).into();
@@ -214,6 +230,9 @@ fn process_response(
     }
 }
 
+/// Creates a new unauthenticated STAMP test packet with default values.
+///
+/// The caller should set the sequence number and timestamp before sending.
 pub fn assemble_unauth_packet() -> PacketUnauthenticated {
     PacketUnauthenticated {
         timestamp: 0,
@@ -223,6 +242,9 @@ pub fn assemble_unauth_packet() -> PacketUnauthenticated {
     }
 }
 
+/// Creates a new authenticated STAMP test packet with default values.
+///
+/// The caller should set the sequence number, timestamp, and HMAC before sending.
 pub fn assemble_auth_packet() -> PacketAuthenticated {
     PacketAuthenticated {
         timestamp: 0,

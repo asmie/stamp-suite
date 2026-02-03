@@ -25,6 +25,10 @@ use crate::{
 
 use super::{assemble_auth_answer, assemble_unauth_answer};
 
+/// Runs the STAMP Session Reflector using pnet for raw packet capture.
+///
+/// Captures packets at the datalink layer to extract the real TTL value.
+/// Requires elevated privileges (root or CAP_NET_RAW on Linux).
 pub async fn run_receiver(conf: &Configuration) {
     let interface_ip_match =
         |iface: &NetworkInterface| iface.ips.iter().any(|ip| ip.ip() == conf.local_addr);

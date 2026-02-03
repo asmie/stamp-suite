@@ -15,6 +15,11 @@ use crate::{
 
 use super::{assemble_auth_answer, assemble_unauth_answer};
 
+/// Runs the STAMP Session Reflector using tokio UDP sockets.
+///
+/// This is the default implementation that uses a placeholder TTL value (255)
+/// since tokio doesn't provide direct access to IP header fields.
+/// For real TTL capture, use the `ttl-nix` or `ttl-pnet` features.
 pub async fn run_receiver(conf: &Configuration) {
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
 

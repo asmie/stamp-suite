@@ -5,7 +5,9 @@ use thiserror::Error;
 /// StampModes is an enum that represents the STAMP mode.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum StampModes {
+    /// Unauthenticated mode - packets are sent without HMAC authentication.
     Unauthenticated,
+    /// Authenticated mode - packets include HMAC for integrity verification.
     Authenticated,
 }
 

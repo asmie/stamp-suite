@@ -30,6 +30,13 @@ use crate::{
     time::generate_timestamp,
 };
 
+/// Assembles an unauthenticated reflected packet from a received test packet.
+///
+/// # Arguments
+/// * `packet` - The received unauthenticated test packet
+/// * `cs` - Clock format to use for timestamps
+/// * `rcvt` - Receive timestamp when the packet was received
+/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
 pub fn assemble_unauth_answer(
     packet: &PacketUnauthenticated,
     cs: ClockFormat,
@@ -52,6 +59,13 @@ pub fn assemble_unauth_answer(
     }
 }
 
+/// Assembles an authenticated reflected packet from a received test packet.
+///
+/// # Arguments
+/// * `packet` - The received authenticated test packet
+/// * `cs` - Clock format to use for timestamps
+/// * `rcvt` - Receive timestamp when the packet was received
+/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
 pub fn assemble_auth_answer(
     packet: &PacketAuthenticated,
     cs: ClockFormat,

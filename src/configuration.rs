@@ -3,6 +3,10 @@ use thiserror::Error;
 
 pub use crate::{clock_format::ClockFormat, stamp_modes::StampModes};
 
+/// Command-line configuration for the STAMP application.
+///
+/// This struct defines all configurable parameters for both sender and reflector modes,
+/// parsed from command-line arguments using clap.
 #[derive(Parser, Debug)]
 #[clap(author = "Piotr Olszewski", version, about, long_about = None)]
 pub struct Configuration {
@@ -42,30 +46,45 @@ pub struct Configuration {
     /// Print individual statistics for each packet.
     #[clap(short = 'R')]
     pub print_stats: bool,
+    /// Run as Session Reflector instead of Session Sender.
     #[clap(short = 'i', long, default_value_t = false)]
     pub is_reflector: bool,
 }
 
 impl Configuration {
+    /// Validates the configuration parameters.
+    ///
+    /// Returns an error if any configuration value is invalid.
     pub fn validate(&self) -> Result<(), ConfigurationError> {
         Ok(())
     }
 }
 
+/// Error type for configuration validation failures.
 #[derive(Error, Debug)]
 pub enum ConfigurationError {
+    /// Indicates an invalid configuration parameter.
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
 }
 
+/// Checks if authenticated mode is enabled in the auth mode string.
+///
+/// Returns `true` if the mode string contains 'A'.
 pub fn is_auth(mode_str: &str) -> bool {
     mode_str.contains('A')
 }
 
+/// Checks if encrypted mode is enabled in the auth mode string.
+///
+/// Returns `true` if the mode string contains 'E'.
 pub fn is_enc(mode_str: &str) -> bool {
     mode_str.contains('E')
 }
 
+/// Checks if open (unauthenticated) mode is enabled in the auth mode string.
+///
+/// Returns `true` if the mode string contains 'O'.
 pub fn is_open(mode_str: &str) -> bool {
     mode_str.contains('O')
 }

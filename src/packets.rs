@@ -1,61 +1,121 @@
+//! STAMP packet structures as defined in RFC 8762.
+//!
+//! This module contains the packet formats for both authenticated and unauthenticated
+//! STAMP test packets, as well as their reflected counterparts.
+
 use rkyv::{rancor, Archive, Deserialize, Serialize};
 
+/// Unauthenticated STAMP test packet sent by the Session-Sender.
+///
+/// This is the basic packet format without HMAC authentication (44 bytes).
+/// See RFC 8762 Section 4.2.
 #[derive(Archive, Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
 #[rkyv(derive(Debug))]
 pub struct PacketUnauthenticated {
+    /// Packet sequence number for ordering and loss detection.
     pub sequence_number: u32,
+    /// Timestamp when the packet was sent (NTP or PTP format).
     pub timestamp: u64,
+    /// Error estimate for the timestamp.
     pub error_estimate: u16,
+    /// Must Be Zero - reserved padding bytes.
     pub mbz: [u8; 30],
 }
 
+/// Unauthenticated STAMP reflected packet sent by the Session-Reflector.
+///
+/// Contains the original sender information plus reflector timestamps.
+/// See RFC 8762 Section 4.3.
 #[derive(Archive, Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
 #[rkyv(derive(Debug))]
 pub struct ReflectedPacketUnauthenticated {
+    /// Reflector's sequence number.
     pub sequence_number: u32,
+    /// Timestamp when the reflector sent the response.
     pub timestamp: u64,
+    /// Reflector's error estimate.
     pub error_estimate: u16,
+    /// Must Be Zero - reserved.
     pub mbz1: u16,
+    /// Timestamp when the reflector received the test packet.
     pub receive_timestamp: u64,
+    /// Original sender's sequence number (echoed back).
     pub sess_sender_seq_number: u32,
+    /// Original sender's timestamp (echoed back).
     pub sess_sender_timestamp: u64,
+    /// Original sender's error estimate (echoed back).
     pub sess_sender_err_estimate: u16,
+    /// Must Be Zero - reserved.
     pub mbz2: u16,
+    /// TTL/Hop Limit of the received test packet.
     pub sess_sender_ttl: u8,
+    /// Must Be Zero - reserved.
     pub mbz3a: u8,
+    /// Must Be Zero - reserved.
     pub mbz3b: u16,
 }
 
+/// Authenticated STAMP test packet sent by the Session-Sender.
+///
+/// Includes HMAC for integrity verification (112 bytes).
+/// See RFC 8762 Section 4.4.
 #[derive(Archive, Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
 #[rkyv(derive(Debug))]
 pub struct PacketAuthenticated {
+    /// Packet sequence number for ordering and loss detection.
     pub sequence_number: u32,
+    /// Must Be Zero - reserved padding.
     pub mbz0: [u8; 12],
+    /// Timestamp when the packet was sent (NTP or PTP format).
     pub timestamp: u64,
+    /// Error estimate for the timestamp.
     pub error_estimate: u16,
+    /// Must Be Zero - reserved padding.
     pub mbz1a: [u8; 32],
+    /// Must Be Zero - reserved padding.
     pub mbz1b: [u8; 32],
+    /// Must Be Zero - reserved padding.
     pub mbz1c: [u8; 6],
+    /// HMAC for packet authentication.
     pub hmac: [u8; 16],
 }
 
+/// Authenticated STAMP reflected packet sent by the Session-Reflector.
+///
+/// Contains the original sender information plus reflector timestamps with HMAC.
+/// See RFC 8762 Section 4.5.
 #[derive(Archive, Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
 #[rkyv(derive(Debug))]
 pub struct ReflectedPacketAuthenticated {
+    /// Reflector's sequence number.
     pub sequence_number: u32,
+    /// Must Be Zero - reserved padding.
     pub mbz0: [u8; 12],
+    /// Timestamp when the reflector sent the response.
     pub timestamp: u64,
+    /// Reflector's error estimate.
     pub error_estimate: u16,
+    /// Must Be Zero - reserved padding.
     pub mbz1: [u8; 6],
+    /// Timestamp when the reflector received the test packet.
     pub receive_timestamp: u64,
+    /// Must Be Zero - reserved padding.
     pub mbz2: [u8; 8],
+    /// Original sender's sequence number (echoed back).
     pub sess_sender_seq_number: u32,
+    /// Must Be Zero - reserved padding.
     pub mbz3: [u8; 12],
+    /// Original sender's timestamp (echoed back).
     pub sess_sender_timestamp: u64,
+    /// Original sender's error estimate (echoed back).
     pub sess_sender_err_estimate: u16,
+    /// Must Be Zero - reserved padding.
     pub mbz4: [u8; 6],
+    /// TTL/Hop Limit of the received test packet.
     pub sess_sender_ttl: u8,
+    /// Must Be Zero - reserved padding.
     pub mbz5: [u8; 15],
+    /// HMAC for packet authentication.
     pub hmac: [u8; 16],
 }
 

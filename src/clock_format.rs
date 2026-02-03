@@ -5,7 +5,9 @@ use thiserror::Error;
 /// This enum represents the clock format used in the application.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum ClockFormat {
+    /// Network Time Protocol timestamp format (RFC 5905).
     NTP,
+    /// Precision Time Protocol timestamp format (IEEE 1588).
     PTP,
 }
 

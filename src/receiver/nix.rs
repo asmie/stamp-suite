@@ -18,6 +18,10 @@ use crate::{
 
 use super::{assemble_auth_answer, assemble_unauth_answer};
 
+/// Runs the STAMP Session Reflector using nix for real TTL capture.
+///
+/// Uses IP_RECVTTL/IPV6_RECVHOPLIMIT socket options to capture the actual
+/// TTL/Hop Limit from incoming packets. Preferred on Linux systems.
 pub async fn run_receiver(conf: &Configuration) {
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let is_ipv6 = conf.local_addr.is_ipv6();
