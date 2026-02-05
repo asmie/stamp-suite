@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 use thiserror::Error;
 
@@ -49,6 +51,30 @@ pub struct Configuration {
     /// Run as Session Reflector instead of Session Sender.
     #[clap(short = 'i', long, default_value_t = false)]
     pub is_reflector: bool,
+
+    /// Error estimate scale (0-63). Default: 0
+    #[clap(long, default_value_t = 0)]
+    pub error_scale: u8,
+
+    /// Error estimate multiplier (0-255). Default: 1
+    #[clap(long, default_value_t = 1)]
+    pub error_multiplier: u8,
+
+    /// Mark clock as synchronized in error estimate.
+    #[clap(long)]
+    pub clock_synchronized: bool,
+
+    /// HMAC key as hex string (32+ hex chars recommended).
+    #[clap(long, env = "STAMP_HMAC_KEY")]
+    pub hmac_key: Option<String>,
+
+    /// Path to file containing HMAC key.
+    #[clap(long, conflicts_with = "hmac_key")]
+    pub hmac_key_file: Option<PathBuf>,
+
+    /// Require HMAC verification (reject packets with invalid HMAC).
+    #[clap(long)]
+    pub require_hmac: bool,
 }
 
 impl Configuration {
@@ -56,6 +82,12 @@ impl Configuration {
     ///
     /// Returns an error if any configuration value is invalid.
     pub fn validate(&self) -> Result<(), ConfigurationError> {
+        if self.error_scale > 63 {
+            return Err(ConfigurationError::InvalidConfiguration(format!(
+                "Error scale {} exceeds maximum of 63",
+                self.error_scale
+            )));
+        }
         Ok(())
     }
 }
@@ -176,6 +208,12 @@ mod tests {
         assert!(!conf.force_ipv6);
         assert!(!conf.print_stats);
         assert!(!conf.is_reflector);
+        assert_eq!(conf.error_scale, 0);
+        assert_eq!(conf.error_multiplier, 1);
+        assert!(!conf.clock_synchronized);
+        assert!(conf.hmac_key.is_none());
+        assert!(conf.hmac_key_file.is_none());
+        assert!(!conf.require_hmac);
     }
 
     #[test]
@@ -297,5 +335,65 @@ mod tests {
         let args = vec!["test", "--remote-port", "99999"];
         let result = Configuration::try_parse_from(args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_error_estimate_options() {
+        let args = vec![
+            "test",
+            "--error-scale",
+            "10",
+            "--error-multiplier",
+            "100",
+            "--clock-synchronized",
+        ];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(conf.error_scale, 10);
+        assert_eq!(conf.error_multiplier, 100);
+        assert!(conf.clock_synchronized);
+    }
+
+    #[test]
+    fn test_error_scale_validation() {
+        let args = vec!["test", "--error-scale", "63"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
+
+        let args = vec!["test", "--error-scale", "64"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_err());
+    }
+
+    #[test]
+    fn test_hmac_key_option() {
+        let args = vec!["test", "--hmac-key", "0123456789abcdef0123456789abcdef"];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(
+            conf.hmac_key,
+            Some("0123456789abcdef0123456789abcdef".to_string())
+        );
+        assert!(conf.hmac_key_file.is_none());
+    }
+
+    #[test]
+    fn test_hmac_key_file_option() {
+        let args = vec!["test", "--hmac-key-file", "/path/to/key"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.hmac_key.is_none());
+        assert_eq!(
+            conf.hmac_key_file,
+            Some(std::path::PathBuf::from("/path/to/key"))
+        );
+    }
+
+    #[test]
+    fn test_require_hmac_option() {
+        let args = vec!["test", "--require-hmac"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.require_hmac);
     }
 }

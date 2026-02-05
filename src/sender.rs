@@ -8,6 +8,8 @@ use tokio::net::UdpSocket;
 
 use crate::{
     configuration::{is_auth, ClockFormat, Configuration},
+    crypto::{compute_packet_hmac, HmacKey},
+    error_estimate::ErrorEstimate,
     packets::*,
     session::Session,
     time::generate_timestamp,
@@ -62,6 +64,21 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         return SessionStats::default();
     }
 
+    // Build error estimate from configuration
+    let error_estimate = ErrorEstimate::new(
+        conf.clock_synchronized,
+        conf.error_scale,
+        conf.error_multiplier,
+    )
+    .unwrap_or_else(|_| ErrorEstimate::unsynchronized());
+    let error_estimate_wire = error_estimate.to_wire();
+
+    // Load HMAC key if configured
+    let hmac_key = load_hmac_key(conf);
+    if hmac_key.is_some() {
+        log::info!("HMAC authentication enabled");
+    }
+
     let sess = Session::new(0);
     let mut pending: HashMap<u32, PendingPacket> = HashMap::new();
     let mut stats = SessionStats::default();
@@ -76,13 +93,19 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         let send_timestamp = generate_timestamp(conf.clock_source);
 
         let send_result = if use_auth {
-            let mut packet = assemble_auth_packet();
+            let mut packet = assemble_auth_packet(error_estimate_wire);
             packet.sequence_number = seq_num;
             packet.timestamp = send_timestamp;
+
+            // Compute and set HMAC if key is configured
+            if let Some(ref key) = hmac_key {
+                finalize_auth_packet(&mut packet, key);
+            }
+
             let buf = any_as_u8_slice(&packet).unwrap();
             socket.send(&buf).await
         } else {
-            let mut packet = assemble_unauth_packet();
+            let mut packet = assemble_unauth_packet(error_estimate_wire);
             packet.sequence_number = seq_num;
             packet.timestamp = send_timestamp;
             let buf = any_as_u8_slice(&packet).unwrap();
@@ -230,32 +253,79 @@ fn process_response(
     }
 }
 
-/// Creates a new unauthenticated STAMP test packet with default values.
+/// Loads the HMAC key from configuration (hex string or file).
+fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
+    if let Some(ref hex_key) = conf.hmac_key {
+        match HmacKey::from_hex(hex_key) {
+            Ok(key) => return Some(key),
+            Err(e) => {
+                eprintln!("Failed to parse HMAC key: {}", e);
+                return None;
+            }
+        }
+    }
+
+    if let Some(ref path) = conf.hmac_key_file {
+        match HmacKey::from_file(path) {
+            Ok(key) => return Some(key),
+            Err(e) => {
+                eprintln!("Failed to load HMAC key from file: {}", e);
+                return None;
+            }
+        }
+    }
+
+    None
+}
+
+/// Creates a new unauthenticated STAMP test packet with the specified error estimate.
 ///
 /// The caller should set the sequence number and timestamp before sending.
-pub fn assemble_unauth_packet() -> PacketUnauthenticated {
+///
+/// # Arguments
+/// * `error_estimate` - The 16-bit error estimate value in wire format
+pub fn assemble_unauth_packet(error_estimate: u16) -> PacketUnauthenticated {
     PacketUnauthenticated {
         timestamp: 0,
         mbz: [0u8; 30],
-        error_estimate: 0,
+        error_estimate,
         sequence_number: 0,
     }
 }
 
-/// Creates a new authenticated STAMP test packet with default values.
+/// Creates a new authenticated STAMP test packet with the specified error estimate.
 ///
-/// The caller should set the sequence number, timestamp, and HMAC before sending.
-pub fn assemble_auth_packet() -> PacketAuthenticated {
+/// The caller should set the sequence number and timestamp before sending.
+/// Use `finalize_auth_packet` to compute and set the HMAC after all fields are set.
+///
+/// # Arguments
+/// * `error_estimate` - The 16-bit error estimate value in wire format
+pub fn assemble_auth_packet(error_estimate: u16) -> PacketAuthenticated {
     PacketAuthenticated {
         timestamp: 0,
         mbz0: [0u8; 12],
-        error_estimate: 0,
+        error_estimate,
         sequence_number: 0,
         hmac: [0u8; 16],
         mbz1a: [0u8; 32],
         mbz1b: [0u8; 32],
         mbz1c: [0u8; 6],
     }
+}
+
+/// HMAC field offset in PacketAuthenticated (bytes before HMAC field).
+pub const AUTH_PACKET_HMAC_OFFSET: usize = 96;
+
+/// Computes and sets the HMAC for an authenticated packet.
+///
+/// This should be called after all other fields in the packet have been set.
+///
+/// # Arguments
+/// * `packet` - The packet to finalize
+/// * `key` - The HMAC key to use
+pub fn finalize_auth_packet(packet: &mut PacketAuthenticated, key: &HmacKey) {
+    let bytes = any_as_u8_slice(packet).unwrap();
+    packet.hmac = compute_packet_hmac(key, &bytes, AUTH_PACKET_HMAC_OFFSET);
 }
 
 #[cfg(test)]
@@ -293,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_assemble_unauth_packet_defaults() {
-        let packet = assemble_unauth_packet();
+        let packet = assemble_unauth_packet(0);
         assert_eq!(packet.sequence_number, 0);
         assert_eq!(packet.timestamp, 0);
         assert_eq!(packet.error_estimate, 0);
@@ -301,8 +371,15 @@ mod tests {
     }
 
     #[test]
+    fn test_assemble_unauth_packet_with_error_estimate() {
+        let error_estimate = 0x8A64; // S=1, Scale=10, Multiplier=100
+        let packet = assemble_unauth_packet(error_estimate);
+        assert_eq!(packet.error_estimate, error_estimate);
+    }
+
+    #[test]
     fn test_assemble_auth_packet_defaults() {
-        let packet = assemble_auth_packet();
+        let packet = assemble_auth_packet(0);
         assert_eq!(packet.sequence_number, 0);
         assert_eq!(packet.timestamp, 0);
         assert_eq!(packet.error_estimate, 0);
@@ -311,6 +388,47 @@ mod tests {
         assert_eq!(packet.mbz1b, [0u8; 32]);
         assert_eq!(packet.mbz1c, [0u8; 6]);
         assert_eq!(packet.hmac, [0u8; 16]);
+    }
+
+    #[test]
+    fn test_assemble_auth_packet_with_error_estimate() {
+        let error_estimate = 0x8A64;
+        let packet = assemble_auth_packet(error_estimate);
+        assert_eq!(packet.error_estimate, error_estimate);
+    }
+
+    #[test]
+    fn test_finalize_auth_packet_sets_hmac() {
+        use crate::crypto::HmacKey;
+
+        let mut packet = assemble_auth_packet(0);
+        packet.sequence_number = 42;
+        packet.timestamp = 123456789;
+
+        let key = HmacKey::new(vec![0xab; 32]).unwrap();
+        finalize_auth_packet(&mut packet, &key);
+
+        // HMAC should no longer be all zeros
+        assert_ne!(packet.hmac, [0u8; 16]);
+    }
+
+    #[test]
+    fn test_finalize_auth_packet_deterministic() {
+        use crate::crypto::HmacKey;
+
+        let key = HmacKey::new(vec![0xab; 32]).unwrap();
+
+        let mut packet1 = assemble_auth_packet(100);
+        packet1.sequence_number = 1;
+        packet1.timestamp = 999;
+        finalize_auth_packet(&mut packet1, &key);
+
+        let mut packet2 = assemble_auth_packet(100);
+        packet2.sequence_number = 1;
+        packet2.timestamp = 999;
+        finalize_auth_packet(&mut packet2, &key);
+
+        assert_eq!(packet1.hmac, packet2.hmac);
     }
 
     #[test]

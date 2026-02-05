@@ -28,12 +28,15 @@ ttl-pnet = ["pnet"]
 [dependencies]
 rkyv = "0.8.14"
 chrono = "0.4.43"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 env_logger = "0.11"
 log = "0.4"
 nix = { version = "0.31", optional = true, features = ["socket", "uio", "net"] }
 pnet = { version = "0.35", optional = true }
 thiserror = "2.0"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [dependencies.tokio]
 version = "1.49"

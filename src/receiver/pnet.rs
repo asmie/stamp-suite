@@ -19,11 +19,20 @@ use pnet::{
 
 use crate::{
     configuration::{is_auth, Configuration},
+    crypto::HmacKey,
+    error_estimate::ErrorEstimate,
     packets::{any_as_u8_slice, read_struct, PacketAuthenticated, PacketUnauthenticated},
     time::generate_timestamp,
 };
 
 use super::{assemble_auth_answer, assemble_unauth_answer};
+
+/// Context for handling STAMP packets in pnet mode.
+struct PnetContext {
+    error_estimate_wire: u16,
+    hmac_key: Option<HmacKey>,
+    require_hmac: bool,
+}
 
 /// Runs the STAMP Session Reflector using pnet for raw packet capture.
 ///
@@ -50,6 +59,27 @@ pub async fn run_receiver(conf: &Configuration) {
     // We also need a UDP socket to send responses
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let send_socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("Cannot bind send socket");
+
+    // Build error estimate from configuration
+    let error_estimate = ErrorEstimate::new(
+        conf.clock_synchronized,
+        conf.error_scale,
+        conf.error_multiplier,
+    )
+    .unwrap_or_else(|_| ErrorEstimate::unsynchronized());
+    let error_estimate_wire = error_estimate.to_wire();
+
+    // Load HMAC key if configured
+    let hmac_key = load_hmac_key(conf);
+    if hmac_key.is_some() {
+        log::info!("HMAC authentication enabled");
+    }
+
+    let ctx = PnetContext {
+        error_estimate_wire,
+        hmac_key,
+        require_hmac: conf.require_hmac,
+    };
 
     println!(
         "STAMP Reflector listening on {} (pnet mode, real TTL)",
@@ -92,6 +122,7 @@ pub async fn run_receiver(conf: &Configuration) {
                                 conf,
                                 use_auth,
                                 &send_socket,
+                                &ctx,
                             );
                             continue;
                         } else if version == 6 {
@@ -104,6 +135,7 @@ pub async fn run_receiver(conf: &Configuration) {
                                 conf,
                                 use_auth,
                                 &send_socket,
+                                &ctx,
                             );
                             continue;
                         }
@@ -114,6 +146,7 @@ pub async fn run_receiver(conf: &Configuration) {
                     conf,
                     use_auth,
                     &send_socket,
+                    &ctx,
                 );
             }
             Err(e) => eprintln!("packetdump: unable to receive packet: {}", e),
@@ -121,11 +154,45 @@ pub async fn run_receiver(conf: &Configuration) {
     }
 }
 
+/// Loads the HMAC key from configuration (hex string or file).
+fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
+    if let Some(ref hex_key) = conf.hmac_key {
+        match HmacKey::from_hex(hex_key) {
+            Ok(key) => return Some(key),
+            Err(e) => {
+                eprintln!("Failed to parse HMAC key: {}", e);
+                return None;
+            }
+        }
+    }
+
+    if let Some(ref path) = conf.hmac_key_file {
+        match HmacKey::from_file(path) {
+            Ok(key) => return Some(key),
+            Err(e) => {
+                eprintln!("Failed to load HMAC key from file: {}", e);
+                return None;
+            }
+        }
+    }
+
+    None
+}
+
+/// Verifies the HMAC of an incoming authenticated packet.
+fn verify_incoming_hmac(key: &HmacKey, packet_bytes: &[u8], expected_hmac: &[u8; 16]) -> bool {
+    use crate::crypto::verify_packet_hmac;
+    use crate::sender::AUTH_PACKET_HMAC_OFFSET;
+
+    verify_packet_hmac(key, packet_bytes, AUTH_PACKET_HMAC_OFFSET, expected_hmac)
+}
+
 fn handle_packet(
     ethernet: &EthernetPacket,
     conf: &Configuration,
     use_auth: bool,
     send_socket: &std::net::UdpSocket,
+    ctx: &PnetContext,
 ) {
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => {
@@ -143,6 +210,7 @@ fn handle_packet(
                                 conf,
                                 use_auth,
                                 send_socket,
+                                ctx,
                             );
                         }
                     }
@@ -164,6 +232,7 @@ fn handle_packet(
                                 conf,
                                 use_auth,
                                 send_socket,
+                                ctx,
                             );
                         }
                     }
@@ -181,13 +250,34 @@ fn process_stamp_packet(
     conf: &Configuration,
     use_auth: bool,
     send_socket: &std::net::UdpSocket,
+    ctx: &PnetContext,
 ) {
     let rcvt = generate_timestamp(conf.clock_source);
 
     let response = if use_auth {
         match read_struct::<PacketAuthenticated>(data) {
             Ok(packet) => {
-                let answer = assemble_auth_answer(&packet, conf.clock_source, rcvt, ttl);
+                // Verify HMAC if required
+                if ctx.require_hmac {
+                    if let Some(ref key) = ctx.hmac_key {
+                        if !verify_incoming_hmac(key, data, &packet.hmac) {
+                            eprintln!("HMAC verification failed for packet from {}", src);
+                            return;
+                        }
+                    } else {
+                        eprintln!("HMAC required but no key configured");
+                        return;
+                    }
+                }
+
+                let answer = assemble_auth_answer(
+                    &packet,
+                    conf.clock_source,
+                    rcvt,
+                    ttl,
+                    ctx.error_estimate_wire,
+                    ctx.hmac_key.as_ref(),
+                );
                 any_as_u8_slice(&answer).ok()
             }
             Err(e) => {
@@ -201,7 +291,13 @@ fn process_stamp_packet(
     } else {
         match read_struct::<PacketUnauthenticated>(data) {
             Ok(packet) => {
-                let answer = assemble_unauth_answer(&packet, conf.clock_source, rcvt, ttl);
+                let answer = assemble_unauth_answer(
+                    &packet,
+                    conf.clock_source,
+                    rcvt,
+                    ttl,
+                    ctx.error_estimate_wire,
+                );
                 any_as_u8_slice(&answer).ok()
             }
             Err(e) => {

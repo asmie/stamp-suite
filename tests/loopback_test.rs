@@ -43,12 +43,12 @@ async fn run_test_reflector(
     let response = if use_auth {
         let packet: PacketAuthenticated =
             read_struct(&buf[..len]).map_err(|_| "Failed to parse auth packet")?;
-        let answer = assemble_auth_answer(&packet, ClockFormat::NTP, rcvt, ttl);
+        let answer = assemble_auth_answer(&packet, ClockFormat::NTP, rcvt, ttl, 0, None);
         any_as_u8_slice(&answer).map_err(|_| "Failed to serialize auth response")?
     } else {
         let packet: PacketUnauthenticated =
             read_struct(&buf[..len]).map_err(|_| "Failed to parse unauth packet")?;
-        let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, ttl);
+        let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, ttl, 0);
         any_as_u8_slice(&answer).map_err(|_| "Failed to serialize unauth response")?
     };
 
@@ -77,12 +77,12 @@ async fn run_test_sender(
     let send_timestamp = generate_timestamp(ClockFormat::NTP);
 
     let send_buf = if use_auth {
-        let mut packet = assemble_auth_packet();
+        let mut packet = assemble_auth_packet(0);
         packet.sequence_number = seq_num;
         packet.timestamp = send_timestamp;
         any_as_u8_slice(&packet).map_err(|_| "Failed to serialize auth packet")?
     } else {
-        let mut packet = assemble_unauth_packet();
+        let mut packet = assemble_unauth_packet(0);
         packet.sequence_number = seq_num;
         packet.timestamp = send_timestamp;
         any_as_u8_slice(&packet).map_err(|_| "Failed to serialize unauth packet")?
@@ -201,7 +201,7 @@ async fn test_loopback_multiple_packets() {
             {
                 let rcvt = generate_timestamp(ClockFormat::NTP);
                 if let Ok(packet) = read_struct::<PacketUnauthenticated>(&buf[..len]) {
-                    let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64);
+                    let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64, 0);
                     if let Ok(response) = any_as_u8_slice(&answer) {
                         let _ = socket.send_to(&response, src).await;
                         received_count += 1;
@@ -222,7 +222,7 @@ async fn test_loopback_multiple_packets() {
 
     let mut responses_received = 0;
     for seq in 0..5u32 {
-        let mut packet = assemble_unauth_packet();
+        let mut packet = assemble_unauth_packet(0);
         packet.sequence_number = seq;
         packet.timestamp = generate_timestamp(ClockFormat::NTP);
 
@@ -270,7 +270,7 @@ async fn test_loopback_timestamp_ordering() {
             tokio::time::sleep(Duration::from_millis(5)).await;
 
             if let Ok(packet) = read_struct::<PacketUnauthenticated>(&buf[..len]) {
-                let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64);
+                let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64, 0);
                 if let Ok(response) = any_as_u8_slice(&answer) {
                     let _ = socket.send_to(&response, src).await;
                 }
@@ -285,7 +285,7 @@ async fn test_loopback_timestamp_ordering() {
         .unwrap();
 
     let send_timestamp = generate_timestamp(ClockFormat::NTP);
-    let mut packet = assemble_unauth_packet();
+    let mut packet = assemble_unauth_packet(0);
     packet.sequence_number = 1;
     packet.timestamp = send_timestamp;
 
@@ -339,7 +339,7 @@ async fn test_loopback_ipv6() {
         {
             let rcvt = generate_timestamp(ClockFormat::NTP);
             if let Ok(packet) = read_struct::<PacketUnauthenticated>(&buf[..len]) {
-                let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64);
+                let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64, 0);
                 if let Ok(response) = any_as_u8_slice(&answer) {
                     let _ = reflector_socket.send_to(&response, src).await;
                     return true;
@@ -352,7 +352,7 @@ async fn test_loopback_ipv6() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let sender_socket = UdpSocket::bind("[::1]:0").await.unwrap();
-    let mut packet = assemble_unauth_packet();
+    let mut packet = assemble_unauth_packet(0);
     packet.sequence_number = 99;
     packet.timestamp = generate_timestamp(ClockFormat::NTP);
 

@@ -19,6 +19,10 @@
 pub mod clock_format;
 /// Command-line configuration and validation.
 pub mod configuration;
+/// HMAC cryptographic operations for packet authentication.
+pub mod crypto;
+/// Error estimate encoding/decoding for timestamps.
+pub mod error_estimate;
 /// STAMP packet structures and serialization.
 pub mod packets;
 /// Session Reflector implementations.

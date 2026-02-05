@@ -23,12 +23,16 @@ pub use pnet::run_receiver;
 
 use crate::{
     configuration::ClockFormat,
+    crypto::{compute_packet_hmac, HmacKey},
     packets::{
         PacketAuthenticated, PacketUnauthenticated, ReflectedPacketAuthenticated,
         ReflectedPacketUnauthenticated,
     },
     time::generate_timestamp,
 };
+
+/// HMAC field offset in ReflectedPacketAuthenticated (bytes before HMAC field).
+pub const REFLECTED_AUTH_PACKET_HMAC_OFFSET: usize = 96;
 
 /// Assembles an unauthenticated reflected packet from a received test packet.
 ///
@@ -37,11 +41,13 @@ use crate::{
 /// * `cs` - Clock format to use for timestamps
 /// * `rcvt` - Receive timestamp when the packet was received
 /// * `ttl` - TTL/Hop Limit value from the received packet's IP header
+/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
 pub fn assemble_unauth_answer(
     packet: &PacketUnauthenticated,
     cs: ClockFormat,
     rcvt: u64,
     ttl: u8,
+    reflector_error_estimate: u16,
 ) -> ReflectedPacketUnauthenticated {
     ReflectedPacketUnauthenticated {
         sess_sender_timestamp: packet.timestamp,
@@ -49,7 +55,7 @@ pub fn assemble_unauth_answer(
         sess_sender_seq_number: packet.sequence_number,
         sess_sender_ttl: ttl,
         sequence_number: packet.sequence_number,
-        error_estimate: packet.error_estimate,
+        error_estimate: reflector_error_estimate,
         timestamp: generate_timestamp(cs),
         receive_timestamp: rcvt,
         mbz1: 0,
@@ -66,19 +72,23 @@ pub fn assemble_unauth_answer(
 /// * `cs` - Clock format to use for timestamps
 /// * `rcvt` - Receive timestamp when the packet was received
 /// * `ttl` - TTL/Hop Limit value from the received packet's IP header
+/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
+/// * `hmac_key` - Optional HMAC key for computing the response HMAC
 pub fn assemble_auth_answer(
     packet: &PacketAuthenticated,
     cs: ClockFormat,
     rcvt: u64,
     ttl: u8,
+    reflector_error_estimate: u16,
+    hmac_key: Option<&HmacKey>,
 ) -> ReflectedPacketAuthenticated {
-    ReflectedPacketAuthenticated {
+    let mut response = ReflectedPacketAuthenticated {
         sess_sender_timestamp: packet.timestamp,
         sess_sender_err_estimate: packet.error_estimate,
         sess_sender_seq_number: packet.sequence_number,
         sess_sender_ttl: ttl,
         sequence_number: packet.sequence_number,
-        error_estimate: packet.error_estimate,
+        error_estimate: reflector_error_estimate,
         timestamp: generate_timestamp(cs),
         receive_timestamp: rcvt,
         mbz0: [0u8; 12],
@@ -88,7 +98,15 @@ pub fn assemble_auth_answer(
         mbz4: [0u8; 6],
         mbz5: [0u8; 15],
         hmac: [0u8; 16],
+    };
+
+    // Compute HMAC if key is provided
+    if let Some(key) = hmac_key {
+        let bytes = crate::packets::any_as_u8_slice(&response).unwrap();
+        response.hmac = compute_packet_hmac(key, &bytes, REFLECTED_AUTH_PACKET_HMAC_OFFSET);
     }
+
+    response
 }
 
 #[cfg(test)]
@@ -106,8 +124,15 @@ mod tests {
 
         let rcvt = 987654321u64;
         let ttl = 64u8;
+        let reflector_error_estimate = 200u16;
 
-        let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, rcvt, ttl);
+        let reflected = assemble_unauth_answer(
+            &sender_packet,
+            ClockFormat::NTP,
+            rcvt,
+            ttl,
+            reflector_error_estimate,
+        );
 
         // Verify sender fields are echoed
         assert_eq!(
@@ -120,6 +145,8 @@ mod tests {
             sender_packet.error_estimate
         );
         assert_eq!(reflected.sess_sender_ttl, ttl);
+        // Verify reflector's own error estimate is used
+        assert_eq!(reflected.error_estimate, reflector_error_estimate);
     }
 
     #[test]
@@ -132,7 +159,7 @@ mod tests {
         };
 
         let rcvt = 500u64;
-        let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, rcvt, 64);
+        let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, rcvt, 64, 0);
 
         assert_eq!(reflected.receive_timestamp, rcvt);
     }
@@ -146,7 +173,7 @@ mod tests {
             mbz: [0; 30],
         };
 
-        let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, 64);
+        let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, 64, 0);
 
         // Reflector's timestamp should be non-zero (generated)
         assert!(reflected.timestamp > 0);
@@ -167,8 +194,16 @@ mod tests {
 
         let rcvt = 987654321u64;
         let ttl = 128u8;
+        let reflector_error_estimate = 300u16;
 
-        let reflected = assemble_auth_answer(&sender_packet, ClockFormat::NTP, rcvt, ttl);
+        let reflected = assemble_auth_answer(
+            &sender_packet,
+            ClockFormat::NTP,
+            rcvt,
+            ttl,
+            reflector_error_estimate,
+            None,
+        );
 
         // Verify sender fields are echoed
         assert_eq!(
@@ -181,6 +216,8 @@ mod tests {
             sender_packet.error_estimate
         );
         assert_eq!(reflected.sess_sender_ttl, ttl);
+        // Verify reflector's own error estimate is used
+        assert_eq!(reflected.error_estimate, reflector_error_estimate);
     }
 
     #[test]
@@ -194,7 +231,7 @@ mod tests {
 
         // Test various TTL values
         for ttl in [0u8, 1, 64, 128, 255] {
-            let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, ttl);
+            let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, ttl, 0);
             assert_eq!(reflected.sess_sender_ttl, ttl);
         }
     }
@@ -214,8 +251,55 @@ mod tests {
 
         // Test various TTL values
         for ttl in [0u8, 1, 64, 128, 255] {
-            let reflected = assemble_auth_answer(&sender_packet, ClockFormat::NTP, 0, ttl);
+            let reflected = assemble_auth_answer(&sender_packet, ClockFormat::NTP, 0, ttl, 0, None);
             assert_eq!(reflected.sess_sender_ttl, ttl);
         }
+    }
+
+    #[test]
+    fn test_assemble_auth_answer_with_hmac() {
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 123456789,
+            error_estimate: 100,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        let key = HmacKey::new(vec![0xab; 32]).unwrap();
+        let reflected = assemble_auth_answer(
+            &sender_packet,
+            ClockFormat::NTP,
+            987654321,
+            64,
+            200,
+            Some(&key),
+        );
+
+        // HMAC should be non-zero when key is provided
+        assert_ne!(reflected.hmac, [0u8; 16]);
+    }
+
+    #[test]
+    fn test_assemble_auth_answer_without_hmac() {
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 123456789,
+            error_estimate: 100,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        let reflected =
+            assemble_auth_answer(&sender_packet, ClockFormat::NTP, 987654321, 64, 200, None);
+
+        // HMAC should be zero when no key is provided
+        assert_eq!(reflected.hmac, [0u8; 16]);
     }
 }
