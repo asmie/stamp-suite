@@ -1,13 +1,12 @@
 //! STAMP Session Reflector implementations.
 //!
-//! This module provides different implementations for the STAMP reflector based on
-//! compile-time feature flags and platform:
+//! Platform defaults with real TTL capture:
+//! - **Linux**: Uses nix via IP_RECVTTL
+//! - **Windows/macOS**: Uses pnet for raw packet capture
 //!
-//! - **Linux** (default): Uses nix crate for real TTL capture via IP_RECVTTL
-//! - **Windows/macOS** (default): Uses pnet for raw packet capture with real TTL
-//! - **Other platforms** or `--no-default-features`: Uses tokio UDP with placeholder TTL (255)
-//! - **`ttl-nix`** feature: Force nix backend on any platform
-//! - **`ttl-pnet`** feature: Force pnet backend on any platform
+//! Explicit overrides:
+//! - **`ttl-nix`**: Force nix backend on any platform
+//! - **`ttl-pnet`**: Force pnet backend on any platform
 
 // Explicit feature flags take priority
 #[cfg(feature = "ttl-nix")]
@@ -20,58 +19,48 @@ mod pnet;
 #[cfg(all(feature = "ttl-pnet", not(feature = "ttl-nix")))]
 pub use pnet::run_receiver;
 
-// Platform defaults when no explicit feature is set
-// Linux: use nix by default (available via target-specific dependency)
+// Platform defaults (when no explicit feature)
 #[cfg(all(
     target_os = "linux",
-    feature = "default-ttl",
     not(feature = "ttl-nix"),
     not(feature = "ttl-pnet")
 ))]
 mod nix;
 #[cfg(all(
     target_os = "linux",
-    feature = "default-ttl",
     not(feature = "ttl-nix"),
     not(feature = "ttl-pnet")
 ))]
 pub use nix::run_receiver;
 
-// Windows/macOS: use pnet by default (available via target-specific dependency)
 #[cfg(all(
     any(target_os = "windows", target_os = "macos"),
-    feature = "default-ttl",
     not(feature = "ttl-nix"),
     not(feature = "ttl-pnet")
 ))]
 mod pnet;
 #[cfg(all(
     any(target_os = "windows", target_os = "macos"),
-    feature = "default-ttl",
     not(feature = "ttl-nix"),
     not(feature = "ttl-pnet")
 ))]
 pub use pnet::run_receiver;
 
-// Fallback to default (placeholder TTL) on other platforms or when default-ttl is disabled
+// Fallback to placeholder TTL on other platforms
 #[cfg(not(any(
     feature = "ttl-nix",
     feature = "ttl-pnet",
-    all(target_os = "linux", feature = "default-ttl"),
-    all(
-        any(target_os = "windows", target_os = "macos"),
-        feature = "default-ttl"
-    )
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
 )))]
 mod default;
 #[cfg(not(any(
     feature = "ttl-nix",
     feature = "ttl-pnet",
-    all(target_os = "linux", feature = "default-ttl"),
-    all(
-        any(target_os = "windows", target_os = "macos"),
-        feature = "default-ttl"
-    )
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "macos"
 )))]
 pub use default::run_receiver;
 

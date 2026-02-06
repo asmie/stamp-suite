@@ -276,12 +276,6 @@ fn process_stamp_packet(
 ) {
     let rcvt = generate_timestamp(conf.clock_source);
 
-    // Generate reflector sequence number if in stateful mode
-    let reflector_seq = ctx
-        .reflector_session
-        .as_ref()
-        .map(|s| s.generate_sequence_number());
-
     let response = if use_auth {
         let packet_result = if conf.strict_packets {
             PacketAuthenticated::from_bytes(data)
@@ -304,6 +298,12 @@ fn process_stamp_packet(
                     eprintln!("HMAC key required but not configured");
                     return;
                 }
+
+                // Generate reflector sequence number only after successful validation
+                let reflector_seq = ctx
+                    .reflector_session
+                    .as_ref()
+                    .map(|s| s.generate_sequence_number());
 
                 // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
                 Some(assemble_auth_answer_symmetric(
@@ -333,6 +333,12 @@ fn process_stamp_packet(
         };
         match packet_result {
             Ok(packet) => {
+                // Generate reflector sequence number only after successful validation
+                let reflector_seq = ctx
+                    .reflector_session
+                    .as_ref()
+                    .map(|s| s.generate_sequence_number());
+
                 // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
                 Some(assemble_unauth_answer_symmetric(
                     &packet,

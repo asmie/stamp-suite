@@ -97,11 +97,6 @@ pub async fn run_receiver(conf: &Configuration) {
                 let rcvt = generate_timestamp(conf.clock_source);
                 let ttl = 255u8; // Placeholder TTL
 
-                // Generate reflector sequence number if in stateful mode
-                let reflector_seq = reflector_session
-                    .as_ref()
-                    .map(|s| s.generate_sequence_number());
-
                 let response = if use_auth {
                     let packet_result = if conf.strict_packets {
                         PacketAuthenticated::from_bytes(&buf[..len])
@@ -124,6 +119,11 @@ pub async fn run_receiver(conf: &Configuration) {
                                 eprintln!("HMAC key required but not configured");
                                 continue;
                             }
+
+                            // Generate reflector sequence number only after successful validation
+                            let reflector_seq = reflector_session
+                                .as_ref()
+                                .map(|s| s.generate_sequence_number());
 
                             // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
                             Some(assemble_auth_answer_symmetric(
@@ -153,6 +153,11 @@ pub async fn run_receiver(conf: &Configuration) {
                     };
                     match packet_result {
                         Ok(packet) => {
+                            // Generate reflector sequence number only after successful validation
+                            let reflector_seq = reflector_session
+                                .as_ref()
+                                .map(|s| s.generate_sequence_number());
+
                             // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
                             Some(assemble_unauth_answer_symmetric(
                                 &packet,
