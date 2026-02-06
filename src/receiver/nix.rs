@@ -321,34 +321,35 @@ fn extract_ttl_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> O
 
 /// Extract TTL from control messages received via recvmsg (macOS version).
 ///
-/// On macOS, nix doesn't have typed Ipv4Ttl variant, so we parse Unknown cmsgs.
+/// On macOS, nix doesn't have typed Ipv4Ttl/Ipv6HopLimit variants, so we parse Unknown cmsgs.
 /// Returns `None` if TTL/HopLimit could not be extracted from the control messages.
 #[cfg(target_os = "macos")]
 fn extract_ttl_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> Option<u8> {
     let cmsgs = msg.cmsgs().ok()?;
 
     for cmsg in cmsgs {
-        match cmsg {
-            // IPv6 Hop Limit is available on macOS
-            ControlMessageOwned::Ipv6HopLimit(hoplimit) => {
-                return Some(hoplimit.clamp(0, 255) as u8);
-            }
-            // IPv4 TTL comes as Unknown on macOS
-            ControlMessageOwned::Unknown(ucmsg) => {
-                // Check if this is IP_RECVTTL (level=IPPROTO_IP, type=IP_RECVTTL)
-                // The cmsg header is at the start, followed by the data (TTL as i32)
-                if ucmsg.0.cmsg_level == libc::IPPROTO_IP {
-                    // On macOS, IP_RECVTTL delivers TTL as int
-                    let data = &ucmsg.1;
-                    if data.len() >= 4 {
-                        let ttl = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
-                        return Some(ttl.clamp(0, 255) as u8);
-                    } else if !data.is_empty() {
-                        return Some(data[0]);
-                    }
+        if let ControlMessageOwned::Unknown(ref ucmsg) = cmsg {
+            let level = ucmsg.cmsg_header.cmsg_level;
+            let data = &ucmsg.data_bytes;
+
+            // IPv4 TTL (level=IPPROTO_IP)
+            if level == libc::IPPROTO_IP {
+                if data.len() >= 4 {
+                    let ttl = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+                    return Some(ttl.clamp(0, 255) as u8);
+                } else if !data.is_empty() {
+                    return Some(data[0]);
                 }
             }
-            _ => continue,
+            // IPv6 Hop Limit (level=IPPROTO_IPV6)
+            else if level == libc::IPPROTO_IPV6 {
+                if data.len() >= 4 {
+                    let hoplimit = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+                    return Some(hoplimit.clamp(0, 255) as u8);
+                } else if !data.is_empty() {
+                    return Some(data[0]);
+                }
+            }
         }
     }
 

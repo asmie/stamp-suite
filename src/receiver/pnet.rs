@@ -66,8 +66,7 @@ pub async fn run_receiver(conf: &Configuration) {
     } else {
         "0.0.0.0:0"
     };
-    let send_socket =
-        std::net::UdpSocket::bind(send_bind_addr).expect("Cannot bind send socket");
+    let send_socket = std::net::UdpSocket::bind(send_bind_addr).expect("Cannot bind send socket");
 
     // Check if authenticated mode is used
     let use_auth = is_auth(&conf.auth_mode);
