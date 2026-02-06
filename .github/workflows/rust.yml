@@ -66,7 +66,7 @@ jobs:
             features: --all-features
           - os: macos-latest
             rust: stable
-            features: --features ttl-pnet
+            features: ""
           - os: windows-latest
             rust: stable
             features: ""
@@ -78,6 +78,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.os }}-${{ matrix.rust }}
+      - name: Install Npcap SDK (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile "$env:TEMP/npcap-sdk.zip"
+          Expand-Archive -Path "$env:TEMP/npcap-sdk.zip" -DestinationPath "C:/npcap-sdk"
+          echo "LIB=C:/npcap-sdk/Lib/x64" >> $env:GITHUB_ENV
       - name: Run tests
         run: cargo test --verbose ${{ matrix.features }}
 
@@ -128,6 +135,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+      - name: Install Npcap SDK (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile "$env:TEMP/npcap-sdk.zip"
+          Expand-Archive -Path "$env:TEMP/npcap-sdk.zip" -DestinationPath "C:/npcap-sdk"
+          echo "LIB=C:/npcap-sdk/Lib/x64" >> $env:GITHUB_ENV
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 

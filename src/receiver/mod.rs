@@ -1,8 +1,8 @@
 //! STAMP Session Reflector implementations.
 //!
 //! Platform defaults with real TTL capture:
-//! - **Linux**: Uses nix via IP_RECVTTL
-//! - **Windows/macOS**: Uses pnet for raw packet capture
+//! - **Linux/macOS**: Uses nix via IP_RECVTTL
+//! - **Windows**: Uses pnet for raw packet capture
 //!
 //! Explicit overrides:
 //! - **`ttl-nix`**: Force nix backend on any platform
@@ -21,26 +21,26 @@ pub use pnet::run_receiver;
 
 // Platform defaults (when no explicit feature)
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     not(feature = "ttl-nix"),
     not(feature = "ttl-pnet")
 ))]
 mod nix;
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "macos"),
     not(feature = "ttl-nix"),
     not(feature = "ttl-pnet")
 ))]
 pub use nix::run_receiver;
 
 #[cfg(all(
-    any(target_os = "windows", target_os = "macos"),
+    target_os = "windows",
     not(feature = "ttl-nix"),
     not(feature = "ttl-pnet")
 ))]
 mod pnet;
 #[cfg(all(
-    any(target_os = "windows", target_os = "macos"),
+    target_os = "windows",
     not(feature = "ttl-nix"),
     not(feature = "ttl-pnet")
 ))]

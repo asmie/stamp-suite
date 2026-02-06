@@ -47,8 +47,8 @@ features = ["full"]
 # Note: These provide defaults when no explicit ttl-* feature is used.
 # Using --features ttl-pnet on Linux will compile both nix and pnet,
 # but only pnet will be used at runtime due to cfg checks in mod.rs.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["socket", "uio", "net"] }
 
-[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+[target.'cfg(target_os = "windows")'.dependencies]
 pnet = "0.35"
