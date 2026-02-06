@@ -146,7 +146,13 @@ pub async fn run_receiver(conf: &Configuration) {
                 let src_addr = msg.address;
 
                 // Extract TTL from control messages
-                let ttl = extract_ttl_from_cmsgs(&msg);
+                let ttl = match extract_ttl_from_cmsgs(&msg) {
+                    Some(t) => t,
+                    None => {
+                        log::warn!("Failed to extract TTL from packet, skipping");
+                        continue;
+                    }
+                };
                 let rcvt = generate_timestamp(conf.clock_source);
 
                 let response = if use_auth {
@@ -288,37 +294,26 @@ fn verify_incoming_hmac(key: &HmacKey, packet_bytes: &[u8], expected_hmac: &[u8;
 }
 
 /// Extract TTL from control messages received via recvmsg.
-fn extract_ttl_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> u8 {
-    let mut ttl = 255u8;
+///
+/// Returns `None` if TTL/HopLimit could not be extracted from the control messages.
+fn extract_ttl_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> Option<u8> {
+    let cmsgs = msg.cmsgs().ok()?;
 
-    if let Ok(cmsgs) = msg.cmsgs() {
-        for cmsg in cmsgs {
-            if let ControlMessageOwned::Unknown(ucmsg) = cmsg {
-                // The UnknownCmsg contains (cmsghdr, Vec<u8>)
-                // For IPv4: level=IPPROTO_IP, type=IP_TTL
-                // For IPv6: level=IPPROTO_IPV6, type=IPV6_HOPLIMIT
-                //
-                // Unfortunately, UnknownCmsg fields are not directly accessible.
-                // We parse the debug output as a workaround.
-                let cmsg_data = format!("{:?}", ucmsg);
-                if cmsg_data.contains('[') {
-                    if let Some(start) = cmsg_data.rfind('[') {
-                        if let Some(end) = cmsg_data.rfind(']') {
-                            let bytes_str = &cmsg_data[start + 1..end];
-                            let bytes: Vec<u8> = bytes_str
-                                .split(", ")
-                                .filter_map(|s| s.trim().parse().ok())
-                                .collect();
-                            if !bytes.is_empty() {
-                                // TTL is typically sent as int, take first byte
-                                ttl = bytes[0];
-                            }
-                        }
-                    }
-                }
+    for cmsg in cmsgs {
+        match cmsg {
+            // IPv4 TTL (from IP_RECVTTL socket option)
+            ControlMessageOwned::Ipv4Ttl(ttl) => {
+                // TTL is i32 but valid range is 0-255
+                return Some(ttl.clamp(0, 255) as u8);
             }
+            // IPv6 Hop Limit (from IPV6_RECVHOPLIMIT socket option)
+            ControlMessageOwned::Ipv6HopLimit(hoplimit) => {
+                // Hop limit is i32 but valid range is 0-255
+                return Some(hoplimit.clamp(0, 255) as u8);
+            }
+            _ => continue,
         }
     }
 
-    ttl
+    None
 }

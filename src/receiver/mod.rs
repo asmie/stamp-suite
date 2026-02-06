@@ -252,9 +252,15 @@ mod tests {
         );
 
         // Verify sender fields are echoed
-        assert_eq!(reflected.sess_sender_seq_number, sender_packet.sequence_number);
+        assert_eq!(
+            reflected.sess_sender_seq_number,
+            sender_packet.sequence_number
+        );
         assert_eq!(reflected.sess_sender_timestamp, sender_packet.timestamp);
-        assert_eq!(reflected.sess_sender_err_estimate, sender_packet.error_estimate);
+        assert_eq!(
+            reflected.sess_sender_err_estimate,
+            sender_packet.error_estimate
+        );
         assert_eq!(reflected.sess_sender_ttl, ttl);
         // Verify reflector's own error estimate is used
         assert_eq!(reflected.error_estimate, reflector_error_estimate);
@@ -318,9 +324,15 @@ mod tests {
         );
 
         // Verify sender fields are echoed
-        assert_eq!(reflected.sess_sender_seq_number, sender_packet.sequence_number);
+        assert_eq!(
+            reflected.sess_sender_seq_number,
+            sender_packet.sequence_number
+        );
         assert_eq!(reflected.sess_sender_timestamp, sender_packet.timestamp);
-        assert_eq!(reflected.sess_sender_err_estimate, sender_packet.error_estimate);
+        assert_eq!(
+            reflected.sess_sender_err_estimate,
+            sender_packet.error_estimate
+        );
         assert_eq!(reflected.sess_sender_ttl, ttl);
         // Verify reflector's own error estimate is used
         assert_eq!(reflected.error_estimate, reflector_error_estimate);
