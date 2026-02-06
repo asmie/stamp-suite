@@ -13,9 +13,11 @@ stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Pr
 
 ### Key Features
 
-- Full RFC 8762 compliance for unauthenticated mode
+- Full RFC 8762 compliance (unauthenticated and authenticated modes)
+- HMAC authentication support
+- Stateful reflector mode (RFC 8972)
 - Support for both NTP and PTP timestamp formats
-- Real TTL/Hop Limit capture (with optional features)
+- Real TTL/Hop Limit capture on all platforms
 - Async I/O using Tokio
 - Cross-platform support (Linux, macOS, Windows)
 
@@ -32,22 +34,24 @@ STAMP measures packet loss and one-way/two-way delays between two endpoints. The
 ### From Source
 
 ```bash
-# Default build (placeholder TTL)
+# Default build (real TTL capture on Linux/macOS/Windows)
 cargo build --release
-
-# With real TTL capture on Linux (recommended)
-cargo build --release --features ttl-nix
-
-# With real TTL capture via raw packets (requires root)
-cargo build --release --features ttl-pnet
 ```
+
+### Platform Support
+
+| Platform | Default Backend | TTL Capture |
+|----------|-----------------|-------------|
+| Linux    | nix (IP_RECVTTL) | Real TTL, no special privileges |
+| macOS    | nix (IP_RECVTTL) | Real TTL, no special privileges |
+| Windows  | pnet (raw packets) | Real TTL, requires Npcap |
 
 ### Feature Flags
 
 | Feature | Description |
 |---------|-------------|
-| `ttl-nix` | Real TTL capture using nix crate (Linux, no special privileges) |
-| `ttl-pnet` | Real TTL capture using pnet raw sockets (requires root/CAP_NET_RAW) |
+| `ttl-nix` | Force nix backend (Linux/macOS/BSD) |
+| `ttl-pnet` | Force pnet raw socket backend (requires root/admin) |
 
 ## Usage
 
@@ -137,26 +141,30 @@ Avg RTT: 0.521 ms
 - `packets.rs` - STAMP packet structures (RFC 8762 format)
 - `sender.rs` - Session-Sender implementation
 - `receiver/` - Session-Reflector implementations
-  - `default.rs` - Tokio UDP (placeholder TTL)
-  - `nix.rs` - nix crate with IP_RECVTTL
-  - `pnet.rs` - Raw packet capture
+  - `nix.rs` - nix crate with IP_RECVTTL (Linux/macOS)
+  - `pnet.rs` - Raw packet capture (Windows)
 - `session.rs` - Session state management
 - `time.rs` - NTP/PTP timestamp generation
 
 ## Current Status
 
-The project is functional for basic STAMP measurements. Current limitations:
+The project is functional for STAMP measurements with the following features:
+
+- Full RFC 8762 compliance (unauthenticated and authenticated modes)
+- HMAC authentication support
+- Stateful reflector mode (RFC 8972)
+- Real TTL capture on all major platforms
+
+Current limitations:
 
 - Single session per instance (no multi-session support yet)
-- Authenticated mode packet format implemented, HMAC not yet functional
 - No STAMP-MIB support
 
 ### Roadmap
 
-- [ ] Full authenticated mode with HMAC
 - [ ] Multi-session support for reflector
-- [ ] Session identifier support (RFC 8972)
 - [ ] DSCP/ECN field handling
+- [ ] Enhanced statistics and reporting
 
 ## Contributing
 

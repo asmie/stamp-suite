@@ -4,9 +4,9 @@
 //! - **Linux/macOS**: Uses nix via IP_RECVTTL
 //! - **Windows**: Uses pnet for raw packet capture
 //!
-//! Explicit overrides:
-//! - **`ttl-nix`**: Force nix backend on any platform
-//! - **`ttl-pnet`**: Force pnet backend on any platform
+//! Explicit overrides (for other platforms or to override defaults):
+//! - **`ttl-nix`**: Force nix backend
+//! - **`ttl-pnet`**: Force pnet backend
 
 // Explicit feature flags take priority
 #[cfg(feature = "ttl-nix")]
@@ -45,24 +45,6 @@ mod pnet;
     not(feature = "ttl-pnet")
 ))]
 pub use pnet::run_receiver;
-
-// Fallback to placeholder TTL on other platforms
-#[cfg(not(any(
-    feature = "ttl-nix",
-    feature = "ttl-pnet",
-    target_os = "linux",
-    target_os = "windows",
-    target_os = "macos"
-)))]
-mod default;
-#[cfg(not(any(
-    feature = "ttl-nix",
-    feature = "ttl-pnet",
-    target_os = "linux",
-    target_os = "windows",
-    target_os = "macos"
-)))]
-pub use default::run_receiver;
 
 use crate::{
     configuration::ClockFormat,

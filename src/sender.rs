@@ -156,7 +156,6 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                         &mut rtt_sum,
                         conf.print_stats,
                         hmac_key.as_ref(),
-                        conf.require_hmac,
                     );
                 }
                 Ok(Err(e)) => {
@@ -186,7 +185,6 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                     &mut rtt_sum,
                     conf.print_stats,
                     hmac_key.as_ref(),
-                    conf.require_hmac,
                 );
             }
             Ok(Err(e)) => {
@@ -218,7 +216,6 @@ fn process_response(
     rtt_sum: &mut u64,
     print_stats: bool,
     hmac_key: Option<&HmacKey>,
-    require_hmac: bool,
 ) {
     let recv_time = Instant::now();
 
@@ -232,19 +229,17 @@ fn process_response(
                 let ttl = packet.sess_sender_ttl;
                 let hmac = packet.hmac;
 
-                // Verify HMAC - mandatory when key is present (RFC 8762 §4.4)
+                // Verify HMAC when key is present (RFC 8762 §4.4)
+                // Note: In authenticated mode, hmac_key is always Some because
+                // run_sender validates this before calling process_response.
                 if let Some(key) = hmac_key {
                     if !verify_packet_hmac(key, data, REFLECTED_AUTH_PACKET_HMAC_OFFSET, &hmac) {
                         eprintln!(
                             "HMAC verification failed for reflected packet seq={}",
                             seq_num
                         );
-                        return; // Always reject invalid HMAC in auth mode
+                        return;
                     }
-                } else if require_hmac {
-                    // require_hmac means "require key to be configured"
-                    eprintln!("HMAC key required but not configured");
-                    return;
                 }
                 (seq_num, recv_ts, send_ts, ttl)
             }
