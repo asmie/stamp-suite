@@ -1,25 +1,79 @@
 //! STAMP Session Reflector implementations.
 //!
 //! This module provides different implementations for the STAMP reflector based on
-//! compile-time feature flags:
+//! compile-time feature flags and platform:
 //!
-//! - **Default** (no features): Uses tokio UDP sockets with placeholder TTL (255)
-//! - **`ttl-nix`**: Uses nix crate for real TTL capture via IP_RECVTTL (Linux preferred)
-//! - **`ttl-pnet`**: Uses pnet for raw packet capture with real TTL (requires root)
+//! - **Linux** (default): Uses nix crate for real TTL capture via IP_RECVTTL
+//! - **Windows/macOS** (default): Uses pnet for raw packet capture with real TTL
+//! - **Other platforms** or `--no-default-features`: Uses tokio UDP with placeholder TTL (255)
+//! - **`ttl-nix`** feature: Force nix backend on any platform
+//! - **`ttl-pnet`** feature: Force pnet backend on any platform
 
-#[cfg(not(any(feature = "ttl-nix", feature = "ttl-pnet")))]
-mod default;
+// Explicit feature flags take priority
 #[cfg(feature = "ttl-nix")]
 mod nix;
-#[cfg(all(feature = "ttl-pnet", not(feature = "ttl-nix")))]
-mod pnet;
-
-#[cfg(not(any(feature = "ttl-nix", feature = "ttl-pnet")))]
-pub use default::run_receiver;
 #[cfg(feature = "ttl-nix")]
 pub use nix::run_receiver;
+
+#[cfg(all(feature = "ttl-pnet", not(feature = "ttl-nix")))]
+mod pnet;
 #[cfg(all(feature = "ttl-pnet", not(feature = "ttl-nix")))]
 pub use pnet::run_receiver;
+
+// Platform defaults when no explicit feature is set
+// Linux: use nix by default (available via target-specific dependency)
+#[cfg(all(
+    target_os = "linux",
+    feature = "default-ttl",
+    not(feature = "ttl-nix"),
+    not(feature = "ttl-pnet")
+))]
+mod nix;
+#[cfg(all(
+    target_os = "linux",
+    feature = "default-ttl",
+    not(feature = "ttl-nix"),
+    not(feature = "ttl-pnet")
+))]
+pub use nix::run_receiver;
+
+// Windows/macOS: use pnet by default (available via target-specific dependency)
+#[cfg(all(
+    any(target_os = "windows", target_os = "macos"),
+    feature = "default-ttl",
+    not(feature = "ttl-nix"),
+    not(feature = "ttl-pnet")
+))]
+mod pnet;
+#[cfg(all(
+    any(target_os = "windows", target_os = "macos"),
+    feature = "default-ttl",
+    not(feature = "ttl-nix"),
+    not(feature = "ttl-pnet")
+))]
+pub use pnet::run_receiver;
+
+// Fallback to default (placeholder TTL) on other platforms or when default-ttl is disabled
+#[cfg(not(any(
+    feature = "ttl-nix",
+    feature = "ttl-pnet",
+    all(target_os = "linux", feature = "default-ttl"),
+    all(
+        any(target_os = "windows", target_os = "macos"),
+        feature = "default-ttl"
+    )
+)))]
+mod default;
+#[cfg(not(any(
+    feature = "ttl-nix",
+    feature = "ttl-pnet",
+    all(target_os = "linux", feature = "default-ttl"),
+    all(
+        any(target_os = "windows", target_os = "macos"),
+        feature = "default-ttl"
+    )
+)))]
+pub use default::run_receiver;
 
 use crate::{
     configuration::ClockFormat,
@@ -42,27 +96,73 @@ pub const REFLECTED_AUTH_PACKET_HMAC_OFFSET: usize = 96;
 /// * `rcvt` - Receive timestamp when the packet was received
 /// * `ttl` - TTL/Hop Limit value from the received packet's IP header
 /// * `reflector_error_estimate` - The reflector's own error estimate in wire format
+/// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
 pub fn assemble_unauth_answer(
     packet: &PacketUnauthenticated,
     cs: ClockFormat,
     rcvt: u64,
     ttl: u8,
     reflector_error_estimate: u16,
+    reflector_seq: Option<u32>,
 ) -> ReflectedPacketUnauthenticated {
     ReflectedPacketUnauthenticated {
         sess_sender_timestamp: packet.timestamp,
         sess_sender_err_estimate: packet.error_estimate,
         sess_sender_seq_number: packet.sequence_number,
         sess_sender_ttl: ttl,
-        sequence_number: packet.sequence_number,
+        sequence_number: reflector_seq.unwrap_or(packet.sequence_number),
         error_estimate: reflector_error_estimate,
         timestamp: generate_timestamp(cs),
         receive_timestamp: rcvt,
         mbz1: 0,
         mbz2: 0,
-        mbz3a: 0,
-        mbz3b: 0,
+        mbz3: [0; 3],
     }
+}
+
+/// Base size of unauthenticated STAMP packets.
+pub const UNAUTH_BASE_SIZE: usize = 44;
+
+/// Base size of authenticated STAMP packets.
+pub const AUTH_BASE_SIZE: usize = 112;
+
+/// Assembles an unauthenticated reflected packet with symmetric size (RFC 8762 Section 4.3).
+///
+/// Preserves the original packet length by copying extra bytes beyond the base 44 bytes.
+///
+/// # Arguments
+/// * `packet` - The received unauthenticated test packet
+/// * `original_data` - The original received packet data
+/// * `cs` - Clock format to use for timestamps
+/// * `rcvt` - Receive timestamp when the packet was received
+/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
+/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
+/// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
+pub fn assemble_unauth_answer_symmetric(
+    packet: &PacketUnauthenticated,
+    original_data: &[u8],
+    cs: ClockFormat,
+    rcvt: u64,
+    ttl: u8,
+    reflector_error_estimate: u16,
+    reflector_seq: Option<u32>,
+) -> Vec<u8> {
+    let base = assemble_unauth_answer(
+        packet,
+        cs,
+        rcvt,
+        ttl,
+        reflector_error_estimate,
+        reflector_seq,
+    );
+    let mut response = base.to_bytes().to_vec();
+
+    // Copy extra bytes beyond base packet (RFC 8762 Section 4.3)
+    if original_data.len() > UNAUTH_BASE_SIZE {
+        response.extend_from_slice(&original_data[UNAUTH_BASE_SIZE..]);
+    }
+
+    response
 }
 
 /// Assembles an authenticated reflected packet from a received test packet.
@@ -74,6 +174,7 @@ pub fn assemble_unauth_answer(
 /// * `ttl` - TTL/Hop Limit value from the received packet's IP header
 /// * `reflector_error_estimate` - The reflector's own error estimate in wire format
 /// * `hmac_key` - Optional HMAC key for computing the response HMAC
+/// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
 pub fn assemble_auth_answer(
     packet: &PacketAuthenticated,
     cs: ClockFormat,
@@ -81,13 +182,14 @@ pub fn assemble_auth_answer(
     ttl: u8,
     reflector_error_estimate: u16,
     hmac_key: Option<&HmacKey>,
+    reflector_seq: Option<u32>,
 ) -> ReflectedPacketAuthenticated {
     let mut response = ReflectedPacketAuthenticated {
         sess_sender_timestamp: packet.timestamp,
         sess_sender_err_estimate: packet.error_estimate,
         sess_sender_seq_number: packet.sequence_number,
         sess_sender_ttl: ttl,
-        sequence_number: packet.sequence_number,
+        sequence_number: reflector_seq.unwrap_or(packet.sequence_number),
         error_estimate: reflector_error_estimate,
         timestamp: generate_timestamp(cs),
         receive_timestamp: rcvt,
@@ -102,8 +204,51 @@ pub fn assemble_auth_answer(
 
     // Compute HMAC if key is provided
     if let Some(key) = hmac_key {
-        let bytes = crate::packets::any_as_u8_slice(&response).unwrap();
+        let bytes = response.to_bytes();
         response.hmac = compute_packet_hmac(key, &bytes, REFLECTED_AUTH_PACKET_HMAC_OFFSET);
+    }
+
+    response
+}
+
+/// Assembles an authenticated reflected packet with symmetric size (RFC 8762 Section 4.3).
+///
+/// Preserves the original packet length by copying extra bytes beyond the base 112 bytes.
+///
+/// # Arguments
+/// * `packet` - The received authenticated test packet
+/// * `original_data` - The original received packet data
+/// * `cs` - Clock format to use for timestamps
+/// * `rcvt` - Receive timestamp when the packet was received
+/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
+/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
+/// * `hmac_key` - Optional HMAC key for computing the response HMAC
+/// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_auth_answer_symmetric(
+    packet: &PacketAuthenticated,
+    original_data: &[u8],
+    cs: ClockFormat,
+    rcvt: u64,
+    ttl: u8,
+    reflector_error_estimate: u16,
+    hmac_key: Option<&HmacKey>,
+    reflector_seq: Option<u32>,
+) -> Vec<u8> {
+    let base = assemble_auth_answer(
+        packet,
+        cs,
+        rcvt,
+        ttl,
+        reflector_error_estimate,
+        hmac_key,
+        reflector_seq,
+    );
+    let mut response = base.to_bytes().to_vec();
+
+    // Copy extra bytes beyond base packet (RFC 8762 Section 4.3)
+    if original_data.len() > AUTH_BASE_SIZE {
+        response.extend_from_slice(&original_data[AUTH_BASE_SIZE..]);
     }
 
     response
@@ -132,21 +277,22 @@ mod tests {
             rcvt,
             ttl,
             reflector_error_estimate,
+            None,
         );
 
         // Verify sender fields are echoed
-        assert_eq!(
-            reflected.sess_sender_seq_number,
+        assert_eq!({ reflected.sess_sender_seq_number }, {
             sender_packet.sequence_number
-        );
-        assert_eq!(reflected.sess_sender_timestamp, sender_packet.timestamp);
-        assert_eq!(
-            reflected.sess_sender_err_estimate,
+        });
+        assert_eq!({ reflected.sess_sender_timestamp }, {
+            sender_packet.timestamp
+        });
+        assert_eq!({ reflected.sess_sender_err_estimate }, {
             sender_packet.error_estimate
-        );
-        assert_eq!(reflected.sess_sender_ttl, ttl);
+        });
+        assert_eq!({ reflected.sess_sender_ttl }, ttl);
         // Verify reflector's own error estimate is used
-        assert_eq!(reflected.error_estimate, reflector_error_estimate);
+        assert_eq!({ reflected.error_estimate }, reflector_error_estimate);
     }
 
     #[test]
@@ -159,9 +305,9 @@ mod tests {
         };
 
         let rcvt = 500u64;
-        let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, rcvt, 64, 0);
+        let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, rcvt, 64, 0, None);
 
-        assert_eq!(reflected.receive_timestamp, rcvt);
+        assert_eq!({ reflected.receive_timestamp }, rcvt);
     }
 
     #[test]
@@ -173,10 +319,10 @@ mod tests {
             mbz: [0; 30],
         };
 
-        let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, 64, 0);
+        let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, 64, 0, None);
 
         // Reflector's timestamp should be non-zero (generated)
-        assert!(reflected.timestamp > 0);
+        assert!({ reflected.timestamp } > 0);
     }
 
     #[test]
@@ -203,21 +349,22 @@ mod tests {
             ttl,
             reflector_error_estimate,
             None,
+            None,
         );
 
         // Verify sender fields are echoed
-        assert_eq!(
-            reflected.sess_sender_seq_number,
+        assert_eq!({ reflected.sess_sender_seq_number }, {
             sender_packet.sequence_number
-        );
-        assert_eq!(reflected.sess_sender_timestamp, sender_packet.timestamp);
-        assert_eq!(
-            reflected.sess_sender_err_estimate,
+        });
+        assert_eq!({ reflected.sess_sender_timestamp }, {
+            sender_packet.timestamp
+        });
+        assert_eq!({ reflected.sess_sender_err_estimate }, {
             sender_packet.error_estimate
-        );
-        assert_eq!(reflected.sess_sender_ttl, ttl);
+        });
+        assert_eq!({ reflected.sess_sender_ttl }, ttl);
         // Verify reflector's own error estimate is used
-        assert_eq!(reflected.error_estimate, reflector_error_estimate);
+        assert_eq!({ reflected.error_estimate }, reflector_error_estimate);
     }
 
     #[test]
@@ -231,8 +378,9 @@ mod tests {
 
         // Test various TTL values
         for ttl in [0u8, 1, 64, 128, 255] {
-            let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, ttl, 0);
-            assert_eq!(reflected.sess_sender_ttl, ttl);
+            let reflected =
+                assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, ttl, 0, None);
+            assert_eq!({ reflected.sess_sender_ttl }, ttl);
         }
     }
 
@@ -251,8 +399,9 @@ mod tests {
 
         // Test various TTL values
         for ttl in [0u8, 1, 64, 128, 255] {
-            let reflected = assemble_auth_answer(&sender_packet, ClockFormat::NTP, 0, ttl, 0, None);
-            assert_eq!(reflected.sess_sender_ttl, ttl);
+            let reflected =
+                assemble_auth_answer(&sender_packet, ClockFormat::NTP, 0, ttl, 0, None, None);
+            assert_eq!({ reflected.sess_sender_ttl }, ttl);
         }
     }
 
@@ -277,10 +426,11 @@ mod tests {
             64,
             200,
             Some(&key),
+            None,
         );
 
         // HMAC should be non-zero when key is provided
-        assert_ne!(reflected.hmac, [0u8; 16]);
+        assert_ne!({ reflected.hmac }, [0u8; 16]);
     }
 
     #[test]
@@ -296,10 +446,161 @@ mod tests {
             hmac: [0; 16],
         };
 
-        let reflected =
-            assemble_auth_answer(&sender_packet, ClockFormat::NTP, 987654321, 64, 200, None);
+        let reflected = assemble_auth_answer(
+            &sender_packet,
+            ClockFormat::NTP,
+            987654321,
+            64,
+            200,
+            None,
+            None,
+        );
 
         // HMAC should be zero when no key is provided
-        assert_eq!(reflected.hmac, [0u8; 16]);
+        assert_eq!({ reflected.hmac }, [0u8; 16]);
+    }
+
+    #[test]
+    fn test_assemble_unauth_answer_with_reflector_seq() {
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 42,
+            timestamp: 123456789,
+            error_estimate: 100,
+            mbz: [0; 30],
+        };
+
+        // Test with independent reflector sequence number
+        let reflected = assemble_unauth_answer(
+            &sender_packet,
+            ClockFormat::NTP,
+            987654321,
+            64,
+            200,
+            Some(999),
+        );
+
+        // Reflector's sequence should be independent
+        assert_eq!({ reflected.sequence_number }, 999);
+        // Sender's sequence still echoed in sess_sender_seq_number
+        assert_eq!({ reflected.sess_sender_seq_number }, 42);
+    }
+
+    #[test]
+    fn test_assemble_auth_answer_with_reflector_seq() {
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 42,
+            mbz0: [0; 12],
+            timestamp: 123456789,
+            error_estimate: 100,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        // Test with independent reflector sequence number
+        let reflected = assemble_auth_answer(
+            &sender_packet,
+            ClockFormat::NTP,
+            987654321,
+            64,
+            200,
+            None,
+            Some(999),
+        );
+
+        // Reflector's sequence should be independent
+        assert_eq!({ reflected.sequence_number }, 999);
+        // Sender's sequence still echoed in sess_sender_seq_number
+        assert_eq!({ reflected.sess_sender_seq_number }, 42);
+    }
+
+    #[test]
+    fn test_assemble_unauth_answer_symmetric_preserves_length() {
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        // Create original data with extra bytes beyond base 44
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]); // 4 extra bytes
+
+        let response = assemble_unauth_answer_symmetric(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+        );
+
+        // Response should be 48 bytes (44 base + 4 extra)
+        assert_eq!(response.len(), 48);
+        // Extra bytes should be preserved at the end
+        assert_eq!(&response[44..], &[0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn test_assemble_auth_answer_symmetric_preserves_length() {
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 100,
+            error_estimate: 10,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        // Create original data with extra bytes beyond base 112
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55]); // 5 extra bytes
+
+        let response = assemble_auth_answer_symmetric(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            None,
+        );
+
+        // Response should be 117 bytes (112 base + 5 extra)
+        assert_eq!(response.len(), 117);
+        // Extra bytes should be preserved at the end
+        assert_eq!(&response[112..], &[0x11, 0x22, 0x33, 0x44, 0x55]);
+    }
+
+    #[test]
+    fn test_assemble_unauth_answer_symmetric_base_size() {
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        // Original data is exactly base size
+        let original_data = sender_packet.to_bytes();
+
+        let response = assemble_unauth_answer_symmetric(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+        );
+
+        // Response should be exactly 44 bytes
+        assert_eq!(response.len(), 44);
     }
 }

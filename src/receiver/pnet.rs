@@ -21,17 +21,19 @@ use crate::{
     configuration::{is_auth, Configuration},
     crypto::HmacKey,
     error_estimate::ErrorEstimate,
-    packets::{any_as_u8_slice, read_struct, PacketAuthenticated, PacketUnauthenticated},
+    packets::{PacketAuthenticated, PacketUnauthenticated},
+    session::Session,
     time::generate_timestamp,
 };
 
-use super::{assemble_auth_answer, assemble_unauth_answer};
+use super::{assemble_auth_answer_symmetric, assemble_unauth_answer_symmetric};
 
 /// Context for handling STAMP packets in pnet mode.
 struct PnetContext {
     error_estimate_wire: u16,
     hmac_key: Option<HmacKey>,
     require_hmac: bool,
+    reflector_session: Option<Session>,
 }
 
 /// Runs the STAMP Session Reflector using pnet for raw packet capture.
@@ -60,33 +62,53 @@ pub async fn run_receiver(conf: &Configuration) {
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let send_socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("Cannot bind send socket");
 
-    // Build error estimate from configuration
-    let error_estimate = ErrorEstimate::new(
-        conf.clock_synchronized,
-        conf.error_scale,
-        conf.error_multiplier,
-    )
-    .unwrap_or_else(|_| ErrorEstimate::unsynchronized());
-    let error_estimate_wire = error_estimate.to_wire();
+    // Check if authenticated mode is used
+    let use_auth = is_auth(&conf.auth_mode);
 
     // Load HMAC key if configured
     let hmac_key = load_hmac_key(conf);
+
+    // Validate: authenticated mode requires HMAC key
+    if use_auth && hmac_key.is_none() {
+        eprintln!(
+            "Error: Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file)"
+        );
+        return;
+    }
+
+    // Build error estimate from configuration with Z flag set based on clock source
+    let error_estimate = ErrorEstimate::with_clock_format(
+        conf.clock_synchronized,
+        conf.clock_source,
+        conf.error_scale,
+        conf.error_multiplier,
+    )
+    .unwrap_or_else(|_| ErrorEstimate::unsynchronized_with_format(conf.clock_source));
+    let error_estimate_wire = error_estimate.to_wire();
+
     if hmac_key.is_some() {
         log::info!("HMAC authentication enabled");
     }
+
+    // Create session for stateful reflector mode (RFC 8972)
+    let reflector_session = if conf.stateful_reflector {
+        log::info!("Stateful reflector mode enabled (RFC 8972)");
+        Some(Session::new(0))
+    } else {
+        None
+    };
 
     let ctx = PnetContext {
         error_estimate_wire,
         hmac_key,
         require_hmac: conf.require_hmac,
+        reflector_session,
     };
 
     println!(
         "STAMP Reflector listening on {} (pnet mode, real TTL)",
         local_addr
     );
-
-    let use_auth = is_auth(&conf.auth_mode);
 
     loop {
         let mut buf: [u8; 1600] = [0u8; 1600];
@@ -254,31 +276,46 @@ fn process_stamp_packet(
 ) {
     let rcvt = generate_timestamp(conf.clock_source);
 
+    // Generate reflector sequence number if in stateful mode
+    let reflector_seq = ctx
+        .reflector_session
+        .as_ref()
+        .map(|s| s.generate_sequence_number());
+
     let response = if use_auth {
-        match read_struct::<PacketAuthenticated>(data) {
+        let packet_result = if conf.strict_packets {
+            PacketAuthenticated::from_bytes(data)
+        } else {
+            Ok(PacketAuthenticated::from_bytes_lenient(data))
+        };
+        match packet_result {
             Ok(packet) => {
-                // Verify HMAC if required
-                if ctx.require_hmac {
-                    if let Some(ref key) = ctx.hmac_key {
-                        if !verify_incoming_hmac(key, data, &packet.hmac) {
-                            eprintln!("HMAC verification failed for packet from {}", src);
-                            return;
-                        }
-                    } else {
-                        eprintln!("HMAC required but no key configured");
-                        return;
+                // Copy HMAC to avoid unaligned access
+                let hmac = packet.hmac;
+
+                // Verify HMAC - mandatory when key is present (RFC 8762 §4.4)
+                if let Some(ref key) = ctx.hmac_key {
+                    if !verify_incoming_hmac(key, data, &hmac) {
+                        eprintln!("HMAC verification failed for packet from {}", src);
+                        return; // Always reject invalid HMAC in auth mode
                     }
+                } else if ctx.require_hmac {
+                    // require_hmac means "require key to be configured"
+                    eprintln!("HMAC key required but not configured");
+                    return;
                 }
 
-                let answer = assemble_auth_answer(
+                // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
+                Some(assemble_auth_answer_symmetric(
                     &packet,
+                    data,
                     conf.clock_source,
                     rcvt,
                     ttl,
                     ctx.error_estimate_wire,
                     ctx.hmac_key.as_ref(),
-                );
-                any_as_u8_slice(&answer).ok()
+                    reflector_seq,
+                ))
             }
             Err(e) => {
                 eprintln!(
@@ -289,16 +326,23 @@ fn process_stamp_packet(
             }
         }
     } else {
-        match read_struct::<PacketUnauthenticated>(data) {
+        let packet_result = if conf.strict_packets {
+            PacketUnauthenticated::from_bytes(data)
+        } else {
+            Ok(PacketUnauthenticated::from_bytes_lenient(data))
+        };
+        match packet_result {
             Ok(packet) => {
-                let answer = assemble_unauth_answer(
+                // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
+                Some(assemble_unauth_answer_symmetric(
                     &packet,
+                    data,
                     conf.clock_source,
                     rcvt,
                     ttl,
                     ctx.error_estimate_wire,
-                );
-                any_as_u8_slice(&answer).ok()
+                    reflector_seq,
+                ))
             }
             Err(e) => {
                 eprintln!(

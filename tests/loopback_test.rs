@@ -41,15 +41,15 @@ async fn run_test_reflector(
     let ttl = 64u8;
 
     let response = if use_auth {
-        let packet: PacketAuthenticated =
-            read_struct(&buf[..len]).map_err(|_| "Failed to parse auth packet")?;
-        let answer = assemble_auth_answer(&packet, ClockFormat::NTP, rcvt, ttl, 0, None);
-        any_as_u8_slice(&answer).map_err(|_| "Failed to serialize auth response")?
+        let packet = PacketAuthenticated::from_bytes(&buf[..len])
+            .map_err(|_| "Failed to parse auth packet")?;
+        let answer = assemble_auth_answer(&packet, ClockFormat::NTP, rcvt, ttl, 0, None, None);
+        answer.to_bytes().to_vec()
     } else {
-        let packet: PacketUnauthenticated =
-            read_struct(&buf[..len]).map_err(|_| "Failed to parse unauth packet")?;
-        let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, ttl, 0);
-        any_as_u8_slice(&answer).map_err(|_| "Failed to serialize unauth response")?
+        let packet = PacketUnauthenticated::from_bytes(&buf[..len])
+            .map_err(|_| "Failed to parse unauth packet")?;
+        let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, ttl, 0, None);
+        answer.to_bytes().to_vec()
     };
 
     socket
@@ -80,12 +80,12 @@ async fn run_test_sender(
         let mut packet = assemble_auth_packet(0);
         packet.sequence_number = seq_num;
         packet.timestamp = send_timestamp;
-        any_as_u8_slice(&packet).map_err(|_| "Failed to serialize auth packet")?
+        packet.to_bytes().to_vec()
     } else {
         let mut packet = assemble_unauth_packet(0);
         packet.sequence_number = seq_num;
         packet.timestamp = send_timestamp;
-        any_as_u8_slice(&packet).map_err(|_| "Failed to serialize unauth packet")?
+        packet.to_bytes().to_vec()
     };
 
     socket
@@ -100,16 +100,16 @@ async fn run_test_sender(
         .map_err(|_| "Sender receive error")?;
 
     if use_auth {
-        let response: ReflectedPacketAuthenticated =
-            read_struct(&recv_buf[..len]).map_err(|_| "Failed to parse auth response")?;
+        let response = ReflectedPacketAuthenticated::from_bytes(&recv_buf[..len])
+            .map_err(|_| "Failed to parse auth response")?;
         Ok((
             response.sess_sender_seq_number,
             response.sess_sender_timestamp,
             response.sess_sender_ttl,
         ))
     } else {
-        let response: ReflectedPacketUnauthenticated =
-            read_struct(&recv_buf[..len]).map_err(|_| "Failed to parse unauth response")?;
+        let response = ReflectedPacketUnauthenticated::from_bytes(&recv_buf[..len])
+            .map_err(|_| "Failed to parse unauth response")?;
         Ok((
             response.sess_sender_seq_number,
             response.sess_sender_timestamp,
@@ -200,12 +200,12 @@ async fn test_loopback_multiple_packets() {
                 timeout(Duration::from_secs(2), socket.recv_from(&mut buf)).await
             {
                 let rcvt = generate_timestamp(ClockFormat::NTP);
-                if let Ok(packet) = read_struct::<PacketUnauthenticated>(&buf[..len]) {
-                    let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64, 0);
-                    if let Ok(response) = any_as_u8_slice(&answer) {
-                        let _ = socket.send_to(&response, src).await;
-                        received_count += 1;
-                    }
+                if let Ok(packet) = PacketUnauthenticated::from_bytes(&buf[..len]) {
+                    let answer =
+                        assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64, 0, None);
+                    let response = answer.to_bytes();
+                    let _ = socket.send_to(&response, src).await;
+                    received_count += 1;
                 }
             }
         }
@@ -226,7 +226,7 @@ async fn test_loopback_multiple_packets() {
         packet.sequence_number = seq;
         packet.timestamp = generate_timestamp(ClockFormat::NTP);
 
-        let buf = any_as_u8_slice(&packet).unwrap();
+        let buf = packet.to_bytes();
         sender_socket.send_to(&buf, reflector_addr).await.unwrap();
 
         let mut recv_buf = [0u8; 1024];
@@ -236,8 +236,8 @@ async fn test_loopback_multiple_packets() {
         )
         .await
         {
-            if let Ok(response) = read_struct::<ReflectedPacketUnauthenticated>(&recv_buf[..len]) {
-                assert_eq!(response.sess_sender_seq_number, seq);
+            if let Ok(response) = ReflectedPacketUnauthenticated::from_bytes(&recv_buf[..len]) {
+                assert_eq!({ response.sess_sender_seq_number }, seq);
                 responses_received += 1;
             }
         }
@@ -269,11 +269,10 @@ async fn test_loopback_timestamp_ordering() {
             // Small delay to ensure send timestamp is different from receive
             tokio::time::sleep(Duration::from_millis(5)).await;
 
-            if let Ok(packet) = read_struct::<PacketUnauthenticated>(&buf[..len]) {
-                let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64, 0);
-                if let Ok(response) = any_as_u8_slice(&answer) {
-                    let _ = socket.send_to(&response, src).await;
-                }
+            if let Ok(packet) = PacketUnauthenticated::from_bytes(&buf[..len]) {
+                let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64, 0, None);
+                let response = answer.to_bytes();
+                let _ = socket.send_to(&response, src).await;
             }
         }
     });
@@ -289,7 +288,7 @@ async fn test_loopback_timestamp_ordering() {
     packet.sequence_number = 1;
     packet.timestamp = send_timestamp;
 
-    let buf = any_as_u8_slice(&packet).unwrap();
+    let buf = packet.to_bytes();
     let reflector_addr: SocketAddr = format!("127.0.0.1:{}", reflector_port).parse().unwrap();
     sender_socket.send_to(&buf, reflector_addr).await.unwrap();
 
@@ -302,19 +301,20 @@ async fn test_loopback_timestamp_ordering() {
     .unwrap()
     .unwrap();
 
-    let response: ReflectedPacketUnauthenticated = read_struct(&recv_buf[..len]).unwrap();
+    let response = ReflectedPacketUnauthenticated::from_bytes(&recv_buf[..len]).unwrap();
 
     // Verify timestamp ordering: sender_ts <= receive_ts <= reflector_send_ts
     assert_eq!(
-        response.sess_sender_timestamp, send_timestamp,
+        { response.sess_sender_timestamp },
+        send_timestamp,
         "Sender timestamp should be echoed"
     );
     assert!(
-        response.receive_timestamp >= send_timestamp,
+        { response.receive_timestamp } >= send_timestamp,
         "Receive timestamp should be >= send timestamp"
     );
     assert!(
-        response.timestamp >= response.receive_timestamp,
+        { response.timestamp } >= { response.receive_timestamp },
         "Reflector send timestamp should be >= receive timestamp"
     );
 
@@ -338,12 +338,11 @@ async fn test_loopback_ipv6() {
             timeout(Duration::from_secs(2), reflector_socket.recv_from(&mut buf)).await
         {
             let rcvt = generate_timestamp(ClockFormat::NTP);
-            if let Ok(packet) = read_struct::<PacketUnauthenticated>(&buf[..len]) {
-                let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64, 0);
-                if let Ok(response) = any_as_u8_slice(&answer) {
-                    let _ = reflector_socket.send_to(&response, src).await;
-                    return true;
-                }
+            if let Ok(packet) = PacketUnauthenticated::from_bytes(&buf[..len]) {
+                let answer = assemble_unauth_answer(&packet, ClockFormat::NTP, rcvt, 64, 0, None);
+                let response = answer.to_bytes();
+                let _ = reflector_socket.send_to(&response, src).await;
+                return true;
             }
         }
         false
@@ -356,7 +355,7 @@ async fn test_loopback_ipv6() {
     packet.sequence_number = 99;
     packet.timestamp = generate_timestamp(ClockFormat::NTP);
 
-    let buf = any_as_u8_slice(&packet).unwrap();
+    let buf = packet.to_bytes();
     let reflector_addr: SocketAddr = format!("[::1]:{}", reflector_port).parse().unwrap();
     sender_socket.send_to(&buf, reflector_addr).await.unwrap();
 
@@ -369,8 +368,8 @@ async fn test_loopback_ipv6() {
 
     assert!(result.is_ok(), "Should receive response over IPv6");
     let (len, _) = result.unwrap().unwrap();
-    let response: ReflectedPacketUnauthenticated = read_struct(&recv_buf[..len]).unwrap();
-    assert_eq!(response.sess_sender_seq_number, 99);
+    let response = ReflectedPacketUnauthenticated::from_bytes(&recv_buf[..len]).unwrap();
+    assert_eq!({ response.sess_sender_seq_number }, 99);
 
     assert!(reflector_handle.await.unwrap(), "Reflector should succeed");
 }

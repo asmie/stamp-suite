@@ -42,8 +42,8 @@ pub struct Configuration {
     /// Force IPv6 addresses.
     #[clap(short = '6')]
     pub force_ipv6: bool,
-    /// Specify work mode - A for auth, E for encrypted and O for open mode -  default "AEO".
-    #[clap(short = 'A', long, default_value = "AEO")]
+    /// Specify work mode - A for auth, E for encrypted and O for open mode - default "O" (open/unauthenticated).
+    #[clap(short = 'A', long, default_value = "O")]
     pub auth_mode: String,
     /// Print individual statistics for each packet.
     #[clap(short = 'R')]
@@ -72,9 +72,21 @@ pub struct Configuration {
     #[clap(long, conflicts_with = "hmac_key")]
     pub hmac_key_file: Option<PathBuf>,
 
-    /// Require HMAC verification (reject packets with invalid HMAC).
+    /// Require HMAC key to be configured (error if missing in auth mode).
+    /// Note: When an HMAC key is present, verification is always mandatory per RFC 8762 §4.4.
     #[clap(long)]
     pub require_hmac: bool,
+
+    /// Reject short packets instead of zero-filling (RFC 8762 Section 4.6).
+    /// By default, missing bytes are zero-filled for TWAMP-Light interoperability.
+    #[clap(long)]
+    pub strict_packets: bool,
+
+    /// Use stateful reflector mode with independent sequence counter (RFC 8972).
+    /// When enabled, the reflector maintains its own sequence counter instead of
+    /// echoing the sender's sequence number.
+    #[clap(long)]
+    pub stateful_reflector: bool,
 }
 
 impl Configuration {
@@ -203,7 +215,7 @@ mod tests {
         assert_eq!(conf.send_delay, 1000);
         assert_eq!(conf.count, 1000);
         assert_eq!(conf.timeout, 5);
-        assert_eq!(conf.auth_mode, "AEO");
+        assert_eq!(conf.auth_mode, "O"); // RFC 8762 default: open/unauthenticated mode
         assert!(!conf.force_ipv4);
         assert!(!conf.force_ipv6);
         assert!(!conf.print_stats);
@@ -395,5 +407,38 @@ mod tests {
         let conf = Configuration::parse_from(args);
 
         assert!(conf.require_hmac);
+    }
+
+    #[test]
+    fn test_strict_packets_option() {
+        let args = vec!["test", "--strict-packets"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.strict_packets);
+    }
+
+    #[test]
+    fn test_strict_packets_default_false() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+
+        // Default is false (lenient mode is default per RFC 8762 §4.6)
+        assert!(!conf.strict_packets);
+    }
+
+    #[test]
+    fn test_stateful_reflector_option() {
+        let args = vec!["test", "--stateful-reflector"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.stateful_reflector);
+    }
+
+    #[test]
+    fn test_stateful_reflector_default_false() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(!conf.stateful_reflector);
     }
 }
