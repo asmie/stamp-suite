@@ -59,8 +59,15 @@ pub async fn run_receiver(conf: &Configuration) {
     };
 
     // We also need a UDP socket to send responses
+    // Bind to appropriate address family based on configured local address
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
-    let send_socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("Cannot bind send socket");
+    let send_bind_addr = if conf.local_addr.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    let send_socket =
+        std::net::UdpSocket::bind(send_bind_addr).expect("Cannot bind send socket");
 
     // Check if authenticated mode is used
     let use_auth = is_auth(&conf.auth_mode);
