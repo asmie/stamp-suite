@@ -401,37 +401,37 @@ mod tests {
     #[test]
     fn test_assemble_unauth_packet_defaults() {
         let packet = assemble_unauth_packet(0);
-        assert_eq!({ packet.sequence_number }, 0);
-        assert_eq!({ packet.timestamp }, 0);
-        assert_eq!({ packet.error_estimate }, 0);
-        assert_eq!({ packet.mbz }, [0u8; 30]);
+        assert_eq!(packet.sequence_number, 0);
+        assert_eq!(packet.timestamp, 0);
+        assert_eq!(packet.error_estimate, 0);
+        assert_eq!(packet.mbz, [0u8; 30]);
     }
 
     #[test]
     fn test_assemble_unauth_packet_with_error_estimate() {
         let error_estimate = 0x8A64; // S=1, Scale=10, Multiplier=100
         let packet = assemble_unauth_packet(error_estimate);
-        assert_eq!({ packet.error_estimate }, error_estimate);
+        assert_eq!(packet.error_estimate, error_estimate);
     }
 
     #[test]
     fn test_assemble_auth_packet_defaults() {
         let packet = assemble_auth_packet(0);
-        assert_eq!({ packet.sequence_number }, 0);
-        assert_eq!({ packet.timestamp }, 0);
-        assert_eq!({ packet.error_estimate }, 0);
-        assert_eq!({ packet.mbz0 }, [0u8; 12]);
-        assert_eq!({ packet.mbz1a }, [0u8; 32]);
-        assert_eq!({ packet.mbz1b }, [0u8; 32]);
-        assert_eq!({ packet.mbz1c }, [0u8; 6]);
-        assert_eq!({ packet.hmac }, [0u8; 16]);
+        assert_eq!(packet.sequence_number, 0);
+        assert_eq!(packet.timestamp, 0);
+        assert_eq!(packet.error_estimate, 0);
+        assert_eq!(packet.mbz0, [0u8; 12]);
+        assert_eq!(packet.mbz1a, [0u8; 32]);
+        assert_eq!(packet.mbz1b, [0u8; 32]);
+        assert_eq!(packet.mbz1c, [0u8; 6]);
+        assert_eq!(packet.hmac, [0u8; 16]);
     }
 
     #[test]
     fn test_assemble_auth_packet_with_error_estimate() {
         let error_estimate = 0x8A64;
         let packet = assemble_auth_packet(error_estimate);
-        assert_eq!({ packet.error_estimate }, error_estimate);
+        assert_eq!(packet.error_estimate, error_estimate);
     }
 
     #[test]

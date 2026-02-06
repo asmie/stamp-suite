@@ -252,18 +252,12 @@ mod tests {
         );
 
         // Verify sender fields are echoed
-        assert_eq!({ reflected.sess_sender_seq_number }, {
-            sender_packet.sequence_number
-        });
-        assert_eq!({ reflected.sess_sender_timestamp }, {
-            sender_packet.timestamp
-        });
-        assert_eq!({ reflected.sess_sender_err_estimate }, {
-            sender_packet.error_estimate
-        });
-        assert_eq!({ reflected.sess_sender_ttl }, ttl);
+        assert_eq!(reflected.sess_sender_seq_number, sender_packet.sequence_number);
+        assert_eq!(reflected.sess_sender_timestamp, sender_packet.timestamp);
+        assert_eq!(reflected.sess_sender_err_estimate, sender_packet.error_estimate);
+        assert_eq!(reflected.sess_sender_ttl, ttl);
         // Verify reflector's own error estimate is used
-        assert_eq!({ reflected.error_estimate }, reflector_error_estimate);
+        assert_eq!(reflected.error_estimate, reflector_error_estimate);
     }
 
     #[test]
@@ -278,7 +272,7 @@ mod tests {
         let rcvt = 500u64;
         let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, rcvt, 64, 0, None);
 
-        assert_eq!({ reflected.receive_timestamp }, rcvt);
+        assert_eq!(reflected.receive_timestamp, rcvt);
     }
 
     #[test]
@@ -293,7 +287,7 @@ mod tests {
         let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, 64, 0, None);
 
         // Reflector's timestamp should be non-zero (generated)
-        assert!({ reflected.timestamp } > 0);
+        assert!(reflected.timestamp > 0);
     }
 
     #[test]
@@ -324,18 +318,12 @@ mod tests {
         );
 
         // Verify sender fields are echoed
-        assert_eq!({ reflected.sess_sender_seq_number }, {
-            sender_packet.sequence_number
-        });
-        assert_eq!({ reflected.sess_sender_timestamp }, {
-            sender_packet.timestamp
-        });
-        assert_eq!({ reflected.sess_sender_err_estimate }, {
-            sender_packet.error_estimate
-        });
-        assert_eq!({ reflected.sess_sender_ttl }, ttl);
+        assert_eq!(reflected.sess_sender_seq_number, sender_packet.sequence_number);
+        assert_eq!(reflected.sess_sender_timestamp, sender_packet.timestamp);
+        assert_eq!(reflected.sess_sender_err_estimate, sender_packet.error_estimate);
+        assert_eq!(reflected.sess_sender_ttl, ttl);
         // Verify reflector's own error estimate is used
-        assert_eq!({ reflected.error_estimate }, reflector_error_estimate);
+        assert_eq!(reflected.error_estimate, reflector_error_estimate);
     }
 
     #[test]
@@ -351,7 +339,7 @@ mod tests {
         for ttl in [0u8, 1, 64, 128, 255] {
             let reflected =
                 assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, ttl, 0, None);
-            assert_eq!({ reflected.sess_sender_ttl }, ttl);
+            assert_eq!(reflected.sess_sender_ttl, ttl);
         }
     }
 
@@ -372,7 +360,7 @@ mod tests {
         for ttl in [0u8, 1, 64, 128, 255] {
             let reflected =
                 assemble_auth_answer(&sender_packet, ClockFormat::NTP, 0, ttl, 0, None, None);
-            assert_eq!({ reflected.sess_sender_ttl }, ttl);
+            assert_eq!(reflected.sess_sender_ttl, ttl);
         }
     }
 
@@ -401,7 +389,7 @@ mod tests {
         );
 
         // HMAC should be non-zero when key is provided
-        assert_ne!({ reflected.hmac }, [0u8; 16]);
+        assert_ne!(reflected.hmac, [0u8; 16]);
     }
 
     #[test]
@@ -428,7 +416,7 @@ mod tests {
         );
 
         // HMAC should be zero when no key is provided
-        assert_eq!({ reflected.hmac }, [0u8; 16]);
+        assert_eq!(reflected.hmac, [0u8; 16]);
     }
 
     #[test]
@@ -451,9 +439,9 @@ mod tests {
         );
 
         // Reflector's sequence should be independent
-        assert_eq!({ reflected.sequence_number }, 999);
+        assert_eq!(reflected.sequence_number, 999);
         // Sender's sequence still echoed in sess_sender_seq_number
-        assert_eq!({ reflected.sess_sender_seq_number }, 42);
+        assert_eq!(reflected.sess_sender_seq_number, 42);
     }
 
     #[test]
@@ -481,9 +469,9 @@ mod tests {
         );
 
         // Reflector's sequence should be independent
-        assert_eq!({ reflected.sequence_number }, 999);
+        assert_eq!(reflected.sequence_number, 999);
         // Sender's sequence still echoed in sess_sender_seq_number
-        assert_eq!({ reflected.sess_sender_seq_number }, 42);
+        assert_eq!(reflected.sess_sender_seq_number, 42);
     }
 
     #[test]

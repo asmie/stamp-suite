@@ -3,8 +3,8 @@
 //! This module contains the packet formats for both authenticated and unauthenticated
 //! STAMP test packets, as well as their reflected counterparts.
 //!
-//! All packet structures use `#[repr(C, packed)]` to ensure exact byte layout
-//! matching RFC 8762 requirements, with explicit big-endian serialization.
+//! These are in-memory representations. Wire format serialization is handled
+//! explicitly by `to_bytes()` and `from_bytes()` methods with big-endian encoding.
 
 /// Unauthenticated STAMP test packet sent by the Session-Sender.
 ///
@@ -28,7 +28,6 @@
 /// |                                                               |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
-#[repr(C, packed)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct PacketUnauthenticated {
     /// Packet sequence number for ordering and loss detection.
@@ -40,9 +39,6 @@ pub struct PacketUnauthenticated {
     /// Must Be Zero - reserved padding bytes.
     pub mbz: [u8; 30],
 }
-
-// Compile-time size assertion for PacketUnauthenticated
-const _: () = assert!(std::mem::size_of::<PacketUnauthenticated>() == 44);
 
 impl PacketUnauthenticated {
     /// Serializes the packet to a 44-byte array in big-endian wire format.
@@ -119,7 +115,6 @@ impl PacketUnauthenticated {
 /// |Ses-Sender TTL |                      MBZ                      |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
-#[repr(C, packed)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct ReflectedPacketUnauthenticated {
     /// Reflector's sequence number.
@@ -145,9 +140,6 @@ pub struct ReflectedPacketUnauthenticated {
     /// Must Be Zero - reserved (3 bytes).
     pub mbz3: [u8; 3],
 }
-
-// Compile-time size assertion for ReflectedPacketUnauthenticated
-const _: () = assert!(std::mem::size_of::<ReflectedPacketUnauthenticated>() == 44);
 
 impl ReflectedPacketUnauthenticated {
     /// Serializes the packet to a 44-byte array in big-endian wire format.
@@ -195,7 +187,6 @@ impl ReflectedPacketUnauthenticated {
 ///
 /// Includes HMAC for integrity verification (112 bytes).
 /// See RFC 8762 Section 4.4.
-#[repr(C, packed)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct PacketAuthenticated {
     /// Packet sequence number for ordering and loss detection.
@@ -213,9 +204,6 @@ pub struct PacketAuthenticated {
     /// HMAC for packet authentication.
     pub hmac: [u8; 16],
 }
-
-// Compile-time size assertion for PacketAuthenticated
-const _: () = assert!(std::mem::size_of::<PacketAuthenticated>() == 112);
 
 impl PacketAuthenticated {
     /// Serializes the packet to a 112-byte array in big-endian wire format.
@@ -278,7 +266,6 @@ impl PacketAuthenticated {
 ///
 /// Contains the original sender information plus reflector timestamps with HMAC (112 bytes).
 /// See RFC 8762 Section 4.5.
-#[repr(C, packed)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct ReflectedPacketAuthenticated {
     /// Reflector's sequence number.
@@ -312,9 +299,6 @@ pub struct ReflectedPacketAuthenticated {
     /// HMAC for packet authentication.
     pub hmac: [u8; 16],
 }
-
-// Compile-time size assertion for ReflectedPacketAuthenticated
-const _: () = assert!(std::mem::size_of::<ReflectedPacketAuthenticated>() == 112);
 
 impl ReflectedPacketAuthenticated {
     /// Serializes the packet to a 112-byte array in big-endian wire format.
@@ -371,11 +355,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_packet_sizes_match_rfc() {
-        assert_eq!(std::mem::size_of::<PacketUnauthenticated>(), 44);
-        assert_eq!(std::mem::size_of::<ReflectedPacketUnauthenticated>(), 44);
-        assert_eq!(std::mem::size_of::<PacketAuthenticated>(), 112);
-        assert_eq!(std::mem::size_of::<ReflectedPacketAuthenticated>(), 112);
+    fn test_wire_format_sizes_match_rfc() {
+        // Verify wire format sizes match RFC 8762 requirements
+        let unauth = PacketUnauthenticated {
+            sequence_number: 0,
+            timestamp: 0,
+            error_estimate: 0,
+            mbz: [0; 30],
+        };
+        assert_eq!(unauth.to_bytes().len(), 44);
+
+        let reflected_unauth = ReflectedPacketUnauthenticated {
+            sequence_number: 0,
+            timestamp: 0,
+            error_estimate: 0,
+            mbz1: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 0,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            mbz2: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        assert_eq!(reflected_unauth.to_bytes().len(), 44);
+
+        let auth = PacketAuthenticated {
+            sequence_number: 0,
+            mbz0: [0; 12],
+            timestamp: 0,
+            error_estimate: 0,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+        assert_eq!(auth.to_bytes().len(), 112);
+
+        let reflected_auth = ReflectedPacketAuthenticated {
+            sequence_number: 0,
+            mbz0: [0; 12],
+            timestamp: 0,
+            error_estimate: 0,
+            mbz1: [0; 6],
+            receive_timestamp: 0,
+            mbz2: [0; 8],
+            sess_sender_seq_number: 0,
+            mbz3: [0; 12],
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            mbz4: [0; 6],
+            sess_sender_ttl: 0,
+            mbz5: [0; 15],
+            hmac: [0; 16],
+        };
+        assert_eq!(reflected_auth.to_bytes().len(), 112);
     }
 
     #[test]
@@ -492,10 +526,10 @@ mod tests {
         let serialized = packet.to_bytes();
         let deserialized = PacketUnauthenticated::from_bytes(&serialized).unwrap();
 
-        assert_eq!({ deserialized.sequence_number }, 0x12345678);
-        assert_eq!({ deserialized.timestamp }, 0xDEADBEEFCAFEBABE);
-        assert_eq!({ deserialized.error_estimate }, 0xABCD);
-        assert_eq!({ deserialized.mbz }, [0x42; 30]);
+        assert_eq!(deserialized.sequence_number, 0x12345678);
+        assert_eq!(deserialized.timestamp, 0xDEADBEEFCAFEBABE);
+        assert_eq!(deserialized.error_estimate, 0xABCD);
+        assert_eq!(deserialized.mbz, [0x42; 30]);
     }
 
     #[test]
@@ -518,10 +552,10 @@ mod tests {
         let deserialized = ReflectedPacketUnauthenticated::from_bytes(&serialized).unwrap();
 
         // Verify echoed fields
-        assert_eq!({ deserialized.sess_sender_seq_number }, 500);
-        assert_eq!({ deserialized.sess_sender_timestamp }, 600);
-        assert_eq!({ deserialized.sess_sender_err_estimate }, 700);
-        assert_eq!({ deserialized.sess_sender_ttl }, 64);
+        assert_eq!(deserialized.sess_sender_seq_number, 500);
+        assert_eq!(deserialized.sess_sender_timestamp, 600);
+        assert_eq!(deserialized.sess_sender_err_estimate, 700);
+        assert_eq!(deserialized.sess_sender_ttl, 64);
     }
 
     #[test]
@@ -711,8 +745,7 @@ mod tests {
             let restored = PacketUnauthenticated::from_bytes(&bytes).unwrap();
 
             assert_eq!(
-                { restored.sequence_number },
-                seq,
+                restored.sequence_number, seq,
                 "Sequence number {} should roundtrip correctly",
                 seq
             );
@@ -733,8 +766,7 @@ mod tests {
             let restored = PacketUnauthenticated::from_bytes(&bytes).unwrap();
 
             assert_eq!(
-                { restored.timestamp },
-                ts,
+                restored.timestamp, ts,
                 "Timestamp {} should roundtrip correctly",
                 ts
             );
@@ -755,8 +787,7 @@ mod tests {
             let restored = PacketUnauthenticated::from_bytes(&bytes).unwrap();
 
             assert_eq!(
-                { restored.error_estimate },
-                ee,
+                restored.error_estimate, ee,
                 "Error estimate {} should roundtrip correctly",
                 ee
             );
@@ -784,8 +815,7 @@ mod tests {
             let restored = ReflectedPacketUnauthenticated::from_bytes(&bytes).unwrap();
 
             assert_eq!(
-                { restored.sess_sender_ttl },
-                ttl,
+                restored.sess_sender_ttl, ttl,
                 "TTL {} should roundtrip correctly",
                 ttl
             );
@@ -817,9 +847,9 @@ mod tests {
 
         let restored = PacketUnauthenticated::from_bytes_lenient(&short_buf);
 
-        assert_eq!({ restored.sequence_number }, 0x12345678);
-        assert_eq!({ restored.timestamp }, 0xDEADBEEFCAFEBABE);
-        assert_eq!({ restored.error_estimate }, 0xABCD);
+        assert_eq!(restored.sequence_number, 0x12345678);
+        assert_eq!(restored.timestamp, 0xDEADBEEFCAFEBABE);
+        assert_eq!(restored.error_estimate, 0xABCD);
         // First 6 bytes should be 0x42, rest zero-filled
         assert_eq!(restored.mbz[0..6], [0x42; 6]);
         assert_eq!(restored.mbz[6..30], [0; 24]);
@@ -830,9 +860,9 @@ mod tests {
         let empty: [u8; 0] = [];
         let restored = PacketUnauthenticated::from_bytes_lenient(&empty);
 
-        assert_eq!({ restored.sequence_number }, 0);
-        assert_eq!({ restored.timestamp }, 0);
-        assert_eq!({ restored.error_estimate }, 0);
+        assert_eq!(restored.sequence_number, 0);
+        assert_eq!(restored.timestamp, 0);
+        assert_eq!(restored.error_estimate, 0);
         assert_eq!(restored.mbz, [0; 30]);
     }
 
@@ -866,10 +896,10 @@ mod tests {
 
         let restored = PacketAuthenticated::from_bytes_lenient(&short_buf);
 
-        assert_eq!({ restored.sequence_number }, 0x12345678);
+        assert_eq!(restored.sequence_number, 0x12345678);
         assert_eq!(restored.mbz0, [0x11; 12]);
-        assert_eq!({ restored.timestamp }, 0xDEADBEEFCAFEBABE);
-        assert_eq!({ restored.error_estimate }, 0xABCD);
+        assert_eq!(restored.timestamp, 0xDEADBEEFCAFEBABE);
+        assert_eq!(restored.error_estimate, 0xABCD);
         // First 4 bytes of mbz1a should be 0x22, rest zero-filled
         assert_eq!(restored.mbz1a[0..4], [0x22; 4]);
         assert_eq!(restored.mbz1a[4..32], [0; 28]);
