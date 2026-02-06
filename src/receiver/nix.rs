@@ -296,6 +296,7 @@ fn verify_incoming_hmac(key: &HmacKey, packet_bytes: &[u8], expected_hmac: &[u8;
 /// Extract TTL from control messages received via recvmsg.
 ///
 /// Returns `None` if TTL/HopLimit could not be extracted from the control messages.
+#[cfg(target_os = "linux")]
 fn extract_ttl_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> Option<u8> {
     let cmsgs = msg.cmsgs().ok()?;
 
@@ -310,6 +311,42 @@ fn extract_ttl_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> O
             ControlMessageOwned::Ipv6HopLimit(hoplimit) => {
                 // Hop limit is i32 but valid range is 0-255
                 return Some(hoplimit.clamp(0, 255) as u8);
+            }
+            _ => continue,
+        }
+    }
+
+    None
+}
+
+/// Extract TTL from control messages received via recvmsg (macOS version).
+///
+/// On macOS, nix doesn't have typed Ipv4Ttl variant, so we parse Unknown cmsgs.
+/// Returns `None` if TTL/HopLimit could not be extracted from the control messages.
+#[cfg(target_os = "macos")]
+fn extract_ttl_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> Option<u8> {
+    let cmsgs = msg.cmsgs().ok()?;
+
+    for cmsg in cmsgs {
+        match cmsg {
+            // IPv6 Hop Limit is available on macOS
+            ControlMessageOwned::Ipv6HopLimit(hoplimit) => {
+                return Some(hoplimit.clamp(0, 255) as u8);
+            }
+            // IPv4 TTL comes as Unknown on macOS
+            ControlMessageOwned::Unknown(ucmsg) => {
+                // Check if this is IP_RECVTTL (level=IPPROTO_IP, type=IP_RECVTTL)
+                // The cmsg header is at the start, followed by the data (TTL as i32)
+                if ucmsg.0.cmsg_level == libc::IPPROTO_IP {
+                    // On macOS, IP_RECVTTL delivers TTL as int
+                    let data = &ucmsg.1;
+                    if data.len() >= 4 {
+                        let ttl = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+                        return Some(ttl.clamp(0, 255) as u8);
+                    } else if !data.is_empty() {
+                        return Some(data[0]);
+                    }
+                }
             }
             _ => continue,
         }
