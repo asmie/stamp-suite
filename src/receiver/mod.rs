@@ -99,11 +99,12 @@ pub const AUTH_BASE_SIZE: usize = 112;
 
 /// Assembles an unauthenticated reflected packet with symmetric size (RFC 8762 Section 4.3).
 ///
-/// Preserves the original packet length by copying extra bytes beyond the base 44 bytes.
+/// Preserves the original packet length by padding with zeros beyond the base 44 bytes.
+/// Per RFC 8762 Section 4.2.1, extra octets SHOULD be filled with zeros.
 ///
 /// # Arguments
 /// * `packet` - The received unauthenticated test packet
-/// * `original_data` - The original received packet data
+/// * `original_data` - The original received packet data (used only for length)
 /// * `cs` - Clock format to use for timestamps
 /// * `rcvt` - Receive timestamp when the packet was received
 /// * `ttl` - TTL/Hop Limit value from the received packet's IP header
@@ -128,9 +129,9 @@ pub fn assemble_unauth_answer_symmetric(
     );
     let mut response = base.to_bytes().to_vec();
 
-    // Copy extra bytes beyond base packet (RFC 8762 Section 4.3)
+    // Pad with zeros to match original length (RFC 8762 Section 4.2.1)
     if original_data.len() > UNAUTH_BASE_SIZE {
-        response.extend_from_slice(&original_data[UNAUTH_BASE_SIZE..]);
+        response.resize(original_data.len(), 0);
     }
 
     response
@@ -184,11 +185,12 @@ pub fn assemble_auth_answer(
 
 /// Assembles an authenticated reflected packet with symmetric size (RFC 8762 Section 4.3).
 ///
-/// Preserves the original packet length by copying extra bytes beyond the base 112 bytes.
+/// Preserves the original packet length by padding with zeros beyond the base 112 bytes.
+/// Per RFC 8762 Section 4.2.1, extra octets SHOULD be filled with zeros.
 ///
 /// # Arguments
 /// * `packet` - The received authenticated test packet
-/// * `original_data` - The original received packet data
+/// * `original_data` - The original received packet data (used only for length)
 /// * `cs` - Clock format to use for timestamps
 /// * `rcvt` - Receive timestamp when the packet was received
 /// * `ttl` - TTL/Hop Limit value from the received packet's IP header
@@ -217,9 +219,9 @@ pub fn assemble_auth_answer_symmetric(
     );
     let mut response = base.to_bytes().to_vec();
 
-    // Copy extra bytes beyond base packet (RFC 8762 Section 4.3)
+    // Pad with zeros to match original length (RFC 8762 Section 4.2.1)
     if original_data.len() > AUTH_BASE_SIZE {
-        response.extend_from_slice(&original_data[AUTH_BASE_SIZE..]);
+        response.resize(original_data.len(), 0);
     }
 
     response
@@ -511,8 +513,8 @@ mod tests {
 
         // Response should be 48 bytes (44 base + 4 extra)
         assert_eq!(response.len(), 48);
-        // Extra bytes should be preserved at the end
-        assert_eq!(&response[44..], &[0xAA, 0xBB, 0xCC, 0xDD]);
+        // Extra bytes should be zeros per RFC 8762 Section 4.2.1
+        assert_eq!(&response[44..], &[0x00, 0x00, 0x00, 0x00]);
     }
 
     #[test]
@@ -545,8 +547,8 @@ mod tests {
 
         // Response should be 117 bytes (112 base + 5 extra)
         assert_eq!(response.len(), 117);
-        // Extra bytes should be preserved at the end
-        assert_eq!(&response[112..], &[0x11, 0x22, 0x33, 0x44, 0x55]);
+        // Extra bytes should be zeros per RFC 8762 Section 4.2.1
+        assert_eq!(&response[112..], &[0x00, 0x00, 0x00, 0x00, 0x00]);
     }
 
     #[test]

@@ -17,12 +17,14 @@ use pnet::{
     util::MacAddr,
 };
 
+use std::sync::Arc;
+
 use crate::{
     configuration::{is_auth, Configuration},
     crypto::HmacKey,
     error_estimate::ErrorEstimate,
     packets::{PacketAuthenticated, PacketUnauthenticated},
-    session::Session,
+    session::SessionManager,
     time::generate_timestamp,
 };
 
@@ -33,7 +35,7 @@ struct PnetContext {
     error_estimate_wire: u16,
     hmac_key: Option<HmacKey>,
     require_hmac: bool,
-    reflector_session: Option<Session>,
+    session_manager: Option<Arc<SessionManager>>,
 }
 
 /// Runs the STAMP Session Reflector using pnet for raw packet capture.
@@ -96,10 +98,15 @@ pub async fn run_receiver(conf: &Configuration) {
         log::info!("HMAC authentication enabled");
     }
 
-    // Create session for stateful reflector mode (RFC 8972)
-    let reflector_session = if conf.stateful_reflector {
+    // Create session manager for stateful reflector mode (RFC 8972)
+    let session_manager: Option<Arc<SessionManager>> = if conf.stateful_reflector {
+        let timeout = if conf.session_timeout > 0 {
+            Some(std::time::Duration::from_secs(conf.session_timeout))
+        } else {
+            None
+        };
         log::info!("Stateful reflector mode enabled (RFC 8972)");
-        Some(Session::new(0))
+        Some(Arc::new(SessionManager::new(timeout)))
     } else {
         None
     };
@@ -108,7 +115,7 @@ pub async fn run_receiver(conf: &Configuration) {
         error_estimate_wire,
         hmac_key,
         require_hmac: conf.require_hmac,
-        reflector_session,
+        session_manager,
     };
 
     println!(
@@ -307,9 +314,9 @@ fn process_stamp_packet(
 
                 // Generate reflector sequence number only after successful validation
                 let reflector_seq = ctx
-                    .reflector_session
+                    .session_manager
                     .as_ref()
-                    .map(|s| s.generate_sequence_number());
+                    .map(|mgr| mgr.generate_sequence_number(src));
 
                 // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
                 Some(assemble_auth_answer_symmetric(
@@ -341,9 +348,9 @@ fn process_stamp_packet(
             Ok(packet) => {
                 // Generate reflector sequence number only after successful validation
                 let reflector_seq = ctx
-                    .reflector_session
+                    .session_manager
                     .as_ref()
-                    .map(|s| s.generate_sequence_number());
+                    .map(|mgr| mgr.generate_sequence_number(src));
 
                 // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
                 Some(assemble_unauth_answer_symmetric(

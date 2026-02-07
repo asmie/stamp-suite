@@ -15,7 +15,7 @@ stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Pr
 
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
 - HMAC authentication support
-- Stateful reflector mode (RFC 8972)
+- Stateful reflector mode with per-client session tracking (RFC 8972 Section 4)
 - Support for both NTP and PTP timestamp formats
 - Real TTL/Hop Limit capture on all platforms
 - Async I/O using Tokio
@@ -68,6 +68,13 @@ stamp-suite -i --local-addr 192.168.1.100 --local-port 8620
 
 # With verbose per-packet statistics
 stamp-suite -i -R
+
+# Stateful reflector mode (RFC 8972) - maintains independent sequence
+# counters per client, allowing detection of reflector-side packet loss
+stamp-suite -i --stateful-reflector
+
+# Stateful mode with custom session timeout (default: 300 seconds)
+stamp-suite -i --stateful-reflector --session-timeout 600
 ```
 
 ### Session-Sender (Client)
@@ -101,9 +108,11 @@ Options:
   -L, --timeout <TIMEOUT>          Timeout for lost packets in seconds [default: 5]
   -4                               Force IPv4 addresses
   -6                               Force IPv6 addresses
-  -A, --auth-mode <AUTH_MODE>      Work mode: A=auth, E=encrypted, O=open [default: AEO]
+  -A, --auth-mode <AUTH_MODE>      Work mode: A=authenticated, O=open [default: O]
   -R                               Print individual statistics for each packet
   -i, --is-reflector               Run as Session Reflector instead of Sender
+      --stateful-reflector         Enable stateful reflector mode (RFC 8972 Section 4)
+      --session-timeout <SECONDS>  Session timeout for stateful mode [default: 300]
   -h, --help                       Print help
   -V, --version                    Print version
 ```
@@ -152,17 +161,15 @@ The project is functional for STAMP measurements with the following features:
 
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
 - HMAC authentication support
-- Stateful reflector mode (RFC 8972)
+- Stateful reflector mode with per-client session tracking (RFC 8972 Section 4)
 - Real TTL capture on all major platforms
 
 Current limitations:
 
-- Single session per instance (no multi-session support yet)
 - No STAMP-MIB support
 
 ### Roadmap
 
-- [ ] Multi-session support for reflector
 - [ ] DSCP/ECN field handling
 - [ ] Enhanced statistics and reporting
 

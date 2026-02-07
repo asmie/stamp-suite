@@ -12,6 +12,7 @@ use stamp_suite::configuration::ClockFormat;
 use stamp_suite::packets::*;
 use stamp_suite::receiver::{assemble_auth_answer, assemble_unauth_answer};
 use stamp_suite::sender::{assemble_auth_packet, assemble_unauth_packet};
+use stamp_suite::session::SessionManager;
 use stamp_suite::time::generate_timestamp;
 
 /// Find an available port for testing.
@@ -319,6 +320,145 @@ async fn test_loopback_timestamp_ordering() {
     );
 
     reflector_handle.await.unwrap();
+}
+
+/// Test stateful reflector mode with multiple clients getting independent sequence numbers.
+///
+/// This verifies RFC 8972 Section 4 compliance: each client (IP:port) should receive
+/// independent reflector sequence numbers, allowing detection of reflector-side packet loss.
+#[tokio::test]
+async fn test_stateful_reflector_multi_client() {
+    use std::sync::Arc;
+
+    let reflector_port = find_available_port().await;
+    let client1_port = find_available_port().await;
+    let client2_port = find_available_port().await;
+
+    // Create session manager for stateful reflector
+    let session_manager = Arc::new(SessionManager::new(None));
+
+    let reflector_socket = UdpSocket::bind(format!("127.0.0.1:{}", reflector_port))
+        .await
+        .unwrap();
+
+    // Spawn reflector that uses SessionManager for per-client sequence numbers
+    let session_manager_clone = Arc::clone(&session_manager);
+    let reflector_handle = tokio::spawn(async move {
+        let mut buf = [0u8; 1024];
+        let mut packets_handled = 0;
+
+        // Handle 6 packets (3 from each client, interleaved)
+        for _ in 0..6 {
+            if let Ok(Ok((len, src))) =
+                timeout(Duration::from_secs(2), reflector_socket.recv_from(&mut buf)).await
+            {
+                let rcvt = generate_timestamp(ClockFormat::NTP);
+                if let Ok(packet) = PacketUnauthenticated::from_bytes(&buf[..len]) {
+                    // Generate reflector sequence number from SessionManager
+                    let reflector_seq = session_manager_clone.generate_sequence_number(src);
+
+                    let answer = assemble_unauth_answer(
+                        &packet,
+                        ClockFormat::NTP,
+                        rcvt,
+                        64,
+                        0,
+                        Some(reflector_seq),
+                    );
+                    let response = answer.to_bytes();
+                    let _ = reflector_socket.send_to(&response, src).await;
+                    packets_handled += 1;
+                }
+            }
+        }
+        packets_handled
+    });
+
+    // Give reflector time to bind
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Create two client sockets
+    let client1_socket = UdpSocket::bind(format!("127.0.0.1:{}", client1_port))
+        .await
+        .unwrap();
+    let client2_socket = UdpSocket::bind(format!("127.0.0.1:{}", client2_port))
+        .await
+        .unwrap();
+
+    let reflector_addr: SocketAddr = format!("127.0.0.1:{}", reflector_port).parse().unwrap();
+
+    // Track reflector sequence numbers received by each client
+    let mut client1_reflector_seqs: Vec<u32> = Vec::new();
+    let mut client2_reflector_seqs: Vec<u32> = Vec::new();
+
+    // Send packets interleaved: client1, client2, client1, client2, client1, client2
+    for i in 0..3 {
+        // Client 1 sends
+        {
+            let mut packet = assemble_unauth_packet(0);
+            packet.sequence_number = i as u32;
+            packet.timestamp = generate_timestamp(ClockFormat::NTP);
+            let buf = packet.to_bytes();
+            client1_socket.send_to(&buf, reflector_addr).await.unwrap();
+
+            let mut recv_buf = [0u8; 1024];
+            let (len, _) = timeout(
+                Duration::from_secs(1),
+                client1_socket.recv_from(&mut recv_buf),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+            let response = ReflectedPacketUnauthenticated::from_bytes(&recv_buf[..len]).unwrap();
+            client1_reflector_seqs.push(response.sequence_number);
+        }
+
+        // Client 2 sends
+        {
+            let mut packet = assemble_unauth_packet(0);
+            packet.sequence_number = (i + 100) as u32; // Different sender seq to distinguish
+            packet.timestamp = generate_timestamp(ClockFormat::NTP);
+            let buf = packet.to_bytes();
+            client2_socket.send_to(&buf, reflector_addr).await.unwrap();
+
+            let mut recv_buf = [0u8; 1024];
+            let (len, _) = timeout(
+                Duration::from_secs(1),
+                client2_socket.recv_from(&mut recv_buf),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+            let response = ReflectedPacketUnauthenticated::from_bytes(&recv_buf[..len]).unwrap();
+            client2_reflector_seqs.push(response.sequence_number);
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let packets_handled = reflector_handle.await.unwrap();
+    assert_eq!(packets_handled, 6, "Reflector should handle 6 packets");
+
+    // Verify each client received independent sequence numbers starting from 0
+    assert_eq!(
+        client1_reflector_seqs,
+        vec![0, 1, 2],
+        "Client 1 should receive reflector seq 0, 1, 2"
+    );
+    assert_eq!(
+        client2_reflector_seqs,
+        vec![0, 1, 2],
+        "Client 2 should receive reflector seq 0, 1, 2"
+    );
+
+    // Verify SessionManager created two separate sessions
+    assert_eq!(
+        session_manager.session_count(),
+        2,
+        "SessionManager should have 2 sessions"
+    );
 }
 
 #[tokio::test]

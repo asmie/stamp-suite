@@ -2,7 +2,7 @@
 //!
 //! Preferred on Linux systems. No special privileges required for regular UDP sockets.
 
-use std::{io::IoSliceMut, net::SocketAddr, os::fd::AsRawFd};
+use std::{io::IoSliceMut, net::SocketAddr, os::fd::AsRawFd, sync::Arc};
 
 use nix::{
     libc,
@@ -15,7 +15,7 @@ use crate::{
     crypto::HmacKey,
     error_estimate::ErrorEstimate,
     packets::{PacketAuthenticated, PacketUnauthenticated},
-    session::Session,
+    session::SessionManager,
     time::generate_timestamp,
 };
 
@@ -109,10 +109,15 @@ pub async fn run_receiver(conf: &Configuration) {
         log::info!("HMAC authentication enabled");
     }
 
-    // Create session for stateful reflector mode (RFC 8972)
-    let reflector_session = if conf.stateful_reflector {
+    // Create session manager for stateful reflector mode (RFC 8972)
+    let session_manager: Option<Arc<SessionManager>> = if conf.stateful_reflector {
+        let timeout = if conf.session_timeout > 0 {
+            Some(std::time::Duration::from_secs(conf.session_timeout))
+        } else {
+            None
+        };
         log::info!("Stateful reflector mode enabled (RFC 8972)");
-        Some(Session::new(0))
+        Some(Arc::new(SessionManager::new(timeout)))
     } else {
         None
     };
@@ -143,7 +148,7 @@ pub async fn run_receiver(conf: &Configuration) {
         ) {
             Ok(msg) => {
                 let len = msg.bytes;
-                let src_addr = msg.address;
+                let src_storage = msg.address;
 
                 // Extract TTL from control messages
                 let ttl = match extract_ttl_from_cmsgs(&msg) {
@@ -153,6 +158,25 @@ pub async fn run_receiver(conf: &Configuration) {
                         continue;
                     }
                 };
+
+                // Convert source address for session lookup and response
+                let src_addr: SocketAddr = match src_storage {
+                    Some(ref src) => {
+                        if let Some(v4) = src.as_sockaddr_in() {
+                            std::net::SocketAddrV4::new(v4.ip(), v4.port()).into()
+                        } else if let Some(v6) = src.as_sockaddr_in6() {
+                            std::net::SocketAddrV6::new(v6.ip(), v6.port(), 0, 0).into()
+                        } else {
+                            eprintln!("Unknown source address type");
+                            continue;
+                        }
+                    }
+                    None => {
+                        eprintln!("No source address available");
+                        continue;
+                    }
+                };
+
                 let rcvt = generate_timestamp(conf.clock_source);
 
                 let response = if use_auth {
@@ -179,9 +203,9 @@ pub async fn run_receiver(conf: &Configuration) {
                             }
 
                             // Generate reflector sequence number only after successful validation
-                            let reflector_seq = reflector_session
+                            let reflector_seq = session_manager
                                 .as_ref()
-                                .map(|s| s.generate_sequence_number());
+                                .map(|mgr| mgr.generate_sequence_number(src_addr));
 
                             // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
                             Some(assemble_auth_answer_symmetric(
@@ -209,9 +233,9 @@ pub async fn run_receiver(conf: &Configuration) {
                     match packet_result {
                         Ok(packet) => {
                             // Generate reflector sequence number only after successful validation
-                            let reflector_seq = reflector_session
+                            let reflector_seq = session_manager
                                 .as_ref()
-                                .map(|s| s.generate_sequence_number());
+                                .map(|mgr| mgr.generate_sequence_number(src_addr));
 
                             // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
                             Some(assemble_unauth_answer_symmetric(
@@ -232,20 +256,8 @@ pub async fn run_receiver(conf: &Configuration) {
                 };
 
                 if let Some(response_buf) = response {
-                    if let Some(src) = src_addr {
-                        // Convert SockaddrStorage back to SocketAddr
-                        let dest: SocketAddr = if let Some(v4) = src.as_sockaddr_in() {
-                            std::net::SocketAddrV4::new(v4.ip(), v4.port()).into()
-                        } else if let Some(v6) = src.as_sockaddr_in6() {
-                            std::net::SocketAddrV6::new(v6.ip(), v6.port(), 0, 0).into()
-                        } else {
-                            eprintln!("Unknown source address type");
-                            continue;
-                        };
-
-                        if let Err(e) = tokio_socket.send_to(&response_buf, dest).await {
-                            eprintln!("Failed to send response: {}", e);
-                        }
+                    if let Err(e) = tokio_socket.send_to(&response_buf, src_addr).await {
+                        eprintln!("Failed to send response: {}", e);
                     }
                 }
             }

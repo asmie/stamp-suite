@@ -82,11 +82,16 @@ pub struct Configuration {
     #[clap(long)]
     pub strict_packets: bool,
 
-    /// Use stateful reflector mode with independent sequence counter (RFC 8972).
-    /// When enabled, the reflector maintains its own sequence counter instead of
-    /// echoing the sender's sequence number.
+    /// Enable stateful reflector mode per RFC 8972 Section 4. The reflector maintains
+    /// independent sequence counters for each client (IP:port) instead of echoing
+    /// the sender's sequence number, allowing clients to detect reflector-side packet loss.
     #[clap(long)]
     pub stateful_reflector: bool,
+
+    /// Session timeout in seconds for stateful reflector mode. Sessions inactive for
+    /// this duration may be cleaned up. Default: 300 (5 minutes). Set to 0 to disable.
+    #[clap(long, default_value_t = 300)]
+    pub session_timeout: u64,
 }
 
 impl Configuration {
@@ -102,6 +107,11 @@ impl Configuration {
         }
 
         // Validate auth mode - only A (authenticated) and O (open) are valid per RFC 8762
+        if self.auth_mode.is_empty() {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "Auth mode cannot be empty. Valid options: A (authenticated), O (open)".to_string(),
+            ));
+        }
         for c in self.auth_mode.chars() {
             if c != 'A' && c != 'O' {
                 return Err(ConfigurationError::InvalidConfiguration(format!(
@@ -165,7 +175,7 @@ mod tests {
             "--timeout",
             "5",
             "--auth-mode",
-            "AEO",
+            "AO",
             "--is-reflector",
         ];
         let conf = Configuration::parse_from(args);
@@ -177,8 +187,9 @@ mod tests {
         assert_eq!(conf.send_delay, 1000);
         assert_eq!(conf.count, 1000);
         assert_eq!(conf.timeout, 5);
-        assert_eq!(conf.auth_mode, "AEO");
+        assert_eq!(conf.auth_mode, "AO");
         assert!(conf.is_reflector);
+        assert!(conf.validate().is_ok());
     }
 
     #[test]
@@ -331,9 +342,8 @@ mod tests {
     fn test_auth_mode_empty() {
         let args = vec!["test", "--auth-mode", ""];
         let conf = Configuration::parse_from(args);
-        assert!(conf.validate().is_ok()); // Empty is valid (no modes enabled)
-        assert!(!is_auth(&conf.auth_mode));
-        assert!(!is_open(&conf.auth_mode));
+        // Empty auth mode is invalid - must specify at least one mode
+        assert!(conf.validate().is_err());
     }
 
     #[test]
@@ -446,5 +456,38 @@ mod tests {
         let conf = Configuration::parse_from(args);
 
         assert!(!conf.stateful_reflector);
+    }
+
+    #[test]
+    fn test_session_timeout_default() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(conf.session_timeout, 300);
+    }
+
+    #[test]
+    fn test_session_timeout_custom() {
+        let args = vec!["test", "--session-timeout", "600"];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(conf.session_timeout, 600);
+    }
+
+    #[test]
+    fn test_session_timeout_zero_disables() {
+        let args = vec!["test", "--session-timeout", "0"];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(conf.session_timeout, 0);
+    }
+
+    #[test]
+    fn test_stateful_reflector_with_timeout() {
+        let args = vec!["test", "--stateful-reflector", "--session-timeout", "120"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.stateful_reflector);
+        assert_eq!(conf.session_timeout, 120);
     }
 }
