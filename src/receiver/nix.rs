@@ -187,7 +187,7 @@ pub async fn run_receiver(conf: &Configuration) {
                     };
                     match packet_result {
                         Ok(packet) => {
-                            // Copy HMAC to avoid unaligned access
+                            // Extract HMAC for verification
                             let hmac = packet.hmac;
 
                             // Verify HMAC - mandatory when key is present (RFC 8762 §4.4)

@@ -222,7 +222,7 @@ fn process_response(
     let (seq_num, reflector_recv_ts, reflector_send_ts, sender_ttl) = if use_auth {
         match ReflectedPacketAuthenticated::from_bytes(data) {
             Ok(packet) => {
-                // Copy fields from packed struct to avoid unaligned access
+                // Extract fields for verification and return
                 let seq_num = packet.sess_sender_seq_number;
                 let recv_ts = packet.receive_timestamp;
                 let send_ts = packet.timestamp;

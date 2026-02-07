@@ -36,6 +36,8 @@ struct PnetContext {
     hmac_key: Option<HmacKey>,
     require_hmac: bool,
     session_manager: Option<Arc<SessionManager>>,
+    send_socket_v4: std::net::UdpSocket,
+    send_socket_v6: Option<std::net::UdpSocket>,
 }
 
 /// Runs the STAMP Session Reflector using pnet for raw packet capture.
@@ -60,15 +62,12 @@ pub async fn run_receiver(conf: &Configuration) {
         Err(e) => panic!("packetdump: unable to create channel: {}", e),
     };
 
-    // We also need a UDP socket to send responses
-    // Bind to appropriate address family based on configured local address
+    // We need UDP sockets to send responses - one for each address family
+    // since pnet captures at the datalink layer and may see both IPv4 and IPv6 packets
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
-    let send_bind_addr = if conf.local_addr.is_ipv6() {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    };
-    let send_socket = std::net::UdpSocket::bind(send_bind_addr).expect("Cannot bind send socket");
+    let send_socket_v4 =
+        std::net::UdpSocket::bind("0.0.0.0:0").expect("Cannot bind IPv4 send socket");
+    let send_socket_v6 = std::net::UdpSocket::bind("[::]:0").ok(); // Optional, may fail if IPv6 unavailable
 
     // Check if authenticated mode is used
     let use_auth = is_auth(&conf.auth_mode);
@@ -116,6 +115,8 @@ pub async fn run_receiver(conf: &Configuration) {
         hmac_key,
         require_hmac: conf.require_hmac,
         session_manager,
+        send_socket_v4,
+        send_socket_v6,
     };
 
     println!(
@@ -156,7 +157,6 @@ pub async fn run_receiver(conf: &Configuration) {
                                 &fake_ethernet_frame.to_immutable(),
                                 conf,
                                 use_auth,
-                                &send_socket,
                                 &ctx,
                             );
                             continue;
@@ -169,20 +169,13 @@ pub async fn run_receiver(conf: &Configuration) {
                                 &fake_ethernet_frame.to_immutable(),
                                 conf,
                                 use_auth,
-                                &send_socket,
                                 &ctx,
                             );
                             continue;
                         }
                     }
                 }
-                handle_packet(
-                    &EthernetPacket::new(packet).unwrap(),
-                    conf,
-                    use_auth,
-                    &send_socket,
-                    &ctx,
-                );
+                handle_packet(&EthernetPacket::new(packet).unwrap(), conf, use_auth, &ctx);
             }
             Err(e) => eprintln!("packetdump: unable to receive packet: {}", e),
         }
@@ -226,7 +219,6 @@ fn handle_packet(
     ethernet: &EthernetPacket,
     conf: &Configuration,
     use_auth: bool,
-    send_socket: &std::net::UdpSocket,
     ctx: &PnetContext,
 ) {
     match ethernet.get_ethertype() {
@@ -238,15 +230,7 @@ fn handle_packet(
                             let ttl = header.get_ttl();
                             let src =
                                 SocketAddr::new(IpAddr::V4(header.get_source()), udp.get_source());
-                            process_stamp_packet(
-                                udp.payload(),
-                                src,
-                                ttl,
-                                conf,
-                                use_auth,
-                                send_socket,
-                                ctx,
-                            );
+                            process_stamp_packet(udp.payload(), src, ttl, conf, use_auth, ctx);
                         }
                     }
                 }
@@ -260,15 +244,7 @@ fn handle_packet(
                             let ttl = header.get_hop_limit();
                             let src =
                                 SocketAddr::new(IpAddr::V6(header.get_source()), udp.get_source());
-                            process_stamp_packet(
-                                udp.payload(),
-                                src,
-                                ttl,
-                                conf,
-                                use_auth,
-                                send_socket,
-                                ctx,
-                            );
+                            process_stamp_packet(udp.payload(), src, ttl, conf, use_auth, ctx);
                         }
                     }
                 }
@@ -284,7 +260,6 @@ fn process_stamp_packet(
     ttl: u8,
     conf: &Configuration,
     use_auth: bool,
-    send_socket: &std::net::UdpSocket,
     ctx: &PnetContext,
 ) {
     let rcvt = generate_timestamp(conf.clock_source);
@@ -297,7 +272,7 @@ fn process_stamp_packet(
         };
         match packet_result {
             Ok(packet) => {
-                // Copy HMAC to avoid unaligned access
+                // Extract HMAC for verification
                 let hmac = packet.hmac;
 
                 // Verify HMAC - mandatory when key is present (RFC 8762 §4.4)
@@ -374,7 +349,18 @@ fn process_stamp_packet(
     };
 
     if let Some(response_buf) = response {
-        if let Err(e) = send_socket.send_to(&response_buf, src) {
+        // Use the appropriate socket based on address family
+        let send_result = match src {
+            SocketAddr::V4(_) => ctx.send_socket_v4.send_to(&response_buf, src),
+            SocketAddr::V6(_) => match &ctx.send_socket_v6 {
+                Some(socket) => socket.send_to(&response_buf, src),
+                None => {
+                    eprintln!("Cannot send IPv6 response: IPv6 socket unavailable");
+                    return;
+                }
+            },
+        };
+        if let Err(e) = send_result {
             eprintln!("Failed to send response to {}: {}", src, e);
         }
     }
