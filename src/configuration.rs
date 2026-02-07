@@ -42,8 +42,8 @@ pub struct Configuration {
     /// Force IPv6 addresses.
     #[clap(short = '6')]
     pub force_ipv6: bool,
-    /// Specify work mode - A for auth, E for encrypted and O for open mode -  default "AEO".
-    #[clap(short = 'A', long, default_value = "AEO")]
+    /// Specify work mode - A for authenticated, O for open (unauthenticated) - default "O".
+    #[clap(short = 'A', long, default_value = "O")]
     pub auth_mode: String,
     /// Print individual statistics for each packet.
     #[clap(short = 'R')]
@@ -72,9 +72,21 @@ pub struct Configuration {
     #[clap(long, conflicts_with = "hmac_key")]
     pub hmac_key_file: Option<PathBuf>,
 
-    /// Require HMAC verification (reject packets with invalid HMAC).
+    /// Require HMAC key to be configured (error if missing in auth mode).
+    /// Note: When an HMAC key is present, verification is always mandatory per RFC 8762 §4.4.
     #[clap(long)]
     pub require_hmac: bool,
+
+    /// Reject short packets instead of zero-filling (RFC 8762 Section 4.6).
+    /// By default, missing bytes are zero-filled for TWAMP-Light interoperability.
+    #[clap(long)]
+    pub strict_packets: bool,
+
+    /// Use stateful reflector mode with independent sequence counter (RFC 8972).
+    /// When enabled, the reflector maintains its own sequence counter instead of
+    /// echoing the sender's sequence number.
+    #[clap(long)]
+    pub stateful_reflector: bool,
 }
 
 impl Configuration {
@@ -88,6 +100,17 @@ impl Configuration {
                 self.error_scale
             )));
         }
+
+        // Validate auth mode - only A (authenticated) and O (open) are valid per RFC 8762
+        for c in self.auth_mode.chars() {
+            if c != 'A' && c != 'O' {
+                return Err(ConfigurationError::InvalidConfiguration(format!(
+                    "Invalid auth mode '{}'. Valid options: A (authenticated), O (open)",
+                    c
+                )));
+            }
+        }
+
         Ok(())
     }
 }
@@ -105,13 +128,6 @@ pub enum ConfigurationError {
 /// Returns `true` if the mode string contains 'A'.
 pub fn is_auth(mode_str: &str) -> bool {
     mode_str.contains('A')
-}
-
-/// Checks if encrypted mode is enabled in the auth mode string.
-///
-/// Returns `true` if the mode string contains 'E'.
-pub fn is_enc(mode_str: &str) -> bool {
-    mode_str.contains('E')
 }
 
 /// Checks if open (unauthenticated) mode is enabled in the auth mode string.
@@ -174,20 +190,16 @@ mod tests {
 
     #[test]
     fn test_is_auth() {
-        assert!(is_auth("AEO"));
-        assert!(!is_auth("EO"));
-    }
-
-    #[test]
-    fn test_is_enc() {
-        assert!(is_enc("AEO"));
-        assert!(!is_enc("AO"));
+        assert!(is_auth("AO"));
+        assert!(is_auth("A"));
+        assert!(!is_auth("O"));
     }
 
     #[test]
     fn test_is_open() {
-        assert!(is_open("AEO"));
-        assert!(!is_open("AE"));
+        assert!(is_open("AO"));
+        assert!(is_open("O"));
+        assert!(!is_open("A"));
     }
 
     #[test]
@@ -203,7 +215,7 @@ mod tests {
         assert_eq!(conf.send_delay, 1000);
         assert_eq!(conf.count, 1000);
         assert_eq!(conf.timeout, 5);
-        assert_eq!(conf.auth_mode, "AEO");
+        assert_eq!(conf.auth_mode, "O"); // RFC 8762 default: open/unauthenticated mode
         assert!(!conf.force_ipv4);
         assert!(!conf.force_ipv6);
         assert!(!conf.print_stats);
@@ -272,62 +284,68 @@ mod tests {
 
     #[test]
     fn test_auth_mode_variations() {
-        // Single modes
+        // Authenticated mode
         let args = vec!["test", "--auth-mode", "A"];
         let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
         assert!(is_auth(&conf.auth_mode));
-        assert!(!is_enc(&conf.auth_mode));
         assert!(!is_open(&conf.auth_mode));
 
-        let args = vec!["test", "--auth-mode", "E"];
-        let conf = Configuration::parse_from(args);
-        assert!(!is_auth(&conf.auth_mode));
-        assert!(is_enc(&conf.auth_mode));
-        assert!(!is_open(&conf.auth_mode));
-
+        // Open mode
         let args = vec!["test", "--auth-mode", "O"];
         let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
         assert!(!is_auth(&conf.auth_mode));
-        assert!(!is_enc(&conf.auth_mode));
         assert!(is_open(&conf.auth_mode));
     }
 
     #[test]
     fn test_auth_mode_combinations() {
-        let args = vec!["test", "--auth-mode", "AE"];
-        let conf = Configuration::parse_from(args);
-        assert!(is_auth(&conf.auth_mode));
-        assert!(is_enc(&conf.auth_mode));
-        assert!(!is_open(&conf.auth_mode));
-
+        // Both A and O (valid combination)
         let args = vec!["test", "--auth-mode", "AO"];
         let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
         assert!(is_auth(&conf.auth_mode));
-        assert!(!is_enc(&conf.auth_mode));
         assert!(is_open(&conf.auth_mode));
+    }
 
-        let args = vec!["test", "--auth-mode", "EO"];
+    #[test]
+    fn test_auth_mode_invalid() {
+        // E (encrypted) is not supported per RFC 8762
+        let args = vec!["test", "--auth-mode", "E"];
         let conf = Configuration::parse_from(args);
-        assert!(!is_auth(&conf.auth_mode));
-        assert!(is_enc(&conf.auth_mode));
-        assert!(is_open(&conf.auth_mode));
+        assert!(conf.validate().is_err());
+
+        // Invalid character
+        let args = vec!["test", "--auth-mode", "X"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_err());
+
+        // Mixed valid and invalid
+        let args = vec!["test", "--auth-mode", "AE"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_err());
     }
 
     #[test]
     fn test_auth_mode_empty() {
         let args = vec!["test", "--auth-mode", ""];
         let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok()); // Empty is valid (no modes enabled)
         assert!(!is_auth(&conf.auth_mode));
-        assert!(!is_enc(&conf.auth_mode));
         assert!(!is_open(&conf.auth_mode));
     }
 
     #[test]
     fn test_auth_mode_case_sensitive() {
-        // Lowercase should not match
-        assert!(!is_auth("aeo"));
-        assert!(!is_enc("aeo"));
-        assert!(!is_open("aeo"));
+        // Lowercase should not match the mode checks
+        assert!(!is_auth("ao"));
+        assert!(!is_open("ao"));
+
+        // But lowercase is also invalid in validation
+        let args = vec!["test", "--auth-mode", "a"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_err());
     }
 
     #[test]
@@ -395,5 +413,38 @@ mod tests {
         let conf = Configuration::parse_from(args);
 
         assert!(conf.require_hmac);
+    }
+
+    #[test]
+    fn test_strict_packets_option() {
+        let args = vec!["test", "--strict-packets"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.strict_packets);
+    }
+
+    #[test]
+    fn test_strict_packets_default_false() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+
+        // Default is false (lenient mode is default per RFC 8762 §4.6)
+        assert!(!conf.strict_packets);
+    }
+
+    #[test]
+    fn test_stateful_reflector_option() {
+        let args = vec!["test", "--stateful-reflector"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.stateful_reflector);
+    }
+
+    #[test]
+    fn test_stateful_reflector_default_false() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(!conf.stateful_reflector);
     }
 }

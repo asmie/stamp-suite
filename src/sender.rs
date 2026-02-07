@@ -7,10 +7,15 @@ use std::{
 use tokio::net::UdpSocket;
 
 use crate::{
-    configuration::{is_auth, ClockFormat, Configuration},
-    crypto::{compute_packet_hmac, HmacKey},
+    clock_format::ClockFormat,
+    configuration::{is_auth, Configuration},
+    crypto::{compute_packet_hmac, verify_packet_hmac, HmacKey},
     error_estimate::ErrorEstimate,
-    packets::*,
+    packets::{
+        PacketAuthenticated, PacketUnauthenticated, ReflectedPacketAuthenticated,
+        ReflectedPacketUnauthenticated,
+    },
+    receiver::REFLECTED_AUTH_PACKET_HMAC_OFFSET,
     session::Session,
     time::generate_timestamp,
 };
@@ -64,17 +69,30 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         return SessionStats::default();
     }
 
-    // Build error estimate from configuration
-    let error_estimate = ErrorEstimate::new(
+    // Build error estimate from configuration with Z flag set based on clock source
+    let error_estimate = ErrorEstimate::with_clock_format(
         conf.clock_synchronized,
+        conf.clock_source,
         conf.error_scale,
         conf.error_multiplier,
     )
-    .unwrap_or_else(|_| ErrorEstimate::unsynchronized());
+    .unwrap_or_else(|_| ErrorEstimate::unsynchronized_with_format(conf.clock_source));
     let error_estimate_wire = error_estimate.to_wire();
+
+    // Check if authenticated mode is used
+    let use_auth = is_auth(&conf.auth_mode);
 
     // Load HMAC key if configured
     let hmac_key = load_hmac_key(conf);
+
+    // Validate: authenticated mode requires HMAC key
+    if use_auth && hmac_key.is_none() {
+        eprintln!(
+            "Error: Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file)"
+        );
+        return SessionStats::default();
+    }
+
     if hmac_key.is_some() {
         log::info!("HMAC authentication enabled");
     }
@@ -84,7 +102,6 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
     let mut stats = SessionStats::default();
     let mut rtt_sum: u64 = 0;
     let mut recv_buf = [0u8; 1024];
-    let use_auth = is_auth(&conf.auth_mode);
     let timeout = Duration::from_secs(conf.timeout as u64);
 
     for _ in 0..conf.count {
@@ -97,18 +114,18 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
             packet.sequence_number = seq_num;
             packet.timestamp = send_timestamp;
 
-            // Compute and set HMAC if key is configured
+            // Compute and set HMAC (key is guaranteed to be present in auth mode)
             if let Some(ref key) = hmac_key {
                 finalize_auth_packet(&mut packet, key);
             }
 
-            let buf = any_as_u8_slice(&packet).unwrap();
+            let buf = packet.to_bytes();
             socket.send(&buf).await
         } else {
             let mut packet = assemble_unauth_packet(error_estimate_wire);
             packet.sequence_number = seq_num;
             packet.timestamp = send_timestamp;
-            let buf = any_as_u8_slice(&packet).unwrap();
+            let buf = packet.to_bytes();
             socket.send(&buf).await
         };
 
@@ -138,6 +155,7 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                         &mut stats,
                         &mut rtt_sum,
                         conf.print_stats,
+                        hmac_key.as_ref(),
                     );
                 }
                 Ok(Err(e)) => {
@@ -166,6 +184,7 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                     &mut stats,
                     &mut rtt_sum,
                     conf.print_stats,
+                    hmac_key.as_ref(),
                 );
             }
             Ok(Err(e)) => {
@@ -187,6 +206,7 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
     stats
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_response(
     data: &[u8],
     use_auth: bool,
@@ -195,24 +215,41 @@ fn process_response(
     stats: &mut SessionStats,
     rtt_sum: &mut u64,
     print_stats: bool,
+    hmac_key: Option<&HmacKey>,
 ) {
     let recv_time = Instant::now();
 
     let (seq_num, reflector_recv_ts, reflector_send_ts, sender_ttl) = if use_auth {
-        match read_struct::<ReflectedPacketAuthenticated>(data) {
-            Ok(packet) => (
-                packet.sess_sender_seq_number,
-                packet.receive_timestamp,
-                packet.timestamp,
-                packet.sess_sender_ttl,
-            ),
+        match ReflectedPacketAuthenticated::from_bytes(data) {
+            Ok(packet) => {
+                // Copy fields from packed struct to avoid unaligned access
+                let seq_num = packet.sess_sender_seq_number;
+                let recv_ts = packet.receive_timestamp;
+                let send_ts = packet.timestamp;
+                let ttl = packet.sess_sender_ttl;
+                let hmac = packet.hmac;
+
+                // Verify HMAC when key is present (RFC 8762 §4.4)
+                // Note: In authenticated mode, hmac_key is always Some because
+                // run_sender validates this before calling process_response.
+                if let Some(key) = hmac_key {
+                    if !verify_packet_hmac(key, data, REFLECTED_AUTH_PACKET_HMAC_OFFSET, &hmac) {
+                        eprintln!(
+                            "HMAC verification failed for reflected packet seq={}",
+                            seq_num
+                        );
+                        return;
+                    }
+                }
+                (seq_num, recv_ts, send_ts, ttl)
+            }
             Err(e) => {
                 eprintln!("Failed to deserialize authenticated response: {}", e);
                 return;
             }
         }
     } else {
-        match read_struct::<ReflectedPacketUnauthenticated>(data) {
+        match ReflectedPacketUnauthenticated::from_bytes(data) {
             Ok(packet) => (
                 packet.sess_sender_seq_number,
                 packet.receive_timestamp,
@@ -324,7 +361,7 @@ pub const AUTH_PACKET_HMAC_OFFSET: usize = 96;
 /// * `packet` - The packet to finalize
 /// * `key` - The HMAC key to use
 pub fn finalize_auth_packet(packet: &mut PacketAuthenticated, key: &HmacKey) {
-    let bytes = any_as_u8_slice(packet).unwrap();
+    let bytes = packet.to_bytes();
     packet.hmac = compute_packet_hmac(key, &bytes, AUTH_PACKET_HMAC_OFFSET);
 }
 

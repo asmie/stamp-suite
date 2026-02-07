@@ -22,22 +22,33 @@ readme = "README.md"
 
 [features]
 default = []
-ttl-nix = ["nix"]
-ttl-pnet = ["pnet"]
+ttl-nix = ["dep:nix"]
+ttl-pnet = ["dep:pnet"]
 
 [dependencies]
-rkyv = "0.8.14"
 chrono = "0.4.43"
 clap = { version = "4.5", features = ["derive", "env"] }
 env_logger = "0.11"
 log = "0.4"
-nix = { version = "0.31", optional = true, features = ["socket", "uio", "net"] }
-pnet = { version = "0.35", optional = true }
 thiserror = "2.0"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 
+# TTL backend dependencies (all optional, selected by features)
+nix = { version = "0.31", optional = true, default-features = false, features = ["socket", "uio", "net"] }
+pnet = { version = "0.35", optional = true }
+
 [dependencies.tokio]
 version = "1.49"
 features = ["full"]
+
+# Platform-specific default backends
+# Note: These provide defaults when no explicit ttl-* feature is used.
+# Using --features ttl-pnet on Linux will compile both nix and pnet,
+# but only pnet will be used at runtime due to cfg checks in mod.rs.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["socket", "uio", "net"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+pnet = "0.35"
