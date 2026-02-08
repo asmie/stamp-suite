@@ -947,7 +947,22 @@ impl TlvList {
             // Verify HMAC if present - marks ALL TLVs with I-flag on failure
             self.verify_hmac_and_mark(key, sequence_number_bytes, tlv_bytes)
         } else {
-            true
+            // No key available - per RFC 8972 §4.8, if we can't verify the HMAC TLV,
+            // we SHOULD set the I-flag to indicate integrity could not be verified
+            if let Some(ref mut hmac) = self.hmac_tlv {
+                hmac.set_integrity_failed();
+                // Also update wire_order_tlvs if present (for proper echo)
+                if let Some(ref mut wire_order) = self.wire_order_tlvs {
+                    for tlv in wire_order.iter_mut() {
+                        if tlv.tlv_type == TlvType::Hmac {
+                            tlv.set_integrity_failed();
+                        }
+                    }
+                }
+                false // Indicate verification could not be performed
+            } else {
+                true // No HMAC TLV present, nothing to verify
+            }
         }
     }
 }

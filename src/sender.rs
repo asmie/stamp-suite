@@ -479,17 +479,23 @@ fn validate_reflected_tlvs(
 
     // Verify TLV HMAC if key is available
     if let Some(key) = hmac_key {
-        if tlvs.hmac_tlv().is_some() {
-            // Use the fixed base_size to locate TLV bytes correctly
-            // (avoids fragility with trailing padding or non-TLV bytes)
-            if base_size >= 4 && data.len() > base_size {
-                let seq_bytes = &data[..4];
-                let tlv_bytes = &data[base_size..];
+        if let Some(hmac_tlv) = tlvs.hmac_tlv() {
+            // Check if reflector set I-flag (couldn't verify HMAC)
+            if hmac_tlv.is_integrity_failed() {
+                // Reflector echoed our HMAC with I-flag - it couldn't verify
+                status_parts.push("HMAC:unverified".to_string());
+            } else {
+                // Use the fixed base_size to locate TLV bytes correctly
+                // (avoids fragility with trailing padding or non-TLV bytes)
+                if base_size >= 4 && data.len() > base_size {
+                    let seq_bytes = &data[..4];
+                    let tlv_bytes = &data[base_size..];
 
-                if tlvs.verify_hmac(key, seq_bytes, tlv_bytes).is_ok() {
-                    status_parts.push("HMAC:ok".to_string());
-                } else {
-                    status_parts.push("HMAC:fail".to_string());
+                    if tlvs.verify_hmac(key, seq_bytes, tlv_bytes).is_ok() {
+                        status_parts.push("HMAC:ok".to_string());
+                    } else {
+                        status_parts.push("HMAC:fail".to_string());
+                    }
                 }
             }
         } else {

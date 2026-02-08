@@ -175,6 +175,18 @@ impl Configuration {
             ));
         }
 
+        // Validate authenticated mode reflector requires HMAC key (RFC 8762 §4.4)
+        if self.is_reflector
+            && self.auth_mode.is_authenticated()
+            && self.hmac_key.is_none()
+            && self.hmac_key_file.is_none()
+        {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "Authenticated mode reflector (-A A -i) requires --hmac-key or --hmac-key-file for HMAC verification"
+                    .to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -223,6 +235,8 @@ mod tests {
             "--auth-mode",
             "A",
             "--is-reflector",
+            "--hmac-key",
+            "0123456789abcdef0123456789abcdef",
         ];
         let conf = Configuration::parse_from(args);
         assert_eq!(conf.remote_addr, "127.0.0.1".parse::<IpAddr>().unwrap());
@@ -235,6 +249,7 @@ mod tests {
         assert_eq!(conf.timeout, 5);
         assert_eq!(conf.auth_mode, AuthMode::Authenticated);
         assert!(conf.is_reflector);
+        assert!(conf.hmac_key.is_some());
         assert!(conf.validate().is_ok());
     }
 
@@ -370,6 +385,43 @@ mod tests {
     #[test]
     fn test_auth_mode_default() {
         assert_eq!(AuthMode::default(), AuthMode::Open);
+    }
+
+    #[test]
+    fn test_auth_reflector_requires_hmac_key() {
+        // Authenticated mode reflector without HMAC key should fail validation
+        let args = vec!["test", "-i", "--auth-mode", "A"];
+        let conf = Configuration::parse_from(args);
+        let result = conf.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires --hmac-key"));
+    }
+
+    #[test]
+    fn test_auth_reflector_with_hmac_key_valid() {
+        // Authenticated mode reflector with HMAC key should pass validation
+        let args = vec![
+            "test",
+            "-i",
+            "--auth-mode",
+            "A",
+            "--hmac-key",
+            "0123456789abcdef0123456789abcdef",
+        ];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
+    }
+
+    #[test]
+    fn test_auth_sender_without_hmac_key_valid() {
+        // Authenticated mode sender without HMAC key is allowed (sender computes HMAC)
+        let args = vec!["test", "--auth-mode", "A"];
+        let conf = Configuration::parse_from(args);
+        // Sender without HMAC key is valid - it just won't verify responses
+        assert!(conf.validate().is_ok());
     }
 
     #[test]

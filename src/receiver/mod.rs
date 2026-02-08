@@ -193,8 +193,8 @@ pub fn process_stamp_packet(
 
     // Determine whether to verify incoming TLV HMAC:
     // - Always verify if --verify-tlv-hmac is set
-    // - Auto-verify in authenticated mode when HMAC key is configured
-    let verify_tlv_hmac = ctx.verify_tlv_hmac || (use_auth && ctx.hmac_key.is_some());
+    // - Auto-verify when HMAC key is configured (regardless of auth mode)
+    let verify_tlv_hmac = ctx.verify_tlv_hmac || ctx.hmac_key.is_some();
 
     if use_auth {
         process_auth_packet(
