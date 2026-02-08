@@ -1,9 +1,45 @@
-use std::path::PathBuf;
+use std::{fmt, path::PathBuf, str::FromStr};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use thiserror::Error;
 
 pub use crate::{clock_format::ClockFormat, stamp_modes::StampModes};
+
+/// TLV handling mode for the reflector.
+///
+/// Controls how the reflector handles TLV extensions in incoming packets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum TlvHandlingMode {
+    /// Ignore TLVs - strip them from reflected packets (zero-pad to preserve length).
+    Ignore,
+    /// Echo TLVs back to sender, marking unknown types with U-flag per RFC 8972.
+    #[default]
+    Echo,
+}
+
+impl fmt::Display for TlvHandlingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ignore => write!(f, "ignore"),
+            Self::Echo => write!(f, "echo"),
+        }
+    }
+}
+
+impl FromStr for TlvHandlingMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "ignore" => Ok(Self::Ignore),
+            "echo" => Ok(Self::Echo),
+            _ => Err(format!(
+                "Invalid TLV mode '{}'. Valid options: ignore, echo",
+                s
+            )),
+        }
+    }
+}
 
 /// Command-line configuration for the STAMP application.
 ///
@@ -92,6 +128,21 @@ pub struct Configuration {
     /// this duration may be cleaned up. Default: 300 (5 minutes). Set to 0 to disable.
     #[clap(long, default_value_t = 300)]
     pub session_timeout: u64,
+
+    /// TLV handling mode for the reflector (RFC 8972). Default: echo.
+    /// - ignore: Strip TLVs from reflected packets (zero-pad to preserve length)
+    /// - echo: Echo TLVs back, marking unknown types with U-flag
+    #[clap(long, value_enum, default_value_t = TlvHandlingMode::Echo)]
+    pub tlv_mode: TlvHandlingMode,
+
+    /// Verify HMAC TLV in incoming packets (RFC 8972). Requires HMAC key.
+    #[clap(long)]
+    pub verify_tlv_hmac: bool,
+
+    /// Session-Sender Identifier to include in sender packets (RFC 8972).
+    /// Will be encoded in an Extra Padding TLV.
+    #[clap(long)]
+    pub ssid: Option<u16>,
 }
 
 impl Configuration {
@@ -106,19 +157,21 @@ impl Configuration {
             )));
         }
 
-        // Validate auth mode - only A (authenticated) and O (open) are valid per RFC 8762
-        if self.auth_mode.is_empty() {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "Auth mode cannot be empty. Valid options: A (authenticated), O (open)".to_string(),
-            ));
+        // Validate auth mode - only A (authenticated) or O (open) are valid per RFC 8762
+        // A STAMP session is either authenticated or unauthenticated, not both
+        if self.auth_mode != "A" && self.auth_mode != "O" {
+            return Err(ConfigurationError::InvalidConfiguration(format!(
+                "Invalid auth mode '{}'. Must be exactly 'A' (authenticated) or 'O' (open/unauthenticated)",
+                self.auth_mode
+            )));
         }
-        for c in self.auth_mode.chars() {
-            if c != 'A' && c != 'O' {
-                return Err(ConfigurationError::InvalidConfiguration(format!(
-                    "Invalid auth mode '{}'. Valid options: A (authenticated), O (open)",
-                    c
-                )));
-            }
+
+        // Validate --verify-tlv-hmac requires HMAC key to be configured
+        if self.verify_tlv_hmac && self.hmac_key.is_none() && self.hmac_key_file.is_none() {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "--verify-tlv-hmac requires --hmac-key or --hmac-key-file to be specified"
+                    .to_string(),
+            ));
         }
 
         Ok(())
@@ -133,18 +186,18 @@ pub enum ConfigurationError {
     InvalidConfiguration(String),
 }
 
-/// Checks if authenticated mode is enabled in the auth mode string.
+/// Checks if authenticated mode is enabled.
 ///
-/// Returns `true` if the mode string contains 'A'.
+/// Returns `true` if the mode string is exactly "A".
 pub fn is_auth(mode_str: &str) -> bool {
-    mode_str.contains('A')
+    mode_str == "A"
 }
 
-/// Checks if open (unauthenticated) mode is enabled in the auth mode string.
+/// Checks if open (unauthenticated) mode is enabled.
 ///
-/// Returns `true` if the mode string contains 'O'.
+/// Returns `true` if the mode string is exactly "O".
 pub fn is_open(mode_str: &str) -> bool {
-    mode_str.contains('O')
+    mode_str == "O"
 }
 
 #[cfg(test)]
@@ -175,7 +228,7 @@ mod tests {
             "--timeout",
             "5",
             "--auth-mode",
-            "AO",
+            "A",
             "--is-reflector",
         ];
         let conf = Configuration::parse_from(args);
@@ -187,7 +240,7 @@ mod tests {
         assert_eq!(conf.send_delay, 1000);
         assert_eq!(conf.count, 1000);
         assert_eq!(conf.timeout, 5);
-        assert_eq!(conf.auth_mode, "AO");
+        assert_eq!(conf.auth_mode, "A");
         assert!(conf.is_reflector);
         assert!(conf.validate().is_ok());
     }
@@ -201,16 +254,18 @@ mod tests {
 
     #[test]
     fn test_is_auth() {
-        assert!(is_auth("AO"));
         assert!(is_auth("A"));
         assert!(!is_auth("O"));
+        assert!(!is_auth("AO")); // Composite strings are not valid
+        assert!(!is_auth(""));
     }
 
     #[test]
     fn test_is_open() {
-        assert!(is_open("AO"));
         assert!(is_open("O"));
         assert!(!is_open("A"));
+        assert!(!is_open("AO")); // Composite strings are not valid
+        assert!(!is_open(""));
     }
 
     #[test]
@@ -311,13 +366,21 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_mode_combinations() {
-        // Both A and O (valid combination)
+    fn test_auth_mode_combinations_invalid() {
+        // Composite strings like "AO" are not valid - must be exactly "A" or "O"
         let args = vec!["test", "--auth-mode", "AO"];
         let conf = Configuration::parse_from(args);
-        assert!(conf.validate().is_ok());
-        assert!(is_auth(&conf.auth_mode));
-        assert!(is_open(&conf.auth_mode));
+        assert!(conf.validate().is_err());
+
+        // "OA" is also invalid
+        let args = vec!["test", "--auth-mode", "OA"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_err());
+
+        // "AA" is also invalid
+        let args = vec!["test", "--auth-mode", "AA"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_err());
     }
 
     #[test]
@@ -489,5 +552,116 @@ mod tests {
 
         assert!(conf.stateful_reflector);
         assert_eq!(conf.session_timeout, 120);
+    }
+
+    #[test]
+    fn test_tlv_mode_default() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(conf.tlv_mode, TlvHandlingMode::Echo);
+    }
+
+    #[test]
+    fn test_tlv_mode_ignore() {
+        let args = vec!["test", "--tlv-mode", "ignore"];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(conf.tlv_mode, TlvHandlingMode::Ignore);
+    }
+
+    #[test]
+    fn test_tlv_mode_echo() {
+        let args = vec!["test", "--tlv-mode", "echo"];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(conf.tlv_mode, TlvHandlingMode::Echo);
+    }
+
+    #[test]
+    fn test_verify_tlv_hmac_with_key() {
+        let args = vec![
+            "test",
+            "--verify-tlv-hmac",
+            "--hmac-key",
+            "0123456789abcdef",
+        ];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.verify_tlv_hmac);
+        assert!(conf.validate().is_ok());
+    }
+
+    #[test]
+    fn test_verify_tlv_hmac_with_key_file() {
+        let args = vec![
+            "test",
+            "--verify-tlv-hmac",
+            "--hmac-key-file",
+            "/path/to/key",
+        ];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.verify_tlv_hmac);
+        assert!(conf.validate().is_ok());
+    }
+
+    #[test]
+    fn test_verify_tlv_hmac_requires_key() {
+        // --verify-tlv-hmac without HMAC key should fail validation
+        let args = vec!["test", "--verify-tlv-hmac"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.verify_tlv_hmac);
+        let result = conf.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("--verify-tlv-hmac requires"));
+    }
+
+    #[test]
+    fn test_verify_tlv_hmac_default() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(!conf.verify_tlv_hmac);
+    }
+
+    #[test]
+    fn test_ssid_option() {
+        let args = vec!["test", "--ssid", "12345"];
+        let conf = Configuration::parse_from(args);
+
+        assert_eq!(conf.ssid, Some(12345));
+    }
+
+    #[test]
+    fn test_ssid_default_none() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+
+        assert!(conf.ssid.is_none());
+    }
+
+    #[test]
+    fn test_tlv_handling_mode_from_str() {
+        assert_eq!(
+            "ignore".parse::<TlvHandlingMode>().unwrap(),
+            TlvHandlingMode::Ignore
+        );
+        assert_eq!(
+            "ECHO".parse::<TlvHandlingMode>().unwrap(),
+            TlvHandlingMode::Echo
+        );
+        assert!("invalid".parse::<TlvHandlingMode>().is_err());
+        assert!("process".parse::<TlvHandlingMode>().is_err());
+    }
+
+    #[test]
+    fn test_tlv_handling_mode_display() {
+        assert_eq!(TlvHandlingMode::Ignore.to_string(), "ignore");
+        assert_eq!(TlvHandlingMode::Echo.to_string(), "echo");
     }
 }

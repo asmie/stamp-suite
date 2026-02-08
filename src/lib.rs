@@ -35,3 +35,5 @@ pub mod session;
 pub mod stamp_modes;
 /// Timestamp generation utilities.
 pub mod time;
+/// TLV extension support per RFC 8972.
+pub mod tlv;

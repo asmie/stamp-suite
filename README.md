@@ -14,10 +14,12 @@ stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Pr
 ### Key Features
 
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
+- RFC 8972 TLV extension support (Session-Sender ID, HMAC for TLV integrity)
 - HMAC authentication support
 - Stateful reflector mode with per-client session tracking (RFC 8972 Section 4)
 - Support for both NTP and PTP timestamp formats
 - Real TTL/Hop Limit capture on all platforms
+- Backward compatible - works with clients/reflectors without TLV support
 - Async I/O using Tokio
 - Cross-platform support (Linux, macOS, Windows)
 
@@ -75,6 +77,13 @@ stamp-suite -i --stateful-reflector
 
 # Stateful mode with custom session timeout (default: 300 seconds)
 stamp-suite -i --stateful-reflector --session-timeout 600
+
+# TLV handling modes (RFC 8972 extensions)
+stamp-suite -i --tlv-mode echo      # Echo TLVs back (default, RFC compliant)
+stamp-suite -i --tlv-mode ignore    # Strip TLVs for backward compatibility
+
+# Verify TLV HMAC integrity (requires --hmac-key)
+stamp-suite -i --verify-tlv-hmac --hmac-key <hex-key>
 ```
 
 ### Session-Sender (Client)
@@ -92,6 +101,9 @@ stamp-suite --remote-addr 192.168.1.100 \
     --count 100 \
     --send-delay 100 \
     -R
+
+# With Session-Sender Identifier (RFC 8972 TLV extension)
+stamp-suite --remote-addr 192.168.1.100 --ssid 12345
 ```
 
 ### Command-Line Options
@@ -113,6 +125,9 @@ Options:
   -i, --is-reflector               Run as Session Reflector instead of Sender
       --stateful-reflector         Enable stateful reflector mode (RFC 8972 Section 4)
       --session-timeout <SECONDS>  Session timeout for stateful mode [default: 300]
+      --tlv-mode <MODE>            TLV handling: ignore, echo [default: echo]
+      --verify-tlv-hmac            Verify HMAC TLV in incoming packets
+      --ssid <ID>                  Session-Sender Identifier for TLV extension
   -h, --help                       Print help
   -V, --version                    Print version
 ```
@@ -154,15 +169,70 @@ Avg RTT: 0.521 ms
   - `pnet.rs` - Raw packet capture (Windows)
 - `session.rs` - Session state management
 - `time.rs` - NTP/PTP timestamp generation
+- `tlv.rs` - TLV extension support (RFC 8972)
+
+## TLV Extensions (RFC 8972)
+
+The implementation supports RFC 8972 TLV (Type-Length-Value) extensions, which allow STAMP packets to carry optional data beyond the base packet format.
+
+### Supported TLV Types
+
+| Type | Name | Description |
+|------|------|-------------|
+| 1 | Extra Padding | Can carry Session-Sender ID (SSID) in first 2 bytes |
+| 2 | Location | Location information |
+| 3 | Timestamp Info | Additional timestamp data |
+| 4 | Class of Service | QoS information |
+| 5 | Direct Measurement | Direct measurement data |
+| 6 | Access Report | Access report data |
+| 7 | Follow-Up Telemetry | Telemetry information |
+| 8 | HMAC | TLV integrity verification (must be last) |
+
+### TLV Handling Modes
+
+The reflector supports two TLV handling modes via `--tlv-mode`:
+
+| Mode | Behavior |
+|------|----------|
+| `echo` (default) | Echo TLVs back to sender, marking unknown types with U-flag |
+| `ignore` | Strip all TLVs from response (backward compatibility) |
+
+### Backward Compatibility
+
+The implementation is fully backward compatible:
+
+- **No TLVs in packet**: Standard RFC 8762 handling is used
+- **TLVs present**: Handled according to `--tlv-mode` setting
+- **Old clients**: Work seamlessly with TLV-enabled reflectors
+- **New clients with SSID**: Reflectors without TLV support will zero-pad the response
+
+### TLV Wire Format (RFC 8972 Section 4.2)
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|STAMP TLV Flags|     Type      |            Length             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                         Value...                              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+- **Flags (1 octet)**: U=Unrecognized (bit 0), M=Malformed (bit 1), I=Integrity failed (bit 2), Reserved (bits 3-7)
+- **Type (1 octet)**: TLV type identifier (0-255)
+- **Length (2 octets)**: Length of Value field in bytes
 
 ## Current Status
 
 The project is functional for STAMP measurements with the following features:
 
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
-- HMAC authentication support
+- RFC 8972 TLV extension support with automatic detection
+- HMAC authentication support (base packet and TLV integrity)
 - Stateful reflector mode with per-client session tracking (RFC 8972 Section 4)
+- Session-Sender Identifier (SSID) support via Extra Padding TLV
 - Real TTL capture on all major platforms
+- Backward compatible with non-TLV implementations
 
 Current limitations:
 
@@ -172,6 +242,7 @@ Current limitations:
 
 - [ ] DSCP/ECN field handling
 - [ ] Enhanced statistics and reporting
+- [ ] Additional TLV type processing (Location, Telemetry, etc.)
 
 ## Contributing
 

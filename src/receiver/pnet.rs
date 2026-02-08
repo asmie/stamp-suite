@@ -20,7 +20,7 @@ use pnet::{
 use std::sync::Arc;
 
 use crate::{
-    configuration::{is_auth, Configuration},
+    configuration::{is_auth, Configuration, TlvHandlingMode},
     crypto::HmacKey,
     error_estimate::ErrorEstimate,
     packets::{PacketAuthenticated, PacketUnauthenticated},
@@ -28,7 +28,11 @@ use crate::{
     time::generate_timestamp,
 };
 
-use super::{assemble_auth_answer_symmetric, assemble_unauth_answer_symmetric};
+use super::{
+    assemble_auth_answer_symmetric, assemble_auth_answer_with_tlvs,
+    assemble_unauth_answer_symmetric, assemble_unauth_answer_with_tlvs, AUTH_BASE_SIZE,
+    UNAUTH_BASE_SIZE,
+};
 
 /// Context for handling STAMP packets in pnet mode.
 struct PnetContext {
@@ -38,6 +42,8 @@ struct PnetContext {
     session_manager: Option<Arc<SessionManager>>,
     send_socket_v4: std::net::UdpSocket,
     send_socket_v6: Option<std::net::UdpSocket>,
+    tlv_mode: TlvHandlingMode,
+    verify_tlv_hmac: bool,
 }
 
 /// Runs the STAMP Session Reflector using pnet for raw packet capture.
@@ -117,7 +123,13 @@ pub async fn run_receiver(conf: &Configuration) {
         session_manager,
         send_socket_v4,
         send_socket_v6,
+        tlv_mode: conf.tlv_mode,
+        verify_tlv_hmac: conf.verify_tlv_hmac,
     };
+
+    if conf.tlv_mode != TlvHandlingMode::Ignore {
+        log::info!("TLV handling mode: {:?}", conf.tlv_mode);
+    }
 
     println!(
         "STAMP Reflector listening on {} (pnet mode, real TTL)",
@@ -264,54 +276,101 @@ fn process_stamp_packet(
 ) {
     let rcvt = generate_timestamp(conf.clock_source);
 
-    let response = if use_auth {
-        let packet_result = if conf.strict_packets {
-            PacketAuthenticated::from_bytes(data)
-        } else {
-            Ok(PacketAuthenticated::from_bytes_lenient(data))
-        };
-        match packet_result {
-            Ok(packet) => {
-                // Extract HMAC for verification
-                let hmac = packet.hmac;
+    // Determine if packet has TLVs
+    let base_size = if use_auth {
+        AUTH_BASE_SIZE
+    } else {
+        UNAUTH_BASE_SIZE
+    };
+    let has_tlvs = data.len() > base_size;
 
-                // Verify HMAC - mandatory when key is present (RFC 8762 §4.4)
-                if let Some(ref key) = ctx.hmac_key {
-                    if !verify_incoming_hmac(key, data, &hmac) {
-                        eprintln!("HMAC verification failed for packet from {}", src);
-                        return; // Always reject invalid HMAC in auth mode
-                    }
-                } else if ctx.require_hmac {
-                    // require_hmac means "require key to be configured"
-                    eprintln!("HMAC key required but not configured");
+    // TLV HMAC key for responses (only if we're not ignoring TLVs)
+    // Per RFC 8972 §4.8: on HMAC verification failure, TLVs are echoed
+    // with I-flag set rather than dropping the packet
+    let tlv_hmac_key = if ctx.tlv_mode != TlvHandlingMode::Ignore {
+        ctx.hmac_key.as_ref()
+    } else {
+        None
+    };
+
+    // Determine whether to verify incoming TLV HMAC:
+    // - Always verify if --verify-tlv-hmac is set
+    // - Auto-verify in authenticated mode when HMAC key is configured
+    //   (consistent with base packet HMAC verification behavior)
+    let verify_tlv_hmac = ctx.verify_tlv_hmac || (use_auth && ctx.hmac_key.is_some());
+
+    let response = if use_auth {
+        // Parse packet leniently with canonical buffer for HMAC verification
+        // Per RFC 8762 §4.6, short packets are zero-filled and HMAC must be
+        // verified against the canonical (zero-padded) representation
+        let (packet, canonical_buf) = if conf.strict_packets {
+            match PacketAuthenticated::from_bytes(data) {
+                Ok(p) => {
+                    // For strict mode, the buffer is already full-size
+                    let mut buf = [0u8; 112];
+                    buf.copy_from_slice(&data[..112]);
+                    (p, buf)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to deserialize authenticated packet from {}: {}",
+                        src, e
+                    );
                     return;
                 }
-
-                // Generate reflector sequence number only after successful validation
-                let reflector_seq = ctx
-                    .session_manager
-                    .as_ref()
-                    .map(|mgr| mgr.generate_sequence_number(src));
-
-                // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
-                Some(assemble_auth_answer_symmetric(
-                    &packet,
-                    data,
-                    conf.clock_source,
-                    rcvt,
-                    ttl,
-                    ctx.error_estimate_wire,
-                    ctx.hmac_key.as_ref(),
-                    reflector_seq,
-                ))
             }
-            Err(e) => {
-                eprintln!(
-                    "Failed to deserialize authenticated packet from {}: {}",
-                    src, e
-                );
-                return;
+        } else {
+            PacketAuthenticated::from_bytes_lenient_with_canonical(data)
+        };
+
+        // Extract HMAC for verification
+        let hmac = packet.hmac;
+
+        // Verify HMAC against canonical buffer - mandatory when key is present (RFC 8762 §4.4)
+        if let Some(ref key) = ctx.hmac_key {
+            if !verify_incoming_hmac(key, &canonical_buf, &hmac) {
+                eprintln!("HMAC verification failed for packet from {}", src);
+                return; // Always reject invalid HMAC in auth mode
             }
+        } else if ctx.require_hmac {
+            // require_hmac means "require key to be configured"
+            eprintln!("HMAC key required but not configured");
+            return;
+        }
+
+        // Generate reflector sequence number only after successful validation
+        let reflector_seq = ctx
+            .session_manager
+            .as_ref()
+            .map(|mgr| mgr.generate_sequence_number(src));
+
+        // Use TLV-aware assembly if packet has TLVs
+        // Per RFC 8972 §4.8: on HMAC failure, echo TLVs with I-flag set
+        if has_tlvs {
+            Some(assemble_auth_answer_with_tlvs(
+                &packet,
+                data,
+                conf.clock_source,
+                rcvt,
+                ttl,
+                ctx.error_estimate_wire,
+                ctx.hmac_key.as_ref(),
+                reflector_seq,
+                ctx.tlv_mode,
+                tlv_hmac_key,
+                verify_tlv_hmac,
+            ))
+        } else {
+            Some(assemble_auth_answer_symmetric(
+                &packet,
+                data,
+                conf.clock_source,
+                rcvt,
+                ttl,
+                ctx.error_estimate_wire,
+                ctx.hmac_key.as_ref(),
+                reflector_seq,
+            ))
         }
     } else {
         let packet_result = if conf.strict_packets {
@@ -327,16 +386,32 @@ fn process_stamp_packet(
                     .as_ref()
                     .map(|mgr| mgr.generate_sequence_number(src));
 
-                // Use symmetric assembly to preserve original packet length (RFC 8762 Section 4.3)
-                Some(assemble_unauth_answer_symmetric(
-                    &packet,
-                    data,
-                    conf.clock_source,
-                    rcvt,
-                    ttl,
-                    ctx.error_estimate_wire,
-                    reflector_seq,
-                ))
+                // Use TLV-aware assembly if packet has TLVs
+                // Per RFC 8972 §4.8: on HMAC failure, echo TLVs with I-flag set
+                if has_tlvs {
+                    Some(assemble_unauth_answer_with_tlvs(
+                        &packet,
+                        data,
+                        conf.clock_source,
+                        rcvt,
+                        ttl,
+                        ctx.error_estimate_wire,
+                        reflector_seq,
+                        ctx.tlv_mode,
+                        tlv_hmac_key,
+                        verify_tlv_hmac,
+                    ))
+                } else {
+                    Some(assemble_unauth_answer_symmetric(
+                        &packet,
+                        data,
+                        conf.clock_source,
+                        rcvt,
+                        ttl,
+                        ctx.error_estimate_wire,
+                        reflector_seq,
+                    ))
+                }
             }
             Err(e) => {
                 eprintln!(

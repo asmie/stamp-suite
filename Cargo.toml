@@ -1,7 +1,7 @@
 [package]
 authors = ['Piotr Olszewski <asmie@asmie.pl>']
 name = "stamp-suite"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.93.0"
 
