@@ -118,8 +118,6 @@ Options:
   -d, --send-delay <SEND_DELAY>    Delay between packets in milliseconds [default: 1000]
   -c, --count <COUNT>              Number of packets to send [default: 1000]
   -L, --timeout <TIMEOUT>          Timeout for lost packets in seconds [default: 5]
-  -4                               Force IPv4 addresses
-  -6                               Force IPv6 addresses
   -A, --auth-mode <AUTH_MODE>      Work mode: A=authenticated, O=open [default: O]
   -R                               Print individual statistics for each packet
   -i, --is-reflector               Run as Session Reflector instead of Sender

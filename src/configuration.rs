@@ -1,9 +1,40 @@
-use std::{fmt, path::PathBuf, str::FromStr};
+use std::{fmt, path::PathBuf};
 
 use clap::{Parser, ValueEnum};
 use thiserror::Error;
 
-pub use crate::{clock_format::ClockFormat, stamp_modes::StampModes};
+pub use crate::clock_format::ClockFormat;
+
+/// STAMP authentication mode per RFC 8762.
+///
+/// A STAMP session is either authenticated or unauthenticated (open), not both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum AuthMode {
+    /// Authenticated mode - packets include HMAC for integrity verification.
+    #[value(name = "A")]
+    Authenticated,
+    /// Open (unauthenticated) mode - packets are sent without HMAC authentication.
+    #[default]
+    #[value(name = "O")]
+    Open,
+}
+
+impl AuthMode {
+    /// Returns true if this is authenticated mode.
+    #[must_use]
+    pub fn is_authenticated(&self) -> bool {
+        matches!(self, AuthMode::Authenticated)
+    }
+}
+
+impl fmt::Display for AuthMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authenticated => write!(f, "A"),
+            Self::Open => write!(f, "O"),
+        }
+    }
+}
 
 /// TLV handling mode for the reflector.
 ///
@@ -22,21 +53,6 @@ impl fmt::Display for TlvHandlingMode {
         match self {
             Self::Ignore => write!(f, "ignore"),
             Self::Echo => write!(f, "echo"),
-        }
-    }
-}
-
-impl FromStr for TlvHandlingMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "ignore" => Ok(Self::Ignore),
-            "echo" => Ok(Self::Echo),
-            _ => Err(format!(
-                "Invalid TLV mode '{}'. Valid options: ignore, echo",
-                s
-            )),
         }
     }
 }
@@ -72,15 +88,9 @@ pub struct Configuration {
     /// Amount of time to wait for packet until consider it lost (in seconds).
     #[clap(short = 'L', long, default_value_t = 5)]
     pub timeout: u8,
-    /// Force IPv4 addresses.
-    #[clap(short = '4')]
-    pub force_ipv4: bool,
-    /// Force IPv6 addresses.
-    #[clap(short = '6')]
-    pub force_ipv6: bool,
     /// Specify work mode - A for authenticated, O for open (unauthenticated) - default "O".
-    #[clap(short = 'A', long, default_value = "O")]
-    pub auth_mode: String,
+    #[clap(short = 'A', long, value_enum, default_value_t = AuthMode::Open)]
+    pub auth_mode: AuthMode,
     /// Print individual statistics for each packet.
     #[clap(short = 'R')]
     pub print_stats: bool,
@@ -157,15 +167,6 @@ impl Configuration {
             )));
         }
 
-        // Validate auth mode - only A (authenticated) or O (open) are valid per RFC 8762
-        // A STAMP session is either authenticated or unauthenticated, not both
-        if self.auth_mode != "A" && self.auth_mode != "O" {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
-                "Invalid auth mode '{}'. Must be exactly 'A' (authenticated) or 'O' (open/unauthenticated)",
-                self.auth_mode
-            )));
-        }
-
         // Validate --verify-tlv-hmac requires HMAC key to be configured
         if self.verify_tlv_hmac && self.hmac_key.is_none() && self.hmac_key_file.is_none() {
             return Err(ConfigurationError::InvalidConfiguration(
@@ -187,17 +188,9 @@ pub enum ConfigurationError {
 }
 
 /// Checks if authenticated mode is enabled.
-///
-/// Returns `true` if the mode string is exactly "A".
-pub fn is_auth(mode_str: &str) -> bool {
-    mode_str == "A"
-}
-
-/// Checks if open (unauthenticated) mode is enabled.
-///
-/// Returns `true` if the mode string is exactly "O".
-pub fn is_open(mode_str: &str) -> bool {
-    mode_str == "O"
+#[inline]
+pub fn is_auth(mode: AuthMode) -> bool {
+    mode.is_authenticated()
 }
 
 #[cfg(test)]
@@ -240,7 +233,7 @@ mod tests {
         assert_eq!(conf.send_delay, 1000);
         assert_eq!(conf.count, 1000);
         assert_eq!(conf.timeout, 5);
-        assert_eq!(conf.auth_mode, "A");
+        assert_eq!(conf.auth_mode, AuthMode::Authenticated);
         assert!(conf.is_reflector);
         assert!(conf.validate().is_ok());
     }
@@ -254,18 +247,14 @@ mod tests {
 
     #[test]
     fn test_is_auth() {
-        assert!(is_auth("A"));
-        assert!(!is_auth("O"));
-        assert!(!is_auth("AO")); // Composite strings are not valid
-        assert!(!is_auth(""));
+        assert!(is_auth(AuthMode::Authenticated));
+        assert!(!is_auth(AuthMode::Open));
     }
 
     #[test]
-    fn test_is_open() {
-        assert!(is_open("O"));
-        assert!(!is_open("A"));
-        assert!(!is_open("AO")); // Composite strings are not valid
-        assert!(!is_open(""));
+    fn test_auth_mode_method() {
+        assert!(AuthMode::Authenticated.is_authenticated());
+        assert!(!AuthMode::Open.is_authenticated());
     }
 
     #[test]
@@ -281,9 +270,7 @@ mod tests {
         assert_eq!(conf.send_delay, 1000);
         assert_eq!(conf.count, 1000);
         assert_eq!(conf.timeout, 5);
-        assert_eq!(conf.auth_mode, "O"); // RFC 8762 default: open/unauthenticated mode
-        assert!(!conf.force_ipv4);
-        assert!(!conf.force_ipv6);
+        assert_eq!(conf.auth_mode, AuthMode::Open); // RFC 8762 default
         assert!(!conf.print_stats);
         assert!(!conf.is_reflector);
         assert_eq!(conf.error_scale, 0);
@@ -304,10 +291,8 @@ mod tests {
 
     #[test]
     fn test_short_flags() {
-        let args = vec!["test", "-4", "-6", "-R", "-i"];
+        let args = vec!["test", "-R", "-i"];
         let conf = Configuration::parse_from(args);
-        assert!(conf.force_ipv4);
-        assert!(conf.force_ipv6);
         assert!(conf.print_stats);
         assert!(conf.is_reflector);
     }
@@ -354,71 +339,37 @@ mod tests {
         let args = vec!["test", "--auth-mode", "A"];
         let conf = Configuration::parse_from(args);
         assert!(conf.validate().is_ok());
-        assert!(is_auth(&conf.auth_mode));
-        assert!(!is_open(&conf.auth_mode));
+        assert!(is_auth(conf.auth_mode));
+        assert_eq!(conf.auth_mode, AuthMode::Authenticated);
 
         // Open mode
         let args = vec!["test", "--auth-mode", "O"];
         let conf = Configuration::parse_from(args);
         assert!(conf.validate().is_ok());
-        assert!(!is_auth(&conf.auth_mode));
-        assert!(is_open(&conf.auth_mode));
+        assert!(!is_auth(conf.auth_mode));
+        assert_eq!(conf.auth_mode, AuthMode::Open);
     }
 
     #[test]
-    fn test_auth_mode_combinations_invalid() {
-        // Composite strings like "AO" are not valid - must be exactly "A" or "O"
-        let args = vec!["test", "--auth-mode", "AO"];
-        let conf = Configuration::parse_from(args);
-        assert!(conf.validate().is_err());
-
-        // "OA" is also invalid
-        let args = vec!["test", "--auth-mode", "OA"];
-        let conf = Configuration::parse_from(args);
-        assert!(conf.validate().is_err());
-
-        // "AA" is also invalid
-        let args = vec!["test", "--auth-mode", "AA"];
-        let conf = Configuration::parse_from(args);
-        assert!(conf.validate().is_err());
+    fn test_auth_mode_invalid_rejected_by_clap() {
+        // Invalid values are now rejected by clap at parse time
+        let invalid_modes = ["AO", "OA", "AA", "E", "X", "AE", "", "a", "o"];
+        for mode in invalid_modes {
+            let args = vec!["test", "--auth-mode", mode];
+            let result = Configuration::try_parse_from(args);
+            assert!(result.is_err(), "Mode '{}' should be rejected", mode);
+        }
     }
 
     #[test]
-    fn test_auth_mode_invalid() {
-        // E (encrypted) is not supported per RFC 8762
-        let args = vec!["test", "--auth-mode", "E"];
-        let conf = Configuration::parse_from(args);
-        assert!(conf.validate().is_err());
-
-        // Invalid character
-        let args = vec!["test", "--auth-mode", "X"];
-        let conf = Configuration::parse_from(args);
-        assert!(conf.validate().is_err());
-
-        // Mixed valid and invalid
-        let args = vec!["test", "--auth-mode", "AE"];
-        let conf = Configuration::parse_from(args);
-        assert!(conf.validate().is_err());
+    fn test_auth_mode_display() {
+        assert_eq!(AuthMode::Authenticated.to_string(), "A");
+        assert_eq!(AuthMode::Open.to_string(), "O");
     }
 
     #[test]
-    fn test_auth_mode_empty() {
-        let args = vec!["test", "--auth-mode", ""];
-        let conf = Configuration::parse_from(args);
-        // Empty auth mode is invalid - must specify at least one mode
-        assert!(conf.validate().is_err());
-    }
-
-    #[test]
-    fn test_auth_mode_case_sensitive() {
-        // Lowercase should not match the mode checks
-        assert!(!is_auth("ao"));
-        assert!(!is_open("ao"));
-
-        // But lowercase is also invalid in validation
-        let args = vec!["test", "--auth-mode", "a"];
-        let conf = Configuration::parse_from(args);
-        assert!(conf.validate().is_err());
+    fn test_auth_mode_default() {
+        assert_eq!(AuthMode::default(), AuthMode::Open);
     }
 
     #[test]
@@ -647,16 +598,22 @@ mod tests {
 
     #[test]
     fn test_tlv_handling_mode_from_str() {
+        // ValueEnum::from_str(value, ignore_case)
         assert_eq!(
-            "ignore".parse::<TlvHandlingMode>().unwrap(),
+            TlvHandlingMode::from_str("ignore", false).unwrap(),
             TlvHandlingMode::Ignore
         );
         assert_eq!(
-            "ECHO".parse::<TlvHandlingMode>().unwrap(),
+            TlvHandlingMode::from_str("echo", false).unwrap(),
             TlvHandlingMode::Echo
         );
-        assert!("invalid".parse::<TlvHandlingMode>().is_err());
-        assert!("process".parse::<TlvHandlingMode>().is_err());
+        // Case-insensitive parsing
+        assert_eq!(
+            TlvHandlingMode::from_str("ECHO", true).unwrap(),
+            TlvHandlingMode::Echo
+        );
+        assert!(TlvHandlingMode::from_str("invalid", false).is_err());
+        assert!(TlvHandlingMode::from_str("process", false).is_err());
     }
 
     #[test]

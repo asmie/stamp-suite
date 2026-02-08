@@ -20,7 +20,7 @@ use crate::clock_format::ClockFormat;
 /// - S = Synchronization flag (1 = synchronized)
 /// - Z = Timestamp format (0 = NTP, 1 = PTP)
 /// - Error = Multiplier × 2^(-32) × 2^Scale seconds
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ErrorEstimate {
     /// Synchronization bit (S). When set to 1, indicates the clock is synchronized.
     pub synchronized: bool,
@@ -186,6 +186,16 @@ impl From<ErrorEstimate> for u16 {
     }
 }
 
+impl Default for ErrorEstimate {
+    /// Returns a default unsynchronized error estimate with NTP format.
+    ///
+    /// This is equivalent to `ErrorEstimate::unsynchronized()`:
+    /// S=0, Z=0 (NTP), Scale=0, Multiplier=1.
+    fn default() -> Self {
+        Self::unsynchronized()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,11 +309,13 @@ mod tests {
 
     #[test]
     fn test_default_trait() {
+        // Default is now consistent with unsynchronized()
         let estimate = ErrorEstimate::default();
         assert!(!estimate.synchronized);
         assert!(!estimate.z_flag);
         assert_eq!(estimate.scale, 0);
-        assert_eq!(estimate.multiplier, 0);
+        assert_eq!(estimate.multiplier, 1);
+        assert_eq!(estimate, ErrorEstimate::unsynchronized());
     }
 
     #[test]

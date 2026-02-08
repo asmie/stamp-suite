@@ -2,28 +2,21 @@
 //!
 //! Preferred on Linux systems. No special privileges required for regular UDP sockets.
 
-use std::{io::IoSliceMut, net::SocketAddr, os::fd::AsRawFd, sync::Arc};
+use std::{io::IoSliceMut, net::SocketAddr, os::fd::AsRawFd, sync::Arc, time::Duration};
 
 use nix::{
     libc,
     sys::socket::{recvmsg, ControlMessageOwned, MsgFlags, SockaddrStorage},
 };
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, time::interval};
 
 use crate::{
     configuration::{is_auth, Configuration, TlvHandlingMode},
-    crypto::HmacKey,
     error_estimate::ErrorEstimate,
-    packets::{PacketAuthenticated, PacketUnauthenticated},
     session::SessionManager,
-    time::generate_timestamp,
 };
 
-use super::{
-    assemble_auth_answer_symmetric, assemble_auth_answer_with_tlvs,
-    assemble_unauth_answer_symmetric, assemble_unauth_answer_with_tlvs, AUTH_BASE_SIZE,
-    UNAUTH_BASE_SIZE,
-};
+use super::{load_hmac_key, process_stamp_packet, ProcessingContext};
 
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
 ///
@@ -78,15 +71,22 @@ pub async fn run_receiver(conf: &Configuration) {
     }
 
     // Set non-blocking for tokio
-    std_socket
-        .set_nonblocking(true)
-        .expect("Failed to set non-blocking");
+    if let Err(e) = std_socket.set_nonblocking(true) {
+        eprintln!("Error: Failed to set socket non-blocking: {}", e);
+        return;
+    }
 
     // Wrap in tokio for async readiness notifications
-    let tokio_socket = UdpSocket::from_std(std_socket).expect("Failed to create tokio socket");
+    let tokio_socket = match UdpSocket::from_std(std_socket) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: Failed to create tokio socket: {}", e);
+            return;
+        }
+    };
 
     // Check if authenticated mode is used
-    let use_auth = is_auth(&conf.auth_mode);
+    let use_auth = is_auth(conf.auth_mode);
 
     // Load HMAC key if configured
     let hmac_key = load_hmac_key(conf);
@@ -138,11 +138,43 @@ pub async fn run_receiver(conf: &Configuration) {
     let mut buf = [0u8; 1024];
     let mut cmsg_buf = vec![0u8; 256];
 
+    // Session cleanup interval: run at half the timeout period, minimum 1 second
+    // When session_timeout is 0, checked_div returns None, disabling cleanup
+    let cleanup_interval = session_manager.as_ref().and_then(|_| {
+        conf.session_timeout
+            .checked_div(2)
+            .map(|t| Duration::from_secs(t.max(1)))
+    });
+    let mut cleanup_timer = cleanup_interval.map(interval);
+
     loop {
-        // Wait for socket to be readable
-        if let Err(e) = tokio_socket.readable().await {
-            eprintln!("Failed to wait for readable: {}", e);
-            continue;
+        // Wait for socket to be readable or cleanup timer to fire
+        tokio::select! {
+            biased;
+
+            result = tokio_socket.readable() => {
+                if let Err(e) = result {
+                    eprintln!("Failed to wait for readable: {}", e);
+                    continue;
+                }
+            }
+
+            _ = async {
+                if let Some(ref mut timer) = cleanup_timer {
+                    timer.tick().await
+                } else {
+                    std::future::pending::<tokio::time::Instant>().await
+                }
+            } => {
+                // Run periodic session cleanup
+                if let Some(ref mgr) = session_manager {
+                    let removed = mgr.cleanup_stale_sessions();
+                    if removed > 0 {
+                        log::debug!("Session cleanup: removed {} stale sessions", removed);
+                    }
+                }
+                continue;
+            }
         }
 
         // Use nix recvmsg to get TTL from control messages
@@ -185,149 +217,22 @@ pub async fn run_receiver(conf: &Configuration) {
                     }
                 };
 
-                let rcvt = generate_timestamp(conf.clock_source);
                 let data = &buf[..len];
 
-                // Determine if packet has TLVs
-                let base_size = if use_auth {
-                    AUTH_BASE_SIZE
-                } else {
-                    UNAUTH_BASE_SIZE
-                };
-                let has_tlvs = len > base_size;
-
-                // TLV HMAC key for responses (only if we're not ignoring TLVs)
-                // Per RFC 8972 §4.8: on HMAC verification failure, TLVs are echoed
-                // with I-flag set rather than dropping the packet
-                let tlv_hmac_key = if conf.tlv_mode != TlvHandlingMode::Ignore {
-                    hmac_key.as_ref()
-                } else {
-                    None
+                let ctx = ProcessingContext {
+                    clock_source: conf.clock_source,
+                    error_estimate_wire,
+                    hmac_key: hmac_key.as_ref(),
+                    require_hmac: conf.require_hmac,
+                    session_manager: session_manager.as_ref(),
+                    tlv_mode: conf.tlv_mode,
+                    verify_tlv_hmac: conf.verify_tlv_hmac,
+                    strict_packets: conf.strict_packets,
                 };
 
-                // Determine whether to verify incoming TLV HMAC:
-                // - Always verify if --verify-tlv-hmac is set
-                // - Auto-verify in authenticated mode when HMAC key is configured
-                //   (consistent with base packet HMAC verification behavior)
-                let verify_tlv_hmac = conf.verify_tlv_hmac || (use_auth && hmac_key.is_some());
-
-                let response = if use_auth {
-                    // Parse packet leniently with canonical buffer for HMAC verification
-                    // Per RFC 8762 §4.6, short packets are zero-filled and HMAC must be
-                    // verified against the canonical (zero-padded) representation
-                    let (packet, canonical_buf) = if conf.strict_packets {
-                        match PacketAuthenticated::from_bytes(data) {
-                            Ok(p) => {
-                                // For strict mode, the buffer is already full-size
-                                let mut buf = [0u8; 112];
-                                buf.copy_from_slice(&data[..112]);
-                                (p, buf)
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to deserialize authenticated packet: {}", e);
-                                continue;
-                            }
-                        }
-                    } else {
-                        PacketAuthenticated::from_bytes_lenient_with_canonical(data)
-                    };
-
-                    // Extract HMAC for verification
-                    let hmac = packet.hmac;
-
-                    // Verify HMAC against canonical buffer - mandatory when key is present (RFC 8762 §4.4)
-                    if let Some(ref key) = hmac_key {
-                        if !verify_incoming_hmac(key, &canonical_buf, &hmac) {
-                            eprintln!("HMAC verification failed");
-                            continue; // Always reject invalid HMAC in auth mode
-                        }
-                    } else if conf.require_hmac {
-                        // require_hmac means "require key to be configured"
-                        eprintln!("HMAC key required but not configured");
-                        continue;
-                    }
-
-                    // Generate reflector sequence number only after successful validation
-                    let reflector_seq = session_manager
-                        .as_ref()
-                        .map(|mgr| mgr.generate_sequence_number(src_addr));
-
-                    // Use TLV-aware assembly if packet has TLVs
-                    // Per RFC 8972 §4.8: on HMAC failure, echo TLVs with I-flag set
-                    if has_tlvs {
-                        Some(assemble_auth_answer_with_tlvs(
-                            &packet,
-                            data,
-                            conf.clock_source,
-                            rcvt,
-                            ttl,
-                            error_estimate_wire,
-                            hmac_key.as_ref(),
-                            reflector_seq,
-                            conf.tlv_mode,
-                            tlv_hmac_key,
-                            verify_tlv_hmac,
-                        ))
-                    } else {
-                        Some(assemble_auth_answer_symmetric(
-                            &packet,
-                            data,
-                            conf.clock_source,
-                            rcvt,
-                            ttl,
-                            error_estimate_wire,
-                            hmac_key.as_ref(),
-                            reflector_seq,
-                        ))
-                    }
-                } else {
-                    let packet_result = if conf.strict_packets {
-                        PacketUnauthenticated::from_bytes(data)
-                    } else {
-                        Ok(PacketUnauthenticated::from_bytes_lenient(data))
-                    };
-                    match packet_result {
-                        Ok(packet) => {
-                            // Generate reflector sequence number only after successful validation
-                            let reflector_seq = session_manager
-                                .as_ref()
-                                .map(|mgr| mgr.generate_sequence_number(src_addr));
-
-                            // Use TLV-aware assembly if packet has TLVs
-                            // Per RFC 8972 §4.8: on HMAC failure, echo TLVs with I-flag set
-                            if has_tlvs {
-                                Some(assemble_unauth_answer_with_tlvs(
-                                    &packet,
-                                    data,
-                                    conf.clock_source,
-                                    rcvt,
-                                    ttl,
-                                    error_estimate_wire,
-                                    reflector_seq,
-                                    conf.tlv_mode,
-                                    tlv_hmac_key,
-                                    verify_tlv_hmac,
-                                ))
-                            } else {
-                                Some(assemble_unauth_answer_symmetric(
-                                    &packet,
-                                    data,
-                                    conf.clock_source,
-                                    rcvt,
-                                    ttl,
-                                    error_estimate_wire,
-                                    reflector_seq,
-                                ))
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to deserialize unauthenticated packet: {}", e);
-                            continue;
-                        }
-                    }
-                };
-
-                if let Some(response_buf) = response {
+                if let Some(response_buf) =
+                    process_stamp_packet(data, src_addr, ttl, use_auth, &ctx)
+                {
                     if let Err(e) = tokio_socket.send_to(&response_buf, src_addr).await {
                         eprintln!("Failed to send response: {}", e);
                     }
@@ -342,39 +247,6 @@ pub async fn run_receiver(conf: &Configuration) {
             }
         }
     }
-}
-
-/// Loads the HMAC key from configuration (hex string or file).
-fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
-    if let Some(ref hex_key) = conf.hmac_key {
-        match HmacKey::from_hex(hex_key) {
-            Ok(key) => return Some(key),
-            Err(e) => {
-                eprintln!("Failed to parse HMAC key: {}", e);
-                return None;
-            }
-        }
-    }
-
-    if let Some(ref path) = conf.hmac_key_file {
-        match HmacKey::from_file(path) {
-            Ok(key) => return Some(key),
-            Err(e) => {
-                eprintln!("Failed to load HMAC key from file: {}", e);
-                return None;
-            }
-        }
-    }
-
-    None
-}
-
-/// Verifies the HMAC of an incoming authenticated packet.
-fn verify_incoming_hmac(key: &HmacKey, packet_bytes: &[u8], expected_hmac: &[u8; 16]) -> bool {
-    use crate::crypto::verify_packet_hmac;
-    use crate::sender::AUTH_PACKET_HMAC_OFFSET;
-
-    verify_packet_hmac(key, packet_bytes, AUTH_PACKET_HMAC_OFFSET, expected_hmac)
 }
 
 /// Extract TTL from control messages received via recvmsg.

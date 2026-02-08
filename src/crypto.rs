@@ -7,6 +7,7 @@ use std::{fs, path::Path};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -71,8 +72,8 @@ impl HmacKey {
     /// Creates a new HmacKey by reading from a file.
     ///
     /// The file should contain the key as raw bytes or hex-encoded text.
-    /// If the file content starts with valid hex characters and has even length,
-    /// it's treated as hex. Otherwise, it's treated as raw bytes.
+    /// If the file content is valid UTF-8 and parses as hex, it's treated as hex.
+    /// Otherwise, it's treated as raw bytes.
     ///
     /// # Arguments
     /// * `path` - Path to the key file
@@ -81,19 +82,17 @@ impl HmacKey {
     /// Returns `HmacError::FileReadError` if the file cannot be read.
     /// Returns `HmacError::KeyTooShort` if the key is less than 16 bytes.
     pub fn from_file(path: &Path) -> Result<Self, HmacError> {
-        let content =
-            fs::read_to_string(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+        let raw_bytes = fs::read(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
 
-        let trimmed = content.trim();
-
-        // Try to parse as hex first
-        if let Ok(key) = Self::from_hex(trimmed) {
-            return Ok(key);
+        // Try to parse as hex if it's valid UTF-8
+        if let Ok(content) = std::str::from_utf8(&raw_bytes) {
+            let trimmed = content.trim();
+            if let Ok(key) = Self::from_hex(trimmed) {
+                return Ok(key);
+            }
         }
 
         // Fall back to raw bytes
-        let raw_bytes = fs::read(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
-
         Self::new(raw_bytes)
     }
 
@@ -147,17 +146,20 @@ impl HmacKey {
 
 /// Performs constant-time comparison of two byte slices.
 ///
-/// This prevents timing attacks by always comparing all bytes.
+/// Uses the `subtle` crate for audited constant-time semantics.
+/// This prevents timing attacks by always comparing all bytes in constant time.
 fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    a.ct_eq(b).into()
+}
 
-    let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
+/// Extracts the authenticated portion of a packet (data before the HMAC field).
+#[inline]
+fn authenticated_data(packet_bytes: &[u8], hmac_offset: usize) -> &[u8] {
+    if hmac_offset <= packet_bytes.len() {
+        &packet_bytes[..hmac_offset]
+    } else {
+        packet_bytes
     }
-    result == 0
 }
 
 /// Computes HMAC for packet data up to the HMAC field offset.
@@ -175,12 +177,7 @@ pub fn compute_packet_hmac(
     packet_bytes: &[u8],
     hmac_offset: usize,
 ) -> [u8; HMAC_OUTPUT_LENGTH] {
-    let data = if hmac_offset <= packet_bytes.len() {
-        &packet_bytes[..hmac_offset]
-    } else {
-        packet_bytes
-    };
-    key.compute(data)
+    key.compute(authenticated_data(packet_bytes, hmac_offset))
 }
 
 /// Verifies the HMAC of a packet.
@@ -200,12 +197,7 @@ pub fn verify_packet_hmac(
     hmac_offset: usize,
     expected: &[u8; HMAC_OUTPUT_LENGTH],
 ) -> bool {
-    let data = if hmac_offset <= packet_bytes.len() {
-        &packet_bytes[..hmac_offset]
-    } else {
-        packet_bytes
-    };
-    key.verify(data, expected)
+    key.verify(authenticated_data(packet_bytes, hmac_offset), expected)
 }
 
 #[cfg(test)]

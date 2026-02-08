@@ -22,6 +22,103 @@ pub enum PacketError {
     TlvError(#[from] TlvError),
 }
 
+// ============================================================================
+// Wire format parsing helpers
+// ============================================================================
+
+/// Checks that buffer has at least `expected` bytes.
+#[inline]
+fn check_size(buf: &[u8], expected: usize) -> Result<(), PacketError> {
+    if buf.len() < expected {
+        Err(PacketError::BufferTooSmall {
+            expected,
+            actual: buf.len(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Reads a big-endian u16 from buffer at given offset.
+///
+/// # Safety invariant
+/// Caller must ensure `offset + 2 <= buf.len()`. This is checked via debug_assert.
+#[inline]
+fn read_u16(buf: &[u8], offset: usize) -> u16 {
+    debug_assert!(
+        offset + 2 <= buf.len(),
+        "read_u16: offset {} + 2 exceeds buffer length {}",
+        offset,
+        buf.len()
+    );
+    // SAFETY: debug_assert ensures bounds; slice length is exactly 2
+    u16::from_be_bytes([buf[offset], buf[offset + 1]])
+}
+
+/// Reads a big-endian u32 from buffer at given offset.
+///
+/// # Safety invariant
+/// Caller must ensure `offset + 4 <= buf.len()`. This is checked via debug_assert.
+#[inline]
+fn read_u32(buf: &[u8], offset: usize) -> u32 {
+    debug_assert!(
+        offset + 4 <= buf.len(),
+        "read_u32: offset {} + 4 exceeds buffer length {}",
+        offset,
+        buf.len()
+    );
+    // SAFETY: debug_assert ensures bounds; slice length is exactly 4
+    u32::from_be_bytes([
+        buf[offset],
+        buf[offset + 1],
+        buf[offset + 2],
+        buf[offset + 3],
+    ])
+}
+
+/// Reads a big-endian u64 from buffer at given offset.
+///
+/// # Safety invariant
+/// Caller must ensure `offset + 8 <= buf.len()`. This is checked via debug_assert.
+#[inline]
+fn read_u64(buf: &[u8], offset: usize) -> u64 {
+    debug_assert!(
+        offset + 8 <= buf.len(),
+        "read_u64: offset {} + 8 exceeds buffer length {}",
+        offset,
+        buf.len()
+    );
+    // SAFETY: debug_assert ensures bounds; slice length is exactly 8
+    u64::from_be_bytes([
+        buf[offset],
+        buf[offset + 1],
+        buf[offset + 2],
+        buf[offset + 3],
+        buf[offset + 4],
+        buf[offset + 5],
+        buf[offset + 6],
+        buf[offset + 7],
+    ])
+}
+
+/// Copies a fixed-size array from buffer at given offset.
+///
+/// # Safety invariant
+/// Caller must ensure `offset + N <= buf.len()`. This is checked via debug_assert.
+#[inline]
+fn read_array<const N: usize>(buf: &[u8], offset: usize) -> [u8; N] {
+    debug_assert!(
+        offset + N <= buf.len(),
+        "read_array<{}>: offset {} + {} exceeds buffer length {}",
+        N,
+        offset,
+        N,
+        buf.len()
+    );
+    // SAFETY: debug_assert ensures bounds; try_into succeeds because slice length equals N
+    buf[offset..offset + N].try_into().unwrap()
+}
+
 /// Unauthenticated STAMP test packet sent by the Session-Sender.
 ///
 /// This is the basic packet format without HMAC authentication (44 bytes).
@@ -71,15 +168,13 @@ impl PacketUnauthenticated {
     ///
     /// # Errors
     /// Returns an error if the buffer is smaller than 44 bytes.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, &'static str> {
-        if buf.len() < 44 {
-            return Err("Buffer too small for PacketUnauthenticated");
-        }
+    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
+        check_size(buf, 44)?;
         Ok(Self {
-            sequence_number: u32::from_be_bytes(buf[0..4].try_into().unwrap()),
-            timestamp: u64::from_be_bytes(buf[4..12].try_into().unwrap()),
-            error_estimate: u16::from_be_bytes(buf[12..14].try_into().unwrap()),
-            mbz: buf[14..44].try_into().unwrap(),
+            sequence_number: read_u32(buf, 0),
+            timestamp: read_u64(buf, 4),
+            error_estimate: read_u16(buf, 12),
+            mbz: read_array(buf, 14),
         })
     }
 
@@ -93,10 +188,10 @@ impl PacketUnauthenticated {
         padded[..copy_len].copy_from_slice(&buf[..copy_len]);
 
         Self {
-            sequence_number: u32::from_be_bytes(padded[0..4].try_into().unwrap()),
-            timestamp: u64::from_be_bytes(padded[4..12].try_into().unwrap()),
-            error_estimate: u16::from_be_bytes(padded[12..14].try_into().unwrap()),
-            mbz: padded[14..44].try_into().unwrap(),
+            sequence_number: read_u32(&padded, 0),
+            timestamp: read_u64(&padded, 4),
+            error_estimate: read_u16(&padded, 12),
+            mbz: read_array(&padded, 14),
         }
     }
 }
@@ -179,22 +274,20 @@ impl ReflectedPacketUnauthenticated {
     ///
     /// # Errors
     /// Returns an error if the buffer is smaller than 44 bytes.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, &'static str> {
-        if buf.len() < 44 {
-            return Err("Buffer too small for ReflectedPacketUnauthenticated");
-        }
+    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
+        check_size(buf, 44)?;
         Ok(Self {
-            sequence_number: u32::from_be_bytes(buf[0..4].try_into().unwrap()),
-            timestamp: u64::from_be_bytes(buf[4..12].try_into().unwrap()),
-            error_estimate: u16::from_be_bytes(buf[12..14].try_into().unwrap()),
-            mbz1: u16::from_be_bytes(buf[14..16].try_into().unwrap()),
-            receive_timestamp: u64::from_be_bytes(buf[16..24].try_into().unwrap()),
-            sess_sender_seq_number: u32::from_be_bytes(buf[24..28].try_into().unwrap()),
-            sess_sender_timestamp: u64::from_be_bytes(buf[28..36].try_into().unwrap()),
-            sess_sender_err_estimate: u16::from_be_bytes(buf[36..38].try_into().unwrap()),
-            mbz2: u16::from_be_bytes(buf[38..40].try_into().unwrap()),
+            sequence_number: read_u32(buf, 0),
+            timestamp: read_u64(buf, 4),
+            error_estimate: read_u16(buf, 12),
+            mbz1: read_u16(buf, 14),
+            receive_timestamp: read_u64(buf, 16),
+            sess_sender_seq_number: read_u32(buf, 24),
+            sess_sender_timestamp: read_u64(buf, 28),
+            sess_sender_err_estimate: read_u16(buf, 36),
+            mbz2: read_u16(buf, 38),
             sess_sender_ttl: buf[40],
-            mbz3: buf[41..44].try_into().unwrap(),
+            mbz3: read_array(buf, 41),
         })
     }
 
@@ -208,17 +301,17 @@ impl ReflectedPacketUnauthenticated {
         padded[..copy_len].copy_from_slice(&buf[..copy_len]);
 
         Self {
-            sequence_number: u32::from_be_bytes(padded[0..4].try_into().unwrap()),
-            timestamp: u64::from_be_bytes(padded[4..12].try_into().unwrap()),
-            error_estimate: u16::from_be_bytes(padded[12..14].try_into().unwrap()),
-            mbz1: u16::from_be_bytes(padded[14..16].try_into().unwrap()),
-            receive_timestamp: u64::from_be_bytes(padded[16..24].try_into().unwrap()),
-            sess_sender_seq_number: u32::from_be_bytes(padded[24..28].try_into().unwrap()),
-            sess_sender_timestamp: u64::from_be_bytes(padded[28..36].try_into().unwrap()),
-            sess_sender_err_estimate: u16::from_be_bytes(padded[36..38].try_into().unwrap()),
-            mbz2: u16::from_be_bytes(padded[38..40].try_into().unwrap()),
+            sequence_number: read_u32(&padded, 0),
+            timestamp: read_u64(&padded, 4),
+            error_estimate: read_u16(&padded, 12),
+            mbz1: read_u16(&padded, 14),
+            receive_timestamp: read_u64(&padded, 16),
+            sess_sender_seq_number: read_u32(&padded, 24),
+            sess_sender_timestamp: read_u64(&padded, 28),
+            sess_sender_err_estimate: read_u16(&padded, 36),
+            mbz2: read_u16(&padded, 38),
             sess_sender_ttl: padded[40],
-            mbz3: padded[41..44].try_into().unwrap(),
+            mbz3: read_array(&padded, 41),
         }
     }
 }
@@ -264,19 +357,17 @@ impl PacketAuthenticated {
     ///
     /// # Errors
     /// Returns an error if the buffer is smaller than 112 bytes.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, &'static str> {
-        if buf.len() < 112 {
-            return Err("Buffer too small for PacketAuthenticated");
-        }
+    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
+        check_size(buf, 112)?;
         Ok(Self {
-            sequence_number: u32::from_be_bytes(buf[0..4].try_into().unwrap()),
-            mbz0: buf[4..16].try_into().unwrap(),
-            timestamp: u64::from_be_bytes(buf[16..24].try_into().unwrap()),
-            error_estimate: u16::from_be_bytes(buf[24..26].try_into().unwrap()),
-            mbz1a: buf[26..58].try_into().unwrap(),
-            mbz1b: buf[58..90].try_into().unwrap(),
-            mbz1c: buf[90..96].try_into().unwrap(),
-            hmac: buf[96..112].try_into().unwrap(),
+            sequence_number: read_u32(buf, 0),
+            mbz0: read_array(buf, 4),
+            timestamp: read_u64(buf, 16),
+            error_estimate: read_u16(buf, 24),
+            mbz1a: read_array(buf, 26),
+            mbz1b: read_array(buf, 58),
+            mbz1c: read_array(buf, 90),
+            hmac: read_array(buf, 96),
         })
     }
 
@@ -301,14 +392,14 @@ impl PacketAuthenticated {
         padded[..copy_len].copy_from_slice(&buf[..copy_len]);
 
         let packet = Self {
-            sequence_number: u32::from_be_bytes(padded[0..4].try_into().unwrap()),
-            mbz0: padded[4..16].try_into().unwrap(),
-            timestamp: u64::from_be_bytes(padded[16..24].try_into().unwrap()),
-            error_estimate: u16::from_be_bytes(padded[24..26].try_into().unwrap()),
-            mbz1a: padded[26..58].try_into().unwrap(),
-            mbz1b: padded[58..90].try_into().unwrap(),
-            mbz1c: padded[90..96].try_into().unwrap(),
-            hmac: padded[96..112].try_into().unwrap(),
+            sequence_number: read_u32(&padded, 0),
+            mbz0: read_array(&padded, 4),
+            timestamp: read_u64(&padded, 16),
+            error_estimate: read_u16(&padded, 24),
+            mbz1a: read_array(&padded, 26),
+            mbz1b: read_array(&padded, 58),
+            mbz1c: read_array(&padded, 90),
+            hmac: read_array(&padded, 96),
         };
 
         (packet, padded)
@@ -379,26 +470,24 @@ impl ReflectedPacketAuthenticated {
     ///
     /// # Errors
     /// Returns an error if the buffer is smaller than 112 bytes.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, &'static str> {
-        if buf.len() < 112 {
-            return Err("Buffer too small for ReflectedPacketAuthenticated");
-        }
+    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
+        check_size(buf, 112)?;
         Ok(Self {
-            sequence_number: u32::from_be_bytes(buf[0..4].try_into().unwrap()),
-            mbz0: buf[4..16].try_into().unwrap(),
-            timestamp: u64::from_be_bytes(buf[16..24].try_into().unwrap()),
-            error_estimate: u16::from_be_bytes(buf[24..26].try_into().unwrap()),
-            mbz1: buf[26..32].try_into().unwrap(),
-            receive_timestamp: u64::from_be_bytes(buf[32..40].try_into().unwrap()),
-            mbz2: buf[40..48].try_into().unwrap(),
-            sess_sender_seq_number: u32::from_be_bytes(buf[48..52].try_into().unwrap()),
-            mbz3: buf[52..64].try_into().unwrap(),
-            sess_sender_timestamp: u64::from_be_bytes(buf[64..72].try_into().unwrap()),
-            sess_sender_err_estimate: u16::from_be_bytes(buf[72..74].try_into().unwrap()),
-            mbz4: buf[74..80].try_into().unwrap(),
+            sequence_number: read_u32(buf, 0),
+            mbz0: read_array(buf, 4),
+            timestamp: read_u64(buf, 16),
+            error_estimate: read_u16(buf, 24),
+            mbz1: read_array(buf, 26),
+            receive_timestamp: read_u64(buf, 32),
+            mbz2: read_array(buf, 40),
+            sess_sender_seq_number: read_u32(buf, 48),
+            mbz3: read_array(buf, 52),
+            sess_sender_timestamp: read_u64(buf, 64),
+            sess_sender_err_estimate: read_u16(buf, 72),
+            mbz4: read_array(buf, 74),
             sess_sender_ttl: buf[80],
-            mbz5: buf[81..96].try_into().unwrap(),
-            hmac: buf[96..112].try_into().unwrap(),
+            mbz5: read_array(buf, 81),
+            hmac: read_array(buf, 96),
         })
     }
 
@@ -413,21 +502,21 @@ impl ReflectedPacketAuthenticated {
         padded[..copy_len].copy_from_slice(&buf[..copy_len]);
 
         let packet = Self {
-            sequence_number: u32::from_be_bytes(padded[0..4].try_into().unwrap()),
-            mbz0: padded[4..16].try_into().unwrap(),
-            timestamp: u64::from_be_bytes(padded[16..24].try_into().unwrap()),
-            error_estimate: u16::from_be_bytes(padded[24..26].try_into().unwrap()),
-            mbz1: padded[26..32].try_into().unwrap(),
-            receive_timestamp: u64::from_be_bytes(padded[32..40].try_into().unwrap()),
-            mbz2: padded[40..48].try_into().unwrap(),
-            sess_sender_seq_number: u32::from_be_bytes(padded[48..52].try_into().unwrap()),
-            mbz3: padded[52..64].try_into().unwrap(),
-            sess_sender_timestamp: u64::from_be_bytes(padded[64..72].try_into().unwrap()),
-            sess_sender_err_estimate: u16::from_be_bytes(padded[72..74].try_into().unwrap()),
-            mbz4: padded[74..80].try_into().unwrap(),
+            sequence_number: read_u32(&padded, 0),
+            mbz0: read_array(&padded, 4),
+            timestamp: read_u64(&padded, 16),
+            error_estimate: read_u16(&padded, 24),
+            mbz1: read_array(&padded, 26),
+            receive_timestamp: read_u64(&padded, 32),
+            mbz2: read_array(&padded, 40),
+            sess_sender_seq_number: read_u32(&padded, 48),
+            mbz3: read_array(&padded, 52),
+            sess_sender_timestamp: read_u64(&padded, 64),
+            sess_sender_err_estimate: read_u16(&padded, 72),
+            mbz4: read_array(&padded, 74),
             sess_sender_ttl: padded[80],
-            mbz5: padded[81..96].try_into().unwrap(),
-            hmac: padded[96..112].try_into().unwrap(),
+            mbz5: read_array(&padded, 81),
+            hmac: read_array(&padded, 96),
         };
 
         (packet, padded)
@@ -469,18 +558,7 @@ impl ExtendedPacketUnauthenticated {
     /// # Errors
     /// Returns an error if the buffer is too small or TLV parsing fails.
     pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        if buf.len() < Self::BASE_SIZE {
-            return Err(PacketError::BufferTooSmall {
-                expected: Self::BASE_SIZE,
-                actual: buf.len(),
-            });
-        }
-
-        let base =
-            PacketUnauthenticated::from_bytes(buf).map_err(|_| PacketError::BufferTooSmall {
-                expected: Self::BASE_SIZE,
-                actual: buf.len(),
-            })?;
+        let base = PacketUnauthenticated::from_bytes(buf)?;
 
         let tlvs = if buf.len() > Self::BASE_SIZE {
             TlvList::parse(&buf[Self::BASE_SIZE..])?
@@ -572,22 +650,10 @@ impl ExtendedReflectedPacketUnauthenticated {
     /// # Errors
     /// Returns an error if the buffer is too small or TLV parsing fails.
     pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        if buf.len() < Self::BASE_SIZE {
-            return Err(PacketError::BufferTooSmall {
-                expected: Self::BASE_SIZE,
-                actual: buf.len(),
-            });
-        }
-
-        let base = ReflectedPacketUnauthenticated::from_bytes(buf).map_err(|_| {
-            PacketError::BufferTooSmall {
-                expected: Self::BASE_SIZE,
-                actual: buf.len(),
-            }
-        })?;
+        let base = ReflectedPacketUnauthenticated::from_bytes(buf)?;
 
         let tlvs = if buf.len() > Self::BASE_SIZE {
-            TlvList::parse(&buf[Self::BASE_SIZE..]).map_err(PacketError::TlvError)?
+            TlvList::parse(&buf[Self::BASE_SIZE..])?
         } else {
             TlvList::new()
         };
@@ -657,18 +723,7 @@ impl ExtendedPacketAuthenticated {
     /// # Errors
     /// Returns an error if the buffer is too small or TLV parsing fails.
     pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        if buf.len() < Self::BASE_SIZE {
-            return Err(PacketError::BufferTooSmall {
-                expected: Self::BASE_SIZE,
-                actual: buf.len(),
-            });
-        }
-
-        let base =
-            PacketAuthenticated::from_bytes(buf).map_err(|_| PacketError::BufferTooSmall {
-                expected: Self::BASE_SIZE,
-                actual: buf.len(),
-            })?;
+        let base = PacketAuthenticated::from_bytes(buf)?;
 
         let tlvs = if buf.len() > Self::BASE_SIZE {
             TlvList::parse(&buf[Self::BASE_SIZE..])?
@@ -760,22 +815,10 @@ impl ExtendedReflectedPacketAuthenticated {
     /// # Errors
     /// Returns an error if the buffer is too small or TLV parsing fails.
     pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        if buf.len() < Self::BASE_SIZE {
-            return Err(PacketError::BufferTooSmall {
-                expected: Self::BASE_SIZE,
-                actual: buf.len(),
-            });
-        }
-
-        let base = ReflectedPacketAuthenticated::from_bytes(buf).map_err(|_| {
-            PacketError::BufferTooSmall {
-                expected: Self::BASE_SIZE,
-                actual: buf.len(),
-            }
-        })?;
+        let base = ReflectedPacketAuthenticated::from_bytes(buf)?;
 
         let tlvs = if buf.len() > Self::BASE_SIZE {
-            TlvList::parse(&buf[Self::BASE_SIZE..]).map_err(PacketError::TlvError)?
+            TlvList::parse(&buf[Self::BASE_SIZE..])?
         } else {
             TlvList::new()
         };

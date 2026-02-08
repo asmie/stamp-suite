@@ -77,55 +77,35 @@ impl SessionManager {
         }
     }
 
-    /// Gets the session for a client, creating a new one if necessary.
-    ///
-    /// Also updates the last active time for the session.
-    pub fn get_or_create_session(&self, client: SocketAddr) -> Arc<Session> {
-        // Try read lock first for the common case (session exists)
-        {
-            let sessions = self.sessions.read().unwrap();
-            if let Some(entry) = sessions.get(&client) {
-                return Arc::clone(&entry.session);
-            }
-        }
-
-        // Need to create a new session - acquire write lock
-        let mut sessions = self.sessions.write().unwrap();
-
-        // Double-check after acquiring write lock (another thread may have created it)
-        if let Some(entry) = sessions.get_mut(&client) {
-            entry.last_active = Instant::now();
-            return Arc::clone(&entry.session);
-        }
-
-        // Create new session
-        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
-        let session = Arc::new(Session::new(session_id));
-        sessions.insert(
-            client,
-            SessionEntry {
-                session: Arc::clone(&session),
-                last_active: Instant::now(),
-            },
-        );
-
-        log::debug!("Created new session {} for client {}", session_id, client);
-        session
-    }
-
     /// Generates and returns the next sequence number for a client's session.
     ///
     /// Creates a new session if one doesn't exist for the client.
+    /// Also updates the last_active time in a single lock acquisition.
     pub fn generate_sequence_number(&self, client: SocketAddr) -> u32 {
-        let session = self.get_or_create_session(client);
+        // Take write lock once for both session lookup and activity update
+        let mut sessions = self.sessions.write().unwrap();
 
-        // Update last_active time
-        if let Ok(mut sessions) = self.sessions.write() {
-            if let Some(entry) = sessions.get_mut(&client) {
-                entry.last_active = Instant::now();
-            }
-        }
+        let session = if let Some(entry) = sessions.get_mut(&client) {
+            // Existing session - update activity and return
+            entry.last_active = Instant::now();
+            Arc::clone(&entry.session)
+        } else {
+            // Create new session
+            let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+            let session = Arc::new(Session::new(session_id));
+            sessions.insert(
+                client,
+                SessionEntry {
+                    session: Arc::clone(&session),
+                    last_active: Instant::now(),
+                },
+            );
+            log::debug!("Created new session {} for client {}", session_id, client);
+            session
+        };
 
+        // Release lock before generating sequence number
+        drop(sessions);
         session.generate_sequence_number()
     }
 

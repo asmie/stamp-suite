@@ -1,7 +1,7 @@
 [package]
 authors = ['Piotr Olszewski <asmie@asmie.pl>']
 name = "stamp-suite"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.93.0"
 
@@ -34,6 +34,7 @@ thiserror = "2.0"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+subtle = "2.5"
 
 # TTL backend dependencies (all optional, selected by features)
 nix = { version = "0.31", optional = true, default-features = false, features = ["socket", "uio", "net"] }
@@ -41,7 +42,7 @@ pnet = { version = "0.35", optional = true }
 
 [dependencies.tokio]
 version = "1.49"
-features = ["full"]
+features = ["rt-multi-thread", "net", "time", "macros"]
 
 # Platform-specific default backends
 # Note: These provide defaults when no explicit ttl-* feature is used.

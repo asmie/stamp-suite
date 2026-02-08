@@ -2,10 +2,13 @@
 //!
 //! Requires raw socket capabilities (root/CAP_NET_RAW on Linux).
 
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::{Duration, Instant},
+};
 
 use pnet::{
-    datalink::{self, Channel::Ethernet, NetworkInterface},
+    datalink::{self, Channel::Ethernet, Config, NetworkInterface},
     packet::{
         ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket},
         ip::IpNextHeaderProtocols,
@@ -20,30 +23,17 @@ use pnet::{
 use std::sync::Arc;
 
 use crate::{
-    configuration::{is_auth, Configuration, TlvHandlingMode},
-    crypto::HmacKey,
+    configuration::{is_auth, Configuration},
     error_estimate::ErrorEstimate,
-    packets::{PacketAuthenticated, PacketUnauthenticated},
     session::SessionManager,
-    time::generate_timestamp,
 };
 
-use super::{
-    assemble_auth_answer_symmetric, assemble_auth_answer_with_tlvs,
-    assemble_unauth_answer_symmetric, assemble_unauth_answer_with_tlvs, AUTH_BASE_SIZE,
-    UNAUTH_BASE_SIZE,
-};
+use super::{load_hmac_key, process_stamp_packet, ProcessingContext};
 
-/// Context for handling STAMP packets in pnet mode.
-struct PnetContext {
-    error_estimate_wire: u16,
-    hmac_key: Option<HmacKey>,
-    require_hmac: bool,
-    session_manager: Option<Arc<SessionManager>>,
+/// Context for sending STAMP responses in pnet mode.
+struct PnetSendContext {
     send_socket_v4: std::net::UdpSocket,
     send_socket_v6: Option<std::net::UdpSocket>,
-    tlv_mode: TlvHandlingMode,
-    verify_tlv_hmac: bool,
 }
 
 /// Runs the STAMP Session Reflector using pnet for raw packet capture.
@@ -56,27 +46,61 @@ pub async fn run_receiver(conf: &Configuration) {
 
     // Find the network interface with the provided local IP address
     let interfaces = datalink::interfaces();
-    let interface = interfaces
-        .into_iter()
-        .find(interface_ip_match)
-        .unwrap_or_else(|| panic!("No interface found with IP address {}", conf.local_addr));
+    let interface = interfaces.into_iter().find(interface_ip_match);
+
+    let interface = match interface {
+        Some(iface) => iface,
+        None => {
+            eprintln!(
+                "Error: No interface found with IP address {}",
+                conf.local_addr
+            );
+            return;
+        }
+    };
+
+    // Configure read timeout for periodic cleanup during idle periods
+    // Use half the session timeout (min 1s) if stateful mode, otherwise no timeout
+    let read_timeout = if conf.stateful_reflector && conf.session_timeout > 0 {
+        Some(Duration::from_secs((conf.session_timeout / 2).max(1)))
+    } else {
+        None
+    };
+    let config = Config {
+        read_timeout,
+        ..Default::default()
+    };
 
     // Create a channel to receive on
-    let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
+    let (_, mut rx) = match datalink::channel(&interface, config) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
-        Ok(_) => panic!("packetdump: unhandled channel type"),
-        Err(e) => panic!("packetdump: unable to create channel: {}", e),
+        Ok(_) => {
+            eprintln!(
+                "Error: Unhandled channel type for interface {}",
+                interface.name
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!("Error: Unable to create capture channel: {}", e);
+            return;
+        }
     };
 
     // We need UDP sockets to send responses - one for each address family
     // since pnet captures at the datalink layer and may see both IPv4 and IPv6 packets
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
-    let send_socket_v4 =
-        std::net::UdpSocket::bind("0.0.0.0:0").expect("Cannot bind IPv4 send socket");
+    let send_socket_v4 = match std::net::UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: Cannot bind IPv4 send socket: {}", e);
+            return;
+        }
+    };
     let send_socket_v6 = std::net::UdpSocket::bind("[::]:0").ok(); // Optional, may fail if IPv6 unavailable
 
     // Check if authenticated mode is used
-    let use_auth = is_auth(&conf.auth_mode);
+    let use_auth = is_auth(conf.auth_mode);
 
     // Load HMAC key if configured
     let hmac_key = load_hmac_key(conf);
@@ -116,18 +140,12 @@ pub async fn run_receiver(conf: &Configuration) {
         None
     };
 
-    let ctx = PnetContext {
-        error_estimate_wire,
-        hmac_key,
-        require_hmac: conf.require_hmac,
-        session_manager,
+    let send_ctx = PnetSendContext {
         send_socket_v4,
         send_socket_v6,
-        tlv_mode: conf.tlv_mode,
-        verify_tlv_hmac: conf.verify_tlv_hmac,
     };
 
-    if conf.tlv_mode != TlvHandlingMode::Ignore {
+    if conf.tlv_mode != crate::configuration::TlvHandlingMode::Ignore {
         log::info!("TLV handling mode: {:?}", conf.tlv_mode);
     }
 
@@ -136,8 +154,30 @@ pub async fn run_receiver(conf: &Configuration) {
         local_addr
     );
 
+    // Session cleanup interval: run at half the timeout period, minimum 1 second
+    // When session_timeout is 0, checked_div returns None, disabling cleanup
+    let cleanup_interval = session_manager.as_ref().and_then(|_| {
+        conf.session_timeout
+            .checked_div(2)
+            .map(|t| Duration::from_secs(t.max(1)))
+    });
+    let mut last_cleanup = Instant::now();
+
+    // Reusable buffer for constructing fake ethernet frames (hoisted outside loop)
+    let mut buf = [0u8; 1600];
+
     loop {
-        let mut buf: [u8; 1600] = [0u8; 1600];
+        // Periodic session cleanup check
+        if let (Some(ref mgr), Some(interval)) = (&session_manager, cleanup_interval) {
+            if last_cleanup.elapsed() >= interval {
+                let removed = mgr.cleanup_stale_sessions();
+                if removed > 0 {
+                    log::debug!("Session cleanup: removed {} stale sessions", removed);
+                }
+                last_cleanup = Instant::now();
+            }
+        }
+
         let mut fake_ethernet_frame = MutableEthernetPacket::new(&mut buf[..]).unwrap();
         match rx.next() {
             Ok(packet) => {
@@ -157,9 +197,10 @@ pub async fn run_receiver(conf: &Configuration) {
                         payload_offset = 0;
                     }
                     if packet.len() > payload_offset {
-                        let version = Ipv4Packet::new(&packet[payload_offset..])
-                            .unwrap()
-                            .get_version();
+                        let Some(ip_header) = Ipv4Packet::new(&packet[payload_offset..]) else {
+                            continue; // Malformed packet, skip
+                        };
+                        let version = ip_header.get_version();
                         if version == 4 {
                             fake_ethernet_frame.set_destination(MacAddr(0, 0, 0, 0, 0, 0));
                             fake_ethernet_frame.set_source(MacAddr(0, 0, 0, 0, 0, 0));
@@ -169,7 +210,10 @@ pub async fn run_receiver(conf: &Configuration) {
                                 &fake_ethernet_frame.to_immutable(),
                                 conf,
                                 use_auth,
-                                &ctx,
+                                error_estimate_wire,
+                                hmac_key.as_ref(),
+                                session_manager.as_ref(),
+                                &send_ctx,
                             );
                             continue;
                         } else if version == 6 {
@@ -181,57 +225,50 @@ pub async fn run_receiver(conf: &Configuration) {
                                 &fake_ethernet_frame.to_immutable(),
                                 conf,
                                 use_auth,
-                                &ctx,
+                                error_estimate_wire,
+                                hmac_key.as_ref(),
+                                session_manager.as_ref(),
+                                &send_ctx,
                             );
                             continue;
                         }
                     }
                 }
-                handle_packet(&EthernetPacket::new(packet).unwrap(), conf, use_auth, &ctx);
+                let Some(ethernet) = EthernetPacket::new(packet) else {
+                    continue; // Malformed frame, skip
+                };
+                handle_packet(
+                    &ethernet,
+                    conf,
+                    use_auth,
+                    error_estimate_wire,
+                    hmac_key.as_ref(),
+                    session_manager.as_ref(),
+                    &send_ctx,
+                );
             }
-            Err(e) => eprintln!("packetdump: unable to receive packet: {}", e),
-        }
-    }
-}
-
-/// Loads the HMAC key from configuration (hex string or file).
-fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
-    if let Some(ref hex_key) = conf.hmac_key {
-        match HmacKey::from_hex(hex_key) {
-            Ok(key) => return Some(key),
             Err(e) => {
-                eprintln!("Failed to parse HMAC key: {}", e);
-                return None;
+                // Timeout errors are expected when read_timeout is set - just continue to run cleanup
+                if e.kind() != std::io::ErrorKind::TimedOut
+                    && e.kind() != std::io::ErrorKind::WouldBlock
+                {
+                    eprintln!("packetdump: unable to receive packet: {}", e);
+                }
             }
         }
     }
-
-    if let Some(ref path) = conf.hmac_key_file {
-        match HmacKey::from_file(path) {
-            Ok(key) => return Some(key),
-            Err(e) => {
-                eprintln!("Failed to load HMAC key from file: {}", e);
-                return None;
-            }
-        }
-    }
-
-    None
 }
 
-/// Verifies the HMAC of an incoming authenticated packet.
-fn verify_incoming_hmac(key: &HmacKey, packet_bytes: &[u8], expected_hmac: &[u8; 16]) -> bool {
-    use crate::crypto::verify_packet_hmac;
-    use crate::sender::AUTH_PACKET_HMAC_OFFSET;
-
-    verify_packet_hmac(key, packet_bytes, AUTH_PACKET_HMAC_OFFSET, expected_hmac)
-}
+use crate::crypto::HmacKey;
 
 fn handle_packet(
     ethernet: &EthernetPacket,
     conf: &Configuration,
     use_auth: bool,
-    ctx: &PnetContext,
+    error_estimate_wire: u16,
+    hmac_key: Option<&HmacKey>,
+    session_manager: Option<&Arc<SessionManager>>,
+    send_ctx: &PnetSendContext,
 ) {
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => {
@@ -242,7 +279,17 @@ fn handle_packet(
                             let ttl = header.get_ttl();
                             let src =
                                 SocketAddr::new(IpAddr::V4(header.get_source()), udp.get_source());
-                            process_stamp_packet(udp.payload(), src, ttl, conf, use_auth, ctx);
+                            handle_stamp_packet(
+                                udp.payload(),
+                                src,
+                                ttl,
+                                conf,
+                                use_auth,
+                                error_estimate_wire,
+                                hmac_key,
+                                session_manager,
+                                send_ctx,
+                            );
                         }
                     }
                 }
@@ -256,7 +303,17 @@ fn handle_packet(
                             let ttl = header.get_hop_limit();
                             let src =
                                 SocketAddr::new(IpAddr::V6(header.get_source()), udp.get_source());
-                            process_stamp_packet(udp.payload(), src, ttl, conf, use_auth, ctx);
+                            handle_stamp_packet(
+                                udp.payload(),
+                                src,
+                                ttl,
+                                conf,
+                                use_auth,
+                                error_estimate_wire,
+                                hmac_key,
+                                session_manager,
+                                send_ctx,
+                            );
                         }
                     }
                 }
@@ -266,168 +323,34 @@ fn handle_packet(
     }
 }
 
-fn process_stamp_packet(
+#[allow(clippy::too_many_arguments)]
+fn handle_stamp_packet(
     data: &[u8],
     src: SocketAddr,
     ttl: u8,
     conf: &Configuration,
     use_auth: bool,
-    ctx: &PnetContext,
+    error_estimate_wire: u16,
+    hmac_key: Option<&HmacKey>,
+    session_manager: Option<&Arc<SessionManager>>,
+    send_ctx: &PnetSendContext,
 ) {
-    let rcvt = generate_timestamp(conf.clock_source);
-
-    // Determine if packet has TLVs
-    let base_size = if use_auth {
-        AUTH_BASE_SIZE
-    } else {
-        UNAUTH_BASE_SIZE
-    };
-    let has_tlvs = data.len() > base_size;
-
-    // TLV HMAC key for responses (only if we're not ignoring TLVs)
-    // Per RFC 8972 §4.8: on HMAC verification failure, TLVs are echoed
-    // with I-flag set rather than dropping the packet
-    let tlv_hmac_key = if ctx.tlv_mode != TlvHandlingMode::Ignore {
-        ctx.hmac_key.as_ref()
-    } else {
-        None
+    let ctx = ProcessingContext {
+        clock_source: conf.clock_source,
+        error_estimate_wire,
+        hmac_key,
+        require_hmac: conf.require_hmac,
+        session_manager,
+        tlv_mode: conf.tlv_mode,
+        verify_tlv_hmac: conf.verify_tlv_hmac,
+        strict_packets: conf.strict_packets,
     };
 
-    // Determine whether to verify incoming TLV HMAC:
-    // - Always verify if --verify-tlv-hmac is set
-    // - Auto-verify in authenticated mode when HMAC key is configured
-    //   (consistent with base packet HMAC verification behavior)
-    let verify_tlv_hmac = ctx.verify_tlv_hmac || (use_auth && ctx.hmac_key.is_some());
-
-    let response = if use_auth {
-        // Parse packet leniently with canonical buffer for HMAC verification
-        // Per RFC 8762 §4.6, short packets are zero-filled and HMAC must be
-        // verified against the canonical (zero-padded) representation
-        let (packet, canonical_buf) = if conf.strict_packets {
-            match PacketAuthenticated::from_bytes(data) {
-                Ok(p) => {
-                    // For strict mode, the buffer is already full-size
-                    let mut buf = [0u8; 112];
-                    buf.copy_from_slice(&data[..112]);
-                    (p, buf)
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Failed to deserialize authenticated packet from {}: {}",
-                        src, e
-                    );
-                    return;
-                }
-            }
-        } else {
-            PacketAuthenticated::from_bytes_lenient_with_canonical(data)
-        };
-
-        // Extract HMAC for verification
-        let hmac = packet.hmac;
-
-        // Verify HMAC against canonical buffer - mandatory when key is present (RFC 8762 §4.4)
-        if let Some(ref key) = ctx.hmac_key {
-            if !verify_incoming_hmac(key, &canonical_buf, &hmac) {
-                eprintln!("HMAC verification failed for packet from {}", src);
-                return; // Always reject invalid HMAC in auth mode
-            }
-        } else if ctx.require_hmac {
-            // require_hmac means "require key to be configured"
-            eprintln!("HMAC key required but not configured");
-            return;
-        }
-
-        // Generate reflector sequence number only after successful validation
-        let reflector_seq = ctx
-            .session_manager
-            .as_ref()
-            .map(|mgr| mgr.generate_sequence_number(src));
-
-        // Use TLV-aware assembly if packet has TLVs
-        // Per RFC 8972 §4.8: on HMAC failure, echo TLVs with I-flag set
-        if has_tlvs {
-            Some(assemble_auth_answer_with_tlvs(
-                &packet,
-                data,
-                conf.clock_source,
-                rcvt,
-                ttl,
-                ctx.error_estimate_wire,
-                ctx.hmac_key.as_ref(),
-                reflector_seq,
-                ctx.tlv_mode,
-                tlv_hmac_key,
-                verify_tlv_hmac,
-            ))
-        } else {
-            Some(assemble_auth_answer_symmetric(
-                &packet,
-                data,
-                conf.clock_source,
-                rcvt,
-                ttl,
-                ctx.error_estimate_wire,
-                ctx.hmac_key.as_ref(),
-                reflector_seq,
-            ))
-        }
-    } else {
-        let packet_result = if conf.strict_packets {
-            PacketUnauthenticated::from_bytes(data)
-        } else {
-            Ok(PacketUnauthenticated::from_bytes_lenient(data))
-        };
-        match packet_result {
-            Ok(packet) => {
-                // Generate reflector sequence number only after successful validation
-                let reflector_seq = ctx
-                    .session_manager
-                    .as_ref()
-                    .map(|mgr| mgr.generate_sequence_number(src));
-
-                // Use TLV-aware assembly if packet has TLVs
-                // Per RFC 8972 §4.8: on HMAC failure, echo TLVs with I-flag set
-                if has_tlvs {
-                    Some(assemble_unauth_answer_with_tlvs(
-                        &packet,
-                        data,
-                        conf.clock_source,
-                        rcvt,
-                        ttl,
-                        ctx.error_estimate_wire,
-                        reflector_seq,
-                        ctx.tlv_mode,
-                        tlv_hmac_key,
-                        verify_tlv_hmac,
-                    ))
-                } else {
-                    Some(assemble_unauth_answer_symmetric(
-                        &packet,
-                        data,
-                        conf.clock_source,
-                        rcvt,
-                        ttl,
-                        ctx.error_estimate_wire,
-                        reflector_seq,
-                    ))
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "Failed to deserialize unauthenticated packet from {}: {}",
-                    src, e
-                );
-                return;
-            }
-        }
-    };
-
-    if let Some(response_buf) = response {
+    if let Some(response_buf) = process_stamp_packet(data, src, ttl, use_auth, &ctx) {
         // Use the appropriate socket based on address family
         let send_result = match src {
-            SocketAddr::V4(_) => ctx.send_socket_v4.send_to(&response_buf, src),
-            SocketAddr::V6(_) => match &ctx.send_socket_v6 {
+            SocketAddr::V4(_) => send_ctx.send_socket_v4.send_to(&response_buf, src),
+            SocketAddr::V6(_) => match &send_ctx.send_socket_v6 {
                 Some(socket) => socket.send_to(&response_buf, src),
                 None => {
                     eprintln!("Cannot send IPv6 response: IPv6 socket unavailable");

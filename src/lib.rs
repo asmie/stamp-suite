@@ -31,8 +31,6 @@ pub mod receiver;
 pub mod sender;
 /// Session state management.
 pub mod session;
-/// STAMP authentication mode definitions.
-pub mod stamp_modes;
 /// Timestamp generation utilities.
 pub mod time;
 /// TLV extension support per RFC 8972.

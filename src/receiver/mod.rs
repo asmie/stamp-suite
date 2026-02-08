@@ -46,16 +46,45 @@ mod pnet;
 ))]
 pub use pnet::run_receiver;
 
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use crate::{
-    configuration::{ClockFormat, TlvHandlingMode},
-    crypto::{compute_packet_hmac, HmacKey},
+    configuration::{ClockFormat, Configuration, TlvHandlingMode},
+    crypto::{compute_packet_hmac, verify_packet_hmac, HmacKey},
     packets::{
         PacketAuthenticated, PacketUnauthenticated, ReflectedPacketAuthenticated,
         ReflectedPacketUnauthenticated,
     },
+    session::SessionManager,
     time::generate_timestamp,
     tlv::TlvList,
 };
+
+/// Loads the HMAC key from configuration (hex string or file).
+pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
+    if let Some(ref hex_key) = conf.hmac_key {
+        match HmacKey::from_hex(hex_key) {
+            Ok(key) => return Some(key),
+            Err(e) => {
+                eprintln!("Failed to parse HMAC key: {}", e);
+                return None;
+            }
+        }
+    }
+
+    if let Some(ref path) = conf.hmac_key_file {
+        match HmacKey::from_file(path) {
+            Ok(key) => return Some(key),
+            Err(e) => {
+                eprintln!("Failed to load HMAC key from file: {}", e);
+                return None;
+            }
+        }
+    }
+
+    None
+}
 
 /// HMAC field offset in ReflectedPacketAuthenticated (bytes before HMAC field).
 pub const REFLECTED_AUTH_PACKET_HMAC_OFFSET: usize = 96;
@@ -97,6 +126,243 @@ pub const UNAUTH_BASE_SIZE: usize = 44;
 
 /// Base size of authenticated STAMP packets.
 pub const AUTH_BASE_SIZE: usize = 112;
+
+/// HMAC offset in authenticated sender packets (for verifying incoming packets).
+const AUTH_PACKET_HMAC_OFFSET: usize = 96;
+
+/// Context for processing STAMP packets, shared between backends.
+pub struct ProcessingContext<'a> {
+    /// Clock format for timestamps.
+    pub clock_source: ClockFormat,
+    /// Error estimate in wire format.
+    pub error_estimate_wire: u16,
+    /// HMAC key for authentication.
+    pub hmac_key: Option<&'a HmacKey>,
+    /// Whether HMAC is required.
+    pub require_hmac: bool,
+    /// Session manager for stateful mode.
+    pub session_manager: Option<&'a Arc<SessionManager>>,
+    /// TLV handling mode.
+    pub tlv_mode: TlvHandlingMode,
+    /// Whether to verify incoming TLV HMAC.
+    pub verify_tlv_hmac: bool,
+    /// Whether to use strict packet parsing.
+    pub strict_packets: bool,
+}
+
+/// Processes a STAMP packet and returns the response buffer.
+///
+/// This is the shared packet processing logic used by both nix and pnet backends.
+/// Handles parsing, HMAC verification, and response assembly for both authenticated
+/// and unauthenticated modes.
+///
+/// # Arguments
+/// * `data` - The raw packet data
+/// * `src` - Source address for session tracking
+/// * `ttl` - TTL/Hop Limit from IP header
+/// * `use_auth` - Whether authenticated mode is enabled
+/// * `ctx` - Processing context with configuration
+///
+/// # Returns
+/// `Some(response_buffer)` on success, `None` if packet should be dropped
+pub fn process_stamp_packet(
+    data: &[u8],
+    src: SocketAddr,
+    ttl: u8,
+    use_auth: bool,
+    ctx: &ProcessingContext,
+) -> Option<Vec<u8>> {
+    let rcvt = generate_timestamp(ctx.clock_source);
+
+    // Determine if packet has TLVs
+    let base_size = if use_auth {
+        AUTH_BASE_SIZE
+    } else {
+        UNAUTH_BASE_SIZE
+    };
+    let has_tlvs = data.len() > base_size;
+
+    // TLV HMAC key for responses (only if we're not ignoring TLVs)
+    // Per RFC 8972 §4.8: on HMAC verification failure, TLVs are echoed
+    // with I-flag set rather than dropping the packet
+    let tlv_hmac_key = if ctx.tlv_mode != TlvHandlingMode::Ignore {
+        ctx.hmac_key
+    } else {
+        None
+    };
+
+    // Determine whether to verify incoming TLV HMAC:
+    // - Always verify if --verify-tlv-hmac is set
+    // - Auto-verify in authenticated mode when HMAC key is configured
+    let verify_tlv_hmac = ctx.verify_tlv_hmac || (use_auth && ctx.hmac_key.is_some());
+
+    if use_auth {
+        process_auth_packet(
+            data,
+            src,
+            ttl,
+            rcvt,
+            has_tlvs,
+            tlv_hmac_key,
+            verify_tlv_hmac,
+            ctx,
+        )
+    } else {
+        process_unauth_packet(
+            data,
+            src,
+            ttl,
+            rcvt,
+            has_tlvs,
+            tlv_hmac_key,
+            verify_tlv_hmac,
+            ctx,
+        )
+    }
+}
+
+/// Processes an authenticated STAMP packet.
+#[allow(clippy::too_many_arguments)]
+fn process_auth_packet(
+    data: &[u8],
+    src: SocketAddr,
+    ttl: u8,
+    rcvt: u64,
+    has_tlvs: bool,
+    tlv_hmac_key: Option<&HmacKey>,
+    verify_tlv_hmac: bool,
+    ctx: &ProcessingContext,
+) -> Option<Vec<u8>> {
+    // Parse packet leniently with canonical buffer for HMAC verification
+    // Per RFC 8762 §4.6, short packets are zero-filled and HMAC must be
+    // verified against the canonical (zero-padded) representation
+    let (packet, canonical_buf) = if ctx.strict_packets {
+        match PacketAuthenticated::from_bytes(data) {
+            Ok(p) => {
+                let mut buf = [0u8; 112];
+                buf.copy_from_slice(&data[..112]);
+                (p, buf)
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to deserialize authenticated packet from {}: {}",
+                    src, e
+                );
+                return None;
+            }
+        }
+    } else {
+        PacketAuthenticated::from_bytes_lenient_with_canonical(data)
+    };
+
+    // Extract HMAC for verification
+    let hmac = packet.hmac;
+
+    // Verify HMAC against canonical buffer - mandatory when key is present (RFC 8762 §4.4)
+    if let Some(key) = ctx.hmac_key {
+        if !verify_packet_hmac(key, &canonical_buf, AUTH_PACKET_HMAC_OFFSET, &hmac) {
+            eprintln!("HMAC verification failed for packet from {}", src);
+            return None;
+        }
+    } else if ctx.require_hmac {
+        eprintln!("HMAC key required but not configured");
+        return None;
+    }
+
+    // Generate reflector sequence number only after successful validation
+    let reflector_seq = ctx
+        .session_manager
+        .map(|mgr| mgr.generate_sequence_number(src));
+
+    // Use TLV-aware assembly if packet has TLVs
+    if has_tlvs {
+        Some(assemble_auth_answer_with_tlvs(
+            &packet,
+            data,
+            ctx.clock_source,
+            rcvt,
+            ttl,
+            ctx.error_estimate_wire,
+            ctx.hmac_key,
+            reflector_seq,
+            ctx.tlv_mode,
+            tlv_hmac_key,
+            verify_tlv_hmac,
+        ))
+    } else {
+        Some(assemble_auth_answer_symmetric(
+            &packet,
+            data,
+            ctx.clock_source,
+            rcvt,
+            ttl,
+            ctx.error_estimate_wire,
+            ctx.hmac_key,
+            reflector_seq,
+        ))
+    }
+}
+
+/// Processes an unauthenticated STAMP packet.
+#[allow(clippy::too_many_arguments)]
+fn process_unauth_packet(
+    data: &[u8],
+    src: SocketAddr,
+    ttl: u8,
+    rcvt: u64,
+    has_tlvs: bool,
+    tlv_hmac_key: Option<&HmacKey>,
+    verify_tlv_hmac: bool,
+    ctx: &ProcessingContext,
+) -> Option<Vec<u8>> {
+    let packet_result = if ctx.strict_packets {
+        PacketUnauthenticated::from_bytes(data)
+    } else {
+        Ok(PacketUnauthenticated::from_bytes_lenient(data))
+    };
+
+    match packet_result {
+        Ok(packet) => {
+            // Generate reflector sequence number only after successful validation
+            let reflector_seq = ctx
+                .session_manager
+                .map(|mgr| mgr.generate_sequence_number(src));
+
+            // Use TLV-aware assembly if packet has TLVs
+            if has_tlvs {
+                Some(assemble_unauth_answer_with_tlvs(
+                    &packet,
+                    data,
+                    ctx.clock_source,
+                    rcvt,
+                    ttl,
+                    ctx.error_estimate_wire,
+                    reflector_seq,
+                    ctx.tlv_mode,
+                    tlv_hmac_key,
+                    verify_tlv_hmac,
+                ))
+            } else {
+                Some(assemble_unauth_answer_symmetric(
+                    &packet,
+                    data,
+                    ctx.clock_source,
+                    rcvt,
+                    ttl,
+                    ctx.error_estimate_wire,
+                    reflector_seq,
+                ))
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "Failed to deserialize unauthenticated packet from {}: {}",
+                src, e
+            );
+            None
+        }
+    }
+}
 
 /// Assembles an unauthenticated reflected packet with symmetric size (RFC 8762 Section 4.3).
 ///
@@ -426,35 +692,35 @@ pub fn assemble_auth_answer_with_tlvs(
     response
 }
 
-/// Verifies TLV HMAC if present in the incoming packet per RFC 8972 §4.8.
-///
-/// The HMAC covers the Sequence Number field (first 4 bytes) + preceding TLVs.
-///
-/// Returns true if no HMAC TLV is present or if verification succeeds.
-/// Returns false if HMAC verification fails.
-pub fn verify_incoming_tlv_hmac(original_data: &[u8], base_size: usize, key: &HmacKey) -> bool {
-    if original_data.len() <= base_size {
-        return true; // No TLVs to verify
-    }
-
-    let tlv_data = &original_data[base_size..];
-    let Ok(tlvs) = TlvList::parse(tlv_data) else {
-        return false; // Malformed TLVs
-    };
-
-    if tlvs.hmac_tlv().is_none() {
-        return true; // No HMAC TLV to verify
-    }
-
-    // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + preceding TLVs
-    let sequence_number_bytes = &original_data[..4];
-    tlvs.verify_hmac(key, sequence_number_bytes, tlv_data)
-        .is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: Verifies TLV HMAC if present in the incoming packet per RFC 8972 §4.8.
+    ///
+    /// The HMAC covers the Sequence Number field (first 4 bytes) + preceding TLVs.
+    ///
+    /// Returns true if no HMAC TLV is present or if verification succeeds.
+    /// Returns false if HMAC verification fails.
+    fn verify_incoming_tlv_hmac(original_data: &[u8], base_size: usize, key: &HmacKey) -> bool {
+        if original_data.len() <= base_size {
+            return true; // No TLVs to verify
+        }
+
+        let tlv_data = &original_data[base_size..];
+        let Ok(tlvs) = TlvList::parse(tlv_data) else {
+            return false; // Malformed TLVs
+        };
+
+        if tlvs.hmac_tlv().is_none() {
+            return true; // No HMAC TLV to verify
+        }
+
+        // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + preceding TLVs
+        let sequence_number_bytes = &original_data[..4];
+        tlvs.verify_hmac(key, sequence_number_bytes, tlv_data)
+            .is_ok()
+    }
 
     #[test]
     fn test_assemble_unauth_answer_echoes_sender_fields() {

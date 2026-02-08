@@ -17,7 +17,9 @@ use crate::{
         PacketAuthenticated, PacketUnauthenticated, ReflectedPacketAuthenticated,
         ReflectedPacketUnauthenticated,
     },
-    receiver::{AUTH_BASE_SIZE, REFLECTED_AUTH_PACKET_HMAC_OFFSET, UNAUTH_BASE_SIZE},
+    receiver::{
+        load_hmac_key, AUTH_BASE_SIZE, REFLECTED_AUTH_PACKET_HMAC_OFFSET, UNAUTH_BASE_SIZE,
+    },
     session::Session,
     time::generate_timestamp,
     tlv::{RawTlv, SessionSenderId, TlvList},
@@ -40,6 +42,30 @@ pub struct SessionStats {
     pub max_rtt_ns: Option<u64>,
     /// Average round-trip time in nanoseconds.
     pub avg_rtt_ns: Option<u64>,
+}
+
+impl SessionStats {
+    /// Prints a summary of the session statistics to stdout.
+    pub fn print_summary(&self) {
+        println!("\n--- STAMP Statistics ---");
+        println!("Packets sent: {}", self.packets_sent);
+        println!("Packets received: {}", self.packets_received);
+        let loss_pct = if self.packets_sent > 0 {
+            (self.packets_lost as f64 / self.packets_sent as f64) * 100.0
+        } else {
+            0.0
+        };
+        println!("Packets lost: {} ({:.1}%)", self.packets_lost, loss_pct);
+        if let Some(min_rtt) = self.min_rtt_ns {
+            println!("Min RTT: {:.3} ms", min_rtt as f64 / 1_000_000.0);
+        }
+        if let Some(max_rtt) = self.max_rtt_ns {
+            println!("Max RTT: {:.3} ms", max_rtt as f64 / 1_000_000.0);
+        }
+        if let Some(avg_rtt) = self.avg_rtt_ns {
+            println!("Avg RTT: {:.3} ms", avg_rtt as f64 / 1_000_000.0);
+        }
+    }
 }
 
 /// Internal structure to track packets awaiting responses.
@@ -83,7 +109,7 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
     let error_estimate_wire = error_estimate.to_wire();
 
     // Check if authenticated mode is used
-    let use_auth = is_auth(&conf.auth_mode);
+    let use_auth = is_auth(conf.auth_mode);
 
     // Load HMAC key if configured
     let hmac_key = load_hmac_key(conf);
@@ -180,32 +206,42 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
             },
         );
 
-        // Non-blocking receive attempts
+        // Event-driven receive: process responses until send_delay expires
+        let send_delay = Duration::from_millis(conf.send_delay as u64);
+        let deadline = tokio::time::Instant::now() + send_delay;
+
         loop {
-            match tokio::time::timeout(Duration::from_millis(1), socket.recv(&mut recv_buf)).await {
-                Ok(Ok(len)) => {
-                    process_response(
-                        &recv_buf[..len],
-                        use_auth,
-                        use_tlvs,
-                        conf.clock_source,
-                        &mut pending,
-                        &mut stats,
-                        &mut rtt_sum,
-                        conf.print_stats,
-                        hmac_key.as_ref(),
-                    );
+            tokio::select! {
+                biased;
+
+                result = socket.recv(&mut recv_buf) => {
+                    match result {
+                        Ok(len) => {
+                            process_response(
+                                &recv_buf[..len],
+                                use_auth,
+                                use_tlvs,
+                                conf.clock_source,
+                                &mut pending,
+                                &mut stats,
+                                &mut rtt_sum,
+                                conf.print_stats,
+                                hmac_key.as_ref(),
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("Receive error: {}", e);
+                            break;
+                        }
+                    }
                 }
-                Ok(Err(e)) => {
-                    eprintln!("Receive error: {}", e);
+
+                _ = tokio::time::sleep_until(deadline) => {
+                    // Send delay expired, time to send next packet
                     break;
                 }
-                Err(_) => break, // Timeout - no more packets available
             }
         }
-
-        // Wait for send delay
-        tokio::time::sleep(Duration::from_millis(conf.send_delay as u64)).await;
     }
 
     // Final wait phase for remaining responses
@@ -250,7 +286,7 @@ fn process_response(
     data: &[u8],
     use_auth: bool,
     use_tlvs: bool,
-    clock_source: ClockFormat,
+    _clock_source: ClockFormat,
     pending: &mut HashMap<u32, PendingPacket>,
     stats: &mut SessionStats,
     rtt_sum: &mut u64,
@@ -366,7 +402,6 @@ fn process_response(
         stats.max_rtt_ns = Some(stats.max_rtt_ns.map_or(rtt_ns, |max| max.max(rtt_ns)));
 
         if print_stats {
-            let _now_ts = generate_timestamp(clock_source);
             let tlv_status = tlv_info
                 .as_ref()
                 .map_or(String::new(), |info| format!(" tlv=[{}]", info));
@@ -468,31 +503,6 @@ fn validate_reflected_tlvs(
     } else {
         Some(format!("{} TLVs, {}", tlv_count, status_parts.join(", ")))
     }
-}
-
-/// Loads the HMAC key from configuration (hex string or file).
-fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
-    if let Some(ref hex_key) = conf.hmac_key {
-        match HmacKey::from_hex(hex_key) {
-            Ok(key) => return Some(key),
-            Err(e) => {
-                eprintln!("Failed to parse HMAC key: {}", e);
-                return None;
-            }
-        }
-    }
-
-    if let Some(ref path) = conf.hmac_key_file {
-        match HmacKey::from_file(path) {
-            Ok(key) => return Some(key),
-            Err(e) => {
-                eprintln!("Failed to load HMAC key from file: {}", e);
-                return None;
-            }
-        }
-    }
-
-    None
 }
 
 /// Creates a new unauthenticated STAMP test packet with the specified error estimate.

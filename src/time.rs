@@ -27,13 +27,19 @@ pub fn generate_timestamp(cs: ClockFormat) -> u64 {
 
 fn convert_dt_to_ntp(date: DateTime<Utc>) -> u64 {
     let secs = (date.timestamp() + NTP_UNIX_OFFSET) as u32;
-    let fraction = ((date.timestamp_subsec_micros() as u64) * u32::MAX as u64 / 1000000) as u32;
+    // NTP fraction: nanoseconds * 2^32 / 10^9
+    // Use nanoseconds for better precision than microseconds
+    let fraction = ((date.timestamp_subsec_nanos() as u64) << 32) / 1_000_000_000;
 
-    ((secs as u64) << 32) | fraction as u64
+    ((secs as u64) << 32) | fraction
 }
 
 fn convert_dt_to_ptp(date: DateTime<Utc>) -> u64 {
-    ((date.timestamp() << 32) as u64) | (date.timestamp_subsec_nanos() as u64)
+    // Cast to u64 first to avoid signed shift issues with pre-epoch timestamps
+    // For pre-epoch (negative) timestamps, the upper 32 bits will wrap correctly
+    let secs = date.timestamp() as u64;
+    let nanos = date.timestamp_subsec_nanos() as u64;
+    (secs << 32) | nanos
 }
 
 #[cfg(test)]
@@ -55,17 +61,16 @@ mod tests {
             let actual_secs = (test_val >> 32) as i64;
             assert_eq!(actual_secs, expected_secs, "Mismatch in seconds field");
 
+            // Verify fractional part: convert NTP fraction back to nanoseconds
             let ntp_frac = test_val as u32;
-            let expected_micros = sample.timestamp_subsec_micros();
-            let actual_micros = ((ntp_frac as u64) * 1_000_000 / (1u64 << 32)) as u32;
-            // Allow 1 microsecond tolerance due to rounding in NTP fractional conversion.
-            // NTP uses 2^32 fractions per second, so converting to/from microseconds
-            // can have rounding error up to 0.5 microseconds in each direction.
+            let actual_nanos = ((ntp_frac as u64) * 1_000_000_000 / (1u64 << 32)) as u32;
+            // Allow 1 nanosecond tolerance due to rounding in NTP fractional conversion.
+            // NTP uses 2^32 fractions per second (~0.23ns resolution).
             assert!(
-                (expected_micros as i32 - actual_micros as i32).abs() <= 1,
-                "Mismatch in fractional micros: expected {}, got {}",
-                expected_micros,
-                actual_micros
+                (nanos as i64 - actual_nanos as i64).abs() <= 1,
+                "Mismatch in fractional nanos: expected {}, got {}",
+                nanos,
+                actual_nanos
             );
         }
     }
