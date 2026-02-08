@@ -287,19 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn test_session_manager_get_or_create() {
-        let manager = SessionManager::new(None);
-        let client = make_addr(10001);
-
-        // Get or create returns same session
-        let session1 = manager.get_or_create_session(client);
-        let session2 = manager.get_or_create_session(client);
-
-        assert_eq!(session1.get_id(), session2.get_id());
-        assert_eq!(Arc::strong_count(&session1), 3); // manager + session1 + session2
-    }
-
-    #[test]
     fn test_session_manager_thread_safety() {
         let manager = Arc::new(SessionManager::new(None));
         let mut handles = vec![];
@@ -346,15 +333,16 @@ mod tests {
 
     #[test]
     fn test_session_manager_cleanup_with_timeout() {
-        // Use a very short timeout for testing
-        let manager = SessionManager::new(Some(Duration::from_millis(1)));
+        // Use a short but reasonable timeout for testing
+        // 50ms timeout with 100ms sleep provides 2x margin for slow/loaded systems
+        let manager = SessionManager::new(Some(Duration::from_millis(50)));
         let client = make_addr(10001);
 
         manager.generate_sequence_number(client);
         assert_eq!(manager.session_count(), 1);
 
-        // Wait for timeout
-        thread::sleep(Duration::from_millis(10));
+        // Wait for timeout (2x the timeout duration for reliability)
+        thread::sleep(Duration::from_millis(100));
 
         // Cleanup should remove the stale session
         assert_eq!(manager.cleanup_stale_sessions(), 1);

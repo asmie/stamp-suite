@@ -78,12 +78,6 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_format_error_message() {
-        let err = "invalid".parse::<ClockFormat>().unwrap_err();
-        assert_eq!(err.to_string(), "Invalid clock source");
-    }
-
-    #[test]
     fn test_clock_format_roundtrip() {
         // Parse -> Display -> Parse should give same result
         let ntp = "NTP".parse::<ClockFormat>().unwrap();

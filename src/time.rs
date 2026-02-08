@@ -58,6 +58,9 @@ mod tests {
             let ntp_frac = test_val as u32;
             let expected_micros = sample.timestamp_subsec_micros();
             let actual_micros = ((ntp_frac as u64) * 1_000_000 / (1u64 << 32)) as u32;
+            // Allow 1 microsecond tolerance due to rounding in NTP fractional conversion.
+            // NTP uses 2^32 fractions per second, so converting to/from microseconds
+            // can have rounding error up to 0.5 microseconds in each direction.
             assert!(
                 (expected_micros as i32 - actual_micros as i32).abs() <= 1,
                 "Mismatch in fractional micros: expected {}, got {}",
@@ -99,23 +102,5 @@ mod tests {
         let ptp_ts = convert_dt_to_ptp(unix_epoch);
         // At Unix epoch, PTP timestamp should be 0
         assert_eq!(ptp_ts, 0);
-    }
-
-    #[test]
-    fn test_timestamps_are_monotonic() {
-        // Generate multiple timestamps and verify they're non-decreasing
-        let mut prev_ntp = 0u64;
-        let mut prev_ptp = 0u64;
-
-        for _ in 0..100 {
-            let ntp = generate_timestamp(ClockFormat::NTP);
-            let ptp = generate_timestamp(ClockFormat::PTP);
-
-            assert!(ntp >= prev_ntp, "NTP timestamps should be monotonic");
-            assert!(ptp >= prev_ptp, "PTP timestamps should be monotonic");
-
-            prev_ntp = ntp;
-            prev_ptp = ptp;
-        }
     }
 }

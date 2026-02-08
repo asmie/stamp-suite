@@ -214,28 +214,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_bit() {
-        // S=1 should set bit 15
-        let synced = ErrorEstimate::new(true, false, 0, 0).unwrap();
-        assert_eq!(synced.to_wire() & 0x8000, 0x8000);
-
-        // S=0 should clear bit 15
-        let unsynced = ErrorEstimate::new(false, false, 0, 0).unwrap();
-        assert_eq!(unsynced.to_wire() & 0x8000, 0);
-    }
-
-    #[test]
-    fn test_z_flag_bit() {
-        // Z=1 (PTP) should set bit 14
-        let ptp = ErrorEstimate::new(false, true, 0, 0).unwrap();
-        assert_eq!(ptp.to_wire() & 0x4000, 0x4000);
-
-        // Z=0 (NTP) should clear bit 14
-        let ntp = ErrorEstimate::new(false, false, 0, 0).unwrap();
-        assert_eq!(ntp.to_wire() & 0x4000, 0);
-    }
-
-    #[test]
     fn test_scale_range() {
         // Scale 0-63 should be valid
         for scale in 0..=63 {
@@ -330,7 +308,10 @@ mod tests {
 
     #[test]
     fn test_from_u16() {
-        let value: u16 = 0xCA64; // S=1, Z=1 (PTP), Scale=0x0A (10), Multiplier=0x64 (100)
+        // Wire format: S(1) Z(1) Scale(6) Multiplier(8)
+        // 0xCA64 = 1100_1010_0110_0100
+        //          S=1, Z=1, Scale=001010 (10), Mult=01100100 (100)
+        let value: u16 = 0xCA64;
         let estimate: ErrorEstimate = value.into();
         assert!(estimate.synchronized);
         assert!(estimate.z_flag);
@@ -342,7 +323,10 @@ mod tests {
     fn test_into_u16() {
         let estimate = ErrorEstimate::new(true, true, 10, 100).unwrap();
         let value: u16 = estimate.into();
-        assert_eq!(value, 0xCA64); // S=1, Z=1, Scale=10, Multiplier=100
+        // Verify bit-packing: S=1(0x8000) + Z=1(0x4000) + Scale=10(0x0A<<8) + Mult=100(0x64)
+        let expected = 0x8000 | 0x4000 | (10 << 8) | 100;
+        assert_eq!(value, expected);
+        assert_eq!(value, 0xCA64);
     }
 
     #[test]

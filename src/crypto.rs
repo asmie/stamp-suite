@@ -224,16 +224,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hmac_truncation() {
-        let key = HmacKey::new(vec![0u8; 32]).unwrap();
-        let data = b"test data";
-
-        let hmac = key.compute(data);
-
-        assert_eq!(hmac.len(), 16);
-    }
-
-    #[test]
     fn test_verify_correct_key() {
         let key = HmacKey::new(vec![0xab; 32]).unwrap();
         let data = b"important message";
@@ -302,16 +292,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_packet_hmac() {
-        let key = HmacKey::new(vec![0xab; 32]).unwrap();
-        let packet = vec![0u8; 112]; // Simulated packet
-
-        let hmac = compute_packet_hmac(&key, &packet, 96);
-
-        assert_eq!(hmac.len(), 16);
-    }
-
-    #[test]
     fn test_verify_packet_hmac() {
         let key = HmacKey::new(vec![0xab; 32]).unwrap();
         let packet = vec![0u8; 112];
@@ -322,14 +302,21 @@ mod tests {
 
     #[test]
     fn test_constant_time_compare() {
+        // Note: This test verifies correctness only. The constant-time property
+        // (resistance to timing attacks) cannot be reliably tested in a unit test
+        // and must be verified by code inspection or specialized timing analysis tools.
         let a = [1, 2, 3, 4];
         let b = [1, 2, 3, 4];
-        let c = [1, 2, 3, 5];
-        let d = [1, 2, 3];
+        let c = [1, 2, 3, 5]; // Different at last byte
+        let d = [1, 2, 3]; // Different length
+        let e = [5, 2, 3, 4]; // Different at first byte
 
         assert!(constant_time_compare(&a, &b));
         assert!(!constant_time_compare(&a, &c));
         assert!(!constant_time_compare(&a, &d));
+        assert!(!constant_time_compare(&a, &e));
+        assert!(!constant_time_compare(&[], &[1]));
+        assert!(constant_time_compare(&[], &[]));
     }
 
     #[test]

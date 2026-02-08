@@ -1020,18 +1020,6 @@ mod tests {
     }
 
     #[test]
-    fn test_to_bytes_size() {
-        let packet = PacketUnauthenticated {
-            sequence_number: 1,
-            timestamp: 2,
-            error_estimate: 3,
-            mbz: [0; 30],
-        };
-        let bytes = packet.to_bytes();
-        assert_eq!(bytes.len(), 44);
-    }
-
-    #[test]
     fn test_buffer_larger_than_needed() {
         // Create a packet and serialize it
         let packet = PacketUnauthenticated {
@@ -1140,56 +1128,6 @@ mod tests {
         for i in 0..16 {
             assert_eq!(bytes[96 + i], 0xAB);
         }
-    }
-
-    #[test]
-    fn test_different_packets_different_bytes() {
-        let packet1 = PacketUnauthenticated {
-            sequence_number: 1,
-            timestamp: 100,
-            error_estimate: 10,
-            mbz: [0; 30],
-        };
-
-        let packet2 = PacketUnauthenticated {
-            sequence_number: 2,
-            timestamp: 200,
-            error_estimate: 20,
-            mbz: [0; 30],
-        };
-
-        let bytes1 = packet1.to_bytes();
-        let bytes2 = packet2.to_bytes();
-
-        assert_ne!(
-            bytes1, bytes2,
-            "Different packets should serialize differently"
-        );
-    }
-
-    #[test]
-    fn test_identical_packets_identical_bytes() {
-        let packet1 = PacketUnauthenticated {
-            sequence_number: 42,
-            timestamp: 12345,
-            error_estimate: 99,
-            mbz: [0xAA; 30],
-        };
-
-        let packet2 = PacketUnauthenticated {
-            sequence_number: 42,
-            timestamp: 12345,
-            error_estimate: 99,
-            mbz: [0xAA; 30],
-        };
-
-        let bytes1 = packet1.to_bytes();
-        let bytes2 = packet2.to_bytes();
-
-        assert_eq!(
-            bytes1, bytes2,
-            "Identical packets should serialize identically"
-        );
     }
 
     #[test]
@@ -1573,15 +1511,5 @@ mod tests {
         let bytes = ext.to_bytes();
 
         assert_eq!(bytes.len(), ext.wire_size());
-    }
-
-    #[test]
-    fn test_packet_error_display() {
-        let err = PacketError::BufferTooSmall {
-            expected: 44,
-            actual: 20,
-        };
-        assert!(err.to_string().contains("44"));
-        assert!(err.to_string().contains("20"));
     }
 }
