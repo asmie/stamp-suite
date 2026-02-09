@@ -148,6 +148,9 @@ pub struct ProcessingContext<'a> {
     pub verify_tlv_hmac: bool,
     /// Whether to use strict packet parsing.
     pub strict_packets: bool,
+    /// Whether metrics recording is enabled.
+    #[cfg(feature = "metrics")]
+    pub metrics_enabled: bool,
 }
 
 /// Processes a STAMP packet and returns the response buffer.
@@ -172,6 +175,18 @@ pub fn process_stamp_packet(
     use_auth: bool,
     ctx: &ProcessingContext,
 ) -> Option<Vec<u8>> {
+    #[cfg(feature = "metrics")]
+    let start_time = if ctx.metrics_enabled {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
+
+    #[cfg(feature = "metrics")]
+    if ctx.metrics_enabled {
+        crate::metrics::reflector_metrics::record_packet_received();
+    }
+
     let rcvt = generate_timestamp(ctx.clock_source);
 
     // Determine if packet has TLVs
@@ -196,7 +211,7 @@ pub fn process_stamp_packet(
     // - Auto-verify when HMAC key is configured (regardless of auth mode)
     let verify_tlv_hmac = ctx.verify_tlv_hmac || ctx.hmac_key.is_some();
 
-    if use_auth {
+    let result = if use_auth {
         process_auth_packet(
             data,
             src,
@@ -218,7 +233,20 @@ pub fn process_stamp_packet(
             verify_tlv_hmac,
             ctx,
         )
+    };
+
+    #[cfg(feature = "metrics")]
+    if ctx.metrics_enabled {
+        if result.is_some() {
+            crate::metrics::reflector_metrics::record_packet_reflected();
+        }
+        if let Some(start) = start_time {
+            let elapsed = start.elapsed().as_secs_f64();
+            crate::metrics::reflector_metrics::record_processing_time(elapsed);
+        }
     }
+
+    result
 }
 
 /// Processes an authenticated STAMP packet.
@@ -248,6 +276,10 @@ fn process_auth_packet(
                     "Failed to deserialize authenticated packet from {}: {}",
                     src, e
                 );
+                #[cfg(feature = "metrics")]
+                if ctx.metrics_enabled {
+                    crate::metrics::reflector_metrics::record_packet_dropped("parse_error");
+                }
                 return None;
             }
         }
@@ -262,10 +294,19 @@ fn process_auth_packet(
     if let Some(key) = ctx.hmac_key {
         if !verify_packet_hmac(key, &canonical_buf, AUTH_PACKET_HMAC_OFFSET, &hmac) {
             eprintln!("HMAC verification failed for packet from {}", src);
+            #[cfg(feature = "metrics")]
+            if ctx.metrics_enabled {
+                crate::metrics::reflector_metrics::record_hmac_failure();
+                crate::metrics::reflector_metrics::record_packet_dropped("hmac_failure");
+            }
             return None;
         }
     } else if ctx.require_hmac {
         eprintln!("HMAC key required but not configured");
+        #[cfg(feature = "metrics")]
+        if ctx.metrics_enabled {
+            crate::metrics::reflector_metrics::record_packet_dropped("hmac_required");
+        }
         return None;
     }
 
@@ -359,6 +400,10 @@ fn process_unauth_packet(
                 "Failed to deserialize unauthenticated packet from {}: {}",
                 src, e
             );
+            #[cfg(feature = "metrics")]
+            if ctx.metrics_enabled {
+                crate::metrics::reflector_metrics::record_packet_dropped("parse_error");
+            }
             None
         }
     }

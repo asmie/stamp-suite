@@ -344,6 +344,8 @@ fn handle_stamp_packet(
         tlv_mode: conf.tlv_mode,
         verify_tlv_hmac: conf.verify_tlv_hmac,
         strict_packets: conf.strict_packets,
+        #[cfg(feature = "metrics")]
+        metrics_enabled: conf.metrics,
     };
 
     if let Some(response_buf) = process_stamp_packet(data, src, ttl, use_auth, &ctx) {

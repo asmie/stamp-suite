@@ -228,6 +228,8 @@ pub async fn run_receiver(conf: &Configuration) {
                     tlv_mode: conf.tlv_mode,
                     verify_tlv_hmac: conf.verify_tlv_hmac,
                     strict_packets: conf.strict_packets,
+                    #[cfg(feature = "metrics")]
+                    metrics_enabled: conf.metrics,
                 };
 
                 if let Some(response_buf) =

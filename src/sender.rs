@@ -81,7 +81,12 @@ struct PendingPacket {
 ///
 /// Sends packets to the configured remote address and waits for reflected responses.
 /// Returns statistics about the measurement session including RTT and packet loss.
+///
+/// When the `metrics` feature is enabled and `--metrics` flag is set, this function
+/// also records Prometheus metrics for packets sent, received, lost, and RTT values.
 pub async fn run_sender(conf: &Configuration) -> SessionStats {
+    #[cfg(feature = "metrics")]
+    let metrics_enabled = conf.metrics;
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let remote_addr: SocketAddr = (conf.remote_addr, conf.remote_port).into();
 
@@ -198,6 +203,10 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         }
 
         stats.packets_sent += 1;
+        #[cfg(feature = "metrics")]
+        if metrics_enabled {
+            crate::metrics::sender_metrics::record_packet_sent();
+        }
         pending.insert(
             seq_num,
             PendingPacket {
@@ -227,6 +236,8 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                                 &mut rtt_sum,
                                 conf.print_stats,
                                 hmac_key.as_ref(),
+                                #[cfg(feature = "metrics")]
+                                metrics_enabled,
                             );
                         }
                         Err(e) => {
@@ -260,6 +271,8 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                     &mut rtt_sum,
                     conf.print_stats,
                     hmac_key.as_ref(),
+                    #[cfg(feature = "metrics")]
+                    metrics_enabled,
                 );
             }
             Ok(Err(e)) => {
@@ -272,6 +285,12 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
 
     // Mark remaining pending packets as lost
     stats.packets_lost = pending.len() as u32;
+    #[cfg(feature = "metrics")]
+    if metrics_enabled {
+        for _ in 0..stats.packets_lost {
+            crate::metrics::sender_metrics::record_packet_lost();
+        }
+    }
 
     // Calculate average RTT
     if stats.packets_received > 0 {
@@ -292,6 +311,7 @@ fn process_response(
     rtt_sum: &mut u64,
     print_stats: bool,
     hmac_key: Option<&HmacKey>,
+    #[cfg(feature = "metrics")] metrics_enabled: bool,
 ) {
     let recv_time = Instant::now();
 
@@ -321,13 +341,24 @@ fn process_response(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num
                     );
+                    #[cfg(feature = "metrics")]
+                    if metrics_enabled {
+                        crate::metrics::sender_metrics::record_hmac_failure();
+                    }
                     return;
                 }
             }
 
             // Validate TLVs if present
             let tlv_info = if ext_packet.has_tlvs() {
-                validate_reflected_tlvs(&ext_packet.tlvs, data, AUTH_BASE_SIZE, hmac_key)
+                validate_reflected_tlvs(
+                    &ext_packet.tlvs,
+                    data,
+                    AUTH_BASE_SIZE,
+                    hmac_key,
+                    #[cfg(feature = "metrics")]
+                    metrics_enabled,
+                )
             } else {
                 None
             };
@@ -354,6 +385,10 @@ fn process_response(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num
                     );
+                    #[cfg(feature = "metrics")]
+                    if metrics_enabled {
+                        crate::metrics::sender_metrics::record_hmac_failure();
+                    }
                     return;
                 }
             }
@@ -366,7 +401,14 @@ fn process_response(
 
         // Validate TLVs if present
         let tlv_info = if ext_packet.has_tlvs() {
-            validate_reflected_tlvs(&ext_packet.tlvs, data, UNAUTH_BASE_SIZE, hmac_key)
+            validate_reflected_tlvs(
+                &ext_packet.tlvs,
+                data,
+                UNAUTH_BASE_SIZE,
+                hmac_key,
+                #[cfg(feature = "metrics")]
+                metrics_enabled,
+            )
         } else {
             None
         };
@@ -400,6 +442,19 @@ fn process_response(
 
         stats.min_rtt_ns = Some(stats.min_rtt_ns.map_or(rtt_ns, |min| min.min(rtt_ns)));
         stats.max_rtt_ns = Some(stats.max_rtt_ns.map_or(rtt_ns, |max| max.max(rtt_ns)));
+
+        #[cfg(feature = "metrics")]
+        if metrics_enabled {
+            let rtt_seconds = rtt_ns as f64 / 1_000_000_000.0;
+            crate::metrics::sender_metrics::record_packet_received();
+            crate::metrics::sender_metrics::record_rtt(rtt_seconds);
+            if let Some(min_ns) = stats.min_rtt_ns {
+                crate::metrics::sender_metrics::set_rtt_min(min_ns as f64 / 1_000_000_000.0);
+            }
+            if let Some(max_ns) = stats.max_rtt_ns {
+                crate::metrics::sender_metrics::set_rtt_max(max_ns as f64 / 1_000_000_000.0);
+            }
+        }
 
         if print_stats {
             let tlv_status = tlv_info
@@ -435,6 +490,7 @@ fn validate_reflected_tlvs(
     data: &[u8],
     base_size: usize,
     hmac_key: Option<&HmacKey>,
+    #[cfg(feature = "metrics")] metrics_enabled: bool,
 ) -> Option<String> {
     let mut status_parts = Vec::new();
     let tlv_count = tlvs.len();
@@ -466,15 +522,33 @@ fn validate_reflected_tlvs(
         }
     }
 
-    // Report flagged TLVs
+    // Report flagged TLVs and record metrics
     if unrecognized_count > 0 {
         status_parts.push(format!("{}U", unrecognized_count));
+        #[cfg(feature = "metrics")]
+        if metrics_enabled {
+            for _ in 0..unrecognized_count {
+                crate::metrics::sender_metrics::record_tlv_error("U");
+            }
+        }
     }
     if malformed_count > 0 {
         status_parts.push(format!("{}M", malformed_count));
+        #[cfg(feature = "metrics")]
+        if metrics_enabled {
+            for _ in 0..malformed_count {
+                crate::metrics::sender_metrics::record_tlv_error("M");
+            }
+        }
     }
     if integrity_failed_count > 0 {
         status_parts.push(format!("{}I", integrity_failed_count));
+        #[cfg(feature = "metrics")]
+        if metrics_enabled {
+            for _ in 0..integrity_failed_count {
+                crate::metrics::sender_metrics::record_tlv_error("I");
+            }
+        }
     }
 
     // Verify TLV HMAC if key is available

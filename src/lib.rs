@@ -35,3 +35,7 @@ pub mod session;
 pub mod time;
 /// TLV extension support per RFC 8972.
 pub mod tlv;
+
+/// Prometheus metrics support (requires "metrics" feature).
+#[cfg(feature = "metrics")]
+pub mod metrics;

@@ -1,4 +1,4 @@
-use std::{fmt, path::PathBuf};
+use std::{fmt, net::SocketAddr, path::PathBuf};
 
 use clap::{Parser, ValueEnum};
 use thiserror::Error;
@@ -153,6 +153,14 @@ pub struct Configuration {
     /// Will be encoded in an Extra Padding TLV.
     #[clap(long)]
     pub ssid: Option<u16>,
+
+    /// Enable Prometheus metrics endpoint (requires "metrics" feature).
+    #[clap(long)]
+    pub metrics: bool,
+
+    /// Address to bind the metrics HTTP server.
+    #[clap(long, default_value = "127.0.0.1:9090")]
+    pub metrics_addr: SocketAddr,
 }
 
 impl Configuration {

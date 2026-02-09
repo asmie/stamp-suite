@@ -24,6 +24,7 @@ readme = "README.md"
 default = []
 ttl-nix = ["dep:nix"]
 ttl-pnet = ["dep:pnet"]
+metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", "dep:tokio-util"]
 
 [dependencies]
 chrono = "0.4.43"
@@ -39,6 +40,12 @@ subtle = "2.5"
 # TTL backend dependencies (all optional, selected by features)
 nix = { version = "0.31", optional = true, default-features = false, features = ["socket", "uio", "net"] }
 pnet = { version = "0.35", optional = true }
+
+# Metrics dependencies (optional, enabled by "metrics" feature)
+axum = { version = "0.8", optional = true }
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.16", optional = true }
+tokio-util = { version = "0.7", optional = true, features = ["rt"] }
 
 [dependencies.tokio]
 version = "1.49"

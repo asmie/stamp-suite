@@ -19,6 +19,28 @@ async fn main() {
 
     info!("Configuration valid. Starting up...");
 
+    // Initialize metrics server if enabled
+    #[cfg(feature = "metrics")]
+    let _metrics_server = if conf.metrics {
+        match stamp_suite::metrics::init(conf.metrics_addr).await {
+            Ok(server) => {
+                info!("Metrics server started on {}", conf.metrics_addr);
+                Some(server)
+            }
+            Err(e) => {
+                eprintln!("Failed to start metrics server: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    #[cfg(feature = "metrics")]
+    if conf.metrics && !cfg!(feature = "metrics") {
+        eprintln!("Warning: --metrics flag requires the 'metrics' feature to be enabled");
+    }
+
     if conf.is_reflector {
         receiver::run_receiver(&conf).await;
     } else {
