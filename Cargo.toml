@@ -44,7 +44,7 @@ pnet = { version = "0.35", optional = true }
 # Metrics dependencies (optional, enabled by "metrics" feature)
 axum = { version = "0.8", optional = true }
 metrics = { version = "0.24", optional = true }
-metrics-exporter-prometheus = { version = "0.16", optional = true }
+metrics-exporter-prometheus = { version = "0.18", optional = true }
 tokio-util = { version = "0.7", optional = true, features = ["rt"] }
 
 [dependencies.tokio]

@@ -5,7 +5,6 @@
 //! Uses `spawn_blocking` to run the blocking packet capture loop on a dedicated
 //! thread, preventing starvation of the async runtime.
 
-use nix::libc;
 use std::{
     net::{IpAddr, SocketAddr},
     time::{Duration, Instant},
@@ -278,8 +277,7 @@ fn run_capture_loop(
                     target_os = "tvos"
                 )) && iface_props.is_up
                     && !iface_props.is_broadcast
-                    && ((!iface_props.is_loopback && iface_props.is_point_to_point)
-                        || iface_props.is_loopback)
+                    && (iface_props.is_loopback || iface_props.is_point_to_point)
                 {
                     if iface_props.is_loopback {
                         payload_offset = 14;
@@ -381,6 +379,79 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
     }
 }
 
+/// Sets the IP TOS (Type of Service) / IPv6 Traffic Class on a socket.
+///
+/// This controls the DSCP/ECN bits in outgoing packets for CoS TLV support (RFC 8972 §5.2).
+#[cfg(unix)]
+fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::io::Result<()> {
+    use nix::libc;
+    use std::os::fd::AsRawFd;
+
+    let fd = socket.as_raw_fd();
+    let tos_val: libc::c_int = tos as libc::c_int;
+    let (level, opt) = if is_ipv6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_TOS)
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            opt,
+            &tos_val as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Sets the IP TOS (Type of Service) / IPv6 Traffic Class on a socket.
+///
+/// Windows implementation using Winsock2 `setsockopt`.
+#[cfg(windows)]
+fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn setsockopt(s: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
+    }
+
+    const IPPROTO_IP: i32 = 0;
+    const IPPROTO_IPV6: i32 = 41;
+    const IP_TOS: i32 = 3;
+    const IPV6_TCLASS: i32 = 39;
+
+    let raw_socket = socket.as_raw_socket() as usize;
+    let tos_val: i32 = tos as i32;
+    let (level, opt) = if is_ipv6 {
+        (IPPROTO_IPV6, IPV6_TCLASS)
+    } else {
+        (IPPROTO_IP, IP_TOS)
+    };
+
+    let result = unsafe {
+        setsockopt(
+            raw_socket,
+            level,
+            opt,
+            &tos_val as *const i32 as *const u8,
+            std::mem::size_of::<i32>() as i32,
+        )
+    };
+    if result != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 fn handle_stamp_packet(
     data: &[u8],
     src: SocketAddr,
@@ -406,67 +477,50 @@ fn handle_stamp_packet(
     };
 
     if let Some(mut response) = process_stamp_packet(data, src, ttl, config.use_auth, &ctx) {
-        use std::os::fd::AsRawFd;
-
         // Determine TOS value: use CoS TLV request if present, otherwise default (0).
         let (tos, has_cos_request) = match response.cos_request {
             Some((dscp, ecn)) => (((dscp & 0x3F) << 2) | (ecn & 0x03), true),
             None => (0u8, false),
         };
 
-        // Get socket info and TOS cache based on address family
-        let (fd, level, opt, last_tos_cache) = match src {
-            SocketAddr::V4(_) => (
-                send_ctx.send_socket_v4.as_raw_fd(),
-                libc::IPPROTO_IP,
-                libc::IP_TOS,
-                &send_ctx.last_tos_v4,
-            ),
-            SocketAddr::V6(_) => {
-                if let Some(ref socket) = send_ctx.send_socket_v6 {
-                    (
-                        socket.as_raw_fd(),
-                        libc::IPPROTO_IPV6,
-                        libc::IPV6_TCLASS,
-                        &send_ctx.last_tos_v6,
-                    )
-                } else {
-                    eprintln!("Cannot send IPv6 response: IPv6 socket unavailable");
-                    return;
-                }
-            }
+        let is_ipv6 = src.is_ipv6();
+
+        // Check IPv6 socket availability early
+        if is_ipv6 && send_ctx.send_socket_v6.is_none() {
+            eprintln!("Cannot send IPv6 response: IPv6 socket unavailable");
+            return;
+        }
+
+        let last_tos_cache = if is_ipv6 {
+            &send_ctx.last_tos_v6
+        } else {
+            &send_ctx.last_tos_v4
         };
 
         // Only call setsockopt if TOS value changed (reduces syscall overhead under load)
         if tos != last_tos_cache.get() {
-            let tos_val: libc::c_int = tos as libc::c_int;
-            let result = unsafe {
-                libc::setsockopt(
-                    fd,
-                    level,
-                    opt,
-                    &tos_val as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                )
-            };
-            if result < 0 {
-                if has_cos_request {
-                    log::debug!(
-                        "Failed to set IP_TOS/IPV6_TCLASS to {}: {}",
-                        tos,
-                        std::io::Error::last_os_error()
-                    );
-                    // Set RP flag in CoS TLV to indicate policy rejection (RFC 8972 §5.2)
-                    let base_size = if config.use_auth {
-                        AUTH_BASE_SIZE
-                    } else {
-                        UNAUTH_BASE_SIZE
-                    };
-                    set_cos_policy_rejected(&mut response.data, base_size);
-                }
-                // Don't update cache on failure - retry next time
+            let socket: &std::net::UdpSocket = if is_ipv6 {
+                send_ctx.send_socket_v6.as_ref().unwrap()
             } else {
-                last_tos_cache.set(tos);
+                &send_ctx.send_socket_v4
+            };
+            match set_socket_tos(socket, tos, is_ipv6) {
+                Ok(()) => {
+                    last_tos_cache.set(tos);
+                }
+                Err(e) => {
+                    if has_cos_request {
+                        log::debug!("Failed to set IP_TOS/IPV6_TCLASS to {}: {}", tos, e);
+                        // Set RP flag in CoS TLV to indicate policy rejection (RFC 8972 §5.2)
+                        let base_size = if config.use_auth {
+                            AUTH_BASE_SIZE
+                        } else {
+                            UNAUTH_BASE_SIZE
+                        };
+                        set_cos_policy_rejected(&mut response.data, base_size);
+                    }
+                    // Don't update cache on failure - retry next time
+                }
             }
         }
 
