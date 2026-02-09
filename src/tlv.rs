@@ -40,6 +40,9 @@ pub const TLV_HEADER_SIZE: usize = 4;
 /// HMAC TLV value length (16 bytes).
 pub const HMAC_TLV_VALUE_SIZE: usize = 16;
 
+/// Class of Service TLV value size (4 bytes).
+pub const COS_TLV_VALUE_SIZE: usize = 4;
+
 /// Errors that can occur during TLV parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum TlvError {
@@ -66,6 +69,10 @@ pub enum TlvError {
     /// Multiple HMAC TLVs found.
     #[error("Multiple HMAC TLVs found, only one allowed")]
     MultipleHmacTlvs,
+
+    /// Class of Service TLV has invalid length.
+    #[error("CoS TLV has invalid length {0}, expected {COS_TLV_VALUE_SIZE}")]
+    InvalidCosLength(usize),
 }
 
 /// TLV flag bits as defined in RFC 8972 Section 4.2.
@@ -376,9 +383,18 @@ impl RawTlv {
     /// is used in the Length field to produce a byte-exact echo per RFC 8972 §4.8.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.wire_size());
+        self.write_to(&mut buf);
+        buf
+    }
+
+    /// Writes the TLV to the provided buffer without allocating.
+    ///
+    /// This is more efficient than `to_bytes()` when building larger messages.
+    #[inline]
+    pub fn write_to(&self, buf: &mut Vec<u8>) {
         // Use preserved wire length for truncated TLVs, otherwise actual value length
         let length = self.wire_length.unwrap_or(self.value.len() as u16);
-        let mut buf = Vec::with_capacity(TLV_HEADER_SIZE + self.value.len());
 
         // Byte 0: Flags (1 octet)
         buf.push(self.flags.to_byte());
@@ -391,8 +407,6 @@ impl RawTlv {
 
         // Value (only the bytes we actually have)
         buf.extend_from_slice(&self.value);
-
-        buf
     }
 
     /// Returns the total size of this TLV when serialized (header + value).
@@ -576,8 +590,10 @@ impl TlvList {
     /// # Returns
     /// A tuple of (TlvList, bool) where the bool indicates if any TLV was malformed.
     pub fn parse_lenient(buf: &[u8]) -> (Self, bool) {
-        let mut list = Self::new();
-        let mut wire_order: Vec<RawTlv> = Vec::new();
+        // Parse TLVs into a temporary Vec first to avoid cloning in the common case.
+        // Only if there are issues requiring wire-order preservation do we need
+        // to keep both the wire-order Vec and the separated fields.
+        let mut parsed_tlvs: Vec<RawTlv> = Vec::new();
         let mut offset = 0;
         let mut found_hmac = false;
         let mut any_malformed = false;
@@ -587,6 +603,20 @@ impl TlvList {
             // Check if remaining buffer is too small for a TLV header
             if buf.len() - offset < TLV_HEADER_SIZE {
                 // Remaining bytes are padding, stop parsing
+                break;
+            }
+
+            // Check for trailing zero-padding: if the TLV header is all zeros AND all remaining
+            // bytes are zeros, treat as padding and stop parsing. This handles the case where
+            // reflector in "ignore" mode pads the response with zeros to maintain symmetric
+            // packet size.
+            //
+            // We cannot treat *any* all-zero header as padding because a Reserved TLV (type=0)
+            // with zero-length value is valid on the wire and has an all-zero header.
+            // Only if the entire remaining buffer is zeros do we know it's padding.
+            let header = &buf[offset..offset + TLV_HEADER_SIZE];
+            if header == [0, 0, 0, 0] && buf[offset..].iter().all(|&b| b == 0) {
+                // Trailing zeros indicate padding, not a real TLV
                 break;
             }
 
@@ -616,16 +646,7 @@ impl TlvList {
                         }
                     }
 
-                    // Always add to wire_order for potential failure echo
-                    wire_order.push(tlv.clone());
-
-                    // Also populate separated fields for normal operations
-                    if tlv.tlv_type.is_hmac() {
-                        list.hmac_tlv = Some(tlv);
-                    } else {
-                        list.tlvs.push(tlv);
-                    }
-
+                    parsed_tlvs.push(tlv);
                     offset += consumed;
 
                     // If this TLV was truncated, we can't continue (don't know where next starts)
@@ -640,10 +661,30 @@ impl TlvList {
             }
         }
 
-        // Preserve wire order if there are issues that require exact echo
-        // (malformed TLVs, multiple HMACs, or TLVs after HMAC)
-        if any_malformed || has_multiple_hmac {
-            list.wire_order_tlvs = Some(wire_order);
+        let need_wire_order = any_malformed || has_multiple_hmac;
+
+        // Build the TlvList from parsed TLVs
+        let mut list = Self::new();
+
+        if need_wire_order {
+            // Clone TLVs into separated fields while keeping wire order
+            for tlv in &parsed_tlvs {
+                if tlv.tlv_type.is_hmac() {
+                    list.hmac_tlv = Some(tlv.clone());
+                } else {
+                    list.tlvs.push(tlv.clone());
+                }
+            }
+            list.wire_order_tlvs = Some(parsed_tlvs);
+        } else {
+            // No issues: move TLVs directly into separated fields (no cloning)
+            for tlv in parsed_tlvs {
+                if tlv.tlv_type.is_hmac() {
+                    list.hmac_tlv = Some(tlv);
+                } else {
+                    list.tlvs.push(tlv);
+                }
+            }
         }
 
         (list, any_malformed)
@@ -656,35 +697,73 @@ impl TlvList {
     /// Otherwise, HMAC TLV is always serialized last per RFC 8972.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.wire_size());
+        self.write_to(&mut buf);
+        buf
+    }
+
+    /// Writes the TLV list to the provided buffer without allocating.
+    ///
+    /// This is more efficient than `to_bytes()` when building larger messages.
+    #[inline]
+    pub fn write_to(&self, buf: &mut Vec<u8>) {
         // Use wire-order if available (for failure echo)
         if let Some(ref wire_order) = self.wire_order_tlvs {
-            let total_size: usize = wire_order.iter().map(|t| t.wire_size()).sum();
-            let mut buf = Vec::with_capacity(total_size);
             for tlv in wire_order {
-                buf.extend_from_slice(&tlv.to_bytes());
+                tlv.write_to(buf);
             }
-            return buf;
+            return;
         }
 
         // Normal mode: non-HMAC TLVs first, HMAC last
-        let total_size: usize = self.iter().map(|t| t.wire_size()).sum();
-        let mut buf = Vec::with_capacity(total_size);
-
         for tlv in &self.tlvs {
-            buf.extend_from_slice(&tlv.to_bytes());
+            tlv.write_to(buf);
         }
 
         if let Some(ref hmac) = self.hmac_tlv {
-            buf.extend_from_slice(&hmac.to_bytes());
+            hmac.write_to(buf);
         }
-
-        buf
     }
 
     /// Returns the total wire size of all TLVs.
     #[must_use]
     pub fn wire_size(&self) -> usize {
         self.iter().map(|t| t.wire_size()).sum()
+    }
+
+    /// Builds the HMAC input data per RFC 8972 §4.8.
+    ///
+    /// The HMAC covers: Sequence Number (first 4 bytes) + preceding TLVs (non-HMAC).
+    fn build_hmac_input(&self, sequence_number_bytes: &[u8], tlv_bytes: &[u8]) -> Vec<u8> {
+        let non_hmac_size: usize = self.tlvs.iter().map(|t| t.wire_size()).sum();
+
+        let mut data = Vec::with_capacity(4 + non_hmac_size);
+
+        // Append sequence number (up to 4 bytes)
+        if sequence_number_bytes.len() >= 4 {
+            data.extend_from_slice(&sequence_number_bytes[..4]);
+        } else {
+            data.extend_from_slice(sequence_number_bytes);
+        }
+
+        // Append preceding TLVs (non-HMAC portion of TLV bytes)
+        if non_hmac_size <= tlv_bytes.len() {
+            data.extend_from_slice(&tlv_bytes[..non_hmac_size]);
+        }
+
+        data
+    }
+
+    /// Extracts the expected HMAC bytes from the HMAC TLV value.
+    ///
+    /// # Errors
+    /// Returns `TlvError::InvalidHmacLength` if the value is not exactly 16 bytes.
+    fn extract_hmac_bytes(hmac_tlv: &RawTlv) -> Result<[u8; 16], TlvError> {
+        hmac_tlv
+            .value
+            .as_slice()
+            .try_into()
+            .map_err(|_| TlvError::InvalidHmacLength(hmac_tlv.value.len()))
     }
 
     /// Verifies the HMAC TLV if present per RFC 8972 §4.8.
@@ -708,25 +787,8 @@ impl TlvList {
             return Ok(()); // No HMAC to verify
         };
 
-        // Per RFC 8972 §4.8: HMAC covers Sequence Number + preceding TLVs
-        let non_hmac_size: usize = self.tlvs.iter().map(|t| t.wire_size()).sum();
-
-        // Build data to verify: Sequence Number (4 bytes) + preceding TLVs
-        let mut data = Vec::with_capacity(4 + non_hmac_size);
-        if sequence_number_bytes.len() >= 4 {
-            data.extend_from_slice(&sequence_number_bytes[..4]);
-        } else {
-            data.extend_from_slice(sequence_number_bytes);
-        }
-        if non_hmac_size <= tlv_bytes.len() {
-            data.extend_from_slice(&tlv_bytes[..non_hmac_size]);
-        }
-
-        let expected: [u8; 16] = hmac_tlv
-            .value
-            .as_slice()
-            .try_into()
-            .map_err(|_| TlvError::InvalidHmacLength(hmac_tlv.value.len()))?;
+        let data = self.build_hmac_input(sequence_number_bytes, tlv_bytes);
+        let expected = Self::extract_hmac_bytes(hmac_tlv)?;
 
         if key.verify(&data, &expected) {
             Ok(())
@@ -759,20 +821,9 @@ impl TlvList {
             return true; // No HMAC to verify
         };
 
-        // Per RFC 8972 §4.8: HMAC covers Sequence Number + preceding TLVs
-        let non_hmac_size: usize = self.tlvs.iter().map(|t| t.wire_size()).sum();
+        let data = self.build_hmac_input(sequence_number_bytes, tlv_bytes);
 
-        let mut data = Vec::with_capacity(4 + non_hmac_size);
-        if sequence_number_bytes.len() >= 4 {
-            data.extend_from_slice(&sequence_number_bytes[..4]);
-        } else {
-            data.extend_from_slice(sequence_number_bytes);
-        }
-        if non_hmac_size <= tlv_bytes.len() {
-            data.extend_from_slice(&tlv_bytes[..non_hmac_size]);
-        }
-
-        let Ok(expected): Result<[u8; 16], _> = hmac_tlv.value.as_slice().try_into() else {
+        let Ok(expected) = Self::extract_hmac_bytes(hmac_tlv) else {
             // Invalid HMAC length - mark ALL TLVs with I-flag per RFC 8972 §4.8
             self.mark_all_integrity_failed();
             return false;
@@ -826,6 +877,44 @@ impl TlvList {
                 .all(|t| t.tlv_type == TlvType::ExtraPadding)
     }
 
+    /// Counts TLVs with each error flag type (U, M, I).
+    ///
+    /// Returns a tuple of (unrecognized_count, malformed_count, integrity_failed_count).
+    /// Useful for metrics recording after applying reflector flags.
+    #[must_use]
+    pub fn count_error_flags(&self) -> (usize, usize, usize) {
+        let mut unrecognized = 0;
+        let mut malformed = 0;
+        let mut integrity_failed = 0;
+
+        for tlv in &self.tlvs {
+            if tlv.is_unrecognized() {
+                unrecognized += 1;
+            }
+            if tlv.is_malformed() {
+                malformed += 1;
+            }
+            if tlv.is_integrity_failed() {
+                integrity_failed += 1;
+            }
+        }
+
+        // Also check HMAC TLV if present
+        if let Some(ref hmac) = self.hmac_tlv {
+            if hmac.is_unrecognized() {
+                unrecognized += 1;
+            }
+            if hmac.is_malformed() {
+                malformed += 1;
+            }
+            if hmac.is_integrity_failed() {
+                integrity_failed += 1;
+            }
+        }
+
+        (unrecognized, malformed, integrity_failed)
+    }
+
     /// Computes and sets the HMAC TLV per RFC 8972 §4.8.
     ///
     /// The HMAC covers the Sequence Number field (first 4 bytes of base packet)
@@ -838,7 +927,9 @@ impl TlvList {
     /// * `sequence_number_bytes` - The 4-byte sequence number field from base packet
     pub fn set_hmac(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) {
         // Per RFC 8972 §4.8: HMAC covers Sequence Number field + preceding TLVs
-        let mut data = Vec::with_capacity(4 + self.wire_size());
+        // Pre-calculate size to avoid reallocations
+        let tlvs_size: usize = self.tlvs.iter().map(|t| t.wire_size()).sum();
+        let mut data = Vec::with_capacity(4 + tlvs_size);
 
         // Sequence Number field (first 4 bytes)
         if sequence_number_bytes.len() >= 4 {
@@ -847,9 +938,9 @@ impl TlvList {
             data.extend_from_slice(sequence_number_bytes);
         }
 
-        // All preceding TLVs (non-HMAC)
+        // All preceding TLVs (non-HMAC) - write directly without intermediate allocations
         for tlv in &self.tlvs {
-            data.extend_from_slice(&tlv.to_bytes());
+            tlv.write_to(&mut data);
         }
 
         let hmac = key.compute(&data);
@@ -964,6 +1055,84 @@ impl TlvList {
                 true // No HMAC TLV present, nothing to verify
             }
         }
+    }
+
+    /// Extracts the requested DSCP1/ECN1 from the first CoS TLV if present.
+    ///
+    /// Returns `Some((dscp1, ecn1))` if a CoS TLV is found and valid.
+    #[must_use]
+    pub fn get_cos_request(&self) -> Option<(u8, u8)> {
+        for tlv in &self.tlvs {
+            if tlv.tlv_type == TlvType::ClassOfService {
+                if let Ok(cos) = ClassOfServiceTlv::from_raw(tlv) {
+                    return Some((cos.dscp1, cos.ecn1));
+                }
+            }
+        }
+        None
+    }
+
+    /// Updates any Class of Service TLVs with the received DSCP/ECN values.
+    ///
+    /// Per RFC 8972 §5.2, the Session-Reflector fills in DSCP2 and ECN2 fields
+    /// with the values received at its ingress before reflecting the packet.
+    ///
+    /// Updates bytes in-place to avoid allocation overhead. The CoS TLV layout:
+    /// - Byte 0: DSCP1 (6 bits) | ECN1 (2 bits) - preserved
+    /// - Byte 1: DSCP2 (6 bits) | ECN2 (2 bits) - updated
+    /// - Byte 2: RP (2 bits) | Reserved (6 bits) - RP updated if policy_rejected
+    /// - Byte 3: Reserved - preserved
+    ///
+    /// # Arguments
+    /// * `received_dscp` - DSCP value received at reflector's ingress (6 bits, 0-63)
+    /// * `received_ecn` - ECN value received at reflector's ingress (2 bits, 0-3)
+    /// * `policy_rejected` - True if local policy rejected the requested DSCP1
+    pub fn update_cos_tlvs(&mut self, received_dscp: u8, received_ecn: u8, policy_rejected: bool) {
+        // Update in separated tlvs list
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::ClassOfService && tlv.value.len() == COS_TLV_VALUE_SIZE {
+                Self::update_cos_value_in_place(
+                    &mut tlv.value,
+                    received_dscp,
+                    received_ecn,
+                    policy_rejected,
+                );
+            }
+        }
+
+        // Also update wire-order TLVs if present (for failure echo path)
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order {
+                if tlv.tlv_type == TlvType::ClassOfService && tlv.value.len() == COS_TLV_VALUE_SIZE
+                {
+                    Self::update_cos_value_in_place(
+                        &mut tlv.value,
+                        received_dscp,
+                        received_ecn,
+                        policy_rejected,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Updates CoS TLV value bytes in-place.
+    ///
+    /// Modifies DSCP2/ECN2/RP fields without allocating a new value buffer.
+    /// Assumes value is exactly `COS_TLV_VALUE_SIZE` (4) bytes.
+    #[inline]
+    fn update_cos_value_in_place(
+        value: &mut [u8],
+        received_dscp: u8,
+        received_ecn: u8,
+        policy_rejected: bool,
+    ) {
+        // Byte 1: DSCP2 (6 bits) | ECN2 (2 bits)
+        value[1] = ((received_dscp & 0x3F) << 2) | (received_ecn & 0x03);
+
+        // Byte 2: RP (2 bits) | Reserved (6 bits) - preserve reserved bits
+        let rp_bits = if policy_rejected { 0x40 } else { 0x00 }; // RP=1 in bits 7-6
+        value[2] = rp_bits | (value[2] & 0x3F);
     }
 }
 
@@ -1089,6 +1258,145 @@ impl SessionSenderId {
     #[must_use]
     pub fn to_extra_padding_tlv(self, additional_padding: usize) -> ExtraPaddingTlv {
         ExtraPaddingTlv::with_ssid(self.0, additional_padding)
+    }
+}
+
+/// Class of Service TLV (Type 4) for DSCP/ECN measurement per RFC 8972 §4.4.
+///
+/// Enables measurement of DSCP and ECN field manipulation by middleboxes.
+///
+/// # Wire Format
+///
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |   DSCP1   |ECN|   DSCP2   |EC2| RP|        Reserved           |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClassOfServiceTlv {
+    /// DSCP value intended for reflected packet (6 bits, 0-63).
+    /// Set by Session-Sender to indicate desired DSCP for the return path.
+    pub dscp1: u8,
+    /// ECN value intended for reflected packet (2 bits, 0-3).
+    /// Set by Session-Sender to indicate desired ECN for the return path.
+    pub ecn1: u8,
+    /// DSCP value received at Session-Reflector's ingress (6 bits, 0-63).
+    /// Filled in by Session-Reflector to report received DSCP.
+    pub dscp2: u8,
+    /// ECN value received at Session-Reflector's ingress (2 bits, 0-3).
+    /// Filled in by Session-Reflector to report received ECN.
+    pub ecn2: u8,
+    /// Reverse Path flag (2 bits).
+    /// - 0: Session-Reflector applied DSCP1 to reflected packet
+    /// - 1: Session-Reflector's policy rejected DSCP1, used received DSCP instead
+    pub rp: u8,
+}
+
+impl ClassOfServiceTlv {
+    /// Creates a new CoS TLV for the sender (DSCP2/ECN2/RP are zero).
+    #[must_use]
+    pub fn new(dscp: u8, ecn: u8) -> Self {
+        Self {
+            dscp1: dscp & 0x3F, // 6 bits max
+            ecn1: ecn & 0x03,   // 2 bits max
+            dscp2: 0,
+            ecn2: 0,
+            rp: 0,
+        }
+    }
+
+    /// Creates a CoS TLV for the reflector response.
+    ///
+    /// # Arguments
+    /// * `dscp1` - Original DSCP1 from sender's request
+    /// * `ecn1` - Original ECN1 from sender's request
+    /// * `received_dscp` - DSCP value received at reflector's ingress
+    /// * `received_ecn` - ECN value received at reflector's ingress
+    /// * `policy_rejected` - True if local policy rejected DSCP1
+    #[must_use]
+    pub fn for_response(
+        dscp1: u8,
+        ecn1: u8,
+        received_dscp: u8,
+        received_ecn: u8,
+        policy_rejected: bool,
+    ) -> Self {
+        Self {
+            dscp1: dscp1 & 0x3F,
+            ecn1: ecn1 & 0x03,
+            dscp2: received_dscp & 0x3F,
+            ecn2: received_ecn & 0x03,
+            rp: if policy_rejected { 1 } else { 0 },
+        }
+    }
+
+    /// Parses a CoS TLV from a RawTlv.
+    ///
+    /// # Errors
+    /// Returns an error if the value is not 4 bytes.
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        if raw.value.len() != COS_TLV_VALUE_SIZE {
+            return Err(TlvError::InvalidCosLength(raw.value.len()));
+        }
+
+        // Byte 0: DSCP1 (6 bits) | ECN1 (2 bits)
+        let dscp1 = (raw.value[0] >> 2) & 0x3F;
+        let ecn1 = raw.value[0] & 0x03;
+
+        // Byte 1: DSCP2 (6 bits) | ECN2 (2 bits)
+        let dscp2 = (raw.value[1] >> 2) & 0x3F;
+        let ecn2 = raw.value[1] & 0x03;
+
+        // Byte 2: RP (2 bits) | Reserved (6 bits)
+        let rp = (raw.value[2] >> 6) & 0x03;
+
+        Ok(Self {
+            dscp1,
+            ecn1,
+            dscp2,
+            ecn2,
+            rp,
+        })
+    }
+
+    /// Converts to a RawTlv.
+    #[must_use]
+    pub fn to_raw(&self) -> RawTlv {
+        let mut value = [0u8; COS_TLV_VALUE_SIZE];
+
+        // Byte 0: DSCP1 (6 bits) | ECN1 (2 bits)
+        value[0] = ((self.dscp1 & 0x3F) << 2) | (self.ecn1 & 0x03);
+
+        // Byte 1: DSCP2 (6 bits) | ECN2 (2 bits)
+        value[1] = ((self.dscp2 & 0x3F) << 2) | (self.ecn2 & 0x03);
+
+        // Byte 2: RP (2 bits) | Reserved (6 bits)
+        value[2] = (self.rp & 0x03) << 6;
+
+        // Byte 3: Reserved
+        value[3] = 0;
+
+        RawTlv::new(TlvType::ClassOfService, value.to_vec())
+    }
+
+    /// Returns true if the reflector's policy rejected the requested DSCP.
+    #[must_use]
+    pub fn policy_rejected(&self) -> bool {
+        self.rp != 0
+    }
+
+    /// Returns the DSCP value that should be used for the reflected packet.
+    ///
+    /// Returns DSCP1 if policy allows, or DSCP2 (received) if policy rejected.
+    #[must_use]
+    pub fn effective_dscp(&self, policy_rejected: bool) -> u8 {
+        if policy_rejected {
+            self.dscp2
+        } else {
+            self.dscp1
+        }
     }
 }
 
@@ -1424,6 +1732,49 @@ mod tests {
         assert!(!list.non_hmac_tlvs()[0].is_unrecognized()); // ExtraPadding is recognized
         assert!(list.non_hmac_tlvs()[1].is_unrecognized()); // Unknown is unrecognized
         assert!(list.non_hmac_tlvs()[2].is_unrecognized()); // Reserved is unrecognized
+    }
+
+    #[test]
+    fn test_count_error_flags() {
+        let mut list = TlvList::new();
+
+        // Add TLVs with various error states
+        let mut unrecognized_tlv = RawTlv::new(TlvType::Unknown(99), vec![1, 2]);
+        unrecognized_tlv.set_unrecognized();
+
+        let mut malformed_tlv = RawTlv::new(TlvType::ExtraPadding, vec![]);
+        malformed_tlv.set_malformed();
+
+        let mut integrity_failed_tlv = RawTlv::new(TlvType::Location, vec![1, 2, 3, 4]);
+        integrity_failed_tlv.set_integrity_failed();
+
+        // Normal TLV without errors
+        let normal_tlv = RawTlv::new(TlvType::ClassOfService, vec![0; 4]);
+
+        list.push(unrecognized_tlv).unwrap();
+        list.push(malformed_tlv).unwrap();
+        list.push(integrity_failed_tlv).unwrap();
+        list.push(normal_tlv).unwrap();
+
+        let (u, m, i) = list.count_error_flags();
+        assert_eq!(u, 1, "Expected 1 unrecognized TLV");
+        assert_eq!(m, 1, "Expected 1 malformed TLV");
+        assert_eq!(i, 1, "Expected 1 integrity-failed TLV");
+    }
+
+    #[test]
+    fn test_count_error_flags_includes_hmac() {
+        let mut list = TlvList::new();
+
+        // Add HMAC TLV with integrity-failed flag
+        let mut hmac_tlv = RawTlv::new(TlvType::Hmac, vec![0xAB; 16]);
+        hmac_tlv.set_integrity_failed();
+        list.push(hmac_tlv).unwrap();
+
+        let (u, m, i) = list.count_error_flags();
+        assert_eq!(u, 0);
+        assert_eq!(m, 0);
+        assert_eq!(i, 1, "HMAC TLV integrity flag should be counted");
     }
 
     #[test]
@@ -1971,5 +2322,272 @@ mod tests {
         assert_eq!(output[1], 0x02); // type = Location
         assert_eq!(u16::from_be_bytes([output[2], output[3]]), 10);
         assert_eq!(&output[4..], &[0xBB; 10]);
+    }
+
+    // Class of Service TLV tests
+
+    #[test]
+    fn test_cos_tlv_new() {
+        let cos = ClassOfServiceTlv::new(46, 2); // DSCP=46 (EF), ECN=2
+
+        assert_eq!(cos.dscp1, 46);
+        assert_eq!(cos.ecn1, 2);
+        assert_eq!(cos.dscp2, 0);
+        assert_eq!(cos.ecn2, 0);
+        assert_eq!(cos.rp, 0);
+    }
+
+    #[test]
+    fn test_cos_tlv_new_clamps_values() {
+        // Values exceeding max should be clamped
+        let cos = ClassOfServiceTlv::new(0xFF, 0xFF);
+
+        assert_eq!(cos.dscp1, 0x3F); // 6 bits max
+        assert_eq!(cos.ecn1, 0x03); // 2 bits max
+    }
+
+    #[test]
+    fn test_cos_tlv_for_response() {
+        let cos = ClassOfServiceTlv::for_response(46, 2, 0, 1, false);
+
+        assert_eq!(cos.dscp1, 46);
+        assert_eq!(cos.ecn1, 2);
+        assert_eq!(cos.dscp2, 0);
+        assert_eq!(cos.ecn2, 1);
+        assert_eq!(cos.rp, 0);
+        assert!(!cos.policy_rejected());
+    }
+
+    #[test]
+    fn test_cos_tlv_for_response_policy_rejected() {
+        let cos = ClassOfServiceTlv::for_response(46, 2, 0, 1, true);
+
+        assert_eq!(cos.rp, 1);
+        assert!(cos.policy_rejected());
+    }
+
+    #[test]
+    fn test_cos_tlv_to_raw() {
+        let cos = ClassOfServiceTlv::new(46, 2);
+        let raw = cos.to_raw();
+
+        assert_eq!(raw.tlv_type, TlvType::ClassOfService);
+        assert_eq!(raw.value.len(), COS_TLV_VALUE_SIZE);
+
+        // Byte 0: DSCP1 (46 = 0x2E) << 2 | ECN1 (2) = 0xBA
+        assert_eq!(raw.value[0], 0xBA);
+        // Byte 1: DSCP2 (0) << 2 | ECN2 (0) = 0x00
+        assert_eq!(raw.value[1], 0x00);
+        // Byte 2: RP (0) << 6 = 0x00
+        assert_eq!(raw.value[2], 0x00);
+        // Byte 3: Reserved
+        assert_eq!(raw.value[3], 0x00);
+    }
+
+    #[test]
+    fn test_cos_tlv_roundtrip() {
+        let original = ClassOfServiceTlv::for_response(46, 2, 10, 1, true);
+        let raw = original.to_raw();
+        let parsed = ClassOfServiceTlv::from_raw(&raw).unwrap();
+
+        assert_eq!(parsed.dscp1, original.dscp1);
+        assert_eq!(parsed.ecn1, original.ecn1);
+        assert_eq!(parsed.dscp2, original.dscp2);
+        assert_eq!(parsed.ecn2, original.ecn2);
+        assert_eq!(parsed.rp, original.rp);
+    }
+
+    #[test]
+    fn test_cos_tlv_from_raw_invalid_length() {
+        let raw = RawTlv::new(TlvType::ClassOfService, vec![0, 0]); // Only 2 bytes
+        let result = ClassOfServiceTlv::from_raw(&raw);
+
+        assert!(matches!(result, Err(TlvError::InvalidCosLength(2))));
+    }
+
+    #[test]
+    fn test_cos_tlv_effective_dscp() {
+        let cos = ClassOfServiceTlv::for_response(46, 2, 10, 1, false);
+
+        // When policy allows, use DSCP1
+        assert_eq!(cos.effective_dscp(false), 46);
+
+        // When policy rejects, use DSCP2
+        assert_eq!(cos.effective_dscp(true), 10);
+    }
+
+    #[test]
+    fn test_cos_tlv_wire_format_boundary_values() {
+        // Test with max values
+        let cos = ClassOfServiceTlv {
+            dscp1: 63, // Max 6-bit value
+            ecn1: 3,   // Max 2-bit value
+            dscp2: 63,
+            ecn2: 3,
+            rp: 3, // Max 2-bit value
+        };
+        let raw = cos.to_raw();
+
+        // Byte 0: (63 << 2) | 3 = 0xFF
+        assert_eq!(raw.value[0], 0xFF);
+        // Byte 1: (63 << 2) | 3 = 0xFF
+        assert_eq!(raw.value[1], 0xFF);
+        // Byte 2: 3 << 6 = 0xC0
+        assert_eq!(raw.value[2], 0xC0);
+
+        // Roundtrip
+        let parsed = ClassOfServiceTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.dscp1, 63);
+        assert_eq!(parsed.ecn1, 3);
+        assert_eq!(parsed.dscp2, 63);
+        assert_eq!(parsed.ecn2, 3);
+        assert_eq!(parsed.rp, 3);
+    }
+
+    #[test]
+    fn test_parse_lenient_skips_zero_padding() {
+        // Test that zero-padding (all-zero TLV headers) is treated as padding, not TLVs.
+        // This handles the case where reflector in "ignore" mode pads responses with zeros.
+
+        // Build buffer with one real TLV followed by zero-padding
+        let mut buf = Vec::new();
+
+        // Location TLV (type 2)
+        buf.push(0x00); // flags
+        buf.push(0x02); // type = Location
+        buf.extend_from_slice(&4u16.to_be_bytes()); // length = 4
+        buf.extend_from_slice(&[1, 2, 3, 4]); // value
+
+        // Zero-padding (simulating reflector ignore mode)
+        buf.extend_from_slice(&[0u8; 16]); // 16 bytes of zeros = 4 all-zero TLV headers
+
+        let (list, had_malformed) = TlvList::parse_lenient(&buf);
+
+        // Should only have one TLV, zero-padding should be ignored
+        assert!(!had_malformed);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.non_hmac_tlvs().len(), 1);
+        assert_eq!(list.non_hmac_tlvs()[0].tlv_type, TlvType::Location);
+    }
+
+    #[test]
+    fn test_parse_lenient_all_zero_buffer() {
+        // Test that a buffer of all zeros is treated as empty (no TLVs)
+        let buf = [0u8; 32]; // 32 bytes of zeros
+
+        let (list, had_malformed) = TlvList::parse_lenient(&buf);
+
+        assert!(!had_malformed);
+        assert!(list.is_empty());
+        assert_eq!(list.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_lenient_zero_padding_after_hmac() {
+        // Test that zero-padding after HMAC TLV is properly ignored
+        let mut buf = Vec::new();
+
+        // Valid HMAC TLV
+        buf.push(0x00); // flags
+        buf.push(0x08); // type = HMAC
+        buf.extend_from_slice(&16u16.to_be_bytes()); // length = 16
+        buf.extend_from_slice(&[0xAA; 16]); // 16-byte value
+
+        // Zero-padding after HMAC
+        buf.extend_from_slice(&[0u8; 8]); // 8 bytes of zeros
+
+        let (list, had_malformed) = TlvList::parse_lenient(&buf);
+
+        assert!(!had_malformed);
+        assert_eq!(list.len(), 1);
+        assert!(list.hmac_tlv().is_some());
+        assert!(list.non_hmac_tlvs().is_empty());
+    }
+
+    #[test]
+    fn test_parse_lenient_reserved_tlv_zero_length_not_padding() {
+        // A Reserved TLV (type=0) with zero-length value has header 00 00 00 00.
+        // This must NOT be treated as padding if followed by non-zero data.
+        let mut buf = Vec::new();
+
+        // Reserved TLV with zero length (header: 00 00 00 00)
+        buf.push(0x00); // flags = 0
+        buf.push(0x00); // type = Reserved (0)
+        buf.extend_from_slice(&0u16.to_be_bytes()); // length = 0 (no value)
+
+        // Another TLV after the Reserved TLV
+        buf.push(0x00); // flags
+        buf.push(0x02); // type = Location
+        buf.extend_from_slice(&4u16.to_be_bytes()); // length = 4
+        buf.extend_from_slice(&[1, 2, 3, 4]); // value
+
+        let (list, had_malformed) = TlvList::parse_lenient(&buf);
+
+        // Should have TWO TLVs: Reserved and Location
+        assert!(!had_malformed);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.non_hmac_tlvs().len(), 2);
+        assert_eq!(list.non_hmac_tlvs()[0].tlv_type, TlvType::Reserved);
+        assert_eq!(list.non_hmac_tlvs()[0].value.len(), 0);
+        assert_eq!(list.non_hmac_tlvs()[1].tlv_type, TlvType::Location);
+    }
+
+    #[test]
+    fn test_parse_lenient_reserved_tlv_followed_by_trailing_zeros() {
+        // Edge case: A Reserved TLV (type=0) with zero-length followed by only trailing zeros.
+        // Since the remaining bytes are all zeros, the lenient parser treats this as trailing
+        // padding (indistinguishable from a zero-length Reserved TLV + padding).
+        // This is acceptable for lenient parsing - if precise distinction is needed,
+        // use the non-lenient parser.
+        let mut buf = Vec::new();
+
+        // Location TLV first
+        buf.push(0x00); // flags
+        buf.push(0x02); // type = Location
+        buf.extend_from_slice(&4u16.to_be_bytes()); // length = 4
+        buf.extend_from_slice(&[1, 2, 3, 4]); // value
+
+        // Reserved TLV with zero length (header: 00 00 00 00)
+        buf.push(0x00); // flags = 0
+        buf.push(0x00); // type = Reserved (0)
+        buf.extend_from_slice(&0u16.to_be_bytes()); // length = 0
+
+        // Trailing zeros after Reserved TLV
+        buf.extend_from_slice(&[0u8; 8]);
+
+        let (list, had_malformed) = TlvList::parse_lenient(&buf);
+
+        // Lenient parser treats all-zero trailing bytes as padding.
+        // Only the Location TLV is parsed; the Reserved+zeros are treated as padding.
+        assert!(!had_malformed);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.non_hmac_tlvs()[0].tlv_type, TlvType::Location);
+    }
+
+    #[test]
+    fn test_parse_lenient_reserved_tlv_with_value_not_padding() {
+        // A Reserved TLV with non-zero length is distinguishable from padding.
+        let mut buf = Vec::new();
+
+        // Reserved TLV with length=2 (not all-zeros)
+        buf.push(0x00); // flags = 0
+        buf.push(0x00); // type = Reserved (0)
+        buf.extend_from_slice(&2u16.to_be_bytes()); // length = 2
+        buf.extend_from_slice(&[0x00, 0x00]); // value (zeros, but length > 0)
+
+        // Location TLV after
+        buf.push(0x00); // flags
+        buf.push(0x02); // type = Location
+        buf.extend_from_slice(&4u16.to_be_bytes()); // length = 4
+        buf.extend_from_slice(&[1, 2, 3, 4]); // value
+
+        let (list, had_malformed) = TlvList::parse_lenient(&buf);
+
+        // Should have TWO TLVs: Reserved (with value) and Location
+        assert!(!had_malformed);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.non_hmac_tlvs()[0].tlv_type, TlvType::Reserved);
+        assert_eq!(list.non_hmac_tlvs()[0].value.len(), 2);
+        assert_eq!(list.non_hmac_tlvs()[1].tlv_type, TlvType::Location);
     }
 }

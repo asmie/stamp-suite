@@ -36,8 +36,8 @@ async fn main() {
         None
     };
 
-    #[cfg(feature = "metrics")]
-    if conf.metrics && !cfg!(feature = "metrics") {
+    #[cfg(not(feature = "metrics"))]
+    if conf.metrics {
         eprintln!("Warning: --metrics flag requires the 'metrics' feature to be enabled");
     }
 

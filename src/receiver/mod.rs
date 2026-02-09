@@ -58,7 +58,7 @@ use crate::{
     },
     session::SessionManager,
     time::generate_timestamp,
-    tlv::TlvList,
+    tlv::{TlvList, TlvType, TLV_HEADER_SIZE},
 };
 
 /// Loads the HMAC key from configuration (hex string or file).
@@ -88,6 +88,55 @@ pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
 
 /// HMAC field offset in ReflectedPacketAuthenticated (bytes before HMAC field).
 pub const REFLECTED_AUTH_PACKET_HMAC_OFFSET: usize = 96;
+
+/// Updates the RP (policy rejected) flag in a CoS TLV within the response buffer.
+///
+/// This should be called when setsockopt fails to apply the requested DSCP/ECN,
+/// per RFC 8972 §5.2 which requires setting RP=1 to indicate policy rejection.
+///
+/// # Arguments
+/// * `response` - The response buffer containing TLVs after the base packet
+/// * `base_packet_size` - Size of the base packet (44 for unauth, 112 for auth)
+///
+/// # Returns
+/// `true` if a CoS TLV was found and updated, `false` otherwise.
+pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> bool {
+    if response.len() <= base_packet_size {
+        return false; // No TLV area
+    }
+
+    let tlv_area = &mut response[base_packet_size..];
+    let mut offset = 0;
+
+    while offset + TLV_HEADER_SIZE <= tlv_area.len() {
+        // Check for trailing zero-padding: only treat all-zero header as padding
+        // if ALL remaining bytes are zeros. A Reserved TLV (type=0) with zero-length
+        // is valid and should not stop iteration if followed by real TLVs.
+        if tlv_area[offset..offset + TLV_HEADER_SIZE] == [0, 0, 0, 0]
+            && tlv_area[offset..].iter().all(|&b| b == 0)
+        {
+            break;
+        }
+
+        let tlv_type = TlvType::from_byte(tlv_area[offset + 1]);
+        let length = u16::from_be_bytes([tlv_area[offset + 2], tlv_area[offset + 3]]) as usize;
+        let value_start = offset + TLV_HEADER_SIZE;
+        let value_end = value_start + length.min(tlv_area.len() - value_start);
+
+        if tlv_type == TlvType::ClassOfService && value_end >= value_start + 3 {
+            // CoS TLV found - set RP flag (bits 6-7 of byte 2 in value)
+            // RP=1 means policy rejected the DSCP request
+            let rp_byte_offset = value_start + 2;
+            // Set RP bits (upper 2 bits) to 01 (rejected), preserving reserved bits
+            tlv_area[rp_byte_offset] = (tlv_area[rp_byte_offset] & 0x3F) | 0x40;
+            return true;
+        }
+
+        offset += TLV_HEADER_SIZE + length;
+    }
+
+    false
+}
 
 /// Assembles an unauthenticated reflected packet from a received test packet.
 ///
@@ -130,6 +179,16 @@ pub const AUTH_BASE_SIZE: usize = 112;
 /// HMAC offset in authenticated sender packets (for verifying incoming packets).
 const AUTH_PACKET_HMAC_OFFSET: usize = 96;
 
+/// Response from STAMP packet processing, including optional CoS request.
+#[derive(Debug)]
+pub struct StampResponse {
+    /// The response packet data to send.
+    pub data: Vec<u8>,
+    /// Requested DSCP/ECN from CoS TLV (if present).
+    /// Tuple of (dscp1, ecn1) that should be applied to the outgoing packet.
+    pub cos_request: Option<(u8, u8)>,
+}
+
 /// Context for processing STAMP packets, shared between backends.
 pub struct ProcessingContext<'a> {
     /// Clock format for timestamps.
@@ -151,9 +210,13 @@ pub struct ProcessingContext<'a> {
     /// Whether metrics recording is enabled.
     #[cfg(feature = "metrics")]
     pub metrics_enabled: bool,
+    /// DSCP value received from IP header (6 bits, 0-63).
+    pub received_dscp: u8,
+    /// ECN value received from IP header (2 bits, 0-3).
+    pub received_ecn: u8,
 }
 
-/// Processes a STAMP packet and returns the response buffer.
+/// Processes a STAMP packet and returns the response.
 ///
 /// This is the shared packet processing logic used by both nix and pnet backends.
 /// Handles parsing, HMAC verification, and response assembly for both authenticated
@@ -167,14 +230,15 @@ pub struct ProcessingContext<'a> {
 /// * `ctx` - Processing context with configuration
 ///
 /// # Returns
-/// `Some(response_buffer)` on success, `None` if packet should be dropped
+/// `Some(StampResponse)` on success, `None` if packet should be dropped.
+/// The response includes the packet data and optional CoS request (DSCP1/ECN1).
 pub fn process_stamp_packet(
     data: &[u8],
     src: SocketAddr,
     ttl: u8,
     use_auth: bool,
     ctx: &ProcessingContext,
-) -> Option<Vec<u8>> {
+) -> Option<StampResponse> {
     #[cfg(feature = "metrics")]
     let start_time = if ctx.metrics_enabled {
         Some(std::time::Instant::now())
@@ -260,7 +324,7 @@ fn process_auth_packet(
     tlv_hmac_key: Option<&HmacKey>,
     verify_tlv_hmac: bool,
     ctx: &ProcessingContext,
-) -> Option<Vec<u8>> {
+) -> Option<StampResponse> {
     // Parse packet leniently with canonical buffer for HMAC verification
     // Per RFC 8762 §4.6, short packets are zero-filled and HMAC must be
     // verified against the canonical (zero-padded) representation
@@ -329,18 +393,23 @@ fn process_auth_packet(
             ctx.tlv_mode,
             tlv_hmac_key,
             verify_tlv_hmac,
+            ctx.received_dscp,
+            ctx.received_ecn,
         ))
     } else {
-        Some(assemble_auth_answer_symmetric(
-            &packet,
-            data,
-            ctx.clock_source,
-            rcvt,
-            ttl,
-            ctx.error_estimate_wire,
-            ctx.hmac_key,
-            reflector_seq,
-        ))
+        Some(StampResponse {
+            data: assemble_auth_answer_symmetric(
+                &packet,
+                data,
+                ctx.clock_source,
+                rcvt,
+                ttl,
+                ctx.error_estimate_wire,
+                ctx.hmac_key,
+                reflector_seq,
+            ),
+            cos_request: None,
+        })
     }
 }
 
@@ -355,7 +424,7 @@ fn process_unauth_packet(
     tlv_hmac_key: Option<&HmacKey>,
     verify_tlv_hmac: bool,
     ctx: &ProcessingContext,
-) -> Option<Vec<u8>> {
+) -> Option<StampResponse> {
     let packet_result = if ctx.strict_packets {
         PacketUnauthenticated::from_bytes(data)
     } else {
@@ -382,17 +451,22 @@ fn process_unauth_packet(
                     ctx.tlv_mode,
                     tlv_hmac_key,
                     verify_tlv_hmac,
+                    ctx.received_dscp,
+                    ctx.received_ecn,
                 ))
             } else {
-                Some(assemble_unauth_answer_symmetric(
-                    &packet,
-                    data,
-                    ctx.clock_source,
-                    rcvt,
-                    ttl,
-                    ctx.error_estimate_wire,
-                    reflector_seq,
-                ))
+                Some(StampResponse {
+                    data: assemble_unauth_answer_symmetric(
+                        &packet,
+                        data,
+                        ctx.clock_source,
+                        rcvt,
+                        ttl,
+                        ctx.error_estimate_wire,
+                        reflector_seq,
+                    ),
+                    cos_request: None,
+                })
             }
         }
         Err(e) => {
@@ -555,6 +629,8 @@ pub fn assemble_auth_answer_symmetric(
 /// * `tlv_mode` - How to handle TLV extensions
 /// * `tlv_hmac_key` - Optional HMAC key for TLV HMAC computation in response
 /// * `verify_incoming_hmac` - Whether to verify incoming TLV HMAC (sets I-flag on failure)
+/// * `received_dscp` - DSCP value received from IP header (for CoS TLV)
+/// * `received_ecn` - ECN value received from IP header (for CoS TLV)
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_unauth_answer_with_tlvs(
     packet: &PacketUnauthenticated,
@@ -567,7 +643,9 @@ pub fn assemble_unauth_answer_with_tlvs(
     tlv_mode: TlvHandlingMode,
     tlv_hmac_key: Option<&HmacKey>,
     verify_incoming_hmac: bool,
-) -> Vec<u8> {
+    received_dscp: u8,
+    received_ecn: u8,
+) -> StampResponse {
     let base = assemble_unauth_answer(
         packet,
         cs,
@@ -578,6 +656,7 @@ pub fn assemble_unauth_answer_with_tlvs(
     );
     let base_bytes = base.to_bytes();
     let mut response = base_bytes.to_vec();
+    let mut cos_request: Option<(u8, u8)> = None;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -593,14 +672,14 @@ pub fn assemble_unauth_answer_with_tlvs(
             if original_data.len() > UNAUTH_BASE_SIZE {
                 let tlv_data = &original_data[UNAUTH_BASE_SIZE..];
 
-                // Try strict parsing first, fall back to lenient parsing for malformed TLVs
-                let (mut tlvs, had_malformed) = match TlvList::parse(tlv_data) {
-                    Ok(tlvs) => (tlvs, false),
-                    Err(_) => {
-                        // Strict parsing failed - use lenient parsing to mark malformed TLVs
-                        TlvList::parse_lenient(tlv_data)
-                    }
-                };
+                // Parse TLVs leniently - this handles both valid and malformed TLVs in a single pass.
+                // had_malformed indicates whether any TLV was malformed (which also means strict
+                // parsing would have failed). This avoids double-parsing malformed/adversarial traffic.
+                let (mut tlvs, had_malformed) = TlvList::parse_lenient(tlv_data);
+
+                // Extract CoS request (DSCP1/ECN1) before updating
+                // This will be used to set IP_TOS on the outgoing packet
+                cos_request = tlvs.get_cos_request();
 
                 // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + TLVs
                 let incoming_seq_bytes = &original_data[..4];
@@ -617,6 +696,25 @@ pub fn assemble_unauth_answer_with_tlvs(
                 };
                 let hmac_ok = tlvs.apply_reflector_flags(verify_key, incoming_seq_bytes, tlv_data);
 
+                // Record TLV error metrics
+                #[cfg(feature = "metrics")]
+                {
+                    let (u_count, m_count, i_count) = tlvs.count_error_flags();
+                    for _ in 0..u_count {
+                        crate::metrics::reflector_metrics::record_tlv_error("U");
+                    }
+                    for _ in 0..m_count {
+                        crate::metrics::reflector_metrics::record_tlv_error("M");
+                    }
+                    for _ in 0..i_count {
+                        crate::metrics::reflector_metrics::record_tlv_error("I");
+                    }
+                }
+
+                // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
+                // Note: policy_rejected flag will be set by the send path if DSCP application fails
+                tlvs.update_cos_tlvs(received_dscp, received_ecn, false);
+
                 // Only compute fresh HMAC for response if verification passed AND no malformed TLVs
                 // Per RFC 8972 §4.8: on failure, echo TLVs with flags set, don't regenerate HMAC
                 if hmac_ok && !had_malformed {
@@ -626,12 +724,15 @@ pub fn assemble_unauth_answer_with_tlvs(
                     }
                 }
 
-                response.extend_from_slice(&tlvs.to_bytes());
+                tlvs.write_to(&mut response);
             }
         }
     }
 
-    response
+    StampResponse {
+        data: response,
+        cos_request,
+    }
 }
 
 /// Assembles an authenticated reflected packet with TLV handling (RFC 8972).
@@ -651,6 +752,8 @@ pub fn assemble_unauth_answer_with_tlvs(
 /// * `tlv_mode` - How to handle TLV extensions
 /// * `tlv_hmac_key` - Optional HMAC key for TLV HMAC computation in response
 /// * `verify_incoming_hmac` - Whether to verify incoming TLV HMAC (sets I-flag on failure)
+/// * `received_dscp` - DSCP value received from IP header (for CoS TLV)
+/// * `received_ecn` - ECN value received from IP header (for CoS TLV)
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_auth_answer_with_tlvs(
     packet: &PacketAuthenticated,
@@ -664,7 +767,9 @@ pub fn assemble_auth_answer_with_tlvs(
     tlv_mode: TlvHandlingMode,
     tlv_hmac_key: Option<&HmacKey>,
     verify_incoming_hmac: bool,
-) -> Vec<u8> {
+    received_dscp: u8,
+    received_ecn: u8,
+) -> StampResponse {
     let base = assemble_auth_answer(
         packet,
         cs,
@@ -676,6 +781,7 @@ pub fn assemble_auth_answer_with_tlvs(
     );
     let base_bytes = base.to_bytes();
     let mut response = base_bytes.to_vec();
+    let mut cos_request: Option<(u8, u8)> = None;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -690,14 +796,14 @@ pub fn assemble_auth_answer_with_tlvs(
             if original_data.len() > AUTH_BASE_SIZE {
                 let tlv_data = &original_data[AUTH_BASE_SIZE..];
 
-                // Try strict parsing first, fall back to lenient parsing for malformed TLVs
-                let (mut tlvs, had_malformed) = match TlvList::parse(tlv_data) {
-                    Ok(tlvs) => (tlvs, false),
-                    Err(_) => {
-                        // Strict parsing failed - use lenient parsing to mark malformed TLVs
-                        TlvList::parse_lenient(tlv_data)
-                    }
-                };
+                // Parse TLVs leniently - this handles both valid and malformed TLVs in a single pass.
+                // had_malformed indicates whether any TLV was malformed (which also means strict
+                // parsing would have failed). This avoids double-parsing malformed/adversarial traffic.
+                let (mut tlvs, had_malformed) = TlvList::parse_lenient(tlv_data);
+
+                // Extract CoS request (DSCP1/ECN1) before updating
+                // This will be used to set IP_TOS on the outgoing packet
+                cos_request = tlvs.get_cos_request();
 
                 // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + TLVs
                 let incoming_seq_bytes = &original_data[..4];
@@ -720,6 +826,25 @@ pub fn assemble_auth_answer_with_tlvs(
                     require_hmac_tlv,
                 );
 
+                // Record TLV error metrics
+                #[cfg(feature = "metrics")]
+                {
+                    let (u_count, m_count, i_count) = tlvs.count_error_flags();
+                    for _ in 0..u_count {
+                        crate::metrics::reflector_metrics::record_tlv_error("U");
+                    }
+                    for _ in 0..m_count {
+                        crate::metrics::reflector_metrics::record_tlv_error("M");
+                    }
+                    for _ in 0..i_count {
+                        crate::metrics::reflector_metrics::record_tlv_error("I");
+                    }
+                }
+
+                // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
+                // Note: policy_rejected flag will be set by the send path if DSCP application fails
+                tlvs.update_cos_tlvs(received_dscp, received_ecn, false);
+
                 // Only compute fresh HMAC for response if verification passed AND no malformed TLVs
                 // Per RFC 8972 §4.8: on failure, echo TLVs with flags set, don't regenerate HMAC
                 if hmac_ok && !had_malformed {
@@ -729,12 +854,15 @@ pub fn assemble_auth_answer_with_tlvs(
                     }
                 }
 
-                response.extend_from_slice(&tlvs.to_bytes());
+                tlvs.write_to(&mut response);
             }
         }
     }
 
-    response
+    StampResponse {
+        data: response,
+        cos_request,
+    }
 }
 
 #[cfg(test)]
@@ -1142,12 +1270,14 @@ mod tests {
             TlvHandlingMode::Ignore,
             None,
             false,
+            0,
+            0,
         );
 
         // Response should match original length but TLVs stripped (zero-padded)
-        assert_eq!(response.len(), 44 + TLV_HEADER_SIZE + 8);
+        assert_eq!(response.data.len(), 44 + TLV_HEADER_SIZE + 8);
         // Extra bytes should be zero (TLVs stripped)
-        assert!(response[44..].iter().all(|&b| b == 0));
+        assert!(response.data[44..].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -1177,12 +1307,14 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
+            0,
+            0,
         );
 
         // Response should include echoed TLV
-        assert_eq!(response.len(), 44 + TLV_HEADER_SIZE + 4);
+        assert_eq!(response.data.len(), 44 + TLV_HEADER_SIZE + 4);
         // TLV should be echoed (check type in byte 1 per RFC 8972)
-        assert_eq!(response[45], 1); // ExtraPadding type
+        assert_eq!(response.data[45], 1); // ExtraPadding type
     }
 
     #[test]
@@ -1212,13 +1344,15 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
+            0,
+            0,
         );
 
         // Check U-flag is set (bit 0 of flags byte per RFC 8972)
         // Byte 0: Flags (U=0x80), Byte 1: Type
-        assert_eq!(response[44], 0x80); // U-flag set in flags byte
-        assert_eq!(response[45], 15); // Type 15 in type byte
-        assert_eq!(response.len(), 44 + TLV_HEADER_SIZE + 4);
+        assert_eq!(response.data[44], 0x80); // U-flag set in flags byte
+        assert_eq!(response.data[45], 15); // Type 15 in type byte
+        assert_eq!(response.data.len(), 44 + TLV_HEADER_SIZE + 4);
     }
 
     #[test]
@@ -1253,12 +1387,14 @@ mod tests {
             TlvHandlingMode::Ignore,
             None,
             false,
+            0,
+            0,
         );
 
         // Response should match original length but TLVs stripped
-        assert_eq!(response.len(), 112 + TLV_HEADER_SIZE + 8);
+        assert_eq!(response.data.len(), 112 + TLV_HEADER_SIZE + 8);
         // Extra bytes should be zero
-        assert!(response[112..].iter().all(|&b| b == 0));
+        assert!(response.data[112..].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -1293,12 +1429,14 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
+            0,
+            0,
         );
 
         // Response should include echoed TLV
-        assert_eq!(response.len(), 112 + TLV_HEADER_SIZE + 4);
+        assert_eq!(response.data.len(), 112 + TLV_HEADER_SIZE + 4);
         // TLV should be echoed (check type in byte 1 per RFC 8972)
-        assert_eq!(response[113], 2); // Location type
+        assert_eq!(response.data[113], 2); // Location type
     }
 
     #[test]
@@ -1329,18 +1467,20 @@ mod tests {
             TlvHandlingMode::Echo,
             Some(&key),
             false,
+            0,
+            0,
         );
 
         // Response should include ExtraPadding + HMAC TLV
         // 44 base + (4 header + 4 value) + (4 header + 16 value)
         assert_eq!(
-            response.len(),
+            response.data.len(),
             44 + TLV_HEADER_SIZE + 4 + TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE
         );
 
         // HMAC TLV should be last (type 8 in byte 1 per RFC 8972)
         let hmac_tlv_start = 44 + TLV_HEADER_SIZE + 4;
-        assert_eq!(response[hmac_tlv_start + 1], 8);
+        assert_eq!(response.data[hmac_tlv_start + 1], 8);
     }
 
     #[test]
@@ -1468,12 +1608,14 @@ mod tests {
             TlvHandlingMode::Echo,
             Some(&key2), // Wrong key for verification
             true,        // Verify HMAC (will fail)
+            0,
+            0,
         );
 
         // Response should include TLVs
         // Base (44) + ExtraPadding TLV (4+4) + HMAC TLV (4+16) = 72 bytes
         assert_eq!(
-            response.len(),
+            response.data.len(),
             44 + TLV_HEADER_SIZE + 4 + TLV_HEADER_SIZE + 16
         );
 
@@ -1481,7 +1623,7 @@ mod tests {
         let hmac_tlv_start = 44 + TLV_HEADER_SIZE + 4;
 
         // Check I-flag is set on HMAC TLV (bit 5 of flags byte)
-        let hmac_flags = response[hmac_tlv_start];
+        let hmac_flags = response.data[hmac_tlv_start];
         assert!(
             hmac_flags & 0x20 != 0,
             "I-flag should be set on HMAC TLV, flags={:02x}",
@@ -1489,7 +1631,7 @@ mod tests {
         );
 
         // Check HMAC value is preserved (NOT regenerated)
-        let response_hmac = &response[hmac_tlv_start + TLV_HEADER_SIZE..];
+        let response_hmac = &response.data[hmac_tlv_start + TLV_HEADER_SIZE..];
         assert_eq!(
             response_hmac,
             &original_hmac[..],
@@ -1538,11 +1680,13 @@ mod tests {
             TlvHandlingMode::Echo,
             Some(&key), // Correct key for verification
             true,       // Verify HMAC (will succeed)
+            0,
+            0,
         );
 
         // Response should include TLVs
         assert_eq!(
-            response.len(),
+            response.data.len(),
             44 + TLV_HEADER_SIZE + 4 + TLV_HEADER_SIZE + 16
         );
 
@@ -1550,7 +1694,7 @@ mod tests {
         let hmac_tlv_start = 44 + TLV_HEADER_SIZE + 4;
 
         // Check I-flag is NOT set on HMAC TLV
-        let hmac_flags = response[hmac_tlv_start];
+        let hmac_flags = response.data[hmac_tlv_start];
         assert!(
             hmac_flags & 0x20 == 0,
             "I-flag should NOT be set on successful verification, flags={:02x}",
@@ -1558,7 +1702,7 @@ mod tests {
         );
 
         // Check HMAC value is DIFFERENT (regenerated for new sequence number)
-        let response_hmac = &response[hmac_tlv_start + TLV_HEADER_SIZE..];
+        let response_hmac = &response.data[hmac_tlv_start + TLV_HEADER_SIZE..];
         assert_ne!(
             response_hmac,
             &original_hmac[..],
@@ -1596,14 +1740,16 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
+            0,
+            0,
         );
 
         // Response should include base + malformed TLV (header + truncated value)
         // The TLV should have whatever data was available
-        assert!(response.len() > 44, "Response should include TLV data");
+        assert!(response.data.len() > 44, "Response should include TLV data");
 
         // Check M-flag is set on the TLV (bit 6 of flags byte = 0x40)
-        let tlv_flags = response[44];
+        let tlv_flags = response.data[44];
         assert!(
             tlv_flags & 0x40 != 0,
             "M-flag should be set on malformed TLV, flags={:02x}",
@@ -1611,7 +1757,7 @@ mod tests {
         );
 
         // Type should be preserved
-        assert_eq!(response[45], 0x01, "TLV type should be preserved");
+        assert_eq!(response.data[45], 0x01, "TLV type should be preserved");
     }
 
     #[test]
@@ -1647,14 +1793,16 @@ mod tests {
             TlvHandlingMode::Echo,
             Some(&key),
             false,
+            0,
+            0,
         );
 
         // Response should only have the malformed TLV, no HMAC TLV added
         // (because we don't regenerate HMAC when there are malformed TLVs)
-        assert!(response.len() > 44);
+        assert!(response.data.len() > 44);
 
         // Check M-flag is set
-        let tlv_flags = response[44];
+        let tlv_flags = response.data[44];
         assert!(
             tlv_flags & 0x40 != 0,
             "M-flag should be set on malformed TLV"
@@ -1663,9 +1811,286 @@ mod tests {
         // Should NOT have an HMAC TLV appended (response should be relatively short)
         // Base (44) + header (4) + truncated value (4) = 52 bytes
         assert_eq!(
-            response.len(),
+            response.data.len(),
             44 + TLV_HEADER_SIZE + 4,
             "Should not have HMAC TLV when TLVs are malformed"
         );
+    }
+
+    #[test]
+    fn test_assemble_unauth_with_cos_tlv_updates_dscp_ecn() {
+        use crate::tlv::{ClassOfServiceTlv, TlvType, COS_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        // Create packet with CoS TLV (sender requests DSCP=46 EF, ECN=0)
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        let cos_tlv = ClassOfServiceTlv::new(46, 0);
+        original_data.extend_from_slice(&cos_tlv.to_raw().to_bytes());
+
+        // Reflect with received DSCP=10, ECN=2 (simulating network modified values)
+        let received_dscp = 10u8;
+        let received_ecn = 2u8;
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            received_dscp,
+            received_ecn,
+        );
+
+        // Response should include base + CoS TLV
+        assert_eq!(
+            response.data.len(),
+            44 + TLV_HEADER_SIZE + COS_TLV_VALUE_SIZE
+        );
+
+        // Parse the CoS TLV from response to verify DSCP2/ECN2 were filled in
+        let tlv_start = 44;
+        assert_eq!(
+            response.data[tlv_start + 1],
+            TlvType::ClassOfService.to_byte()
+        ); // Type
+
+        // Parse the value bytes
+        let value_start = tlv_start + TLV_HEADER_SIZE;
+        // Byte 0: DSCP1 (6 bits) | ECN1 (2 bits) - should be preserved from sender
+        let dscp1 = (response.data[value_start] >> 2) & 0x3F;
+        let ecn1 = response.data[value_start] & 0x03;
+        assert_eq!(dscp1, 46, "DSCP1 should be preserved");
+        assert_eq!(ecn1, 0, "ECN1 should be preserved");
+
+        // Byte 1: DSCP2 (6 bits) | ECN2 (2 bits) - should be filled by reflector
+        let dscp2 = (response.data[value_start + 1] >> 2) & 0x3F;
+        let ecn2 = response.data[value_start + 1] & 0x03;
+        assert_eq!(dscp2, received_dscp, "DSCP2 should be received DSCP");
+        assert_eq!(ecn2, received_ecn, "ECN2 should be received ECN");
+
+        // Byte 2: RP (2 bits) - should be 0 (policy not rejected)
+        let rp = (response.data[value_start + 2] >> 6) & 0x03;
+        assert_eq!(rp, 0, "RP should be 0 (policy accepted)");
+    }
+
+    #[test]
+    fn test_assemble_auth_with_cos_tlv_updates_dscp_ecn() {
+        use crate::tlv::{ClassOfServiceTlv, TlvType, COS_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
+
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 100,
+            error_estimate: 10,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        // Create packet with CoS TLV (sender requests DSCP=0 BE, ECN=1)
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        let cos_tlv = ClassOfServiceTlv::new(0, 1);
+        original_data.extend_from_slice(&cos_tlv.to_raw().to_bytes());
+
+        // Reflect with received DSCP=32, ECN=3
+        let received_dscp = 32u8;
+        let received_ecn = 3u8;
+        let response = assemble_auth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            received_dscp,
+            received_ecn,
+        );
+
+        // Response should include base + CoS TLV
+        assert_eq!(
+            response.data.len(),
+            112 + TLV_HEADER_SIZE + COS_TLV_VALUE_SIZE
+        );
+
+        // Parse the CoS TLV from response
+        let tlv_start = 112;
+        assert_eq!(
+            response.data[tlv_start + 1],
+            TlvType::ClassOfService.to_byte()
+        );
+
+        let value_start = tlv_start + TLV_HEADER_SIZE;
+        // DSCP1/ECN1 preserved
+        let dscp1 = (response.data[value_start] >> 2) & 0x3F;
+        let ecn1 = response.data[value_start] & 0x03;
+        assert_eq!(dscp1, 0);
+        assert_eq!(ecn1, 1);
+
+        // DSCP2/ECN2 filled by reflector
+        let dscp2 = (response.data[value_start + 1] >> 2) & 0x3F;
+        let ecn2 = response.data[value_start + 1] & 0x03;
+        assert_eq!(dscp2, received_dscp);
+        assert_eq!(ecn2, received_ecn);
+    }
+
+    #[test]
+    fn test_set_cos_policy_rejected_unauth() {
+        use crate::tlv::ClassOfServiceTlv;
+
+        // Build an unauthenticated response with a CoS TLV
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 42,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        let cos_tlv = ClassOfServiceTlv::new(46, 2); // DSCP=46, ECN=2
+        original_data.extend_from_slice(&cos_tlv.to_raw().to_bytes());
+
+        let mut response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            0,
+            0,
+        );
+
+        // Verify RP is initially 0
+        let value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE;
+        let rp_before = (response.data[value_start + 2] >> 6) & 0x03;
+        assert_eq!(rp_before, 0);
+
+        // Simulate DSCP application failure by calling set_cos_policy_rejected
+        let updated = set_cos_policy_rejected(&mut response.data, UNAUTH_BASE_SIZE);
+        assert!(updated);
+
+        // Verify RP is now 1
+        let rp_after = (response.data[value_start + 2] >> 6) & 0x03;
+        assert_eq!(rp_after, 1);
+    }
+
+    #[test]
+    fn test_set_cos_policy_rejected_auth() {
+        use crate::tlv::ClassOfServiceTlv;
+
+        // Build an authenticated response with a CoS TLV
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 42,
+            mbz0: [0; 12],
+            timestamp: 100,
+            error_estimate: 10,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        let cos_tlv = ClassOfServiceTlv::new(46, 2);
+        original_data.extend_from_slice(&cos_tlv.to_raw().to_bytes());
+
+        let mut response = assemble_auth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            0,
+            0,
+        );
+
+        // Verify RP is initially 0
+        let value_start = AUTH_BASE_SIZE + TLV_HEADER_SIZE;
+        let rp_before = (response.data[value_start + 2] >> 6) & 0x03;
+        assert_eq!(rp_before, 0);
+
+        // Simulate DSCP application failure
+        let updated = set_cos_policy_rejected(&mut response.data, AUTH_BASE_SIZE);
+        assert!(updated);
+
+        // Verify RP is now 1
+        let rp_after = (response.data[value_start + 2] >> 6) & 0x03;
+        assert_eq!(rp_after, 1);
+    }
+
+    #[test]
+    fn test_set_cos_policy_rejected_no_cos_tlv() {
+        // Build a response without a CoS TLV
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 42,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+        let mut response = sender_packet.to_bytes().to_vec();
+
+        // Should return false when no CoS TLV is present
+        let updated = set_cos_policy_rejected(&mut response, UNAUTH_BASE_SIZE);
+        assert!(!updated);
+    }
+
+    #[test]
+    fn test_set_cos_policy_rejected_reserved_tlv_before_cos() {
+        use crate::tlv::ClassOfServiceTlv;
+
+        // Build a response with a zero-length Reserved TLV (header 00 00 00 00)
+        // followed by a CoS TLV. The Reserved TLV must not be mistaken for padding.
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 42,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+        let mut response = sender_packet.to_bytes().to_vec();
+
+        // Add Reserved TLV with zero length: flags=0, type=0, length=0
+        response.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        // Add CoS TLV after the Reserved TLV
+        let cos_tlv = ClassOfServiceTlv::new(46, 2); // DSCP=46, ECN=2
+        response.extend_from_slice(&cos_tlv.to_raw().to_bytes());
+
+        // Verify RP is initially 0
+        let cos_value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE + TLV_HEADER_SIZE; // Skip Reserved + CoS header
+        let rp_before = (response[cos_value_start + 2] >> 6) & 0x03;
+        assert_eq!(rp_before, 0);
+
+        // The Reserved TLV (00 00 00 00) should NOT stop iteration because
+        // it's followed by non-zero data (the CoS TLV).
+        let updated = set_cos_policy_rejected(&mut response, UNAUTH_BASE_SIZE);
+        assert!(updated, "Should find CoS TLV after Reserved TLV");
+
+        // Verify RP is now 1
+        let rp_after = (response[cos_value_start + 2] >> 6) & 0x03;
+        assert_eq!(rp_after, 1);
     }
 }

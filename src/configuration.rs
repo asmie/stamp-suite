@@ -161,6 +161,24 @@ pub struct Configuration {
     /// Address to bind the metrics HTTP server.
     #[clap(long, default_value = "127.0.0.1:9090")]
     pub metrics_addr: SocketAddr,
+
+    /// Enable Class of Service TLV for DSCP/ECN measurement (RFC 8972 §4.4).
+    /// When enabled, the sender includes a CoS TLV with the requested DSCP/ECN values,
+    /// and the reflector reports the received DSCP/ECN values.
+    #[clap(long)]
+    pub cos: bool,
+
+    /// DSCP value to request for reflected packets (0-63).
+    /// Only used when --cos is enabled. Common values:
+    /// 0=Best Effort, 10=AF11, 18=AF21, 26=AF31, 34=AF41, 46=EF
+    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..64))]
+    pub dscp: u8,
+
+    /// ECN value to request for reflected packets (0-3).
+    /// Only used when --cos is enabled.
+    /// 0=Not-ECT, 1=ECT(1), 2=ECT(0), 3=CE (Congestion Experienced)
+    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..4))]
+    pub ecn: u8,
 }
 
 impl Configuration {
@@ -183,16 +201,20 @@ impl Configuration {
             ));
         }
 
-        // Validate authenticated mode reflector requires HMAC key (RFC 8762 §4.4)
-        if self.is_reflector
-            && self.auth_mode.is_authenticated()
+        // Validate authenticated mode requires HMAC key (RFC 8762 §4.4)
+        if self.auth_mode.is_authenticated()
             && self.hmac_key.is_none()
             && self.hmac_key_file.is_none()
         {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "Authenticated mode reflector (-A A -i) requires --hmac-key or --hmac-key-file for HMAC verification"
-                    .to_string(),
-            ));
+            let mode_desc = if self.is_reflector {
+                "reflector"
+            } else {
+                "sender"
+            };
+            return Err(ConfigurationError::InvalidConfiguration(format!(
+                "Authenticated mode {} (-A A) requires --hmac-key or --hmac-key-file",
+                mode_desc
+            )));
         }
 
         Ok(())
@@ -358,8 +380,14 @@ mod tests {
 
     #[test]
     fn test_auth_mode_variations() {
-        // Authenticated mode
-        let args = vec!["test", "--auth-mode", "A"];
+        // Authenticated mode (requires HMAC key)
+        let args = vec![
+            "test",
+            "--auth-mode",
+            "A",
+            "--hmac-key",
+            "0123456789abcdef0123456789abcdef",
+        ];
         let conf = Configuration::parse_from(args);
         assert!(conf.validate().is_ok());
         assert!(is_auth(conf.auth_mode));
@@ -424,11 +452,25 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_sender_without_hmac_key_valid() {
-        // Authenticated mode sender without HMAC key is allowed (sender computes HMAC)
+    fn test_auth_sender_requires_hmac_key() {
+        // Authenticated mode sender requires HMAC key
         let args = vec!["test", "--auth-mode", "A"];
         let conf = Configuration::parse_from(args);
-        // Sender without HMAC key is valid - it just won't verify responses
+        let err = conf.validate().unwrap_err();
+        assert!(err.to_string().contains("requires --hmac-key"));
+    }
+
+    #[test]
+    fn test_auth_sender_with_hmac_key_valid() {
+        // Authenticated mode sender with HMAC key is valid
+        let args = vec![
+            "test",
+            "--auth-mode",
+            "A",
+            "--hmac-key",
+            "0123456789abcdef0123456789abcdef",
+        ];
+        let conf = Configuration::parse_from(args);
         assert!(conf.validate().is_ok());
     }
 

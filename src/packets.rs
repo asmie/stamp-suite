@@ -585,8 +585,10 @@ impl ExtendedPacketUnauthenticated {
     /// Serializes the extended packet to bytes.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = self.base.to_bytes().to_vec();
-        buf.extend_from_slice(&self.tlvs.to_bytes());
+        // Pre-allocate exact capacity to avoid reallocations
+        let mut buf = Vec::with_capacity(Self::BASE_SIZE + self.tlvs.wire_size());
+        buf.extend_from_slice(&self.base.to_bytes());
+        self.tlvs.write_to(&mut buf);
         buf
     }
 
@@ -634,8 +636,10 @@ impl ExtendedReflectedPacketUnauthenticated {
     /// Serializes the extended packet to bytes.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = self.base.to_bytes().to_vec();
-        buf.extend_from_slice(&self.tlvs.to_bytes());
+        // Pre-allocate exact capacity to avoid reallocations
+        let mut buf = Vec::with_capacity(Self::BASE_SIZE + self.tlvs.wire_size());
+        buf.extend_from_slice(&self.base.to_bytes());
+        self.tlvs.write_to(&mut buf);
         buf
     }
 
@@ -750,8 +754,10 @@ impl ExtendedPacketAuthenticated {
     /// Serializes the extended packet to bytes.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = self.base.to_bytes().to_vec();
-        buf.extend_from_slice(&self.tlvs.to_bytes());
+        // Pre-allocate exact capacity to avoid reallocations
+        let mut buf = Vec::with_capacity(Self::BASE_SIZE + self.tlvs.wire_size());
+        buf.extend_from_slice(&self.base.to_bytes());
+        self.tlvs.write_to(&mut buf);
         buf
     }
 
@@ -799,8 +805,10 @@ impl ExtendedReflectedPacketAuthenticated {
     /// Serializes the extended packet to bytes.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = self.base.to_bytes().to_vec();
-        buf.extend_from_slice(&self.tlvs.to_bytes());
+        // Pre-allocate exact capacity to avoid reallocations
+        let mut buf = Vec::with_capacity(Self::BASE_SIZE + self.tlvs.wire_size());
+        buf.extend_from_slice(&self.base.to_bytes());
+        self.tlvs.write_to(&mut buf);
         buf
     }
 

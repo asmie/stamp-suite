@@ -22,7 +22,7 @@ use crate::{
     },
     session::Session,
     time::generate_timestamp,
-    tlv::{RawTlv, SessionSenderId, TlvList},
+    tlv::{ClassOfServiceTlv, RawTlv, SessionSenderId, TlvList},
 };
 
 /// Statistics collected during a STAMP sender session.
@@ -138,63 +138,101 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
     let mut recv_buf = [0u8; 1024];
     let timeout = Duration::from_secs(conf.timeout as u64);
 
-    // Check if we need to include TLV extensions (SSID)
-    let use_tlvs = conf.ssid.is_some();
+    // Check if we need to include TLV extensions (SSID or CoS)
+    let use_tlvs = conf.ssid.is_some() || conf.cos;
     if use_tlvs {
-        log::info!("TLV extensions enabled with SSID: {}", conf.ssid.unwrap());
+        if let Some(ssid) = conf.ssid {
+            log::info!("TLV extensions enabled with SSID: {}", ssid);
+        }
+        if conf.cos {
+            log::info!(
+                "Class of Service TLV enabled (DSCP={}, ECN={})",
+                conf.dscp,
+                conf.ecn
+            );
+        }
     }
+
+    // Build CoS TLV if enabled (once, before loop)
+    let cos_tlv: Option<RawTlv> = if conf.cos {
+        Some(ClassOfServiceTlv::new(conf.dscp, conf.ecn).to_raw())
+    } else {
+        None
+    };
+
+    // Pre-build TLV slice reference to avoid per-packet allocation
+    let extra_tlvs: &[RawTlv] = match &cos_tlv {
+        Some(tlv) => std::slice::from_ref(tlv),
+        None => &[],
+    };
+
+    // Precompute send strategy to avoid branching in hot loop.
+    // Using an enum moves the mode decision outside the loop.
+    enum SendMode<'a> {
+        AuthTlv { key: &'a HmacKey },
+        AuthBase { key: &'a HmacKey },
+        OpenTlv { tlv_key: Option<&'a HmacKey> },
+        OpenBase,
+    }
+
+    let send_mode = if use_auth {
+        // Key is guaranteed present - validated at function start
+        let key = hmac_key.as_ref().unwrap();
+        if use_tlvs {
+            SendMode::AuthTlv { key }
+        } else {
+            SendMode::AuthBase { key }
+        }
+    } else if use_tlvs {
+        SendMode::OpenTlv {
+            tlv_key: hmac_key.as_ref(),
+        }
+    } else {
+        SendMode::OpenBase
+    };
 
     for _ in 0..conf.count {
         let seq_num = sess.generate_sequence_number();
         let send_time = Instant::now();
         let send_timestamp = generate_timestamp(conf.clock_source);
 
-        let send_result = if use_auth {
-            if use_tlvs {
-                // Use TLV-aware packet builder with SSID
-                // TLV HMAC uses same key as base packet HMAC
+        let send_result = match &send_mode {
+            SendMode::AuthTlv { key } => {
                 let buf = build_auth_packet_with_tlvs(
                     seq_num,
                     send_timestamp,
                     error_estimate_wire,
-                    hmac_key.as_ref().expect("auth mode requires key"),
+                    key,
                     conf.ssid,
-                    vec![],
-                    hmac_key.as_ref(), // TLV HMAC key
+                    extra_tlvs,
+                    Some(*key),
                 );
                 socket.send(&buf).await
-            } else {
-                // Base packet without TLVs
+            }
+            SendMode::AuthBase { key } => {
                 let mut packet = assemble_auth_packet(error_estimate_wire);
                 packet.sequence_number = seq_num;
                 packet.timestamp = send_timestamp;
-
-                // Compute and set HMAC (key is guaranteed to be present in auth mode)
-                if let Some(ref key) = hmac_key {
-                    finalize_auth_packet(&mut packet, key);
-                }
-
-                let buf = packet.to_bytes();
+                finalize_auth_packet(&mut packet, key);
+                socket.send(&packet.to_bytes()).await
+            }
+            SendMode::OpenTlv { tlv_key } => {
+                let buf = build_unauth_packet_with_tlvs(
+                    seq_num,
+                    send_timestamp,
+                    error_estimate_wire,
+                    conf.ssid,
+                    extra_tlvs,
+                    *tlv_key,
+                );
                 socket.send(&buf).await
             }
-        } else if use_tlvs {
-            // Use TLV-aware packet builder with SSID
-            let buf = build_unauth_packet_with_tlvs(
-                seq_num,
-                send_timestamp,
-                error_estimate_wire,
-                conf.ssid,
-                vec![],
-                hmac_key.as_ref(), // TLV HMAC key (optional in unauth mode)
-            );
-            socket.send(&buf).await
-        } else {
-            // Base packet without TLVs
-            let mut packet = assemble_unauth_packet(error_estimate_wire);
-            packet.sequence_number = seq_num;
-            packet.timestamp = send_timestamp;
-            let buf = packet.to_bytes();
-            socket.send(&buf).await
+            SendMode::OpenBase => {
+                let mut packet = assemble_unauth_packet(error_estimate_wire);
+                packet.sequence_number = seq_num;
+                packet.timestamp = send_timestamp;
+                socket.send(&packet.to_bytes()).await
+            }
         };
 
         if let Err(e) = send_result {
@@ -220,9 +258,10 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         let deadline = tokio::time::Instant::now() + send_delay;
 
         loop {
+            // Use unbiased select to ensure fair scheduling between receiving
+            // responses and the send timer. Biased select would starve the timer
+            // under heavy receive load, reducing packet send rates.
             tokio::select! {
-                biased;
-
                 result = socket.recv(&mut recv_buf) => {
                     match result {
                         Ok(len) => {
@@ -649,7 +688,7 @@ pub fn build_unauth_packet_with_tlvs(
     timestamp: u64,
     error_estimate: u16,
     ssid: Option<u16>,
-    extra_tlvs: Vec<RawTlv>,
+    extra_tlvs: &[RawTlv],
     tlv_hmac_key: Option<&HmacKey>,
 ) -> Vec<u8> {
     let base = PacketUnauthenticated {
@@ -670,7 +709,7 @@ pub fn build_unauth_packet_with_tlvs(
 
     // Add any extra TLVs
     for tlv in extra_tlvs {
-        tlvs.push(tlv).ok();
+        tlvs.push(tlv.clone()).ok();
     }
 
     // Add TLV HMAC if key is provided
@@ -704,7 +743,7 @@ pub fn build_auth_packet_with_tlvs(
     error_estimate: u16,
     base_hmac_key: &HmacKey,
     ssid: Option<u16>,
-    extra_tlvs: Vec<RawTlv>,
+    extra_tlvs: &[RawTlv],
     tlv_hmac_key: Option<&HmacKey>,
 ) -> Vec<u8> {
     let mut base = PacketAuthenticated {
@@ -732,7 +771,7 @@ pub fn build_auth_packet_with_tlvs(
 
     // Add any extra TLVs
     for tlv in extra_tlvs {
-        tlvs.push(tlv).ok();
+        tlvs.push(tlv.clone()).ok();
     }
 
     // Add TLV HMAC if key is provided
@@ -885,7 +924,7 @@ mod tests {
 
     #[test]
     fn test_build_unauth_packet_with_tlvs_no_tlvs() {
-        let packet = build_unauth_packet_with_tlvs(1, 1000, 100, None, vec![], None);
+        let packet = build_unauth_packet_with_tlvs(1, 1000, 100, None, &[], None);
 
         // Should be just base packet (44 bytes)
         assert_eq!(packet.len(), 44);
@@ -896,7 +935,7 @@ mod tests {
         use crate::tlv::TLV_HEADER_SIZE;
 
         let ssid: u16 = 12345;
-        let packet = build_unauth_packet_with_tlvs(1, 1000, 100, Some(ssid), vec![], None);
+        let packet = build_unauth_packet_with_tlvs(1, 1000, 100, Some(ssid), &[], None);
 
         // Base (44) + ExtraPadding TLV (4 header + 2 SSID value)
         assert_eq!(packet.len(), 44 + TLV_HEADER_SIZE + 2);
@@ -917,7 +956,7 @@ mod tests {
         use crate::tlv::{TlvType, TLV_HEADER_SIZE};
 
         let extra_tlv = RawTlv::new(TlvType::Location, vec![1, 2, 3, 4]);
-        let packet = build_unauth_packet_with_tlvs(1, 1000, 100, None, vec![extra_tlv], None);
+        let packet = build_unauth_packet_with_tlvs(1, 1000, 100, None, &[extra_tlv], None);
 
         // Base (44) + Location TLV (4 header + 4 value)
         assert_eq!(packet.len(), 44 + TLV_HEADER_SIZE + 4);
@@ -931,7 +970,7 @@ mod tests {
         use crate::tlv::{HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
 
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
-        let packet = build_unauth_packet_with_tlvs(1, 1000, 100, Some(100), vec![], Some(&key));
+        let packet = build_unauth_packet_with_tlvs(1, 1000, 100, Some(100), &[], Some(&key));
 
         // Base (44) + SSID TLV (4+2) + HMAC TLV (4+16)
         assert_eq!(
@@ -947,7 +986,7 @@ mod tests {
     #[test]
     fn test_build_auth_packet_with_tlvs_no_tlvs() {
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
-        let packet = build_auth_packet_with_tlvs(1, 1000, 100, &key, None, vec![], None);
+        let packet = build_auth_packet_with_tlvs(1, 1000, 100, &key, None, &[], None);
 
         // Should be just base packet (112 bytes)
         assert_eq!(packet.len(), 112);
@@ -961,7 +1000,7 @@ mod tests {
         use crate::tlv::TLV_HEADER_SIZE;
 
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
-        let packet = build_auth_packet_with_tlvs(1, 1000, 100, &key, Some(54321), vec![], None);
+        let packet = build_auth_packet_with_tlvs(1, 1000, 100, &key, Some(54321), &[], None);
 
         // Base (112) + ExtraPadding TLV (4 header + 2 SSID value)
         assert_eq!(packet.len(), 112 + TLV_HEADER_SIZE + 2);
@@ -975,7 +1014,7 @@ mod tests {
         use crate::tlv::{HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
 
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
-        let packet = build_auth_packet_with_tlvs(1, 1000, 100, &key, Some(100), vec![], Some(&key));
+        let packet = build_auth_packet_with_tlvs(1, 1000, 100, &key, Some(100), &[], Some(&key));
 
         // Base (112) + SSID TLV (4+2) + HMAC TLV (4+16)
         assert_eq!(

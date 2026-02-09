@@ -101,6 +101,14 @@ impl SessionManager {
                 },
             );
             log::debug!("Created new session {} for client {}", session_id, client);
+
+            // Record session creation metrics
+            #[cfg(feature = "metrics")]
+            {
+                crate::metrics::reflector_metrics::record_session_created();
+                crate::metrics::reflector_metrics::set_active_sessions(sessions.len());
+            }
+
             session
         };
 
@@ -134,6 +142,10 @@ impl SessionManager {
         let removed = before_count - sessions.len();
         if removed > 0 {
             log::info!("Cleaned up {} stale sessions", removed);
+
+            // Update active sessions gauge after cleanup
+            #[cfg(feature = "metrics")]
+            crate::metrics::reflector_metrics::set_active_sessions(sessions.len());
         }
         removed
     }
