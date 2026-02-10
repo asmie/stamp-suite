@@ -2,7 +2,13 @@
 //!
 //! Preferred on Linux systems. No special privileges required for regular UDP sockets.
 
-use std::{io::IoSliceMut, net::SocketAddr, os::fd::AsRawFd, sync::Arc, time::Duration};
+use std::{
+    io::IoSliceMut,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    os::fd::AsRawFd,
+    sync::Arc,
+    time::Duration,
+};
 
 use nix::{
     libc,
@@ -105,6 +111,37 @@ pub async fn run_receiver(conf: &Configuration) {
         );
     }
 
+    // Enable packet info reception for destination address (for Location TLV).
+    // Without this, a wildcard bind (0.0.0.0/::) reports the bind address as dst_addr.
+    let pktinfo_result = if is_ipv6 {
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_RECVPKTINFO,
+                &enable as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        }
+    } else {
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_PKTINFO,
+                &enable as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        }
+    };
+
+    if pktinfo_result < 0 {
+        log::warn!(
+            "Failed to set IP_PKTINFO/IPV6_RECVPKTINFO: {} (Location TLV dst_addr may use bind address)",
+            std::io::Error::last_os_error()
+        );
+    }
+
     // Set non-blocking for tokio
     if let Err(e) = std_socket.set_nonblocking(true) {
         eprintln!("Error: Failed to set socket non-blocking: {}", e);
@@ -152,18 +189,19 @@ pub async fn run_receiver(conf: &Configuration) {
         log::info!("TLV handling mode: {:?}", conf.tlv_mode);
     }
 
-    // Create session manager for stateful reflector mode (RFC 8972)
-    let session_manager: Option<Arc<SessionManager>> = if conf.stateful_reflector {
-        let timeout = if conf.session_timeout > 0 {
-            Some(std::time::Duration::from_secs(conf.session_timeout))
-        } else {
-            None
-        };
-        log::info!("Stateful reflector mode enabled (RFC 8972)");
-        Some(Arc::new(SessionManager::new(timeout)))
+    // Always create session manager for per-client counter/reflection tracking
+    // (needed for Direct Measurement and Follow-Up Telemetry TLVs regardless of mode).
+    // When --stateful-reflector is on, also used for per-client sequence numbers.
+    let session_timeout = if conf.session_timeout > 0 {
+        Some(std::time::Duration::from_secs(conf.session_timeout))
     } else {
         None
     };
+    let session_manager = Arc::new(SessionManager::new(session_timeout));
+
+    if conf.stateful_reflector {
+        log::info!("Stateful reflector mode enabled (RFC 8972)");
+    }
 
     println!(
         "STAMP Reflector listening on {} (nix mode, real TTL)",
@@ -175,11 +213,10 @@ pub async fn run_receiver(conf: &Configuration) {
 
     // Session cleanup interval: run at half the timeout period, minimum 1 second
     // When session_timeout is 0, checked_div returns None, disabling cleanup
-    let cleanup_interval = session_manager.as_ref().and_then(|_| {
-        conf.session_timeout
-            .checked_div(2)
-            .map(|t| Duration::from_secs(t.max(1)))
-    });
+    let cleanup_interval = conf
+        .session_timeout
+        .checked_div(2)
+        .map(|t| Duration::from_secs(t.max(1)));
     let mut cleanup_timer = cleanup_interval.map(interval);
 
     // Cache last applied TOS value to avoid redundant setsockopt calls under load.
@@ -206,11 +243,9 @@ pub async fn run_receiver(conf: &Configuration) {
                 }
             } => {
                 // Run periodic session cleanup
-                if let Some(ref mgr) = session_manager {
-                    let removed = mgr.cleanup_stale_sessions();
-                    if removed > 0 {
-                        log::debug!("Session cleanup: removed {} stale sessions", removed);
-                    }
+                let removed = session_manager.cleanup_stale_sessions();
+                if removed > 0 {
+                    log::debug!("Session cleanup: removed {} stale sessions", removed);
                 }
                 continue;
             }
@@ -243,6 +278,10 @@ pub async fn run_receiver(conf: &Configuration) {
                     .map(|tos| ((tos >> 2) & 0x3F, tos & 0x03))
                     .unwrap_or((0, 0));
 
+                // Extract actual destination address from packet info (for Location TLV).
+                // Falls back to configured bind address if pktinfo is unavailable.
+                let dst_addr = extract_dst_addr_from_cmsgs(&msg).unwrap_or(conf.local_addr);
+
                 // Convert source address for session lookup and response
                 let src_addr: SocketAddr = match src_storage {
                     Some(ref src) => {
@@ -263,12 +302,32 @@ pub async fn run_receiver(conf: &Configuration) {
 
                 let data = &buf[..len];
 
+                // Get session counters for Direct Measurement and Follow-Up Telemetry.
+                // Always tracked per-client, independent of --stateful-reflector.
+                let counter_session = session_manager.get_or_create_session(src_addr);
+                counter_session.record_received();
+                let reflector_rx_count = Some(counter_session.get_received_count());
+                let reflector_tx_count = Some(counter_session.get_transmitted_count());
+                let last_reflection = Some(counter_session.get_last_reflection());
+
+                // Build packet address info for Location TLV
+                let packet_addr_info = Some(crate::tlv::PacketAddressInfo {
+                    src_addr: src_addr.ip(),
+                    src_port: src_addr.port(),
+                    dst_addr,
+                    dst_port: conf.local_port,
+                });
+
                 let ctx = ProcessingContext {
                     clock_source: conf.clock_source,
                     error_estimate_wire,
                     hmac_key: hmac_key.as_ref(),
                     require_hmac: conf.require_hmac,
-                    session_manager: session_manager.as_ref(),
+                    session_manager: if conf.stateful_reflector {
+                        Some(&session_manager)
+                    } else {
+                        None
+                    },
                     tlv_mode: conf.tlv_mode,
                     verify_tlv_hmac: conf.verify_tlv_hmac,
                     strict_packets: conf.strict_packets,
@@ -276,6 +335,10 @@ pub async fn run_receiver(conf: &Configuration) {
                     metrics_enabled: conf.metrics,
                     received_dscp,
                     received_ecn,
+                    reflector_rx_count,
+                    reflector_tx_count,
+                    packet_addr_info,
+                    last_reflection,
                 };
 
                 if let Some(mut response) =
@@ -335,6 +398,23 @@ pub async fn run_receiver(conf: &Configuration) {
 
                     if let Err(e) = tokio_socket.send_to(&response.data, src_addr).await {
                         eprintln!("Failed to send response: {}", e);
+                    } else {
+                        // Record transmission for Direct Measurement and Follow-Up Telemetry.
+                        // Always tracked per-client, independent of --stateful-reflector.
+                        let session = session_manager.get_or_create_session(src_addr);
+                        session.record_transmitted();
+                        // Extract the reflected seq from the response packet
+                        // (first 4 bytes of reflected packet = sequence_number)
+                        if response.data.len() >= 4 {
+                            let reflected_seq = u32::from_be_bytes([
+                                response.data[0],
+                                response.data[1],
+                                response.data[2],
+                                response.data[3],
+                            ]);
+                            let send_ts = crate::time::generate_timestamp(conf.clock_source);
+                            session.record_reflection(reflected_seq, send_ts);
+                        }
                     }
                 }
             }
@@ -469,6 +549,33 @@ fn extract_tos_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> O
                     return Some(data[0]);
                 }
             }
+        }
+    }
+
+    None
+}
+
+/// Extract destination IP address from control messages received via recvmsg.
+///
+/// Uses IP_PKTINFO (IPv4) or IPV6_PKTINFO (IPv6) to determine the actual
+/// destination address of the received packet. This is needed when the reflector
+/// is bound to a wildcard address (0.0.0.0 / ::) so the Location TLV reports
+/// the real destination rather than the bind address.
+///
+/// Returns `None` if packet info could not be extracted from the control messages.
+fn extract_dst_addr_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> Option<IpAddr> {
+    let cmsgs = msg.cmsgs().ok()?;
+
+    for cmsg in cmsgs {
+        match cmsg {
+            ControlMessageOwned::Ipv4PacketInfo(pktinfo) => {
+                let octets = pktinfo.ipi_addr.s_addr.to_be_bytes();
+                return Some(IpAddr::V4(Ipv4Addr::from(octets)));
+            }
+            ControlMessageOwned::Ipv6PacketInfo(pktinfo) => {
+                return Some(IpAddr::V6(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)));
+            }
+            _ => continue,
         }
     }
 

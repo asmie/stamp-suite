@@ -56,7 +56,9 @@ struct CaptureConfig {
     use_auth: bool,
     error_estimate_wire: u16,
     hmac_key: Option<HmacKey>,
-    session_manager: Option<Arc<SessionManager>>,
+    session_manager: Arc<SessionManager>,
+    /// Whether stateful per-client sequence numbering is enabled.
+    stateful_reflector: bool,
     tlv_mode: TlvHandlingMode,
     require_hmac: bool,
     verify_tlv_hmac: bool,
@@ -109,9 +111,9 @@ pub async fn run_receiver(conf: &Configuration) {
         is_point_to_point: interface.is_point_to_point(),
     };
 
-    // Configure read timeout for periodic cleanup during idle periods
-    // Use half the session timeout (min 1s) if stateful mode, otherwise no timeout
-    let read_timeout = if conf.stateful_reflector && conf.session_timeout > 0 {
+    // Configure read timeout for periodic cleanup during idle periods.
+    // Use half the session timeout (min 1s) to allow cleanup of stale counter sessions.
+    let read_timeout = if conf.session_timeout > 0 {
         Some(Duration::from_secs((conf.session_timeout / 2).max(1)))
     } else {
         None
@@ -177,18 +179,19 @@ pub async fn run_receiver(conf: &Configuration) {
         log::info!("HMAC authentication enabled");
     }
 
-    // Create session manager for stateful reflector mode (RFC 8972)
-    let session_manager: Option<Arc<SessionManager>> = if conf.stateful_reflector {
-        let timeout = if conf.session_timeout > 0 {
-            Some(std::time::Duration::from_secs(conf.session_timeout))
-        } else {
-            None
-        };
-        log::info!("Stateful reflector mode enabled (RFC 8972)");
-        Some(Arc::new(SessionManager::new(timeout)))
+    // Always create session manager for per-client counter/reflection tracking
+    // (needed for Direct Measurement and Follow-Up Telemetry TLVs regardless of mode).
+    // When --stateful-reflector is on, also used for per-client sequence numbers.
+    let session_timeout = if conf.session_timeout > 0 {
+        Some(std::time::Duration::from_secs(conf.session_timeout))
     } else {
         None
     };
+    let session_manager = Arc::new(SessionManager::new(session_timeout));
+
+    if conf.stateful_reflector {
+        log::info!("Stateful reflector mode enabled (RFC 8972)");
+    }
 
     let send_ctx = PnetSendContext {
         send_socket_v4,
@@ -208,11 +211,10 @@ pub async fn run_receiver(conf: &Configuration) {
 
     // Session cleanup interval: run at half the timeout period, minimum 1 second
     // When session_timeout is 0, checked_div returns None, disabling cleanup
-    let cleanup_interval = session_manager.as_ref().and_then(|_| {
-        conf.session_timeout
-            .checked_div(2)
-            .map(|t| Duration::from_secs(t.max(1)))
-    });
+    let cleanup_interval = conf
+        .session_timeout
+        .checked_div(2)
+        .map(|t| Duration::from_secs(t.max(1)));
 
     // Build capture config with all values needed by the blocking loop
     let capture_config = CaptureConfig {
@@ -222,6 +224,7 @@ pub async fn run_receiver(conf: &Configuration) {
         error_estimate_wire,
         hmac_key,
         session_manager,
+        stateful_reflector: conf.stateful_reflector,
         tlv_mode: conf.tlv_mode,
         require_hmac: conf.require_hmac,
         verify_tlv_hmac: conf.verify_tlv_hmac,
@@ -256,10 +259,9 @@ fn run_capture_loop(
 
     loop {
         // Periodic session cleanup check
-        if let (Some(ref mgr), Some(interval)) = (&config.session_manager, config.cleanup_interval)
-        {
+        if let Some(interval) = config.cleanup_interval {
             if last_cleanup.elapsed() >= interval {
-                let removed = mgr.cleanup_stale_sessions();
+                let removed = config.session_manager.cleanup_stale_sessions();
                 if removed > 0 {
                     log::debug!("Session cleanup: removed {} stale sessions", removed);
                 }
@@ -335,12 +337,14 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                             let ecn = header.get_ecn();
                             let src =
                                 SocketAddr::new(IpAddr::V4(header.get_source()), udp.get_source());
+                            let dst_addr = IpAddr::V4(header.get_destination());
                             handle_stamp_packet(
                                 udp.payload(),
                                 src,
                                 ttl,
                                 dscp,
                                 ecn,
+                                dst_addr,
                                 config,
                                 send_ctx,
                             );
@@ -361,12 +365,14 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                             let ecn = traffic_class & 0x03;
                             let src =
                                 SocketAddr::new(IpAddr::V6(header.get_source()), udp.get_source());
+                            let dst_addr = IpAddr::V6(header.get_destination());
                             handle_stamp_packet(
                                 udp.payload(),
                                 src,
                                 ttl,
                                 dscp,
                                 ecn,
+                                dst_addr,
                                 config,
                                 send_ctx,
                             );
@@ -458,15 +464,38 @@ fn handle_stamp_packet(
     ttl: u8,
     dscp: u8,
     ecn: u8,
+    dst_addr: IpAddr,
     config: &CaptureConfig,
     send_ctx: &PnetSendContext,
 ) {
+    // Get session counters for Direct Measurement and Follow-Up Telemetry.
+    // Always tracked per-client, independent of --stateful-reflector.
+    let counter_session = config.session_manager.get_or_create_session(src);
+    counter_session.record_received();
+    let reflector_rx_count = Some(counter_session.get_received_count());
+    let reflector_tx_count = Some(counter_session.get_transmitted_count());
+    let last_reflection = Some(counter_session.get_last_reflection());
+
+    // Build packet address info for Location TLV.
+    // dst_addr comes from the parsed IP header, so it's always the real
+    // destination even when bound to a wildcard address.
+    let packet_addr_info = Some(crate::tlv::PacketAddressInfo {
+        src_addr: src.ip(),
+        src_port: src.port(),
+        dst_addr,
+        dst_port: config.local_port,
+    });
+
     let ctx = ProcessingContext {
         clock_source: config.clock_source,
         error_estimate_wire: config.error_estimate_wire,
         hmac_key: config.hmac_key.as_ref(),
         require_hmac: config.require_hmac,
-        session_manager: config.session_manager.as_ref(),
+        session_manager: if config.stateful_reflector {
+            Some(&config.session_manager)
+        } else {
+            None
+        },
         tlv_mode: config.tlv_mode,
         verify_tlv_hmac: config.verify_tlv_hmac,
         strict_packets: config.strict_packets,
@@ -474,6 +503,10 @@ fn handle_stamp_packet(
         metrics_enabled: config.metrics_enabled,
         received_dscp: dscp,
         received_ecn: ecn,
+        reflector_rx_count,
+        reflector_tx_count,
+        packet_addr_info,
+        last_reflection,
     };
 
     if let Some(mut response) = process_stamp_packet(data, src, ttl, config.use_auth, &ctx) {
@@ -537,6 +570,21 @@ fn handle_stamp_packet(
         };
         if let Err(e) = send_result {
             eprintln!("Failed to send response to {}: {}", src, e);
+        } else {
+            // Record transmission for Direct Measurement and Follow-Up Telemetry.
+            // Always tracked per-client, independent of --stateful-reflector.
+            let session = config.session_manager.get_or_create_session(src);
+            session.record_transmitted();
+            if response.data.len() >= 4 {
+                let reflected_seq = u32::from_be_bytes([
+                    response.data[0],
+                    response.data[1],
+                    response.data[2],
+                    response.data[3],
+                ]);
+                let send_ts = crate::time::generate_timestamp(config.clock_source);
+                session.record_reflection(reflected_seq, send_ts);
+            }
         }
     }
 }

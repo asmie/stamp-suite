@@ -179,6 +179,39 @@ pub struct Configuration {
     /// 0=Not-ECT, 1=ECT(1), 2=ECT(0), 3=CE (Congestion Experienced)
     #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..4))]
     pub ecn: u8,
+
+    /// Enable Access Report TLV (RFC 8972 §4.6) with the given Access ID (0-15).
+    /// The reflector echoes this TLV unchanged.
+    #[clap(long, value_parser = clap::value_parser!(u8).range(0..16))]
+    pub access_report: Option<u8>,
+
+    /// Return code for Access Report TLV (default: 1 = available).
+    /// Only used when --access-report is enabled.
+    #[clap(long, default_value_t = 1)]
+    pub access_return_code: u8,
+
+    /// Enable Timestamp Information TLV (RFC 8972 §4.3).
+    /// The sender includes its sync source and timestamp method;
+    /// the reflector fills in its own values.
+    #[clap(long)]
+    pub timestamp_info: bool,
+
+    /// Enable Direct Measurement TLV (RFC 8972 §4.5).
+    /// The sender includes its transmit count; the reflector fills
+    /// receive and transmit counters.
+    #[clap(long)]
+    pub direct_measurement: bool,
+
+    /// Enable Location TLV (RFC 8972 §4.2).
+    /// The reflector fills in the observed source/destination addresses and ports.
+    #[clap(long)]
+    pub location: bool,
+
+    /// Enable Follow-Up Telemetry TLV (RFC 8972 §4.7).
+    /// The reflector fills in the previous reflection's sequence number
+    /// and timestamp.
+    #[clap(long)]
+    pub follow_up_telemetry: bool,
 }
 
 impl Configuration {

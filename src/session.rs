@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, RwLock,
     },
     time::{Duration, Instant},
@@ -10,13 +10,22 @@ use std::{
 
 /// Represents a STAMP measurement session.
 ///
-/// A session tracks the session identifier and maintains an atomic counter
-/// for generating unique sequence numbers for each packet.
+/// A session tracks the session identifier, maintains an atomic counter
+/// for generating unique sequence numbers, and tracks packet counters
+/// for Direct Measurement and Follow-Up Telemetry TLV support.
 pub struct Session {
     /// Unique identifier for this session.
     sess_id: u32,
     /// Atomic counter for generating sequential packet numbers.
     curr_seq: AtomicU32,
+    /// Total packets received in this session (for Direct Measurement TLV).
+    packets_received: AtomicU32,
+    /// Total packets transmitted in this session (for Direct Measurement TLV).
+    packets_transmitted: AtomicU32,
+    /// Sequence number of the last reflected packet (for Follow-Up Telemetry TLV).
+    last_reflected_seq: AtomicU32,
+    /// Timestamp of the last reflected packet (for Follow-Up Telemetry TLV).
+    last_reflected_timestamp: AtomicU64,
 }
 
 impl Session {
@@ -27,6 +36,10 @@ impl Session {
         Session {
             sess_id: id,
             curr_seq: AtomicU32::new(0),
+            packets_received: AtomicU32::new(0),
+            packets_transmitted: AtomicU32::new(0),
+            last_reflected_seq: AtomicU32::new(0),
+            last_reflected_timestamp: AtomicU64::new(0),
         }
     }
 
@@ -40,6 +53,41 @@ impl Session {
     /// This method is thread-safe and atomically increments the counter.
     pub fn generate_sequence_number(&self) -> u32 {
         self.curr_seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Records a received packet for this session.
+    pub fn record_received(&self) {
+        self.packets_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a transmitted packet for this session.
+    pub fn record_transmitted(&self) {
+        self.packets_transmitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns the total count of received packets.
+    pub fn get_received_count(&self) -> u32 {
+        self.packets_received.load(Ordering::Relaxed)
+    }
+
+    /// Returns the total count of transmitted packets.
+    pub fn get_transmitted_count(&self) -> u32 {
+        self.packets_transmitted.load(Ordering::Relaxed)
+    }
+
+    /// Records a reflection with the given sequence number and timestamp.
+    pub fn record_reflection(&self, seq: u32, timestamp: u64) {
+        self.last_reflected_seq.store(seq, Ordering::Relaxed);
+        self.last_reflected_timestamp
+            .store(timestamp, Ordering::Relaxed);
+    }
+
+    /// Returns the last reflection's sequence number and timestamp.
+    pub fn get_last_reflection(&self) -> (u32, u64) {
+        (
+            self.last_reflected_seq.load(Ordering::Relaxed),
+            self.last_reflected_timestamp.load(Ordering::Relaxed),
+        )
     }
 }
 
@@ -82,6 +130,48 @@ impl SessionManager {
     /// Creates a new session if one doesn't exist for the client.
     /// Also updates the last_active time in a single lock acquisition.
     pub fn generate_sequence_number(&self, client: SocketAddr) -> u32 {
+        let (seq, _session) = self.get_session_and_seq(client);
+        seq
+    }
+
+    /// Returns the session for a client without generating a sequence number.
+    ///
+    /// Creates a new session if one doesn't exist. This is useful for accessing
+    /// session state (counters, last reflection) without consuming a sequence number.
+    pub fn get_or_create_session(&self, client: SocketAddr) -> Arc<Session> {
+        let mut sessions = self.sessions.write().unwrap();
+
+        if let Some(entry) = sessions.get_mut(&client) {
+            entry.last_active = Instant::now();
+            Arc::clone(&entry.session)
+        } else {
+            let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+            let session = Arc::new(Session::new(session_id));
+            sessions.insert(
+                client,
+                SessionEntry {
+                    session: Arc::clone(&session),
+                    last_active: Instant::now(),
+                },
+            );
+            log::debug!("Created new session {} for client {}", session_id, client);
+
+            #[cfg(feature = "metrics")]
+            {
+                crate::metrics::reflector_metrics::record_session_created();
+                crate::metrics::reflector_metrics::set_active_sessions(sessions.len());
+            }
+
+            session
+        }
+    }
+
+    /// Gets the session for a client and generates the next sequence number.
+    ///
+    /// Returns both the sequence number and an Arc to the session, allowing the
+    /// caller to access session state (e.g., packet counters for Direct Measurement TLV).
+    /// Creates a new session if one doesn't exist for the client.
+    pub fn get_session_and_seq(&self, client: SocketAddr) -> (u32, Arc<Session>) {
         // Take write lock once for both session lookup and activity update
         let mut sessions = self.sessions.write().unwrap();
 
@@ -114,7 +204,8 @@ impl SessionManager {
 
         // Release lock before generating sequence number
         drop(sessions);
-        session.generate_sequence_number()
+        let seq = session.generate_sequence_number();
+        (seq, session)
     }
 
     /// Removes sessions that have been inactive longer than the timeout.

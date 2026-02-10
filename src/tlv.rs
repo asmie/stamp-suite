@@ -43,6 +43,21 @@ pub const HMAC_TLV_VALUE_SIZE: usize = 16;
 /// Class of Service TLV value size (4 bytes).
 pub const COS_TLV_VALUE_SIZE: usize = 4;
 
+/// Access Report TLV value size (2 bytes).
+pub const ACCESS_REPORT_TLV_VALUE_SIZE: usize = 2;
+
+/// Timestamp Information TLV value size (4 bytes).
+pub const TIMESTAMP_INFO_TLV_VALUE_SIZE: usize = 4;
+
+/// Direct Measurement TLV value size (12 bytes: three u32 counters).
+pub const DIRECT_MEASUREMENT_TLV_VALUE_SIZE: usize = 12;
+
+/// Location TLV minimum value size (4 bytes: dest_port + src_port).
+pub const LOCATION_TLV_MIN_VALUE_SIZE: usize = 4;
+
+/// Follow-Up Telemetry TLV value size (16 bytes).
+pub const FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE: usize = 16;
+
 /// Errors that can occur during TLV parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum TlvError {
@@ -73,6 +88,26 @@ pub enum TlvError {
     /// Class of Service TLV has invalid length.
     #[error("CoS TLV has invalid length {0}, expected {COS_TLV_VALUE_SIZE}")]
     InvalidCosLength(usize),
+
+    /// Access Report TLV has invalid length.
+    #[error("Access Report TLV has invalid length {0}, expected {ACCESS_REPORT_TLV_VALUE_SIZE}")]
+    InvalidAccessReportLength(usize),
+
+    /// Timestamp Information TLV has invalid length.
+    #[error("Timestamp Info TLV has invalid length {0}, expected {TIMESTAMP_INFO_TLV_VALUE_SIZE}")]
+    InvalidTimestampInfoLength(usize),
+
+    /// Direct Measurement TLV has invalid length.
+    #[error("Direct Measurement TLV has invalid length {0}, expected {DIRECT_MEASUREMENT_TLV_VALUE_SIZE}")]
+    InvalidDirectMeasurementLength(usize),
+
+    /// Location TLV has invalid length (too short for ports).
+    #[error("Location TLV has invalid length {0}, minimum {LOCATION_TLV_MIN_VALUE_SIZE}")]
+    InvalidLocationLength(usize),
+
+    /// Follow-Up Telemetry TLV has invalid length.
+    #[error("Follow-Up Telemetry TLV has invalid length {0}, expected {FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE}")]
+    InvalidFollowUpTelemetryLength(usize),
 }
 
 /// TLV flag bits as defined in RFC 8972 Section 4.2.
@@ -1020,6 +1055,9 @@ impl TlvList {
         // Mark unrecognized types with U-flag
         self.mark_unrecognized_types();
 
+        // Validate known TLV types for correct value sizes (sets M-flag on mismatches)
+        self.validate_known_tlv_lengths();
+
         // If we have an HMAC key, verify the HMAC TLV
         if let Some(key) = hmac_key {
             // Check for missing HMAC TLV in strict mode
@@ -1133,6 +1171,196 @@ impl TlvList {
         // Byte 2: RP (2 bits) | Reserved (6 bits) - preserve reserved bits
         let rp_bits = if policy_rejected { 0x40 } else { 0x00 }; // RP=1 in bits 7-6
         value[2] = rp_bits | (value[2] & 0x3F);
+    }
+
+    /// Updates Timestamp Information TLVs with the reflector's sync source and method.
+    ///
+    /// Per RFC 8972 §4.3, the Session-Reflector fills `sync_src_out` and `timestamp_out`
+    /// (bytes 2-3 of the value) with its own clock information.
+    pub fn update_timestamp_info_tlvs(&mut self, sync_src: SyncSource, ts_method: TimestampMethod) {
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::TimestampInfo
+                && tlv.value.len() == TIMESTAMP_INFO_TLV_VALUE_SIZE
+            {
+                tlv.value[2] = sync_src.to_byte();
+                tlv.value[3] = ts_method.to_byte();
+            }
+        }
+
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order {
+                if tlv.tlv_type == TlvType::TimestampInfo
+                    && tlv.value.len() == TIMESTAMP_INFO_TLV_VALUE_SIZE
+                {
+                    tlv.value[2] = sync_src.to_byte();
+                    tlv.value[3] = ts_method.to_byte();
+                }
+            }
+        }
+    }
+
+    /// Updates Direct Measurement TLVs with the reflector's packet counters.
+    ///
+    /// Per RFC 8972 §4.5, the Session-Reflector fills `R_RxC` and `R_TxC`
+    /// (bytes 4-11 of the value) while preserving `S_TxC` (bytes 0-3).
+    pub fn update_direct_measurement_tlvs(&mut self, rx_count: u32, tx_count: u32) {
+        let rx_bytes = rx_count.to_be_bytes();
+        let tx_bytes = tx_count.to_be_bytes();
+
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::DirectMeasurement
+                && tlv.value.len() == DIRECT_MEASUREMENT_TLV_VALUE_SIZE
+            {
+                tlv.value[4..8].copy_from_slice(&rx_bytes);
+                tlv.value[8..12].copy_from_slice(&tx_bytes);
+            }
+        }
+
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order {
+                if tlv.tlv_type == TlvType::DirectMeasurement
+                    && tlv.value.len() == DIRECT_MEASUREMENT_TLV_VALUE_SIZE
+                {
+                    tlv.value[4..8].copy_from_slice(&rx_bytes);
+                    tlv.value[8..12].copy_from_slice(&tx_bytes);
+                }
+            }
+        }
+    }
+
+    /// Updates Location TLVs with the observed packet address information.
+    ///
+    /// Per RFC 8972 §4.2, the Session-Reflector fills in the ports and adds
+    /// sub-TLVs for the source and destination IP addresses it observed.
+    pub fn update_location_tlvs(&mut self, info: &PacketAddressInfo) {
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::Location && tlv.value.len() >= LOCATION_TLV_MIN_VALUE_SIZE {
+                Self::update_location_value_in_place(&mut tlv.value, info);
+            }
+        }
+
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order {
+                if tlv.tlv_type == TlvType::Location
+                    && tlv.value.len() >= LOCATION_TLV_MIN_VALUE_SIZE
+                {
+                    Self::update_location_value_in_place(&mut tlv.value, info);
+                }
+            }
+        }
+    }
+
+    /// Updates Location TLV value with address information.
+    ///
+    /// Replaces the entire value with ports and address sub-TLVs.
+    fn update_location_value_in_place(value: &mut Vec<u8>, info: &PacketAddressInfo) {
+        value.clear();
+        // Dest port and src port
+        value.extend_from_slice(&info.dst_port.to_be_bytes());
+        value.extend_from_slice(&info.src_port.to_be_bytes());
+        // Add source address sub-TLV
+        match info.src_addr {
+            std::net::IpAddr::V4(addr) => {
+                let sub = LocationSubTlv::new(LocationSubType::Ipv4Src, addr.octets().to_vec());
+                value.extend_from_slice(&sub.to_bytes());
+            }
+            std::net::IpAddr::V6(addr) => {
+                let sub = LocationSubTlv::new(LocationSubType::Ipv6Src, addr.octets().to_vec());
+                value.extend_from_slice(&sub.to_bytes());
+            }
+        }
+        // Add destination address sub-TLV
+        match info.dst_addr {
+            std::net::IpAddr::V4(addr) => {
+                let sub = LocationSubTlv::new(LocationSubType::Ipv4Dst, addr.octets().to_vec());
+                value.extend_from_slice(&sub.to_bytes());
+            }
+            std::net::IpAddr::V6(addr) => {
+                let sub = LocationSubTlv::new(LocationSubType::Ipv6Dst, addr.octets().to_vec());
+                value.extend_from_slice(&sub.to_bytes());
+            }
+        }
+    }
+
+    /// Updates Follow-Up Telemetry TLVs with the last reflection data.
+    ///
+    /// Per RFC 8972 §4.7, the Session-Reflector fills in the sequence number
+    /// and timestamp from its previous reflection.
+    pub fn update_follow_up_telemetry_tlvs(
+        &mut self,
+        last_seq: u32,
+        last_ts: u64,
+        mode: TimestampMethod,
+    ) {
+        let seq_bytes = last_seq.to_be_bytes();
+        let ts_bytes = last_ts.to_be_bytes();
+        let mode_byte = mode.to_byte();
+
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::FollowUpTelemetry
+                && tlv.value.len() == FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE
+            {
+                tlv.value[0..4].copy_from_slice(&seq_bytes);
+                tlv.value[4..12].copy_from_slice(&ts_bytes);
+                tlv.value[12] = mode_byte;
+                tlv.value[13..16].fill(0); // Reserved
+            }
+        }
+
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order {
+                if tlv.tlv_type == TlvType::FollowUpTelemetry
+                    && tlv.value.len() == FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE
+                {
+                    tlv.value[0..4].copy_from_slice(&seq_bytes);
+                    tlv.value[4..12].copy_from_slice(&ts_bytes);
+                    tlv.value[12] = mode_byte;
+                    tlv.value[13..16].fill(0); // Reserved
+                }
+            }
+        }
+    }
+
+    /// Validates known TLV types for correct value sizes and sets M-flag on mismatches.
+    ///
+    /// Per RFC 8972, the Session-Reflector sets the M (malformed) flag when a
+    /// recognized TLV type has an incorrect value length.
+    pub fn validate_known_tlv_lengths(&mut self) {
+        for tlv in &mut self.tlvs {
+            let malformed = match tlv.tlv_type {
+                TlvType::ClassOfService => tlv.value.len() != COS_TLV_VALUE_SIZE,
+                TlvType::AccessReport => tlv.value.len() != ACCESS_REPORT_TLV_VALUE_SIZE,
+                TlvType::TimestampInfo => tlv.value.len() != TIMESTAMP_INFO_TLV_VALUE_SIZE,
+                TlvType::DirectMeasurement => tlv.value.len() != DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
+                TlvType::Location => tlv.value.len() < LOCATION_TLV_MIN_VALUE_SIZE,
+                TlvType::FollowUpTelemetry => tlv.value.len() != FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE,
+                _ => false,
+            };
+            if malformed {
+                tlv.set_malformed();
+            }
+        }
+
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order {
+                let malformed = match tlv.tlv_type {
+                    TlvType::ClassOfService => tlv.value.len() != COS_TLV_VALUE_SIZE,
+                    TlvType::AccessReport => tlv.value.len() != ACCESS_REPORT_TLV_VALUE_SIZE,
+                    TlvType::TimestampInfo => tlv.value.len() != TIMESTAMP_INFO_TLV_VALUE_SIZE,
+                    TlvType::DirectMeasurement => {
+                        tlv.value.len() != DIRECT_MEASUREMENT_TLV_VALUE_SIZE
+                    }
+                    TlvType::Location => tlv.value.len() < LOCATION_TLV_MIN_VALUE_SIZE,
+                    TlvType::FollowUpTelemetry => {
+                        tlv.value.len() != FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE
+                    }
+                    _ => false,
+                };
+                if malformed {
+                    tlv.set_malformed();
+                }
+            }
+        }
     }
 }
 
@@ -1397,6 +1625,609 @@ impl ClassOfServiceTlv {
         } else {
             self.dscp1
         }
+    }
+}
+
+/// Access Report TLV (Type 6) per RFC 8972 §4.6.
+///
+/// Carries an Access Identifier and Return Code. The reflector echoes this TLV
+/// unchanged; structured parsing provides validation.
+///
+/// # Wire Format
+///
+/// ```text
+///  0                   1
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// | Access ID |Rsv|  Return Code  |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AccessReportTlv {
+    /// Access Identifier (4 bits, 0-15).
+    pub access_id: u8,
+    /// Return Code (8 bits).
+    pub return_code: u8,
+}
+
+impl AccessReportTlv {
+    /// Creates a new Access Report TLV.
+    #[must_use]
+    pub fn new(access_id: u8, return_code: u8) -> Self {
+        Self {
+            access_id: access_id & 0x0F,
+            return_code,
+        }
+    }
+
+    /// Parses an Access Report TLV from a RawTlv.
+    ///
+    /// # Errors
+    /// Returns an error if the value is not 2 bytes.
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        if raw.value.len() != ACCESS_REPORT_TLV_VALUE_SIZE {
+            return Err(TlvError::InvalidAccessReportLength(raw.value.len()));
+        }
+        let access_id = (raw.value[0] >> 4) & 0x0F;
+        let return_code = raw.value[1];
+        Ok(Self {
+            access_id,
+            return_code,
+        })
+    }
+
+    /// Converts to a RawTlv.
+    #[must_use]
+    pub fn to_raw(&self) -> RawTlv {
+        let mut value = [0u8; ACCESS_REPORT_TLV_VALUE_SIZE];
+        value[0] = (self.access_id & 0x0F) << 4;
+        value[1] = self.return_code;
+        RawTlv::new(TlvType::AccessReport, value.to_vec())
+    }
+}
+
+/// Synchronization source for Timestamp Information TLV per RFC 8972 §4.3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SyncSource {
+    /// NTP synchronization.
+    Ntp = 1,
+    /// PTP (IEEE 1588) synchronization.
+    Ptp = 2,
+    /// GPS synchronization.
+    Gps = 3,
+    /// GLONASS synchronization.
+    Glonass = 4,
+    /// LORAN-C synchronization.
+    LoranC = 5,
+    /// BDS (BeiDou) synchronization.
+    Bds = 6,
+    /// Galileo synchronization.
+    Galileo = 7,
+    /// Local clock (unsynchronized).
+    Local = 8,
+    /// SSU/BITS synchronization.
+    SsuBits = 9,
+    /// Unknown synchronization source.
+    Unknown(u8),
+}
+
+impl SyncSource {
+    /// Creates a SyncSource from a byte value.
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Self {
+        match byte {
+            1 => Self::Ntp,
+            2 => Self::Ptp,
+            3 => Self::Gps,
+            4 => Self::Glonass,
+            5 => Self::LoranC,
+            6 => Self::Bds,
+            7 => Self::Galileo,
+            8 => Self::Local,
+            9 => Self::SsuBits,
+            n => Self::Unknown(n),
+        }
+    }
+
+    /// Converts to a byte value.
+    #[must_use]
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Self::Ntp => 1,
+            Self::Ptp => 2,
+            Self::Gps => 3,
+            Self::Glonass => 4,
+            Self::LoranC => 5,
+            Self::Bds => 6,
+            Self::Galileo => 7,
+            Self::Local => 8,
+            Self::SsuBits => 9,
+            Self::Unknown(n) => n,
+        }
+    }
+}
+
+/// Timestamp method for Timestamp Information TLV per RFC 8972 §4.3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TimestampMethod {
+    /// Hardware-assisted timestamping.
+    HwAssist = 1,
+    /// Software local timestamping.
+    SwLocal = 2,
+    /// Control plane timestamping.
+    ControlPlane = 3,
+    /// Unknown method.
+    Unknown(u8),
+}
+
+impl TimestampMethod {
+    /// Creates a TimestampMethod from a byte value.
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Self {
+        match byte {
+            1 => Self::HwAssist,
+            2 => Self::SwLocal,
+            3 => Self::ControlPlane,
+            n => Self::Unknown(n),
+        }
+    }
+
+    /// Converts to a byte value.
+    #[must_use]
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Self::HwAssist => 1,
+            Self::SwLocal => 2,
+            Self::ControlPlane => 3,
+            Self::Unknown(n) => n,
+        }
+    }
+}
+
+/// Timestamp Information TLV (Type 3) per RFC 8972 §4.3.
+///
+/// Carries synchronization source and timestamp method for both
+/// the sender (in) and reflector (out) directions.
+///
+/// # Wire Format
+///
+/// ```text
+///  0         1         2         3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// | Sync Src In   | TS Method In  | Sync Src Out  | TS Method Out |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimestampInfoTlv {
+    /// Synchronization source of the sender.
+    pub sync_src_in: SyncSource,
+    /// Timestamp method of the sender.
+    pub timestamp_in: TimestampMethod,
+    /// Synchronization source of the reflector.
+    pub sync_src_out: SyncSource,
+    /// Timestamp method of the reflector.
+    pub timestamp_out: TimestampMethod,
+}
+
+impl TimestampInfoTlv {
+    /// Creates a new Timestamp Info TLV for the sender.
+    ///
+    /// The sender fills the in-fields with its own values and zeros out-fields.
+    #[must_use]
+    pub fn new(sync_src: SyncSource, ts_method: TimestampMethod) -> Self {
+        Self {
+            sync_src_in: sync_src,
+            timestamp_in: ts_method,
+            sync_src_out: SyncSource::Unknown(0),
+            timestamp_out: TimestampMethod::Unknown(0),
+        }
+    }
+
+    /// Parses a Timestamp Info TLV from a RawTlv.
+    ///
+    /// # Errors
+    /// Returns an error if the value is not 4 bytes.
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        if raw.value.len() != TIMESTAMP_INFO_TLV_VALUE_SIZE {
+            return Err(TlvError::InvalidTimestampInfoLength(raw.value.len()));
+        }
+        Ok(Self {
+            sync_src_in: SyncSource::from_byte(raw.value[0]),
+            timestamp_in: TimestampMethod::from_byte(raw.value[1]),
+            sync_src_out: SyncSource::from_byte(raw.value[2]),
+            timestamp_out: TimestampMethod::from_byte(raw.value[3]),
+        })
+    }
+
+    /// Converts to a RawTlv.
+    #[must_use]
+    pub fn to_raw(&self) -> RawTlv {
+        let value = vec![
+            self.sync_src_in.to_byte(),
+            self.timestamp_in.to_byte(),
+            self.sync_src_out.to_byte(),
+            self.timestamp_out.to_byte(),
+        ];
+        RawTlv::new(TlvType::TimestampInfo, value)
+    }
+}
+
+/// Direct Measurement TLV (Type 5) per RFC 8972 §4.5.
+///
+/// Three 4-byte counters: sender transmit count, reflector receive count,
+/// and reflector transmit count.
+///
+/// # Wire Format
+///
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                    Sender Tx Count (S_TxC)                    |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                   Reflector Rx Count (R_RxC)                  |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                   Reflector Tx Count (R_TxC)                  |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectMeasurementTlv {
+    /// Sender transmit count.
+    pub sender_tx_count: u32,
+    /// Reflector receive count.
+    pub reflector_rx_count: u32,
+    /// Reflector transmit count.
+    pub reflector_tx_count: u32,
+}
+
+impl DirectMeasurementTlv {
+    /// Creates a new Direct Measurement TLV for the sender.
+    ///
+    /// The sender fills `sender_tx_count`; reflector fields are zeroed.
+    #[must_use]
+    pub fn new(sender_tx_count: u32) -> Self {
+        Self {
+            sender_tx_count,
+            reflector_rx_count: 0,
+            reflector_tx_count: 0,
+        }
+    }
+
+    /// Parses a Direct Measurement TLV from a RawTlv.
+    ///
+    /// # Errors
+    /// Returns an error if the value is not 12 bytes.
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        if raw.value.len() != DIRECT_MEASUREMENT_TLV_VALUE_SIZE {
+            return Err(TlvError::InvalidDirectMeasurementLength(raw.value.len()));
+        }
+        let sender_tx_count =
+            u32::from_be_bytes([raw.value[0], raw.value[1], raw.value[2], raw.value[3]]);
+        let reflector_rx_count =
+            u32::from_be_bytes([raw.value[4], raw.value[5], raw.value[6], raw.value[7]]);
+        let reflector_tx_count =
+            u32::from_be_bytes([raw.value[8], raw.value[9], raw.value[10], raw.value[11]]);
+        Ok(Self {
+            sender_tx_count,
+            reflector_rx_count,
+            reflector_tx_count,
+        })
+    }
+
+    /// Converts to a RawTlv.
+    #[must_use]
+    pub fn to_raw(&self) -> RawTlv {
+        let mut value = Vec::with_capacity(DIRECT_MEASUREMENT_TLV_VALUE_SIZE);
+        value.extend_from_slice(&self.sender_tx_count.to_be_bytes());
+        value.extend_from_slice(&self.reflector_rx_count.to_be_bytes());
+        value.extend_from_slice(&self.reflector_tx_count.to_be_bytes());
+        RawTlv::new(TlvType::DirectMeasurement, value)
+    }
+}
+
+/// Location sub-TLV types per RFC 8972 §4.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LocationSubType {
+    /// IPv4 source address (4 bytes).
+    Ipv4Src = 1,
+    /// IPv4 destination address (4 bytes).
+    Ipv4Dst = 2,
+    /// IPv6 source address (16 bytes).
+    Ipv6Src = 3,
+    /// IPv6 destination address (16 bytes).
+    Ipv6Dst = 4,
+    /// Autonomous System Number (4 bytes).
+    Asn = 5,
+    /// Interface name (variable).
+    IfName = 6,
+    /// Interface index (4 bytes).
+    IfIndex = 7,
+    /// MPLS label stack (variable).
+    MplsLabel = 8,
+    /// Segment Routing SID (variable).
+    SrSid = 9,
+    /// Unknown sub-type.
+    Unknown(u8),
+}
+
+impl LocationSubType {
+    /// Creates a LocationSubType from a byte value.
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Self {
+        match byte {
+            1 => Self::Ipv4Src,
+            2 => Self::Ipv4Dst,
+            3 => Self::Ipv6Src,
+            4 => Self::Ipv6Dst,
+            5 => Self::Asn,
+            6 => Self::IfName,
+            7 => Self::IfIndex,
+            8 => Self::MplsLabel,
+            9 => Self::SrSid,
+            n => Self::Unknown(n),
+        }
+    }
+
+    /// Converts to a byte value.
+    #[must_use]
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Self::Ipv4Src => 1,
+            Self::Ipv4Dst => 2,
+            Self::Ipv6Src => 3,
+            Self::Ipv6Dst => 4,
+            Self::Asn => 5,
+            Self::IfName => 6,
+            Self::IfIndex => 7,
+            Self::MplsLabel => 8,
+            Self::SrSid => 9,
+            Self::Unknown(n) => n,
+        }
+    }
+}
+
+/// A single location sub-TLV within the Location TLV.
+///
+/// # Wire Format
+///
+/// ```text
+///  0         1         2         3
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |   Sub-Type    |    Length      |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |            Value ...           |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationSubTlv {
+    /// Sub-TLV type.
+    pub sub_type: LocationSubType,
+    /// Sub-TLV value.
+    pub value: Vec<u8>,
+}
+
+impl LocationSubTlv {
+    /// Creates a new location sub-TLV.
+    #[must_use]
+    pub fn new(sub_type: LocationSubType, value: Vec<u8>) -> Self {
+        Self { sub_type, value }
+    }
+
+    /// Serializes the sub-TLV to bytes.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(2 + self.value.len());
+        buf.push(self.sub_type.to_byte());
+        buf.push(self.value.len() as u8);
+        buf.extend_from_slice(&self.value);
+        buf
+    }
+
+    /// Parses a sub-TLV from a byte slice.
+    ///
+    /// Returns the parsed sub-TLV and bytes consumed, or None if buffer is too small.
+    #[must_use]
+    pub fn parse(buf: &[u8]) -> Option<(Self, usize)> {
+        if buf.len() < 2 {
+            return None;
+        }
+        let sub_type = LocationSubType::from_byte(buf[0]);
+        let length = buf[1] as usize;
+        if buf.len() < 2 + length {
+            return None;
+        }
+        let value = buf[2..2 + length].to_vec();
+        Some((Self { sub_type, value }, 2 + length))
+    }
+}
+
+/// Location TLV (Type 2) per RFC 8972 §4.2.
+///
+/// Carries source/destination ports and sub-TLVs for addresses.
+/// The reflector fills in its observed ports and addresses.
+///
+/// # Wire Format
+///
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |         Dest Port             |         Source Port            |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |         Sub-TLVs ...                                          |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationTlv {
+    /// Destination port.
+    pub dest_port: u16,
+    /// Source port.
+    pub src_port: u16,
+    /// Sub-TLVs containing address information.
+    pub sub_tlvs: Vec<LocationSubTlv>,
+}
+
+impl LocationTlv {
+    /// Creates a new empty Location TLV (sender requests reflector to fill).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            dest_port: 0,
+            src_port: 0,
+            sub_tlvs: Vec::new(),
+        }
+    }
+
+    /// Parses a Location TLV from a RawTlv.
+    ///
+    /// # Errors
+    /// Returns an error if the value is shorter than 4 bytes (ports).
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        if raw.value.len() < LOCATION_TLV_MIN_VALUE_SIZE {
+            return Err(TlvError::InvalidLocationLength(raw.value.len()));
+        }
+        let dest_port = u16::from_be_bytes([raw.value[0], raw.value[1]]);
+        let src_port = u16::from_be_bytes([raw.value[2], raw.value[3]]);
+
+        let mut sub_tlvs = Vec::new();
+        let mut offset = 4;
+        while offset < raw.value.len() {
+            if let Some((sub, consumed)) = LocationSubTlv::parse(&raw.value[offset..]) {
+                sub_tlvs.push(sub);
+                offset += consumed;
+            } else {
+                break;
+            }
+        }
+
+        Ok(Self {
+            dest_port,
+            src_port,
+            sub_tlvs,
+        })
+    }
+
+    /// Converts to a RawTlv.
+    #[must_use]
+    pub fn to_raw(&self) -> RawTlv {
+        let mut value = Vec::new();
+        value.extend_from_slice(&self.dest_port.to_be_bytes());
+        value.extend_from_slice(&self.src_port.to_be_bytes());
+        for sub in &self.sub_tlvs {
+            value.extend_from_slice(&sub.to_bytes());
+        }
+        RawTlv::new(TlvType::Location, value)
+    }
+}
+
+impl Default for LocationTlv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Packet address information for Location TLV processing.
+///
+/// Used by the reflector to fill in the Location TLV with observed addresses/ports.
+#[derive(Debug, Clone)]
+pub struct PacketAddressInfo {
+    /// Source IP address of the received packet.
+    pub src_addr: std::net::IpAddr,
+    /// Source port of the received packet.
+    pub src_port: u16,
+    /// Destination IP address of the received packet.
+    pub dst_addr: std::net::IpAddr,
+    /// Destination port of the received packet.
+    pub dst_port: u16,
+}
+
+/// Follow-Up Telemetry TLV (Type 7) per RFC 8972 §4.7.
+///
+/// References a previously reflected packet with a follow-up timestamp.
+///
+/// # Wire Format
+///
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                    Sequence Number                            |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                                                               |
+/// |                    Follow-Up Timestamp (8 bytes)              |
+/// |                                                               |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// | TS Mode       |           Reserved (3 bytes)                  |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FollowUpTelemetryTlv {
+    /// Sequence number of the previously reflected packet.
+    pub sequence_number: u32,
+    /// Follow-up timestamp from the reflector.
+    pub follow_up_timestamp: u64,
+    /// Timestamp mode used by the reflector.
+    pub timestamp_mode: TimestampMethod,
+}
+
+impl FollowUpTelemetryTlv {
+    /// Creates a new Follow-Up Telemetry TLV for the sender (all fields zeroed).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sequence_number: 0,
+            follow_up_timestamp: 0,
+            timestamp_mode: TimestampMethod::Unknown(0),
+        }
+    }
+
+    /// Parses a Follow-Up Telemetry TLV from a RawTlv.
+    ///
+    /// # Errors
+    /// Returns an error if the value is not 16 bytes.
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        if raw.value.len() != FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE {
+            return Err(TlvError::InvalidFollowUpTelemetryLength(raw.value.len()));
+        }
+        let sequence_number =
+            u32::from_be_bytes([raw.value[0], raw.value[1], raw.value[2], raw.value[3]]);
+        let follow_up_timestamp = u64::from_be_bytes([
+            raw.value[4],
+            raw.value[5],
+            raw.value[6],
+            raw.value[7],
+            raw.value[8],
+            raw.value[9],
+            raw.value[10],
+            raw.value[11],
+        ]);
+        let timestamp_mode = TimestampMethod::from_byte(raw.value[12]);
+        Ok(Self {
+            sequence_number,
+            follow_up_timestamp,
+            timestamp_mode,
+        })
+    }
+
+    /// Converts to a RawTlv.
+    #[must_use]
+    pub fn to_raw(&self) -> RawTlv {
+        let mut value = Vec::with_capacity(FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE);
+        value.extend_from_slice(&self.sequence_number.to_be_bytes());
+        value.extend_from_slice(&self.follow_up_timestamp.to_be_bytes());
+        value.push(self.timestamp_mode.to_byte());
+        value.extend_from_slice(&[0u8; 3]); // Reserved
+        RawTlv::new(TlvType::FollowUpTelemetry, value)
+    }
+}
+
+impl Default for FollowUpTelemetryTlv {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2589,5 +3420,764 @@ mod tests {
         assert_eq!(list.non_hmac_tlvs()[0].tlv_type, TlvType::Reserved);
         assert_eq!(list.non_hmac_tlvs()[0].value.len(), 2);
         assert_eq!(list.non_hmac_tlvs()[1].tlv_type, TlvType::Location);
+    }
+
+    // ========================================================================
+    // Access Report TLV tests (Type 6)
+    // ========================================================================
+
+    #[test]
+    fn test_access_report_tlv_new() {
+        let tlv = AccessReportTlv::new(5, 1);
+        assert_eq!(tlv.access_id, 5);
+        assert_eq!(tlv.return_code, 1);
+    }
+
+    #[test]
+    fn test_access_report_tlv_new_clamps_access_id() {
+        let tlv = AccessReportTlv::new(0xFF, 1);
+        assert_eq!(tlv.access_id, 0x0F); // Only lower 4 bits kept
+    }
+
+    #[test]
+    fn test_access_report_tlv_roundtrip() {
+        let original = AccessReportTlv::new(10, 42);
+        let raw = original.to_raw();
+        let parsed = AccessReportTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.access_id, original.access_id);
+        assert_eq!(parsed.return_code, original.return_code);
+    }
+
+    #[test]
+    fn test_access_report_tlv_wire_format() {
+        let tlv = AccessReportTlv::new(0x0A, 0x03);
+        let raw = tlv.to_raw();
+        assert_eq!(raw.tlv_type, TlvType::AccessReport);
+        assert_eq!(raw.value.len(), ACCESS_REPORT_TLV_VALUE_SIZE);
+        // Byte 0: access_id (0x0A) << 4 = 0xA0
+        assert_eq!(raw.value[0], 0xA0);
+        // Byte 1: return_code = 0x03
+        assert_eq!(raw.value[1], 0x03);
+    }
+
+    #[test]
+    fn test_access_report_tlv_from_raw_invalid_length() {
+        let raw = RawTlv::new(TlvType::AccessReport, vec![0x00]);
+        let result = AccessReportTlv::from_raw(&raw);
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidAccessReportLength(1))
+        ));
+    }
+
+    #[test]
+    fn test_access_report_tlv_from_raw_too_long() {
+        let raw = RawTlv::new(TlvType::AccessReport, vec![0x00, 0x01, 0x02]);
+        let result = AccessReportTlv::from_raw(&raw);
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidAccessReportLength(3))
+        ));
+    }
+
+    #[test]
+    fn test_access_report_tlv_boundary_values() {
+        // Max access_id (15), max return_code (255)
+        let tlv = AccessReportTlv::new(15, 255);
+        let raw = tlv.to_raw();
+        let parsed = AccessReportTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.access_id, 15);
+        assert_eq!(parsed.return_code, 255);
+
+        // Min values
+        let tlv = AccessReportTlv::new(0, 0);
+        let raw = tlv.to_raw();
+        let parsed = AccessReportTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.access_id, 0);
+        assert_eq!(parsed.return_code, 0);
+    }
+
+    // ========================================================================
+    // SyncSource and TimestampMethod enum tests
+    // ========================================================================
+
+    #[test]
+    fn test_sync_source_roundtrip() {
+        let sources = [
+            SyncSource::Ntp,
+            SyncSource::Ptp,
+            SyncSource::Gps,
+            SyncSource::Glonass,
+            SyncSource::LoranC,
+            SyncSource::Bds,
+            SyncSource::Galileo,
+            SyncSource::Local,
+            SyncSource::SsuBits,
+            SyncSource::Unknown(42),
+        ];
+        for src in &sources {
+            let byte = src.to_byte();
+            let parsed = SyncSource::from_byte(byte);
+            assert_eq!(*src, parsed);
+        }
+    }
+
+    #[test]
+    fn test_sync_source_byte_values() {
+        assert_eq!(SyncSource::Ntp.to_byte(), 1);
+        assert_eq!(SyncSource::Ptp.to_byte(), 2);
+        assert_eq!(SyncSource::Gps.to_byte(), 3);
+        assert_eq!(SyncSource::Local.to_byte(), 8);
+        assert_eq!(SyncSource::SsuBits.to_byte(), 9);
+        assert_eq!(SyncSource::Unknown(0).to_byte(), 0);
+        assert_eq!(SyncSource::Unknown(255).to_byte(), 255);
+    }
+
+    #[test]
+    fn test_timestamp_method_roundtrip() {
+        let methods = [
+            TimestampMethod::HwAssist,
+            TimestampMethod::SwLocal,
+            TimestampMethod::ControlPlane,
+            TimestampMethod::Unknown(99),
+        ];
+        for method in &methods {
+            let byte = method.to_byte();
+            let parsed = TimestampMethod::from_byte(byte);
+            assert_eq!(*method, parsed);
+        }
+    }
+
+    #[test]
+    fn test_timestamp_method_byte_values() {
+        assert_eq!(TimestampMethod::HwAssist.to_byte(), 1);
+        assert_eq!(TimestampMethod::SwLocal.to_byte(), 2);
+        assert_eq!(TimestampMethod::ControlPlane.to_byte(), 3);
+        assert_eq!(TimestampMethod::Unknown(0).to_byte(), 0);
+    }
+
+    // ========================================================================
+    // Timestamp Info TLV tests (Type 3)
+    // ========================================================================
+
+    #[test]
+    fn test_timestamp_info_tlv_new() {
+        let tlv = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::SwLocal);
+        assert_eq!(tlv.sync_src_in, SyncSource::Ntp);
+        assert_eq!(tlv.timestamp_in, TimestampMethod::SwLocal);
+        assert_eq!(tlv.sync_src_out, SyncSource::Unknown(0));
+        assert_eq!(tlv.timestamp_out, TimestampMethod::Unknown(0));
+    }
+
+    #[test]
+    fn test_timestamp_info_tlv_roundtrip() {
+        let original = TimestampInfoTlv {
+            sync_src_in: SyncSource::Ptp,
+            timestamp_in: TimestampMethod::HwAssist,
+            sync_src_out: SyncSource::Gps,
+            timestamp_out: TimestampMethod::ControlPlane,
+        };
+        let raw = original.to_raw();
+        let parsed = TimestampInfoTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_timestamp_info_tlv_wire_format() {
+        let tlv = TimestampInfoTlv {
+            sync_src_in: SyncSource::Ntp,             // 1
+            timestamp_in: TimestampMethod::SwLocal,   // 2
+            sync_src_out: SyncSource::Ptp,            // 2
+            timestamp_out: TimestampMethod::HwAssist, // 1
+        };
+        let raw = tlv.to_raw();
+        assert_eq!(raw.tlv_type, TlvType::TimestampInfo);
+        assert_eq!(raw.value.len(), TIMESTAMP_INFO_TLV_VALUE_SIZE);
+        assert_eq!(raw.value, vec![1, 2, 2, 1]);
+    }
+
+    #[test]
+    fn test_timestamp_info_tlv_from_raw_invalid_length() {
+        let raw = RawTlv::new(TlvType::TimestampInfo, vec![1, 2, 3]);
+        let result = TimestampInfoTlv::from_raw(&raw);
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidTimestampInfoLength(3))
+        ));
+    }
+
+    #[test]
+    fn test_timestamp_info_tlv_from_raw_too_long() {
+        let raw = RawTlv::new(TlvType::TimestampInfo, vec![1, 2, 3, 4, 5]);
+        let result = TimestampInfoTlv::from_raw(&raw);
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidTimestampInfoLength(5))
+        ));
+    }
+
+    // ========================================================================
+    // Direct Measurement TLV tests (Type 5)
+    // ========================================================================
+
+    #[test]
+    fn test_direct_measurement_tlv_new() {
+        let tlv = DirectMeasurementTlv::new(100);
+        assert_eq!(tlv.sender_tx_count, 100);
+        assert_eq!(tlv.reflector_rx_count, 0);
+        assert_eq!(tlv.reflector_tx_count, 0);
+    }
+
+    #[test]
+    fn test_direct_measurement_tlv_roundtrip() {
+        let original = DirectMeasurementTlv {
+            sender_tx_count: 1000,
+            reflector_rx_count: 999,
+            reflector_tx_count: 998,
+        };
+        let raw = original.to_raw();
+        let parsed = DirectMeasurementTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_direct_measurement_tlv_wire_format() {
+        let tlv = DirectMeasurementTlv {
+            sender_tx_count: 0x00000001,
+            reflector_rx_count: 0x00000002,
+            reflector_tx_count: 0x00000003,
+        };
+        let raw = tlv.to_raw();
+        assert_eq!(raw.tlv_type, TlvType::DirectMeasurement);
+        assert_eq!(raw.value.len(), DIRECT_MEASUREMENT_TLV_VALUE_SIZE);
+        // Big-endian u32 values
+        assert_eq!(&raw.value[0..4], &[0, 0, 0, 1]);
+        assert_eq!(&raw.value[4..8], &[0, 0, 0, 2]);
+        assert_eq!(&raw.value[8..12], &[0, 0, 0, 3]);
+    }
+
+    #[test]
+    fn test_direct_measurement_tlv_max_values() {
+        let tlv = DirectMeasurementTlv {
+            sender_tx_count: u32::MAX,
+            reflector_rx_count: u32::MAX,
+            reflector_tx_count: u32::MAX,
+        };
+        let raw = tlv.to_raw();
+        let parsed = DirectMeasurementTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.sender_tx_count, u32::MAX);
+        assert_eq!(parsed.reflector_rx_count, u32::MAX);
+        assert_eq!(parsed.reflector_tx_count, u32::MAX);
+    }
+
+    #[test]
+    fn test_direct_measurement_tlv_from_raw_invalid_length() {
+        let raw = RawTlv::new(TlvType::DirectMeasurement, vec![0; 8]);
+        let result = DirectMeasurementTlv::from_raw(&raw);
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidDirectMeasurementLength(8))
+        ));
+    }
+
+    #[test]
+    fn test_direct_measurement_tlv_from_raw_too_long() {
+        let raw = RawTlv::new(TlvType::DirectMeasurement, vec![0; 16]);
+        let result = DirectMeasurementTlv::from_raw(&raw);
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidDirectMeasurementLength(16))
+        ));
+    }
+
+    // ========================================================================
+    // Location sub-TLV tests
+    // ========================================================================
+
+    #[test]
+    fn test_location_sub_type_roundtrip() {
+        let types = [
+            LocationSubType::Ipv4Src,
+            LocationSubType::Ipv4Dst,
+            LocationSubType::Ipv6Src,
+            LocationSubType::Ipv6Dst,
+            LocationSubType::Asn,
+            LocationSubType::IfName,
+            LocationSubType::IfIndex,
+            LocationSubType::MplsLabel,
+            LocationSubType::SrSid,
+            LocationSubType::Unknown(42),
+        ];
+        for t in &types {
+            assert_eq!(*t, LocationSubType::from_byte(t.to_byte()));
+        }
+    }
+
+    #[test]
+    fn test_location_sub_tlv_to_bytes_and_parse() {
+        let sub = LocationSubTlv::new(LocationSubType::Ipv4Src, vec![192, 168, 1, 1]);
+        let bytes = sub.to_bytes();
+        assert_eq!(bytes.len(), 6); // 1 type + 1 length + 4 value
+        assert_eq!(bytes[0], 1); // Ipv4Src
+        assert_eq!(bytes[1], 4); // length
+        assert_eq!(&bytes[2..], &[192, 168, 1, 1]);
+
+        let (parsed, consumed) = LocationSubTlv::parse(&bytes).unwrap();
+        assert_eq!(consumed, 6);
+        assert_eq!(parsed, sub);
+    }
+
+    #[test]
+    fn test_location_sub_tlv_ipv6() {
+        let addr = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let sub = LocationSubTlv::new(LocationSubType::Ipv6Dst, addr.to_vec());
+        let bytes = sub.to_bytes();
+        assert_eq!(bytes.len(), 18); // 1 + 1 + 16
+
+        let (parsed, consumed) = LocationSubTlv::parse(&bytes).unwrap();
+        assert_eq!(consumed, 18);
+        assert_eq!(parsed.sub_type, LocationSubType::Ipv6Dst);
+        assert_eq!(parsed.value, addr.to_vec());
+    }
+
+    #[test]
+    fn test_location_sub_tlv_parse_too_short() {
+        assert!(LocationSubTlv::parse(&[]).is_none());
+        assert!(LocationSubTlv::parse(&[1]).is_none());
+    }
+
+    #[test]
+    fn test_location_sub_tlv_parse_truncated_value() {
+        // Header says length=4 but only 2 bytes available
+        let buf = [1, 4, 192, 168];
+        assert!(LocationSubTlv::parse(&buf).is_none());
+    }
+
+    // ========================================================================
+    // Location TLV tests (Type 2)
+    // ========================================================================
+
+    #[test]
+    fn test_location_tlv_new() {
+        let tlv = LocationTlv::new();
+        assert_eq!(tlv.dest_port, 0);
+        assert_eq!(tlv.src_port, 0);
+        assert!(tlv.sub_tlvs.is_empty());
+    }
+
+    #[test]
+    fn test_location_tlv_default() {
+        let tlv = LocationTlv::default();
+        assert_eq!(tlv.dest_port, 0);
+        assert_eq!(tlv.src_port, 0);
+        assert!(tlv.sub_tlvs.is_empty());
+    }
+
+    #[test]
+    fn test_location_tlv_roundtrip_empty() {
+        let original = LocationTlv {
+            dest_port: 862,
+            src_port: 50000,
+            sub_tlvs: vec![],
+        };
+        let raw = original.to_raw();
+        let parsed = LocationTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.dest_port, 862);
+        assert_eq!(parsed.src_port, 50000);
+        assert!(parsed.sub_tlvs.is_empty());
+    }
+
+    #[test]
+    fn test_location_tlv_roundtrip_with_sub_tlvs() {
+        let original = LocationTlv {
+            dest_port: 862,
+            src_port: 12345,
+            sub_tlvs: vec![
+                LocationSubTlv::new(LocationSubType::Ipv4Src, vec![10, 0, 0, 1]),
+                LocationSubTlv::new(LocationSubType::Ipv4Dst, vec![10, 0, 0, 2]),
+            ],
+        };
+        let raw = original.to_raw();
+        let parsed = LocationTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_location_tlv_wire_format() {
+        let tlv = LocationTlv {
+            dest_port: 0x035E, // 862
+            src_port: 0xC350,  // 50000
+            sub_tlvs: vec![LocationSubTlv::new(
+                LocationSubType::Ipv4Src,
+                vec![192, 168, 1, 1],
+            )],
+        };
+        let raw = tlv.to_raw();
+        assert_eq!(raw.tlv_type, TlvType::Location);
+        // 4 bytes ports + 6 bytes sub-TLV = 10
+        assert_eq!(raw.value.len(), 10);
+        assert_eq!(&raw.value[0..2], &[0x03, 0x5E]); // dest_port
+        assert_eq!(&raw.value[2..4], &[0xC3, 0x50]); // src_port
+        assert_eq!(raw.value[4], 1); // sub-TLV type: Ipv4Src
+        assert_eq!(raw.value[5], 4); // sub-TLV length
+        assert_eq!(&raw.value[6..10], &[192, 168, 1, 1]); // sub-TLV value
+    }
+
+    #[test]
+    fn test_location_tlv_from_raw_too_short() {
+        let raw = RawTlv::new(TlvType::Location, vec![0, 0, 0]); // Only 3 bytes
+        let result = LocationTlv::from_raw(&raw);
+        assert!(matches!(result, Err(TlvError::InvalidLocationLength(3))));
+    }
+
+    #[test]
+    fn test_location_tlv_from_raw_empty() {
+        let raw = RawTlv::new(TlvType::Location, vec![]);
+        let result = LocationTlv::from_raw(&raw);
+        assert!(matches!(result, Err(TlvError::InvalidLocationLength(0))));
+    }
+
+    #[test]
+    fn test_location_tlv_from_raw_ports_only() {
+        // Exactly 4 bytes: just ports, no sub-TLVs
+        let raw = RawTlv::new(TlvType::Location, vec![0x03, 0x5E, 0xC3, 0x50]);
+        let parsed = LocationTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.dest_port, 862);
+        assert_eq!(parsed.src_port, 50000);
+        assert!(parsed.sub_tlvs.is_empty());
+    }
+
+    // ========================================================================
+    // Follow-Up Telemetry TLV tests (Type 7)
+    // ========================================================================
+
+    #[test]
+    fn test_follow_up_telemetry_tlv_new() {
+        let tlv = FollowUpTelemetryTlv::new();
+        assert_eq!(tlv.sequence_number, 0);
+        assert_eq!(tlv.follow_up_timestamp, 0);
+        assert_eq!(tlv.timestamp_mode, TimestampMethod::Unknown(0));
+    }
+
+    #[test]
+    fn test_follow_up_telemetry_tlv_default() {
+        let tlv = FollowUpTelemetryTlv::default();
+        assert_eq!(tlv.sequence_number, 0);
+    }
+
+    #[test]
+    fn test_follow_up_telemetry_tlv_roundtrip() {
+        let original = FollowUpTelemetryTlv {
+            sequence_number: 42,
+            follow_up_timestamp: 0x0123456789ABCDEF,
+            timestamp_mode: TimestampMethod::SwLocal,
+        };
+        let raw = original.to_raw();
+        let parsed = FollowUpTelemetryTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_follow_up_telemetry_tlv_wire_format() {
+        let tlv = FollowUpTelemetryTlv {
+            sequence_number: 1,
+            follow_up_timestamp: 0xFF00FF00FF00FF00,
+            timestamp_mode: TimestampMethod::HwAssist,
+        };
+        let raw = tlv.to_raw();
+        assert_eq!(raw.tlv_type, TlvType::FollowUpTelemetry);
+        assert_eq!(raw.value.len(), FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE);
+        // Bytes 0-3: sequence_number = 1
+        assert_eq!(&raw.value[0..4], &[0, 0, 0, 1]);
+        // Bytes 4-11: follow_up_timestamp
+        assert_eq!(
+            &raw.value[4..12],
+            &[0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00]
+        );
+        // Byte 12: timestamp_mode = HwAssist (1)
+        assert_eq!(raw.value[12], 1);
+        // Bytes 13-15: reserved (zeros)
+        assert_eq!(&raw.value[13..16], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn test_follow_up_telemetry_tlv_from_raw_invalid_length() {
+        let raw = RawTlv::new(TlvType::FollowUpTelemetry, vec![0; 12]);
+        let result = FollowUpTelemetryTlv::from_raw(&raw);
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidFollowUpTelemetryLength(12))
+        ));
+    }
+
+    #[test]
+    fn test_follow_up_telemetry_tlv_from_raw_too_long() {
+        let raw = RawTlv::new(TlvType::FollowUpTelemetry, vec![0; 20]);
+        let result = FollowUpTelemetryTlv::from_raw(&raw);
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidFollowUpTelemetryLength(20))
+        ));
+    }
+
+    #[test]
+    fn test_follow_up_telemetry_tlv_max_values() {
+        let original = FollowUpTelemetryTlv {
+            sequence_number: u32::MAX,
+            follow_up_timestamp: u64::MAX,
+            timestamp_mode: TimestampMethod::Unknown(255),
+        };
+        let raw = original.to_raw();
+        let parsed = FollowUpTelemetryTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    // ========================================================================
+    // TlvList update method tests
+    // ========================================================================
+
+    #[test]
+    fn test_update_timestamp_info_tlvs() {
+        let mut list = TlvList::new();
+        let sender_tlv = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::SwLocal);
+        list.push(sender_tlv.to_raw()).unwrap();
+
+        list.update_timestamp_info_tlvs(SyncSource::Ptp, TimestampMethod::HwAssist);
+
+        let raw = &list.non_hmac_tlvs()[0];
+        let parsed = TimestampInfoTlv::from_raw(raw).unwrap();
+        // In-fields should be preserved
+        assert_eq!(parsed.sync_src_in, SyncSource::Ntp);
+        assert_eq!(parsed.timestamp_in, TimestampMethod::SwLocal);
+        // Out-fields should be updated
+        assert_eq!(parsed.sync_src_out, SyncSource::Ptp);
+        assert_eq!(parsed.timestamp_out, TimestampMethod::HwAssist);
+    }
+
+    #[test]
+    fn test_update_timestamp_info_skips_wrong_size() {
+        let mut list = TlvList::new();
+        // Push a TimestampInfo with wrong size (3 bytes instead of 4)
+        list.push(RawTlv::new(TlvType::TimestampInfo, vec![1, 2, 3]))
+            .unwrap();
+
+        list.update_timestamp_info_tlvs(SyncSource::Ptp, TimestampMethod::HwAssist);
+
+        // Value should be unchanged since size didn't match
+        assert_eq!(list.non_hmac_tlvs()[0].value, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_update_direct_measurement_tlvs() {
+        let mut list = TlvList::new();
+        let sender_tlv = DirectMeasurementTlv::new(100);
+        list.push(sender_tlv.to_raw()).unwrap();
+
+        list.update_direct_measurement_tlvs(50, 49);
+
+        let raw = &list.non_hmac_tlvs()[0];
+        let parsed = DirectMeasurementTlv::from_raw(raw).unwrap();
+        // Sender tx count preserved
+        assert_eq!(parsed.sender_tx_count, 100);
+        // Reflector counts filled
+        assert_eq!(parsed.reflector_rx_count, 50);
+        assert_eq!(parsed.reflector_tx_count, 49);
+    }
+
+    #[test]
+    fn test_update_direct_measurement_skips_wrong_size() {
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::DirectMeasurement, vec![0; 8]))
+            .unwrap();
+
+        list.update_direct_measurement_tlvs(50, 49);
+
+        // Value should be unchanged
+        assert_eq!(list.non_hmac_tlvs()[0].value, vec![0; 8]);
+    }
+
+    #[test]
+    fn test_update_location_tlvs_ipv4() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let mut list = TlvList::new();
+        let sender_tlv = LocationTlv::new();
+        list.push(sender_tlv.to_raw()).unwrap();
+
+        let info = PacketAddressInfo {
+            src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            src_port: 50000,
+            dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            dst_port: 862,
+        };
+        list.update_location_tlvs(&info);
+
+        let raw = &list.non_hmac_tlvs()[0];
+        let parsed = LocationTlv::from_raw(raw).unwrap();
+        assert_eq!(parsed.dest_port, 862);
+        assert_eq!(parsed.src_port, 50000);
+        assert_eq!(parsed.sub_tlvs.len(), 2);
+        assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::Ipv4Src);
+        assert_eq!(parsed.sub_tlvs[0].value, vec![10, 0, 0, 1]);
+        assert_eq!(parsed.sub_tlvs[1].sub_type, LocationSubType::Ipv4Dst);
+        assert_eq!(parsed.sub_tlvs[1].value, vec![10, 0, 0, 2]);
+    }
+
+    #[test]
+    fn test_update_location_tlvs_ipv6() {
+        use std::net::{IpAddr, Ipv6Addr};
+
+        let mut list = TlvList::new();
+        let sender_tlv = LocationTlv::new();
+        list.push(sender_tlv.to_raw()).unwrap();
+
+        let src = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+        let info = PacketAddressInfo {
+            src_addr: IpAddr::V6(src),
+            src_port: 50000,
+            dst_addr: IpAddr::V6(dst),
+            dst_port: 862,
+        };
+        list.update_location_tlvs(&info);
+
+        let raw = &list.non_hmac_tlvs()[0];
+        let parsed = LocationTlv::from_raw(raw).unwrap();
+        assert_eq!(parsed.dest_port, 862);
+        assert_eq!(parsed.src_port, 50000);
+        assert_eq!(parsed.sub_tlvs.len(), 2);
+        assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::Ipv6Src);
+        assert_eq!(parsed.sub_tlvs[0].value, src.octets().to_vec());
+        assert_eq!(parsed.sub_tlvs[1].sub_type, LocationSubType::Ipv6Dst);
+        assert_eq!(parsed.sub_tlvs[1].value, dst.octets().to_vec());
+    }
+
+    #[test]
+    fn test_update_follow_up_telemetry_tlvs() {
+        let mut list = TlvList::new();
+        let sender_tlv = FollowUpTelemetryTlv::new();
+        list.push(sender_tlv.to_raw()).unwrap();
+
+        list.update_follow_up_telemetry_tlvs(42, 0xDEADBEEFCAFEBABE, TimestampMethod::SwLocal);
+
+        let raw = &list.non_hmac_tlvs()[0];
+        let parsed = FollowUpTelemetryTlv::from_raw(raw).unwrap();
+        assert_eq!(parsed.sequence_number, 42);
+        assert_eq!(parsed.follow_up_timestamp, 0xDEADBEEFCAFEBABE);
+        assert_eq!(parsed.timestamp_mode, TimestampMethod::SwLocal);
+    }
+
+    #[test]
+    fn test_update_follow_up_telemetry_skips_wrong_size() {
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::FollowUpTelemetry, vec![0; 8]))
+            .unwrap();
+
+        list.update_follow_up_telemetry_tlvs(42, 100, TimestampMethod::SwLocal);
+
+        // Value should be unchanged
+        assert_eq!(list.non_hmac_tlvs()[0].value, vec![0; 8]);
+    }
+
+    // ========================================================================
+    // validate_known_tlv_lengths tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_known_tlv_lengths_correct_sizes() {
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(
+            TlvType::ClassOfService,
+            vec![0; COS_TLV_VALUE_SIZE],
+        ))
+        .unwrap();
+        list.push(RawTlv::new(
+            TlvType::AccessReport,
+            vec![0; ACCESS_REPORT_TLV_VALUE_SIZE],
+        ))
+        .unwrap();
+        list.push(RawTlv::new(
+            TlvType::TimestampInfo,
+            vec![0; TIMESTAMP_INFO_TLV_VALUE_SIZE],
+        ))
+        .unwrap();
+        list.push(RawTlv::new(
+            TlvType::DirectMeasurement,
+            vec![0; DIRECT_MEASUREMENT_TLV_VALUE_SIZE],
+        ))
+        .unwrap();
+        list.push(RawTlv::new(
+            TlvType::Location,
+            vec![0; LOCATION_TLV_MIN_VALUE_SIZE],
+        ))
+        .unwrap();
+        list.push(RawTlv::new(
+            TlvType::FollowUpTelemetry,
+            vec![0; FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE],
+        ))
+        .unwrap();
+
+        list.validate_known_tlv_lengths();
+
+        // None should be marked malformed
+        for tlv in list.non_hmac_tlvs() {
+            assert!(
+                !tlv.is_malformed(),
+                "TLV {:?} should not be malformed",
+                tlv.tlv_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_known_tlv_lengths_wrong_sizes() {
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::ClassOfService, vec![0; 2]))
+            .unwrap(); // Wrong: needs 4
+        list.push(RawTlv::new(TlvType::AccessReport, vec![0; 5]))
+            .unwrap(); // Wrong: needs 2
+        list.push(RawTlv::new(TlvType::TimestampInfo, vec![0; 1]))
+            .unwrap(); // Wrong: needs 4
+        list.push(RawTlv::new(TlvType::DirectMeasurement, vec![0; 8]))
+            .unwrap(); // Wrong: needs 12
+        list.push(RawTlv::new(TlvType::Location, vec![0; 2]))
+            .unwrap(); // Wrong: min 4
+        list.push(RawTlv::new(TlvType::FollowUpTelemetry, vec![0; 10]))
+            .unwrap(); // Wrong: needs 16
+
+        list.validate_known_tlv_lengths();
+
+        // All should be marked malformed
+        for tlv in list.non_hmac_tlvs() {
+            assert!(
+                tlv.is_malformed(),
+                "TLV {:?} should be malformed",
+                tlv.tlv_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_known_tlv_lengths_location_longer_ok() {
+        let mut list = TlvList::new();
+        // Location with sub-TLVs (longer than minimum) should be fine
+        list.push(RawTlv::new(TlvType::Location, vec![0; 20]))
+            .unwrap();
+
+        list.validate_known_tlv_lengths();
+
+        assert!(!list.non_hmac_tlvs()[0].is_malformed());
+    }
+
+    #[test]
+    fn test_validate_known_tlv_lengths_unknown_types_ignored() {
+        let mut list = TlvList::new();
+        // Unknown type with any length should not be marked malformed
+        list.push(RawTlv::new(TlvType::Unknown(99), vec![0; 3]))
+            .unwrap();
+
+        list.validate_known_tlv_lengths();
+
+        assert!(!list.non_hmac_tlvs()[0].is_malformed());
     }
 }

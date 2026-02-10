@@ -22,7 +22,11 @@ use crate::{
     },
     session::Session,
     time::generate_timestamp,
-    tlv::{ClassOfServiceTlv, RawTlv, SessionSenderId, TlvList},
+    tlv::{
+        AccessReportTlv, ClassOfServiceTlv, DirectMeasurementTlv, FollowUpTelemetryTlv,
+        LocationTlv, RawTlv, SessionSenderId, SyncSource, TimestampInfoTlv, TimestampMethod,
+        TlvList,
+    },
 };
 
 /// Statistics collected during a STAMP sender session.
@@ -138,33 +142,53 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
     let mut recv_buf = [0u8; 1024];
     let timeout = Duration::from_secs(conf.timeout as u64);
 
-    // Check if we need to include TLV extensions (SSID or CoS)
-    let use_tlvs = conf.ssid.is_some() || conf.cos;
+    // Build all extra TLVs (once, before loop)
+    let mut extra_tlvs: Vec<RawTlv> = Vec::new();
+
+    if conf.cos {
+        extra_tlvs.push(ClassOfServiceTlv::new(conf.dscp, conf.ecn).to_raw());
+        log::info!(
+            "Class of Service TLV enabled (DSCP={}, ECN={})",
+            conf.dscp,
+            conf.ecn
+        );
+    }
+
+    if let Some(access_id) = conf.access_report {
+        extra_tlvs.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
+        log::info!(
+            "Access Report TLV enabled (id={}, code={})",
+            access_id,
+            conf.access_return_code
+        );
+    }
+
+    if conf.timestamp_info {
+        let sync_src = match conf.clock_source {
+            ClockFormat::NTP => SyncSource::Ntp,
+            ClockFormat::PTP => SyncSource::Ptp,
+        };
+        extra_tlvs.push(TimestampInfoTlv::new(sync_src, TimestampMethod::SwLocal).to_raw());
+        log::info!("Timestamp Information TLV enabled");
+    }
+
+    if conf.location {
+        extra_tlvs.push(LocationTlv::new().to_raw());
+        log::info!("Location TLV enabled");
+    }
+
+    if conf.follow_up_telemetry {
+        extra_tlvs.push(FollowUpTelemetryTlv::new().to_raw());
+        log::info!("Follow-Up Telemetry TLV enabled");
+    }
+
+    // Check if we need to include TLV extensions
+    let use_tlvs = conf.ssid.is_some() || !extra_tlvs.is_empty() || conf.direct_measurement;
     if use_tlvs {
         if let Some(ssid) = conf.ssid {
             log::info!("TLV extensions enabled with SSID: {}", ssid);
         }
-        if conf.cos {
-            log::info!(
-                "Class of Service TLV enabled (DSCP={}, ECN={})",
-                conf.dscp,
-                conf.ecn
-            );
-        }
     }
-
-    // Build CoS TLV if enabled (once, before loop)
-    let cos_tlv: Option<RawTlv> = if conf.cos {
-        Some(ClassOfServiceTlv::new(conf.dscp, conf.ecn).to_raw())
-    } else {
-        None
-    };
-
-    // Pre-build TLV slice reference to avoid per-packet allocation
-    let extra_tlvs: &[RawTlv] = match &cos_tlv {
-        Some(tlv) => std::slice::from_ref(tlv),
-        None => &[],
-    };
 
     // Precompute send strategy to avoid branching in hot loop.
     // Using an enum moves the mode decision outside the loop.
@@ -196,6 +220,20 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         let send_time = Instant::now();
         let send_timestamp = generate_timestamp(conf.clock_source);
 
+        // Build per-packet TLVs (Direct Measurement changes each packet)
+        let per_packet_tlvs: Vec<RawTlv>;
+        let all_extra_tlvs = if conf.direct_measurement {
+            let dm = DirectMeasurementTlv::new(stats.packets_sent + 1);
+            per_packet_tlvs = extra_tlvs
+                .iter()
+                .cloned()
+                .chain(std::iter::once(dm.to_raw()))
+                .collect();
+            &per_packet_tlvs
+        } else {
+            &extra_tlvs
+        };
+
         let send_result = match &send_mode {
             SendMode::AuthTlv { key } => {
                 let buf = build_auth_packet_with_tlvs(
@@ -204,7 +242,7 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                     error_estimate_wire,
                     key,
                     conf.ssid,
-                    extra_tlvs,
+                    all_extra_tlvs,
                     Some(*key),
                 );
                 socket.send(&buf).await
@@ -222,7 +260,7 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                     send_timestamp,
                     error_estimate_wire,
                     conf.ssid,
-                    extra_tlvs,
+                    all_extra_tlvs,
                     *tlv_key,
                 );
                 socket.send(&buf).await

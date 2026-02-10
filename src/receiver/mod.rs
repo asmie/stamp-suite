@@ -58,7 +58,7 @@ use crate::{
     },
     session::SessionManager,
     time::generate_timestamp,
-    tlv::{TlvList, TlvType, TLV_HEADER_SIZE},
+    tlv::{PacketAddressInfo, SyncSource, TimestampMethod, TlvList, TlvType, TLV_HEADER_SIZE},
 };
 
 /// Loads the HMAC key from configuration (hex string or file).
@@ -214,6 +214,14 @@ pub struct ProcessingContext<'a> {
     pub received_dscp: u8,
     /// ECN value received from IP header (2 bits, 0-3).
     pub received_ecn: u8,
+    /// Reflector packet receive count (for Direct Measurement TLV).
+    pub reflector_rx_count: Option<u32>,
+    /// Reflector packet transmit count (for Direct Measurement TLV).
+    pub reflector_tx_count: Option<u32>,
+    /// Packet address information (for Location TLV).
+    pub packet_addr_info: Option<PacketAddressInfo>,
+    /// Last reflection data: (seq, timestamp) for Follow-Up Telemetry TLV.
+    pub last_reflection: Option<(u32, u64)>,
 }
 
 /// Processes a STAMP packet and returns the response.
@@ -393,8 +401,7 @@ fn process_auth_packet(
             ctx.tlv_mode,
             tlv_hmac_key,
             verify_tlv_hmac,
-            ctx.received_dscp,
-            ctx.received_ecn,
+            ctx,
         ))
     } else {
         Some(StampResponse {
@@ -451,8 +458,7 @@ fn process_unauth_packet(
                     ctx.tlv_mode,
                     tlv_hmac_key,
                     verify_tlv_hmac,
-                    ctx.received_dscp,
-                    ctx.received_ecn,
+                    ctx,
                 ))
             } else {
                 Some(StampResponse {
@@ -643,8 +649,7 @@ pub fn assemble_unauth_answer_with_tlvs(
     tlv_mode: TlvHandlingMode,
     tlv_hmac_key: Option<&HmacKey>,
     verify_incoming_hmac: bool,
-    received_dscp: u8,
-    received_ecn: u8,
+    ctx: &ProcessingContext,
 ) -> StampResponse {
     let base = assemble_unauth_answer(
         packet,
@@ -712,8 +717,33 @@ pub fn assemble_unauth_answer_with_tlvs(
                 }
 
                 // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
-                // Note: policy_rejected flag will be set by the send path if DSCP application fails
-                tlvs.update_cos_tlvs(received_dscp, received_ecn, false);
+                tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
+
+                // Update Timestamp Information TLVs (RFC 8972 §4.3)
+                let sync_src = match ctx.clock_source {
+                    ClockFormat::NTP => SyncSource::Ntp,
+                    ClockFormat::PTP => SyncSource::Ptp,
+                };
+                tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
+
+                // Update Direct Measurement TLVs (RFC 8972 §4.5)
+                if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
+                    tlvs.update_direct_measurement_tlvs(rx, tx);
+                }
+
+                // Update Location TLVs (RFC 8972 §4.2)
+                if let Some(ref addr_info) = ctx.packet_addr_info {
+                    tlvs.update_location_tlvs(addr_info);
+                }
+
+                // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
+                if let Some((last_seq, last_ts)) = ctx.last_reflection {
+                    tlvs.update_follow_up_telemetry_tlvs(
+                        last_seq,
+                        last_ts,
+                        TimestampMethod::SwLocal,
+                    );
+                }
 
                 // Only compute fresh HMAC for response if verification passed AND no malformed TLVs
                 // Per RFC 8972 §4.8: on failure, echo TLVs with flags set, don't regenerate HMAC
@@ -739,21 +769,6 @@ pub fn assemble_unauth_answer_with_tlvs(
 ///
 /// Per RFC 8972 §4.8, on HMAC verification failure, TLVs are echoed with I-flag
 /// set on ALL TLVs rather than dropping the packet.
-///
-/// # Arguments
-/// * `packet` - The received authenticated test packet
-/// * `original_data` - The original received packet data
-/// * `cs` - Clock format to use for timestamps
-/// * `rcvt` - Receive timestamp when the packet was received
-/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
-/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
-/// * `hmac_key` - Optional HMAC key for computing the base response HMAC
-/// * `reflector_seq` - Optional independent reflector sequence number
-/// * `tlv_mode` - How to handle TLV extensions
-/// * `tlv_hmac_key` - Optional HMAC key for TLV HMAC computation in response
-/// * `verify_incoming_hmac` - Whether to verify incoming TLV HMAC (sets I-flag on failure)
-/// * `received_dscp` - DSCP value received from IP header (for CoS TLV)
-/// * `received_ecn` - ECN value received from IP header (for CoS TLV)
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_auth_answer_with_tlvs(
     packet: &PacketAuthenticated,
@@ -767,8 +782,7 @@ pub fn assemble_auth_answer_with_tlvs(
     tlv_mode: TlvHandlingMode,
     tlv_hmac_key: Option<&HmacKey>,
     verify_incoming_hmac: bool,
-    received_dscp: u8,
-    received_ecn: u8,
+    ctx: &ProcessingContext,
 ) -> StampResponse {
     let base = assemble_auth_answer(
         packet,
@@ -842,8 +856,33 @@ pub fn assemble_auth_answer_with_tlvs(
                 }
 
                 // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
-                // Note: policy_rejected flag will be set by the send path if DSCP application fails
-                tlvs.update_cos_tlvs(received_dscp, received_ecn, false);
+                tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
+
+                // Update Timestamp Information TLVs (RFC 8972 §4.3)
+                let sync_src = match ctx.clock_source {
+                    ClockFormat::NTP => SyncSource::Ntp,
+                    ClockFormat::PTP => SyncSource::Ptp,
+                };
+                tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
+
+                // Update Direct Measurement TLVs (RFC 8972 §4.5)
+                if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
+                    tlvs.update_direct_measurement_tlvs(rx, tx);
+                }
+
+                // Update Location TLVs (RFC 8972 §4.2)
+                if let Some(ref addr_info) = ctx.packet_addr_info {
+                    tlvs.update_location_tlvs(addr_info);
+                }
+
+                // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
+                if let Some((last_seq, last_ts)) = ctx.last_reflection {
+                    tlvs.update_follow_up_telemetry_tlvs(
+                        last_seq,
+                        last_ts,
+                        TimestampMethod::SwLocal,
+                    );
+                }
 
                 // Only compute fresh HMAC for response if verification passed AND no malformed TLVs
                 // Per RFC 8972 §4.8: on failure, echo TLVs with flags set, don't regenerate HMAC
@@ -868,6 +907,28 @@ pub fn assemble_auth_answer_with_tlvs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Creates a default ProcessingContext for tests with given DSCP/ECN values.
+    fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext<'static> {
+        ProcessingContext {
+            clock_source: ClockFormat::NTP,
+            error_estimate_wire: 0,
+            hmac_key: None,
+            require_hmac: false,
+            session_manager: None,
+            tlv_mode: TlvHandlingMode::Echo,
+            verify_tlv_hmac: false,
+            strict_packets: false,
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
+            received_dscp,
+            received_ecn,
+            reflector_rx_count: None,
+            reflector_tx_count: None,
+            packet_addr_info: None,
+            last_reflection: None,
+        }
+    }
 
     /// Test helper: Verifies TLV HMAC if present in the incoming packet per RFC 8972 §4.8.
     ///
@@ -1270,8 +1331,7 @@ mod tests {
             TlvHandlingMode::Ignore,
             None,
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Response should match original length but TLVs stripped (zero-padded)
@@ -1307,8 +1367,7 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Response should include echoed TLV
@@ -1344,8 +1403,7 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Check U-flag is set (bit 0 of flags byte per RFC 8972)
@@ -1387,8 +1445,7 @@ mod tests {
             TlvHandlingMode::Ignore,
             None,
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Response should match original length but TLVs stripped
@@ -1429,8 +1486,7 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Response should include echoed TLV
@@ -1467,8 +1523,7 @@ mod tests {
             TlvHandlingMode::Echo,
             Some(&key),
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Response should include ExtraPadding + HMAC TLV
@@ -1608,8 +1663,7 @@ mod tests {
             TlvHandlingMode::Echo,
             Some(&key2), // Wrong key for verification
             true,        // Verify HMAC (will fail)
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Response should include TLVs
@@ -1680,8 +1734,7 @@ mod tests {
             TlvHandlingMode::Echo,
             Some(&key), // Correct key for verification
             true,       // Verify HMAC (will succeed)
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Response should include TLVs
@@ -1740,8 +1793,7 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Response should include base + malformed TLV (header + truncated value)
@@ -1793,8 +1845,7 @@ mod tests {
             TlvHandlingMode::Echo,
             Some(&key),
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Response should only have the malformed TLV, no HMAC TLV added
@@ -1847,8 +1898,7 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
-            received_dscp,
-            received_ecn,
+            &test_ctx(received_dscp, received_ecn),
         );
 
         // Response should include base + CoS TLV
@@ -1918,8 +1968,7 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
-            received_dscp,
-            received_ecn,
+            &test_ctx(received_dscp, received_ecn),
         );
 
         // Response should include base + CoS TLV
@@ -1975,8 +2024,7 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Verify RP is initially 0
@@ -2024,8 +2072,7 @@ mod tests {
             TlvHandlingMode::Echo,
             None,
             false,
-            0,
-            0,
+            &test_ctx(0, 0),
         );
 
         // Verify RP is initially 0

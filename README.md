@@ -14,8 +14,9 @@ stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Pr
 ### Key Features
 
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
-- RFC 8972 TLV extension support (Session-Sender ID, HMAC for TLV integrity)
+- RFC 8972 TLV extension support with full processing for all defined types
 - Class of Service (CoS) TLV support with DSCP/ECN measurement (RFC 8972 §5.2)
+- Location, Timestamp Info, Direct Measurement, Access Report, and Follow-Up Telemetry TLVs
 - HMAC authentication support
 - Stateful reflector mode with per-client session tracking (RFC 8972 Section 4)
 - Support for both NTP and PTP timestamp formats
@@ -113,6 +114,28 @@ stamp-suite --remote-addr 192.168.1.100 --ssid 12345
 
 # With Class of Service TLV (measure DSCP/ECN handling)
 stamp-suite --remote-addr 192.168.1.100 --cos --dscp 46 --ecn 2
+
+# With Location TLV (reflector reports observed src/dst addresses)
+stamp-suite --remote-addr 192.168.1.100 --location
+
+# With Direct Measurement TLV (packet loss counters)
+stamp-suite --remote-addr 192.168.1.100 --direct-measurement
+
+# With Timestamp Info TLV (clock sync and timestamping method)
+stamp-suite --remote-addr 192.168.1.100 --timestamp-info
+
+# With Follow-Up Telemetry TLV (previous reflection data)
+stamp-suite --remote-addr 192.168.1.100 --follow-up-telemetry
+
+# With Access Report TLV (access ID 5, return code 1)
+stamp-suite --remote-addr 192.168.1.100 --access-report 5
+
+# Combine multiple TLV types
+stamp-suite --remote-addr 192.168.1.100 \
+    --cos --dscp 46 \
+    --direct-measurement \
+    --location \
+    --timestamp-info
 ```
 
 ### Command-Line Options
@@ -138,6 +161,12 @@ Options:
       --cos                        Enable Class of Service TLV
       --dscp <VALUE>               DSCP value for CoS TLV (0-63) [default: 0]
       --ecn <VALUE>                ECN value for CoS TLV (0-3) [default: 0]
+      --location                   Enable Location TLV
+      --timestamp-info             Enable Timestamp Information TLV
+      --direct-measurement         Enable Direct Measurement TLV
+      --follow-up-telemetry        Enable Follow-Up Telemetry TLV
+      --access-report <ID>         Enable Access Report TLV with Access ID (0-15)
+      --access-return-code <CODE>  Return code for Access Report TLV [default: 1]
       --hmac-key <HEX>             HMAC key in hex format
       --hmac-key-file <PATH>       Path to file containing HMAC key
       --metrics                    Enable Prometheus metrics endpoint (requires metrics feature)
@@ -197,15 +226,15 @@ The implementation supports RFC 8972 TLV (Type-Length-Value) extensions, which a
 | Type | Name | Description | Status |
 |------|------|-------------|--------|
 | 1 | Extra Padding | Can carry Session-Sender ID (SSID) in first 2 bytes | Full |
-| 2 | Location | Location information | Echo |
-| 3 | Timestamp Info | Additional timestamp data | Echo |
+| 2 | Location | Source/destination addresses and ports (RFC 8972 §4.2) | Full |
+| 3 | Timestamp Info | Sync source and timestamping method (RFC 8972 §4.3) | Full |
 | 4 | Class of Service | DSCP/ECN measurement (RFC 8972 §5.2) | Full |
-| 5 | Direct Measurement | Direct measurement data | Echo |
-| 6 | Access Report | Access report data | Echo |
-| 7 | Follow-Up Telemetry | Telemetry information | Echo |
+| 5 | Direct Measurement | Sender/reflector packet counters (RFC 8972 §4.5) | Full |
+| 6 | Access Report | Access identifier and return code (RFC 8972 §4.6) | Full |
+| 7 | Follow-Up Telemetry | Previous reflection seq/timestamp (RFC 8972 §4.7) | Full |
 | 8 | HMAC | TLV integrity verification (must be last) | Full |
 
-**Status**: Full = fully processed, Echo = echoed back with appropriate flags
+**Status**: Full = structured parsing, validation, and reflector field population
 
 ### TLV Handling Modes
 
@@ -256,6 +285,57 @@ The reflector automatically fills in:
 
 This allows detection of DSCP remarking or ECN modification in the network.
 
+### Location TLV (RFC 8972 §4.2)
+
+The Location TLV reports the observed source and destination addresses and ports at the reflector:
+
+```bash
+stamp-suite --remote-addr 192.168.1.100 --location
+```
+
+The reflector fills in the actual destination IP from the received packet (using `IP_PKTINFO`/`IPV6_RECVPKTINFO` on nix, or parsed IP headers on pnet), so it reports the correct address even when bound to a wildcard (`0.0.0.0`/`::`). Address information is carried as sub-TLVs (IPv4 or IPv6 source/destination).
+
+### Direct Measurement TLV (RFC 8972 §4.5)
+
+The Direct Measurement TLV carries per-session packet counters for loss measurement:
+
+```bash
+stamp-suite --remote-addr 192.168.1.100 --direct-measurement
+```
+
+- **Sender** fills its transmit count (incremented per packet)
+- **Reflector** fills its receive and transmit counts for the client's session
+
+Counters are tracked per-client regardless of whether `--stateful-reflector` is enabled.
+
+### Follow-Up Telemetry TLV (RFC 8972 §4.7)
+
+The Follow-Up Telemetry TLV carries information about the previously reflected packet:
+
+```bash
+stamp-suite --remote-addr 192.168.1.100 --follow-up-telemetry
+```
+
+The reflector fills in the sequence number and timestamp from the last reflection for the client's session, along with its timestamping method. Like Direct Measurement, this works independently of `--stateful-reflector`.
+
+### Timestamp Information TLV (RFC 8972 §4.3)
+
+The Timestamp Info TLV reports the synchronization source and timestamping method at each endpoint:
+
+```bash
+stamp-suite --remote-addr 192.168.1.100 --timestamp-info
+```
+
+The sender fills its own sync source and method; the reflector fills in its values (e.g., NTP + software-local timestamping).
+
+### Access Report TLV (RFC 8972 §4.6)
+
+The Access Report TLV carries an access identifier and return code. The reflector echoes it unchanged:
+
+```bash
+stamp-suite --remote-addr 192.168.1.100 --access-report 5 --access-return-code 1
+```
+
 ## Prometheus Metrics
 
 When built with `--features metrics`, the reflector can expose Prometheus metrics:
@@ -278,9 +358,14 @@ Available metrics include:
 The project is functional for STAMP measurements with the following features:
 
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
-- RFC 8972 TLV extension support with automatic detection
+- Full RFC 8972 TLV extension support (all 8 defined TLV types)
 - HMAC authentication support (base packet and TLV integrity)
 - Class of Service TLV with DSCP/ECN measurement (RFC 8972 §5.2)
+- Location TLV with real destination address capture (even on wildcard binds)
+- Direct Measurement TLV with per-client packet counters
+- Timestamp Information TLV with sync source and method reporting
+- Follow-Up Telemetry TLV with previous reflection tracking
+- Access Report TLV with structured validation
 - Stateful reflector mode with per-client session tracking (RFC 8972 Section 4)
 - Session-Sender Identifier (SSID) support via Extra Padding TLV
 - Real TTL capture on all major platforms
@@ -290,7 +375,6 @@ The project is functional for STAMP measurements with the following features:
 ### Roadmap
 
 - [ ] Enhanced statistics and reporting
-- [ ] Additional TLV type processing (Location, Telemetry, etc.)
 - [ ] SNMP/STAMP-MIB support
 
 ## Contributing
