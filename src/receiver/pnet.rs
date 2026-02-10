@@ -332,22 +332,17 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                 if header.get_next_level_protocol() == IpNextHeaderProtocols::Udp {
                     if let Some(udp) = UdpPacket::new(header.payload()) {
                         if udp.get_destination() == config.local_port {
-                            let ttl = header.get_ttl();
-                            let dscp = header.get_dscp();
-                            let ecn = header.get_ecn();
-                            let src =
-                                SocketAddr::new(IpAddr::V4(header.get_source()), udp.get_source());
-                            let dst_addr = IpAddr::V4(header.get_destination());
-                            handle_stamp_packet(
-                                udp.payload(),
-                                src,
-                                ttl,
-                                dscp,
-                                ecn,
-                                dst_addr,
-                                config,
-                                send_ctx,
-                            );
+                            let pkt = PacketMeta {
+                                src: SocketAddr::new(
+                                    IpAddr::V4(header.get_source()),
+                                    udp.get_source(),
+                                ),
+                                dst_addr: IpAddr::V4(header.get_destination()),
+                                ttl: header.get_ttl(),
+                                dscp: header.get_dscp(),
+                                ecn: header.get_ecn(),
+                            };
+                            handle_stamp_packet(udp.payload(), &pkt, config, send_ctx);
                         }
                     }
                 }
@@ -358,24 +353,19 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                 if header.get_next_header() == IpNextHeaderProtocols::Udp {
                     if let Some(udp) = UdpPacket::new(header.payload()) {
                         if udp.get_destination() == config.local_port {
-                            let ttl = header.get_hop_limit();
                             // IPv6 Traffic Class contains DSCP (upper 6 bits) and ECN (lower 2 bits)
                             let traffic_class = header.get_traffic_class();
-                            let dscp = (traffic_class >> 2) & 0x3F;
-                            let ecn = traffic_class & 0x03;
-                            let src =
-                                SocketAddr::new(IpAddr::V6(header.get_source()), udp.get_source());
-                            let dst_addr = IpAddr::V6(header.get_destination());
-                            handle_stamp_packet(
-                                udp.payload(),
-                                src,
-                                ttl,
-                                dscp,
-                                ecn,
-                                dst_addr,
-                                config,
-                                send_ctx,
-                            );
+                            let pkt = PacketMeta {
+                                src: SocketAddr::new(
+                                    IpAddr::V6(header.get_source()),
+                                    udp.get_source(),
+                                ),
+                                dst_addr: IpAddr::V6(header.get_destination()),
+                                ttl: header.get_hop_limit(),
+                                dscp: (traffic_class >> 2) & 0x3F,
+                                ecn: traffic_class & 0x03,
+                            };
+                            handle_stamp_packet(udp.payload(), &pkt, config, send_ctx);
                         }
                     }
                 }
@@ -458,19 +448,24 @@ fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::
     }
 }
 
-fn handle_stamp_packet(
-    data: &[u8],
+/// Per-packet metadata extracted from IP/UDP headers.
+struct PacketMeta {
     src: SocketAddr,
+    dst_addr: IpAddr,
     ttl: u8,
     dscp: u8,
     ecn: u8,
-    dst_addr: IpAddr,
+}
+
+fn handle_stamp_packet(
+    data: &[u8],
+    pkt: &PacketMeta,
     config: &CaptureConfig,
     send_ctx: &PnetSendContext,
 ) {
     // Get session counters for Direct Measurement and Follow-Up Telemetry.
     // Always tracked per-client, independent of --stateful-reflector.
-    let counter_session = config.session_manager.get_or_create_session(src);
+    let counter_session = config.session_manager.get_or_create_session(pkt.src);
     counter_session.record_received();
     let reflector_rx_count = Some(counter_session.get_received_count());
     let reflector_tx_count = Some(counter_session.get_transmitted_count());
@@ -480,9 +475,9 @@ fn handle_stamp_packet(
     // dst_addr comes from the parsed IP header, so it's always the real
     // destination even when bound to a wildcard address.
     let packet_addr_info = Some(crate::tlv::PacketAddressInfo {
-        src_addr: src.ip(),
-        src_port: src.port(),
-        dst_addr,
+        src_addr: pkt.src.ip(),
+        src_port: pkt.src.port(),
+        dst_addr: pkt.dst_addr,
         dst_port: config.local_port,
     });
 
@@ -501,22 +496,23 @@ fn handle_stamp_packet(
         strict_packets: config.strict_packets,
         #[cfg(feature = "metrics")]
         metrics_enabled: config.metrics_enabled,
-        received_dscp: dscp,
-        received_ecn: ecn,
+        received_dscp: pkt.dscp,
+        received_ecn: pkt.ecn,
         reflector_rx_count,
         reflector_tx_count,
         packet_addr_info,
         last_reflection,
     };
 
-    if let Some(mut response) = process_stamp_packet(data, src, ttl, config.use_auth, &ctx) {
+    if let Some(mut response) = process_stamp_packet(data, pkt.src, pkt.ttl, config.use_auth, &ctx)
+    {
         // Determine TOS value: use CoS TLV request if present, otherwise default (0).
         let (tos, has_cos_request) = match response.cos_request {
             Some((dscp, ecn)) => (((dscp & 0x3F) << 2) | (ecn & 0x03), true),
             None => (0u8, false),
         };
 
-        let is_ipv6 = src.is_ipv6();
+        let is_ipv6 = pkt.src.is_ipv6();
 
         // Check IPv6 socket availability early
         if is_ipv6 && send_ctx.send_socket_v6.is_none() {
@@ -558,10 +554,10 @@ fn handle_stamp_packet(
         }
 
         // Use the appropriate socket based on address family
-        let send_result = match src {
-            SocketAddr::V4(_) => send_ctx.send_socket_v4.send_to(&response.data, src),
+        let send_result = match pkt.src {
+            SocketAddr::V4(_) => send_ctx.send_socket_v4.send_to(&response.data, pkt.src),
             SocketAddr::V6(_) => match &send_ctx.send_socket_v6 {
-                Some(socket) => socket.send_to(&response.data, src),
+                Some(socket) => socket.send_to(&response.data, pkt.src),
                 None => {
                     eprintln!("Cannot send IPv6 response: IPv6 socket unavailable");
                     return;
@@ -569,11 +565,11 @@ fn handle_stamp_packet(
             },
         };
         if let Err(e) = send_result {
-            eprintln!("Failed to send response to {}: {}", src, e);
+            eprintln!("Failed to send response to {}: {}", pkt.src, e);
         } else {
             // Record transmission for Direct Measurement and Follow-Up Telemetry.
             // Always tracked per-client, independent of --stateful-reflector.
-            let session = config.session_manager.get_or_create_session(src);
+            let session = config.session_manager.get_or_create_session(pkt.src);
             session.record_transmitted();
             if response.data.len() >= 4 {
                 let reflected_seq = u32::from_be_bytes([
