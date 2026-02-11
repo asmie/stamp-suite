@@ -1,6 +1,6 @@
 # stamp-suite
 
-Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust (RFC 8762 and RFC 8972)
+Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust (RFC 8762, RFC 8972, and RFC 9503)
 
 [![CI](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml/badge.svg)](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml)
 [![Dependency status](https://deps.rs/repo/github/asmie/stamp-suite/status.svg)](https://deps.rs/repo/github/asmie/stamp-suite)
@@ -9,12 +9,13 @@ Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust (RFC 8
 
 ## About
 
-stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Protocol (STAMP) as defined in RFC 8762 and RFC 8972. It provides a single binary that can operate as either a Session-Sender (client) or Session-Reflector (server) for measuring packet loss and network delays.
+stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Protocol (STAMP) as defined in RFC 8762, RFC 8972, and RFC 9503. It provides a single binary that can operate as either a Session-Sender (client) or Session-Reflector (server) for measuring packet loss and network delays.
 
 ### Key Features
 
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
 - RFC 8972 TLV extension support with full processing for all defined types
+- RFC 9503 Segment Routing extensions (Destination Node Address, Return Path with SR-MPLS/SRv6)
 - Class of Service (CoS) TLV support with DSCP/ECN measurement (RFC 8972 §5.2)
 - Location, Timestamp Info, Direct Measurement, Access Report, and Follow-Up Telemetry TLVs
 - HMAC authentication support
@@ -130,6 +131,21 @@ stamp-suite --remote-addr 192.168.1.100 --follow-up-telemetry
 # With Access Report TLV (access ID 5, return code 1)
 stamp-suite --remote-addr 192.168.1.100 --access-report 5
 
+# With Destination Node Address TLV (RFC 9503 - verify reflector identity)
+stamp-suite --remote-addr 192.168.1.100 --ssid 1 --dest-node-addr 192.168.1.100
+
+# With Return Path TLV - suppress reply (RFC 9503)
+stamp-suite --remote-addr 192.168.1.100 --return-path-cc 0
+
+# With Return Path TLV - alternate reply address (RFC 9503)
+stamp-suite --remote-addr 192.168.1.100 --return-address 10.0.0.5
+
+# With Return Path TLV - SR-MPLS label stack (RFC 9503)
+stamp-suite --remote-addr 192.168.1.100 --return-sr-mpls-labels 100,200,300
+
+# With Return Path TLV - SRv6 segment list (RFC 9503)
+stamp-suite --remote-addr 192.168.1.100 --return-srv6-sids 2001:db8::1,2001:db8::2
+
 # Combine multiple TLV types
 stamp-suite --remote-addr 192.168.1.100 \
     --cos --dscp 46 \
@@ -169,6 +185,11 @@ Options:
       --access-return-code <CODE>  Return code for Access Report TLV [default: 1]
       --hmac-key <HEX>             HMAC key in hex format
       --hmac-key-file <PATH>       Path to file containing HMAC key
+      --dest-node-addr <IP>        Destination Node Address TLV (RFC 9503, requires --ssid)
+      --return-path-cc <CODE>      Return Path control code: 0=suppress, 1=same-link (RFC 9503)
+      --return-address <IP>        Return Path alternate reply address (RFC 9503)
+      --return-sr-mpls-labels <L>  Return Path SR-MPLS label stack, comma-separated (RFC 9503)
+      --return-srv6-sids <SIDS>    Return Path SRv6 segment list, comma-separated (RFC 9503)
       --metrics                    Enable Prometheus metrics endpoint (requires metrics feature)
       --metrics-addr <ADDR>        Metrics server bind address [default: 127.0.0.1:9090]
   -h, --help                       Print help
@@ -233,8 +254,10 @@ The implementation supports RFC 8972 TLV (Type-Length-Value) extensions, which a
 | 6 | Access Report | Access identifier and return code (RFC 8972 §4.6) | Full |
 | 7 | Follow-Up Telemetry | Previous reflection seq/timestamp (RFC 8972 §4.7) | Full |
 | 8 | HMAC | TLV integrity verification (must be last) | Full |
+| 9 | Destination Node Address | Verify intended reflector identity (RFC 9503 §4) | Full |
+| 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | Full |
 
-**Status**: Full = structured parsing, validation, and reflector field population
+**Status**: Full = structured parsing, validation, and reflector field population. SR-MPLS/SRv6 forwarding is echoed with U-flag (actual segment routing is out of scope for userspace UDP).
 
 ### TLV Handling Modes
 
@@ -336,6 +359,40 @@ The Access Report TLV carries an access identifier and return code. The reflecto
 stamp-suite --remote-addr 192.168.1.100 --access-report 5 --access-return-code 1
 ```
 
+### Destination Node Address TLV (RFC 9503 §4)
+
+The Destination Node Address TLV lets the sender specify the intended reflector address. The reflector checks whether the address matches any of its local interfaces:
+
+```bash
+# Verify that 192.168.1.100 is handling the reflection (requires --ssid)
+stamp-suite --remote-addr 192.168.1.100 --ssid 1 --dest-node-addr 192.168.1.100
+```
+
+If the address does not match, the reflector sets the U-flag on the TLV and still reflects the packet, allowing the sender to detect misrouting (e.g., anycast failover).
+
+### Return Path TLV (RFC 9503 §5)
+
+The Return Path TLV controls how the reflector routes its reply. Several sub-TLV types are supported:
+
+```bash
+# Suppress reply entirely (control code 0)
+stamp-suite --remote-addr 192.168.1.100 --return-path-cc 0
+
+# Request reply to an alternate address
+stamp-suite --remote-addr 192.168.1.100 --return-address 10.0.0.5
+
+# Request SR-MPLS return path (echoed with U-flag in userspace)
+stamp-suite --remote-addr 192.168.1.100 --return-sr-mpls-labels 100,200,300
+
+# Request SRv6 return path (echoed with U-flag in userspace)
+stamp-suite --remote-addr 192.168.1.100 --return-srv6-sids 2001:db8::1,2001:db8::2
+```
+
+The reflector handles each sub-TLV type:
+- **Control Code**: Bit 0 controls reply behavior (0=suppress, 1=reply); reserved bits are ignored per RFC 9503
+- **Return Address**: Reflector sends the reply to the specified IP. On send failure, it sets the U-flag and falls back to the original source address
+- **SR-MPLS / SRv6**: Echoed with U-flag set (actual segment routing forwarding is out of scope for userspace UDP)
+
 ## Prometheus Metrics
 
 When built with `--features metrics`, the reflector can expose Prometheus metrics:
@@ -359,6 +416,7 @@ The project is functional for STAMP measurements with the following features:
 
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
 - Full RFC 8972 TLV extension support (all 8 defined TLV types)
+- RFC 9503 Segment Routing extensions (Destination Node Address and Return Path TLVs)
 - HMAC authentication support (base packet and TLV integrity)
 - Class of Service TLV with DSCP/ECN measurement (RFC 8972 §5.2)
 - Location TLV with real destination address capture (even on wildcard binds)
@@ -366,6 +424,8 @@ The project is functional for STAMP measurements with the following features:
 - Timestamp Information TLV with sync source and method reporting
 - Follow-Up Telemetry TLV with previous reflection tracking
 - Access Report TLV with structured validation
+- Destination Node Address TLV with local address matching (RFC 9503 §4)
+- Return Path TLV with suppress, alternate address, and SR echo support (RFC 9503 §5)
 - Stateful reflector mode with per-client session tracking (RFC 8972 Section 4)
 - Session-Sender Identifier (SSID) support via Extra Padding TLV
 - Real TTL capture on all major platforms
@@ -404,3 +464,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [RFC 8762 - Simple Two-Way Active Measurement Protocol](https://datatracker.ietf.org/doc/html/rfc8762)
 - [RFC 8972 - Simple Two-Way Active Measurement Protocol Optional Extensions](https://datatracker.ietf.org/doc/html/rfc8972)
+- [RFC 9503 - Simple Two-Way Active Measurement Protocol Extensions for Segment Routing Networks](https://datatracker.ietf.org/doc/html/rfc9503)

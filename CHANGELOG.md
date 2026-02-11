@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-02-11
+
+### Added
+
+- **RFC 9503 Segment Routing Extensions**: STAMP extensions for SR-MPLS and SRv6 networks
+  - Destination Node Address TLV (Type 9): sender specifies intended reflector address; reflector sets U-flag on mismatch
+  - Return Path TLV (Type 10) with sub-TLV support:
+    - Control Code sub-TLV: suppress reply (code 0) or request same-link reply (code 1); reserved bits ignored per RFC 9503
+    - Return Address sub-TLV: reflector sends reply to an alternate IP address
+    - SR-MPLS Label Stack sub-TLV: proper MPLS LSE encoding (Label/TC/S/TTL); echoed with U-flag (userspace SR forwarding unsupported)
+    - SRv6 Segment List sub-TLV: echoed with U-flag (userspace SR forwarding unsupported)
+  - `--dest-node-addr <IP>` sender CLI option (requires `--ssid`)
+  - `--return-path-cc <CODE>` sender CLI option (0=suppress, 1=same-link)
+  - `--return-address <IP>` sender CLI option for alternate reply address
+  - `--return-sr-mpls-labels <LABELS>` sender CLI option (comma-separated 20-bit labels)
+  - `--return-srv6-sids <SIDS>` sender CLI option (comma-separated IPv6 SIDs)
+- Alternate-address send failure fallback: on failure, reflector sets U-flag on Return Path TLV, recomputes HMAC, and retries to original source address
+- Local address enumeration for Destination Node Address matching (nix: `getifaddrs`, pnet: `datalink::interfaces`)
+
+### Fixed
+
+- SR-MPLS labels are now encoded as proper MPLS Label Stack Entries (Label<<12 | TC | S-bit | TTL) instead of raw u32 values
+- Return Path Control Code decoding uses `cc & 1` bit masking instead of rejecting reserved bits, per RFC 9503
+- `--return-sr-mpls-labels` and `--return-srv6-sids` now correctly conflict with each other at the CLI level
+
+### Changed
+
+- `ProcessingContext.local_addresses` changed from `Vec<IpAddr>` to `&[IpAddr]` to avoid per-packet cloning in hot path
+
 ## [0.3.1] - 2026-02-08
 
 ### Changed

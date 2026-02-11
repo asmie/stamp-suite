@@ -58,6 +58,15 @@ pub const LOCATION_TLV_MIN_VALUE_SIZE: usize = 4;
 /// Follow-Up Telemetry TLV value size (16 bytes).
 pub const FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE: usize = 16;
 
+/// Destination Node Address TLV IPv4 value size (4 bytes).
+pub const DEST_NODE_ADDR_IPV4_SIZE: usize = 4;
+
+/// Destination Node Address TLV IPv6 value size (16 bytes).
+pub const DEST_NODE_ADDR_IPV6_SIZE: usize = 16;
+
+/// Return Path Control Code sub-TLV value size (4 bytes).
+pub const RETURN_PATH_CONTROL_CODE_SIZE: usize = 4;
+
 /// Errors that can occur during TLV parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum TlvError {
@@ -108,6 +117,14 @@ pub enum TlvError {
     /// Follow-Up Telemetry TLV has invalid length.
     #[error("Follow-Up Telemetry TLV has invalid length {0}, expected {FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE}")]
     InvalidFollowUpTelemetryLength(usize),
+
+    /// Destination Node Address TLV has invalid length.
+    #[error("Destination Node Address TLV has invalid length {0}, expected 4 (IPv4) or 16 (IPv6)")]
+    InvalidDestinationNodeAddressLength(usize),
+
+    /// Return Path TLV has invalid length.
+    #[error("Return Path TLV has invalid length {0}, minimum 4 (one sub-TLV header)")]
+    InvalidReturnPathLength(usize),
 }
 
 /// TLV flag bits as defined in RFC 8972 Section 4.2.
@@ -215,7 +232,11 @@ pub enum TlvType {
     FollowUpTelemetry = 7,
     /// HMAC TLV (8) - Must be last in the TLV list.
     Hmac = 8,
-    /// Unknown type (9-15).
+    /// Destination Node Address TLV (9) - RFC 9503 §4.
+    DestinationNodeAddress = 9,
+    /// Return Path TLV (10) - RFC 9503 §5.
+    ReturnPath = 10,
+    /// Unknown type (11-255).
     Unknown(u8),
 }
 
@@ -233,6 +254,8 @@ impl TlvType {
             6 => Self::AccessReport,
             7 => Self::FollowUpTelemetry,
             8 => Self::Hmac,
+            9 => Self::DestinationNodeAddress,
+            10 => Self::ReturnPath,
             n => Self::Unknown(n),
         }
     }
@@ -250,6 +273,8 @@ impl TlvType {
             Self::AccessReport => 6,
             Self::FollowUpTelemetry => 7,
             Self::Hmac => 8,
+            Self::DestinationNodeAddress => 9,
+            Self::ReturnPath => 10,
             Self::Unknown(n) => n,
         }
     }
@@ -1327,6 +1352,11 @@ impl TlvList {
                 TlvType::DirectMeasurement => tlv.value.len() != DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
                 TlvType::Location => tlv.value.len() < LOCATION_TLV_MIN_VALUE_SIZE,
                 TlvType::FollowUpTelemetry => tlv.value.len() != FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE,
+                TlvType::DestinationNodeAddress => {
+                    tlv.value.len() != DEST_NODE_ADDR_IPV4_SIZE
+                        && tlv.value.len() != DEST_NODE_ADDR_IPV6_SIZE
+                }
+                TlvType::ReturnPath => tlv.value.len() < TLV_HEADER_SIZE,
                 _ => false,
             };
             if malformed {
@@ -1347,6 +1377,11 @@ impl TlvList {
                     TlvType::FollowUpTelemetry => {
                         tlv.value.len() != FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE
                     }
+                    TlvType::DestinationNodeAddress => {
+                        tlv.value.len() != DEST_NODE_ADDR_IPV4_SIZE
+                            && tlv.value.len() != DEST_NODE_ADDR_IPV6_SIZE
+                    }
+                    TlvType::ReturnPath => tlv.value.len() < TLV_HEADER_SIZE,
                     _ => false,
                 };
                 if malformed {
@@ -2224,6 +2259,434 @@ impl Default for FollowUpTelemetryTlv {
     }
 }
 
+/// Destination Node Address TLV (Type 9) per RFC 9503 §4.
+///
+/// The Session-Sender includes this TLV to specify the intended reflector address.
+/// The Session-Reflector checks if the address matches one of its local addresses
+/// and sets the U-flag if it does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestinationNodeAddressTlv {
+    /// The intended destination address.
+    pub address: std::net::IpAddr,
+}
+
+impl DestinationNodeAddressTlv {
+    /// Creates a new Destination Node Address TLV.
+    #[must_use]
+    pub fn new(address: std::net::IpAddr) -> Self {
+        Self { address }
+    }
+
+    /// Parses a Destination Node Address TLV from a RawTlv.
+    ///
+    /// # Errors
+    /// Returns an error if the value length is not 4 (IPv4) or 16 (IPv6).
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        match raw.value.len() {
+            DEST_NODE_ADDR_IPV4_SIZE => {
+                let addr =
+                    std::net::Ipv4Addr::new(raw.value[0], raw.value[1], raw.value[2], raw.value[3]);
+                Ok(Self {
+                    address: std::net::IpAddr::V4(addr),
+                })
+            }
+            DEST_NODE_ADDR_IPV6_SIZE => {
+                let mut octets = [0u8; 16];
+                octets.copy_from_slice(&raw.value);
+                let addr = std::net::Ipv6Addr::from(octets);
+                Ok(Self {
+                    address: std::net::IpAddr::V6(addr),
+                })
+            }
+            other => Err(TlvError::InvalidDestinationNodeAddressLength(other)),
+        }
+    }
+
+    /// Converts to a RawTlv.
+    #[must_use]
+    pub fn to_raw(&self) -> RawTlv {
+        let value = match self.address {
+            std::net::IpAddr::V4(addr) => addr.octets().to_vec(),
+            std::net::IpAddr::V6(addr) => addr.octets().to_vec(),
+        };
+        RawTlv::new(TlvType::DestinationNodeAddress, value)
+    }
+}
+
+/// Return Path sub-TLV type identifiers per RFC 9503 §5.
+///
+/// Sub-TLVs use the standard 4-byte STAMP TLV header format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReturnPathSubType {
+    /// Control Code sub-TLV (1).
+    ControlCode,
+    /// Return Address sub-TLV (2).
+    ReturnAddress,
+    /// SR-MPLS Label Stack sub-TLV (3).
+    SrMplsLabelStack,
+    /// SRv6 Segment List sub-TLV (4).
+    Srv6SegmentList,
+    /// Unknown sub-type.
+    Unknown(u8),
+}
+
+impl ReturnPathSubType {
+    /// Creates a ReturnPathSubType from a byte value.
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Self {
+        match byte {
+            1 => Self::ControlCode,
+            2 => Self::ReturnAddress,
+            3 => Self::SrMplsLabelStack,
+            4 => Self::Srv6SegmentList,
+            n => Self::Unknown(n),
+        }
+    }
+
+    /// Converts the sub-type to a byte value.
+    #[must_use]
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Self::ControlCode => 1,
+            Self::ReturnAddress => 2,
+            Self::SrMplsLabelStack => 3,
+            Self::Srv6SegmentList => 4,
+            Self::Unknown(n) => n,
+        }
+    }
+}
+
+/// Return Path TLV (Type 10) per RFC 9503 §5.
+///
+/// Contains sub-TLVs that specify how the reflector should route its reply.
+/// Sub-TLVs use the standard 4-byte STAMP TLV header (Flags | Type | Length×2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnPathTlv {
+    /// Sub-TLVs within this Return Path TLV.
+    pub sub_tlvs: Vec<RawTlv>,
+}
+
+impl ReturnPathTlv {
+    /// Creates an empty Return Path TLV.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sub_tlvs: Vec::new(),
+        }
+    }
+
+    /// Creates a Return Path TLV with a Control Code sub-TLV.
+    #[must_use]
+    pub fn with_control_code(code: u32) -> Self {
+        let value = code.to_be_bytes().to_vec();
+        let sub = RawTlv::new(
+            TlvType::Unknown(ReturnPathSubType::ControlCode.to_byte()),
+            value,
+        );
+        Self {
+            sub_tlvs: vec![sub],
+        }
+    }
+
+    /// Creates a Return Path TLV with a Return Address sub-TLV.
+    #[must_use]
+    pub fn with_return_address(addr: std::net::IpAddr) -> Self {
+        let value = match addr {
+            std::net::IpAddr::V4(a) => a.octets().to_vec(),
+            std::net::IpAddr::V6(a) => a.octets().to_vec(),
+        };
+        let sub = RawTlv::new(
+            TlvType::Unknown(ReturnPathSubType::ReturnAddress.to_byte()),
+            value,
+        );
+        Self {
+            sub_tlvs: vec![sub],
+        }
+    }
+
+    /// Creates a Return Path TLV with an SR-MPLS Label Stack sub-TLV.
+    ///
+    /// Each label is a 20-bit MPLS label value, encoded as a proper 4-byte
+    /// MPLS Label Stack Entry (LSE): Label(20) | TC(3) | S(1) | TTL(8).
+    /// TC is set to 0, TTL to 255, and the S-bit (bottom-of-stack) is set
+    /// on the last entry only.
+    #[must_use]
+    pub fn with_sr_mpls_labels(labels: &[u32]) -> Self {
+        let mut value = Vec::with_capacity(labels.len() * 4);
+        let last = labels.len().saturating_sub(1);
+        for (i, label) in labels.iter().enumerate() {
+            let s_bit: u32 = if i == last { 1 } else { 0 };
+            let lse = (label << 12) | (s_bit << 8) | 255; // TC=0, TTL=255
+            value.extend_from_slice(&lse.to_be_bytes());
+        }
+        let sub = RawTlv::new(
+            TlvType::Unknown(ReturnPathSubType::SrMplsLabelStack.to_byte()),
+            value,
+        );
+        Self {
+            sub_tlvs: vec![sub],
+        }
+    }
+
+    /// Creates a Return Path TLV with an SRv6 Segment List sub-TLV.
+    ///
+    /// Each SID is encoded as a 16-byte IPv6 address.
+    #[must_use]
+    pub fn with_srv6_sids(sids: &[std::net::Ipv6Addr]) -> Self {
+        let mut value = Vec::with_capacity(sids.len() * 16);
+        for sid in sids {
+            value.extend_from_slice(&sid.octets());
+        }
+        let sub = RawTlv::new(
+            TlvType::Unknown(ReturnPathSubType::Srv6SegmentList.to_byte()),
+            value,
+        );
+        Self {
+            sub_tlvs: vec![sub],
+        }
+    }
+
+    /// Adds a Return Address sub-TLV to this Return Path TLV.
+    pub fn add_return_address(&mut self, addr: std::net::IpAddr) {
+        let value = match addr {
+            std::net::IpAddr::V4(a) => a.octets().to_vec(),
+            std::net::IpAddr::V6(a) => a.octets().to_vec(),
+        };
+        self.sub_tlvs.push(RawTlv::new(
+            TlvType::Unknown(ReturnPathSubType::ReturnAddress.to_byte()),
+            value,
+        ));
+    }
+
+    /// Parses a Return Path TLV from a RawTlv.
+    ///
+    /// The value is parsed as a sequence of sub-TLVs using the standard 4-byte header.
+    ///
+    /// # Errors
+    /// Returns an error if the value is too short to contain any sub-TLV.
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        if raw.value.len() < TLV_HEADER_SIZE {
+            return Err(TlvError::InvalidReturnPathLength(raw.value.len()));
+        }
+        let (sub_tlvs_list, _) = TlvList::parse_lenient(&raw.value);
+        let mut sub_tlvs = Vec::new();
+        for tlv in sub_tlvs_list.non_hmac_tlvs() {
+            sub_tlvs.push(tlv.clone());
+        }
+        if let Some(hmac) = sub_tlvs_list.hmac_tlv() {
+            sub_tlvs.push(hmac.clone());
+        }
+        Ok(Self { sub_tlvs })
+    }
+
+    /// Converts to a RawTlv.
+    #[must_use]
+    pub fn to_raw(&self) -> RawTlv {
+        let mut value = Vec::new();
+        for sub in &self.sub_tlvs {
+            sub.write_to(&mut value);
+        }
+        RawTlv::new(TlvType::ReturnPath, value)
+    }
+
+    /// Returns the Control Code value if a Control Code sub-TLV is present.
+    #[must_use]
+    pub fn get_control_code(&self) -> Option<u32> {
+        for sub in &self.sub_tlvs {
+            if sub.tlv_type.to_byte() == ReturnPathSubType::ControlCode.to_byte()
+                && sub.value.len() == RETURN_PATH_CONTROL_CODE_SIZE
+            {
+                return Some(u32::from_be_bytes([
+                    sub.value[0],
+                    sub.value[1],
+                    sub.value[2],
+                    sub.value[3],
+                ]));
+            }
+        }
+        None
+    }
+
+    /// Returns the Return Address if a Return Address sub-TLV is present.
+    #[must_use]
+    pub fn get_return_address(&self) -> Option<std::net::IpAddr> {
+        for sub in &self.sub_tlvs {
+            if sub.tlv_type.to_byte() == ReturnPathSubType::ReturnAddress.to_byte() {
+                match sub.value.len() {
+                    4 => {
+                        return Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                            sub.value[0],
+                            sub.value[1],
+                            sub.value[2],
+                            sub.value[3],
+                        )));
+                    }
+                    16 => {
+                        let mut octets = [0u8; 16];
+                        octets.copy_from_slice(&sub.value);
+                        return Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns true if an SR-MPLS Label Stack sub-TLV is present.
+    #[must_use]
+    pub fn has_sr_mpls(&self) -> bool {
+        self.sub_tlvs
+            .iter()
+            .any(|sub| sub.tlv_type.to_byte() == ReturnPathSubType::SrMplsLabelStack.to_byte())
+    }
+
+    /// Returns true if an SRv6 Segment List sub-TLV is present.
+    #[must_use]
+    pub fn has_srv6(&self) -> bool {
+        self.sub_tlvs
+            .iter()
+            .any(|sub| sub.tlv_type.to_byte() == ReturnPathSubType::Srv6SegmentList.to_byte())
+    }
+}
+
+impl Default for ReturnPathTlv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Action determined by processing a Return Path TLV (RFC 9503 §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReturnPathAction {
+    /// Normal reply (no Return Path TLV, or Control Code 0x1 same-link).
+    Normal,
+    /// Suppress reply entirely (Control Code 0x0).
+    SuppressReply,
+    /// Reply to an alternate address (Return Address sub-TLV).
+    AlternateAddress(std::net::SocketAddr),
+    /// SR forwarding requested but unsupported — echo with U-flag, reply normally.
+    UnsupportedSr,
+}
+
+impl TlvList {
+    /// Processes Destination Node Address TLVs per RFC 9503 §4.
+    ///
+    /// Finds the first Destination Node Address TLV and checks if the address
+    /// matches one of the reflector's local addresses. If not, sets the U-flag.
+    ///
+    /// Returns `true` if the address matched (or no such TLV was present).
+    pub fn process_destination_node_address(&mut self, local_addrs: &[std::net::IpAddr]) -> bool {
+        let mut matched = true;
+
+        // Check in separated tlvs
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::DestinationNodeAddress {
+                if let Ok(dna) = DestinationNodeAddressTlv::from_raw(tlv) {
+                    if !local_addrs.contains(&dna.address) {
+                        tlv.set_unrecognized();
+                        matched = false;
+                    }
+                }
+                break;
+            }
+        }
+
+        // Also update wire-order TLVs if present
+        if !matched {
+            if let Some(ref mut wire_order) = self.wire_order_tlvs {
+                for tlv in wire_order {
+                    if tlv.tlv_type == TlvType::DestinationNodeAddress {
+                        tlv.set_unrecognized();
+                        break;
+                    }
+                }
+            }
+        }
+
+        matched
+    }
+
+    /// Processes Return Path TLVs per RFC 9503 §5.
+    ///
+    /// Finds the first Return Path TLV, parses its sub-TLVs, and determines
+    /// the appropriate action for the reflector.
+    ///
+    /// # Arguments
+    /// * `sender_port` - The sender's UDP port (used for alternate address replies)
+    pub fn process_return_path(&mut self, sender_port: u16) -> ReturnPathAction {
+        // Find the first Return Path TLV
+        let rp_idx = self
+            .tlvs
+            .iter()
+            .position(|tlv| tlv.tlv_type == TlvType::ReturnPath);
+
+        let Some(idx) = rp_idx else {
+            return ReturnPathAction::Normal;
+        };
+
+        let Ok(rp) = ReturnPathTlv::from_raw(&self.tlvs[idx]) else {
+            // Parse failed — set U-flag and return Normal
+            self.tlvs[idx].set_unrecognized();
+            if let Some(ref mut wire_order) = self.wire_order_tlvs {
+                for tlv in wire_order.iter_mut() {
+                    if tlv.tlv_type == TlvType::ReturnPath {
+                        tlv.set_unrecognized();
+                        break;
+                    }
+                }
+            }
+            return ReturnPathAction::Normal;
+        };
+
+        // Check for Control Code sub-TLV
+        // RFC 9503: only bit 0 (reply-request) is meaningful; remaining bits are reserved and ignored.
+        if let Some(cc) = rp.get_control_code() {
+            return if cc & 1 == 0 {
+                ReturnPathAction::SuppressReply
+            } else {
+                ReturnPathAction::Normal // Same-link = normal for userspace UDP
+            };
+        }
+
+        // Check for Return Address sub-TLV
+        if let Some(addr) = rp.get_return_address() {
+            return ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(
+                addr,
+                sender_port,
+            ));
+        }
+
+        // Check for SR-MPLS or SRv6 — unsupported in userspace
+        if rp.has_sr_mpls() || rp.has_srv6() {
+            self.set_return_path_u_flag();
+            return ReturnPathAction::UnsupportedSr;
+        }
+
+        // Empty or unrecognized sub-TLVs — set U-flag, return Normal
+        self.set_return_path_u_flag();
+        ReturnPathAction::Normal
+    }
+
+    /// Sets the U-flag on the Return Path TLV in both separated and wire-order lists.
+    fn set_return_path_u_flag(&mut self) {
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::ReturnPath {
+                tlv.set_unrecognized();
+                break;
+            }
+        }
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order.iter_mut() {
+                if tlv.tlv_type == TlvType::ReturnPath {
+                    tlv.set_unrecognized();
+                    break;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2305,7 +2768,8 @@ mod tests {
         assert_eq!(TlvType::from_byte(0), TlvType::Reserved);
         assert_eq!(TlvType::from_byte(1), TlvType::ExtraPadding);
         assert_eq!(TlvType::from_byte(8), TlvType::Hmac);
-        assert_eq!(TlvType::from_byte(9), TlvType::Unknown(9));
+        assert_eq!(TlvType::from_byte(9), TlvType::DestinationNodeAddress);
+        assert_eq!(TlvType::from_byte(10), TlvType::ReturnPath);
         assert_eq!(TlvType::from_byte(15), TlvType::Unknown(15));
         assert_eq!(TlvType::from_byte(200), TlvType::Unknown(200));
     }
@@ -2315,7 +2779,8 @@ mod tests {
         assert_eq!(TlvType::Reserved.to_byte(), 0);
         assert_eq!(TlvType::ExtraPadding.to_byte(), 1);
         assert_eq!(TlvType::Hmac.to_byte(), 8);
-        assert_eq!(TlvType::Unknown(10).to_byte(), 10);
+        assert_eq!(TlvType::DestinationNodeAddress.to_byte(), 9);
+        assert_eq!(TlvType::ReturnPath.to_byte(), 10);
         assert_eq!(TlvType::Unknown(200).to_byte(), 200);
     }
 
@@ -2324,7 +2789,7 @@ mod tests {
         assert!(TlvType::ExtraPadding.is_recognized());
         assert!(TlvType::Hmac.is_recognized());
         assert!(!TlvType::Reserved.is_recognized());
-        assert!(!TlvType::Unknown(9).is_recognized());
+        assert!(!TlvType::Unknown(99).is_recognized());
     }
 
     #[test]
@@ -4226,5 +4691,306 @@ mod tests {
         list.validate_known_tlv_lengths();
 
         assert!(!list.non_hmac_tlvs()[0].is_malformed());
+    }
+
+    // ===== RFC 9503 Tests =====
+
+    #[test]
+    fn test_destination_node_address_ipv4_roundtrip() {
+        let addr = "192.168.1.1".parse::<std::net::IpAddr>().unwrap();
+        let tlv = DestinationNodeAddressTlv::new(addr);
+        let raw = tlv.to_raw();
+        assert_eq!(raw.tlv_type, TlvType::DestinationNodeAddress);
+        assert_eq!(raw.value.len(), 4);
+
+        let parsed = DestinationNodeAddressTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.address, addr);
+    }
+
+    #[test]
+    fn test_destination_node_address_ipv6_roundtrip() {
+        let addr = "2001:db8::1".parse::<std::net::IpAddr>().unwrap();
+        let tlv = DestinationNodeAddressTlv::new(addr);
+        let raw = tlv.to_raw();
+        assert_eq!(raw.tlv_type, TlvType::DestinationNodeAddress);
+        assert_eq!(raw.value.len(), 16);
+
+        let parsed = DestinationNodeAddressTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.address, addr);
+    }
+
+    #[test]
+    fn test_destination_node_address_invalid_length() {
+        let raw = RawTlv::new(TlvType::DestinationNodeAddress, vec![0; 8]);
+        let result = DestinationNodeAddressTlv::from_raw(&raw);
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidDestinationNodeAddressLength(8))
+        ));
+    }
+
+    #[test]
+    fn test_return_path_sub_type_roundtrip() {
+        for (byte, expected) in [
+            (1, ReturnPathSubType::ControlCode),
+            (2, ReturnPathSubType::ReturnAddress),
+            (3, ReturnPathSubType::SrMplsLabelStack),
+            (4, ReturnPathSubType::Srv6SegmentList),
+            (99, ReturnPathSubType::Unknown(99)),
+        ] {
+            let sub_type = ReturnPathSubType::from_byte(byte);
+            assert_eq!(sub_type, expected);
+            assert_eq!(sub_type.to_byte(), byte);
+        }
+    }
+
+    #[test]
+    fn test_return_path_control_code_roundtrip() {
+        let rp = ReturnPathTlv::with_control_code(0x1);
+        let raw = rp.to_raw();
+        assert_eq!(raw.tlv_type, TlvType::ReturnPath);
+
+        let parsed = ReturnPathTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.get_control_code(), Some(0x1));
+        assert!(parsed.get_return_address().is_none());
+        assert!(!parsed.has_sr_mpls());
+        assert!(!parsed.has_srv6());
+    }
+
+    #[test]
+    fn test_return_path_return_address_ipv4_roundtrip() {
+        let addr: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let rp = ReturnPathTlv::with_return_address(addr);
+        let raw = rp.to_raw();
+
+        let parsed = ReturnPathTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.get_return_address(), Some(addr));
+        assert!(parsed.get_control_code().is_none());
+    }
+
+    #[test]
+    fn test_return_path_return_address_ipv6_roundtrip() {
+        let addr: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        let rp = ReturnPathTlv::with_return_address(addr);
+        let raw = rp.to_raw();
+
+        let parsed = ReturnPathTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.get_return_address(), Some(addr));
+    }
+
+    #[test]
+    fn test_return_path_sr_mpls_roundtrip() {
+        let labels = vec![100, 200, 300];
+        let rp = ReturnPathTlv::with_sr_mpls_labels(&labels);
+        let raw = rp.to_raw();
+
+        let parsed = ReturnPathTlv::from_raw(&raw).unwrap();
+        assert!(parsed.has_sr_mpls());
+        assert!(!parsed.has_srv6());
+
+        // Verify proper MPLS LSE encoding: Label(20)|TC(3)|S(1)|TTL(8)
+        let sr_sub = parsed
+            .sub_tlvs
+            .iter()
+            .find(|s| s.tlv_type.to_byte() == ReturnPathSubType::SrMplsLabelStack.to_byte())
+            .unwrap();
+        assert_eq!(sr_sub.value.len(), 12); // 3 labels × 4 bytes
+        let lse0 = u32::from_be_bytes(sr_sub.value[0..4].try_into().unwrap());
+        let lse1 = u32::from_be_bytes(sr_sub.value[4..8].try_into().unwrap());
+        let lse2 = u32::from_be_bytes(sr_sub.value[8..12].try_into().unwrap());
+        // Label field (top 20 bits)
+        assert_eq!(lse0 >> 12, 100);
+        assert_eq!(lse1 >> 12, 200);
+        assert_eq!(lse2 >> 12, 300);
+        // S-bit (bit 8) — only set on last entry
+        assert_eq!(lse0 & 0x100, 0);
+        assert_eq!(lse1 & 0x100, 0);
+        assert_eq!(lse2 & 0x100, 0x100);
+        // TTL (bottom 8 bits) = 255
+        assert_eq!(lse0 & 0xFF, 255);
+        assert_eq!(lse1 & 0xFF, 255);
+        assert_eq!(lse2 & 0xFF, 255);
+        // TC (bits 11-9) = 0
+        assert_eq!(lse0 & 0xE00, 0);
+    }
+
+    #[test]
+    fn test_return_path_srv6_roundtrip() {
+        let sids = vec![
+            "2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap(),
+            "2001:db8::2".parse::<std::net::Ipv6Addr>().unwrap(),
+        ];
+        let rp = ReturnPathTlv::with_srv6_sids(&sids);
+        let raw = rp.to_raw();
+
+        let parsed = ReturnPathTlv::from_raw(&raw).unwrap();
+        assert!(!parsed.has_sr_mpls());
+        assert!(parsed.has_srv6());
+    }
+
+    #[test]
+    fn test_return_path_empty_value_error() {
+        let raw = RawTlv::new(TlvType::ReturnPath, vec![0; 2]);
+        let result = ReturnPathTlv::from_raw(&raw);
+        assert!(matches!(result, Err(TlvError::InvalidReturnPathLength(2))));
+    }
+
+    #[test]
+    fn test_validate_destination_node_address_correct_sizes() {
+        // IPv4 (4 bytes) — should NOT be malformed
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::DestinationNodeAddress, vec![0; 4]))
+            .unwrap();
+        list.validate_known_tlv_lengths();
+        assert!(!list.non_hmac_tlvs()[0].is_malformed());
+
+        // IPv6 (16 bytes) — should NOT be malformed
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::DestinationNodeAddress, vec![0; 16]))
+            .unwrap();
+        list.validate_known_tlv_lengths();
+        assert!(!list.non_hmac_tlvs()[0].is_malformed());
+    }
+
+    #[test]
+    fn test_validate_destination_node_address_wrong_size() {
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::DestinationNodeAddress, vec![0; 8]))
+            .unwrap();
+        list.validate_known_tlv_lengths();
+        assert!(list.non_hmac_tlvs()[0].is_malformed());
+    }
+
+    #[test]
+    fn test_validate_return_path_correct_size() {
+        // Minimum valid: 4 bytes (one sub-TLV header)
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::ReturnPath, vec![0; 4]))
+            .unwrap();
+        list.validate_known_tlv_lengths();
+        assert!(!list.non_hmac_tlvs()[0].is_malformed());
+    }
+
+    #[test]
+    fn test_validate_return_path_wrong_size() {
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::ReturnPath, vec![0; 2]))
+            .unwrap();
+        list.validate_known_tlv_lengths();
+        assert!(list.non_hmac_tlvs()[0].is_malformed());
+    }
+
+    #[test]
+    fn test_process_destination_node_address_match() {
+        let addr: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+        let tlv = DestinationNodeAddressTlv::new(addr);
+        let mut list = TlvList::new();
+        list.push(tlv.to_raw()).unwrap();
+
+        let local_addrs = vec![addr];
+        let matched = list.process_destination_node_address(&local_addrs);
+        assert!(matched);
+        assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
+    }
+
+    #[test]
+    fn test_process_destination_node_address_mismatch() {
+        let addr: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+        let tlv = DestinationNodeAddressTlv::new(addr);
+        let mut list = TlvList::new();
+        list.push(tlv.to_raw()).unwrap();
+
+        let local_addrs = vec!["10.0.0.1".parse().unwrap()];
+        let matched = list.process_destination_node_address(&local_addrs);
+        assert!(!matched);
+        assert!(list.non_hmac_tlvs()[0].is_unrecognized());
+    }
+
+    #[test]
+    fn test_process_return_path_suppress() {
+        let rp = ReturnPathTlv::with_control_code(0x0);
+        let mut list = TlvList::new();
+        list.push(rp.to_raw()).unwrap();
+
+        let action = list.process_return_path(1234);
+        assert_eq!(action, ReturnPathAction::SuppressReply);
+    }
+
+    #[test]
+    fn test_process_return_path_normal() {
+        let rp = ReturnPathTlv::with_control_code(0x1);
+        let mut list = TlvList::new();
+        list.push(rp.to_raw()).unwrap();
+
+        let action = list.process_return_path(1234);
+        assert_eq!(action, ReturnPathAction::Normal);
+    }
+
+    #[test]
+    fn test_process_return_path_cc_reserved_bits_suppress() {
+        // RFC 9503: only bit 0 matters; reserved bits are ignored.
+        // 0xFE has bit 0 clear → suppress.
+        let rp = ReturnPathTlv::with_control_code(0xFE);
+        let mut list = TlvList::new();
+        list.push(rp.to_raw()).unwrap();
+
+        let action = list.process_return_path(1234);
+        assert_eq!(action, ReturnPathAction::SuppressReply);
+    }
+
+    #[test]
+    fn test_process_return_path_cc_reserved_bits_normal() {
+        // RFC 9503: only bit 0 matters; reserved bits are ignored.
+        // 0xFF has bit 0 set → normal reply.
+        let rp = ReturnPathTlv::with_control_code(0xFF);
+        let mut list = TlvList::new();
+        list.push(rp.to_raw()).unwrap();
+
+        let action = list.process_return_path(1234);
+        assert_eq!(action, ReturnPathAction::Normal);
+    }
+
+    #[test]
+    fn test_process_return_path_alternate_addr() {
+        let addr: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        let rp = ReturnPathTlv::with_return_address(addr);
+        let mut list = TlvList::new();
+        list.push(rp.to_raw()).unwrap();
+
+        let action = list.process_return_path(862);
+        assert_eq!(
+            action,
+            ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(addr, 862))
+        );
+    }
+
+    #[test]
+    fn test_process_return_path_sr_unsupported() {
+        let rp = ReturnPathTlv::with_sr_mpls_labels(&[100, 200]);
+        let mut list = TlvList::new();
+        list.push(rp.to_raw()).unwrap();
+
+        let action = list.process_return_path(862);
+        assert_eq!(action, ReturnPathAction::UnsupportedSr);
+        assert!(list.non_hmac_tlvs()[0].is_unrecognized());
+    }
+
+    #[test]
+    fn test_tlv_type_is_recognized_for_rfc9503_types() {
+        assert!(TlvType::DestinationNodeAddress.is_recognized());
+        assert!(TlvType::ReturnPath.is_recognized());
+    }
+
+    #[test]
+    fn test_return_path_add_return_address() {
+        let labels = vec![100, 200];
+        let mut rp = ReturnPathTlv::with_sr_mpls_labels(&labels);
+        let addr: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        rp.add_return_address(addr);
+
+        let raw = rp.to_raw();
+        let parsed = ReturnPathTlv::from_raw(&raw).unwrap();
+        assert!(parsed.has_sr_mpls());
+        assert_eq!(parsed.get_return_address(), Some(addr));
     }
 }

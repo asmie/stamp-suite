@@ -35,10 +35,12 @@ use crate::{
     stats::OutputFormat,
 };
 
+use crate::tlv::ReturnPathAction;
+
 use super::{
     load_hmac_key, print_reflector_stats, process_stamp_packet, recompute_response_tlv_hmac,
-    set_cos_policy_rejected, ProcessingContext, ReflectorCounters, AUTH_BASE_SIZE,
-    UNAUTH_BASE_SIZE,
+    set_cos_policy_rejected, set_return_path_u_flag_in_response, ProcessingContext,
+    ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Context for sending STAMP responses in pnet mode.
@@ -75,6 +77,8 @@ struct CaptureConfig {
     counters: Arc<ReflectorCounters>,
     /// Output format for shutdown statistics.
     output_format: OutputFormat,
+    /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
+    local_addresses: Vec<IpAddr>,
 }
 
 /// Interface properties needed for macOS special handling.
@@ -230,6 +234,9 @@ pub async fn run_receiver(conf: &Configuration) {
     let start_time = Instant::now();
     let output_format = conf.output_format;
 
+    // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
+    let local_addresses = build_local_addresses(conf.local_addr);
+
     // Build capture config with all values needed by the blocking loop
     let capture_config = CaptureConfig {
         local_port: conf.local_port,
@@ -249,6 +256,7 @@ pub async fn run_receiver(conf: &Configuration) {
         shutdown: Arc::clone(&shutdown),
         counters: Arc::clone(&counters),
         output_format,
+        local_addresses,
     };
 
     // Spawn async task to listen for Ctrl+C and set shutdown flag
@@ -539,17 +547,33 @@ fn handle_stamp_packet(
         reflector_tx_count,
         packet_addr_info,
         last_reflection,
+        local_addresses: &config.local_addresses,
+        sender_port: pkt.src.port(),
     };
 
     if let Some(mut response) = process_stamp_packet(data, pkt.src, pkt.ttl, config.use_auth, &ctx)
     {
+        // Handle Return Path action (RFC 9503 §5)
+        let send_target = match &response.return_path_action {
+            ReturnPathAction::SuppressReply => {
+                log::debug!("Return Path: suppressing reply to {}", pkt.src);
+                config
+                    .counters
+                    .packets_dropped
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                return;
+            }
+            ReturnPathAction::AlternateAddress(addr) => *addr,
+            ReturnPathAction::Normal | ReturnPathAction::UnsupportedSr => pkt.src,
+        };
+
         // Determine TOS value: use CoS TLV request if present, otherwise default (0).
         let (tos, has_cos_request) = match response.cos_request {
             Some((dscp, ecn)) => (((dscp & 0x3F) << 2) | (ecn & 0x03), true),
             None => (0u8, false),
         };
 
-        let is_ipv6 = pkt.src.is_ipv6();
+        let is_ipv6 = send_target.is_ipv6();
 
         // Check IPv6 socket availability early
         if is_ipv6 && send_ctx.send_socket_v6.is_none() {
@@ -599,28 +623,56 @@ fn handle_stamp_packet(
             }
         }
 
-        // Use the appropriate socket based on address family
-        let send_result = match pkt.src {
-            SocketAddr::V4(_) => send_ctx.send_socket_v4.send_to(&response.data, pkt.src),
-            SocketAddr::V6(_) => match &send_ctx.send_socket_v6 {
-                Some(socket) => socket.send_to(&response.data, pkt.src),
-                None => {
-                    eprintln!("Cannot send IPv6 response: IPv6 socket unavailable");
-                    config
-                        .counters
-                        .packets_dropped
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    return;
-                }
-            },
+        // Helper: send to the given target using the correct address-family socket.
+        let try_send = |data: &[u8], target: SocketAddr| -> Result<usize, std::io::Error> {
+            match target {
+                SocketAddr::V4(_) => send_ctx.send_socket_v4.send_to(data, target),
+                SocketAddr::V6(_) => match &send_ctx.send_socket_v6 {
+                    Some(socket) => socket.send_to(data, target),
+                    None => Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrNotAvailable,
+                        "IPv6 socket unavailable",
+                    )),
+                },
+            }
         };
-        if let Err(e) = send_result {
-            eprintln!("Failed to send response to {}: {}", pkt.src, e);
-            config
-                .counters
-                .packets_dropped
-                .fetch_add(1, AtomicOrdering::Relaxed);
-        } else {
+
+        let sent_ok = match try_send(&response.data, send_target) {
+            Ok(_) => true,
+            Err(e) if send_target != pkt.src => {
+                // Alternate-address send failed — set U-flag on Return Path TLV
+                // and fall back to original source (RFC 9503 §5).
+                log::debug!(
+                    "Return Path: alternate send to {} failed ({}), falling back to {}",
+                    send_target,
+                    e,
+                    pkt.src
+                );
+                let base_size = if config.use_auth {
+                    AUTH_BASE_SIZE
+                } else {
+                    UNAUTH_BASE_SIZE
+                };
+                if set_return_path_u_flag_in_response(&mut response.data, base_size) {
+                    if let Some(ref key) = config.hmac_key {
+                        recompute_response_tlv_hmac(&mut response.data, base_size, key);
+                    }
+                }
+                match try_send(&response.data, pkt.src) {
+                    Ok(_) => true,
+                    Err(e2) => {
+                        eprintln!("Failed to send response to {}: {}", pkt.src, e2);
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to send response to {}: {}", send_target, e);
+                false
+            }
+        };
+
+        if sent_ok {
             config
                 .counters
                 .packets_reflected
@@ -639,6 +691,43 @@ fn handle_stamp_packet(
                 let send_ts = crate::time::generate_timestamp(config.clock_source);
                 session.record_reflection(reflected_seq, send_ts);
             }
+        } else {
+            config
+                .counters
+                .packets_dropped
+                .fetch_add(1, AtomicOrdering::Relaxed);
         }
+    }
+}
+
+/// Builds the list of local IP addresses for Destination Node Address TLV matching.
+///
+/// If the bind address is a wildcard (0.0.0.0 or ::), enumerates all interface addresses
+/// via `pnet::datalink::interfaces()`. Otherwise, returns just the configured address.
+fn build_local_addresses(bind_addr: IpAddr) -> Vec<IpAddr> {
+    let is_wildcard = match bind_addr {
+        IpAddr::V4(v4) => v4.is_unspecified(),
+        IpAddr::V6(v6) => v6.is_unspecified(),
+    };
+
+    if !is_wildcard {
+        return vec![bind_addr];
+    }
+
+    // Enumerate interface addresses via pnet
+    let mut addrs = Vec::new();
+    for iface in datalink::interfaces() {
+        for ip_net in &iface.ips {
+            addrs.push(ip_net.ip());
+        }
+    }
+
+    if addrs.is_empty() {
+        log::warn!(
+            "Could not enumerate local addresses; Destination Node Address matching may fail"
+        );
+        vec![bind_addr]
+    } else {
+        addrs
     }
 }

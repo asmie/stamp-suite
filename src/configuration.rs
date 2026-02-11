@@ -221,6 +221,40 @@ pub struct Configuration {
     /// Periodic reporting interval in seconds (0 = disabled, sender only).
     #[clap(long, default_value_t = 0)]
     pub report_interval: u32,
+
+    /// Destination Node Address for SR networks (RFC 9503 §4). Requires --ssid.
+    #[clap(long, value_name = "IP")]
+    pub dest_node_addr: Option<std::net::IpAddr>,
+
+    /// Return Path control code (RFC 9503 §5): 0=no reply, 1=same link reply.
+    #[clap(
+        long,
+        value_parser = clap::value_parser!(u32),
+        conflicts_with_all = ["return_address", "return_sr_mpls_labels", "return_srv6_sids"]
+    )]
+    pub return_path_cc: Option<u32>,
+
+    /// Return Path alternate reply address (RFC 9503 §5).
+    #[clap(long, value_name = "IP", conflicts_with = "return_path_cc")]
+    pub return_address: Option<std::net::IpAddr>,
+
+    /// Return Path SR-MPLS label stack (RFC 9503 §5). Comma-separated 20-bit labels.
+    #[clap(
+        long,
+        value_name = "LABELS",
+        value_delimiter = ',',
+        conflicts_with_all = ["return_path_cc", "return_srv6_sids"]
+    )]
+    pub return_sr_mpls_labels: Option<Vec<u32>>,
+
+    /// Return Path SRv6 segment list (RFC 9503 §5). Comma-separated IPv6 SIDs.
+    #[clap(
+        long,
+        value_name = "SIDS",
+        value_delimiter = ',',
+        conflicts_with_all = ["return_path_cc", "return_sr_mpls_labels"]
+    )]
+    pub return_srv6_sids: Option<Vec<std::net::Ipv6Addr>>,
 }
 
 impl Configuration {
@@ -257,6 +291,35 @@ impl Configuration {
                 "Authenticated mode {} (-A A) requires --hmac-key or --hmac-key-file",
                 mode_desc
             )));
+        }
+
+        // Validate --dest-node-addr requires --ssid (RFC 9503 mandates SSID)
+        if self.dest_node_addr.is_some() && self.ssid.is_none() {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "--dest-node-addr requires --ssid to be specified (RFC 9503)".to_string(),
+            ));
+        }
+
+        // Validate --return-path-cc value must be 0 or 1
+        if let Some(cc) = self.return_path_cc {
+            if cc > 1 {
+                return Err(ConfigurationError::InvalidConfiguration(format!(
+                    "--return-path-cc value {} is invalid, must be 0 or 1",
+                    cc
+                )));
+            }
+        }
+
+        // Validate --return-sr-mpls-labels values are 20-bit
+        if let Some(ref labels) = self.return_sr_mpls_labels {
+            for label in labels {
+                if *label > 0xFFFFF {
+                    return Err(ConfigurationError::InvalidConfiguration(format!(
+                        "--return-sr-mpls-labels value {} exceeds 20-bit maximum (0xFFFFF)",
+                        label
+                    )));
+                }
+            }
         }
 
         Ok(())
@@ -764,5 +827,92 @@ mod tests {
     fn test_tlv_handling_mode_display() {
         assert_eq!(TlvHandlingMode::Ignore.to_string(), "ignore");
         assert_eq!(TlvHandlingMode::Echo.to_string(), "echo");
+    }
+
+    // ===== RFC 9503 Configuration Tests =====
+
+    #[test]
+    fn test_dest_node_addr_requires_ssid() {
+        let args = vec!["test", "--dest-node-addr", "192.168.1.1"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_err());
+    }
+
+    #[test]
+    fn test_dest_node_addr_with_ssid_ok() {
+        let args = vec!["test", "--dest-node-addr", "192.168.1.1", "--ssid", "42"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
+    }
+
+    #[test]
+    fn test_return_path_cc_valid_values() {
+        let args = vec!["test", "--return-path-cc", "0"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
+
+        let args = vec!["test", "--return-path-cc", "1"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
+    }
+
+    #[test]
+    fn test_return_path_cc_invalid_value() {
+        let args = vec!["test", "--return-path-cc", "2"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_err());
+    }
+
+    #[test]
+    fn test_return_path_cc_conflicts_with_return_address() {
+        let result = Configuration::try_parse_from(vec![
+            "test",
+            "--return-path-cc",
+            "0",
+            "--return-address",
+            "10.0.0.1",
+        ]);
+        assert!(result.is_err()); // clap conflict
+    }
+
+    #[test]
+    fn test_return_sr_mpls_labels_valid() {
+        let args = vec!["test", "--return-sr-mpls-labels", "100,200,300"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
+        assert_eq!(conf.return_sr_mpls_labels, Some(vec![100, 200, 300]));
+    }
+
+    #[test]
+    fn test_return_sr_mpls_labels_exceeds_20bit() {
+        let args = vec!["test", "--return-sr-mpls-labels", "1048576"]; // 0x100000
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_err());
+    }
+
+    #[test]
+    fn test_return_srv6_sids_parsed() {
+        let args = vec!["test", "--return-srv6-sids", "2001:db8::1,2001:db8::2"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(
+            conf.return_srv6_sids,
+            Some(vec![
+                "2001:db8::1".parse().unwrap(),
+                "2001:db8::2".parse().unwrap(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_return_sr_mpls_conflicts_with_srv6() {
+        let args = vec![
+            "test",
+            "--return-sr-mpls-labels",
+            "100,200",
+            "--return-srv6-sids",
+            "2001:db8::1",
+        ];
+        let result = Configuration::try_parse_from(args);
+        assert!(result.is_err());
     }
 }

@@ -22,10 +22,12 @@ use crate::{
     session::SessionManager,
 };
 
+use crate::tlv::ReturnPathAction;
+
 use super::{
     load_hmac_key, print_reflector_stats, process_stamp_packet, recompute_response_tlv_hmac,
-    set_cos_policy_rejected, ProcessingContext, ReflectorCounters, AUTH_BASE_SIZE,
-    UNAUTH_BASE_SIZE,
+    set_cos_policy_rejected, set_return_path_u_flag_in_response, ProcessingContext,
+    ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
@@ -208,6 +210,10 @@ pub async fn run_receiver(conf: &Configuration) {
     let start_time = std::time::Instant::now();
     let output_format = conf.output_format;
 
+    // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
+    // Start with the configured bind address; if wildcard, enumerate interface addresses.
+    let local_addresses = build_local_addresses(conf.local_addr);
+
     println!(
         "STAMP Reflector listening on {} (nix mode, real TTL)",
         local_addr
@@ -352,11 +358,26 @@ pub async fn run_receiver(conf: &Configuration) {
                     reflector_tx_count,
                     packet_addr_info,
                     last_reflection,
+                    local_addresses: &local_addresses,
+                    sender_port: src_addr.port(),
                 };
 
                 if let Some(mut response) =
                     process_stamp_packet(data, src_addr, ttl, use_auth, &ctx)
                 {
+                    // Handle Return Path action (RFC 9503 §5)
+                    let send_target = match &response.return_path_action {
+                        ReturnPathAction::SuppressReply => {
+                            log::debug!("Return Path: suppressing reply to {}", src_addr);
+                            counters
+                                .packets_dropped
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            continue;
+                        }
+                        ReturnPathAction::AlternateAddress(addr) => *addr,
+                        ReturnPathAction::Normal | ReturnPathAction::UnsupportedSr => src_addr,
+                    };
+
                     // Determine TOS value: use CoS TLV request if present, otherwise default (0).
                     let (tos, has_cos_request) = match response.cos_request {
                         Some((dscp, ecn)) => (((dscp & 0x3F) << 2) | (ecn & 0x03), true),
@@ -418,12 +439,42 @@ pub async fn run_receiver(conf: &Configuration) {
                         }
                     }
 
-                    if let Err(e) = tokio_socket.send_to(&response.data, src_addr).await {
-                        eprintln!("Failed to send response: {}", e);
-                        counters
-                            .packets_dropped
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    } else {
+                    let sent_ok = match tokio_socket.send_to(&response.data, send_target).await {
+                        Ok(_) => true,
+                        Err(e) if send_target != src_addr => {
+                            // Alternate-address send failed — set U-flag on Return Path TLV
+                            // and fall back to original source (RFC 9503 §5).
+                            log::debug!(
+                                "Return Path: alternate send to {} failed ({}), falling back to {}",
+                                send_target,
+                                e,
+                                src_addr
+                            );
+                            let base_size = if use_auth {
+                                AUTH_BASE_SIZE
+                            } else {
+                                UNAUTH_BASE_SIZE
+                            };
+                            if set_return_path_u_flag_in_response(&mut response.data, base_size) {
+                                if let Some(ref key) = hmac_key {
+                                    recompute_response_tlv_hmac(&mut response.data, base_size, key);
+                                }
+                            }
+                            match tokio_socket.send_to(&response.data, src_addr).await {
+                                Ok(_) => true,
+                                Err(e2) => {
+                                    eprintln!("Failed to send response to {}: {}", src_addr, e2);
+                                    false
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to send response: {}", e);
+                            false
+                        }
+                    };
+
+                    if sent_ok {
                         counters
                             .packets_reflected
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -443,6 +494,10 @@ pub async fn run_receiver(conf: &Configuration) {
                             let send_ts = crate::time::generate_timestamp(conf.clock_source);
                             session.record_reflection(reflected_seq, send_ts);
                         }
+                    } else {
+                        counters
+                            .packets_dropped
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -608,4 +663,42 @@ fn extract_dst_addr_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>)
     }
 
     None
+}
+
+/// Builds the list of local IP addresses for Destination Node Address TLV matching.
+///
+/// If the bind address is a wildcard (0.0.0.0 or ::), enumerates all interface addresses
+/// via `nix::ifaddrs::getifaddrs()`. Otherwise, returns just the configured address.
+fn build_local_addresses(bind_addr: IpAddr) -> Vec<IpAddr> {
+    let is_wildcard = match bind_addr {
+        IpAddr::V4(v4) => v4.is_unspecified(),
+        IpAddr::V6(v6) => v6.is_unspecified(),
+    };
+
+    if !is_wildcard {
+        return vec![bind_addr];
+    }
+
+    // Enumerate interface addresses
+    let mut addrs = Vec::new();
+    if let Ok(ifaddrs) = nix::ifaddrs::getifaddrs() {
+        for ifaddr in ifaddrs {
+            if let Some(addr) = ifaddr.address {
+                if let Some(v4) = addr.as_sockaddr_in() {
+                    addrs.push(IpAddr::V4(v4.ip()));
+                } else if let Some(v6) = addr.as_sockaddr_in6() {
+                    addrs.push(IpAddr::V6(v6.ip()));
+                }
+            }
+        }
+    }
+
+    if addrs.is_empty() {
+        log::warn!(
+            "Could not enumerate local addresses; Destination Node Address matching may fail"
+        );
+        vec![bind_addr]
+    } else {
+        addrs
+    }
 }

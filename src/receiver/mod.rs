@@ -61,7 +61,10 @@ use crate::{
     session::SessionManager,
     stats::{self, OutputFormat},
     time::generate_timestamp,
-    tlv::{PacketAddressInfo, SyncSource, TimestampMethod, TlvList, TlvType, TLV_HEADER_SIZE},
+    tlv::{
+        PacketAddressInfo, ReturnPathAction, SyncSource, TimestampMethod, TlvList, TlvType,
+        TLV_HEADER_SIZE,
+    },
 };
 
 /// Loads the HMAC key from configuration (hex string or file).
@@ -182,6 +185,43 @@ pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> 
     false
 }
 
+/// Sets the U-flag on the Return Path TLV in a serialized STAMP response.
+///
+/// Walks the TLV area to find a Return Path TLV (type 10) and sets its
+/// unrecognized flag. Used when the reflector cannot honor the requested
+/// return path (e.g., alternate-address send failure) per RFC 9503 §5.
+///
+/// Returns `true` if the Return Path TLV was found and updated.
+pub fn set_return_path_u_flag_in_response(response: &mut [u8], base_packet_size: usize) -> bool {
+    if response.len() <= base_packet_size {
+        return false;
+    }
+
+    let tlv_area = &mut response[base_packet_size..];
+    let mut offset = 0;
+
+    while offset + TLV_HEADER_SIZE <= tlv_area.len() {
+        if tlv_area[offset..offset + TLV_HEADER_SIZE] == [0, 0, 0, 0]
+            && tlv_area[offset..].iter().all(|&b| b == 0)
+        {
+            break;
+        }
+
+        let tlv_type = TlvType::from_byte(tlv_area[offset + 1]);
+        let length = u16::from_be_bytes([tlv_area[offset + 2], tlv_area[offset + 3]]) as usize;
+
+        if tlv_type == TlvType::ReturnPath {
+            // Set U-flag (bit 7) on the flags byte
+            tlv_area[offset] |= 0x80;
+            return true;
+        }
+
+        offset += TLV_HEADER_SIZE + length;
+    }
+
+    false
+}
+
 /// Recomputes the TLV HMAC in a serialized STAMP response after in-place mutation.
 ///
 /// This must be called after any modification to the TLV area of an already-assembled
@@ -276,6 +316,8 @@ pub struct StampResponse {
     /// Requested DSCP/ECN from CoS TLV (if present).
     /// Tuple of (dscp1, ecn1) that should be applied to the outgoing packet.
     pub cos_request: Option<(u8, u8)>,
+    /// Action determined by Return Path TLV processing (RFC 9503 §5).
+    pub return_path_action: ReturnPathAction,
 }
 
 /// Context for processing STAMP packets, shared between backends.
@@ -311,6 +353,10 @@ pub struct ProcessingContext<'a> {
     pub packet_addr_info: Option<PacketAddressInfo>,
     /// Last reflection data: (seq, timestamp) for Follow-Up Telemetry TLV.
     pub last_reflection: Option<(u32, u64)>,
+    /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
+    pub local_addresses: &'a [std::net::IpAddr],
+    /// Sender's UDP port for Return Path alternate address replies (RFC 9503 §5).
+    pub sender_port: u16,
 }
 
 /// Processes a STAMP packet and returns the response.
@@ -505,6 +551,7 @@ fn process_auth_packet(
                 reflector_seq,
             ),
             cos_request: None,
+            return_path_action: ReturnPathAction::Normal,
         })
     }
 }
@@ -561,6 +608,7 @@ fn process_unauth_packet(
                         reflector_seq,
                     ),
                     cos_request: None,
+                    return_path_action: ReturnPathAction::Normal,
                 })
             }
         }
@@ -751,6 +799,7 @@ pub fn assemble_unauth_answer_with_tlvs(
     let base_bytes = base.to_bytes();
     let mut response = base_bytes.to_vec();
     let mut cos_request: Option<(u8, u8)> = None;
+    let mut return_path_action = ReturnPathAction::Normal;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -836,6 +885,12 @@ pub fn assemble_unauth_answer_with_tlvs(
                         );
                     }
 
+                    // Process Destination Node Address TLV (RFC 9503 §4)
+                    tlvs.process_destination_node_address(ctx.local_addresses);
+
+                    // Process Return Path TLV (RFC 9503 §5)
+                    return_path_action = tlvs.process_return_path(ctx.sender_port);
+
                     // Compute fresh HMAC for response
                     if let Some(key) = tlv_hmac_key {
                         let response_seq_bytes = &base_bytes[..4];
@@ -851,6 +906,7 @@ pub fn assemble_unauth_answer_with_tlvs(
     StampResponse {
         data: response,
         cos_request,
+        return_path_action,
     }
 }
 
@@ -885,6 +941,7 @@ pub fn assemble_auth_answer_with_tlvs(
     let base_bytes = base.to_bytes();
     let mut response = base_bytes.to_vec();
     let mut cos_request: Option<(u8, u8)> = None;
+    let mut return_path_action = ReturnPathAction::Normal;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -975,6 +1032,12 @@ pub fn assemble_auth_answer_with_tlvs(
                         );
                     }
 
+                    // Process Destination Node Address TLV (RFC 9503 §4)
+                    tlvs.process_destination_node_address(ctx.local_addresses);
+
+                    // Process Return Path TLV (RFC 9503 §5)
+                    return_path_action = tlvs.process_return_path(ctx.sender_port);
+
                     // Compute fresh HMAC for response
                     if let Some(key) = tlv_hmac_key {
                         let response_seq_bytes = &base_bytes[..4];
@@ -990,6 +1053,7 @@ pub fn assemble_auth_answer_with_tlvs(
     StampResponse {
         data: response,
         cos_request,
+        return_path_action,
     }
 }
 
@@ -1016,6 +1080,8 @@ mod tests {
             reflector_tx_count: None,
             packet_addr_info: None,
             last_reflection: None,
+            local_addresses: &[],
+            sender_port: 0,
         }
     }
 
@@ -2341,5 +2407,237 @@ mod tests {
             UNAUTH_BASE_SIZE,
             &key
         ));
+    }
+
+    // ===== RFC 9503 Integration Tests =====
+
+    #[test]
+    fn test_unauth_dest_node_addr_match() {
+        use crate::tlv::DestinationNodeAddressTlv;
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        let addr: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+        let dna_tlv = DestinationNodeAddressTlv::new(addr);
+
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&dna_tlv.to_raw().to_bytes());
+
+        let local_addrs = vec![addr];
+        let mut ctx = test_ctx(0, 0);
+        ctx.local_addresses = &local_addrs;
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        // Check TLV is echoed without U-flag (flags byte at offset 44 = 0x00)
+        assert_eq!(response.data[UNAUTH_BASE_SIZE] & 0x80, 0x00);
+        assert_eq!(response.return_path_action, ReturnPathAction::Normal);
+    }
+
+    #[test]
+    fn test_unauth_dest_node_addr_mismatch() {
+        use crate::tlv::DestinationNodeAddressTlv;
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        let addr: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+        let dna_tlv = DestinationNodeAddressTlv::new(addr);
+
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&dna_tlv.to_raw().to_bytes());
+
+        let local_addrs: Vec<std::net::IpAddr> = vec!["10.0.0.1".parse().unwrap()];
+        let mut ctx = test_ctx(0, 0);
+        ctx.local_addresses = &local_addrs;
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        // Check TLV is echoed WITH U-flag set (flags byte bit 7)
+        assert_eq!(response.data[UNAUTH_BASE_SIZE] & 0x80, 0x80);
+    }
+
+    #[test]
+    fn test_unauth_return_path_suppress() {
+        use crate::tlv::ReturnPathTlv;
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        let rp_tlv = ReturnPathTlv::with_control_code(0x0);
+
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&rp_tlv.to_raw().to_bytes());
+
+        let ctx = test_ctx(0, 0);
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        assert_eq!(response.return_path_action, ReturnPathAction::SuppressReply);
+    }
+
+    #[test]
+    fn test_unauth_return_path_alternate_addr() {
+        use crate::tlv::ReturnPathTlv;
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        let alt_addr: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        let rp_tlv = ReturnPathTlv::with_return_address(alt_addr);
+
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&rp_tlv.to_raw().to_bytes());
+
+        let mut ctx = test_ctx(0, 0);
+        ctx.sender_port = 12345;
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        assert_eq!(
+            response.return_path_action,
+            ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(alt_addr, 12345))
+        );
+    }
+
+    #[test]
+    fn test_unauth_return_path_sr_unsupported() {
+        use crate::tlv::ReturnPathTlv;
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        let rp_tlv = ReturnPathTlv::with_sr_mpls_labels(&[100, 200]);
+
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&rp_tlv.to_raw().to_bytes());
+
+        let ctx = test_ctx(0, 0);
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        assert_eq!(response.return_path_action, ReturnPathAction::UnsupportedSr);
+        // Return Path TLV should have U-flag set
+        assert_eq!(response.data[UNAUTH_BASE_SIZE] & 0x80, 0x80);
+    }
+
+    #[test]
+    fn test_set_return_path_u_flag_in_response() {
+        use crate::tlv::ReturnPathTlv;
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        let rp_tlv = ReturnPathTlv::with_return_address("10.0.0.5".parse().unwrap());
+
+        let mut data = sender_packet.to_bytes().to_vec();
+        data.extend_from_slice(&rp_tlv.to_raw().to_bytes());
+
+        // U-flag should not be set initially
+        assert_eq!(data[UNAUTH_BASE_SIZE] & 0x80, 0);
+
+        let updated = set_return_path_u_flag_in_response(&mut data, UNAUTH_BASE_SIZE);
+        assert!(updated);
+        assert_eq!(data[UNAUTH_BASE_SIZE] & 0x80, 0x80);
+    }
+
+    #[test]
+    fn test_set_return_path_u_flag_no_return_path_tlv() {
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        let mut data = sender_packet.to_bytes().to_vec();
+
+        let updated = set_return_path_u_flag_in_response(&mut data, UNAUTH_BASE_SIZE);
+        assert!(!updated);
     }
 }

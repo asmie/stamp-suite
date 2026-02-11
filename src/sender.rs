@@ -24,9 +24,9 @@ use crate::{
     stats::{RttCollector, RttSample, StatsSnapshot},
     time::generate_timestamp,
     tlv::{
-        AccessReportTlv, ClassOfServiceTlv, DirectMeasurementTlv, FollowUpTelemetryTlv,
-        LocationTlv, RawTlv, SessionSenderId, SyncSource, TimestampInfoTlv, TimestampMethod,
-        TlvList,
+        AccessReportTlv, ClassOfServiceTlv, DestinationNodeAddressTlv, DirectMeasurementTlv,
+        FollowUpTelemetryTlv, LocationTlv, RawTlv, ReturnPathTlv, SessionSenderId, SyncSource,
+        TimestampInfoTlv, TimestampMethod, TlvList,
     },
 };
 
@@ -153,6 +153,35 @@ pub async fn run_sender(conf: &Configuration) -> StatsSnapshot {
     if conf.follow_up_telemetry {
         extra_tlvs.push(FollowUpTelemetryTlv::new().to_raw());
         log::info!("Follow-Up Telemetry TLV enabled");
+    }
+
+    // Build Destination Node Address TLV (RFC 9503 §4)
+    if let Some(addr) = conf.dest_node_addr {
+        extra_tlvs.push(DestinationNodeAddressTlv::new(addr).to_raw());
+        log::info!("Destination Node Address TLV enabled ({})", addr);
+    }
+
+    // Build Return Path TLV (RFC 9503 §5) — at most one
+    if let Some(cc) = conf.return_path_cc {
+        extra_tlvs.push(ReturnPathTlv::with_control_code(cc).to_raw());
+        log::info!("Return Path TLV enabled (control code={})", cc);
+    } else if let Some(ref labels) = conf.return_sr_mpls_labels {
+        let mut rp = ReturnPathTlv::with_sr_mpls_labels(labels);
+        if let Some(addr) = conf.return_address {
+            rp.add_return_address(addr);
+        }
+        extra_tlvs.push(rp.to_raw());
+        log::info!("Return Path TLV enabled (SR-MPLS, {} labels)", labels.len());
+    } else if let Some(ref sids) = conf.return_srv6_sids {
+        let mut rp = ReturnPathTlv::with_srv6_sids(sids);
+        if let Some(addr) = conf.return_address {
+            rp.add_return_address(addr);
+        }
+        extra_tlvs.push(rp.to_raw());
+        log::info!("Return Path TLV enabled (SRv6, {} SIDs)", sids.len());
+    } else if let Some(addr) = conf.return_address {
+        extra_tlvs.push(ReturnPathTlv::with_return_address(addr).to_raw());
+        log::info!("Return Path TLV enabled (return address={})", addr);
     }
 
     // Check if we need to include TLV extensions
