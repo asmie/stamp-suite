@@ -23,8 +23,9 @@ use crate::{
 };
 
 use super::{
-    load_hmac_key, print_reflector_stats, process_stamp_packet, set_cos_policy_rejected,
-    ProcessingContext, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    load_hmac_key, print_reflector_stats, process_stamp_packet, recompute_response_tlv_hmac,
+    set_cos_policy_rejected, ProcessingContext, ReflectorCounters, AUTH_BASE_SIZE,
+    UNAUTH_BASE_SIZE,
 };
 
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
@@ -400,7 +401,16 @@ pub async fn run_receiver(conf: &Configuration) {
                                 } else {
                                     UNAUTH_BASE_SIZE
                                 };
-                                set_cos_policy_rejected(&mut response.data, base_size);
+                                if set_cos_policy_rejected(&mut response.data, base_size) {
+                                    // RP mutation invalidates the TLV HMAC — recompute
+                                    if let Some(ref key) = hmac_key {
+                                        recompute_response_tlv_hmac(
+                                            &mut response.data,
+                                            base_size,
+                                            key,
+                                        );
+                                    }
+                                }
                             }
                             // Don't update last_tos on failure - retry next time
                         } else {

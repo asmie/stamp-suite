@@ -182,6 +182,51 @@ pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> 
     false
 }
 
+/// Recomputes the TLV HMAC in a serialized STAMP response after in-place mutation.
+///
+/// This must be called after any modification to the TLV area of an already-assembled
+/// response (e.g., after `set_cos_policy_rejected` sets the RP flag) to keep the
+/// HMAC consistent with the packet contents.
+///
+/// The function locates the HMAC TLV at the end of the response (per RFC 8972 §4.8,
+/// HMAC TLV is always last), recomputes the HMAC over `seq_bytes + preceding TLVs`,
+/// and overwrites the HMAC value in place.
+///
+/// Returns `true` if the HMAC was recomputed, `false` if no HMAC TLV was found.
+pub fn recompute_response_tlv_hmac(
+    data: &mut [u8],
+    base_packet_size: usize,
+    hmac_key: &HmacKey,
+) -> bool {
+    // HMAC TLV: header (4 bytes) + value (16 bytes) = 20 bytes total
+    const HMAC_TLV_SIZE: usize = TLV_HEADER_SIZE + 16;
+
+    if data.len() < base_packet_size + HMAC_TLV_SIZE || data.len() < 4 {
+        return false;
+    }
+
+    // HMAC TLV is always serialized last (TlvList::write_to guarantees this)
+    let hmac_tlv_offset = data.len() - HMAC_TLV_SIZE;
+
+    // Verify the last TLV is actually an HMAC TLV (type byte at offset 1 in header)
+    if TlvType::from_byte(data[hmac_tlv_offset + 1]) != TlvType::Hmac {
+        return false;
+    }
+
+    // HMAC input: seq_bytes (first 4 bytes of packet) + all TLV bytes before the HMAC TLV
+    let preceding_len = hmac_tlv_offset - base_packet_size;
+    let mut hmac_input = Vec::with_capacity(4 + preceding_len);
+    hmac_input.extend_from_slice(&data[..4]);
+    hmac_input.extend_from_slice(&data[base_packet_size..hmac_tlv_offset]);
+
+    let hmac = hmac_key.compute(&hmac_input);
+
+    // Overwrite HMAC value in place (value starts after the 4-byte header)
+    let value_start = hmac_tlv_offset + TLV_HEADER_SIZE;
+    data[value_start..value_start + 16].copy_from_slice(&hmac);
+    true
+}
+
 /// Assembles an unauthenticated reflected packet from a received test packet.
 ///
 /// # Arguments
@@ -726,10 +771,6 @@ pub fn assemble_unauth_answer_with_tlvs(
                 // parsing would have failed). This avoids double-parsing malformed/adversarial traffic.
                 let (mut tlvs, had_malformed) = TlvList::parse_lenient(tlv_data);
 
-                // Extract CoS request (DSCP1/ECN1) before updating
-                // This will be used to set IP_TOS on the outgoing packet
-                cos_request = tlvs.get_cos_request();
-
                 // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + TLVs
                 let incoming_seq_bytes = &original_data[..4];
 
@@ -760,38 +801,42 @@ pub fn assemble_unauth_answer_with_tlvs(
                     }
                 }
 
-                // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
-                tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
-
-                // Update Timestamp Information TLVs (RFC 8972 §4.3)
-                let sync_src = match ctx.clock_source {
-                    ClockFormat::NTP => SyncSource::Ntp,
-                    ClockFormat::PTP => SyncSource::Ptp,
-                };
-                tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
-
-                // Update Direct Measurement TLVs (RFC 8972 §4.5)
-                if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
-                    tlvs.update_direct_measurement_tlvs(rx, tx);
-                }
-
-                // Update Location TLVs (RFC 8972 §4.2)
-                if let Some(ref addr_info) = ctx.packet_addr_info {
-                    tlvs.update_location_tlvs(addr_info);
-                }
-
-                // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
-                if let Some((last_seq, last_ts)) = ctx.last_reflection {
-                    tlvs.update_follow_up_telemetry_tlvs(
-                        last_seq,
-                        last_ts,
-                        TimestampMethod::SwLocal,
-                    );
-                }
-
-                // Only compute fresh HMAC for response if verification passed AND no malformed TLVs
-                // Per RFC 8972 §4.8: on failure, echo TLVs with flags set, don't regenerate HMAC
+                // Per RFC 8972 §4.8: on HMAC failure or malformed TLVs, only echo
+                // TLVs with flags set — do NOT perform semantic TLV processing.
                 if hmac_ok && !had_malformed {
+                    // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS
+                    cos_request = tlvs.get_cos_request();
+
+                    // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
+                    tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
+
+                    // Update Timestamp Information TLVs (RFC 8972 §4.3)
+                    let sync_src = match ctx.clock_source {
+                        ClockFormat::NTP => SyncSource::Ntp,
+                        ClockFormat::PTP => SyncSource::Ptp,
+                    };
+                    tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
+
+                    // Update Direct Measurement TLVs (RFC 8972 §4.5)
+                    if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
+                        tlvs.update_direct_measurement_tlvs(rx, tx);
+                    }
+
+                    // Update Location TLVs (RFC 8972 §4.2)
+                    if let Some(ref addr_info) = ctx.packet_addr_info {
+                        tlvs.update_location_tlvs(addr_info);
+                    }
+
+                    // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
+                    if let Some((last_seq, last_ts)) = ctx.last_reflection {
+                        tlvs.update_follow_up_telemetry_tlvs(
+                            last_seq,
+                            last_ts,
+                            TimestampMethod::SwLocal,
+                        );
+                    }
+
+                    // Compute fresh HMAC for response
                     if let Some(key) = tlv_hmac_key {
                         let response_seq_bytes = &base_bytes[..4];
                         tlvs.set_hmac(key, response_seq_bytes);
@@ -859,10 +904,6 @@ pub fn assemble_auth_answer_with_tlvs(
                 // parsing would have failed). This avoids double-parsing malformed/adversarial traffic.
                 let (mut tlvs, had_malformed) = TlvList::parse_lenient(tlv_data);
 
-                // Extract CoS request (DSCP1/ECN1) before updating
-                // This will be used to set IP_TOS on the outgoing packet
-                cos_request = tlvs.get_cos_request();
-
                 // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + TLVs
                 let incoming_seq_bytes = &original_data[..4];
 
@@ -899,38 +940,42 @@ pub fn assemble_auth_answer_with_tlvs(
                     }
                 }
 
-                // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
-                tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
-
-                // Update Timestamp Information TLVs (RFC 8972 §4.3)
-                let sync_src = match ctx.clock_source {
-                    ClockFormat::NTP => SyncSource::Ntp,
-                    ClockFormat::PTP => SyncSource::Ptp,
-                };
-                tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
-
-                // Update Direct Measurement TLVs (RFC 8972 §4.5)
-                if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
-                    tlvs.update_direct_measurement_tlvs(rx, tx);
-                }
-
-                // Update Location TLVs (RFC 8972 §4.2)
-                if let Some(ref addr_info) = ctx.packet_addr_info {
-                    tlvs.update_location_tlvs(addr_info);
-                }
-
-                // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
-                if let Some((last_seq, last_ts)) = ctx.last_reflection {
-                    tlvs.update_follow_up_telemetry_tlvs(
-                        last_seq,
-                        last_ts,
-                        TimestampMethod::SwLocal,
-                    );
-                }
-
-                // Only compute fresh HMAC for response if verification passed AND no malformed TLVs
-                // Per RFC 8972 §4.8: on failure, echo TLVs with flags set, don't regenerate HMAC
+                // Per RFC 8972 §4.8: on HMAC failure or malformed TLVs, only echo
+                // TLVs with flags set — do NOT perform semantic TLV processing.
                 if hmac_ok && !had_malformed {
+                    // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS
+                    cos_request = tlvs.get_cos_request();
+
+                    // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
+                    tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
+
+                    // Update Timestamp Information TLVs (RFC 8972 §4.3)
+                    let sync_src = match ctx.clock_source {
+                        ClockFormat::NTP => SyncSource::Ntp,
+                        ClockFormat::PTP => SyncSource::Ptp,
+                    };
+                    tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
+
+                    // Update Direct Measurement TLVs (RFC 8972 §4.5)
+                    if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
+                        tlvs.update_direct_measurement_tlvs(rx, tx);
+                    }
+
+                    // Update Location TLVs (RFC 8972 §4.2)
+                    if let Some(ref addr_info) = ctx.packet_addr_info {
+                        tlvs.update_location_tlvs(addr_info);
+                    }
+
+                    // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
+                    if let Some((last_seq, last_ts)) = ctx.last_reflection {
+                        tlvs.update_follow_up_telemetry_tlvs(
+                            last_seq,
+                            last_ts,
+                            TimestampMethod::SwLocal,
+                        );
+                    }
+
+                    // Compute fresh HMAC for response
                     if let Some(key) = tlv_hmac_key {
                         let response_seq_bytes = &base_bytes[..4];
                         tlvs.set_hmac(key, response_seq_bytes);
@@ -2183,5 +2228,118 @@ mod tests {
         // Verify RP is now 1
         let rp_after = (response[cos_value_start + 2] >> 6) & 0x03;
         assert_eq!(rp_after, 1);
+    }
+
+    #[test]
+    fn test_recompute_hmac_after_rp_mutation() {
+        use crate::tlv::{ClassOfServiceTlv, TlvList, TLV_HEADER_SIZE};
+
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+
+        // Build an unauthenticated packet with CoS TLV + HMAC
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 0x12345678,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+        let base_bytes = sender_packet.to_bytes();
+
+        let cos_tlv = ClassOfServiceTlv::new(46, 2);
+        let mut tlvs = TlvList::new();
+        tlvs.push(cos_tlv.to_raw()).unwrap();
+        tlvs.set_hmac(&key, &base_bytes);
+
+        let mut original_data = base_bytes.to_vec();
+        original_data.extend_from_slice(&tlvs.to_bytes());
+
+        // Assemble reflector response (HMAC will be recomputed for the response)
+        let mut response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            Some(&key),
+            true,
+            &test_ctx(0, 0),
+        );
+
+        // Save the valid HMAC before mutation
+        let hmac_start = response.data.len() - TLV_HEADER_SIZE - 16;
+        let hmac_before = response.data[hmac_start + TLV_HEADER_SIZE..].to_vec();
+
+        // Verify the response HMAC is valid before mutation
+        let resp_tlv_data = &response.data[UNAUTH_BASE_SIZE..];
+        let (resp_tlvs, _) = TlvList::parse_lenient(resp_tlv_data);
+        assert!(
+            resp_tlvs
+                .verify_hmac(&key, &response.data[..4], resp_tlv_data)
+                .is_ok(),
+            "HMAC should be valid before RP mutation"
+        );
+
+        // Simulate RP mutation (DSCP application failure)
+        assert!(set_cos_policy_rejected(
+            &mut response.data,
+            UNAUTH_BASE_SIZE
+        ));
+
+        // HMAC is now invalid because packet data changed
+        let resp_tlv_data_after_rp = &response.data[UNAUTH_BASE_SIZE..];
+        let (resp_tlvs_bad, _) = TlvList::parse_lenient(resp_tlv_data_after_rp);
+        assert!(
+            resp_tlvs_bad
+                .verify_hmac(&key, &response.data[..4], resp_tlv_data_after_rp)
+                .is_err(),
+            "HMAC should be INVALID after RP mutation without recompute"
+        );
+
+        // Recompute HMAC
+        assert!(recompute_response_tlv_hmac(
+            &mut response.data,
+            UNAUTH_BASE_SIZE,
+            &key,
+        ));
+
+        // HMAC value should have changed
+        let hmac_after = response.data[hmac_start + TLV_HEADER_SIZE..].to_vec();
+        assert_ne!(
+            hmac_before, hmac_after,
+            "HMAC should change after recompute"
+        );
+
+        // Verify the recomputed HMAC is valid
+        let resp_tlv_data_fixed = &response.data[UNAUTH_BASE_SIZE..];
+        let (resp_tlvs_fixed, _) = TlvList::parse_lenient(resp_tlv_data_fixed);
+        assert!(
+            resp_tlvs_fixed
+                .verify_hmac(&key, &response.data[..4], resp_tlv_data_fixed)
+                .is_ok(),
+            "HMAC should be valid after recompute"
+        );
+    }
+
+    #[test]
+    fn test_recompute_hmac_no_hmac_tlv() {
+        // Response without HMAC TLV — recompute should return false
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 42,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let mut data = sender_packet.to_bytes().to_vec();
+        // Add some non-HMAC TLV bytes
+        data.extend_from_slice(&[0, 1, 0, 4, 0xCC, 0xCC, 0xCC, 0xCC]);
+        assert!(!recompute_response_tlv_hmac(
+            &mut data,
+            UNAUTH_BASE_SIZE,
+            &key
+        ));
     }
 }
