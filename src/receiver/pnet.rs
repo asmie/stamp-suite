@@ -32,7 +32,6 @@ use crate::{
     crypto::HmacKey,
     error_estimate::ErrorEstimate,
     session::SessionManager,
-    stats::OutputFormat,
 };
 
 use crate::tlv::ReturnPathAction;
