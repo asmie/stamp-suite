@@ -1076,19 +1076,12 @@ impl TlvList {
             // Verify HMAC if present - marks ALL TLVs with I-flag on failure
             self.verify_hmac_and_mark(key, sequence_number_bytes, tlv_bytes)
         } else {
-            // No key available - per RFC 8972 §4.8, if we can't verify the HMAC TLV,
-            // we SHOULD set the I-flag to indicate integrity could not be verified
-            if let Some(ref mut hmac) = self.hmac_tlv {
-                hmac.set_integrity_failed();
-                // Also update wire_order_tlvs if present (for proper echo)
-                if let Some(ref mut wire_order) = self.wire_order_tlvs {
-                    for tlv in wire_order.iter_mut() {
-                        if tlv.tlv_type == TlvType::Hmac {
-                            tlv.set_integrity_failed();
-                        }
-                    }
-                }
-                false // Indicate verification could not be performed
+            // No key available — if HMAC TLV is present, we cannot verify integrity.
+            // Per RFC 8972 §4.8: set I-flag on ALL TLVs (not just the HMAC TLV)
+            // and treat as verification failure.
+            if self.hmac_tlv.is_some() {
+                self.mark_all_integrity_failed();
+                false
             } else {
                 true // No HMAC TLV present, nothing to verify
             }
@@ -2968,6 +2961,60 @@ mod tests {
 
         assert!(result); // Should pass - non-strict allows missing HMAC
         assert!(!list.non_hmac_tlvs()[0].is_integrity_failed()); // No I-flag
+    }
+
+    #[test]
+    fn test_apply_reflector_flags_no_key_with_hmac_tlv() {
+        // When HMAC TLV exists but no key is available, ALL TLVs must get I-flag
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let seq = vec![0x01, 0x02, 0x03, 0x04];
+
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::ExtraPadding, vec![0xCC; 4]))
+            .unwrap();
+        list.push(RawTlv::new(TlvType::Location, vec![1, 2, 3, 4]))
+            .unwrap();
+        list.set_hmac(&key, &seq);
+
+        let tlv_bytes = list.to_bytes();
+
+        // Call with no key (None) — HMAC TLV is present but unverifiable
+        let result = list.apply_reflector_flags(None, &seq, &tlv_bytes);
+
+        assert!(!result, "Should return false when HMAC present but no key");
+        // ALL non-HMAC TLVs must have I-flag set
+        for tlv in list.non_hmac_tlvs() {
+            assert!(
+                tlv.is_integrity_failed(),
+                "Non-HMAC TLV type {:?} should have I-flag set",
+                tlv.tlv_type
+            );
+        }
+        // HMAC TLV itself must also have I-flag
+        assert!(
+            list.hmac_tlv().unwrap().is_integrity_failed(),
+            "HMAC TLV should have I-flag set"
+        );
+    }
+
+    #[test]
+    fn test_apply_reflector_flags_no_key_no_hmac_tlv() {
+        // When no HMAC TLV exists and no key, should pass (nothing to verify)
+        let seq = vec![0x01, 0x02, 0x03, 0x04];
+
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::ExtraPadding, vec![0xCC; 4]))
+            .unwrap();
+
+        let tlv_bytes = list.to_bytes();
+
+        let result = list.apply_reflector_flags(None, &seq, &tlv_bytes);
+
+        assert!(result, "Should pass when no HMAC TLV and no key");
+        assert!(
+            !list.non_hmac_tlvs()[0].is_integrity_failed(),
+            "No I-flag should be set"
+        );
     }
 
     #[test]
