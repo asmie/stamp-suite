@@ -75,8 +75,6 @@ struct CaptureConfig {
     shutdown: Arc<AtomicBool>,
     /// Aggregate packet counters for reporting.
     counters: Arc<ReflectorCounters>,
-    /// Output format for shutdown statistics.
-    output_format: OutputFormat,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     local_addresses: Vec<IpAddr>,
 }
@@ -255,7 +253,6 @@ pub async fn run_receiver(conf: &Configuration) {
         metrics_enabled: conf.metrics,
         shutdown: Arc::clone(&shutdown),
         counters: Arc::clone(&counters),
-        output_format,
         local_addresses,
     };
 
