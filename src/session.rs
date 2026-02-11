@@ -245,6 +245,21 @@ impl SessionManager {
     pub fn session_count(&self) -> usize {
         self.sessions.read().unwrap().len()
     }
+
+    /// Returns a summary of all sessions: (client_addr, packets_received, packets_transmitted).
+    pub fn session_summaries(&self) -> Vec<(SocketAddr, u32, u32)> {
+        let sessions = self.sessions.read().unwrap();
+        sessions
+            .iter()
+            .map(|(addr, entry)| {
+                (
+                    *addr,
+                    entry.session.get_received_count(),
+                    entry.session.get_transmitted_count(),
+                )
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

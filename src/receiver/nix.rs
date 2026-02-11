@@ -23,8 +23,8 @@ use crate::{
 };
 
 use super::{
-    load_hmac_key, process_stamp_packet, set_cos_policy_rejected, ProcessingContext,
-    AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    load_hmac_key, print_reflector_stats, process_stamp_packet, set_cos_policy_rejected,
+    ProcessingContext, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
@@ -203,6 +203,10 @@ pub async fn run_receiver(conf: &Configuration) {
         log::info!("Stateful reflector mode enabled (RFC 8972)");
     }
 
+    let counters = Arc::new(ReflectorCounters::new());
+    let start_time = std::time::Instant::now();
+    let output_format = conf.output_format;
+
     println!(
         "STAMP Reflector listening on {} (nix mode, real TTL)",
         local_addr
@@ -224,7 +228,7 @@ pub async fn run_receiver(conf: &Configuration) {
     let mut last_tos: u8 = 0;
 
     loop {
-        // Wait for socket to be readable or cleanup timer to fire.
+        // Wait for socket to be readable, cleanup timer, or shutdown signal.
         // Use unbiased select to ensure fair scheduling - biased select
         // would starve the cleanup timer under heavy packet load.
         tokio::select! {
@@ -248,6 +252,11 @@ pub async fn run_receiver(conf: &Configuration) {
                     log::debug!("Session cleanup: removed {} stale sessions", removed);
                 }
                 continue;
+            }
+
+            _ = tokio::signal::ctrl_c() => {
+                print_reflector_stats(&counters, &session_manager, start_time, output_format);
+                return;
             }
         }
 
@@ -301,6 +310,9 @@ pub async fn run_receiver(conf: &Configuration) {
                 };
 
                 let data = &buf[..len];
+                counters
+                    .packets_received
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Get session counters for Direct Measurement and Follow-Up Telemetry.
                 // Always tracked per-client, independent of --stateful-reflector.
@@ -398,7 +410,13 @@ pub async fn run_receiver(conf: &Configuration) {
 
                     if let Err(e) = tokio_socket.send_to(&response.data, src_addr).await {
                         eprintln!("Failed to send response: {}", e);
+                        counters
+                            .packets_dropped
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     } else {
+                        counters
+                            .packets_reflected
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // Record transmission for Direct Measurement and Follow-Up Telemetry.
                         // Always tracked per-client, independent of --stateful-reflector.
                         let session = session_manager.get_or_create_session(src_addr);

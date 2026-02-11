@@ -21,6 +21,7 @@ use crate::{
         load_hmac_key, AUTH_BASE_SIZE, REFLECTED_AUTH_PACKET_HMAC_OFFSET, UNAUTH_BASE_SIZE,
     },
     session::Session,
+    stats::{RttCollector, RttSample, StatsSnapshot},
     time::generate_timestamp,
     tlv::{
         AccessReportTlv, ClassOfServiceTlv, DirectMeasurementTlv, FollowUpTelemetryTlv,
@@ -28,49 +29,6 @@ use crate::{
         TlvList,
     },
 };
-
-/// Statistics collected during a STAMP sender session.
-///
-/// Contains counters for sent/received/lost packets and RTT measurements.
-#[derive(Debug, Default)]
-pub struct SessionStats {
-    /// Total number of packets sent during the session.
-    pub packets_sent: u32,
-    /// Total number of response packets received.
-    pub packets_received: u32,
-    /// Number of packets that were not acknowledged (lost or timed out).
-    pub packets_lost: u32,
-    /// Minimum round-trip time observed in nanoseconds.
-    pub min_rtt_ns: Option<u64>,
-    /// Maximum round-trip time observed in nanoseconds.
-    pub max_rtt_ns: Option<u64>,
-    /// Average round-trip time in nanoseconds.
-    pub avg_rtt_ns: Option<u64>,
-}
-
-impl SessionStats {
-    /// Prints a summary of the session statistics to stdout.
-    pub fn print_summary(&self) {
-        println!("\n--- STAMP Statistics ---");
-        println!("Packets sent: {}", self.packets_sent);
-        println!("Packets received: {}", self.packets_received);
-        let loss_pct = if self.packets_sent > 0 {
-            (self.packets_lost as f64 / self.packets_sent as f64) * 100.0
-        } else {
-            0.0
-        };
-        println!("Packets lost: {} ({:.1}%)", self.packets_lost, loss_pct);
-        if let Some(min_rtt) = self.min_rtt_ns {
-            println!("Min RTT: {:.3} ms", min_rtt as f64 / 1_000_000.0);
-        }
-        if let Some(max_rtt) = self.max_rtt_ns {
-            println!("Max RTT: {:.3} ms", max_rtt as f64 / 1_000_000.0);
-        }
-        if let Some(avg_rtt) = self.avg_rtt_ns {
-            println!("Avg RTT: {:.3} ms", avg_rtt as f64 / 1_000_000.0);
-        }
-    }
-}
 
 /// Internal structure to track packets awaiting responses.
 struct PendingPacket {
@@ -81,6 +39,17 @@ struct PendingPacket {
     send_timestamp: u64,
 }
 
+/// Mutable context for processing received responses.
+struct SenderRecvContext<'a> {
+    pending: &'a mut HashMap<u32, PendingPacket>,
+    rtt_collector: &'a mut RttCollector,
+    packets_received: &'a mut u32,
+    print_stats: bool,
+    hmac_key: Option<&'a HmacKey>,
+    #[cfg(feature = "metrics")]
+    metrics_enabled: bool,
+}
+
 /// Runs the STAMP sender, transmitting test packets and collecting statistics.
 ///
 /// Sends packets to the configured remote address and waits for reflected responses.
@@ -88,23 +57,26 @@ struct PendingPacket {
 ///
 /// When the `metrics` feature is enabled and `--metrics` flag is set, this function
 /// also records Prometheus metrics for packets sent, received, lost, and RTT values.
-pub async fn run_sender(conf: &Configuration) -> SessionStats {
+pub async fn run_sender(conf: &Configuration) -> StatsSnapshot {
     #[cfg(feature = "metrics")]
     let metrics_enabled = conf.metrics;
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let remote_addr: SocketAddr = (conf.remote_addr, conf.remote_port).into();
+    let output_format = conf.output_format;
+
+    let empty_snapshot = || RttCollector::new().snapshot(0, 0);
 
     let socket = match UdpSocket::bind(local_addr).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Cannot bind to address {}: {}", local_addr, e);
-            return SessionStats::default();
+            return empty_snapshot();
         }
     };
 
     if let Err(e) = socket.connect(remote_addr).await {
         eprintln!("Cannot connect to address {}: {}", remote_addr, e);
-        return SessionStats::default();
+        return empty_snapshot();
     }
 
     // Build error estimate from configuration with Z flag set based on clock source
@@ -128,7 +100,7 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         eprintln!(
             "Error: Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file)"
         );
-        return SessionStats::default();
+        return empty_snapshot();
     }
 
     if hmac_key.is_some() {
@@ -137,8 +109,9 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
 
     let sess = Session::new(0);
     let mut pending: HashMap<u32, PendingPacket> = HashMap::new();
-    let mut stats = SessionStats::default();
-    let mut rtt_sum: u64 = 0;
+    let mut rtt_collector = RttCollector::new();
+    let mut packets_sent: u32 = 0;
+    let mut packets_received: u32 = 0;
     let mut recv_buf = [0u8; 1024];
     let timeout = Duration::from_secs(conf.timeout as u64);
 
@@ -215,6 +188,19 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         SendMode::OpenBase
     };
 
+    // Periodic reporting timer
+    let mut report_timer = if conf.report_interval > 0 {
+        Some(tokio::time::interval(Duration::from_secs(
+            conf.report_interval as u64,
+        )))
+    } else {
+        None
+    };
+    // Skip the first immediate tick
+    if let Some(ref mut timer) = report_timer {
+        timer.tick().await;
+    }
+
     for _ in 0..conf.count {
         let seq_num = sess.generate_sequence_number();
         let send_time = Instant::now();
@@ -223,7 +209,7 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         // Build per-packet TLVs (Direct Measurement changes each packet)
         let per_packet_tlvs: Vec<RawTlv>;
         let all_extra_tlvs = if conf.direct_measurement {
-            let dm = DirectMeasurementTlv::new(stats.packets_sent + 1);
+            let dm = DirectMeasurementTlv::new(packets_sent + 1);
             per_packet_tlvs = extra_tlvs
                 .iter()
                 .cloned()
@@ -278,7 +264,7 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
             continue;
         }
 
-        stats.packets_sent += 1;
+        packets_sent += 1;
         #[cfg(feature = "metrics")]
         if metrics_enabled {
             crate::metrics::sender_metrics::record_packet_sent();
@@ -303,18 +289,21 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                 result = socket.recv(&mut recv_buf) => {
                     match result {
                         Ok(len) => {
+                            let mut ctx = SenderRecvContext {
+                                pending: &mut pending,
+                                rtt_collector: &mut rtt_collector,
+                                packets_received: &mut packets_received,
+                                print_stats: conf.print_stats,
+                                hmac_key: hmac_key.as_ref(),
+                                #[cfg(feature = "metrics")]
+                                metrics_enabled,
+                            };
                             process_response(
                                 &recv_buf[..len],
                                 use_auth,
                                 use_tlvs,
                                 conf.clock_source,
-                                &mut pending,
-                                &mut stats,
-                                &mut rtt_sum,
-                                conf.print_stats,
-                                hmac_key.as_ref(),
-                                #[cfg(feature = "metrics")]
-                                metrics_enabled,
+                                &mut ctx,
                             );
                         }
                         Err(e) => {
@@ -328,6 +317,17 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
                     // Send delay expired, time to send next packet
                     break;
                 }
+
+                _ = async {
+                    if let Some(ref mut timer) = report_timer {
+                        timer.tick().await
+                    } else {
+                        std::future::pending::<tokio::time::Instant>().await
+                    }
+                } => {
+                    let interim = rtt_collector.snapshot(packets_sent, pending.len() as u32);
+                    interim.print_interim(output_format);
+                }
             }
         }
     }
@@ -338,18 +338,21 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
         let remaining = timeout.saturating_sub(wait_start.elapsed());
         match tokio::time::timeout(remaining, socket.recv(&mut recv_buf)).await {
             Ok(Ok(len)) => {
+                let mut ctx = SenderRecvContext {
+                    pending: &mut pending,
+                    rtt_collector: &mut rtt_collector,
+                    packets_received: &mut packets_received,
+                    print_stats: conf.print_stats,
+                    hmac_key: hmac_key.as_ref(),
+                    #[cfg(feature = "metrics")]
+                    metrics_enabled,
+                };
                 process_response(
                     &recv_buf[..len],
                     use_auth,
                     use_tlvs,
                     conf.clock_source,
-                    &mut pending,
-                    &mut stats,
-                    &mut rtt_sum,
-                    conf.print_stats,
-                    hmac_key.as_ref(),
-                    #[cfg(feature = "metrics")]
-                    metrics_enabled,
+                    &mut ctx,
                 );
             }
             Ok(Err(e)) => {
@@ -361,34 +364,23 @@ pub async fn run_sender(conf: &Configuration) -> SessionStats {
     }
 
     // Mark remaining pending packets as lost
-    stats.packets_lost = pending.len() as u32;
+    let packets_lost = pending.len() as u32;
     #[cfg(feature = "metrics")]
     if metrics_enabled {
-        for _ in 0..stats.packets_lost {
+        for _ in 0..packets_lost {
             crate::metrics::sender_metrics::record_packet_lost();
         }
     }
 
-    // Calculate average RTT
-    if stats.packets_received > 0 {
-        stats.avg_rtt_ns = Some(rtt_sum / stats.packets_received as u64);
-    }
-
-    stats
+    rtt_collector.snapshot(packets_sent, packets_lost)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn process_response(
     data: &[u8],
     use_auth: bool,
     use_tlvs: bool,
     _clock_source: ClockFormat,
-    pending: &mut HashMap<u32, PendingPacket>,
-    stats: &mut SessionStats,
-    rtt_sum: &mut u64,
-    print_stats: bool,
-    hmac_key: Option<&HmacKey>,
-    #[cfg(feature = "metrics")] metrics_enabled: bool,
+    ctx: &mut SenderRecvContext,
 ) {
     let recv_time = Instant::now();
 
@@ -407,7 +399,7 @@ fn process_response(
             let hmac = base.hmac;
 
             // Verify base packet HMAC against canonical buffer (RFC 8762 §4.4, §4.6)
-            if let Some(key) = hmac_key {
+            if let Some(key) = ctx.hmac_key {
                 if !verify_packet_hmac(
                     key,
                     &canonical_buf,
@@ -419,7 +411,7 @@ fn process_response(
                         seq_num
                     );
                     #[cfg(feature = "metrics")]
-                    if metrics_enabled {
+                    if ctx.metrics_enabled {
                         crate::metrics::sender_metrics::record_hmac_failure();
                     }
                     return;
@@ -432,9 +424,9 @@ fn process_response(
                     &ext_packet.tlvs,
                     data,
                     AUTH_BASE_SIZE,
-                    hmac_key,
+                    ctx.hmac_key,
                     #[cfg(feature = "metrics")]
-                    metrics_enabled,
+                    ctx.metrics_enabled,
                 )
             } else {
                 None
@@ -451,7 +443,7 @@ fn process_response(
             let hmac = packet.hmac;
 
             // Verify HMAC against canonical buffer when key is present (RFC 8762 §4.4, §4.6)
-            if let Some(key) = hmac_key {
+            if let Some(key) = ctx.hmac_key {
                 if !verify_packet_hmac(
                     key,
                     &canonical_buf,
@@ -463,7 +455,7 @@ fn process_response(
                         seq_num
                     );
                     #[cfg(feature = "metrics")]
-                    if metrics_enabled {
+                    if ctx.metrics_enabled {
                         crate::metrics::sender_metrics::record_hmac_failure();
                     }
                     return;
@@ -482,9 +474,9 @@ fn process_response(
                 &ext_packet.tlvs,
                 data,
                 UNAUTH_BASE_SIZE,
-                hmac_key,
+                ctx.hmac_key,
                 #[cfg(feature = "metrics")]
-                metrics_enabled,
+                ctx.metrics_enabled,
             )
         } else {
             None
@@ -509,31 +501,26 @@ fn process_response(
         )
     };
 
-    if let Some(pending_packet) = pending.remove(&seq_num) {
+    if let Some(pending_packet) = ctx.pending.remove(&seq_num) {
         let rtt_ns = recv_time
             .duration_since(pending_packet.send_time)
             .as_nanos() as u64;
 
-        stats.packets_received += 1;
-        *rtt_sum += rtt_ns;
-
-        stats.min_rtt_ns = Some(stats.min_rtt_ns.map_or(rtt_ns, |min| min.min(rtt_ns)));
-        stats.max_rtt_ns = Some(stats.max_rtt_ns.map_or(rtt_ns, |max| max.max(rtt_ns)));
+        *ctx.packets_received += 1;
+        ctx.rtt_collector.record(RttSample {
+            seq: seq_num,
+            rtt_ns,
+            ttl: sender_ttl,
+        });
 
         #[cfg(feature = "metrics")]
-        if metrics_enabled {
+        if ctx.metrics_enabled {
             let rtt_seconds = rtt_ns as f64 / 1_000_000_000.0;
             crate::metrics::sender_metrics::record_packet_received();
             crate::metrics::sender_metrics::record_rtt(rtt_seconds);
-            if let Some(min_ns) = stats.min_rtt_ns {
-                crate::metrics::sender_metrics::set_rtt_min(min_ns as f64 / 1_000_000_000.0);
-            }
-            if let Some(max_ns) = stats.max_rtt_ns {
-                crate::metrics::sender_metrics::set_rtt_max(max_ns as f64 / 1_000_000_000.0);
-            }
         }
 
-        if print_stats {
+        if ctx.print_stats {
             let tlv_status = tlv_info
                 .as_ref()
                 .map_or(String::new(), |info| format!(" tlv=[{}]", info));

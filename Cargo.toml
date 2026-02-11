@@ -31,6 +31,8 @@ chrono = "0.4.43"
 clap = { version = "4.5", features = ["derive", "env"] }
 env_logger = "0.11"
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2.0"
 hmac = "0.12"
 sha2 = "0.10"
@@ -49,7 +51,7 @@ tokio-util = { version = "0.7", optional = true, features = ["rt"] }
 
 [dependencies.tokio]
 version = "1.49"
-features = ["rt-multi-thread", "net", "time", "macros"]
+features = ["rt-multi-thread", "net", "time", "macros", "signal"]
 
 # Platform-specific default backends
 # Note: These provide defaults when no explicit ttl-* feature is used.

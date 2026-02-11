@@ -4,6 +4,7 @@ use clap::{Parser, ValueEnum};
 use thiserror::Error;
 
 pub use crate::clock_format::ClockFormat;
+pub use crate::stats::OutputFormat;
 
 /// STAMP authentication mode per RFC 8762.
 ///
@@ -212,6 +213,14 @@ pub struct Configuration {
     /// and timestamp.
     #[clap(long)]
     pub follow_up_telemetry: bool,
+
+    /// Output format for statistics (text, json, csv).
+    #[clap(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
+
+    /// Periodic reporting interval in seconds (0 = disabled, sender only).
+    #[clap(long, default_value_t = 0)]
+    pub report_interval: u32,
 }
 
 impl Configuration {

@@ -47,7 +47,9 @@ mod pnet;
 pub use pnet::run_receiver;
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::{
     configuration::{ClockFormat, Configuration, TlvHandlingMode},
@@ -57,6 +59,7 @@ use crate::{
         ReflectedPacketUnauthenticated,
     },
     session::SessionManager,
+    stats::{self, OutputFormat},
     time::generate_timestamp,
     tlv::{PacketAddressInfo, SyncSource, TimestampMethod, TlvList, TlvType, TLV_HEADER_SIZE},
 };
@@ -84,6 +87,47 @@ pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
     }
 
     None
+}
+
+/// Aggregate packet counters for the reflector.
+pub struct ReflectorCounters {
+    pub packets_received: AtomicU64,
+    pub packets_reflected: AtomicU64,
+    pub packets_dropped: AtomicU64,
+}
+
+impl ReflectorCounters {
+    pub fn new() -> Self {
+        ReflectorCounters {
+            packets_received: AtomicU64::new(0),
+            packets_reflected: AtomicU64::new(0),
+            packets_dropped: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Default for ReflectorCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Builds and prints the reflector shutdown statistics.
+pub fn print_reflector_stats(
+    counters: &ReflectorCounters,
+    session_manager: &SessionManager,
+    start_time: Instant,
+    output_format: OutputFormat,
+) {
+    let stats = stats::build_reflector_stats(
+        counters.packets_received.load(Ordering::Relaxed),
+        counters.packets_reflected.load(Ordering::Relaxed),
+        counters.packets_dropped.load(Ordering::Relaxed),
+        session_manager.session_summaries(),
+        session_manager.session_count(),
+        start_time.elapsed().as_secs_f64(),
+    );
+    stats.print(output_format);
 }
 
 /// HMAC field offset in ReflectedPacketAuthenticated (bytes before HMAC field).

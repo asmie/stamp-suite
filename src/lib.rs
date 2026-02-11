@@ -31,6 +31,8 @@ pub mod receiver;
 pub mod sender;
 /// Session state management.
 pub mod session;
+/// Statistics collection and reporting.
+pub mod stats;
 /// Timestamp generation utilities.
 pub mod time;
 /// TLV extension support per RFC 8972.

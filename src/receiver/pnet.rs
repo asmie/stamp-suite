@@ -7,6 +7,7 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
+    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
     time::{Duration, Instant},
 };
 
@@ -31,11 +32,12 @@ use crate::{
     crypto::HmacKey,
     error_estimate::ErrorEstimate,
     session::SessionManager,
+    stats::OutputFormat,
 };
 
 use super::{
-    load_hmac_key, process_stamp_packet, set_cos_policy_rejected, ProcessingContext,
-    AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    load_hmac_key, print_reflector_stats, process_stamp_packet, set_cos_policy_rejected,
+    ProcessingContext, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Context for sending STAMP responses in pnet mode.
@@ -66,6 +68,12 @@ struct CaptureConfig {
     cleanup_interval: Option<Duration>,
     #[cfg(feature = "metrics")]
     metrics_enabled: bool,
+    /// Shutdown flag set by signal handler.
+    shutdown: Arc<AtomicBool>,
+    /// Aggregate packet counters for reporting.
+    counters: Arc<ReflectorCounters>,
+    /// Output format for shutdown statistics.
+    output_format: OutputFormat,
 }
 
 /// Interface properties needed for macOS special handling.
@@ -216,6 +224,11 @@ pub async fn run_receiver(conf: &Configuration) {
         .checked_div(2)
         .map(|t| Duration::from_secs(t.max(1)));
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let counters = Arc::new(ReflectorCounters::new());
+    let start_time = Instant::now();
+    let output_format = conf.output_format;
+
     // Build capture config with all values needed by the blocking loop
     let capture_config = CaptureConfig {
         local_port: conf.local_port,
@@ -223,7 +236,7 @@ pub async fn run_receiver(conf: &Configuration) {
         use_auth,
         error_estimate_wire,
         hmac_key,
-        session_manager,
+        session_manager: Arc::clone(&session_manager),
         stateful_reflector: conf.stateful_reflector,
         tlv_mode: conf.tlv_mode,
         require_hmac: conf.require_hmac,
@@ -232,7 +245,17 @@ pub async fn run_receiver(conf: &Configuration) {
         cleanup_interval,
         #[cfg(feature = "metrics")]
         metrics_enabled: conf.metrics,
+        shutdown: Arc::clone(&shutdown),
+        counters: Arc::clone(&counters),
+        output_format,
     };
+
+    // Spawn async task to listen for Ctrl+C and set shutdown flag
+    let shutdown_flag = Arc::clone(&shutdown);
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        shutdown_flag.store(true, AtomicOrdering::Relaxed);
+    });
 
     // Spawn the blocking packet capture loop on a dedicated thread.
     // This prevents starvation of the async runtime which may be running
@@ -245,6 +268,9 @@ pub async fn run_receiver(conf: &Configuration) {
     if let Err(e) = result {
         eprintln!("Capture thread panicked: {}", e);
     }
+
+    // Print reflector stats on shutdown
+    print_reflector_stats(&counters, &session_manager, start_time, output_format);
 }
 
 /// The blocking packet capture loop, run on a dedicated thread.
@@ -258,6 +284,11 @@ fn run_capture_loop(
     let mut buf = [0u8; 1600];
 
     loop {
+        // Check shutdown flag
+        if config.shutdown.load(AtomicOrdering::Relaxed) {
+            break;
+        }
+
         // Periodic session cleanup check
         if let Some(interval) = config.cleanup_interval {
             if last_cleanup.elapsed() >= interval {
@@ -463,6 +494,11 @@ fn handle_stamp_packet(
     config: &CaptureConfig,
     send_ctx: &PnetSendContext,
 ) {
+    config
+        .counters
+        .packets_received
+        .fetch_add(1, AtomicOrdering::Relaxed);
+
     // Get session counters for Direct Measurement and Follow-Up Telemetry.
     // Always tracked per-client, independent of --stateful-reflector.
     let counter_session = config.session_manager.get_or_create_session(pkt.src);
@@ -517,6 +553,10 @@ fn handle_stamp_packet(
         // Check IPv6 socket availability early
         if is_ipv6 && send_ctx.send_socket_v6.is_none() {
             eprintln!("Cannot send IPv6 response: IPv6 socket unavailable");
+            config
+                .counters
+                .packets_dropped
+                .fetch_add(1, AtomicOrdering::Relaxed);
             return;
         }
 
@@ -560,13 +600,25 @@ fn handle_stamp_packet(
                 Some(socket) => socket.send_to(&response.data, pkt.src),
                 None => {
                     eprintln!("Cannot send IPv6 response: IPv6 socket unavailable");
+                    config
+                        .counters
+                        .packets_dropped
+                        .fetch_add(1, AtomicOrdering::Relaxed);
                     return;
                 }
             },
         };
         if let Err(e) = send_result {
             eprintln!("Failed to send response to {}: {}", pkt.src, e);
+            config
+                .counters
+                .packets_dropped
+                .fetch_add(1, AtomicOrdering::Relaxed);
         } else {
+            config
+                .counters
+                .packets_reflected
+                .fetch_add(1, AtomicOrdering::Relaxed);
             // Record transmission for Direct Measurement and Follow-Up Telemetry.
             // Always tracked per-client, independent of --stateful-reflector.
             let session = config.session_manager.get_or_create_session(pkt.src);

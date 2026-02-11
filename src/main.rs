@@ -44,6 +44,6 @@ async fn main() {
     if conf.is_reflector {
         receiver::run_receiver(&conf).await;
     } else {
-        sender::run_sender(&conf).await.print_summary();
+        sender::run_sender(&conf).await.print(conf.output_format);
     }
 }
