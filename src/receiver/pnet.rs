@@ -39,7 +39,7 @@ use crate::tlv::ReturnPathAction;
 use super::{
     load_hmac_key, print_reflector_stats, process_stamp_packet, recompute_response_tlv_hmac,
     set_cos_policy_rejected, set_return_path_u_flag_in_response, ProcessingContext,
-    ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    ReceiverSharedState, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Context for sending STAMP responses in pnet mode.
@@ -94,7 +94,7 @@ struct InterfaceProps {
 ///
 /// The blocking packet capture loop runs in a dedicated thread via `spawn_blocking`
 /// to prevent starvation of the async runtime (e.g., metrics server).
-pub async fn run_receiver(conf: &Configuration) {
+pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let interface_ip_match =
         |iface: &NetworkInterface| iface.ips.iter().any(|ip| ip.ip() == conf.local_addr);
 
@@ -189,15 +189,7 @@ pub async fn run_receiver(conf: &Configuration) {
         log::info!("HMAC authentication enabled");
     }
 
-    // Always create session manager for per-client counter/reflection tracking
-    // (needed for Direct Measurement and Follow-Up Telemetry TLVs regardless of mode).
-    // When --stateful-reflector is on, also used for per-client sequence numbers.
-    let session_timeout = if conf.session_timeout > 0 {
-        Some(std::time::Duration::from_secs(conf.session_timeout))
-    } else {
-        None
-    };
-    let session_manager = Arc::new(SessionManager::new(session_timeout));
+    let session_manager = Arc::clone(&shared.session_manager);
 
     if conf.stateful_reflector {
         log::info!("Stateful reflector mode enabled (RFC 8972)");
@@ -227,8 +219,8 @@ pub async fn run_receiver(conf: &Configuration) {
         .map(|t| Duration::from_secs(t.max(1)));
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let counters = Arc::new(ReflectorCounters::new());
-    let start_time = Instant::now();
+    let counters = Arc::clone(&shared.counters);
+    let start_time = shared.start_time;
     let output_format = conf.output_format;
 
     // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
@@ -571,50 +563,44 @@ fn handle_stamp_packet(
 
         let is_ipv6 = send_target.is_ipv6();
 
-        // Check IPv6 socket availability early
-        if is_ipv6 && send_ctx.send_socket_v6.is_none() {
-            eprintln!("Cannot send IPv6 response: IPv6 socket unavailable");
-            config
-                .counters
-                .packets_dropped
-                .fetch_add(1, AtomicOrdering::Relaxed);
-            return;
-        }
-
         let last_tos_cache = if is_ipv6 {
             &send_ctx.last_tos_v6
         } else {
             &send_ctx.last_tos_v4
         };
 
-        // Only call setsockopt if TOS value changed (reduces syscall overhead under load)
+        // Only call setsockopt if TOS value changed (reduces syscall overhead under load).
+        // Skip if the target socket is unavailable — try_send will fail and the
+        // alternate-address fallback path handles it (sets U-flag, retries on original src).
+        let tos_socket: Option<&std::net::UdpSocket> = if is_ipv6 {
+            send_ctx.send_socket_v6.as_ref()
+        } else {
+            Some(&send_ctx.send_socket_v4)
+        };
         if tos != last_tos_cache.get() {
-            let socket: &std::net::UdpSocket = if is_ipv6 {
-                send_ctx.send_socket_v6.as_ref().unwrap()
-            } else {
-                &send_ctx.send_socket_v4
-            };
-            match set_socket_tos(socket, tos, is_ipv6) {
-                Ok(()) => {
-                    last_tos_cache.set(tos);
-                }
-                Err(e) => {
-                    if has_cos_request {
-                        log::debug!("Failed to set IP_TOS/IPV6_TCLASS to {}: {}", tos, e);
-                        // Set RP flag in CoS TLV to indicate policy rejection (RFC 8972 §5.2)
-                        let base_size = if config.use_auth {
-                            AUTH_BASE_SIZE
-                        } else {
-                            UNAUTH_BASE_SIZE
-                        };
-                        if set_cos_policy_rejected(&mut response.data, base_size) {
-                            // RP mutation invalidates the TLV HMAC — recompute
-                            if let Some(ref key) = config.hmac_key {
-                                recompute_response_tlv_hmac(&mut response.data, base_size, key);
+            if let Some(socket) = tos_socket {
+                match set_socket_tos(socket, tos, is_ipv6) {
+                    Ok(()) => {
+                        last_tos_cache.set(tos);
+                    }
+                    Err(e) => {
+                        if has_cos_request {
+                            log::debug!("Failed to set IP_TOS/IPV6_TCLASS to {}: {}", tos, e);
+                            // Set RP flag in CoS TLV to indicate policy rejection (RFC 8972 §5.2)
+                            let base_size = if config.use_auth {
+                                AUTH_BASE_SIZE
+                            } else {
+                                UNAUTH_BASE_SIZE
+                            };
+                            if set_cos_policy_rejected(&mut response.data, base_size) {
+                                // RP mutation invalidates the TLV HMAC — recompute
+                                if let Some(ref key) = config.hmac_key {
+                                    recompute_response_tlv_hmac(&mut response.data, base_size, key);
+                                }
                             }
                         }
+                        // Don't update cache on failure - retry next time
                     }
-                    // Don't update cache on failure - retry next time
                 }
             }
         }

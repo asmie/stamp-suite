@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-02-13
+
+### Added
+
+- **SNMP AgentX Sub-Agent**: MIB-based monitoring via net-snmpd (requires `snmp` feature, Unix only)
+  - Minimal AgentX protocol implementation (RFC 2741) with no external SNMP crate dependency
+  - STAMP-SUITE-MIB under enterprise OID `.1.3.6.1.4.1.99999` with SMIv2 definition (`mibs/STAMP-SUITE-MIB.mib`)
+  - Reflector subtree: configuration scalars, packet counters (received/reflected/dropped), active session count, uptime
+  - Session table: per-client address, port, packet counts, last sequence number, last active time
+  - Sender subtree: configuration scalars, packets sent/received/lost, RTT min/max/avg, jitter, loss percentage
+  - Live sender statistics updated in the hot path (received, RTT min/max/avg, jitter) — SNMP polling during long runs reflects current progress
+  - `--snmp` and `--snmp-socket <PATH>` CLI options
+- `SessionManager::session_summaries_extended()` for retrieving per-session state
+- `ReceiverSharedState` struct for sharing counters and session manager between receiver backends and SNMP
+
+### Fixed
+
+- pnet backend no longer drops valid fallback responses for Return-Path alternate IPv6 targets; the early-return gate that bypassed the try_send + U-flag fallback path has been removed
+- `snmp` feature is now platform-gated with `cfg(unix)` — on non-Unix platforms, `--snmp` prints a clear error and exits instead of failing to compile
+
+### Changed
+
+- Receiver backends (`nix.rs`, `pnet.rs`) now accept `&ReceiverSharedState` instead of creating their own `Arc<ReflectorCounters>` and `Arc<SessionManager>` internally
+- `run_sender` accepts an optional `Arc<SenderSnmpStats>` (behind `snmp` feature gate) for live statistics export
+
 ## [0.4.0] - 2026-02-11
 
 ### Added

@@ -1,0 +1,482 @@
+-- *****************************************************************
+-- STAMP-SUITE-MIB: MIB for the stamp-suite STAMP implementation
+--
+-- Copyright (c) 2026 Piotr "asmie" Olszewski
+-- Licensed under MIT License
+--
+-- Enterprise OID: 1.3.6.1.4.1.99999 (placeholder PEN)
+-- Apply for a real PEN at https://pen.iana.org/ for production use.
+-- *****************************************************************
+
+STAMP-SUITE-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-TYPE, Counter32, Counter64,
+    Gauge32, Integer32, TimeTicks, Unsigned32
+        FROM SNMPv2-SMI
+    MODULE-COMPLIANCE, OBJECT-GROUP
+        FROM SNMPv2-CONF
+    TruthValue
+        FROM SNMPv2-TC
+    enterprises
+        FROM SNMPv2-SMI;
+
+stampSuiteMIB MODULE-IDENTITY
+    LAST-UPDATED "202501010000Z"
+    ORGANIZATION "stamp-suite project"
+    CONTACT-INFO
+        "https://github.com/asmie/stamp-suite"
+    DESCRIPTION
+        "MIB module for the stamp-suite implementation of the
+         Simple Two-Way Active Measurement Protocol (STAMP)
+         per RFC 8762 and RFC 8972.
+
+         This MIB exposes reflector and sender configuration,
+         operational counters, and per-session state."
+    REVISION     "202501010000Z"
+    DESCRIPTION  "Initial version."
+    ::= { enterprises 99999 }
+
+-- ===================================================================
+-- Top-level structure
+-- ===================================================================
+
+stampSuiteObjects     OBJECT IDENTIFIER ::= { stampSuiteMIB 1 }
+stampSuiteConformance OBJECT IDENTIFIER ::= { stampSuiteMIB 2 }
+
+-- ===================================================================
+-- Reflector subtree
+-- ===================================================================
+
+stampReflector       OBJECT IDENTIFIER ::= { stampSuiteObjects 1 }
+stampReflectorConfig OBJECT IDENTIFIER ::= { stampReflector 1 }
+stampReflectorStats  OBJECT IDENTIFIER ::= { stampReflector 2 }
+
+-- -------------------------------------------------------------------
+-- Reflector Configuration
+-- -------------------------------------------------------------------
+
+stampReflAdminStatus OBJECT-TYPE
+    SYNTAX      INTEGER { enabled(1), disabled(2) }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Administrative status of the STAMP reflector.
+         enabled(1) when running in reflector mode."
+    ::= { stampReflectorConfig 1 }
+
+stampReflListenAddr OBJECT-TYPE
+    SYNTAX      OCTET STRING (SIZE (4|16))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "The IP address the reflector is listening on.
+         4 octets for IPv4, 16 octets for IPv6."
+    ::= { stampReflectorConfig 2 }
+
+stampReflListenPort OBJECT-TYPE
+    SYNTAX      Unsigned32 (0..65535)
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "The UDP port the reflector is listening on."
+    ::= { stampReflectorConfig 3 }
+
+stampReflAuthMode OBJECT-TYPE
+    SYNTAX      INTEGER { open(1), authenticated(2) }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Authentication mode of the reflector per RFC 8762."
+    ::= { stampReflectorConfig 4 }
+
+stampReflTlvMode OBJECT-TYPE
+    SYNTAX      INTEGER { echo(1), ignore(2) }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "TLV handling mode for the reflector per RFC 8972.
+         echo(1): Echo TLVs back to sender.
+         ignore(2): Strip TLVs from reflected packets."
+    ::= { stampReflectorConfig 5 }
+
+stampReflStateful OBJECT-TYPE
+    SYNTAX      TruthValue
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Whether stateful reflector mode is enabled (RFC 8972 Section 4).
+         When true, the reflector maintains independent sequence counters
+         per client."
+    ::= { stampReflectorConfig 6 }
+
+stampReflSessionTimeout OBJECT-TYPE
+    SYNTAX      Unsigned32
+    UNITS       "seconds"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Session timeout in seconds. Sessions inactive for this
+         duration may be cleaned up. 0 means no timeout."
+    ::= { stampReflectorConfig 7 }
+
+-- -------------------------------------------------------------------
+-- Reflector Statistics
+-- -------------------------------------------------------------------
+
+stampReflPktsReceived OBJECT-TYPE
+    SYNTAX      Counter64
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Total number of STAMP test packets received by the reflector."
+    ::= { stampReflectorStats 1 }
+
+stampReflPktsReflected OBJECT-TYPE
+    SYNTAX      Counter64
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Total number of STAMP test packets reflected (sent back)."
+    ::= { stampReflectorStats 2 }
+
+stampReflPktsDropped OBJECT-TYPE
+    SYNTAX      Counter64
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Total number of STAMP test packets dropped (e.g., errors)."
+    ::= { stampReflectorStats 3 }
+
+stampReflActiveSessions OBJECT-TYPE
+    SYNTAX      Gauge32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Current number of active client sessions."
+    ::= { stampReflectorStats 4 }
+
+stampReflUptime OBJECT-TYPE
+    SYNTAX      TimeTicks
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Time since the reflector was started, in hundredths of a second."
+    ::= { stampReflectorStats 5 }
+
+-- -------------------------------------------------------------------
+-- Reflector Session Table
+-- -------------------------------------------------------------------
+
+stampReflSessionTable OBJECT-TYPE
+    SYNTAX      SEQUENCE OF StampReflSessionEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION
+        "Table of active STAMP reflector sessions, one per client."
+    ::= { stampReflector 3 }
+
+stampReflSessionEntry OBJECT-TYPE
+    SYNTAX      StampReflSessionEntry
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION
+        "An entry representing a single reflector session."
+    INDEX       { stampReflSessIndex }
+    ::= { stampReflSessionTable 1 }
+
+StampReflSessionEntry ::= SEQUENCE {
+    stampReflSessIndex       Unsigned32,
+    stampReflSessClientAddr  OCTET STRING,
+    stampReflSessClientPort  Unsigned32,
+    stampReflSessPktsRecv    Counter32,
+    stampReflSessPktsXmit    Counter32,
+    stampReflSessLastSeq     Unsigned32,
+    stampReflSessLastActive  TimeTicks
+}
+
+stampReflSessIndex OBJECT-TYPE
+    SYNTAX      Unsigned32
+    MAX-ACCESS  not-accessible
+    STATUS      current
+    DESCRIPTION
+        "Unique index for this session (matches internal session ID)."
+    ::= { stampReflSessionEntry 1 }
+
+stampReflSessClientAddr OBJECT-TYPE
+    SYNTAX      OCTET STRING (SIZE (4|16))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "IP address of the STAMP sender for this session."
+    ::= { stampReflSessionEntry 2 }
+
+stampReflSessClientPort OBJECT-TYPE
+    SYNTAX      Unsigned32 (0..65535)
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "UDP source port of the STAMP sender for this session."
+    ::= { stampReflSessionEntry 3 }
+
+stampReflSessPktsRecv OBJECT-TYPE
+    SYNTAX      Counter32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Number of STAMP test packets received in this session."
+    ::= { stampReflSessionEntry 4 }
+
+stampReflSessPktsXmit OBJECT-TYPE
+    SYNTAX      Counter32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Number of STAMP test packets reflected in this session."
+    ::= { stampReflSessionEntry 5 }
+
+stampReflSessLastSeq OBJECT-TYPE
+    SYNTAX      Unsigned32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Sequence number of the last reflected packet in this session."
+    ::= { stampReflSessionEntry 6 }
+
+stampReflSessLastActive OBJECT-TYPE
+    SYNTAX      TimeTicks
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Time since the last packet was reflected in this session,
+         in hundredths of a second."
+    ::= { stampReflSessionEntry 7 }
+
+-- ===================================================================
+-- Sender subtree
+-- ===================================================================
+
+stampSender       OBJECT IDENTIFIER ::= { stampSuiteObjects 2 }
+stampSenderConfig OBJECT IDENTIFIER ::= { stampSender 1 }
+stampSenderStats  OBJECT IDENTIFIER ::= { stampSender 2 }
+
+-- -------------------------------------------------------------------
+-- Sender Configuration
+-- -------------------------------------------------------------------
+
+stampSendRemoteAddr OBJECT-TYPE
+    SYNTAX      OCTET STRING (SIZE (4|16))
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Remote (reflector) IP address for the sender."
+    ::= { stampSenderConfig 1 }
+
+stampSendRemotePort OBJECT-TYPE
+    SYNTAX      Unsigned32 (0..65535)
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Remote (reflector) UDP port for the sender."
+    ::= { stampSenderConfig 2 }
+
+stampSendLocalPort OBJECT-TYPE
+    SYNTAX      Unsigned32 (0..65535)
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Local UDP port used by the sender."
+    ::= { stampSenderConfig 3 }
+
+stampSendPktCount OBJECT-TYPE
+    SYNTAX      Unsigned32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Configured number of packets to send per measurement run."
+    ::= { stampSenderConfig 4 }
+
+stampSendDelay OBJECT-TYPE
+    SYNTAX      Unsigned32
+    UNITS       "milliseconds"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Configured delay between sending consecutive test packets."
+    ::= { stampSenderConfig 5 }
+
+stampSendAuthMode OBJECT-TYPE
+    SYNTAX      INTEGER { open(1), authenticated(2) }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Authentication mode of the sender per RFC 8762."
+    ::= { stampSenderConfig 6 }
+
+-- -------------------------------------------------------------------
+-- Sender Statistics
+-- -------------------------------------------------------------------
+
+stampSendPktsSent OBJECT-TYPE
+    SYNTAX      Counter32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Total number of STAMP test packets sent."
+    ::= { stampSenderStats 1 }
+
+stampSendPktsRecv OBJECT-TYPE
+    SYNTAX      Counter32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Total number of reflected packets received."
+    ::= { stampSenderStats 2 }
+
+stampSendPktsLost OBJECT-TYPE
+    SYNTAX      Counter32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Total number of test packets considered lost (timed out)."
+    ::= { stampSenderStats 3 }
+
+stampSendRttMin OBJECT-TYPE
+    SYNTAX      Gauge32
+    UNITS       "microseconds"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Minimum observed round-trip time in microseconds."
+    ::= { stampSenderStats 4 }
+
+stampSendRttMax OBJECT-TYPE
+    SYNTAX      Gauge32
+    UNITS       "microseconds"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Maximum observed round-trip time in microseconds."
+    ::= { stampSenderStats 5 }
+
+stampSendRttAvg OBJECT-TYPE
+    SYNTAX      Gauge32
+    UNITS       "microseconds"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Average round-trip time in microseconds."
+    ::= { stampSenderStats 6 }
+
+stampSendJitter OBJECT-TYPE
+    SYNTAX      Gauge32
+    UNITS       "microseconds"
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Observed jitter (RTT variation) in microseconds."
+    ::= { stampSenderStats 7 }
+
+stampSendLossPct OBJECT-TYPE
+    SYNTAX      Gauge32
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION
+        "Packet loss percentage multiplied by 100.
+         For example, 250 represents 2.50% loss."
+    ::= { stampSenderStats 8 }
+
+-- ===================================================================
+-- Conformance
+-- ===================================================================
+
+stampSuiteCompliances OBJECT IDENTIFIER ::= { stampSuiteConformance 1 }
+stampSuiteGroups      OBJECT IDENTIFIER ::= { stampSuiteConformance 2 }
+
+stampSuiteFullCompliance MODULE-COMPLIANCE
+    STATUS      current
+    DESCRIPTION
+        "Full compliance with the STAMP-SUITE-MIB."
+    MODULE
+        MANDATORY-GROUPS {
+            stampReflectorConfigGroup,
+            stampReflectorStatsGroup,
+            stampReflectorSessionGroup,
+            stampSenderConfigGroup,
+            stampSenderStatsGroup
+        }
+    ::= { stampSuiteCompliances 1 }
+
+stampReflectorConfigGroup OBJECT-GROUP
+    OBJECTS {
+        stampReflAdminStatus,
+        stampReflListenAddr,
+        stampReflListenPort,
+        stampReflAuthMode,
+        stampReflTlvMode,
+        stampReflStateful,
+        stampReflSessionTimeout
+    }
+    STATUS      current
+    DESCRIPTION
+        "Reflector configuration objects."
+    ::= { stampSuiteGroups 1 }
+
+stampReflectorStatsGroup OBJECT-GROUP
+    OBJECTS {
+        stampReflPktsReceived,
+        stampReflPktsReflected,
+        stampReflPktsDropped,
+        stampReflActiveSessions,
+        stampReflUptime
+    }
+    STATUS      current
+    DESCRIPTION
+        "Reflector statistics objects."
+    ::= { stampSuiteGroups 2 }
+
+stampReflectorSessionGroup OBJECT-GROUP
+    OBJECTS {
+        stampReflSessClientAddr,
+        stampReflSessClientPort,
+        stampReflSessPktsRecv,
+        stampReflSessPktsXmit,
+        stampReflSessLastSeq,
+        stampReflSessLastActive
+    }
+    STATUS      current
+    DESCRIPTION
+        "Reflector session table objects."
+    ::= { stampSuiteGroups 3 }
+
+stampSenderConfigGroup OBJECT-GROUP
+    OBJECTS {
+        stampSendRemoteAddr,
+        stampSendRemotePort,
+        stampSendLocalPort,
+        stampSendPktCount,
+        stampSendDelay,
+        stampSendAuthMode
+    }
+    STATUS      current
+    DESCRIPTION
+        "Sender configuration objects."
+    ::= { stampSuiteGroups 4 }
+
+stampSenderStatsGroup OBJECT-GROUP
+    OBJECTS {
+        stampSendPktsSent,
+        stampSendPktsRecv,
+        stampSendPktsLost,
+        stampSendRttMin,
+        stampSendRttMax,
+        stampSendRttAvg,
+        stampSendJitter,
+        stampSendLossPct
+    }
+    STATUS      current
+    DESCRIPTION
+        "Sender statistics objects."
+    ::= { stampSuiteGroups 5 }
+
+END

@@ -41,3 +41,7 @@ pub mod tlv;
 /// Prometheus metrics support (requires "metrics" feature).
 #[cfg(feature = "metrics")]
 pub mod metrics;
+
+/// SNMP AgentX sub-agent support (requires "snmp" feature, Unix only).
+#[cfg(all(unix, feature = "snmp"))]
+pub mod snmp;

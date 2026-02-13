@@ -19,7 +19,6 @@ use tokio::{net::UdpSocket, time::interval};
 use crate::{
     configuration::{is_auth, Configuration, TlvHandlingMode},
     error_estimate::ErrorEstimate,
-    session::SessionManager,
 };
 
 use crate::tlv::ReturnPathAction;
@@ -27,14 +26,14 @@ use crate::tlv::ReturnPathAction;
 use super::{
     load_hmac_key, print_reflector_stats, process_stamp_packet, recompute_response_tlv_hmac,
     set_cos_policy_rejected, set_return_path_u_flag_in_response, ProcessingContext,
-    ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    ReceiverSharedState, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
 ///
 /// Uses IP_RECVTTL/IPV6_RECVHOPLIMIT socket options to capture the actual
 /// TTL/Hop Limit from incoming packets. Preferred on Linux systems.
-pub async fn run_receiver(conf: &Configuration) {
+pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let is_ipv6 = conf.local_addr.is_ipv6();
 
@@ -192,22 +191,14 @@ pub async fn run_receiver(conf: &Configuration) {
         log::info!("TLV handling mode: {:?}", conf.tlv_mode);
     }
 
-    // Always create session manager for per-client counter/reflection tracking
-    // (needed for Direct Measurement and Follow-Up Telemetry TLVs regardless of mode).
-    // When --stateful-reflector is on, also used for per-client sequence numbers.
-    let session_timeout = if conf.session_timeout > 0 {
-        Some(std::time::Duration::from_secs(conf.session_timeout))
-    } else {
-        None
-    };
-    let session_manager = Arc::new(SessionManager::new(session_timeout));
+    let session_manager = Arc::clone(&shared.session_manager);
 
     if conf.stateful_reflector {
         log::info!("Stateful reflector mode enabled (RFC 8972)");
     }
 
-    let counters = Arc::new(ReflectorCounters::new());
-    let start_time = std::time::Instant::now();
+    let counters = Arc::clone(&shared.counters);
+    let start_time = shared.start_time;
     let output_format = conf.output_format;
 
     // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).

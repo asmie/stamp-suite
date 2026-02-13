@@ -214,6 +214,14 @@ pub struct Configuration {
     #[clap(long)]
     pub follow_up_telemetry: bool,
 
+    /// Enable SNMP AgentX sub-agent (requires "snmp" feature).
+    #[clap(long)]
+    pub snmp: bool,
+
+    /// AgentX master agent socket path.
+    #[clap(long, default_value = "/var/agentx/master")]
+    pub snmp_socket: String,
+
     /// Output format for statistics (text, json, csv).
     #[clap(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,

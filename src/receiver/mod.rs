@@ -49,7 +49,7 @@ pub use pnet::run_receiver;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::{
     configuration::{ClockFormat, Configuration, TlvHandlingMode},
@@ -112,6 +112,31 @@ impl ReflectorCounters {
 impl Default for ReflectorCounters {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Shared state created externally and passed into receiver backends.
+///
+/// This allows the SNMP sub-agent (and other subsystems) to access
+/// reflector counters and session state concurrently.
+pub struct ReceiverSharedState {
+    pub counters: Arc<ReflectorCounters>,
+    pub session_manager: Arc<SessionManager>,
+    pub start_time: Instant,
+}
+
+/// Creates the shared state for the receiver, using configuration values.
+pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
+    let session_timeout = if conf.session_timeout > 0 {
+        Some(Duration::from_secs(conf.session_timeout))
+    } else {
+        None
+    };
+
+    ReceiverSharedState {
+        counters: Arc::new(ReflectorCounters::new()),
+        session_manager: Arc::new(SessionManager::new(session_timeout)),
+        start_time: Instant::now(),
     }
 }
 

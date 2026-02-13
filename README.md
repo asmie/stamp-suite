@@ -23,6 +23,7 @@ stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Pr
 - Support for both NTP and PTP timestamp formats
 - Real TTL/Hop Limit capture on all platforms
 - Optional Prometheus metrics endpoint for observability
+- Optional SNMP AgentX sub-agent for MIB-based monitoring (Unix only)
 - Backward compatible - works with clients/reflectors without TLV support
 - Async I/O using Tokio
 - Cross-platform support (Linux, macOS, Windows)
@@ -59,6 +60,7 @@ cargo build --release
 | `ttl-nix` | Force nix backend (Linux/macOS/BSD) |
 | `ttl-pnet` | Force pnet raw socket backend (requires root/admin) |
 | `metrics` | Enable Prometheus metrics endpoint |
+| `snmp` | Enable SNMP AgentX sub-agent (Unix only) |
 
 ## Usage
 
@@ -92,6 +94,12 @@ stamp-suite -i --verify-tlv-hmac --hmac-key <hex-key>
 
 # With Prometheus metrics endpoint (requires --features metrics)
 stamp-suite -i --metrics --metrics-addr 127.0.0.1:9090
+
+# With SNMP AgentX sub-agent (requires --features snmp, Unix only)
+stamp-suite -i --snmp
+
+# Custom AgentX socket path
+stamp-suite -i --snmp --snmp-socket /var/agentx/master
 ```
 
 ### Session-Sender (Client)
@@ -192,6 +200,8 @@ Options:
       --return-srv6-sids <SIDS>    Return Path SRv6 segment list, comma-separated (RFC 9503)
       --metrics                    Enable Prometheus metrics endpoint (requires metrics feature)
       --metrics-addr <ADDR>        Metrics server bind address [default: 127.0.0.1:9090]
+      --snmp                       Enable SNMP AgentX sub-agent (requires snmp feature, Unix only)
+      --snmp-socket <PATH>         AgentX master agent socket path [default: /var/agentx/master]
   -h, --help                       Print help
   -V, --version                    Print version
 ```
@@ -237,6 +247,11 @@ Avg RTT: 0.521 ms
 - `metrics/` - Prometheus metrics (optional, requires `metrics` feature)
   - `sender_metrics.rs` - Sender-side metrics
   - `reflector_metrics.rs` - Reflector-side metrics
+- `snmp/` - SNMP AgentX sub-agent (optional, requires `snmp` feature, Unix only)
+  - `agentx.rs` - AgentX protocol implementation (RFC 2741)
+  - `handler.rs` - STAMP-SUITE-MIB handler
+  - `oids.rs` - OID constants
+  - `state.rs` - Shared state types
 
 ## TLV Extensions (RFC 8972)
 
@@ -410,6 +425,37 @@ Available metrics include:
 - `stamp_reflector_hmac_failures_total` - HMAC verification failures
 - `stamp_reflector_processing_seconds` - Packet processing time histogram
 
+## SNMP AgentX Sub-Agent
+
+When built with `--features snmp` (Unix only), stamp-suite can connect to an existing net-snmpd master agent via the AgentX protocol (RFC 2741) and expose reflector/sender state through a custom STAMP-SUITE-MIB.
+
+```bash
+cargo build --release --features snmp
+
+# Reflector with SNMP
+stamp-suite -i --snmp
+
+# Custom AgentX socket path
+stamp-suite -i --snmp --snmp-socket /var/agentx/master
+
+# Query via net-snmp tools
+snmpwalk -v2c -c public localhost .1.3.6.1.4.1.99999
+```
+
+The MIB (provided in `mibs/STAMP-SUITE-MIB.mib`) exposes:
+
+| Subtree | Contents |
+|---------|----------|
+| Reflector Config | Admin status, listen address/port, auth mode, TLV mode, stateful flag, session timeout |
+| Reflector Stats | Packets received/reflected/dropped, active sessions, uptime |
+| Session Table | Per-client address, port, packet counts, last sequence number, last active time |
+| Sender Config | Remote address/port, local port, packet count, send delay, auth mode |
+| Sender Stats | Packets sent/received/lost, RTT min/max/avg, jitter, loss percentage |
+
+Sender statistics are updated live during the measurement run (not just at completion), so SNMP polling reflects current progress.
+
+**Note**: The `snmp` feature requires a Unix platform (Linux/macOS) because AgentX uses Unix domain sockets. On non-Unix platforms, `--snmp` prints an error and exits.
+
 ## Current Status
 
 The project is functional for STAMP measurements with the following features:
@@ -430,12 +476,12 @@ The project is functional for STAMP measurements with the following features:
 - Session-Sender Identifier (SSID) support via Extra Padding TLV
 - Real TTL capture on all major platforms
 - Optional Prometheus metrics for observability (requires `metrics` feature)
+- Optional SNMP AgentX sub-agent with STAMP-SUITE-MIB (requires `snmp` feature, Unix only)
 - Backward compatible with non-TLV implementations
 
 ### Roadmap
 
 - [ ] Enhanced statistics and reporting
-- [ ] SNMP/STAMP-MIB support
 
 ## Contributing
 

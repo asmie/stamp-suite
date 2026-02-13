@@ -48,6 +48,8 @@ struct SenderRecvContext<'a> {
     hmac_key: Option<&'a HmacKey>,
     #[cfg(feature = "metrics")]
     metrics_enabled: bool,
+    #[cfg(all(unix, feature = "snmp"))]
+    snmp_stats: Option<&'a crate::snmp::state::SenderSnmpStats>,
 }
 
 /// Runs the STAMP sender, transmitting test packets and collecting statistics.
@@ -57,7 +59,13 @@ struct SenderRecvContext<'a> {
 ///
 /// When the `metrics` feature is enabled and `--metrics` flag is set, this function
 /// also records Prometheus metrics for packets sent, received, lost, and RTT values.
-pub async fn run_sender(conf: &Configuration) -> StatsSnapshot {
+pub async fn run_sender(
+    conf: &Configuration,
+    #[cfg(all(unix, feature = "snmp"))] snmp_stats: Option<
+        std::sync::Arc<crate::snmp::state::SenderSnmpStats>,
+    >,
+    #[cfg(not(all(unix, feature = "snmp")))] _snmp_stats: Option<()>,
+) -> StatsSnapshot {
     #[cfg(feature = "metrics")]
     let metrics_enabled = conf.metrics;
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
@@ -294,6 +302,10 @@ pub async fn run_sender(conf: &Configuration) -> StatsSnapshot {
         }
 
         packets_sent += 1;
+        #[cfg(all(unix, feature = "snmp"))]
+        if let Some(ref stats) = snmp_stats {
+            stats.inc_sent();
+        }
         #[cfg(feature = "metrics")]
         if metrics_enabled {
             crate::metrics::sender_metrics::record_packet_sent();
@@ -326,6 +338,8 @@ pub async fn run_sender(conf: &Configuration) -> StatsSnapshot {
                                 hmac_key: hmac_key.as_ref(),
                                 #[cfg(feature = "metrics")]
                                 metrics_enabled,
+                                #[cfg(all(unix, feature = "snmp"))]
+                                snmp_stats: snmp_stats.as_deref(),
                             };
                             process_response(
                                 &recv_buf[..len],
@@ -375,6 +389,8 @@ pub async fn run_sender(conf: &Configuration) -> StatsSnapshot {
                     hmac_key: hmac_key.as_ref(),
                     #[cfg(feature = "metrics")]
                     metrics_enabled,
+                    #[cfg(all(unix, feature = "snmp"))]
+                    snmp_stats: snmp_stats.as_deref(),
                 };
                 process_response(
                     &recv_buf[..len],
@@ -400,8 +416,36 @@ pub async fn run_sender(conf: &Configuration) -> StatsSnapshot {
             crate::metrics::sender_metrics::record_packet_lost();
         }
     }
+    #[cfg(all(unix, feature = "snmp"))]
+    if let Some(ref stats) = snmp_stats {
+        for _ in 0..packets_lost {
+            stats.inc_lost();
+        }
+    }
 
-    rtt_collector.snapshot(packets_sent, packets_lost)
+    let snapshot = rtt_collector.snapshot(packets_sent, packets_lost);
+
+    // Update SNMP stats from final snapshot
+    #[cfg(all(unix, feature = "snmp"))]
+    if let Some(ref stats) = snmp_stats {
+        let ms_to_us = |ms: f64| (ms * 1000.0) as u32;
+        stats.update_from_snapshot(crate::snmp::state::SenderStatsSnapshot {
+            sent: packets_sent,
+            received: packets_received,
+            lost: packets_lost,
+            rtt_min_us: snapshot.min_rtt_ms.map(ms_to_us).unwrap_or(0),
+            rtt_max_us: snapshot.max_rtt_ms.map(ms_to_us).unwrap_or(0),
+            rtt_avg_us: snapshot.avg_rtt_ms.map(ms_to_us).unwrap_or(0),
+            jitter_us: snapshot.jitter_ms.map(ms_to_us).unwrap_or(0),
+            loss_pct_x100: if packets_sent > 0 {
+                ((packets_lost as u64 * 10000) / packets_sent as u64) as u32
+            } else {
+                0
+            },
+        });
+    }
+
+    snapshot
 }
 
 fn process_response(
@@ -541,6 +585,12 @@ fn process_response(
             rtt_ns,
             ttl: sender_ttl,
         });
+
+        #[cfg(all(unix, feature = "snmp"))]
+        if let Some(stats) = ctx.snmp_stats {
+            stats.inc_received();
+            stats.record_rtt((rtt_ns / 1000) as u32);
+        }
 
         #[cfg(feature = "metrics")]
         if ctx.metrics_enabled {

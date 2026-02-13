@@ -260,6 +260,41 @@ impl SessionManager {
             })
             .collect()
     }
+
+    /// Returns an extended summary of all sessions for SNMP reporting.
+    pub fn session_summaries_extended(&self) -> Vec<SessionSummary> {
+        let sessions = self.sessions.read().unwrap();
+        sessions
+            .iter()
+            .map(|(addr, entry)| {
+                let (last_seq, _ts) = entry.session.get_last_reflection();
+                SessionSummary {
+                    client_addr: *addr,
+                    session_id: entry.session.get_id(),
+                    packets_received: entry.session.get_received_count(),
+                    packets_transmitted: entry.session.get_transmitted_count(),
+                    last_reflected_seq: last_seq,
+                    last_active: entry.last_active,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Extended session summary for SNMP reporting.
+pub struct SessionSummary {
+    /// Client address (IP:port).
+    pub client_addr: SocketAddr,
+    /// Session identifier.
+    pub session_id: u32,
+    /// Total packets received.
+    pub packets_received: u32,
+    /// Total packets transmitted.
+    pub packets_transmitted: u32,
+    /// Last reflected sequence number.
+    pub last_reflected_seq: u32,
+    /// Timestamp of last activity.
+    pub last_active: Instant,
 }
 
 #[cfg(test)]
