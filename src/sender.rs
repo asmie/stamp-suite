@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     net::SocketAddr,
     time::{Duration, Instant},
 };
@@ -117,6 +117,10 @@ pub async fn run_sender(
 
     let sess = Session::new(0);
     let mut pending: HashMap<u32, PendingPacket> = HashMap::new();
+    // Time-ordered expiry queue for O(k) eviction instead of O(n) HashMap scan.
+    // Entries are (deadline, seq_num). Since packets are sent sequentially,
+    // deadlines are naturally ordered. Lazy deletion skips already-received entries.
+    let mut expiry_queue: VecDeque<(Instant, u32)> = VecDeque::new();
     let mut rtt_collector = RttCollector::new();
     let mut packets_sent: u32 = 0;
     let mut packets_received: u32 = 0;
@@ -324,6 +328,9 @@ pub async fn run_sender(
                 send_timestamp,
             },
         );
+        if timeout > Duration::ZERO {
+            expiry_queue.push_back((send_time + timeout, seq_num));
+        }
 
         // Event-driven receive: process responses until send_delay expires
         let send_delay = Duration::from_millis(conf.send_delay as u64);
@@ -375,30 +382,33 @@ pub async fn run_sender(
                         std::future::pending::<tokio::time::Instant>().await
                     }
                 } => {
-                    let interim = rtt_collector.snapshot(packets_sent, pending.len() as u32);
+                    let interim = rtt_collector.snapshot(packets_sent, packets_lost);
                     interim.print_interim(output_format);
                 }
             }
         }
 
-        // Evict timed-out packets so SNMP/metrics see losses promptly
-        if timeout > Duration::ZERO {
+        // Evict timed-out packets from the front of the expiry queue.
+        // O(k) where k = expired + already-received entries at front,
+        // instead of O(n) scanning the full HashMap.
+        {
             let now = Instant::now();
-            let expired: Vec<u32> = pending
-                .iter()
-                .filter(|(_, p)| now.duration_since(p.send_time) >= timeout)
-                .map(|(&seq, _)| seq)
-                .collect();
-            for seq in expired {
-                pending.remove(&seq);
-                packets_lost += 1;
-                #[cfg(feature = "metrics")]
-                if metrics_enabled {
-                    crate::metrics::sender_metrics::record_packet_lost();
+            while let Some(&(deadline, seq)) = expiry_queue.front() {
+                if deadline > now {
+                    break;
                 }
-                #[cfg(all(unix, feature = "snmp"))]
-                if let Some(ref stats) = snmp_stats {
-                    stats.inc_lost();
+                expiry_queue.pop_front();
+                // Lazy deletion: skip if response was already received
+                if pending.remove(&seq).is_some() {
+                    packets_lost += 1;
+                    #[cfg(feature = "metrics")]
+                    if metrics_enabled {
+                        crate::metrics::sender_metrics::record_packet_lost();
+                    }
+                    #[cfg(all(unix, feature = "snmp"))]
+                    if let Some(ref stats) = snmp_stats {
+                        stats.inc_lost();
+                    }
                 }
             }
         }
@@ -437,20 +447,16 @@ pub async fn run_sender(
         }
     }
 
-    // Mark remaining pending packets as lost
+    // Mark remaining pending packets as lost (batched for efficiency)
     let remaining_lost = pending.len() as u32;
     packets_lost += remaining_lost;
     #[cfg(feature = "metrics")]
-    if metrics_enabled {
-        for _ in 0..remaining_lost {
-            crate::metrics::sender_metrics::record_packet_lost();
-        }
+    if metrics_enabled && remaining_lost > 0 {
+        crate::metrics::sender_metrics::record_packets_lost(remaining_lost as u64);
     }
     #[cfg(all(unix, feature = "snmp"))]
     if let Some(ref stats) = snmp_stats {
-        for _ in 0..remaining_lost {
-            stats.inc_lost();
-        }
+        stats.inc_lost_by(remaining_lost);
     }
 
     rtt_collector.snapshot(packets_sent, packets_lost)

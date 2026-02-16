@@ -175,9 +175,7 @@ impl StampMibHandler {
                 ));
             }
             if *oid == oids::stamp_send_loss_pct() {
-                return Some(VarBindValue::Gauge32(
-                    stats.loss_pct_x100.load(Ordering::Relaxed),
-                ));
+                return Some(VarBindValue::Gauge32(stats.loss_pct_x100()));
             }
         } else {
             // No sender stats — return 0 for sender stat OIDs

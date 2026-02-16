@@ -20,6 +20,11 @@ pub fn record_packet_lost() {
     counter!("stamp_sender_packets_lost_total").increment(1);
 }
 
+/// Records that multiple packets were lost (batch variant).
+pub fn record_packets_lost(count: u64) {
+    counter!("stamp_sender_packets_lost_total").increment(count);
+}
+
 /// Records an RTT observation in seconds.
 pub fn record_rtt(rtt_seconds: f64) {
     histogram!("stamp_sender_rtt_seconds").record(rtt_seconds);
@@ -59,6 +64,7 @@ mod tests {
         record_packet_sent();
         record_packet_received();
         record_packet_lost();
+        record_packets_lost(5);
         record_rtt(0.001);
         set_rtt_min(0.0005);
         set_rtt_max(0.002);

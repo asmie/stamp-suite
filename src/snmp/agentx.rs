@@ -213,7 +213,10 @@ pub fn decode_oid(buf: &[u8]) -> Result<(Oid, bool, usize), AgentXError> {
     let prefix = buf[4];
     let include = buf[5] != 0;
 
-    let expected_len = 8 + n_subid * 4;
+    let expected_len = n_subid
+        .checked_mul(4)
+        .and_then(|v| v.checked_add(8))
+        .ok_or_else(|| AgentXError::Protocol("OID length overflow".to_string()))?;
     if buf.len() < expected_len {
         return Err(AgentXError::Protocol(format!(
             "OID buffer too short: need {} have {}",

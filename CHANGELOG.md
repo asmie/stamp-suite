@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **RFC 9534 Micro-session ID TLV**: Per-member-link performance measurement on LAGs
+  - Micro-session ID TLV (Type 11) with sender and reflector member link identifiers
+  - `--micro-session-id <ID>` sender CLI option to identify the local LAG member link
+  - `--reflector-member-link-id <ID>` reflector CLI option to fill in reflector-side member link ID
+  - Reflector validates non-zero reflector ID in received TLV (discards on mismatch per RFC 9534 §3.2)
+  - Full `MicroSessionIdTlv` struct with `new`/`from_raw`/`to_raw` and `TlvList::update_micro_session_id_tlvs()`
+- `SenderSnmpStats::inc_lost_by(count)` for batched loss counter updates
+- `record_packets_lost(count)` batch metrics API for sender loss events
+
+### Fixed
+
+- AgentX OID decode (`decode_oid`) now requires 8 bytes minimum instead of 4, preventing panic when reading `prefix`/`include` fields from short buffers
+- AgentX OID decode uses `checked_mul`/`checked_add` for expected buffer length to prevent overflow on 32-bit targets with crafted wire data
+- Sender interim report (`--report-interval`) now uses confirmed `packets_lost` counter instead of `pending.len()`, which incorrectly counted in-flight packets as lost
+- SNMP `loss_pct_x100` is now computed on read instead of cached, preventing stale values when `packets_sent` increases without corresponding loss events
+
+### Changed
+
+- Sender timeout eviction replaced O(n) full HashMap scan with O(k) `VecDeque`-based lazy eviction queue; deadlines are naturally time-ordered since packets are sent sequentially
+- Final sender loss accounting uses batched `inc_lost_by()` and `record_packets_lost()` instead of per-packet loops
+- Reflector TLV semantic processing (CoS, Timestamp Info, Direct Measurement, Location, Follow-Up Telemetry, Destination Node Address, Micro-session ID, Return Path, HMAC recomputation) extracted into shared `apply_semantic_tlv_processing()` helper, eliminating duplication between `assemble_unauth_answer_with_tlvs` and `assemble_auth_answer_with_tlvs`
+- `TlvList::validate_known_tlv_lengths()` refactored to use shared `validate_known_tlv_lengths_slice()` helper operating on both `tlvs` and `wire_order_tlvs`
+- `TlvList::update_micro_session_id_tlvs()` uses shared `apply_micro_session_id()` helper for both TLV vectors
+
+### Removed
+
+- `SenderStatsSnapshot` struct and `SenderSnmpStats::update_from_snapshot()` — all sender SNMP counters are now updated live; the final-snapshot path was dead code
+
 ## [0.5.0] - 2026-02-13
 
 ### Added

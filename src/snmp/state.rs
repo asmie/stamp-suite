@@ -45,9 +45,9 @@ pub struct SnmpConfig {
 
 /// Sender statistics exposed via SNMP, updated atomically.
 ///
-/// Counters are updated live during the sender run (inc_sent, inc_received,
-/// record_rtt) so that SNMP polling sees current values. A final
-/// `update_from_snapshot` call at the end sets definitive results.
+/// All counters are updated live during the sender run so that SNMP polling
+/// sees current values. Derived metrics (loss percentage) are computed on
+/// read to avoid staleness.
 pub struct SenderSnmpStats {
     pub packets_sent: AtomicU32,
     pub packets_received: AtomicU32,
@@ -56,8 +56,6 @@ pub struct SenderSnmpStats {
     pub rtt_max_us: AtomicU32,
     pub rtt_avg_us: AtomicU32,
     pub jitter_us: AtomicU32,
-    /// Loss percentage × 100 (e.g. 250 = 2.50%).
-    pub loss_pct_x100: AtomicU32,
     /// Running RTT sum in microseconds (internal, for live average computation).
     rtt_sum_us: AtomicU64,
     /// Last observed RTT in microseconds (internal, for jitter computation).
@@ -74,24 +72,9 @@ impl SenderSnmpStats {
             rtt_max_us: AtomicU32::new(0),
             rtt_avg_us: AtomicU32::new(0),
             jitter_us: AtomicU32::new(0),
-            loss_pct_x100: AtomicU32::new(0),
             rtt_sum_us: AtomicU64::new(0),
             last_rtt_us: AtomicU32::new(0),
         }
-    }
-
-    /// Updates statistics from a completed sender run.
-    pub fn update_from_snapshot(&self, snap: SenderStatsSnapshot) {
-        self.packets_sent.store(snap.sent, Ordering::Relaxed);
-        self.packets_received
-            .store(snap.received, Ordering::Relaxed);
-        self.packets_lost.store(snap.lost, Ordering::Relaxed);
-        self.rtt_min_us.store(snap.rtt_min_us, Ordering::Relaxed);
-        self.rtt_max_us.store(snap.rtt_max_us, Ordering::Relaxed);
-        self.rtt_avg_us.store(snap.rtt_avg_us, Ordering::Relaxed);
-        self.jitter_us.store(snap.jitter_us, Ordering::Relaxed);
-        self.loss_pct_x100
-            .store(snap.loss_pct_x100, Ordering::Relaxed);
     }
 
     /// Increments the packets_sent counter.
@@ -104,22 +87,35 @@ impl SenderSnmpStats {
         self.packets_received.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Increments the packets_lost counter and recomputes loss percentage.
+    /// Increments the packets_lost counter.
     pub fn inc_lost(&self) {
         self.packets_lost.fetch_add(1, Ordering::Relaxed);
-        self.update_loss_pct();
     }
 
-    /// Recomputes loss percentage from current sent/lost counters.
-    fn update_loss_pct(&self) {
+    /// Adds `count` to the packets_lost counter.
+    ///
+    /// More efficient than calling `inc_lost()` in a loop because it performs
+    /// a single atomic add.
+    pub fn inc_lost_by(&self, count: u32) {
+        if count > 0 {
+            self.packets_lost.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    /// Computes loss percentage × 100 from current sent/lost counters.
+    ///
+    /// Computed on read rather than cached to avoid staleness when
+    /// `packets_sent` increases without corresponding loss events.
+    /// SNMP polls are infrequent so the cost (two atomic loads + one division)
+    /// is negligible.
+    pub fn loss_pct_x100(&self) -> u32 {
         let sent = self.packets_sent.load(Ordering::Relaxed) as u64;
         let lost = self.packets_lost.load(Ordering::Relaxed) as u64;
-        let pct = if sent > 0 {
+        if sent > 0 {
             (lost * 10000 / sent) as u32
         } else {
             0
-        };
-        self.loss_pct_x100.store(pct, Ordering::Relaxed);
+        }
     }
 
     /// Records a single RTT sample, updating min/max/avg/jitter live.
@@ -160,18 +156,6 @@ impl SenderSnmpStats {
             self.jitter_us.store(new_j, Ordering::Relaxed);
         }
     }
-}
-
-/// Snapshot of sender statistics for atomic update.
-pub struct SenderStatsSnapshot {
-    pub sent: u32,
-    pub received: u32,
-    pub lost: u32,
-    pub rtt_min_us: u32,
-    pub rtt_max_us: u32,
-    pub rtt_avg_us: u32,
-    pub jitter_us: u32,
-    pub loss_pct_x100: u32,
 }
 
 impl Default for SenderSnmpStats {

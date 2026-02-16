@@ -1,6 +1,6 @@
 # stamp-suite
 
-Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust (RFC 8762, RFC 8972, and RFC 9503)
+Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust (RFC 8762, RFC 8972, RFC 9503, and RFC 9534)
 
 [![CI](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml/badge.svg)](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml)
 [![Dependency status](https://deps.rs/repo/github/asmie/stamp-suite/status.svg)](https://deps.rs/repo/github/asmie/stamp-suite)
@@ -9,13 +9,14 @@ Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust (RFC 8
 
 ## About
 
-stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Protocol (STAMP) as defined in RFC 8762, RFC 8972, and RFC 9503. It provides a single binary that can operate as either a Session-Sender (client) or Session-Reflector (server) for measuring packet loss and network delays.
+stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Protocol (STAMP) as defined in RFC 8762, RFC 8972, RFC 9503, and RFC 9534. It provides a single binary that can operate as either a Session-Sender (client) or Session-Reflector (server) for measuring packet loss and network delays.
 
 ### Key Features
 
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
 - RFC 8972 TLV extension support with full processing for all defined types
 - RFC 9503 Segment Routing extensions (Destination Node Address, Return Path with SR-MPLS/SRv6)
+- RFC 9534 Micro-session ID TLV for LAG per-member-link measurement
 - Class of Service (CoS) TLV support with DSCP/ECN measurement (RFC 8972 §5.2)
 - Location, Timestamp Info, Direct Measurement, Access Report, and Follow-Up Telemetry TLVs
 - HMAC authentication support
@@ -89,6 +90,9 @@ stamp-suite -i --stateful-reflector --session-timeout 600
 stamp-suite -i --tlv-mode echo      # Echo TLVs back (default, RFC compliant)
 stamp-suite -i --tlv-mode ignore    # Strip TLVs for backward compatibility
 
+# Reflector member link ID for LAG micro-sessions (RFC 9534)
+stamp-suite -i --reflector-member-link-id 2
+
 # Verify TLV HMAC integrity (requires --hmac-key)
 stamp-suite -i --verify-tlv-hmac --hmac-key <hex-key>
 
@@ -154,6 +158,9 @@ stamp-suite --remote-addr 192.168.1.100 --return-sr-mpls-labels 100,200,300
 # With Return Path TLV - SRv6 segment list (RFC 9503)
 stamp-suite --remote-addr 192.168.1.100 --return-srv6-sids 2001:db8::1,2001:db8::2
 
+# With Micro-session ID TLV for LAG member link measurement (RFC 9534)
+stamp-suite --remote-addr 192.168.1.100 --micro-session-id 1
+
 # Combine multiple TLV types
 stamp-suite --remote-addr 192.168.1.100 \
     --cos --dscp 46 \
@@ -198,6 +205,8 @@ Options:
       --return-address <IP>        Return Path alternate reply address (RFC 9503)
       --return-sr-mpls-labels <L>  Return Path SR-MPLS label stack, comma-separated (RFC 9503)
       --return-srv6-sids <SIDS>    Return Path SRv6 segment list, comma-separated (RFC 9503)
+      --micro-session-id <ID>      Sender micro-session member link ID for LAG measurement (RFC 9534)
+      --reflector-member-link-id <ID> Reflector member link ID for LAG micro-sessions (RFC 9534)
       --metrics                    Enable Prometheus metrics endpoint (requires metrics feature)
       --metrics-addr <ADDR>        Metrics server bind address [default: 127.0.0.1:9090]
       --snmp                       Enable SNMP AgentX sub-agent (requires snmp feature, Unix only)
@@ -271,6 +280,7 @@ The implementation supports RFC 8972 TLV (Type-Length-Value) extensions, which a
 | 8 | HMAC | TLV integrity verification (must be last) | Full |
 | 9 | Destination Node Address | Verify intended reflector identity (RFC 9503 §4) | Full |
 | 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | Full |
+| 11 | Micro-session ID | LAG member link identifiers for per-link measurement (RFC 9534 §3.1) | Full |
 
 **Status**: Full = structured parsing, validation, and reflector field population. SR-MPLS/SRv6 forwarding is echoed with U-flag (actual segment routing is out of scope for userspace UDP).
 
@@ -408,6 +418,20 @@ The reflector handles each sub-TLV type:
 - **Return Address**: Reflector sends the reply to the specified IP. On send failure, it sets the U-flag and falls back to the original source address
 - **SR-MPLS / SRv6**: Echoed with U-flag set (actual segment routing forwarding is out of scope for userspace UDP)
 
+### Micro-session ID TLV (RFC 9534 §3.1)
+
+The Micro-session ID TLV enables per-member-link performance measurement within Link Aggregation Groups (LAGs). Each member link is identified by a 16-bit ID on both sender and reflector sides:
+
+```bash
+# Sender: identify this member link as ID 1
+stamp-suite --remote-addr 192.168.1.100 --micro-session-id 1
+
+# Reflector: identify this member link as ID 2
+stamp-suite -i --reflector-member-link-id 2
+```
+
+The sender sets its member link ID in outgoing packets. The reflector validates any non-zero reflector ID in the received TLV (discards on mismatch), echoes the sender ID unchanged, and fills in its own member link ID.
+
 ## Prometheus Metrics
 
 When built with `--features metrics`, the reflector can expose Prometheus metrics:
@@ -463,6 +487,7 @@ The project is functional for STAMP measurements with the following features:
 - Full RFC 8762 compliance (unauthenticated and authenticated modes)
 - Full RFC 8972 TLV extension support (all 8 defined TLV types)
 - RFC 9503 Segment Routing extensions (Destination Node Address and Return Path TLVs)
+- RFC 9534 Micro-session ID TLV for LAG per-member-link measurement
 - HMAC authentication support (base packet and TLV integrity)
 - Class of Service TLV with DSCP/ECN measurement (RFC 8972 §5.2)
 - Location TLV with real destination address capture (even on wildcard binds)
@@ -511,3 +536,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [RFC 8762 - Simple Two-Way Active Measurement Protocol](https://datatracker.ietf.org/doc/html/rfc8762)
 - [RFC 8972 - Simple Two-Way Active Measurement Protocol Optional Extensions](https://datatracker.ietf.org/doc/html/rfc8972)
 - [RFC 9503 - Simple Two-Way Active Measurement Protocol Extensions for Segment Routing Networks](https://datatracker.ietf.org/doc/html/rfc9503)
+- [RFC 9534 - Simple Two-Way Active Measurement Protocol Extensions for Performance Measurement on a Link Aggregation Group](https://datatracker.ietf.org/doc/html/rfc9534)

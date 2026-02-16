@@ -130,7 +130,9 @@ pub enum TlvError {
     InvalidReturnPathLength(usize),
 
     /// Micro-session ID TLV has invalid length.
-    #[error("Micro-session ID TLV has invalid length {0}, expected {MICRO_SESSION_ID_TLV_VALUE_SIZE}")]
+    #[error(
+        "Micro-session ID TLV has invalid length {0}, expected {MICRO_SESSION_ID_TLV_VALUE_SIZE}"
+    )]
     InvalidMicroSessionIdLength(usize),
 }
 
@@ -1355,7 +1357,16 @@ impl TlvList {
     /// Per RFC 8972, the Session-Reflector sets the M (malformed) flag when a
     /// recognized TLV type has an incorrect value length.
     pub fn validate_known_tlv_lengths(&mut self) {
-        for tlv in &mut self.tlvs {
+        Self::validate_known_tlv_lengths_slice(&mut self.tlvs);
+
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            Self::validate_known_tlv_lengths_slice(wire_order);
+        }
+    }
+
+    /// Validates known TLV lengths on a single slice and sets M-flag on mismatches.
+    fn validate_known_tlv_lengths_slice(tlvs: &mut [RawTlv]) {
+        for tlv in tlvs {
             let malformed = match tlv.tlv_type {
                 TlvType::ClassOfService => tlv.value.len() != COS_TLV_VALUE_SIZE,
                 TlvType::AccessReport => tlv.value.len() != ACCESS_REPORT_TLV_VALUE_SIZE,
@@ -1368,36 +1379,11 @@ impl TlvList {
                         && tlv.value.len() != DEST_NODE_ADDR_IPV6_SIZE
                 }
                 TlvType::ReturnPath => tlv.value.len() < TLV_HEADER_SIZE,
+                TlvType::MicroSessionId => tlv.value.len() != MICRO_SESSION_ID_TLV_VALUE_SIZE,
                 _ => false,
             };
             if malformed {
                 tlv.set_malformed();
-            }
-        }
-
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order {
-                let malformed = match tlv.tlv_type {
-                    TlvType::ClassOfService => tlv.value.len() != COS_TLV_VALUE_SIZE,
-                    TlvType::AccessReport => tlv.value.len() != ACCESS_REPORT_TLV_VALUE_SIZE,
-                    TlvType::TimestampInfo => tlv.value.len() != TIMESTAMP_INFO_TLV_VALUE_SIZE,
-                    TlvType::DirectMeasurement => {
-                        tlv.value.len() != DIRECT_MEASUREMENT_TLV_VALUE_SIZE
-                    }
-                    TlvType::Location => tlv.value.len() < LOCATION_TLV_MIN_VALUE_SIZE,
-                    TlvType::FollowUpTelemetry => {
-                        tlv.value.len() != FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE
-                    }
-                    TlvType::DestinationNodeAddress => {
-                        tlv.value.len() != DEST_NODE_ADDR_IPV4_SIZE
-                            && tlv.value.len() != DEST_NODE_ADDR_IPV6_SIZE
-                    }
-                    TlvType::ReturnPath => tlv.value.len() < TLV_HEADER_SIZE,
-                    _ => false,
-                };
-                if malformed {
-                    tlv.set_malformed();
-                }
             }
         }
     }
@@ -2757,53 +2743,39 @@ impl TlvList {
     ///
     /// Returns `true` if all validations pass, `false` if a mismatch was found.
     pub fn update_micro_session_id_tlvs(&mut self, reflector_member_link_id: u16) -> bool {
-        for tlv in &mut self.tlvs {
+        if !Self::apply_micro_session_id(&mut self.tlvs, reflector_member_link_id) {
+            return false;
+        }
+
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            if !Self::apply_micro_session_id(wire_order, reflector_member_link_id) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Validates and updates Micro-session ID TLVs in a single slice.
+    ///
+    /// Returns `false` if a non-zero reflector ID doesn't match `refl_id`.
+    fn apply_micro_session_id(tlvs: &mut [RawTlv], refl_id: u16) -> bool {
+        for tlv in tlvs {
             if tlv.tlv_type == TlvType::MicroSessionId {
                 let Ok(msid) = MicroSessionIdTlv::from_raw(tlv) else {
                     continue; // Malformed — skip (M-flag already set by parse_lenient)
                 };
 
-                // Validate: if reflector ID is non-zero, it must match our ID
                 if msid.reflector_micro_session_id != 0
-                    && msid.reflector_micro_session_id != reflector_member_link_id
+                    && msid.reflector_micro_session_id != refl_id
                 {
                     return false;
                 }
 
-                // Build updated TLV: echo sender ID, set reflector ID
-                let updated = MicroSessionIdTlv::new(
-                    msid.sender_micro_session_id,
-                    reflector_member_link_id,
-                );
-                let new_raw = updated.to_raw();
-                tlv.value = new_raw.value;
+                let updated = MicroSessionIdTlv::new(msid.sender_micro_session_id, refl_id);
+                tlv.value = updated.to_raw().value;
             }
         }
-
-        // Also update wire-order TLVs
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order {
-                if tlv.tlv_type == TlvType::MicroSessionId {
-                    let Ok(msid) = MicroSessionIdTlv::from_raw(tlv) else {
-                        continue;
-                    };
-
-                    if msid.reflector_micro_session_id != 0
-                        && msid.reflector_micro_session_id != reflector_member_link_id
-                    {
-                        return false;
-                    }
-
-                    let updated = MicroSessionIdTlv::new(
-                        msid.sender_micro_session_id,
-                        reflector_member_link_id,
-                    );
-                    let new_raw = updated.to_raw();
-                    tlv.value = new_raw.value;
-                }
-            }
-        }
-
         true
     }
 }
@@ -4749,6 +4721,11 @@ mod tests {
             vec![0; FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE],
         ))
         .unwrap();
+        list.push(RawTlv::new(
+            TlvType::MicroSessionId,
+            vec![0; MICRO_SESSION_ID_TLV_VALUE_SIZE],
+        ))
+        .unwrap();
 
         list.validate_known_tlv_lengths();
 
@@ -4777,6 +4754,8 @@ mod tests {
             .unwrap(); // Wrong: min 4
         list.push(RawTlv::new(TlvType::FollowUpTelemetry, vec![0; 10]))
             .unwrap(); // Wrong: needs 16
+        list.push(RawTlv::new(TlvType::MicroSessionId, vec![0; 2]))
+            .unwrap(); // Wrong: needs 4
 
         list.validate_known_tlv_lengths();
 
@@ -5133,7 +5112,10 @@ mod tests {
     fn test_micro_session_id_tlv_invalid_length() {
         let raw = RawTlv::new(TlvType::MicroSessionId, vec![0, 1, 2]); // 3 bytes, need 4
         let result = MicroSessionIdTlv::from_raw(&raw);
-        assert!(matches!(result, Err(TlvError::InvalidMicroSessionIdLength(3))));
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidMicroSessionIdLength(3))
+        ));
     }
 
     #[test]

@@ -783,6 +783,68 @@ pub fn assemble_auth_answer_symmetric(
     response
 }
 
+/// Applies semantic TLV processing on the reflector side (RFC 8972 §4.8).
+///
+/// Called when HMAC verification passed and no malformed TLVs were found.
+/// Returns `None` if the packet should be discarded (e.g. Micro-session ID mismatch),
+/// or `Some((cos_request, return_path_action))` on success.
+fn apply_semantic_tlv_processing(
+    tlvs: &mut TlvList,
+    ctx: &ProcessingContext,
+    tlv_hmac_key: Option<&HmacKey>,
+    base_bytes: &[u8],
+) -> Option<(Option<(u8, u8)>, ReturnPathAction)> {
+    // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS
+    let cos_request = tlvs.get_cos_request();
+
+    // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
+    tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
+
+    // Update Timestamp Information TLVs (RFC 8972 §4.3)
+    let sync_src = match ctx.clock_source {
+        ClockFormat::NTP => SyncSource::Ntp,
+        ClockFormat::PTP => SyncSource::Ptp,
+    };
+    tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
+
+    // Update Direct Measurement TLVs (RFC 8972 §4.5)
+    if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
+        tlvs.update_direct_measurement_tlvs(rx, tx);
+    }
+
+    // Update Location TLVs (RFC 8972 §4.2)
+    if let Some(ref addr_info) = ctx.packet_addr_info {
+        tlvs.update_location_tlvs(addr_info);
+    }
+
+    // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
+    if let Some((last_seq, last_ts)) = ctx.last_reflection {
+        tlvs.update_follow_up_telemetry_tlvs(last_seq, last_ts, TimestampMethod::SwLocal);
+    }
+
+    // Process Destination Node Address TLV (RFC 9503 §4)
+    tlvs.process_destination_node_address(ctx.local_addresses);
+
+    // Process Micro-session ID TLV (RFC 9534 §3.2)
+    if let Some(refl_id) = ctx.reflector_member_link_id {
+        if !tlvs.update_micro_session_id_tlvs(refl_id) {
+            log::warn!("Micro-session ID validation failed, discarding packet");
+            return None;
+        }
+    }
+
+    // Process Return Path TLV (RFC 9503 §5)
+    let return_path_action = tlvs.process_return_path(ctx.sender_port);
+
+    // Compute fresh HMAC for response
+    if let Some(key) = tlv_hmac_key {
+        let response_seq_bytes = &base_bytes[..4];
+        tlvs.set_hmac(key, response_seq_bytes);
+    }
+
+    Some((cos_request, return_path_action))
+}
+
 /// Assembles an unauthenticated reflected packet with TLV handling (RFC 8972).
 ///
 /// Per RFC 8972 §4.8, on HMAC verification failure, TLVs are echoed with I-flag
@@ -880,60 +942,18 @@ pub fn assemble_unauth_answer_with_tlvs(
                 // Per RFC 8972 §4.8: on HMAC failure or malformed TLVs, only echo
                 // TLVs with flags set — do NOT perform semantic TLV processing.
                 if hmac_ok && !had_malformed {
-                    // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS
-                    cos_request = tlvs.get_cos_request();
-
-                    // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
-                    tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
-
-                    // Update Timestamp Information TLVs (RFC 8972 §4.3)
-                    let sync_src = match ctx.clock_source {
-                        ClockFormat::NTP => SyncSource::Ntp,
-                        ClockFormat::PTP => SyncSource::Ptp,
-                    };
-                    tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
-
-                    // Update Direct Measurement TLVs (RFC 8972 §4.5)
-                    if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
-                        tlvs.update_direct_measurement_tlvs(rx, tx);
-                    }
-
-                    // Update Location TLVs (RFC 8972 §4.2)
-                    if let Some(ref addr_info) = ctx.packet_addr_info {
-                        tlvs.update_location_tlvs(addr_info);
-                    }
-
-                    // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
-                    if let Some((last_seq, last_ts)) = ctx.last_reflection {
-                        tlvs.update_follow_up_telemetry_tlvs(
-                            last_seq,
-                            last_ts,
-                            TimestampMethod::SwLocal,
-                        );
-                    }
-
-                    // Process Destination Node Address TLV (RFC 9503 §4)
-                    tlvs.process_destination_node_address(ctx.local_addresses);
-
-                    // Process Micro-session ID TLV (RFC 9534 §3.2)
-                    if let Some(refl_id) = ctx.reflector_member_link_id {
-                        if !tlvs.update_micro_session_id_tlvs(refl_id) {
-                            log::warn!("Micro-session ID validation failed, discarding packet");
+                    match apply_semantic_tlv_processing(&mut tlvs, ctx, tlv_hmac_key, &base_bytes) {
+                        Some((cos, rpa)) => {
+                            cos_request = cos;
+                            return_path_action = rpa;
+                        }
+                        None => {
                             return StampResponse {
                                 data: response,
                                 cos_request: None,
                                 return_path_action: ReturnPathAction::SuppressReply,
                             };
                         }
-                    }
-
-                    // Process Return Path TLV (RFC 9503 §5)
-                    return_path_action = tlvs.process_return_path(ctx.sender_port);
-
-                    // Compute fresh HMAC for response
-                    if let Some(key) = tlv_hmac_key {
-                        let response_seq_bytes = &base_bytes[..4];
-                        tlvs.set_hmac(key, response_seq_bytes);
                     }
                 }
 
@@ -1039,60 +1059,18 @@ pub fn assemble_auth_answer_with_tlvs(
                 // Per RFC 8972 §4.8: on HMAC failure or malformed TLVs, only echo
                 // TLVs with flags set — do NOT perform semantic TLV processing.
                 if hmac_ok && !had_malformed {
-                    // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS
-                    cos_request = tlvs.get_cos_request();
-
-                    // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
-                    tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
-
-                    // Update Timestamp Information TLVs (RFC 8972 §4.3)
-                    let sync_src = match ctx.clock_source {
-                        ClockFormat::NTP => SyncSource::Ntp,
-                        ClockFormat::PTP => SyncSource::Ptp,
-                    };
-                    tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
-
-                    // Update Direct Measurement TLVs (RFC 8972 §4.5)
-                    if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
-                        tlvs.update_direct_measurement_tlvs(rx, tx);
-                    }
-
-                    // Update Location TLVs (RFC 8972 §4.2)
-                    if let Some(ref addr_info) = ctx.packet_addr_info {
-                        tlvs.update_location_tlvs(addr_info);
-                    }
-
-                    // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
-                    if let Some((last_seq, last_ts)) = ctx.last_reflection {
-                        tlvs.update_follow_up_telemetry_tlvs(
-                            last_seq,
-                            last_ts,
-                            TimestampMethod::SwLocal,
-                        );
-                    }
-
-                    // Process Destination Node Address TLV (RFC 9503 §4)
-                    tlvs.process_destination_node_address(ctx.local_addresses);
-
-                    // Process Micro-session ID TLV (RFC 9534 §3.2)
-                    if let Some(refl_id) = ctx.reflector_member_link_id {
-                        if !tlvs.update_micro_session_id_tlvs(refl_id) {
-                            log::warn!("Micro-session ID validation failed, discarding packet");
+                    match apply_semantic_tlv_processing(&mut tlvs, ctx, tlv_hmac_key, &base_bytes) {
+                        Some((cos, rpa)) => {
+                            cos_request = cos;
+                            return_path_action = rpa;
+                        }
+                        None => {
                             return StampResponse {
                                 data: response,
                                 cos_request: None,
                                 return_path_action: ReturnPathAction::SuppressReply,
                             };
                         }
-                    }
-
-                    // Process Return Path TLV (RFC 9503 §5)
-                    return_path_action = tlvs.process_return_path(ctx.sender_port);
-
-                    // Compute fresh HMAC for response
-                    if let Some(key) = tlv_hmac_key {
-                        let response_seq_bytes = &base_bytes[..4];
-                        tlvs.set_hmac(key, response_seq_bytes);
                     }
                 }
 
