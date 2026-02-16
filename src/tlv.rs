@@ -67,6 +67,9 @@ pub const DEST_NODE_ADDR_IPV6_SIZE: usize = 16;
 /// Return Path Control Code sub-TLV value size (4 bytes).
 pub const RETURN_PATH_CONTROL_CODE_SIZE: usize = 4;
 
+/// Micro-session ID TLV value size (4 bytes: two u16 IDs).
+pub const MICRO_SESSION_ID_TLV_VALUE_SIZE: usize = 4;
+
 /// Errors that can occur during TLV parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum TlvError {
@@ -125,6 +128,10 @@ pub enum TlvError {
     /// Return Path TLV has invalid length.
     #[error("Return Path TLV has invalid length {0}, minimum 4 (one sub-TLV header)")]
     InvalidReturnPathLength(usize),
+
+    /// Micro-session ID TLV has invalid length.
+    #[error("Micro-session ID TLV has invalid length {0}, expected {MICRO_SESSION_ID_TLV_VALUE_SIZE}")]
+    InvalidMicroSessionIdLength(usize),
 }
 
 /// TLV flag bits as defined in RFC 8972 Section 4.2.
@@ -236,7 +243,9 @@ pub enum TlvType {
     DestinationNodeAddress = 9,
     /// Return Path TLV (10) - RFC 9503 §5.
     ReturnPath = 10,
-    /// Unknown type (11-255).
+    /// Micro-session ID TLV (11) - RFC 9534 §3.1.
+    MicroSessionId = 11,
+    /// Unknown type (12-255).
     Unknown(u8),
 }
 
@@ -256,6 +265,7 @@ impl TlvType {
             8 => Self::Hmac,
             9 => Self::DestinationNodeAddress,
             10 => Self::ReturnPath,
+            11 => Self::MicroSessionId,
             n => Self::Unknown(n),
         }
     }
@@ -275,6 +285,7 @@ impl TlvType {
             Self::Hmac => 8,
             Self::DestinationNodeAddress => 9,
             Self::ReturnPath => 10,
+            Self::MicroSessionId => 11,
             Self::Unknown(n) => n,
         }
     }
@@ -2313,6 +2324,54 @@ impl DestinationNodeAddressTlv {
     }
 }
 
+/// Micro-session ID TLV (Type 11) per RFC 9534 §3.1.
+///
+/// Carries two 16-bit member link identifiers for LAG performance measurement.
+/// The sender sets its own member link ID; the reflector fills in its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicroSessionIdTlv {
+    /// Sender's LAG member link identifier.
+    pub sender_micro_session_id: u16,
+    /// Reflector's LAG member link identifier (0 = unknown).
+    pub reflector_micro_session_id: u16,
+}
+
+impl MicroSessionIdTlv {
+    /// Creates a new Micro-session ID TLV.
+    #[must_use]
+    pub fn new(sender_id: u16, reflector_id: u16) -> Self {
+        Self {
+            sender_micro_session_id: sender_id,
+            reflector_micro_session_id: reflector_id,
+        }
+    }
+
+    /// Parses a Micro-session ID TLV from a RawTlv.
+    ///
+    /// # Errors
+    /// Returns an error if the value length is not exactly 4 bytes.
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        if raw.value.len() != MICRO_SESSION_ID_TLV_VALUE_SIZE {
+            return Err(TlvError::InvalidMicroSessionIdLength(raw.value.len()));
+        }
+        let sender_id = u16::from_be_bytes([raw.value[0], raw.value[1]]);
+        let reflector_id = u16::from_be_bytes([raw.value[2], raw.value[3]]);
+        Ok(Self {
+            sender_micro_session_id: sender_id,
+            reflector_micro_session_id: reflector_id,
+        })
+    }
+
+    /// Converts to a RawTlv.
+    #[must_use]
+    pub fn to_raw(&self) -> RawTlv {
+        let mut value = Vec::with_capacity(MICRO_SESSION_ID_TLV_VALUE_SIZE);
+        value.extend_from_slice(&self.sender_micro_session_id.to_be_bytes());
+        value.extend_from_slice(&self.reflector_micro_session_id.to_be_bytes());
+        RawTlv::new(TlvType::MicroSessionId, value)
+    }
+}
+
 /// Return Path sub-TLV type identifiers per RFC 9503 §5.
 ///
 /// Sub-TLVs use the standard 4-byte STAMP TLV header format.
@@ -2684,6 +2743,68 @@ impl TlvList {
                 }
             }
         }
+    }
+
+    /// Processes Micro-session ID TLVs per RFC 9534 §3.2.
+    ///
+    /// For each Micro-session ID TLV:
+    /// - Validates that if `reflector_micro_session_id` is non-zero, it matches
+    ///   `reflector_member_link_id` (returns `false` on mismatch → packet discarded)
+    /// - Echoes the sender's micro-session ID unchanged
+    /// - Sets the reflector's micro-session ID to `reflector_member_link_id`
+    ///
+    /// Updates both `self.tlvs` and `self.wire_order_tlvs`.
+    ///
+    /// Returns `true` if all validations pass, `false` if a mismatch was found.
+    pub fn update_micro_session_id_tlvs(&mut self, reflector_member_link_id: u16) -> bool {
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::MicroSessionId {
+                let Ok(msid) = MicroSessionIdTlv::from_raw(tlv) else {
+                    continue; // Malformed — skip (M-flag already set by parse_lenient)
+                };
+
+                // Validate: if reflector ID is non-zero, it must match our ID
+                if msid.reflector_micro_session_id != 0
+                    && msid.reflector_micro_session_id != reflector_member_link_id
+                {
+                    return false;
+                }
+
+                // Build updated TLV: echo sender ID, set reflector ID
+                let updated = MicroSessionIdTlv::new(
+                    msid.sender_micro_session_id,
+                    reflector_member_link_id,
+                );
+                let new_raw = updated.to_raw();
+                tlv.value = new_raw.value;
+            }
+        }
+
+        // Also update wire-order TLVs
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order {
+                if tlv.tlv_type == TlvType::MicroSessionId {
+                    let Ok(msid) = MicroSessionIdTlv::from_raw(tlv) else {
+                        continue;
+                    };
+
+                    if msid.reflector_micro_session_id != 0
+                        && msid.reflector_micro_session_id != reflector_member_link_id
+                    {
+                        return false;
+                    }
+
+                    let updated = MicroSessionIdTlv::new(
+                        msid.sender_micro_session_id,
+                        reflector_member_link_id,
+                    );
+                    let new_raw = updated.to_raw();
+                    tlv.value = new_raw.value;
+                }
+            }
+        }
+
+        true
     }
 }
 
@@ -4992,5 +5113,93 @@ mod tests {
         let parsed = ReturnPathTlv::from_raw(&raw).unwrap();
         assert!(parsed.has_sr_mpls());
         assert_eq!(parsed.get_return_address(), Some(addr));
+    }
+
+    // ===== RFC 9534 Micro-session ID TLV Tests =====
+
+    #[test]
+    fn test_micro_session_id_tlv_roundtrip() {
+        let tlv = MicroSessionIdTlv::new(100, 200);
+        let raw = tlv.to_raw();
+        assert_eq!(raw.tlv_type, TlvType::MicroSessionId);
+        assert_eq!(raw.value.len(), MICRO_SESSION_ID_TLV_VALUE_SIZE);
+
+        let parsed = MicroSessionIdTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.sender_micro_session_id, 100);
+        assert_eq!(parsed.reflector_micro_session_id, 200);
+    }
+
+    #[test]
+    fn test_micro_session_id_tlv_invalid_length() {
+        let raw = RawTlv::new(TlvType::MicroSessionId, vec![0, 1, 2]); // 3 bytes, need 4
+        let result = MicroSessionIdTlv::from_raw(&raw);
+        assert!(matches!(result, Err(TlvError::InvalidMicroSessionIdLength(3))));
+    }
+
+    #[test]
+    fn test_micro_session_id_tlv_type_recognized() {
+        assert!(TlvType::MicroSessionId.is_recognized());
+    }
+
+    #[test]
+    fn test_update_micro_session_id_tlvs_sets_reflector_id() {
+        let msid = MicroSessionIdTlv::new(42, 0);
+        let mut list = TlvList::new();
+        list.push(msid.to_raw()).unwrap();
+
+        let ok = list.update_micro_session_id_tlvs(99);
+        assert!(ok);
+
+        let parsed = MicroSessionIdTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+        assert_eq!(parsed.sender_micro_session_id, 42);
+        assert_eq!(parsed.reflector_micro_session_id, 99);
+    }
+
+    #[test]
+    fn test_update_micro_session_id_tlvs_echoes_sender_id() {
+        let msid = MicroSessionIdTlv::new(1234, 0);
+        let mut list = TlvList::new();
+        list.push(msid.to_raw()).unwrap();
+
+        list.update_micro_session_id_tlvs(5678);
+
+        let parsed = MicroSessionIdTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+        assert_eq!(parsed.sender_micro_session_id, 1234);
+    }
+
+    #[test]
+    fn test_update_micro_session_id_tlvs_validates_reflector_id() {
+        // Non-zero reflector ID that does NOT match → should return false
+        let msid = MicroSessionIdTlv::new(42, 50);
+        let mut list = TlvList::new();
+        list.push(msid.to_raw()).unwrap();
+
+        let ok = list.update_micro_session_id_tlvs(99);
+        assert!(!ok);
+    }
+
+    #[test]
+    fn test_update_micro_session_id_tlvs_zero_reflector_id_accepted() {
+        // Reflector ID 0 (unknown) should always pass
+        let msid = MicroSessionIdTlv::new(42, 0);
+        let mut list = TlvList::new();
+        list.push(msid.to_raw()).unwrap();
+
+        let ok = list.update_micro_session_id_tlvs(99);
+        assert!(ok);
+    }
+
+    #[test]
+    fn test_update_micro_session_id_tlvs_matching_reflector_id_accepted() {
+        // Non-zero reflector ID that matches → should pass
+        let msid = MicroSessionIdTlv::new(42, 99);
+        let mut list = TlvList::new();
+        list.push(msid.to_raw()).unwrap();
+
+        let ok = list.update_micro_session_id_tlvs(99);
+        assert!(ok);
+
+        let parsed = MicroSessionIdTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+        assert_eq!(parsed.reflector_micro_session_id, 99);
     }
 }

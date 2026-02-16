@@ -104,9 +104,22 @@ impl SenderSnmpStats {
         self.packets_received.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Increments the packets_lost counter.
+    /// Increments the packets_lost counter and recomputes loss percentage.
     pub fn inc_lost(&self) {
         self.packets_lost.fetch_add(1, Ordering::Relaxed);
+        self.update_loss_pct();
+    }
+
+    /// Recomputes loss percentage from current sent/lost counters.
+    fn update_loss_pct(&self) {
+        let sent = self.packets_sent.load(Ordering::Relaxed) as u64;
+        let lost = self.packets_lost.load(Ordering::Relaxed) as u64;
+        let pct = if sent > 0 {
+            (lost * 10000 / sent) as u32
+        } else {
+            0
+        };
+        self.loss_pct_x100.store(pct, Ordering::Relaxed);
     }
 
     /// Records a single RTT sample, updating min/max/avg/jitter live.

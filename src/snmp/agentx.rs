@@ -205,7 +205,7 @@ pub fn encode_oid(oid: &Oid, include: bool) -> Vec<u8> {
 
 /// Decodes an OID from a buffer. Returns the decoded OID and the number of bytes consumed.
 pub fn decode_oid(buf: &[u8]) -> Result<(Oid, bool, usize), AgentXError> {
-    if buf.len() < 4 {
+    if buf.len() < 8 {
         return Err(AgentXError::Protocol("OID header too short".to_string()));
     }
 
@@ -650,6 +650,15 @@ mod tests {
         let encoded = encode_oid(&oid, false);
         let (decoded, _include, _consumed) = decode_oid(&encoded).unwrap();
         assert_eq!(decoded, oid);
+    }
+
+    #[test]
+    fn test_oid_decode_short_buffer_rejected() {
+        // 4-7 byte buffers must be rejected, not panic
+        for len in 0..8 {
+            let buf = vec![0u8; len];
+            assert!(decode_oid(&buf).is_err());
+        }
     }
 
     #[test]

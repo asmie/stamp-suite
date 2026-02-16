@@ -382,6 +382,8 @@ pub struct ProcessingContext<'a> {
     pub local_addresses: &'a [std::net::IpAddr],
     /// Sender's UDP port for Return Path alternate address replies (RFC 9503 §5).
     pub sender_port: u16,
+    /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
+    pub reflector_member_link_id: Option<u16>,
 }
 
 /// Processes a STAMP packet and returns the response.
@@ -913,6 +915,18 @@ pub fn assemble_unauth_answer_with_tlvs(
                     // Process Destination Node Address TLV (RFC 9503 §4)
                     tlvs.process_destination_node_address(ctx.local_addresses);
 
+                    // Process Micro-session ID TLV (RFC 9534 §3.2)
+                    if let Some(refl_id) = ctx.reflector_member_link_id {
+                        if !tlvs.update_micro_session_id_tlvs(refl_id) {
+                            log::warn!("Micro-session ID validation failed, discarding packet");
+                            return StampResponse {
+                                data: response,
+                                cos_request: None,
+                                return_path_action: ReturnPathAction::SuppressReply,
+                            };
+                        }
+                    }
+
                     // Process Return Path TLV (RFC 9503 §5)
                     return_path_action = tlvs.process_return_path(ctx.sender_port);
 
@@ -1060,6 +1074,18 @@ pub fn assemble_auth_answer_with_tlvs(
                     // Process Destination Node Address TLV (RFC 9503 §4)
                     tlvs.process_destination_node_address(ctx.local_addresses);
 
+                    // Process Micro-session ID TLV (RFC 9534 §3.2)
+                    if let Some(refl_id) = ctx.reflector_member_link_id {
+                        if !tlvs.update_micro_session_id_tlvs(refl_id) {
+                            log::warn!("Micro-session ID validation failed, discarding packet");
+                            return StampResponse {
+                                data: response,
+                                cos_request: None,
+                                return_path_action: ReturnPathAction::SuppressReply,
+                            };
+                        }
+                    }
+
                     // Process Return Path TLV (RFC 9503 §5)
                     return_path_action = tlvs.process_return_path(ctx.sender_port);
 
@@ -1107,6 +1133,7 @@ mod tests {
             last_reflection: None,
             local_addresses: &[],
             sender_port: 0,
+            reflector_member_link_id: None,
         }
     }
 
@@ -2664,5 +2691,95 @@ mod tests {
 
         let updated = set_return_path_u_flag_in_response(&mut data, UNAUTH_BASE_SIZE);
         assert!(!updated);
+    }
+
+    // ===== RFC 9534 Micro-session ID TLV Receiver Tests =====
+
+    #[test]
+    fn test_unauth_with_micro_session_id_fills_reflector_id() {
+        use crate::tlv::MicroSessionIdTlv;
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        // Build packet with Micro-session ID TLV (sender_id=42, reflector_id=0)
+        let msid_raw = MicroSessionIdTlv::new(42, 0).to_raw();
+        let mut data = sender_packet.to_bytes().to_vec();
+        data.extend_from_slice(&msid_raw.to_bytes());
+
+        let mut ctx = test_ctx(0, 0);
+        ctx.reflector_member_link_id = Some(99);
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &data,
+            ClockFormat::NTP,
+            500,
+            64,
+            0,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        // Should not suppress reply
+        assert!(!matches!(
+            response.return_path_action,
+            ReturnPathAction::SuppressReply
+        ));
+
+        // Parse TLVs from response to check reflector ID was filled in
+        let tlv_data = &response.data[UNAUTH_BASE_SIZE..];
+        let tlvs = TlvList::parse(tlv_data).unwrap();
+        let msid_tlv = &tlvs.non_hmac_tlvs()[0];
+        let parsed = MicroSessionIdTlv::from_raw(msid_tlv).unwrap();
+        assert_eq!(parsed.sender_micro_session_id, 42);
+        assert_eq!(parsed.reflector_micro_session_id, 99);
+    }
+
+    #[test]
+    fn test_unauth_with_micro_session_id_mismatch_discards() {
+        use crate::tlv::MicroSessionIdTlv;
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        // Build packet with Micro-session ID TLV (sender_id=42, reflector_id=50 — mismatch)
+        let msid_raw = MicroSessionIdTlv::new(42, 50).to_raw();
+        let mut data = sender_packet.to_bytes().to_vec();
+        data.extend_from_slice(&msid_raw.to_bytes());
+
+        let mut ctx = test_ctx(0, 0);
+        ctx.reflector_member_link_id = Some(99);
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &data,
+            ClockFormat::NTP,
+            500,
+            64,
+            0,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        // Should suppress reply (discard) due to reflector ID mismatch
+        assert!(matches!(
+            response.return_path_action,
+            ReturnPathAction::SuppressReply
+        ));
     }
 }

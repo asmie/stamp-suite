@@ -263,6 +263,16 @@ pub struct Configuration {
         conflicts_with_all = ["return_path_cc", "return_sr_mpls_labels"]
     )]
     pub return_srv6_sids: Option<Vec<std::net::Ipv6Addr>>,
+
+    /// Sender micro-session member link ID for LAG measurement (RFC 9534).
+    /// When set, includes a Micro-session ID TLV in test packets.
+    #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
+    pub micro_session_id: Option<u16>,
+
+    /// Reflector member link ID for LAG micro-sessions (RFC 9534).
+    /// When set, the reflector fills this ID into reflected Micro-session ID TLVs.
+    #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
+    pub reflector_member_link_id: Option<u16>,
 }
 
 impl Configuration {

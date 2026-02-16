@@ -351,6 +351,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     last_reflection,
                     local_addresses: &local_addresses,
                     sender_port: src_addr.port(),
+                    reflector_member_link_id: conf.reflector_member_link_id,
                 };
 
                 if let Some(mut response) =

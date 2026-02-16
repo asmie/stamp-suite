@@ -25,8 +25,8 @@ use crate::{
     time::generate_timestamp,
     tlv::{
         AccessReportTlv, ClassOfServiceTlv, DestinationNodeAddressTlv, DirectMeasurementTlv,
-        FollowUpTelemetryTlv, LocationTlv, RawTlv, ReturnPathTlv, SessionSenderId, SyncSource,
-        TimestampInfoTlv, TimestampMethod, TlvList,
+        FollowUpTelemetryTlv, LocationTlv, MicroSessionIdTlv, RawTlv, ReturnPathTlv,
+        SessionSenderId, SyncSource, TimestampInfoTlv, TimestampMethod, TlvList,
     },
 };
 
@@ -120,6 +120,7 @@ pub async fn run_sender(
     let mut rtt_collector = RttCollector::new();
     let mut packets_sent: u32 = 0;
     let mut packets_received: u32 = 0;
+    let mut packets_lost: u32 = 0;
     let mut recv_buf = [0u8; 1024];
     let timeout = Duration::from_secs(conf.timeout as u64);
 
@@ -190,6 +191,12 @@ pub async fn run_sender(
     } else if let Some(addr) = conf.return_address {
         extra_tlvs.push(ReturnPathTlv::with_return_address(addr).to_raw());
         log::info!("Return Path TLV enabled (return address={})", addr);
+    }
+
+    // Build Micro-session ID TLV (RFC 9534 §3.1)
+    if let Some(sender_id) = conf.micro_session_id {
+        extra_tlvs.push(MicroSessionIdTlv::new(sender_id, 0).to_raw());
+        log::info!("Micro-session ID TLV enabled (sender_id={})", sender_id);
     }
 
     // Check if we need to include TLV extensions
@@ -373,6 +380,28 @@ pub async fn run_sender(
                 }
             }
         }
+
+        // Evict timed-out packets so SNMP/metrics see losses promptly
+        if timeout > Duration::ZERO {
+            let now = Instant::now();
+            let expired: Vec<u32> = pending
+                .iter()
+                .filter(|(_, p)| now.duration_since(p.send_time) >= timeout)
+                .map(|(&seq, _)| seq)
+                .collect();
+            for seq in expired {
+                pending.remove(&seq);
+                packets_lost += 1;
+                #[cfg(feature = "metrics")]
+                if metrics_enabled {
+                    crate::metrics::sender_metrics::record_packet_lost();
+                }
+                #[cfg(all(unix, feature = "snmp"))]
+                if let Some(ref stats) = snmp_stats {
+                    stats.inc_lost();
+                }
+            }
+        }
     }
 
     // Final wait phase for remaining responses
@@ -409,43 +438,22 @@ pub async fn run_sender(
     }
 
     // Mark remaining pending packets as lost
-    let packets_lost = pending.len() as u32;
+    let remaining_lost = pending.len() as u32;
+    packets_lost += remaining_lost;
     #[cfg(feature = "metrics")]
     if metrics_enabled {
-        for _ in 0..packets_lost {
+        for _ in 0..remaining_lost {
             crate::metrics::sender_metrics::record_packet_lost();
         }
     }
     #[cfg(all(unix, feature = "snmp"))]
     if let Some(ref stats) = snmp_stats {
-        for _ in 0..packets_lost {
+        for _ in 0..remaining_lost {
             stats.inc_lost();
         }
     }
 
-    let snapshot = rtt_collector.snapshot(packets_sent, packets_lost);
-
-    // Update SNMP stats from final snapshot
-    #[cfg(all(unix, feature = "snmp"))]
-    if let Some(ref stats) = snmp_stats {
-        let ms_to_us = |ms: f64| (ms * 1000.0) as u32;
-        stats.update_from_snapshot(crate::snmp::state::SenderStatsSnapshot {
-            sent: packets_sent,
-            received: packets_received,
-            lost: packets_lost,
-            rtt_min_us: snapshot.min_rtt_ms.map(ms_to_us).unwrap_or(0),
-            rtt_max_us: snapshot.max_rtt_ms.map(ms_to_us).unwrap_or(0),
-            rtt_avg_us: snapshot.avg_rtt_ms.map(ms_to_us).unwrap_or(0),
-            jitter_us: snapshot.jitter_ms.map(ms_to_us).unwrap_or(0),
-            loss_pct_x100: if packets_sent > 0 {
-                ((packets_lost as u64 * 10000) / packets_sent as u64) as u32
-            } else {
-                0
-            },
-        });
-    }
-
-    snapshot
+    rtt_collector.snapshot(packets_sent, packets_lost)
 }
 
 fn process_response(

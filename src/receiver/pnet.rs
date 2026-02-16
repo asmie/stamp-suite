@@ -76,6 +76,8 @@ struct CaptureConfig {
     counters: Arc<ReflectorCounters>,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     local_addresses: Vec<IpAddr>,
+    /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
+    reflector_member_link_id: Option<u16>,
 }
 
 /// Interface properties needed for macOS special handling.
@@ -245,6 +247,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         shutdown: Arc::clone(&shutdown),
         counters: Arc::clone(&counters),
         local_addresses,
+        reflector_member_link_id: conf.reflector_member_link_id,
     };
 
     // Spawn async task to listen for Ctrl+C and set shutdown flag
@@ -537,6 +540,7 @@ fn handle_stamp_packet(
         last_reflection,
         local_addresses: &config.local_addresses,
         sender_port: pkt.src.port(),
+        reflector_member_link_id: config.reflector_member_link_id,
     };
 
     if let Some(mut response) = process_stamp_packet(data, pkt.src, pkt.ttl, config.use_auth, &ctx)
