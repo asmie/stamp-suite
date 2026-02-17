@@ -54,5 +54,5 @@ exit 0
 %{_datadir}/snmp/mibs/STAMP-SUITE-MIB.mib
 
 %changelog
-* Mon Feb 17 2026 Piotr Olszewski <asmie@asmie.pl> - 0.5.0-1
+* Tue Feb 17 2026 Piotr Olszewski <asmie@asmie.pl> - 0.5.0-1
 - Initial RPM packaging

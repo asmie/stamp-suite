@@ -264,7 +264,7 @@ jobs:
           tar czf ~/rpmbuild/SOURCES/${PKG_NAME}-${PKG_VERSION}.tar.gz -C /tmp "${TARDIR}"
           # Patch spec to skip cargo build (binary already built)
           sed 's/^cargo build --release$/# binary pre-built/' dist/rpm/${PKG_NAME}.spec > ~/rpmbuild/SPECS/${PKG_NAME}.spec
-          rpmbuild -bb \
+          rpmbuild -bb --nodeps \
             --define "_topdir $HOME/rpmbuild" \
             --define "debug_package %{nil}" \
             ~/rpmbuild/SPECS/${PKG_NAME}.spec
