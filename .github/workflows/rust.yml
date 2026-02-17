@@ -267,6 +267,7 @@ jobs:
           rpmbuild -bb --nodeps \
             --define "_topdir $HOME/rpmbuild" \
             --define "debug_package %{nil}" \
+            --define "_unitdir /usr/lib/systemd/system" \
             ~/rpmbuild/SPECS/${PKG_NAME}.spec
       - name: Verify RPM package
         run: |
