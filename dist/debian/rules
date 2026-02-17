@@ -1,0 +1,18 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release
+
+override_dh_auto_test:
+	cargo test --all-features
+
+override_dh_auto_install:
+	# Handled by stamp-suite.install
+
+override_dh_auto_clean:
+	cargo clean

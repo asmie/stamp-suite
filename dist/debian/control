@@ -1,0 +1,20 @@
+Source: stamp-suite
+Section: net
+Priority: optional
+Maintainer: Piotr Olszewski <asmie@asmie.pl>
+Build-Depends: debhelper-compat (= 13), cargo (>= 1.93.0), rustc (>= 1.93.0)
+Standards-Version: 4.6.2
+Homepage: https://github.com/asmie/stamp-suite
+Rules-Requires-Root: no
+
+Package: stamp-suite
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Simple Two-Way Active Measurement Protocol (STAMP)
+ stamp-suite is a Rust implementation of the Simple Two-Way Active
+ Measurement Protocol (STAMP) as defined in RFC 8762 and RFC 8972.
+ It provides a client-server application pair for measuring packet
+ loss and network delays.
+ .
+ The package includes both the STAMP sender and reflector (receiver)
+ in a single binary, selectable via command-line flags.

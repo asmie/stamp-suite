@@ -1,0 +1,4 @@
+target/release/stamp-suite usr/bin
+dist/systemd/stamp-suite.service lib/systemd/system
+mibs/STAMP-SUITE-MIB.mib usr/share/snmp/mibs
+README.md usr/share/doc/stamp-suite

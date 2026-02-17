@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    purge)
+        if getent passwd stamp >/dev/null 2>&1; then
+            deluser --system stamp
+        fi
+        if getent group stamp >/dev/null 2>&1; then
+            delgroup --system stamp
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+        fi
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
