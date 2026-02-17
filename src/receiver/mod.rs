@@ -2055,7 +2055,9 @@ mod tests {
 
     #[test]
     fn test_assemble_unauth_with_cos_tlv_updates_dscp_ecn() {
-        use crate::tlv::{ClassOfServiceTlv, TlvType, COS_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
+        use crate::tlv::{
+            ClassOfServiceTlv, TlvType, TypedTlv, COS_TLV_VALUE_SIZE, TLV_HEADER_SIZE,
+        };
 
         let sender_packet = PacketUnauthenticated {
             sequence_number: 1,
@@ -2120,7 +2122,9 @@ mod tests {
 
     #[test]
     fn test_assemble_auth_with_cos_tlv_updates_dscp_ecn() {
-        use crate::tlv::{ClassOfServiceTlv, TlvType, COS_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
+        use crate::tlv::{
+            ClassOfServiceTlv, TlvType, TypedTlv, COS_TLV_VALUE_SIZE, TLV_HEADER_SIZE,
+        };
 
         let sender_packet = PacketAuthenticated {
             sequence_number: 1,
@@ -2185,7 +2189,7 @@ mod tests {
 
     #[test]
     fn test_set_cos_policy_rejected_unauth() {
-        use crate::tlv::ClassOfServiceTlv;
+        use crate::tlv::{ClassOfServiceTlv, TypedTlv};
 
         // Build an unauthenticated response with a CoS TLV
         let sender_packet = PacketUnauthenticated {
@@ -2228,7 +2232,7 @@ mod tests {
 
     #[test]
     fn test_set_cos_policy_rejected_auth() {
-        use crate::tlv::ClassOfServiceTlv;
+        use crate::tlv::{ClassOfServiceTlv, TypedTlv};
 
         // Build an authenticated response with a CoS TLV
         let sender_packet = PacketAuthenticated {
@@ -2292,7 +2296,7 @@ mod tests {
 
     #[test]
     fn test_set_cos_policy_rejected_reserved_tlv_before_cos() {
-        use crate::tlv::ClassOfServiceTlv;
+        use crate::tlv::{ClassOfServiceTlv, TypedTlv};
 
         // Build a response with a zero-length Reserved TLV (header 00 00 00 00)
         // followed by a CoS TLV. The Reserved TLV must not be mistaken for padding.
@@ -2328,7 +2332,7 @@ mod tests {
 
     #[test]
     fn test_recompute_hmac_after_rp_mutation() {
-        use crate::tlv::{ClassOfServiceTlv, TlvList, TLV_HEADER_SIZE};
+        use crate::tlv::{ClassOfServiceTlv, TlvList, TypedTlv, TLV_HEADER_SIZE};
 
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
 
@@ -2443,7 +2447,7 @@ mod tests {
 
     #[test]
     fn test_unauth_dest_node_addr_match() {
-        use crate::tlv::DestinationNodeAddressTlv;
+        use crate::tlv::{DestinationNodeAddressTlv, TypedTlv};
 
         let sender_packet = PacketUnauthenticated {
             sequence_number: 1,
@@ -2483,7 +2487,7 @@ mod tests {
 
     #[test]
     fn test_unauth_dest_node_addr_mismatch() {
-        use crate::tlv::DestinationNodeAddressTlv;
+        use crate::tlv::{DestinationNodeAddressTlv, TypedTlv};
 
         let sender_packet = PacketUnauthenticated {
             sequence_number: 1,
@@ -2675,7 +2679,7 @@ mod tests {
 
     #[test]
     fn test_unauth_with_micro_session_id_fills_reflector_id() {
-        use crate::tlv::MicroSessionIdTlv;
+        use crate::tlv::{MicroSessionIdTlv, TypedTlv};
 
         let sender_packet = PacketUnauthenticated {
             sequence_number: 1,
@@ -2723,7 +2727,7 @@ mod tests {
 
     #[test]
     fn test_unauth_with_micro_session_id_mismatch_discards() {
-        use crate::tlv::MicroSessionIdTlv;
+        use crate::tlv::{MicroSessionIdTlv, TypedTlv};
 
         let sender_packet = PacketUnauthenticated {
             sequence_number: 1,
@@ -2755,6 +2759,99 @@ mod tests {
         );
 
         // Should suppress reply (discard) due to reflector ID mismatch
+        assert!(matches!(
+            response.return_path_action,
+            ReturnPathAction::SuppressReply
+        ));
+    }
+
+    #[test]
+    fn test_auth_with_micro_session_id_fills_reflector_id() {
+        use crate::tlv::{MicroSessionIdTlv, TypedTlv};
+
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 100,
+            error_estimate: 10,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        let msid_raw = MicroSessionIdTlv::new(42, 0).to_raw();
+        let mut data = sender_packet.to_bytes().to_vec();
+        data.extend_from_slice(&msid_raw.to_bytes());
+
+        let mut ctx = test_ctx(0, 0);
+        ctx.reflector_member_link_id = Some(99);
+
+        let response = assemble_auth_answer_with_tlvs(
+            &sender_packet,
+            &data,
+            ClockFormat::NTP,
+            500,
+            64,
+            0,
+            None,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        assert!(!matches!(
+            response.return_path_action,
+            ReturnPathAction::SuppressReply
+        ));
+
+        let tlv_data = &response.data[AUTH_BASE_SIZE..];
+        let tlvs = TlvList::parse(tlv_data).unwrap();
+        let msid_tlv = &tlvs.non_hmac_tlvs()[0];
+        let parsed = MicroSessionIdTlv::from_raw(msid_tlv).unwrap();
+        assert_eq!(parsed.sender_micro_session_id, 42);
+        assert_eq!(parsed.reflector_micro_session_id, 99);
+    }
+
+    #[test]
+    fn test_auth_with_micro_session_id_mismatch_discards() {
+        use crate::tlv::{MicroSessionIdTlv, TypedTlv};
+
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 100,
+            error_estimate: 10,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        let msid_raw = MicroSessionIdTlv::new(42, 50).to_raw();
+        let mut data = sender_packet.to_bytes().to_vec();
+        data.extend_from_slice(&msid_raw.to_bytes());
+
+        let mut ctx = test_ctx(0, 0);
+        ctx.reflector_member_link_id = Some(99);
+
+        let response = assemble_auth_answer_with_tlvs(
+            &sender_packet,
+            &data,
+            ClockFormat::NTP,
+            500,
+            64,
+            0,
+            None,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
         assert!(matches!(
             response.return_path_action,
             ReturnPathAction::SuppressReply

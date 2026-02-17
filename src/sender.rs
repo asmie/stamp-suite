@@ -26,7 +26,7 @@ use crate::{
     tlv::{
         AccessReportTlv, ClassOfServiceTlv, DestinationNodeAddressTlv, DirectMeasurementTlv,
         FollowUpTelemetryTlv, LocationTlv, MicroSessionIdTlv, RawTlv, ReturnPathTlv,
-        SessionSenderId, SyncSource, TimestampInfoTlv, TimestampMethod, TlvList,
+        SessionSenderId, SyncSource, TimestampInfoTlv, TimestampMethod, TlvList, TypedTlv,
     },
 };
 
