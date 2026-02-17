@@ -12,7 +12,7 @@ COPY Cargo.toml Cargo.lock ./
 
 # Create a dummy main to cache dependency builds
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
-    cargo build --release --all-features && \
+    cargo build --release --features ttl-nix && \
     rm -rf src
 
 # Copy actual source code
@@ -20,17 +20,23 @@ COPY src ./src
 
 # Touch main.rs so cargo rebuilds it (not the cached dummy)
 RUN touch src/main.rs && \
-    cargo build --release --all-features
+    cargo build --release --features ttl-nix
 
 # Runtime stage
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    ca-certificates libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/src/stamp-suite/target/release/stamp-suite /usr/local/bin/stamp-suite
 
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/stamp-suite && \
+    useradd --system --no-create-home --shell /usr/sbin/nologin stamp
+
+USER stamp
+
 EXPOSE 862/udp
 
 ENTRYPOINT ["stamp-suite"]
+CMD ["-i", "--stateful-reflector"]

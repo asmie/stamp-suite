@@ -9,7 +9,7 @@ Rules-Requires-Root: no
 
 Package: stamp-suite
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
 Description: Simple Two-Way Active Measurement Protocol (STAMP)
  stamp-suite is a Rust implementation of the Simple Two-Way Active
  Measurement Protocol (STAMP) as defined in RFC 8762 and RFC 8972.

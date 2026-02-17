@@ -29,7 +29,6 @@ cargo build --release
 install -D -m 0755 target/release/%{name} %{buildroot}%{_bindir}/%{name}
 install -D -m 0644 dist/systemd/%{name}.service %{buildroot}%{_unitdir}/%{name}.service
 install -D -m 0644 mibs/STAMP-SUITE-MIB.mib %{buildroot}%{_datadir}/snmp/mibs/STAMP-SUITE-MIB.mib
-install -D -m 0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 
 %pre
 getent group stamp >/dev/null || groupadd -r stamp

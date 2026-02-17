@@ -171,6 +171,116 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  package-deb:
+    name: Package DEB
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-deb
+      - name: Build release binary
+        run: cargo build --release --all-features
+      - name: Build DEB package
+        run: |
+          PKG_NAME=stamp-suite
+          PKG_VERSION=0.5.0
+          PKG_DIR="${PKG_NAME}_${PKG_VERSION}-1_amd64"
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          mkdir -p "${PKG_DIR}/usr/bin"
+          mkdir -p "${PKG_DIR}/lib/systemd/system"
+          mkdir -p "${PKG_DIR}/usr/share/snmp/mibs"
+          mkdir -p "${PKG_DIR}/usr/share/doc/${PKG_NAME}"
+          # Control file
+          cat > "${PKG_DIR}/DEBIAN/control" <<EOF
+          Package: ${PKG_NAME}
+          Version: ${PKG_VERSION}-1
+          Architecture: amd64
+          Maintainer: Piotr Olszewski <asmie@asmie.pl>
+          Depends: adduser
+          Description: Simple Two-Way Active Measurement Protocol (STAMP)
+           stamp-suite is a Rust implementation of the Simple Two-Way Active
+           Measurement Protocol (STAMP) as defined in RFC 8762 and RFC 8972.
+          Section: net
+          Priority: optional
+          EOF
+          # Trim leading spaces from heredoc
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/control"
+          # Install files
+          cp target/release/${PKG_NAME} "${PKG_DIR}/usr/bin/"
+          cp dist/systemd/${PKG_NAME}.service "${PKG_DIR}/lib/systemd/system/"
+          cp mibs/STAMP-SUITE-MIB.mib "${PKG_DIR}/usr/share/snmp/mibs/"
+          cp README.md "${PKG_DIR}/usr/share/doc/${PKG_NAME}/"
+          # Maintainer scripts
+          for script in postinst postrm prerm; do
+            if [ -f "dist/debian/${script}" ]; then
+              cp "dist/debian/${script}" "${PKG_DIR}/DEBIAN/"
+              chmod 0755 "${PKG_DIR}/DEBIAN/${script}"
+            fi
+          done
+          chmod 0755 "${PKG_DIR}/usr/bin/${PKG_NAME}"
+          dpkg-deb --build --root-owner-group "${PKG_DIR}"
+      - name: Verify DEB package
+        run: |
+          echo "=== Package info ==="
+          dpkg-deb --info stamp-suite_0.5.0-1_amd64.deb
+          echo "=== Package contents ==="
+          dpkg-deb --contents stamp-suite_0.5.0-1_amd64.deb
+          echo "=== Verify expected files ==="
+          dpkg-deb --contents stamp-suite_0.5.0-1_amd64.deb | grep -q usr/bin/stamp-suite
+          dpkg-deb --contents stamp-suite_0.5.0-1_amd64.deb | grep -q lib/systemd/system/stamp-suite.service
+          dpkg-deb --contents stamp-suite_0.5.0-1_amd64.deb | grep -q usr/share/snmp/mibs/STAMP-SUITE-MIB.mib
+          echo "All expected files present in DEB package."
+
+  package-rpm:
+    name: Package RPM
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-rpm
+      - name: Install RPM tools
+        run: sudo apt-get update && sudo apt-get install -y rpm
+      - name: Build release binary
+        run: cargo build --release --all-features
+      - name: Build RPM package
+        run: |
+          # Set up rpmbuild tree
+          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS,BUILDROOT}
+          # Create source tarball layout expected by the spec
+          PKG_NAME=stamp-suite
+          PKG_VERSION=0.5.0
+          TARDIR="${PKG_NAME}-${PKG_VERSION}"
+          mkdir -p "/tmp/${TARDIR}"
+          cp -a . "/tmp/${TARDIR}/"
+          # Pre-build: place the release binary so rpmbuild finds it
+          mkdir -p "/tmp/${TARDIR}/target/release"
+          cp target/release/${PKG_NAME} "/tmp/${TARDIR}/target/release/"
+          tar czf ~/rpmbuild/SOURCES/${PKG_NAME}-${PKG_VERSION}.tar.gz -C /tmp "${TARDIR}"
+          # Patch spec to skip cargo build (binary already built)
+          sed 's/^cargo build --release$/# binary pre-built/' dist/rpm/${PKG_NAME}.spec > ~/rpmbuild/SPECS/${PKG_NAME}.spec
+          rpmbuild -bb \
+            --define "_topdir $HOME/rpmbuild" \
+            --define "debug_package %{nil}" \
+            ~/rpmbuild/SPECS/${PKG_NAME}.spec
+      - name: Verify RPM package
+        run: |
+          RPM_FILE=$(find ~/rpmbuild/RPMS -name '*.rpm' | head -1)
+          echo "=== Package info ==="
+          rpm -qip "${RPM_FILE}"
+          echo "=== Package contents ==="
+          rpm -qlp "${RPM_FILE}"
+          echo "=== Verify expected files ==="
+          rpm -qlp "${RPM_FILE}" | grep -q /usr/bin/stamp-suite
+          rpm -qlp "${RPM_FILE}" | grep -q stamp-suite.service
+          rpm -qlp "${RPM_FILE}" | grep -q STAMP-SUITE-MIB.mib
+          echo "All expected files present in RPM package."
+
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest

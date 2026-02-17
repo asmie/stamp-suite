@@ -10,10 +10,6 @@ case "$1" in
             adduser --system --ingroup stamp --no-create-home \
                 --home /nonexistent --shell /usr/sbin/nologin stamp
         fi
-        if [ -d /run/systemd/system ]; then
-            systemctl daemon-reload
-            deb-systemd-invoke enable stamp-suite.service
-        fi
         ;;
 esac
 

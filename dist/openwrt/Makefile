@@ -6,6 +6,8 @@ PKG_RELEASE:=1
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/asmie/stamp-suite/tar.gz/v$(PKG_VERSION)?
+# TODO: Replace with real SHA256 before feed submission.
+# Generate with: curl -sL <tarball-url> | sha256sum
 PKG_HASH:=skip
 
 PKG_LICENSE:=MIT

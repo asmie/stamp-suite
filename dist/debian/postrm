@@ -9,11 +9,6 @@ case "$1" in
         if getent group stamp >/dev/null 2>&1; then
             delgroup --system stamp
         fi
-        if [ -d /run/systemd/system ]; then
-            systemctl daemon-reload
-        fi
-        ;;
-    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
         ;;
 esac
 

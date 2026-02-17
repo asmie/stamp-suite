@@ -1,18 +1,25 @@
 #!/usr/bin/make -f
 
 export DH_VERBOSE = 1
+export CARGO_HOME = $(CURDIR)/debian/.cargo
 
 %:
 	dh $@
 
+override_dh_auto_configure:
+	cargo vendor debian/vendor
+	mkdir -p $(CARGO_HOME)
+	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "debian/vendor"\n' > $(CARGO_HOME)/config.toml
+
 override_dh_auto_build:
-	cargo build --release
+	cargo build --release --offline
 
 override_dh_auto_test:
-	cargo test --all-features
+	cargo test --all-features --offline
 
 override_dh_auto_install:
 	# Handled by stamp-suite.install
 
 override_dh_auto_clean:
 	cargo clean
+	rm -rf debian/vendor debian/.cargo
