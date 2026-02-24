@@ -378,7 +378,7 @@ mod tests {
     fn test_get_unknown_oid() {
         let state = make_test_state(true);
         let handler = StampMibHandler::new(state);
-        let unknown = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 99999, 99, 99]);
+        let unknown = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134, 99, 99]);
         let vb = handler.get(&unknown);
         assert!(matches!(vb.value, VarBindValue::NoSuchObject));
     }

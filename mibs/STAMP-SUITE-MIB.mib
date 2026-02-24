@@ -4,8 +4,7 @@
 -- Copyright (c) 2026 Piotr "asmie" Olszewski
 -- Licensed under MIT License
 --
--- Enterprise OID: 1.3.6.1.4.1.99999 (placeholder PEN)
--- Apply for a real PEN at https://pen.iana.org/ for production use.
+-- Enterprise OID: 1.3.6.1.4.1.65134 (IANA PEN 65134)
 -- *****************************************************************
 
 STAMP-SUITE-MIB DEFINITIONS ::= BEGIN
@@ -35,7 +34,7 @@ stampSuiteMIB MODULE-IDENTITY
          operational counters, and per-session state."
     REVISION     "202501010000Z"
     DESCRIPTION  "Initial version."
-    ::= { enterprises 99999 }
+    ::= { enterprises 65134 }
 
 -- ===================================================================
 -- Top-level structure

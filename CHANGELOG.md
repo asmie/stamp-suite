@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **SNMP AgentX Sub-Agent**: MIB-based monitoring via net-snmpd (requires `snmp` feature, Unix only)
   - Minimal AgentX protocol implementation (RFC 2741) with no external SNMP crate dependency
-  - STAMP-SUITE-MIB under enterprise OID `.1.3.6.1.4.1.99999` with SMIv2 definition (`mibs/STAMP-SUITE-MIB.mib`)
+  - STAMP-SUITE-MIB under enterprise OID `.1.3.6.1.4.1.65134` with SMIv2 definition (`mibs/STAMP-SUITE-MIB.mib`)
   - Reflector subtree: configuration scalars, packet counters (received/reflected/dropped), active session count, uptime
   - Session table: per-client address, port, packet counts, last sequence number, last active time
   - Sender subtree: configuration scalars, packets sent/received/lost, RTT min/max/avg, jitter, loss percentage

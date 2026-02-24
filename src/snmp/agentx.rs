@@ -627,8 +627,8 @@ mod tests {
 
     #[test]
     fn test_oid_encode_decode_roundtrip_internet() {
-        // OID under internet prefix: 1.3.6.1.4.1.99999
-        let oid = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 99999]);
+        // OID under internet prefix: 1.3.6.1.4.1.65134
+        let oid = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134]);
         let encoded = encode_oid(&oid, false);
         let (decoded, include, consumed) = decode_oid(&encoded).unwrap();
         assert_eq!(decoded, oid);
@@ -679,7 +679,7 @@ mod tests {
     #[test]
     fn test_varbind_encode_integer() {
         let vb = VarBind {
-            oid: Oid::from_slice(&[1, 3, 6, 1, 4, 1, 99999, 1, 1, 1, 1]),
+            oid: Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134, 1, 1, 1, 1]),
             value: VarBindValue::Integer(42),
         };
         let encoded = encode_varbind(&vb);
@@ -695,7 +695,7 @@ mod tests {
     #[test]
     fn test_varbind_encode_counter64() {
         let vb = VarBind {
-            oid: Oid::from_slice(&[1, 3, 6, 1, 4, 1, 99999, 1, 1, 2, 1]),
+            oid: Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134, 1, 1, 2, 1]),
             value: VarBindValue::Counter64(123456789),
         };
         let encoded = encode_varbind(&vb);
@@ -708,7 +708,7 @@ mod tests {
     #[test]
     fn test_varbind_encode_octet_string() {
         let vb = VarBind {
-            oid: Oid::from_slice(&[1, 3, 6, 1, 4, 1, 99999]),
+            oid: Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134]),
             value: VarBindValue::OctetString(b"hello".to_vec()),
         };
         let encoded = encode_varbind(&vb);
@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_search_range_decode() {
-        let start = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 99999]);
+        let start = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134]);
         let end = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 100000]);
 
         let mut buf = Vec::new();
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn test_oid_starts_with() {
         let parent = Oid::from_slice(&[1, 3, 6, 1, 4]);
-        let child = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 99999]);
+        let child = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134]);
         let other = Oid::from_slice(&[1, 3, 6, 2, 1]);
 
         assert!(child.starts_with(&parent));
@@ -772,8 +772,8 @@ mod tests {
 
     #[test]
     fn test_oid_display() {
-        let oid = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 99999]);
-        assert_eq!(format!("{}", oid), ".1.3.6.1.4.1.99999");
+        let oid = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134]);
+        assert_eq!(format!("{}", oid), ".1.3.6.1.4.1.65134");
     }
 
     #[test]
@@ -788,9 +788,9 @@ mod tests {
     #[test]
     fn test_oid_prefix_optimization() {
         // OID .1.3.6.1.4 should use prefix byte 4
-        let oid = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 99999]);
+        let oid = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134]);
         let encoded = encode_oid(&oid, false);
-        // n_subid should be 2 (only sub-ids after the prefix: 1, 99999)
+        // n_subid should be 2 (only sub-ids after the prefix: 1, 65134)
         let n_subid = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
         assert_eq!(n_subid, 2);
         // prefix byte

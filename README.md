@@ -463,7 +463,7 @@ stamp-suite -i --snmp
 stamp-suite -i --snmp --snmp-socket /var/agentx/master
 
 # Query via net-snmp tools
-snmpwalk -v2c -c public localhost .1.3.6.1.4.1.99999
+snmpwalk -v2c -c public localhost .1.3.6.1.4.1.65134
 ```
 
 The MIB (provided in `mibs/STAMP-SUITE-MIB.mib`) exposes:

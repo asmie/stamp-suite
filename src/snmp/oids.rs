@@ -1,11 +1,11 @@
 //! OID constants for the STAMP-SUITE-MIB.
 //!
-//! Enterprise OID: 1.3.6.1.4.1.99999 (placeholder PEN).
+//! Enterprise OID: 1.3.6.1.4.1.65134 (IANA PEN 65134).
 
 use super::agentx::Oid;
 
-/// Base enterprise OID: .1.3.6.1.4.1.99999
-const BASE: &[u32] = &[1, 3, 6, 1, 4, 1, 99999];
+/// Base enterprise OID: .1.3.6.1.4.1.65134
+const BASE: &[u32] = &[1, 3, 6, 1, 4, 1, 65134];
 
 /// Root of the STAMP-SUITE-MIB subtree, used for AgentX registration.
 pub fn stamp_suite_root() -> Oid {
@@ -68,14 +68,14 @@ pub fn stamp_refl_uptime() -> Oid {
 
 // -- Reflector Session Table (.1.1.3.1.*) --
 
-/// Build a session table entry OID: `.1.3.6.1.4.1.99999.1.1.3.1.{column}.{index}`
+/// Build a session table entry OID: `.1.3.6.1.4.1.65134.1.1.3.1.{column}.{index}`
 pub fn stamp_refl_session_entry(column: u32, index: u32) -> Oid {
     let mut v = BASE.to_vec();
     v.extend_from_slice(&[1, 1, 3, 1, column, index]);
     Oid(v)
 }
 
-/// Session table entry prefix (for GetNext walking): .1.3.6.1.4.1.99999.1.1.3.1
+/// Session table entry prefix (for GetNext walking): .1.3.6.1.4.1.65134.1.1.3.1
 pub fn stamp_refl_session_table_prefix() -> Oid {
     let mut v = BASE.to_vec();
     v.extend_from_slice(&[1, 1, 3, 1]);
@@ -205,8 +205,8 @@ mod tests {
     #[test]
     fn test_session_entry_oid() {
         let oid = stamp_refl_session_entry(2, 5);
-        // Should be .1.3.6.1.4.1.99999.1.1.3.1.2.5
-        assert_eq!(oid.0, vec![1, 3, 6, 1, 4, 1, 99999, 1, 1, 3, 1, 2, 5]);
+        // Should be .1.3.6.1.4.1.65134.1.1.3.1.2.5
+        assert_eq!(oid.0, vec![1, 3, 6, 1, 4, 1, 65134, 1, 1, 3, 1, 2, 5]);
     }
 
     #[test]
