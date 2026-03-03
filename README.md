@@ -39,11 +39,24 @@ STAMP measures packet loss and one-way/two-way delays between two endpoints. The
 
 ## Installation
 
-### From Source
+### From Source (Cargo)
 
 ```bash
 # Default build (real TTL capture on Linux/macOS/Windows)
 cargo build --release
+```
+
+### Using Nix
+
+```bash
+# Build the package
+nix build
+
+# Run directly without installing
+nix run . -- --is-reflector
+
+# Enter a development shell with cargo, rustc, rustfmt, and clippy
+nix develop
 ```
 
 ### Platform Support
