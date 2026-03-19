@@ -9,6 +9,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
+use zeroize::Zeroize;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -38,8 +39,19 @@ pub enum HmacError {
 ///
 /// Wraps a key and provides methods for computing and verifying
 /// HMAC-SHA256 truncated to 16 bytes.
-#[derive(Clone)]
 pub struct HmacKey(Vec<u8>);
+
+impl Clone for HmacKey {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl Drop for HmacKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 impl HmacKey {
     /// Creates a new HmacKey from raw bytes.
@@ -83,6 +95,22 @@ impl HmacKey {
     /// Returns `HmacError::KeyTooShort` if the key is less than 16 bytes.
     pub fn from_file(path: &Path) -> Result<Self, HmacError> {
         let raw_bytes = fs::read(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata =
+                fs::metadata(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+            let mode = metadata.permissions().mode();
+            if mode & 0o077 != 0 {
+                log::warn!(
+                    "HMAC key file {:?} has overly permissive permissions (mode {:o}). \
+                     Recommended: chmod 600",
+                    path,
+                    mode & 0o777
+                );
+            }
+        }
 
         // Try to parse as hex if it's valid UTF-8
         if let Ok(content) = std::str::from_utf8(&raw_bytes) {

@@ -273,6 +273,10 @@ pub struct Configuration {
     /// When set, the reflector fills this ID into reflected Micro-session ID TLVs.
     #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
     pub reflector_member_link_id: Option<u16>,
+
+    /// Maximum packets per second per source (0 = unlimited).
+    #[clap(long, default_value_t = 0)]
+    pub max_pps: u32,
 }
 
 impl Configuration {

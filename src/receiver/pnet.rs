@@ -78,6 +78,8 @@ struct CaptureConfig {
     local_addresses: Vec<IpAddr>,
     /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
     reflector_member_link_id: Option<u16>,
+    /// Per-source rate limiter.
+    rate_limiter: Option<Arc<super::RateLimiter>>,
 }
 
 /// Interface properties needed for macOS special handling.
@@ -248,6 +250,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         counters: Arc::clone(&counters),
         local_addresses,
         reflector_member_link_id: conf.reflector_member_link_id,
+        rate_limiter: shared.rate_limiter.as_ref().map(Arc::clone),
     };
 
     // Spawn async task to listen for Ctrl+C and set shutdown flag
@@ -494,6 +497,13 @@ fn handle_stamp_packet(
     config: &CaptureConfig,
     send_ctx: &PnetSendContext,
 ) {
+    // Rate limit check: drop packet if source exceeds max PPS
+    if let Some(ref limiter) = config.rate_limiter {
+        if !limiter.allow(pkt.src.ip()) {
+            return;
+        }
+    }
+
     config
         .counters
         .packets_received

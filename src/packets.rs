@@ -42,32 +42,32 @@ fn check_size(buf: &[u8], expected: usize) -> Result<(), PacketError> {
 /// Reads a big-endian u16 from buffer at given offset.
 ///
 /// # Safety invariant
-/// Caller must ensure `offset + 2 <= buf.len()`. This is checked via debug_assert.
+/// Caller must ensure `offset + 2 <= buf.len()`. This is checked via assert.
 #[inline]
 fn read_u16(buf: &[u8], offset: usize) -> u16 {
-    debug_assert!(
+    assert!(
         offset + 2 <= buf.len(),
         "read_u16: offset {} + 2 exceeds buffer length {}",
         offset,
         buf.len()
     );
-    // SAFETY: debug_assert ensures bounds; slice length is exactly 2
+    // SAFETY: assert ensures bounds; slice length is exactly 2
     u16::from_be_bytes([buf[offset], buf[offset + 1]])
 }
 
 /// Reads a big-endian u32 from buffer at given offset.
 ///
 /// # Safety invariant
-/// Caller must ensure `offset + 4 <= buf.len()`. This is checked via debug_assert.
+/// Caller must ensure `offset + 4 <= buf.len()`. This is checked via assert.
 #[inline]
 fn read_u32(buf: &[u8], offset: usize) -> u32 {
-    debug_assert!(
+    assert!(
         offset + 4 <= buf.len(),
         "read_u32: offset {} + 4 exceeds buffer length {}",
         offset,
         buf.len()
     );
-    // SAFETY: debug_assert ensures bounds; slice length is exactly 4
+    // SAFETY: assert ensures bounds; slice length is exactly 4
     u32::from_be_bytes([
         buf[offset],
         buf[offset + 1],
@@ -79,16 +79,16 @@ fn read_u32(buf: &[u8], offset: usize) -> u32 {
 /// Reads a big-endian u64 from buffer at given offset.
 ///
 /// # Safety invariant
-/// Caller must ensure `offset + 8 <= buf.len()`. This is checked via debug_assert.
+/// Caller must ensure `offset + 8 <= buf.len()`. This is checked via assert.
 #[inline]
 fn read_u64(buf: &[u8], offset: usize) -> u64 {
-    debug_assert!(
+    assert!(
         offset + 8 <= buf.len(),
         "read_u64: offset {} + 8 exceeds buffer length {}",
         offset,
         buf.len()
     );
-    // SAFETY: debug_assert ensures bounds; slice length is exactly 8
+    // SAFETY: assert ensures bounds; slice length is exactly 8
     u64::from_be_bytes([
         buf[offset],
         buf[offset + 1],
@@ -104,10 +104,10 @@ fn read_u64(buf: &[u8], offset: usize) -> u64 {
 /// Copies a fixed-size array from buffer at given offset.
 ///
 /// # Safety invariant
-/// Caller must ensure `offset + N <= buf.len()`. This is checked via debug_assert.
+/// Caller must ensure `offset + N <= buf.len()`. This is checked via assert.
 #[inline]
 fn read_array<const N: usize>(buf: &[u8], offset: usize) -> [u8; N] {
-    debug_assert!(
+    assert!(
         offset + N <= buf.len(),
         "read_array<{}>: offset {} + {} exceeds buffer length {}",
         N,
@@ -115,7 +115,7 @@ fn read_array<const N: usize>(buf: &[u8], offset: usize) -> [u8; N] {
         N,
         buf.len()
     );
-    // SAFETY: debug_assert ensures bounds; try_into succeeds because slice length equals N
+    // SAFETY: assert ensures bounds; try_into succeeds because slice length equals N
     buf[offset..offset + N].try_into().unwrap()
 }
 

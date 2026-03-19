@@ -328,7 +328,7 @@ mod tests {
 
     fn make_test_state(is_reflector: bool) -> Arc<SnmpState> {
         let counters = Arc::new(ReflectorCounters::new());
-        let session_manager = Arc::new(SessionManager::new(None));
+        let session_manager = Arc::new(SessionManager::new(None, None));
         let sender_stats = Arc::new(SenderSnmpStats::new());
 
         Arc::new(SnmpState {
@@ -494,6 +494,28 @@ mod tests {
 
         // Should be the first column (index) of the first session (id=0)
         assert_eq!(vb.oid, oids::stamp_refl_session_entry(1, 0));
+    }
+
+    #[test]
+    fn test_get_next_session_table_walks_past_1000_sessions() {
+        let state = make_test_state(true);
+        let session_manager = state.session_manager.as_ref().unwrap();
+
+        for port in 0..1005 {
+            let client =
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5000 + port as u16);
+            session_manager.get_or_create_session(client);
+        }
+
+        let handler = StampMibHandler::new(state);
+        let target = oids::stamp_refl_session_entry(1, 1004);
+        let before = oids::stamp_refl_session_entry(1, 1003);
+        let end = Oid(vec![]);
+
+        assert!(handler.all_valid_oids().contains(&target));
+
+        let vb = handler.get_next(&before, &end);
+        assert_eq!(vb.oid, target);
     }
 
     #[test]

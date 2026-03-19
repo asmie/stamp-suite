@@ -46,6 +46,7 @@ mod pnet;
 ))]
 pub use pnet::run_receiver;
 
+use std::collections::HashMap as StdHashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -115,6 +116,76 @@ impl Default for ReflectorCounters {
     }
 }
 
+/// Simple per-source rate limiter using a fixed 1-second window.
+pub struct RateLimiter {
+    /// Maximum packets per second per source.
+    max_pps: u32,
+    /// Tracked sources with periodic eviction of inactive buckets.
+    state: std::sync::Mutex<RateLimiterState>,
+}
+
+struct RateLimiterState {
+    last_cleanup: Instant,
+    sources: StdHashMap<std::net::IpAddr, SourceBucket>,
+}
+
+struct SourceBucket {
+    window_start: Instant,
+    last_seen: Instant,
+    packet_count: u32,
+}
+
+impl RateLimiter {
+    const WINDOW: Duration = Duration::from_secs(1);
+    const BUCKET_TTL: Duration = Duration::from_secs(60);
+    const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
+
+    pub fn new(max_pps: u32) -> Self {
+        let now = Instant::now();
+        RateLimiter {
+            max_pps,
+            state: std::sync::Mutex::new(RateLimiterState {
+                last_cleanup: now,
+                sources: StdHashMap::new(),
+            }),
+        }
+    }
+
+    /// Returns true if the packet should be allowed, false if rate-limited.
+    pub fn allow(&self, src: std::net::IpAddr) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        Self::cleanup_expired_buckets(&mut state, now);
+
+        let bucket = state.sources.entry(src).or_insert(SourceBucket {
+            window_start: now,
+            last_seen: now,
+            packet_count: 0,
+        });
+        bucket.last_seen = now;
+
+        if now.duration_since(bucket.window_start) >= Self::WINDOW {
+            bucket.window_start = now;
+            bucket.packet_count = 1;
+            return true;
+        }
+
+        bucket.packet_count += 1;
+        bucket.packet_count <= self.max_pps
+    }
+
+    fn cleanup_expired_buckets(state: &mut RateLimiterState, now: Instant) {
+        if now.duration_since(state.last_cleanup) < Self::CLEANUP_INTERVAL {
+            return;
+        }
+
+        state
+            .sources
+            .retain(|_, bucket| now.duration_since(bucket.last_seen) < Self::BUCKET_TTL);
+        state.last_cleanup = now;
+    }
+}
+
 /// Shared state created externally and passed into receiver backends.
 ///
 /// This allows the SNMP sub-agent (and other subsystems) to access
@@ -123,6 +194,7 @@ pub struct ReceiverSharedState {
     pub counters: Arc<ReflectorCounters>,
     pub session_manager: Arc<SessionManager>,
     pub start_time: Instant,
+    pub rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 /// Creates the shared state for the receiver, using configuration values.
@@ -133,10 +205,17 @@ pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
         None
     };
 
+    let rate_limiter = if conf.max_pps > 0 {
+        Some(Arc::new(RateLimiter::new(conf.max_pps)))
+    } else {
+        None
+    };
+
     ReceiverSharedState {
         counters: Arc::new(ReflectorCounters::new()),
-        session_manager: Arc::new(SessionManager::new(session_timeout)),
+        session_manager: Arc::new(SessionManager::new(session_timeout, None)),
         start_time: Instant::now(),
+        rate_limiter,
     }
 }
 
@@ -1089,6 +1168,7 @@ pub fn assemble_auth_answer_with_tlvs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
 
     /// Creates a default ProcessingContext for tests with given DSCP/ECN values.
     fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext<'static> {
@@ -1206,6 +1286,32 @@ mod tests {
 
         // Reflector's timestamp should be non-zero (generated)
         assert!(reflected.timestamp > 0);
+    }
+
+    #[test]
+    fn test_rate_limiter_expires_inactive_buckets() {
+        let limiter = RateLimiter::new(10);
+        let stale = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let fresh = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+        let trigger = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
+
+        assert!(limiter.allow(stale));
+        assert!(limiter.allow(fresh));
+
+        {
+            let mut state = limiter.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.last_cleanup = Instant::now() - RateLimiter::CLEANUP_INTERVAL;
+            let stale_bucket = state.sources.get_mut(&stale).unwrap();
+            stale_bucket.last_seen =
+                Instant::now() - RateLimiter::BUCKET_TTL - Duration::from_secs(1);
+        }
+
+        assert!(limiter.allow(trigger));
+
+        let state = limiter.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!state.sources.contains_key(&stale));
+        assert!(state.sources.contains_key(&fresh));
+        assert!(state.sources.contains_key(&trigger));
     }
 
     #[test]
@@ -1562,6 +1668,39 @@ mod tests {
     }
 
     #[test]
+    fn test_assemble_unauth_with_tlvs_does_not_truncate_oversized_response() {
+        use crate::tlv::{ExtraPaddingTlv, TlvList};
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            mbz: [0; 30],
+        };
+
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&ExtraPaddingTlv::new(1_600).to_raw().to_bytes());
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &test_ctx(0, 0),
+        );
+
+        assert!(response.data.len() > 1_500);
+        let tlv_data = &response.data[UNAUTH_BASE_SIZE..];
+        assert!(TlvList::parse(tlv_data).is_ok());
+    }
+
+    #[test]
     fn test_assemble_unauth_with_tlvs_marks_unknown() {
         use crate::tlv::{RawTlv, TlvType, TLV_HEADER_SIZE};
 
@@ -1678,6 +1817,48 @@ mod tests {
         assert_eq!(response.data.len(), 112 + TLV_HEADER_SIZE + 4);
         // TLV should be echoed (check type in byte 1 per RFC 8972)
         assert_eq!(response.data[113], 2); // Location type
+    }
+
+    #[test]
+    fn test_assemble_auth_with_tlvs_does_not_truncate_oversized_response() {
+        use crate::tlv::{ExtraPaddingTlv, TlvList};
+
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 100,
+            error_estimate: 10,
+            mbz1a: [0; 32],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&ExtraPaddingTlv::new(1_500).to_raw().to_bytes());
+
+        let key = HmacKey::new(vec![0xCD; 32]).unwrap();
+        let response = assemble_auth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            None,
+            TlvHandlingMode::Echo,
+            Some(&key),
+            false,
+            &test_ctx(0, 0),
+        );
+
+        assert!(response.data.len() > 1_500);
+        let tlv_data = &response.data[AUTH_BASE_SIZE..];
+        let tlvs = TlvList::parse(tlv_data).unwrap();
+        assert!(tlvs
+            .verify_hmac(&key, &response.data[..4], tlv_data)
+            .is_ok());
     }
 
     #[test]

@@ -17,6 +17,14 @@ async fn main() {
         std::process::exit(1);
     }
 
+    if std::env::var("STAMP_HMAC_KEY").is_ok() && conf.hmac_key.is_some() {
+        log::warn!(
+            "HMAC key loaded from STAMP_HMAC_KEY environment variable. \
+             This is less secure than using --hmac-key-file. \
+             Environment variables may be visible in /proc/pid/environ and process listings."
+        );
+    }
+
     info!("Configuration valid. Starting up...");
 
     // Initialize metrics server if enabled

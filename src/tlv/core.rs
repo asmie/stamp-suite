@@ -344,7 +344,13 @@ impl RawTlv {
         let tlv_type = TlvType::from_byte(buf[1]);
         let length = u16::from_be_bytes([buf[2], buf[3]]) as usize;
 
-        let total_size = TLV_HEADER_SIZE + length;
+        let total_size =
+            TLV_HEADER_SIZE
+                .checked_add(length)
+                .ok_or(TlvError::LengthExceedsBuffer {
+                    length,
+                    available: buf.len() - TLV_HEADER_SIZE,
+                })?;
         if buf.len() < total_size {
             return Err(TlvError::LengthExceedsBuffer {
                 length,
@@ -387,8 +393,14 @@ impl RawTlv {
         let available = buf.len() - TLV_HEADER_SIZE;
 
         let (value, wire_length, consumed, malformed) = if declared_length <= available {
-            let value = buf[TLV_HEADER_SIZE..TLV_HEADER_SIZE + declared_length].to_vec();
-            (value, None, TLV_HEADER_SIZE + declared_length, false)
+            let total = TLV_HEADER_SIZE.checked_add(declared_length).ok_or(
+                TlvError::LengthExceedsBuffer {
+                    length: declared_length,
+                    available,
+                },
+            )?;
+            let value = buf[TLV_HEADER_SIZE..total].to_vec();
+            (value, None, total, false)
         } else {
             flags.malformed = true;
             let value = buf[TLV_HEADER_SIZE..].to_vec();

@@ -110,18 +110,22 @@ pub struct SessionManager {
     next_session_id: AtomicU32,
     /// Optional timeout after which inactive sessions may be cleaned up.
     session_timeout: Option<Duration>,
+    /// Optional maximum number of sessions to prevent unbounded growth.
+    max_sessions: Option<usize>,
 }
 
 impl SessionManager {
-    /// Creates a new session manager with an optional timeout.
+    /// Creates a new session manager with an optional timeout and session limit.
     ///
     /// If `session_timeout` is `Some`, sessions that have been inactive
     /// for longer than the timeout may be cleaned up via `cleanup_stale_sessions()`.
-    pub fn new(session_timeout: Option<Duration>) -> Self {
+    /// If `max_sessions` is `Some`, new sessions will be rejected once the limit is reached.
+    pub fn new(session_timeout: Option<Duration>, max_sessions: Option<usize>) -> Self {
         SessionManager {
             sessions: RwLock::new(HashMap::new()),
             next_session_id: AtomicU32::new(0),
             session_timeout,
+            max_sessions,
         }
     }
 
@@ -139,12 +143,23 @@ impl SessionManager {
     /// Creates a new session if one doesn't exist. This is useful for accessing
     /// session state (counters, last reflection) without consuming a sequence number.
     pub fn get_or_create_session(&self, client: SocketAddr) -> Arc<Session> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
 
         if let Some(entry) = sessions.get_mut(&client) {
             entry.last_active = Instant::now();
             Arc::clone(&entry.session)
         } else {
+            if let Some(max) = self.max_sessions {
+                if sessions.len() >= max {
+                    log::warn!(
+                        "Session limit ({}) reached, ignoring new client {}",
+                        max,
+                        client
+                    );
+                    // Return a temporary session that won't be stored
+                    return Arc::new(Session::new(u32::MAX));
+                }
+            }
             let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
             let session = Arc::new(Session::new(session_id));
             sessions.insert(
@@ -173,13 +188,25 @@ impl SessionManager {
     /// Creates a new session if one doesn't exist for the client.
     pub fn get_session_and_seq(&self, client: SocketAddr) -> (u32, Arc<Session>) {
         // Take write lock once for both session lookup and activity update
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
 
         let session = if let Some(entry) = sessions.get_mut(&client) {
             // Existing session - update activity and return
             entry.last_active = Instant::now();
             Arc::clone(&entry.session)
         } else {
+            if let Some(max) = self.max_sessions {
+                if sessions.len() >= max {
+                    log::warn!(
+                        "Session limit ({}) reached, ignoring new client {}",
+                        max,
+                        client
+                    );
+                    // Return a temporary session that won't be stored
+                    let session = Arc::new(Session::new(u32::MAX));
+                    return (0, session);
+                }
+            }
             // Create new session
             let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
             let session = Arc::new(Session::new(session_id));
@@ -218,7 +245,7 @@ impl SessionManager {
             None => return 0,
         };
 
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let before_count = sessions.len();
 
@@ -243,12 +270,15 @@ impl SessionManager {
 
     /// Returns the number of active sessions.
     pub fn session_count(&self) -> usize {
-        self.sessions.read().unwrap().len()
+        self.sessions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Returns a summary of all sessions: (client_addr, packets_received, packets_transmitted).
     pub fn session_summaries(&self) -> Vec<(SocketAddr, u32, u32)> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions
             .iter()
             .map(|(addr, entry)| {
@@ -263,7 +293,7 @@ impl SessionManager {
 
     /// Returns an extended summary of all sessions for SNMP reporting.
     pub fn session_summaries_extended(&self) -> Vec<SessionSummary> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions
             .iter()
             .map(|(addr, entry)| {
@@ -381,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_session_manager_creates_sessions() {
-        let manager = SessionManager::new(None);
+        let manager = SessionManager::new(None, None);
 
         let client1 = make_addr(10001);
         let client2 = make_addr(10002);
@@ -404,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_session_manager_independent_sequences() {
-        let manager = SessionManager::new(None);
+        let manager = SessionManager::new(None, None);
 
         let client1 = make_addr(10001);
         let client2 = make_addr(10002);
@@ -421,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_session_manager_thread_safety() {
-        let manager = Arc::new(SessionManager::new(None));
+        let manager = Arc::new(SessionManager::new(None, None));
         let mut handles = vec![];
 
         // 5 threads, each simulating a different client
@@ -453,7 +483,7 @@ mod tests {
 
     #[test]
     fn test_session_manager_cleanup_no_timeout() {
-        let manager = SessionManager::new(None);
+        let manager = SessionManager::new(None, None);
         let client = make_addr(10001);
 
         manager.generate_sequence_number(client);
@@ -468,7 +498,7 @@ mod tests {
     fn test_session_manager_cleanup_with_timeout() {
         // Use a short but reasonable timeout for testing
         // 50ms timeout with 100ms sleep provides 2x margin for slow/loaded systems
-        let manager = SessionManager::new(Some(Duration::from_millis(50)));
+        let manager = SessionManager::new(Some(Duration::from_millis(50)), None);
         let client = make_addr(10001);
 
         manager.generate_sequence_number(client);
@@ -484,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_session_manager_cleanup_keeps_active() {
-        let manager = SessionManager::new(Some(Duration::from_secs(300)));
+        let manager = SessionManager::new(Some(Duration::from_secs(300)), None);
         let client = make_addr(10001);
 
         manager.generate_sequence_number(client);

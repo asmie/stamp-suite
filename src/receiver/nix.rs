@@ -307,6 +307,13 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     }
                 };
 
+                // Rate limit check: drop packet if source exceeds max PPS
+                if let Some(ref limiter) = shared.rate_limiter {
+                    if !limiter.allow(src_addr.ip()) {
+                        continue;
+                    }
+                }
+
                 let data = &buf[..len];
                 counters
                     .packets_received

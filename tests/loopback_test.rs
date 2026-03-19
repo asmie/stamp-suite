@@ -335,7 +335,7 @@ async fn test_stateful_reflector_multi_client() {
     let client2_port = find_available_port().await;
 
     // Create session manager for stateful reflector
-    let session_manager = Arc::new(SessionManager::new(None));
+    let session_manager = Arc::new(SessionManager::new(None, None));
 
     let reflector_socket = UdpSocket::bind(format!("127.0.0.1:{}", reflector_port))
         .await

@@ -26,6 +26,9 @@ const REASON_SHUTDOWN: u8 = 1;
 // AgentX protocol version
 const AGENTX_VERSION: u8 = 1;
 
+// Maximum allowed PDU payload size (1 MB) to prevent unbounded allocation.
+const MAX_PDU_PAYLOAD: u32 = 1_048_576;
+
 // --- VarBind type constants (RFC 2741 §5.4) ---
 
 const VARBIND_INTEGER: u16 = 2;
@@ -156,6 +159,12 @@ pub fn decode_header(buf: &[u8]) -> Result<PduHeader, AgentXError> {
         return Err(AgentXError::Protocol(format!(
             "Header too short: {} bytes",
             buf.len()
+        )));
+    }
+    if buf[0] != AGENTX_VERSION {
+        return Err(AgentXError::Protocol(format!(
+            "Unsupported AgentX version: {} (expected {})",
+            buf[0], AGENTX_VERSION
         )));
     }
     Ok(PduHeader {
@@ -444,6 +453,13 @@ impl AgentXSession {
         self.stream.read_exact(&mut header_buf)?;
         let header = decode_header(&header_buf)?;
 
+        if header.payload_length > MAX_PDU_PAYLOAD {
+            return Err(AgentXError::Protocol(format!(
+                "PDU payload too large: {} bytes (max {})",
+                header.payload_length, MAX_PDU_PAYLOAD
+            )));
+        }
+
         let mut payload = vec![0u8; header.payload_length as usize];
         if !payload.is_empty() {
             self.stream.read_exact(&mut payload)?;
@@ -479,6 +495,14 @@ impl AgentXSession {
             }
 
             let header = decode_header(&header_buf)?;
+
+            if header.payload_length > MAX_PDU_PAYLOAD {
+                return Err(AgentXError::Protocol(format!(
+                    "PDU payload too large: {} bytes (max {})",
+                    header.payload_length, MAX_PDU_PAYLOAD
+                )));
+            }
+
             let mut payload = vec![0u8; header.payload_length as usize];
             if !payload.is_empty() {
                 self.stream.read_exact(&mut payload)?;
@@ -566,6 +590,7 @@ impl AgentXSession {
 
         let non_repeaters = u16::from_be_bytes([payload[0], payload[1]]) as usize;
         let max_repetitions = u16::from_be_bytes([payload[2], payload[3]]) as usize;
+        let max_repetitions = max_repetitions.min(100); // Cap to prevent DoS
 
         let mut varbinds_buf = Vec::new();
         let mut ranges = Vec::new();

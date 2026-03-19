@@ -90,6 +90,14 @@ pub async fn init(addr: SocketAddr) -> Result<MetricsServer, MetricsError> {
     // Build the HTTP server
     let app = Router::new().route("/metrics", get(move || metrics_handler(handle.clone())));
 
+    if !addr.ip().is_loopback() {
+        log::warn!(
+            "Metrics endpoint binding to non-loopback address {}. \
+             The endpoint has no authentication — ensure network-level access control is in place.",
+            addr
+        );
+    }
+
     let listener = TcpListener::bind(addr).await?;
     log::info!("Metrics server listening on http://{}/metrics", addr);
 
