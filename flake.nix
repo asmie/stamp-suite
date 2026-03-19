@@ -20,7 +20,7 @@
             src = self;
 
 
-            cargoHash = "sha256-LVAyOJIhY5hCGUL7sct+xFlPEGLWeoT7rbqcxCC07fs=";
+            cargoHash = "sha256-9u/LbrM/6yzFA/blKUQVWyS+G+Iv5WW8QHwfyu1sSv8=";
 
             meta = with pkgs.lib; {
               description = "Simple Two-Way Active Measurement Protocol (STAMP) implementation";
