@@ -27,26 +27,20 @@ fn seed_prng() -> u64 {
     }
 }
 
-fn fill_pseudorandom(buf: &mut [u8]) {
+fn pseudorandom_bytes(n: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(n);
     PRNG_STATE.with(|cell| {
         let mut state = cell.get();
-        let mut i = 0;
-        while i < buf.len() {
+        while v.len() < n {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
             let bytes = state.to_le_bytes();
-            let n = (buf.len() - i).min(8);
-            buf[i..i + n].copy_from_slice(&bytes[..n]);
-            i += n;
+            let take = (n - v.len()).min(8);
+            v.extend_from_slice(&bytes[..take]);
         }
         cell.set(state);
     });
-}
-
-fn pseudorandom_bytes(n: usize) -> Vec<u8> {
-    let mut v = vec![0u8; n];
-    fill_pseudorandom(&mut v);
     v
 }
 
