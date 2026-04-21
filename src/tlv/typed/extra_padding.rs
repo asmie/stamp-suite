@@ -1,7 +1,54 @@
 //! Extra Padding TLV (Type 1) with optional Session-Sender Identifier.
 
+use std::cell::Cell;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::tlv::core::{RawTlv, TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
+
+// Per RFC 8972 §4.2, the Extra Padding TLV Value SHOULD carry a pseudorandom
+// sequence of numbers. A xorshift64 stream is sufficient here: the bytes are
+// not keying material and do not need cryptographic quality — they only need
+// to be non-compressible and distinct across packets.
+thread_local! {
+    static PRNG_STATE: Cell<u64> = Cell::new(seed_prng());
+}
+
+fn seed_prng() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15);
+    let mixed = nanos.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ nanos.rotate_left(32);
+    if mixed == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        mixed
+    }
+}
+
+fn fill_pseudorandom(buf: &mut [u8]) {
+    PRNG_STATE.with(|cell| {
+        let mut state = cell.get();
+        let mut i = 0;
+        while i < buf.len() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let bytes = state.to_le_bytes();
+            let n = (buf.len() - i).min(8);
+            buf[i..i + n].copy_from_slice(&bytes[..n]);
+            i += n;
+        }
+        cell.set(state);
+    });
+}
+
+fn pseudorandom_bytes(n: usize) -> Vec<u8> {
+    let mut v = vec![0u8; n];
+    fill_pseudorandom(&mut v);
+    v
+}
 
 /// Extra Padding TLV (Type 1) with optional Session-Sender Identifier.
 ///
@@ -15,18 +62,42 @@ pub struct ExtraPaddingTlv {
 }
 
 impl ExtraPaddingTlv {
-    /// Creates an Extra Padding TLV with just padding.
+    /// Creates an Extra Padding TLV with pseudorandom padding per RFC 8972 §4.2.
     #[must_use]
     pub fn new(padding_size: usize) -> Self {
+        Self {
+            ssid: None,
+            padding: pseudorandom_bytes(padding_size),
+        }
+    }
+
+    /// Creates an Extra Padding TLV with an SSID and pseudorandom padding.
+    #[must_use]
+    pub fn with_ssid(ssid: u16, additional_padding: usize) -> Self {
+        Self {
+            ssid: Some(ssid),
+            padding: pseudorandom_bytes(additional_padding),
+        }
+    }
+
+    /// Creates an Extra Padding TLV with zero-filled padding.
+    ///
+    /// Intended for deterministic construction (tests, fixtures). For normal
+    /// sender use, prefer `new()` which fills with pseudorandom bytes as
+    /// recommended by RFC 8972 §4.2.
+    #[must_use]
+    pub fn new_zeros(padding_size: usize) -> Self {
         Self {
             ssid: None,
             padding: vec![0u8; padding_size],
         }
     }
 
-    /// Creates an Extra Padding TLV with an SSID.
+    /// Creates an Extra Padding TLV with an SSID and zero-filled padding.
+    ///
+    /// See `new_zeros` for when to use this over `with_ssid`.
     #[must_use]
-    pub fn with_ssid(ssid: u16, additional_padding: usize) -> Self {
+    pub fn with_ssid_zeros(ssid: u16, additional_padding: usize) -> Self {
         Self {
             ssid: Some(ssid),
             padding: vec![0u8; additional_padding],
@@ -134,10 +205,38 @@ mod tests {
 
     #[test]
     fn test_extra_padding_tlv_to_raw() {
-        let tlv = ExtraPaddingTlv::with_ssid(0xABCD, 2);
+        let tlv = ExtraPaddingTlv::with_ssid_zeros(0xABCD, 2);
         let raw = tlv.to_raw();
         assert_eq!(raw.tlv_type, TlvType::ExtraPadding);
         assert_eq!(raw.value, vec![0xAB, 0xCD, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_extra_padding_tlv_new_is_pseudorandom() {
+        // Two consecutive calls must not produce identical padding, and the
+        // padding must not be all-zero (RFC 8972 §4.2).
+        let a = ExtraPaddingTlv::new(32);
+        let b = ExtraPaddingTlv::new(32);
+        assert_ne!(a.padding, b.padding);
+        assert!(a.padding.iter().any(|&x| x != 0));
+        assert!(b.padding.iter().any(|&x| x != 0));
+    }
+
+    #[test]
+    fn test_extra_padding_tlv_with_ssid_is_pseudorandom() {
+        let a = ExtraPaddingTlv::with_ssid(0x1234, 32);
+        let b = ExtraPaddingTlv::with_ssid(0x1234, 32);
+        assert_eq!(a.ssid, Some(0x1234));
+        assert_eq!(b.ssid, Some(0x1234));
+        assert_ne!(a.padding, b.padding);
+        assert!(a.padding.iter().any(|&x| x != 0));
+    }
+
+    #[test]
+    fn test_extra_padding_tlv_new_zeros() {
+        let tlv = ExtraPaddingTlv::new_zeros(8);
+        assert!(tlv.ssid.is_none());
+        assert_eq!(tlv.padding, vec![0u8; 8]);
     }
 
     #[test]
