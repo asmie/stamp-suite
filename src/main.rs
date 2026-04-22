@@ -3,7 +3,6 @@
 #[macro_use]
 extern crate log;
 
-use clap::Parser;
 use stamp_suite::configuration::*;
 use stamp_suite::{receiver, sender};
 
@@ -11,11 +10,13 @@ use stamp_suite::{receiver, sender};
 async fn main() {
     env_logger::init();
 
-    let conf = Configuration::parse();
-    if let Err(e) = conf.validate() {
-        eprintln!("Configuration error: {}", e);
-        std::process::exit(1);
-    }
+    let conf = match Configuration::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
 
     if std::env::var("STAMP_HMAC_KEY").is_ok() && conf.hmac_key.is_some() {
         log::warn!(

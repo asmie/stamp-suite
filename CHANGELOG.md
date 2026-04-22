@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TOML configuration file support** (`--config <PATH>`): every CLI option can
+  be supplied through a TOML file so long-lived deployments (systemd units,
+  reflectors, reproducible test rigs) no longer need sprawling command lines.
+  - New `FileConfiguration` struct mirrors `Configuration` with all fields
+    optional; unknown keys are rejected at parse time (`deny_unknown_fields`)
+    so typos surface with the full list of valid keys.
+  - Precedence: command-line flag / `STAMP_HMAC_KEY` env var > TOML file
+    value > hardcoded default. Detected via `clap::ArgMatches::value_source`
+    so the same `Configuration` struct serves both sources.
+  - New `Configuration::load()` entry point parses CLI, merges the optional
+    TOML file, then runs `validate()`. `main.rs` uses it in place of
+    `Configuration::parse()`.
+  - Plaintext `hmac_key` is deliberately absent from the file schema; only
+    `hmac_key_file` is accepted, so secrets cannot leak into a shared config.
+  - On Unix, a warning is logged if the config file is writable by group or
+    other (mask `0o022`) — mirrors the existing check on `--hmac-key-file`.
+  - Range checks for `dscp` (0-63), `ecn` (0-3), `access_report` (0-15),
+    `micro_session_id` (>=1), `reflector_member_link_id` (>=1) were added to
+    `Configuration::validate()` since clap's CLI-side `value_parser!().range()`
+    does not run on values deserialized from TOML.
+  - New dependency: `toml = "0.9"`; dev-dependency: `tempfile = "3"`.
+  - `AuthMode`, `ClockFormat`, `TlvHandlingMode`, and `OutputFormat` gained
+    `serde::Deserialize` derives with renames matching the existing
+    `ValueEnum` string forms.
+
 - **draft-ietf-ippm-asymmetrical-pkts Reflected Test Packet Control TLV (Type 12)**:
   asymmetrical reply measurement
   - `ReflectedControlTlv` struct (Length / Count / Interval + opaque sub-TLV bytes)

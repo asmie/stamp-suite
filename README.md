@@ -265,6 +265,106 @@ Max RTT: 1.203 ms
 Avg RTT: 0.521 ms
 ```
 
+## Configuration File
+
+Any option accepted on the command line can also be supplied through a TOML
+configuration file via `--config <PATH>`. Values in the file are used as
+defaults; any key not present in the file keeps its built-in default.
+
+```bash
+stamp-suite --config /etc/stamp/reflector.toml
+```
+
+### Precedence
+
+From highest to lowest priority:
+
+1. Command-line flag (e.g. `--remote-port 1234`)
+2. `STAMP_HMAC_KEY` environment variable (for the HMAC key only)
+3. Value from the `--config` TOML file
+4. Hardcoded default
+
+In other words: the file provides new defaults; CLI flags and env vars still
+override them field-by-field.
+
+### Example `reflector.toml`
+
+```toml
+# Reflector bound on a specific address/port
+is_reflector = true
+local_addr = "192.0.2.10"
+local_port = 862
+
+# Protocol behaviour
+auth_mode = "O"              # "A" for authenticated, "O" for open
+clock_source = "NTP"         # "NTP" or "PTP"
+tlv_mode = "echo"            # "echo" or "ignore"
+stateful_reflector = true
+session_timeout = 300
+
+# Optional features
+metrics = true
+metrics_addr = "127.0.0.1:9090"
+
+# HMAC key – only a PATH can be set from the config file.
+# The plaintext `hmac_key` field is deliberately rejected; pass the raw
+# key via --hmac-key or the STAMP_HMAC_KEY environment variable instead.
+hmac_key_file = "/etc/stamp/hmac.key"
+```
+
+### Supported keys
+
+Every long-form CLI flag is available in the file using its snake_case
+name (e.g. `--remote-addr` becomes `remote_addr`, `--ber-padding-size`
+becomes `ber_padding_size`). Examples of non-trivial types:
+
+| Field | TOML type | Example |
+|-------|-----------|---------|
+| `remote_addr`, `local_addr`, `dest_node_addr`, `return_address` | string (IPv4 or IPv6) | `"192.0.2.10"`, `"2001:db8::1"` |
+| `metrics_addr` | string (`addr:port`) | `"127.0.0.1:9090"` |
+| `auth_mode` | enum | `"A"` or `"O"` |
+| `clock_source` | enum | `"NTP"` or `"PTP"` |
+| `tlv_mode` | enum | `"echo"` or `"ignore"` |
+| `output_format` | enum | `"text"`, `"json"`, or `"csv"` |
+| `return_sr_mpls_labels` | integer array | `[100, 200, 300]` |
+| `return_srv6_sids` | string array (IPv6) | `["2001:db8::1", "2001:db8::2"]` |
+| `hmac_key_file` | string (path) | `"/etc/stamp/hmac.key"` |
+
+The `hmac_key` and `config` fields are intentionally **not** accepted
+from the file — the former to keep plaintext secrets out of config files,
+the latter because it would be recursive.
+
+### File permissions
+
+Because the config file can set `hmac_key_file` and every other setting,
+treat it as trusted: an attacker who can overwrite it can change any
+STAMP parameter. On Unix, `stamp-suite` logs a warning if the file is
+writable by group or other (any bit in `0o022`). Recommended:
+
+```bash
+chmod 600 /etc/stamp/reflector.toml
+```
+
+### Validation and error messages
+
+Failures are reported with actionable messages:
+
+- **Unknown key** (typo): the parse error lists every valid field name.
+  ```text
+  Configuration file error: parse error in /etc/stamp.toml:
+  TOML parse error at line 1, column 1
+    |
+  1 | remote_portt = 1234
+    | ^^^^^^^^^^^^
+  unknown field `remote_portt`, expected one of `remote_addr`, `local_addr`, ...
+  ```
+- **Wrong type / bad enum variant / malformed TOML**: reported with the
+  exact line/column and caret marker from the `toml` crate.
+- **Out-of-range values** (e.g. `dscp = 200`, `error_scale = 100`, or
+  `auth_mode = "A"` without an HMAC key): caught by
+  `Configuration::validate()` after the merge, with a message naming the
+  offending field.
+
 ## Architecture
 
 ```

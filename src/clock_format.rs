@@ -3,14 +3,16 @@ use std::fmt;
 use clap::ValueEnum;
 
 /// This enum represents the clock format used in the application.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, ValueEnum)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, ValueEnum, serde::Deserialize)]
 pub enum ClockFormat {
     /// Network Time Protocol timestamp format (RFC 5905).
     #[default]
     #[value(name = "NTP")]
+    #[serde(rename = "NTP")]
     NTP,
     /// Precision Time Protocol timestamp format (IEEE 1588).
     #[value(name = "PTP")]
+    #[serde(rename = "PTP")]
     PTP,
 }
 

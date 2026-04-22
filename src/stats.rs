@@ -6,7 +6,17 @@
 use std::net::SocketAddr;
 
 /// Output format for statistics reporting.
-#[derive(Debug, Clone, Copy, Default, clap::ValueEnum, serde::Serialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    clap::ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     /// Human-readable text output.
