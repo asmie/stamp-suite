@@ -186,7 +186,9 @@ jobs:
       - name: Build DEB package
         run: |
           PKG_NAME=stamp-suite
-          PKG_VERSION=0.5.0
+          # Derive from Cargo.toml so packaging stays in sync with the crate version.
+          PKG_VERSION=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          echo "PKG_VERSION=${PKG_VERSION}" >> "$GITHUB_ENV"
           PKG_DIR="${PKG_NAME}_${PKG_VERSION}-1_amd64"
           mkdir -p "${PKG_DIR}/DEBIAN"
           mkdir -p "${PKG_DIR}/usr/bin"
@@ -224,14 +226,15 @@ jobs:
           dpkg-deb --build --root-owner-group "${PKG_DIR}"
       - name: Verify DEB package
         run: |
+          DEB=stamp-suite_${PKG_VERSION}-1_amd64.deb
           echo "=== Package info ==="
-          dpkg-deb --info stamp-suite_0.5.0-1_amd64.deb
+          dpkg-deb --info "${DEB}"
           echo "=== Package contents ==="
-          dpkg-deb --contents stamp-suite_0.5.0-1_amd64.deb
+          dpkg-deb --contents "${DEB}"
           echo "=== Verify expected files ==="
-          dpkg-deb --contents stamp-suite_0.5.0-1_amd64.deb | grep -q usr/bin/stamp-suite
-          dpkg-deb --contents stamp-suite_0.5.0-1_amd64.deb | grep -q lib/systemd/system/stamp-suite.service
-          dpkg-deb --contents stamp-suite_0.5.0-1_amd64.deb | grep -q usr/share/snmp/mibs/STAMP-SUITE-MIB.mib
+          dpkg-deb --contents "${DEB}" | grep -q usr/bin/stamp-suite
+          dpkg-deb --contents "${DEB}" | grep -q lib/systemd/system/stamp-suite.service
+          dpkg-deb --contents "${DEB}" | grep -q usr/share/snmp/mibs/STAMP-SUITE-MIB.mib
           echo "All expected files present in DEB package."
 
   package-rpm:
@@ -254,7 +257,8 @@ jobs:
           mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS,BUILDROOT}
           # Create source tarball layout expected by the spec
           PKG_NAME=stamp-suite
-          PKG_VERSION=0.5.0
+          # Derive from Cargo.toml so the tarball name matches the spec's Version: tag.
+          PKG_VERSION=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
           TARDIR="${PKG_NAME}-${PKG_VERSION}"
           mkdir -p "/tmp/${TARDIR}"
           cp -a . "/tmp/${TARDIR}/"
