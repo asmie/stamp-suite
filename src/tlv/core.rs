@@ -38,6 +38,21 @@ pub const RETURN_PATH_CONTROL_CODE_SIZE: usize = 4;
 /// Micro-session ID TLV value size (4 bytes: two u16 IDs).
 pub const MICRO_SESSION_ID_TLV_VALUE_SIZE: usize = 4;
 
+/// Reflected Test Packet Control TLV minimum value size
+/// (draft-ietf-ippm-asymmetrical-pkts §3: 2 + 2 + 4 = 8 fixed + sub-TLVs).
+///
+/// The fixed portion is 8 bytes (Length-of-Reflected-Packet u16,
+/// Number-of-Reflected-Packets u16, Interval u32). Sub-TLVs are optional.
+pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 8;
+
+/// BER Bit Error Count TLV value size
+/// (draft-gandhi-ippm-stamp-ber §3.3: single u32).
+pub const BER_COUNT_TLV_VALUE_SIZE: usize = 4;
+
+/// BER Max Bit Error Burst Size TLV value size
+/// (draft-gandhi-ippm-stamp-ber §3.4: single u32).
+pub const BER_BURST_TLV_VALUE_SIZE: usize = 4;
+
 /// Errors that can occur during TLV parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum TlvError {
@@ -103,6 +118,18 @@ pub enum TlvError {
     )]
     InvalidMicroSessionIdLength(usize),
 
+    /// Reflected Test Packet Control TLV has invalid length.
+    #[error("Reflected Control TLV has invalid length {0}, minimum {REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE}")]
+    InvalidReflectedControlLength(usize),
+
+    /// BER Bit Error Count TLV has invalid length.
+    #[error("BER Bit Error Count TLV has invalid length {0}, expected {BER_COUNT_TLV_VALUE_SIZE}")]
+    InvalidBerCountLength(usize),
+
+    /// BER Max Bit Error Burst Size TLV has invalid length.
+    #[error("BER Max Burst TLV has invalid length {0}, expected {BER_BURST_TLV_VALUE_SIZE}")]
+    InvalidBerBurstLength(usize),
+
     /// TLV type mismatch when parsing a typed TLV.
     #[error("TLV type mismatch: expected {expected:?}, got {actual:?}")]
     TypeMismatch {
@@ -119,9 +146,13 @@ pub enum TlvError {
 /// ```text
 ///  0 1 2 3 4 5 6 7
 /// +-+-+-+-+-+-+-+-+
-/// |U|M|I|R|R|R|R|R|
+/// |U|M|I|C|R|R|R|R|
 /// +-+-+-+-+-+-+-+-+
 /// ```
+///
+/// Bit 3 (C) is defined by draft-ietf-ippm-asymmetrical-pkts §3 as the
+/// Conformant-Reflected-Packet flag used with the Reflected Test Packet
+/// Control TLV (Type 12). It MUST be 0 in all other contexts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TlvFlags {
     /// Unrecognized TLV type (bit 0, set by receiver when type is unknown).
@@ -130,6 +161,10 @@ pub struct TlvFlags {
     pub malformed: bool,
     /// Integrity check failed (bit 2, set when HMAC verification fails).
     pub integrity_failed: bool,
+    /// Conformant Reflected Packet (bit 3, draft-ietf-ippm-asymmetrical-pkts §3):
+    /// reflector sets to 1 if it could not honour a Reflected Test Packet
+    /// Control TLV's request (MTU, rate/volume cap, or other local policy).
+    pub conformant_reflected: bool,
 }
 
 impl TlvFlags {
@@ -137,9 +172,10 @@ impl TlvFlags {
     #[must_use]
     pub fn from_byte(byte: u8) -> Self {
         Self {
-            unrecognized: (byte & 0x80) != 0,     // Bit 0 (MSB)
-            malformed: (byte & 0x40) != 0,        // Bit 1
-            integrity_failed: (byte & 0x20) != 0, // Bit 2
+            unrecognized: (byte & 0x80) != 0,         // Bit 0 (MSB)
+            malformed: (byte & 0x40) != 0,            // Bit 1
+            integrity_failed: (byte & 0x20) != 0,     // Bit 2
+            conformant_reflected: (byte & 0x10) != 0, // Bit 3
         }
     }
 
@@ -155,6 +191,9 @@ impl TlvFlags {
         }
         if self.integrity_failed {
             byte |= 0x20; // Bit 2
+        }
+        if self.conformant_reflected {
+            byte |= 0x10; // Bit 3
         }
         byte
     }
@@ -224,7 +263,18 @@ pub enum TlvType {
     ReturnPath = 10,
     /// Micro-session ID TLV (11) - RFC 9534 §3.1.
     MicroSessionId = 11,
-    /// Unknown type (12-255).
+    /// Reflected Test Packet Control TLV (12) - draft-ietf-ippm-asymmetrical-pkts §3.
+    ReflectedControl = 12,
+    /// BER Bit Pattern in Padding TLV (240) - draft-gandhi-ippm-stamp-ber §3.2.
+    /// Type number is TBD in the draft; 240 used from RFC 8972 experimental range.
+    BerPattern = 240,
+    /// BER Bit Error Count in Padding TLV (241) - draft-gandhi-ippm-stamp-ber §3.3.
+    /// Type number is TBD in the draft; 241 used from RFC 8972 experimental range.
+    BerCount = 241,
+    /// BER Max Bit Error Burst Size TLV (242) - draft-gandhi-ippm-stamp-ber §3.4.
+    /// Type number is TBD in the draft; 242 used from RFC 8972 experimental range.
+    BerBurst = 242,
+    /// Unknown type.
     Unknown(u8),
 }
 
@@ -245,6 +295,10 @@ impl TlvType {
             9 => Self::DestinationNodeAddress,
             10 => Self::ReturnPath,
             11 => Self::MicroSessionId,
+            12 => Self::ReflectedControl,
+            240 => Self::BerPattern,
+            241 => Self::BerCount,
+            242 => Self::BerBurst,
             n => Self::Unknown(n),
         }
     }
@@ -265,6 +319,10 @@ impl TlvType {
             Self::DestinationNodeAddress => 9,
             Self::ReturnPath => 10,
             Self::MicroSessionId => 11,
+            Self::ReflectedControl => 12,
+            Self::BerPattern => 240,
+            Self::BerCount => 241,
+            Self::BerBurst => 242,
             Self::Unknown(n) => n,
         }
     }
@@ -476,6 +534,13 @@ impl RawTlv {
     pub fn set_integrity_failed(&mut self) {
         self.flags.integrity_failed = true;
     }
+
+    /// Sets the conformant_reflected flag (C-flag) per
+    /// draft-ietf-ippm-asymmetrical-pkts §3. Only meaningful on the
+    /// Reflected Test Packet Control TLV (Type 12).
+    pub fn set_conformant_reflected(&mut self) {
+        self.flags.conformant_reflected = true;
+    }
 }
 
 #[cfg(test)]
@@ -516,6 +581,7 @@ mod tests {
             unrecognized: true,
             malformed: false,
             integrity_failed: true,
+            conformant_reflected: false,
         };
         assert_eq!(flags.to_byte(), 0xA0);
 
@@ -526,8 +592,16 @@ mod tests {
             unrecognized: true,
             malformed: true,
             integrity_failed: true,
+            conformant_reflected: false,
         };
         assert_eq!(flags.to_byte(), 0xE0);
+
+        // C flag alone (draft-ietf-ippm-asymmetrical-pkts §3)
+        let flags = TlvFlags {
+            conformant_reflected: true,
+            ..Default::default()
+        };
+        assert_eq!(flags.to_byte(), 0x10);
     }
 
     #[test]
@@ -535,14 +609,17 @@ mod tests {
         for u in [false, true] {
             for m in [false, true] {
                 for i in [false, true] {
-                    let original = TlvFlags {
-                        unrecognized: u,
-                        malformed: m,
-                        integrity_failed: i,
-                    };
-                    let byte = original.to_byte();
-                    let parsed = TlvFlags::from_byte(byte);
-                    assert_eq!(original, parsed);
+                    for c in [false, true] {
+                        let original = TlvFlags {
+                            unrecognized: u,
+                            malformed: m,
+                            integrity_failed: i,
+                            conformant_reflected: c,
+                        };
+                        let byte = original.to_byte();
+                        let parsed = TlvFlags::from_byte(byte);
+                        assert_eq!(original, parsed);
+                    }
                 }
             }
         }

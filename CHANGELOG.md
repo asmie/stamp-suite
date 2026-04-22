@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **draft-ietf-ippm-asymmetrical-pkts Reflected Test Packet Control TLV (Type 12)**:
+  asymmetrical reply measurement
+  - `ReflectedControlTlv` struct (Length / Count / Interval + opaque sub-TLV bytes)
+  - Reflector emits up to `REFLECTED_CONTROL_MAX_COUNT` (16) reply packets per
+    request, spaced by the requested interval (clamped to
+    `REFLECTED_CONTROL_MIN_INTERVAL_NS` of 1 µs). Excess count, clamped interval,
+    or any non-zero requested length sets the new Conformant (C) flag on the
+    echoed TLV.
+  - nix backend emits extra copies on a spawned tokio task so the recv loop is
+    not blocked; pnet backend sleeps inline (fallback platforms only).
+  - New C-flag bit (0x10) added to `TlvFlags` and `RawTlv::set_conformant_reflected()`.
+    The draft leaves the C bit position TBA; we place it at bit 3, the first bit
+    unused by RFC 8972's U/M/I triple.
+  - Sender CLI: `--reflected-control-count`, `--reflected-control-length`,
+    `--reflected-control-interval-ns`.
+- **draft-gandhi-ippm-stamp-ber BER TLVs**:
+  - Bit Pattern in Padding (Type 240), Bit Error Count in Padding (Type 241),
+    Max Bit Error Burst Size (Type 242). Type numbers are TBD in the draft;
+    240/241/242 from RFC 8972's experimental range.
+  - Reflector XORs the received Extra Padding against the Bit Pattern TLV (or
+    the draft's 0xFF00 default), counts error bits and longest consecutive run
+    across byte boundaries, and writes the results into the Count and Max Burst
+    TLVs.
+  - Missing Extra Padding or duplicate BER TLVs mark all BER TLVs with the
+    U-flag per draft §3.
+  - Sender CLI: `--ber`, `--ber-pattern <HEX>`, `--ber-padding-size`.
+
 - **RFC 9534 Micro-session ID TLV**: Per-member-link performance measurement on LAGs
   - Micro-session ID TLV (Type 11) with sender and reflector member link identifiers
   - `--micro-session-id <ID>` sender CLI option to identify the local LAG member link
@@ -24,8 +51,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AgentX OID decode uses `checked_mul`/`checked_add` for expected buffer length to prevent overflow on 32-bit targets with crafted wire data
 - Sender interim report (`--report-interval`) now uses confirmed `packets_lost` counter instead of `pending.len()`, which incorrectly counted in-flight packets as lost
 - SNMP `loss_pct_x100` is now computed on read instead of cached, preventing stale values when `packets_sent` increases without corresponding loss events
-
-### Changed
 
 - Sender timeout eviction replaced O(n) full HashMap scan with O(k) `VecDeque`-based lazy eviction queue; deadlines are naturally time-ordered since packets are sent sequentially
 - Final sender loss accounting uses batched `inc_lost_by()` and `record_packets_lost()` instead of per-packet loops

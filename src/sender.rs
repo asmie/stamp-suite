@@ -24,8 +24,9 @@ use crate::{
     stats::{RttCollector, RttSample, StatsSnapshot},
     time::generate_timestamp,
     tlv::{
-        AccessReportTlv, ClassOfServiceTlv, DestinationNodeAddressTlv, DirectMeasurementTlv,
-        FollowUpTelemetryTlv, LocationTlv, MicroSessionIdTlv, RawTlv, ReturnPathTlv,
+        AccessReportTlv, BerBurstTlv, BerCountTlv, BerPatternTlv, ClassOfServiceTlv,
+        DestinationNodeAddressTlv, DirectMeasurementTlv, ExtraPaddingTlv, FollowUpTelemetryTlv,
+        LocationTlv, MicroSessionIdTlv, RawTlv, ReflectedControlTlv, ReturnPathTlv,
         SessionSenderId, SyncSource, TimestampInfoTlv, TimestampMethod, TlvList, TypedTlv,
     },
 };
@@ -201,6 +202,64 @@ pub async fn run_sender(
     if let Some(sender_id) = conf.micro_session_id {
         extra_tlvs.push(MicroSessionIdTlv::new(sender_id, 0).to_raw());
         log::info!("Micro-session ID TLV enabled (sender_id={})", sender_id);
+    }
+
+    // Build Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts §3).
+    // Only emit when the sender actually requests multiple replies, to avoid
+    // amplifying trivial single-packet measurements.
+    if conf.reflected_control_count > 1 {
+        extra_tlvs.push(
+            ReflectedControlTlv::new(
+                conf.reflected_control_length,
+                conf.reflected_control_count,
+                conf.reflected_control_interval_ns,
+            )
+            .to_raw(),
+        );
+        log::info!(
+            "Reflected Control TLV enabled (length={}, count={}, interval={}ns)",
+            conf.reflected_control_length,
+            conf.reflected_control_count,
+            conf.reflected_control_interval_ns
+        );
+    }
+
+    // Build BER TLVs (draft-gandhi-ippm-stamp-ber §3). All three are emitted
+    // together, paired with an Extra Padding TLV filled with the repeated pattern.
+    if conf.ber {
+        let pattern_bytes: Vec<u8> = if let Some(hex) = conf.ber_pattern.as_deref() {
+            match parse_hex_pattern(hex) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    eprintln!("Invalid --ber-pattern ({}): {}", hex, e);
+                    return empty_snapshot();
+                }
+            }
+        } else {
+            // Default 0xFF00 per draft §3.2.
+            vec![0xFF, 0x00]
+        };
+
+        // Extra Padding TLV filled with the repeated pattern so the reflector
+        // can XOR-compare it. Use deterministic bytes (not the pseudorandom
+        // default) because the BER computation requires a known pattern.
+        let mut padding_bytes = Vec::with_capacity(conf.ber_padding_size);
+        for i in 0..conf.ber_padding_size {
+            padding_bytes.push(pattern_bytes[i % pattern_bytes.len()]);
+        }
+        let padding_tlv = ExtraPaddingTlv {
+            ssid: None,
+            padding: padding_bytes,
+        };
+        extra_tlvs.push(padding_tlv.to_raw());
+        extra_tlvs.push(BerPatternTlv::new(pattern_bytes).to_raw());
+        extra_tlvs.push(BerCountTlv::default().to_raw());
+        extra_tlvs.push(BerBurstTlv::default().to_raw());
+        log::info!(
+            "BER TLVs enabled (padding_size={}, pattern={})",
+            conf.ber_padding_size,
+            conf.ber_pattern.as_deref().unwrap_or("ff00")
+        );
     }
 
     // Check if we need to include TLV extensions
@@ -742,6 +801,16 @@ fn validate_reflected_tlvs(
     }
 }
 
+/// Parses an ASCII hex string (with optional `0x` prefix) into a byte vector.
+/// Empty input is rejected because an empty BER pattern is meaningless.
+fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
+    let trimmed = s.strip_prefix("0x").unwrap_or(s);
+    if trimmed.is_empty() {
+        return Err("empty pattern".into());
+    }
+    hex::decode(trimmed).map_err(|e| e.to_string())
+}
+
 /// Creates a new unauthenticated STAMP test packet with the specified error estimate.
 ///
 /// The caller should set the sequence number and timestamp before sending.
@@ -967,6 +1036,29 @@ pub fn create_extended_auth_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_hex_pattern_basic() {
+        assert_eq!(parse_hex_pattern("ff00").unwrap(), vec![0xFF, 0x00]);
+        assert_eq!(parse_hex_pattern("0xFF00").unwrap(), vec![0xFF, 0x00]);
+        assert_eq!(parse_hex_pattern("aa55").unwrap(), vec![0xAA, 0x55]);
+    }
+
+    #[test]
+    fn test_parse_hex_pattern_rejects_odd_length() {
+        assert!(parse_hex_pattern("fff").is_err());
+    }
+
+    #[test]
+    fn test_parse_hex_pattern_rejects_non_hex() {
+        assert!(parse_hex_pattern("zzzz").is_err());
+    }
+
+    #[test]
+    fn test_parse_hex_pattern_rejects_empty() {
+        assert!(parse_hex_pattern("").is_err());
+        assert!(parse_hex_pattern("0x").is_err());
+    }
 
     #[test]
     fn test_assemble_unauth_packet_defaults() {

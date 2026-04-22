@@ -28,11 +28,12 @@ pub use traits::TypedTlv;
 
 // Core types and constants
 pub use self::core::{
-    RawTlv, TlvError, TlvFlags, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE,
-    DEST_NODE_ADDR_IPV4_SIZE, DEST_NODE_ADDR_IPV6_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
+    RawTlv, TlvError, TlvFlags, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE, BER_BURST_TLV_VALUE_SIZE,
+    BER_COUNT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE, DEST_NODE_ADDR_IPV4_SIZE,
+    DEST_NODE_ADDR_IPV6_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
     FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE, HMAC_TLV_VALUE_SIZE, LOCATION_TLV_MIN_VALUE_SIZE,
-    MICRO_SESSION_ID_TLV_VALUE_SIZE, RETURN_PATH_CONTROL_CODE_SIZE, TIMESTAMP_INFO_TLV_VALUE_SIZE,
-    TLV_HEADER_SIZE,
+    MICRO_SESSION_ID_TLV_VALUE_SIZE, REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,
+    RETURN_PATH_CONTROL_CODE_SIZE, TIMESTAMP_INFO_TLV_VALUE_SIZE, TLV_HEADER_SIZE,
 };
 
 // Collection
@@ -70,3 +71,15 @@ pub use typed::{ReturnPathAction, ReturnPathSubType, ReturnPathTlv};
 
 // Type 11 — Micro-session ID (RFC 9534)
 pub use typed::MicroSessionIdTlv;
+
+// Type 12 — Reflected Test Packet Control (draft-ietf-ippm-asymmetrical-pkts)
+pub use typed::ReflectedControlTlv;
+
+// Type 240 — BER Bit Pattern in Padding (draft-gandhi-ippm-stamp-ber)
+pub use typed::{BerPatternTlv, BER_DEFAULT_PATTERN};
+
+// Type 241 — BER Bit Error Count in Padding (draft-gandhi-ippm-stamp-ber)
+pub use typed::BerCountTlv;
+
+// Type 242 — BER Max Bit Error Burst Size (draft-gandhi-ippm-stamp-ber)
+pub use typed::BerBurstTlv;

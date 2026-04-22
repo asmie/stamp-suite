@@ -412,6 +412,31 @@ pub const AUTH_BASE_SIZE: usize = 112;
 /// HMAC offset in authenticated sender packets (for verifying incoming packets).
 const AUTH_PACKET_HMAC_OFFSET: usize = 96;
 
+/// Behaviour requested by a Reflected Test Packet Control TLV
+/// (draft-ietf-ippm-asymmetrical-pkts §3).
+///
+/// Tells the backend how many *additional* copies of the reply to emit (on
+/// top of the primary reply), and the inter-packet gap in nanoseconds. If
+/// `extra_copies` is 0, no additional sends are needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReflectedControlBehavior {
+    /// Additional reply packets to emit after the primary reply
+    /// (i.e. total replies = 1 + `extra_copies`).
+    pub extra_copies: u16,
+    /// Nanoseconds between consecutive sends.
+    pub interval_ns: u32,
+}
+
+/// Hard cap on total reply packets emitted for a single Reflected Control
+/// request. Protects against request amplification / DoS. The C flag is set
+/// when the requested count exceeds this cap.
+pub const REFLECTED_CONTROL_MAX_COUNT: u16 = 16;
+
+/// Minimum inter-packet gap honoured by the backend; smaller requested values
+/// are clamped up to this floor to avoid tight busy-loops. The C flag is set
+/// when clamping actually changes the interval.
+pub const REFLECTED_CONTROL_MIN_INTERVAL_NS: u32 = 1_000;
+
 /// Response from STAMP packet processing, including optional CoS request.
 #[derive(Debug)]
 pub struct StampResponse {
@@ -422,6 +447,10 @@ pub struct StampResponse {
     pub cos_request: Option<(u8, u8)>,
     /// Action determined by Return Path TLV processing (RFC 9503 §5).
     pub return_path_action: ReturnPathAction,
+    /// Extra-replies descriptor from a Reflected Test Packet Control TLV
+    /// (draft-ietf-ippm-asymmetrical-pkts §3). `None` when the incoming
+    /// packet had no such TLV.
+    pub reflected_control: Option<ReflectedControlBehavior>,
 }
 
 /// Context for processing STAMP packets, shared between backends.
@@ -658,6 +687,7 @@ fn process_auth_packet(
             ),
             cos_request: None,
             return_path_action: ReturnPathAction::Normal,
+            reflected_control: None,
         })
     }
 }
@@ -715,6 +745,7 @@ fn process_unauth_packet(
                     ),
                     cos_request: None,
                     return_path_action: ReturnPathAction::Normal,
+                    reflected_control: None,
                 })
             }
         }
@@ -862,17 +893,23 @@ pub fn assemble_auth_answer_symmetric(
     response
 }
 
+/// Tuple returned from `apply_semantic_tlv_processing`.
+struct SemanticResult {
+    cos_request: Option<(u8, u8)>,
+    return_path_action: ReturnPathAction,
+    reflected_control: Option<ReflectedControlBehavior>,
+}
+
 /// Applies semantic TLV processing on the reflector side (RFC 8972 §4.8).
 ///
 /// Called when HMAC verification passed and no malformed TLVs were found.
-/// Returns `None` if the packet should be discarded (e.g. Micro-session ID mismatch),
-/// or `Some((cos_request, return_path_action))` on success.
+/// Returns `None` if the packet should be discarded (e.g. Micro-session ID mismatch).
 fn apply_semantic_tlv_processing(
     tlvs: &mut TlvList,
     ctx: &ProcessingContext,
     tlv_hmac_key: Option<&HmacKey>,
     base_bytes: &[u8],
-) -> Option<(Option<(u8, u8)>, ReturnPathAction)> {
+) -> Option<SemanticResult> {
     // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS
     let cos_request = tlvs.get_cos_request();
 
@@ -915,13 +952,56 @@ fn apply_semantic_tlv_processing(
     // Process Return Path TLV (RFC 9503 §5)
     let return_path_action = tlvs.process_return_path(ctx.sender_port);
 
-    // Compute fresh HMAC for response
+    // Process BER TLVs (draft-gandhi-ippm-stamp-ber §3):
+    // compute Bit Error Count and Max Burst against the companion Extra Padding.
+    tlvs.process_ber();
+
+    // Process Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts §3).
+    // We don't honour the requested per-packet length in this implementation — if the
+    // sender asks for a specific length we set the C flag on the echoed TLV to indicate
+    // non-conformance. Count is clamped to REFLECTED_CONTROL_MAX_COUNT and the interval
+    // is clamped up to REFLECTED_CONTROL_MIN_INTERVAL_NS; either clamp sets the C flag.
+    let reflected_control = tlvs.get_reflected_control_request().map(|req| {
+        let requested_count = req.number_of_reflected_packets;
+        let effective_count = requested_count.min(REFLECTED_CONTROL_MAX_COUNT);
+        let effective_interval = req
+            .interval_nanoseconds
+            .max(REFLECTED_CONTROL_MIN_INTERVAL_NS);
+
+        let mut non_conformant = false;
+        if effective_count != requested_count {
+            non_conformant = true;
+        }
+        if effective_interval != req.interval_nanoseconds && requested_count > 1 {
+            non_conformant = true;
+        }
+        // A requested length of 0 means "don't pad". Anything else, we can't honour.
+        if req.length_of_reflected_packet != 0 {
+            non_conformant = true;
+        }
+
+        if non_conformant {
+            tlvs.set_reflected_control_c_flag();
+        }
+
+        let extra_copies = effective_count.saturating_sub(1);
+        ReflectedControlBehavior {
+            extra_copies,
+            interval_ns: effective_interval,
+        }
+    });
+
+    // Compute fresh HMAC for response (must be last, after all TLV mutations)
     if let Some(key) = tlv_hmac_key {
         let response_seq_bytes = &base_bytes[..4];
         tlvs.set_hmac(key, response_seq_bytes);
     }
 
-    Some((cos_request, return_path_action))
+    Some(SemanticResult {
+        cos_request,
+        return_path_action,
+        reflected_control,
+    })
 }
 
 /// Assembles an unauthenticated reflected packet with TLV handling (RFC 8972).
@@ -968,6 +1048,7 @@ pub fn assemble_unauth_answer_with_tlvs(
     let mut response = base_bytes.to_vec();
     let mut cos_request: Option<(u8, u8)> = None;
     let mut return_path_action = ReturnPathAction::Normal;
+    let mut reflected_control: Option<ReflectedControlBehavior> = None;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -1022,15 +1103,17 @@ pub fn assemble_unauth_answer_with_tlvs(
                 // TLVs with flags set — do NOT perform semantic TLV processing.
                 if hmac_ok && !had_malformed {
                     match apply_semantic_tlv_processing(&mut tlvs, ctx, tlv_hmac_key, &base_bytes) {
-                        Some((cos, rpa)) => {
-                            cos_request = cos;
-                            return_path_action = rpa;
+                        Some(result) => {
+                            cos_request = result.cos_request;
+                            return_path_action = result.return_path_action;
+                            reflected_control = result.reflected_control;
                         }
                         None => {
                             return StampResponse {
                                 data: response,
                                 cos_request: None,
                                 return_path_action: ReturnPathAction::SuppressReply,
+                                reflected_control: None,
                             };
                         }
                     }
@@ -1045,6 +1128,7 @@ pub fn assemble_unauth_answer_with_tlvs(
         data: response,
         cos_request,
         return_path_action,
+        reflected_control,
     }
 }
 
@@ -1080,6 +1164,7 @@ pub fn assemble_auth_answer_with_tlvs(
     let mut response = base_bytes.to_vec();
     let mut cos_request: Option<(u8, u8)> = None;
     let mut return_path_action = ReturnPathAction::Normal;
+    let mut reflected_control: Option<ReflectedControlBehavior> = None;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -1139,15 +1224,17 @@ pub fn assemble_auth_answer_with_tlvs(
                 // TLVs with flags set — do NOT perform semantic TLV processing.
                 if hmac_ok && !had_malformed {
                     match apply_semantic_tlv_processing(&mut tlvs, ctx, tlv_hmac_key, &base_bytes) {
-                        Some((cos, rpa)) => {
-                            cos_request = cos;
-                            return_path_action = rpa;
+                        Some(result) => {
+                            cos_request = result.cos_request;
+                            return_path_action = result.return_path_action;
+                            reflected_control = result.reflected_control;
                         }
                         None => {
                             return StampResponse {
                                 data: response,
                                 cos_request: None,
                                 return_path_action: ReturnPathAction::SuppressReply,
+                                reflected_control: None,
                             };
                         }
                     }
@@ -1162,6 +1249,7 @@ pub fn assemble_auth_answer_with_tlvs(
         data: response,
         cos_request,
         return_path_action,
+        reflected_control,
     }
 }
 

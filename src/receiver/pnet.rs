@@ -687,6 +687,36 @@ fn handle_stamp_packet(
                 let send_ts = crate::time::generate_timestamp(config.clock_source);
                 session.record_reflection(reflected_seq, send_ts);
             }
+
+            // Reflected Test Packet Control multi-send
+            // (draft-ietf-ippm-asymmetrical-pkts §3). Inline blocking sleep —
+            // the pnet backend runs packet capture on a dedicated blocking
+            // thread, so this delays subsequent packets. Cap and clamp were
+            // applied upstream in receiver::mod::apply_semantic_tlv_processing.
+            if let Some(behavior) = response.reflected_control {
+                if behavior.extra_copies > 0 {
+                    let interval = std::time::Duration::from_nanos(behavior.interval_ns as u64);
+                    for _ in 0..behavior.extra_copies {
+                        std::thread::sleep(interval);
+                        match try_send(&response.data, send_target) {
+                            Ok(_) => {
+                                config
+                                    .counters
+                                    .packets_reflected
+                                    .fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                            Err(e) => {
+                                log::debug!("Reflected Control extra send failed: {}", e);
+                                config
+                                    .counters
+                                    .packets_dropped
+                                    .fetch_add(1, AtomicOrdering::Relaxed);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         } else {
             config
                 .counters

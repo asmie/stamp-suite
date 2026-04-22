@@ -277,6 +277,46 @@ pub struct Configuration {
     /// Maximum packets per second per source (0 = unlimited).
     #[clap(long, default_value_t = 0)]
     pub max_pps: u32,
+
+    /// Enable the BER TLVs (draft-gandhi-ippm-stamp-ber-05):
+    /// Bit Pattern in Padding (Type 240), Bit Error Count (Type 241), and
+    /// Max Bit Error Burst Size (Type 242). Sender-side only; the reflector
+    /// computes the counts against the incoming Extra Padding.
+    #[clap(long)]
+    pub ber: bool,
+
+    /// Bit pattern used to fill the Extra Padding TLV when `--ber` is set.
+    /// Hex string (e.g. "ff00" or "aa55"). Defaults to the draft's recommended
+    /// pattern (0xFF00). Ignored unless `--ber` is set.
+    #[clap(long, value_name = "HEX")]
+    pub ber_pattern: Option<String>,
+
+    /// Padding length in bytes for the Extra Padding TLV that accompanies the
+    /// BER TLVs. Ignored unless `--ber` is set.
+    #[clap(long, default_value_t = 64)]
+    pub ber_padding_size: usize,
+
+    /// Request asymmetrical reply traffic (draft-ietf-ippm-asymmetrical-pkts §3).
+    /// The sender includes a Reflected Test Packet Control TLV (Type 12) asking
+    /// the reflector to emit N copies of the reply. Setting this to a value
+    /// greater than 1 activates the TLV.
+    #[clap(
+        long,
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u16)
+    )]
+    pub reflected_control_count: u16,
+
+    /// Requested reply packet length for the Reflected Test Packet Control TLV.
+    /// 0 means "don't pad" (the reflector will set C flag anyway if it cannot
+    /// honour). Ignored unless `--reflected-control-count` > 1.
+    #[clap(long, default_value_t = 0)]
+    pub reflected_control_length: u16,
+
+    /// Inter-packet gap in nanoseconds for the Reflected Test Packet Control TLV.
+    /// Ignored unless `--reflected-control-count` > 1.
+    #[clap(long, default_value_t = 1_000_000)]
+    pub reflected_control_interval_ns: u32,
 }
 
 impl Configuration {

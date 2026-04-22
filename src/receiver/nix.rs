@@ -150,9 +150,11 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         return;
     }
 
-    // Wrap in tokio for async readiness notifications
+    // Wrap in tokio for async readiness notifications. Arc so spawned tasks
+    // (e.g. Reflected Test Packet Control multi-send,
+    // draft-ietf-ippm-asymmetrical-pkts §3) can share the socket.
     let tokio_socket = match UdpSocket::from_std(std_socket) {
-        Ok(s) => s,
+        Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("Error: Failed to create tokio socket: {}", e);
             return;
@@ -492,6 +494,45 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                             ]);
                             let send_ts = crate::time::generate_timestamp(conf.clock_source);
                             session.record_reflection(reflected_seq, send_ts);
+                        }
+
+                        // Reflected Test Packet Control multi-send
+                        // (draft-ietf-ippm-asymmetrical-pkts §3). Emit the
+                        // additional copies asynchronously so the main recv
+                        // loop is not blocked by the inter-packet gap.
+                        if let Some(behavior) = response.reflected_control {
+                            if behavior.extra_copies > 0 {
+                                let sock = Arc::clone(&tokio_socket);
+                                let data = response.data.clone();
+                                let target = send_target;
+                                let counters_for_task = Arc::clone(&counters);
+                                tokio::spawn(async move {
+                                    let interval =
+                                        Duration::from_nanos(behavior.interval_ns as u64);
+                                    for _ in 0..behavior.extra_copies {
+                                        tokio::time::sleep(interval).await;
+                                        match sock.send_to(&data, target).await {
+                                            Ok(_) => {
+                                                counters_for_task.packets_reflected.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
+                                            Err(e) => {
+                                                log::debug!(
+                                                    "Reflected Control extra send failed: {}",
+                                                    e
+                                                );
+                                                counters_for_task.packets_dropped.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
                         }
                     } else {
                         counters
