@@ -1,6 +1,6 @@
 # stamp-suite
 
-Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust (RFC 8762, RFC 8972, RFC 9503, and RFC 9534)
+Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust (RFC 8762, RFC 8972, RFC 9503, and RFC 9534; plus experimental support for draft-ietf-ippm-asymmetrical-pkts and draft-gandhi-ippm-stamp-ber)
 
 [![CI](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml/badge.svg)](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml)
 [![Dependency status](https://deps.rs/repo/github/asmie/stamp-suite/status.svg)](https://deps.rs/repo/github/asmie/stamp-suite)
@@ -9,7 +9,7 @@ Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust (RFC 8
 
 ## About
 
-stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Protocol (STAMP) as defined in RFC 8762, RFC 8972, RFC 9503, and RFC 9534. It provides a single binary that can operate as either a Session-Sender (client) or Session-Reflector (server) for measuring packet loss and network delays.
+stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Protocol (STAMP) as defined in RFC 8762, RFC 8972, RFC 9503, and RFC 9534. It also includes experimental support for two IETF drafts: Reflected Test Packet Control (draft-ietf-ippm-asymmetrical-pkts, Type 12) for asymmetrical reply traffic, and Bit Error Rate measurement (draft-gandhi-ippm-stamp-ber, Types 240/241/242). It provides a single binary that can operate as either a Session-Sender (client) or Session-Reflector (server) for measuring packet loss and network delays.
 
 ### Key Features
 
@@ -17,6 +17,8 @@ stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Pr
 - RFC 8972 TLV extension support with full processing for all defined types
 - RFC 9503 Segment Routing extensions (Destination Node Address, Return Path with SR-MPLS/SRv6)
 - RFC 9534 Micro-session ID TLV for LAG per-member-link measurement
+- Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts-14, Type 12) for asymmetrical reply measurement
+- Bit Error Rate TLVs (draft-gandhi-ippm-stamp-ber-05, Types 240/241/242) for residual BER measurement against a known padding pattern
 - Class of Service (CoS) TLV support with DSCP/ECN measurement (RFC 8972 §5.2)
 - Location, Timestamp Info, Direct Measurement, Access Report, and Follow-Up Telemetry TLVs
 - HMAC authentication support
@@ -174,6 +176,18 @@ stamp-suite --remote-addr 192.168.1.100 --return-srv6-sids 2001:db8::1,2001:db8:
 # With Micro-session ID TLV for LAG member link measurement (RFC 9534)
 stamp-suite --remote-addr 192.168.1.100 --micro-session-id 1
 
+# Request asymmetrical reply traffic: 4 replies at 1ms intervals
+# (draft-ietf-ippm-asymmetrical-pkts, Type 12)
+stamp-suite --remote-addr 192.168.1.100 \
+    --reflected-control-count 4 \
+    --reflected-control-interval-ns 1000000
+
+# Enable Bit Error Rate TLVs against a 0xFF00 pattern (draft-gandhi-ippm-stamp-ber)
+stamp-suite --remote-addr 192.168.1.100 --ber --ber-padding-size 128
+
+# BER with a custom pattern (hex, with or without 0x prefix)
+stamp-suite --remote-addr 192.168.1.100 --ber --ber-pattern aa55 --ber-padding-size 256
+
 # Combine multiple TLV types
 stamp-suite --remote-addr 192.168.1.100 \
     --cos --dscp 46 \
@@ -220,6 +234,12 @@ Options:
       --return-srv6-sids <SIDS>    Return Path SRv6 segment list, comma-separated (RFC 9503)
       --micro-session-id <ID>      Sender micro-session member link ID for LAG measurement (RFC 9534)
       --reflector-member-link-id <ID> Reflector member link ID for LAG micro-sessions (RFC 9534)
+      --reflected-control-count <N> Number of reply packets to request (Type 12, >1 activates)
+      --reflected-control-length <LEN> Requested reply packet length in octets (0 = don't pad)
+      --reflected-control-interval-ns <NS> Inter-packet gap in nanoseconds [default: 1000000]
+      --ber                        Enable BER TLVs (Types 240/241/242, sender side)
+      --ber-pattern <HEX>          Bit pattern to repeat in the Extra Padding (default: ff00)
+      --ber-padding-size <BYTES>   Extra Padding length used with --ber [default: 64]
       --metrics                    Enable Prometheus metrics endpoint (requires metrics feature)
       --metrics-addr <ADDR>        Metrics server bind address [default: 127.0.0.1:9090]
       --snmp                       Enable SNMP AgentX sub-agent (requires snmp feature, Unix only)
@@ -294,8 +314,12 @@ The implementation supports RFC 8972 TLV (Type-Length-Value) extensions, which a
 | 9 | Destination Node Address | Verify intended reflector identity (RFC 9503 §4) | Full |
 | 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | Full |
 | 11 | Micro-session ID | LAG member link identifiers for per-link measurement (RFC 9534 §3.1) | Full |
+| 12 | Reflected Test Packet Control | Asymmetrical reply request — count, length, interval (draft-ietf-ippm-asymmetrical-pkts-14) | Experimental |
+| 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-05) | Experimental |
+| 241 | BER Bit Error Count | u32 error-bit count, computed by reflector | Experimental |
+| 242 | BER Max Bit Error Burst Size | u32 longest consecutive error run, computed by reflector | Experimental |
 
-**Status**: Full = structured parsing, validation, and reflector field population. SR-MPLS/SRv6 forwarding is echoed with U-flag (actual segment routing is out of scope for userspace UDP).
+**Status**: Full = structured parsing, validation, and reflector field population. Experimental = implements an active IETF draft; wire format and type numbers for BER (240/241/242) are TBD in the draft (experimental-range picks) while Reflected Control (Type 12) is IANA-assigned. SR-MPLS/SRv6 forwarding is echoed with U-flag (actual segment routing is out of scope for userspace UDP).
 
 ### TLV Handling Modes
 
@@ -327,7 +351,7 @@ The implementation is fully backward compatible:
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-- **Flags (1 octet)**: U=Unrecognized (bit 0), M=Malformed (bit 1), I=Integrity failed (bit 2), Reserved (bits 3-7)
+- **Flags (1 octet)**: U=Unrecognized (bit 0), M=Malformed (bit 1), I=Integrity failed (bit 2), C=Conformant Reflected Packet (bit 3, draft-ietf-ippm-asymmetrical-pkts, set only on Type 12 TLVs), Reserved (bits 4-7)
 - **Type (1 octet)**: TLV type identifier (0-255)
 - **Length (2 octets)**: Length of Value field in bytes
 
@@ -445,6 +469,43 @@ stamp-suite -i --reflector-member-link-id 2
 
 The sender sets its member link ID in outgoing packets. The reflector validates any non-zero reflector ID in the received TLV (discards on mismatch), echoes the sender ID unchanged, and fills in its own member link ID.
 
+### Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts)
+
+The Reflected Test Packet Control TLV (Type 12, IANA-assigned) lets the sender request asymmetrical reply traffic — multiple reply copies spaced at a specified interval:
+
+```bash
+# Ask for 4 replies, 1 ms apart
+stamp-suite --remote-addr 192.168.1.100 \
+    --reflected-control-count 4 \
+    --reflected-control-interval-ns 1000000
+```
+
+Reflector behaviour:
+- Emits up to 16 reply packets per request (hard cap in `REFLECTED_CONTROL_MAX_COUNT`); excess requests are clamped and the **C flag** (Conformant Reflected Packet, bit 3 of the TLV flags byte) is set on the echoed TLV to indicate non-conformance.
+- Clamps the inter-packet interval to at least 1 µs.
+- A non-zero requested packet length is not honoured in this implementation (the reply is not re-padded); the C flag is set to signal this.
+- On the `nix` backend extra copies are sent on a spawned tokio task so the recv loop is never blocked; the `pnet` backend sleeps inline on its capture thread.
+
+### Bit Error Rate TLVs (draft-gandhi-ippm-stamp-ber)
+
+Three experimental TLVs cooperate to measure residual bit errors in the Extra Padding TLV (RFC 8972 Type 1). Type numbers in the draft are TBD; this implementation uses 240/241/242 from RFC 8972's experimental range.
+
+| Type | Name | Direction |
+|------|------|-----------|
+| 240 | Bit Pattern in Padding | sender → reflector (carries the pattern used to fill padding) |
+| 241 | Bit Error Count in Padding | reflector fills (u32 popcount of XOR diff) |
+| 242 | Max Bit Error Burst Size | reflector fills (u32 longest consecutive error run) |
+
+```bash
+# Default pattern 0xFF00, 128-byte padding
+stamp-suite --remote-addr 192.168.1.100 --ber --ber-padding-size 128
+
+# Custom pattern (hex; `0x` prefix optional)
+stamp-suite --remote-addr 192.168.1.100 --ber --ber-pattern aa55 --ber-padding-size 256
+```
+
+The reflector XORs the received padding against the expected pattern (from the Bit Pattern TLV, or 0xFF00 if absent), counts error bits and the longest consecutive error run across byte boundaries, and writes the results into Types 241 and 242. Per draft §3, duplicate BER TLVs or a missing companion Extra Padding TLV cause the reflector to set the U-flag on all BER TLVs and skip the computation.
+
 ## Prometheus Metrics
 
 When built with `--features metrics`, the reflector can expose Prometheus metrics:
@@ -501,6 +562,8 @@ The project is functional for STAMP measurements with the following features:
 - Full RFC 8972 TLV extension support (all 8 defined TLV types)
 - RFC 9503 Segment Routing extensions (Destination Node Address and Return Path TLVs)
 - RFC 9534 Micro-session ID TLV for LAG per-member-link measurement
+- Experimental Reflected Test Packet Control TLV for asymmetrical reply measurement (draft-ietf-ippm-asymmetrical-pkts-14, Type 12)
+- Experimental Bit Error Rate TLVs for residual BER measurement (draft-gandhi-ippm-stamp-ber-05, Types 240/241/242)
 - HMAC authentication support (base packet and TLV integrity)
 - Class of Service TLV with DSCP/ECN measurement (RFC 8972 §5.2)
 - Location TLV with real destination address capture (even on wildcard binds)
@@ -550,3 +613,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [RFC 8972 - Simple Two-Way Active Measurement Protocol Optional Extensions](https://datatracker.ietf.org/doc/html/rfc8972)
 - [RFC 9503 - Simple Two-Way Active Measurement Protocol Extensions for Segment Routing Networks](https://datatracker.ietf.org/doc/html/rfc9503)
 - [RFC 9534 - Simple Two-Way Active Measurement Protocol Extensions for Performance Measurement on a Link Aggregation Group](https://datatracker.ietf.org/doc/html/rfc9534)
+- [draft-ietf-ippm-asymmetrical-pkts - Performance Measurement with Asymmetrical Traffic Using STAMP](https://datatracker.ietf.org/doc/draft-ietf-ippm-asymmetrical-pkts/) (IETF IPPM working group draft; in RFC Editor queue)
+- [draft-gandhi-ippm-stamp-ber - STAMP Extensions for Residual Bit Error Rate Measurement](https://datatracker.ietf.org/doc/draft-gandhi-ippm-stamp-ber/) (individual IETF draft)
