@@ -122,7 +122,8 @@ fn read_array<const N: usize>(buf: &[u8], offset: usize) -> [u8; N] {
 /// Unauthenticated STAMP test packet sent by the Session-Sender.
 ///
 /// This is the basic packet format without HMAC authentication (44 bytes).
-/// See RFC 8762 Section 4.2.
+/// See RFC 8762 Section 4.2, with the RFC 8972 §3 SSID extension occupying
+/// the two octets immediately following Error Estimate.
 ///
 /// Wire format:
 /// ```text
@@ -134,10 +135,10 @@ fn read_array<const N: usize>(buf: &[u8], offset: usize) -> [u8; N] {
 /// |                          Timestamp                           |
 /// |                                                               |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |         Error Estimate        |                               |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               +
+/// |         Error Estimate        |             SSID              |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |                                                               |
-/// |                         MBZ (30 octets)                       |
+/// |                         MBZ (28 octets)                       |
 /// |                                                               |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
@@ -149,8 +150,10 @@ pub struct PacketUnauthenticated {
     pub timestamp: u64,
     /// Error estimate for the timestamp.
     pub error_estimate: u16,
+    /// Session-Sender Identifier per RFC 8972 §3 (0 if unused).
+    pub ssid: u16,
     /// Must Be Zero - reserved padding bytes.
-    pub mbz: [u8; 30],
+    pub mbz: [u8; 28],
 }
 
 impl PacketUnauthenticated {
@@ -160,7 +163,8 @@ impl PacketUnauthenticated {
         buf[0..4].copy_from_slice(&self.sequence_number.to_be_bytes());
         buf[4..12].copy_from_slice(&self.timestamp.to_be_bytes());
         buf[12..14].copy_from_slice(&self.error_estimate.to_be_bytes());
-        buf[14..44].copy_from_slice(&self.mbz);
+        buf[14..16].copy_from_slice(&self.ssid.to_be_bytes());
+        buf[16..44].copy_from_slice(&self.mbz);
         buf
     }
 
@@ -174,7 +178,8 @@ impl PacketUnauthenticated {
             sequence_number: read_u32(buf, 0),
             timestamp: read_u64(buf, 4),
             error_estimate: read_u16(buf, 12),
-            mbz: read_array(buf, 14),
+            ssid: read_u16(buf, 14),
+            mbz: read_array(buf, 16),
         })
     }
 
@@ -191,7 +196,8 @@ impl PacketUnauthenticated {
             sequence_number: read_u32(&padded, 0),
             timestamp: read_u64(&padded, 4),
             error_estimate: read_u16(&padded, 12),
-            mbz: read_array(&padded, 14),
+            ssid: read_u16(&padded, 14),
+            mbz: read_array(&padded, 16),
         }
     }
 }
@@ -234,8 +240,8 @@ pub struct ReflectedPacketUnauthenticated {
     pub timestamp: u64,
     /// Reflector's error estimate.
     pub error_estimate: u16,
-    /// Must Be Zero - reserved.
-    pub mbz1: u16,
+    /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §4.1.1).
+    pub ssid: u16,
     /// Timestamp when the reflector received the test packet.
     pub receive_timestamp: u64,
     /// Original sender's sequence number (echoed back).
@@ -244,8 +250,8 @@ pub struct ReflectedPacketUnauthenticated {
     pub sess_sender_timestamp: u64,
     /// Original sender's error estimate (echoed back).
     pub sess_sender_err_estimate: u16,
-    /// Must Be Zero - reserved.
-    pub mbz2: u16,
+    /// Session-Sender SSID echoed from the received test packet (RFC 8972 §4.1.1).
+    pub sess_sender_ssid: u16,
     /// TTL/Hop Limit of the received test packet.
     pub sess_sender_ttl: u8,
     /// Must Be Zero - reserved (3 bytes).
@@ -259,12 +265,12 @@ impl ReflectedPacketUnauthenticated {
         buf[0..4].copy_from_slice(&self.sequence_number.to_be_bytes());
         buf[4..12].copy_from_slice(&self.timestamp.to_be_bytes());
         buf[12..14].copy_from_slice(&self.error_estimate.to_be_bytes());
-        buf[14..16].copy_from_slice(&self.mbz1.to_be_bytes());
+        buf[14..16].copy_from_slice(&self.ssid.to_be_bytes());
         buf[16..24].copy_from_slice(&self.receive_timestamp.to_be_bytes());
         buf[24..28].copy_from_slice(&self.sess_sender_seq_number.to_be_bytes());
         buf[28..36].copy_from_slice(&self.sess_sender_timestamp.to_be_bytes());
         buf[36..38].copy_from_slice(&self.sess_sender_err_estimate.to_be_bytes());
-        buf[38..40].copy_from_slice(&self.mbz2.to_be_bytes());
+        buf[38..40].copy_from_slice(&self.sess_sender_ssid.to_be_bytes());
         buf[40] = self.sess_sender_ttl;
         buf[41..44].copy_from_slice(&self.mbz3);
         buf
@@ -280,12 +286,12 @@ impl ReflectedPacketUnauthenticated {
             sequence_number: read_u32(buf, 0),
             timestamp: read_u64(buf, 4),
             error_estimate: read_u16(buf, 12),
-            mbz1: read_u16(buf, 14),
+            ssid: read_u16(buf, 14),
             receive_timestamp: read_u64(buf, 16),
             sess_sender_seq_number: read_u32(buf, 24),
             sess_sender_timestamp: read_u64(buf, 28),
             sess_sender_err_estimate: read_u16(buf, 36),
-            mbz2: read_u16(buf, 38),
+            sess_sender_ssid: read_u16(buf, 38),
             sess_sender_ttl: buf[40],
             mbz3: read_array(buf, 41),
         })
@@ -304,12 +310,12 @@ impl ReflectedPacketUnauthenticated {
             sequence_number: read_u32(&padded, 0),
             timestamp: read_u64(&padded, 4),
             error_estimate: read_u16(&padded, 12),
-            mbz1: read_u16(&padded, 14),
+            ssid: read_u16(&padded, 14),
             receive_timestamp: read_u64(&padded, 16),
             sess_sender_seq_number: read_u32(&padded, 24),
             sess_sender_timestamp: read_u64(&padded, 28),
             sess_sender_err_estimate: read_u16(&padded, 36),
-            mbz2: read_u16(&padded, 38),
+            sess_sender_ssid: read_u16(&padded, 38),
             sess_sender_ttl: padded[40],
             mbz3: read_array(&padded, 41),
         }
@@ -319,7 +325,8 @@ impl ReflectedPacketUnauthenticated {
 /// Authenticated STAMP test packet sent by the Session-Sender.
 ///
 /// Includes HMAC for integrity verification (112 bytes).
-/// See RFC 8762 Section 4.4.
+/// See RFC 8762 Section 4.4, with the RFC 8972 §3 SSID extension occupying
+/// the two octets immediately following Error Estimate.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct PacketAuthenticated {
     /// Packet sequence number for ordering and loss detection.
@@ -330,8 +337,10 @@ pub struct PacketAuthenticated {
     pub timestamp: u64,
     /// Error estimate for the timestamp.
     pub error_estimate: u16,
-    /// Must Be Zero - reserved padding (70 bytes total = 32+32+6).
-    pub mbz1a: [u8; 32],
+    /// Session-Sender Identifier per RFC 8972 §3 (0 if unused).
+    pub ssid: u16,
+    /// Must Be Zero - reserved padding (68 bytes total = 30+32+6).
+    pub mbz1a: [u8; 30],
     pub mbz1b: [u8; 32],
     pub mbz1c: [u8; 6],
     /// HMAC for packet authentication.
@@ -346,7 +355,8 @@ impl PacketAuthenticated {
         buf[4..16].copy_from_slice(&self.mbz0);
         buf[16..24].copy_from_slice(&self.timestamp.to_be_bytes());
         buf[24..26].copy_from_slice(&self.error_estimate.to_be_bytes());
-        buf[26..58].copy_from_slice(&self.mbz1a);
+        buf[26..28].copy_from_slice(&self.ssid.to_be_bytes());
+        buf[28..58].copy_from_slice(&self.mbz1a);
         buf[58..90].copy_from_slice(&self.mbz1b);
         buf[90..96].copy_from_slice(&self.mbz1c);
         buf[96..112].copy_from_slice(&self.hmac);
@@ -364,7 +374,8 @@ impl PacketAuthenticated {
             mbz0: read_array(buf, 4),
             timestamp: read_u64(buf, 16),
             error_estimate: read_u16(buf, 24),
-            mbz1a: read_array(buf, 26),
+            ssid: read_u16(buf, 26),
+            mbz1a: read_array(buf, 28),
             mbz1b: read_array(buf, 58),
             mbz1c: read_array(buf, 90),
             hmac: read_array(buf, 96),
@@ -396,7 +407,8 @@ impl PacketAuthenticated {
             mbz0: read_array(&padded, 4),
             timestamp: read_u64(&padded, 16),
             error_estimate: read_u16(&padded, 24),
-            mbz1a: read_array(&padded, 26),
+            ssid: read_u16(&padded, 26),
+            mbz1a: read_array(&padded, 28),
             mbz1b: read_array(&padded, 58),
             mbz1c: read_array(&padded, 90),
             hmac: read_array(&padded, 96),
@@ -420,8 +432,10 @@ pub struct ReflectedPacketAuthenticated {
     pub timestamp: u64,
     /// Reflector's error estimate.
     pub error_estimate: u16,
-    /// Must Be Zero - reserved padding (6 bytes).
-    pub mbz1: [u8; 6],
+    /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §4.1.2).
+    pub ssid: u16,
+    /// Must Be Zero - reserved padding (4 bytes).
+    pub mbz1: [u8; 4],
     /// Timestamp when the reflector received the test packet.
     pub receive_timestamp: u64,
     /// Must Be Zero - reserved padding (8 bytes).
@@ -434,8 +448,10 @@ pub struct ReflectedPacketAuthenticated {
     pub sess_sender_timestamp: u64,
     /// Original sender's error estimate (echoed back).
     pub sess_sender_err_estimate: u16,
-    /// Must Be Zero - reserved padding (6 bytes).
-    pub mbz4: [u8; 6],
+    /// Session-Sender SSID echoed from the received test packet (RFC 8972 §4.1.2).
+    pub sess_sender_ssid: u16,
+    /// Must Be Zero - reserved padding (4 bytes).
+    pub mbz4: [u8; 4],
     /// TTL/Hop Limit of the received test packet.
     pub sess_sender_ttl: u8,
     /// Must Be Zero - reserved padding (15 bytes).
@@ -452,14 +468,16 @@ impl ReflectedPacketAuthenticated {
         buf[4..16].copy_from_slice(&self.mbz0);
         buf[16..24].copy_from_slice(&self.timestamp.to_be_bytes());
         buf[24..26].copy_from_slice(&self.error_estimate.to_be_bytes());
-        buf[26..32].copy_from_slice(&self.mbz1);
+        buf[26..28].copy_from_slice(&self.ssid.to_be_bytes());
+        buf[28..32].copy_from_slice(&self.mbz1);
         buf[32..40].copy_from_slice(&self.receive_timestamp.to_be_bytes());
         buf[40..48].copy_from_slice(&self.mbz2);
         buf[48..52].copy_from_slice(&self.sess_sender_seq_number.to_be_bytes());
         buf[52..64].copy_from_slice(&self.mbz3);
         buf[64..72].copy_from_slice(&self.sess_sender_timestamp.to_be_bytes());
         buf[72..74].copy_from_slice(&self.sess_sender_err_estimate.to_be_bytes());
-        buf[74..80].copy_from_slice(&self.mbz4);
+        buf[74..76].copy_from_slice(&self.sess_sender_ssid.to_be_bytes());
+        buf[76..80].copy_from_slice(&self.mbz4);
         buf[80] = self.sess_sender_ttl;
         buf[81..96].copy_from_slice(&self.mbz5);
         buf[96..112].copy_from_slice(&self.hmac);
@@ -477,14 +495,16 @@ impl ReflectedPacketAuthenticated {
             mbz0: read_array(buf, 4),
             timestamp: read_u64(buf, 16),
             error_estimate: read_u16(buf, 24),
-            mbz1: read_array(buf, 26),
+            ssid: read_u16(buf, 26),
+            mbz1: read_array(buf, 28),
             receive_timestamp: read_u64(buf, 32),
             mbz2: read_array(buf, 40),
             sess_sender_seq_number: read_u32(buf, 48),
             mbz3: read_array(buf, 52),
             sess_sender_timestamp: read_u64(buf, 64),
             sess_sender_err_estimate: read_u16(buf, 72),
-            mbz4: read_array(buf, 74),
+            sess_sender_ssid: read_u16(buf, 74),
+            mbz4: read_array(buf, 76),
             sess_sender_ttl: buf[80],
             mbz5: read_array(buf, 81),
             hmac: read_array(buf, 96),
@@ -506,14 +526,16 @@ impl ReflectedPacketAuthenticated {
             mbz0: read_array(&padded, 4),
             timestamp: read_u64(&padded, 16),
             error_estimate: read_u16(&padded, 24),
-            mbz1: read_array(&padded, 26),
+            ssid: read_u16(&padded, 26),
+            mbz1: read_array(&padded, 28),
             receive_timestamp: read_u64(&padded, 32),
             mbz2: read_array(&padded, 40),
             sess_sender_seq_number: read_u32(&padded, 48),
             mbz3: read_array(&padded, 52),
             sess_sender_timestamp: read_u64(&padded, 64),
             sess_sender_err_estimate: read_u16(&padded, 72),
-            mbz4: read_array(&padded, 74),
+            sess_sender_ssid: read_u16(&padded, 74),
+            mbz4: read_array(&padded, 76),
             sess_sender_ttl: padded[80],
             mbz5: read_array(&padded, 81),
             hmac: read_array(&padded, 96),
@@ -873,7 +895,8 @@ mod tests {
             sequence_number: 0,
             timestamp: 0,
             error_estimate: 0,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         assert_eq!(unauth.to_bytes().len(), 44);
 
@@ -881,12 +904,12 @@ mod tests {
             sequence_number: 0,
             timestamp: 0,
             error_estimate: 0,
-            mbz1: 0,
+            ssid: 0,
             receive_timestamp: 0,
             sess_sender_seq_number: 0,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            mbz2: 0,
+            sess_sender_ssid: 0,
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -897,7 +920,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 0,
             error_estimate: 0,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -909,14 +933,16 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 0,
             error_estimate: 0,
-            mbz1: [0; 6],
+            ssid: 0,
+            mbz1: [0; 4],
             receive_timestamp: 0,
             mbz2: [0; 8],
             sess_sender_seq_number: 0,
             mbz3: [0; 12],
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            mbz4: [0; 6],
+            sess_sender_ssid: 0,
+            mbz4: [0; 4],
             sess_sender_ttl: 0,
             mbz5: [0; 15],
             hmac: [0; 16],
@@ -930,7 +956,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 123456789,
             error_estimate: 100,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let serialized = packet.to_bytes();
         let deserialized = PacketUnauthenticated::from_bytes(&serialized).unwrap();
@@ -943,12 +970,12 @@ mod tests {
             sequence_number: 1,
             timestamp: 123456789,
             error_estimate: 100,
-            mbz1: 0,
+            ssid: 0,
             receive_timestamp: 987654321,
             sess_sender_seq_number: 2,
             sess_sender_timestamp: 123456789,
             sess_sender_err_estimate: 100,
-            mbz2: 0,
+            sess_sender_ssid: 0,
             sess_sender_ttl: 64,
             mbz3: [0; 3],
         };
@@ -964,7 +991,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 123456789,
             error_estimate: 100,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -981,14 +1009,16 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 123456789,
             error_estimate: 100,
-            mbz1: [0; 6],
+            ssid: 0,
+            mbz1: [0; 4],
             receive_timestamp: 987654321,
             mbz2: [0; 8],
             sess_sender_seq_number: 2,
             mbz3: [0; 12],
             sess_sender_timestamp: 123456789,
             sess_sender_err_estimate: 100,
-            mbz4: [0; 6],
+            sess_sender_ssid: 0,
+            mbz4: [0; 4],
             sess_sender_ttl: 64,
             mbz5: [0; 15],
             hmac: [0; 16],
@@ -1033,7 +1063,8 @@ mod tests {
             sequence_number: 0x12345678,
             timestamp: 0xDEADBEEFCAFEBABE,
             error_estimate: 0xABCD,
-            mbz: [0x42; 30],
+            ssid: 0xBEEF,
+            mbz: [0x42; 28],
         };
         let serialized = packet.to_bytes();
         let deserialized = PacketUnauthenticated::from_bytes(&serialized).unwrap();
@@ -1041,7 +1072,8 @@ mod tests {
         assert_eq!(deserialized.sequence_number, 0x12345678);
         assert_eq!(deserialized.timestamp, 0xDEADBEEFCAFEBABE);
         assert_eq!(deserialized.error_estimate, 0xABCD);
-        assert_eq!(deserialized.mbz, [0x42; 30]);
+        assert_eq!(deserialized.ssid, 0xBEEF);
+        assert_eq!(deserialized.mbz, [0x42; 28]);
     }
 
     #[test]
@@ -1051,12 +1083,12 @@ mod tests {
             sequence_number: 100,
             timestamp: 200,
             error_estimate: 300,
-            mbz1: 0,
+            ssid: 0x11,
             receive_timestamp: 400,
             sess_sender_seq_number: 500,
             sess_sender_timestamp: 600,
             sess_sender_err_estimate: 700,
-            mbz2: 0,
+            sess_sender_ssid: 0x22,
             sess_sender_ttl: 64,
             mbz3: [0; 3],
         };
@@ -1067,6 +1099,8 @@ mod tests {
         assert_eq!(deserialized.sess_sender_seq_number, 500);
         assert_eq!(deserialized.sess_sender_timestamp, 600);
         assert_eq!(deserialized.sess_sender_err_estimate, 700);
+        assert_eq!(deserialized.ssid, 0x11);
+        assert_eq!(deserialized.sess_sender_ssid, 0x22);
         assert_eq!(deserialized.sess_sender_ttl, 64);
     }
 
@@ -1077,7 +1111,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 2,
             error_estimate: 3,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let mut bytes = packet.to_bytes().to_vec();
 
@@ -1096,7 +1131,8 @@ mod tests {
             sequence_number: 0x12345678,
             timestamp: 0,
             error_estimate: 0,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let bytes = packet.to_bytes();
 
@@ -1113,7 +1149,8 @@ mod tests {
             sequence_number: 0,
             timestamp: 0x0102030405060708,
             error_estimate: 0,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let bytes = packet.to_bytes();
 
@@ -1134,7 +1171,8 @@ mod tests {
             sequence_number: 0,
             timestamp: 0,
             error_estimate: 0xABCD,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let bytes = packet.to_bytes();
 
@@ -1144,19 +1182,54 @@ mod tests {
     }
 
     #[test]
-    fn test_mbz_bytes_at_correct_offset() {
-        let mbz_pattern = [0x42u8; 30];
+    fn test_ssid_at_correct_offset_unauth() {
+        // RFC 8972 §3: SSID occupies bytes 14-15 immediately after Error Estimate.
         let packet = PacketUnauthenticated {
             sequence_number: 0,
             timestamp: 0,
             error_estimate: 0,
+            ssid: 0x1234,
+            mbz: [0; 28],
+        };
+        let bytes = packet.to_bytes();
+        assert_eq!(bytes[14], 0x12);
+        assert_eq!(bytes[15], 0x34);
+    }
+
+    #[test]
+    fn test_ssid_at_correct_offset_auth() {
+        // RFC 8972 §3: SSID occupies bytes 26-27 in authenticated test packet.
+        let packet = PacketAuthenticated {
+            sequence_number: 0,
+            mbz0: [0; 12],
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0xABCD,
+            mbz1a: [0; 30],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+        let bytes = packet.to_bytes();
+        assert_eq!(bytes[26], 0xAB);
+        assert_eq!(bytes[27], 0xCD);
+    }
+
+    #[test]
+    fn test_mbz_bytes_at_correct_offset() {
+        let mbz_pattern = [0x42u8; 28];
+        let packet = PacketUnauthenticated {
+            sequence_number: 0,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
             mbz: mbz_pattern,
         };
         let bytes = packet.to_bytes();
 
-        // MBZ starts at offset 14
-        for i in 0..30 {
-            assert_eq!(bytes[14 + i], 0x42);
+        // MBZ starts at offset 16 (after 14-byte header + 2-byte SSID)
+        for i in 0..28 {
+            assert_eq!(bytes[16 + i], 0x42);
         }
     }
 
@@ -1168,14 +1241,15 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 0,
             error_estimate: 0,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: hmac_pattern,
         };
         let bytes = packet.to_bytes();
 
-        // HMAC starts at offset 96 (4+12+8+2+32+32+6)
+        // HMAC starts at offset 96 (4+12+8+2+2+30+32+6)
         for i in 0..16 {
             assert_eq!(bytes[96 + i], 0xAB);
         }
@@ -1188,7 +1262,8 @@ mod tests {
                 sequence_number: seq,
                 timestamp: 0,
                 error_estimate: 0,
-                mbz: [0; 30],
+                ssid: 0,
+                mbz: [0; 28],
             };
 
             let bytes = packet.to_bytes();
@@ -1209,7 +1284,8 @@ mod tests {
                 sequence_number: 0,
                 timestamp: ts,
                 error_estimate: 0,
-                mbz: [0; 30],
+                ssid: 0,
+                mbz: [0; 28],
             };
 
             let bytes = packet.to_bytes();
@@ -1230,7 +1306,8 @@ mod tests {
                 sequence_number: 0,
                 timestamp: 0,
                 error_estimate: ee,
-                mbz: [0; 30],
+                ssid: 0,
+                mbz: [0; 28],
             };
 
             let bytes = packet.to_bytes();
@@ -1251,12 +1328,12 @@ mod tests {
                 sequence_number: 0,
                 timestamp: 0,
                 error_estimate: 0,
-                mbz1: 0,
+                ssid: 0,
                 receive_timestamp: 0,
                 sess_sender_seq_number: 0,
                 sess_sender_timestamp: 0,
                 sess_sender_err_estimate: 0,
-                mbz2: 0,
+                sess_sender_ssid: 0,
                 sess_sender_ttl: ttl,
                 mbz3: [0; 3],
             };
@@ -1278,7 +1355,8 @@ mod tests {
             sequence_number: 0x12345678,
             timestamp: 0xDEADBEEFCAFEBABE,
             error_estimate: 0xABCD,
-            mbz: [0x42; 30],
+            ssid: 0x9876,
+            mbz: [0x42; 28],
         };
         let bytes = packet.to_bytes();
 
@@ -1288,21 +1366,23 @@ mod tests {
 
     #[test]
     fn test_from_bytes_lenient_unauth_short_packet() {
-        // Only first 20 bytes provided (seq + timestamp + error_estimate + 6 bytes mbz)
+        // Only first 20 bytes provided (seq + timestamp + error_estimate + ssid + 4 bytes mbz)
         let mut short_buf = [0u8; 20];
         short_buf[0..4].copy_from_slice(&0x12345678u32.to_be_bytes()); // seq
         short_buf[4..12].copy_from_slice(&0xDEADBEEFCAFEBABEu64.to_be_bytes()); // timestamp
         short_buf[12..14].copy_from_slice(&0xABCDu16.to_be_bytes()); // error_estimate
-        short_buf[14..20].copy_from_slice(&[0x42; 6]); // partial mbz
+        short_buf[14..16].copy_from_slice(&0x1122u16.to_be_bytes()); // ssid
+        short_buf[16..20].copy_from_slice(&[0x42; 4]); // partial mbz
 
         let restored = PacketUnauthenticated::from_bytes_lenient(&short_buf);
 
         assert_eq!(restored.sequence_number, 0x12345678);
         assert_eq!(restored.timestamp, 0xDEADBEEFCAFEBABE);
         assert_eq!(restored.error_estimate, 0xABCD);
-        // First 6 bytes should be 0x42, rest zero-filled
-        assert_eq!(restored.mbz[0..6], [0x42; 6]);
-        assert_eq!(restored.mbz[6..30], [0; 24]);
+        assert_eq!(restored.ssid, 0x1122);
+        // First 4 bytes should be 0x42, rest zero-filled
+        assert_eq!(restored.mbz[0..4], [0x42; 4]);
+        assert_eq!(restored.mbz[4..28], [0; 24]);
     }
 
     #[test]
@@ -1313,7 +1393,8 @@ mod tests {
         assert_eq!(restored.sequence_number, 0);
         assert_eq!(restored.timestamp, 0);
         assert_eq!(restored.error_estimate, 0);
-        assert_eq!(restored.mbz, [0; 30]);
+        assert_eq!(restored.ssid, 0);
+        assert_eq!(restored.mbz, [0; 28]);
     }
 
     #[test]
@@ -1323,7 +1404,8 @@ mod tests {
             mbz0: [0x11; 12],
             timestamp: 0xDEADBEEFCAFEBABE,
             error_estimate: 0xABCD,
-            mbz1a: [0x22; 32],
+            ssid: 0x9988,
+            mbz1a: [0x22; 30],
             mbz1b: [0x33; 32],
             mbz1c: [0x44; 6],
             hmac: [0x55; 16],
@@ -1336,13 +1418,14 @@ mod tests {
 
     #[test]
     fn test_from_bytes_lenient_auth_short_packet() {
-        // Only 30 bytes provided
+        // Only 30 bytes provided: seq(4) + mbz0(12) + timestamp(8) + error_estimate(2) + ssid(2) + 2 bytes mbz1a
         let mut short_buf = [0u8; 30];
         short_buf[0..4].copy_from_slice(&0x12345678u32.to_be_bytes()); // seq
         short_buf[4..16].copy_from_slice(&[0x11; 12]); // mbz0
         short_buf[16..24].copy_from_slice(&0xDEADBEEFCAFEBABEu64.to_be_bytes()); // timestamp
         short_buf[24..26].copy_from_slice(&0xABCDu16.to_be_bytes()); // error_estimate
-        short_buf[26..30].copy_from_slice(&[0x22; 4]); // partial mbz1a
+        short_buf[26..28].copy_from_slice(&0x4321u16.to_be_bytes()); // ssid
+        short_buf[28..30].copy_from_slice(&[0x22; 2]); // partial mbz1a
 
         let restored = PacketAuthenticated::from_bytes_lenient(&short_buf);
 
@@ -1350,9 +1433,10 @@ mod tests {
         assert_eq!(restored.mbz0, [0x11; 12]);
         assert_eq!(restored.timestamp, 0xDEADBEEFCAFEBABE);
         assert_eq!(restored.error_estimate, 0xABCD);
-        // First 4 bytes of mbz1a should be 0x22, rest zero-filled
-        assert_eq!(restored.mbz1a[0..4], [0x22; 4]);
-        assert_eq!(restored.mbz1a[4..32], [0; 28]);
+        assert_eq!(restored.ssid, 0x4321);
+        // First 2 bytes of mbz1a should be 0x22, rest zero-filled
+        assert_eq!(restored.mbz1a[0..2], [0x22; 2]);
+        assert_eq!(restored.mbz1a[2..30], [0; 28]);
         assert_eq!(restored.mbz1b, [0; 32]);
         assert_eq!(restored.mbz1c, [0; 6]);
         assert_eq!(restored.hmac, [0; 16]);
@@ -1366,7 +1450,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let ext = ExtendedPacketUnauthenticated::new(base);
 
@@ -1382,7 +1467,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let mut tlvs = TlvList::new();
@@ -1403,7 +1489,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let mut tlvs = TlvList::new();
@@ -1426,7 +1513,8 @@ mod tests {
             sequence_number: 42,
             timestamp: 12345,
             error_estimate: 100,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let mut tlvs = TlvList::new();
@@ -1448,7 +1536,8 @@ mod tests {
             sequence_number: 42,
             timestamp: 12345,
             error_estimate: 100,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let bytes = base.to_bytes();
 
@@ -1465,7 +1554,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -1485,7 +1575,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0xAB; 16],
@@ -1510,12 +1601,12 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz1: 0,
+            ssid: 0,
             receive_timestamp: 50,
             sess_sender_seq_number: 1,
             sess_sender_timestamp: 30,
             sess_sender_err_estimate: 5,
-            mbz2: 0,
+            sess_sender_ssid: 0,
             sess_sender_ttl: 64,
             mbz3: [0; 3],
         };
@@ -1539,14 +1630,16 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1: [0; 6],
+            ssid: 0,
+            mbz1: [0; 4],
             receive_timestamp: 50,
             mbz2: [0; 8],
             sess_sender_seq_number: 1,
             mbz3: [0; 12],
             sess_sender_timestamp: 30,
             sess_sender_err_estimate: 5,
-            mbz4: [0; 6],
+            sess_sender_ssid: 0,
+            mbz4: [0; 4],
             sess_sender_ttl: 64,
             mbz5: [0; 15],
             hmac: [0; 16],

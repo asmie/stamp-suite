@@ -287,7 +287,17 @@ impl TlvList {
             return if cc & 1 == 0 {
                 ReturnPathAction::SuppressReply
             } else {
-                ReturnPathAction::Normal // Same-link = normal for userspace UDP
+                // Bit 0 = 1 requests a reply on the same incoming link.
+                // On single-homed or directly-connected setups, a normal
+                // sendto(src_addr) already egresses over the incoming link
+                // and therefore satisfies the request. We cannot tell from
+                // TLV-processing time whether that will be the case, so we
+                // do not pre-emptively set the U-flag here — doing so would
+                // falsely advertise "unsupported" for the common path. Per
+                // RFC 9503 §4.1.1 the U-flag should be raised only when the
+                // backend actually determines the request was not honoured;
+                // that decision belongs in the send path, not the parser.
+                ReturnPathAction::Normal
             };
         }
 
@@ -780,13 +790,29 @@ mod tests {
     }
 
     #[test]
-    fn test_process_return_path_normal() {
+    fn test_process_return_path_same_link_does_not_preemptively_flag_u() {
+        // RFC 9503 §4.1.1: same-link request (bit 0 = 1). We cannot tell at
+        // TLV-processing time whether the backend's sendto() will actually
+        // egress over the incoming link — on single-homed hosts it trivially
+        // does. Pre-emptively setting U-flag here would falsely mark those
+        // responses "unsupported". The U-flag decision belongs in the send
+        // path once the backend knows what happened.
         let rp = ReturnPathTlv::with_control_code(0x1);
         let mut list = TlvList::new();
         list.push(rp.to_raw()).unwrap();
 
         let action = list.process_return_path(1234);
         assert_eq!(action, ReturnPathAction::Normal);
+
+        let echoed = list
+            .non_hmac_tlvs()
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ReturnPath)
+            .expect("return path TLV kept in response");
+        assert!(
+            !echoed.is_unrecognized(),
+            "same-link request must not pre-emptively set U-flag"
+        );
     }
 
     #[test]
@@ -804,13 +830,21 @@ mod tests {
     #[test]
     fn test_process_return_path_cc_reserved_bits_normal() {
         // RFC 9503: only bit 0 matters; reserved bits are ignored.
-        // 0xFF has bit 0 set → normal reply.
+        // 0xFF has bit 0 set → same-link request; U-flag is not pre-set
+        // since on single-homed paths the backend already satisfies it.
         let rp = ReturnPathTlv::with_control_code(0xFF);
         let mut list = TlvList::new();
         list.push(rp.to_raw()).unwrap();
 
         let action = list.process_return_path(1234);
         assert_eq!(action, ReturnPathAction::Normal);
+
+        let echoed = list
+            .non_hmac_tlvs()
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ReturnPath)
+            .expect("return path TLV kept in response");
+        assert!(!echoed.is_unrecognized());
     }
 
     #[test]
@@ -949,7 +983,6 @@ mod tests {
         // Padding differs from pattern on every bit of first byte.
         list.push(
             ExtraPaddingTlv {
-                ssid: None,
                 padding: vec![0xAA, 0x55],
             }
             .to_raw(),
@@ -981,7 +1014,6 @@ mod tests {
         // Padding 0xFF, pattern 0x00 → 8 errors, max burst 8.
         list.push(
             ExtraPaddingTlv {
-                ssid: None,
                 padding: vec![0xFF],
             }
             .to_raw(),
@@ -1016,7 +1048,6 @@ mod tests {
         let mut list = TlvList::new();
         list.push(
             ExtraPaddingTlv {
-                ssid: None,
                 padding: vec![0xFF, 0x00, 0xFF, 0x00],
             }
             .to_raw(),
@@ -1060,7 +1091,6 @@ mod tests {
         let mut list = TlvList::new();
         list.push(
             ExtraPaddingTlv {
-                ssid: None,
                 padding: vec![0xAA],
             }
             .to_raw(),

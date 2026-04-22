@@ -26,8 +26,8 @@ use crate::{
     tlv::{
         AccessReportTlv, BerBurstTlv, BerCountTlv, BerPatternTlv, ClassOfServiceTlv,
         DestinationNodeAddressTlv, DirectMeasurementTlv, ExtraPaddingTlv, FollowUpTelemetryTlv,
-        LocationTlv, MicroSessionIdTlv, RawTlv, ReflectedControlTlv, ReturnPathTlv,
-        SessionSenderId, SyncSource, TimestampInfoTlv, TimestampMethod, TlvList, TypedTlv,
+        LocationTlv, MicroSessionIdTlv, RawTlv, ReflectedControlTlv, ReturnPathTlv, SyncSource,
+        TimestampInfoTlv, TimestampMethod, TlvList, TypedTlv,
     },
 };
 
@@ -47,6 +47,10 @@ struct SenderRecvContext<'a> {
     packets_received: &'a mut u32,
     print_stats: bool,
     hmac_key: Option<&'a HmacKey>,
+    /// Sender's Micro-session ID from the outgoing MSID TLV (RFC 9534 §3.2).
+    /// Used to validate that the reflector echoed the same sender ID back;
+    /// `None` means the sender did not request Micro-session ID measurement.
+    expected_sender_msid: Option<u16>,
     #[cfg(feature = "metrics")]
     metrics_enabled: bool,
     #[cfg(all(unix, feature = "snmp"))]
@@ -248,7 +252,6 @@ pub async fn run_sender(
             padding_bytes.push(pattern_bytes[i % pattern_bytes.len()]);
         }
         let padding_tlv = ExtraPaddingTlv {
-            ssid: None,
             padding: padding_bytes,
         };
         extra_tlvs.push(padding_tlv.to_raw());
@@ -262,12 +265,11 @@ pub async fn run_sender(
         );
     }
 
-    // Check if we need to include TLV extensions
-    let use_tlvs = conf.ssid.is_some() || !extra_tlvs.is_empty() || conf.direct_measurement;
-    if use_tlvs {
-        if let Some(ssid) = conf.ssid {
-            log::info!("TLV extensions enabled with SSID: {}", ssid);
-        }
+    // Check if we need to include TLV extensions.
+    // SSID lives in the base header per RFC 8972 §3 — it alone does not force TLV mode.
+    let use_tlvs = !extra_tlvs.is_empty() || conf.direct_measurement;
+    if let Some(ssid) = conf.ssid {
+        log::info!("SSID enabled: {}", ssid);
     }
 
     // Precompute send strategy to avoid branching in hot loop.
@@ -344,6 +346,7 @@ pub async fn run_sender(
                 let mut packet = assemble_auth_packet(error_estimate_wire);
                 packet.sequence_number = seq_num;
                 packet.timestamp = send_timestamp;
+                packet.ssid = conf.ssid.unwrap_or(0);
                 finalize_auth_packet(&mut packet, key);
                 socket.send(&packet.to_bytes()).await
             }
@@ -362,6 +365,7 @@ pub async fn run_sender(
                 let mut packet = assemble_unauth_packet(error_estimate_wire);
                 packet.sequence_number = seq_num;
                 packet.timestamp = send_timestamp;
+                packet.ssid = conf.ssid.unwrap_or(0);
                 socket.send(&packet.to_bytes()).await
             }
         };
@@ -409,6 +413,7 @@ pub async fn run_sender(
                                 packets_received: &mut packets_received,
                                 print_stats: conf.print_stats,
                                 hmac_key: hmac_key.as_ref(),
+                                expected_sender_msid: conf.micro_session_id,
                                 #[cfg(feature = "metrics")]
                                 metrics_enabled,
                                 #[cfg(all(unix, feature = "snmp"))]
@@ -485,6 +490,7 @@ pub async fn run_sender(
                     packets_received: &mut packets_received,
                     print_stats: conf.print_stats,
                     hmac_key: hmac_key.as_ref(),
+                    expected_sender_msid: conf.micro_session_id,
                     #[cfg(feature = "metrics")]
                     metrics_enabled,
                     #[cfg(all(unix, feature = "snmp"))]
@@ -566,14 +572,25 @@ fn process_response(
 
             // Validate TLVs if present
             let tlv_info = if ext_packet.has_tlvs() {
-                validate_reflected_tlvs(
+                match validate_reflected_tlvs(
                     &ext_packet.tlvs,
                     data,
                     AUTH_BASE_SIZE,
                     ctx.hmac_key,
+                    ctx.expected_sender_msid,
                     #[cfg(feature = "metrics")]
                     ctx.metrics_enabled,
-                )
+                ) {
+                    Ok(info) => info,
+                    Err(reason) => {
+                        eprintln!("Discarding reflected packet seq={}: {}", seq_num, reason);
+                        #[cfg(feature = "metrics")]
+                        if ctx.metrics_enabled {
+                            crate::metrics::sender_metrics::record_tlv_error("M");
+                        }
+                        return;
+                    }
+                }
             } else {
                 None
             };
@@ -616,14 +633,28 @@ fn process_response(
 
         // Validate TLVs if present
         let tlv_info = if ext_packet.has_tlvs() {
-            validate_reflected_tlvs(
+            match validate_reflected_tlvs(
                 &ext_packet.tlvs,
                 data,
                 UNAUTH_BASE_SIZE,
                 ctx.hmac_key,
+                ctx.expected_sender_msid,
                 #[cfg(feature = "metrics")]
                 ctx.metrics_enabled,
-            )
+            ) {
+                Ok(info) => info,
+                Err(reason) => {
+                    eprintln!(
+                        "Discarding reflected packet seq={}: {}",
+                        base.sess_sender_seq_number, reason
+                    );
+                    #[cfg(feature = "metrics")]
+                    if ctx.metrics_enabled {
+                        crate::metrics::sender_metrics::record_tlv_error("M");
+                    }
+                    return;
+                }
+            }
         } else {
             None
         };
@@ -701,15 +732,74 @@ fn process_response(
 ///
 /// The `base_size` parameter specifies the fixed base packet size (44 for unauthenticated,
 /// 112 for authenticated) to correctly locate TLV bytes in the packet data.
+/// Reason a reflected packet is rejected without updating sender state.
+///
+/// Returned as the error variant of [`validate_reflected_tlvs`]. The caller
+/// must log and discard the packet: no RTT sample recorded, no `pending`
+/// entry consumed, no received counter incremented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TlvRejection {
+    /// Reflected Micro-session ID echoed a `sender_micro_session_id` that
+    /// does not match what this sender emitted (RFC 9534 §3.2 binding check).
+    /// A legitimate reflector always echoes the sender ID unchanged, so a
+    /// mismatch means the response belongs to a different session, a stale
+    /// packet, or a spoofed reply.
+    MsidMismatch { got: u16, expected: u16 },
+    /// Reflected Micro-session ID TLV could not be parsed. Since the TLV
+    /// carries the session binding, we cannot attribute the response to this
+    /// sender and must drop it.
+    MsidMalformed,
+}
+
+impl std::fmt::Display for TlvRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MsidMismatch { got, expected } => write!(
+                f,
+                "Micro-session ID mismatch (got sender_id={}, expected={})",
+                got, expected
+            ),
+            Self::MsidMalformed => {
+                write!(f, "malformed Micro-session ID TLV in reflected packet")
+            }
+        }
+    }
+}
+
 fn validate_reflected_tlvs(
     tlvs: &TlvList,
     data: &[u8],
     base_size: usize,
     hmac_key: Option<&HmacKey>,
+    expected_sender_msid: Option<u16>,
     #[cfg(feature = "metrics")] metrics_enabled: bool,
-) -> Option<String> {
+) -> Result<Option<String>, TlvRejection> {
     let mut status_parts = Vec::new();
     let tlv_count = tlvs.len();
+
+    // RFC 9534 §3.2: verify the reflector echoed our sender_micro_session_id
+    // unchanged. Mismatch or malformed parse invalidates the session binding —
+    // the caller must discard the response (bail with Err) rather than record
+    // RTT against a packet that may belong to a different session.
+    if let Some(expected) = expected_sender_msid {
+        for raw in tlvs.non_hmac_tlvs() {
+            if raw.tlv_type == crate::tlv::TlvType::MicroSessionId {
+                let parsed =
+                    MicroSessionIdTlv::from_raw(raw).map_err(|_| TlvRejection::MsidMalformed)?;
+                if parsed.sender_micro_session_id != expected {
+                    return Err(TlvRejection::MsidMismatch {
+                        got: parsed.sender_micro_session_id,
+                        expected,
+                    });
+                }
+                status_parts.push(format!(
+                    "MSID:ok(reflector={})",
+                    parsed.reflector_micro_session_id
+                ));
+                break;
+            }
+        }
+    }
 
     // Check for flagged TLVs
     let mut unrecognized_count = 0;
@@ -794,11 +884,11 @@ fn validate_reflected_tlvs(
         }
     }
 
-    if status_parts.is_empty() {
+    Ok(if status_parts.is_empty() {
         Some(format!("{} TLVs", tlv_count))
     } else {
         Some(format!("{} TLVs, {}", tlv_count, status_parts.join(", ")))
-    }
+    })
 }
 
 /// Parses an ASCII hex string (with optional `0x` prefix) into a byte vector.
@@ -820,7 +910,8 @@ fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
 pub fn assemble_unauth_packet(error_estimate: u16) -> PacketUnauthenticated {
     PacketUnauthenticated {
         timestamp: 0,
-        mbz: [0u8; 30],
+        ssid: 0,
+        mbz: [0u8; 28],
         error_estimate,
         sequence_number: 0,
     }
@@ -838,9 +929,10 @@ pub fn assemble_auth_packet(error_estimate: u16) -> PacketAuthenticated {
         timestamp: 0,
         mbz0: [0u8; 12],
         error_estimate,
+        ssid: 0,
         sequence_number: 0,
         hmac: [0u8; 16],
-        mbz1a: [0u8; 32],
+        mbz1a: [0u8; 30],
         mbz1b: [0u8; 32],
         mbz1c: [0u8; 6],
     }
@@ -882,17 +974,12 @@ pub fn build_unauth_packet_with_tlvs(
         sequence_number,
         timestamp,
         error_estimate,
-        mbz: [0u8; 30],
+        ssid: ssid.unwrap_or(0),
+        mbz: [0u8; 28],
     };
     let base_bytes = base.to_bytes();
 
     let mut tlvs = TlvList::new();
-
-    // Add SSID as Extra Padding TLV if provided
-    if let Some(id) = ssid {
-        let ssid_tlv = SessionSenderId::new(id).to_extra_padding_tlv(0);
-        tlvs.push(ssid_tlv.to_raw()).ok();
-    }
 
     // Add any extra TLVs
     for tlv in extra_tlvs {
@@ -937,8 +1024,9 @@ pub fn build_auth_packet_with_tlvs(
         sequence_number,
         timestamp,
         error_estimate,
+        ssid: ssid.unwrap_or(0),
         mbz0: [0u8; 12],
-        mbz1a: [0u8; 32],
+        mbz1a: [0u8; 30],
         mbz1b: [0u8; 32],
         mbz1c: [0u8; 6],
         hmac: [0u8; 16],
@@ -949,12 +1037,6 @@ pub fn build_auth_packet_with_tlvs(
     let base_bytes = base.to_bytes();
 
     let mut tlvs = TlvList::new();
-
-    // Add SSID as Extra Padding TLV if provided
-    if let Some(id) = ssid {
-        let ssid_tlv = SessionSenderId::new(id).to_extra_padding_tlv(0);
-        tlvs.push(ssid_tlv.to_raw()).ok();
-    }
 
     // Add any extra TLVs
     for tlv in extra_tlvs {
@@ -989,16 +1071,11 @@ pub fn create_extended_unauth_packet(
         sequence_number,
         timestamp,
         error_estimate,
-        mbz: [0u8; 30],
+        ssid: ssid.unwrap_or(0),
+        mbz: [0u8; 28],
     };
 
-    let mut tlvs = TlvList::new();
-    if let Some(id) = ssid {
-        let ssid_tlv = SessionSenderId::new(id).to_extra_padding_tlv(0);
-        tlvs.push(ssid_tlv.to_raw()).ok();
-    }
-
-    ExtendedPacketUnauthenticated::with_tlvs(base, tlvs)
+    ExtendedPacketUnauthenticated::with_tlvs(base, TlvList::new())
 }
 
 /// Creates an Extended authenticated packet from configuration.
@@ -1015,8 +1092,9 @@ pub fn create_extended_auth_packet(
         sequence_number,
         timestamp,
         error_estimate,
+        ssid: ssid.unwrap_or(0),
         mbz0: [0u8; 12],
-        mbz1a: [0u8; 32],
+        mbz1a: [0u8; 30],
         mbz1b: [0u8; 32],
         mbz1c: [0u8; 6],
         hmac: [0u8; 16],
@@ -1024,13 +1102,7 @@ pub fn create_extended_auth_packet(
 
     finalize_auth_packet(&mut base, hmac_key);
 
-    let mut tlvs = TlvList::new();
-    if let Some(id) = ssid {
-        let ssid_tlv = SessionSenderId::new(id).to_extra_padding_tlv(0);
-        tlvs.push(ssid_tlv.to_raw()).ok();
-    }
-
-    ExtendedPacketAuthenticated::with_tlvs(base, tlvs)
+    ExtendedPacketAuthenticated::with_tlvs(base, TlvList::new())
 }
 
 #[cfg(test)]
@@ -1066,7 +1138,8 @@ mod tests {
         assert_eq!(packet.sequence_number, 0);
         assert_eq!(packet.timestamp, 0);
         assert_eq!(packet.error_estimate, 0);
-        assert_eq!(packet.mbz, [0u8; 30]);
+        assert_eq!(packet.ssid, 0);
+        assert_eq!(packet.mbz, [0u8; 28]);
     }
 
     #[test]
@@ -1082,8 +1155,9 @@ mod tests {
         assert_eq!(packet.sequence_number, 0);
         assert_eq!(packet.timestamp, 0);
         assert_eq!(packet.error_estimate, 0);
+        assert_eq!(packet.ssid, 0);
         assert_eq!(packet.mbz0, [0u8; 12]);
-        assert_eq!(packet.mbz1a, [0u8; 32]);
+        assert_eq!(packet.mbz1a, [0u8; 30]);
         assert_eq!(packet.mbz1b, [0u8; 32]);
         assert_eq!(packet.mbz1c, [0u8; 6]);
         assert_eq!(packet.hmac, [0u8; 16]);
@@ -1142,23 +1216,13 @@ mod tests {
 
     #[test]
     fn test_build_unauth_packet_with_ssid() {
-        use crate::tlv::TLV_HEADER_SIZE;
-
+        // RFC 8972 §3: SSID lives in the base packet header at bytes 14-15,
+        // not as a TLV. Size stays at 44 when no other TLVs are present.
         let ssid: u16 = 12345;
         let packet = build_unauth_packet_with_tlvs(1, 1000, 100, Some(ssid), &[], None);
 
-        // Base (44) + ExtraPadding TLV (4 header + 2 SSID value)
-        assert_eq!(packet.len(), 44 + TLV_HEADER_SIZE + 2);
-
-        // Check TLV structure at offset 44:
-        // Byte 0: Flags (should be 0)
-        assert_eq!(packet[44], 0x00);
-        // Byte 1: Type (ExtraPadding = 1)
-        assert_eq!(packet[45], 1);
-        // Bytes 2-3: Length (2 bytes for SSID)
-        assert_eq!(u16::from_be_bytes([packet[46], packet[47]]), 2);
-        // Bytes 4-5: SSID value in big-endian
-        assert_eq!(u16::from_be_bytes([packet[48], packet[49]]), ssid);
+        assert_eq!(packet.len(), 44);
+        assert_eq!(u16::from_be_bytes([packet[14], packet[15]]), ssid);
     }
 
     #[test]
@@ -1182,15 +1246,14 @@ mod tests {
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
         let packet = build_unauth_packet_with_tlvs(1, 1000, 100, Some(100), &[], Some(&key));
 
-        // Base (44) + SSID TLV (4+2) + HMAC TLV (4+16)
-        assert_eq!(
-            packet.len(),
-            44 + TLV_HEADER_SIZE + 2 + TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE
-        );
+        // Base (44, SSID is in header) + HMAC TLV (4+16)
+        assert_eq!(packet.len(), 44 + TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE);
 
-        // HMAC TLV should be last (type in byte 1 per RFC 8972)
-        let hmac_start = 44 + TLV_HEADER_SIZE + 2;
-        assert_eq!(packet[hmac_start + 1], 8); // HMAC type
+        // SSID echoed in base packet header at bytes 14-15
+        assert_eq!(u16::from_be_bytes([packet[14], packet[15]]), 100);
+
+        // HMAC TLV starts right after the base packet (type byte = 8 per RFC 8972)
+        assert_eq!(packet[44 + 1], 8);
     }
 
     #[test]
@@ -1207,16 +1270,12 @@ mod tests {
 
     #[test]
     fn test_build_auth_packet_with_ssid() {
-        use crate::tlv::TLV_HEADER_SIZE;
-
+        // RFC 8972 §3: SSID lives at bytes 26-27 of the auth packet header, not as a TLV.
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
         let packet = build_auth_packet_with_tlvs(1, 1000, 100, &key, Some(54321), &[], None);
 
-        // Base (112) + ExtraPadding TLV (4 header + 2 SSID value)
-        assert_eq!(packet.len(), 112 + TLV_HEADER_SIZE + 2);
-
-        // Check TLV type (byte 1 per RFC 8972)
-        assert_eq!(packet[113], 1); // ExtraPadding type
+        assert_eq!(packet.len(), 112);
+        assert_eq!(u16::from_be_bytes([packet[26], packet[27]]), 54321);
     }
 
     #[test]
@@ -1226,11 +1285,9 @@ mod tests {
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
         let packet = build_auth_packet_with_tlvs(1, 1000, 100, &key, Some(100), &[], Some(&key));
 
-        // Base (112) + SSID TLV (4+2) + HMAC TLV (4+16)
-        assert_eq!(
-            packet.len(),
-            112 + TLV_HEADER_SIZE + 2 + TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE
-        );
+        // Base (112, SSID in header) + HMAC TLV (4+16)
+        assert_eq!(packet.len(), 112 + TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE);
+        assert_eq!(u16::from_be_bytes([packet[26], packet[27]]), 100);
     }
 
     #[test]
@@ -1243,11 +1300,12 @@ mod tests {
 
     #[test]
     fn test_create_extended_unauth_packet_with_ssid() {
+        // SSID lives in the base header per RFC 8972 §3; no TLV is injected.
         let ext = create_extended_unauth_packet(1, 1000, 100, Some(9999));
 
         assert_eq!(ext.base.sequence_number, 1);
-        assert!(ext.has_tlvs());
-        assert_eq!(ext.tlvs.len(), 1);
+        assert_eq!(ext.base.ssid, 9999);
+        assert!(!ext.has_tlvs());
     }
 
     #[test]
@@ -1263,10 +1321,295 @@ mod tests {
 
     #[test]
     fn test_create_extended_auth_packet_with_ssid() {
+        // SSID lives in the base header per RFC 8972 §3; no TLV is injected.
         let key = HmacKey::new(vec![0xCD; 32]).unwrap();
         let ext = create_extended_auth_packet(1, 1000, 100, &key, Some(8888));
 
-        assert!(ext.has_tlvs());
-        assert_eq!(ext.tlvs.len(), 1);
+        assert_eq!(ext.base.ssid, 8888);
+        assert!(!ext.has_tlvs());
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_msid_match_accepts() {
+        // RFC 9534 §3.2: reflected MSID TLV must carry the sender's sender_id
+        // unchanged; the reflector fills reflector_micro_session_id.
+        let mut tlvs = TlvList::new();
+        tlvs.push(MicroSessionIdTlv::new(7777, 42).to_raw())
+            .unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("matching MSID must return Ok")
+        .expect("status produced");
+
+        assert!(status.contains("MSID:ok"), "got: {}", status);
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_msid_mismatch_rejects() {
+        // RFC 9534 §3.2: a mismatched sender_micro_session_id means the
+        // response cannot be attributed to this session. The validator must
+        // return Err so the caller drops the packet without recording RTT.
+        let mut tlvs = TlvList::new();
+        tlvs.push(MicroSessionIdTlv::new(0xBAD, 42).to_raw())
+            .unwrap();
+
+        let err = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect_err("mismatched MSID must reject");
+
+        assert_eq!(
+            err,
+            TlvRejection::MsidMismatch {
+                got: 0xBAD,
+                expected: 7777
+            }
+        );
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_msid_malformed_rejects() {
+        // A malformed MSID TLV cannot be parsed, so session binding can't be
+        // verified; we must drop the response rather than guess.
+        let mut tlvs = TlvList::new();
+        // MSID TLV value must be exactly 4 bytes (RFC 9534 §3.1). 3 bytes
+        // makes it malformed but keeps the TLV present for the scanner.
+        tlvs.push(crate::tlv::RawTlv::new(
+            crate::tlv::TlvType::MicroSessionId,
+            vec![0, 0, 0],
+        ))
+        .unwrap();
+
+        let err = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            Some(1234),
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect_err("malformed MSID must reject");
+
+        assert_eq!(err, TlvRejection::MsidMalformed);
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_msid_not_requested() {
+        // Sender did not request MSID measurement; even if a stray MSID TLV
+        // arrives we should not synthesize a validation result.
+        let mut tlvs = TlvList::new();
+        tlvs.push(MicroSessionIdTlv::new(1, 2).to_raw()).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("no MSID binding requested → accept")
+        .expect("status produced");
+
+        assert!(!status.contains("MSID"));
+    }
+
+    #[test]
+    fn test_process_response_drops_packet_on_msid_mismatch() {
+        use crate::packets::{
+            ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated,
+        };
+
+        // Build a reflected unauth packet that echoes a different
+        // sender_micro_session_id than we transmitted. process_response MUST
+        // NOT remove the sequence from pending, must not record RTT, and
+        // must not increment packets_received.
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 42,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 42,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let mut tlvs = TlvList::new();
+        tlvs.push(MicroSessionIdTlv::new(0xBAD, 99).to_raw())
+            .unwrap();
+        let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
+        let buf = ext.to_bytes();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            42,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut packets_received = 0u32;
+        let mut ctx = SenderRecvContext {
+            pending: &mut pending,
+            rtt_collector: &mut rtt_collector,
+            packets_received: &mut packets_received,
+            print_stats: false,
+            hmac_key: None,
+            // Sender transmitted with sender_msid=7777; reflector's response
+            // carries 0xBAD → session binding fails.
+            expected_sender_msid: Some(7777),
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
+            #[cfg(all(unix, feature = "snmp"))]
+            snmp_stats: None,
+        };
+
+        process_response(&buf, false, true, ClockFormat::NTP, &mut ctx);
+
+        assert!(
+            pending.contains_key(&42),
+            "pending entry must remain so the packet is still counted as lost"
+        );
+        assert_eq!(
+            packets_received, 0,
+            "received counter must not advance on MSID mismatch"
+        );
+        assert_eq!(
+            rtt_collector.snapshot(1, 0).packets_received,
+            0,
+            "no RTT sample must be recorded on MSID mismatch"
+        );
+    }
+
+    #[test]
+    fn test_process_response_accepts_packet_on_msid_match() {
+        use crate::packets::{
+            ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated,
+        };
+
+        // Control case: matching MSID means the response is accepted,
+        // pending entry is consumed, received counter increments.
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 42,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 42,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let mut tlvs = TlvList::new();
+        tlvs.push(MicroSessionIdTlv::new(7777, 99).to_raw())
+            .unwrap();
+        let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
+        let buf = ext.to_bytes();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            42,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut packets_received = 0u32;
+        let mut ctx = SenderRecvContext {
+            pending: &mut pending,
+            rtt_collector: &mut rtt_collector,
+            packets_received: &mut packets_received,
+            print_stats: false,
+            hmac_key: None,
+            expected_sender_msid: Some(7777),
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
+            #[cfg(all(unix, feature = "snmp"))]
+            snmp_stats: None,
+        };
+
+        process_response(&buf, false, true, ClockFormat::NTP, &mut ctx);
+
+        assert!(!pending.contains_key(&42));
+        assert_eq!(packets_received, 1);
+    }
+
+    #[test]
+    fn test_build_unauth_packet_ssid_round_trips_via_reflector() {
+        use crate::packets::{PacketUnauthenticated, ReflectedPacketUnauthenticated};
+        use crate::receiver::assemble_unauth_answer;
+
+        // End-to-end wire check: an SSID set by the sender reaches the reflector
+        // in the base header and is echoed into both SSID fields of the reply.
+        let built = build_unauth_packet_with_tlvs(1, 100, 0, Some(0xABCD), &[], None);
+        let parsed = PacketUnauthenticated::from_bytes(&built).unwrap();
+        assert_eq!(parsed.ssid, 0xABCD);
+
+        let reply: ReflectedPacketUnauthenticated =
+            assemble_unauth_answer(&parsed, ClockFormat::NTP, 0, 64, 0, None);
+        assert_eq!(reply.ssid, 0xABCD);
+        assert_eq!(reply.sess_sender_ssid, 0xABCD);
+    }
+
+    #[test]
+    fn test_build_auth_packet_ssid_round_trips_via_reflector() {
+        use crate::packets::{PacketAuthenticated, ReflectedPacketAuthenticated};
+        use crate::receiver::assemble_auth_answer;
+
+        // End-to-end wire check for the authenticated path: the SSID set by
+        // the sender must reach the reflector in base header bytes 26-27 and
+        // be echoed into both SSID fields (offsets 26-27 and 74-75) of the
+        // reflected packet. HMAC is recomputed on each side, so getting this
+        // wrong would also desync verification.
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let built = build_auth_packet_with_tlvs(42, 1000, 100, &key, Some(0xBEEF), &[], None);
+        assert_eq!(built.len(), 112);
+        assert_eq!(u16::from_be_bytes([built[26], built[27]]), 0xBEEF);
+
+        let parsed = PacketAuthenticated::from_bytes(&built).unwrap();
+        assert_eq!(parsed.ssid, 0xBEEF);
+
+        let reply: ReflectedPacketAuthenticated =
+            assemble_auth_answer(&parsed, ClockFormat::NTP, 0, 64, 0, Some(&key), None);
+        assert_eq!(reply.ssid, 0xBEEF);
+        assert_eq!(reply.sess_sender_ssid, 0xBEEF);
+
+        // Reflector's HMAC must be computed over the echoed SSID too —
+        // serialize and verify it round-trips through from_bytes.
+        let reply_bytes = reply.to_bytes();
+        assert_eq!(
+            u16::from_be_bytes([reply_bytes[26], reply_bytes[27]]),
+            0xBEEF
+        );
+        assert_eq!(
+            u16::from_be_bytes([reply_bytes[74], reply_bytes[75]]),
+            0xBEEF
+        );
+        let reparsed = ReflectedPacketAuthenticated::from_bytes(&reply_bytes).unwrap();
+        assert_eq!(reparsed.ssid, 0xBEEF);
+        assert_eq!(reparsed.sess_sender_ssid, 0xBEEF);
     }
 }

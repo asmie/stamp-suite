@@ -388,17 +388,19 @@ pub fn assemble_unauth_answer(
     reflector_error_estimate: u16,
     reflector_seq: Option<u32>,
 ) -> ReflectedPacketUnauthenticated {
+    // RFC 8972 §4.1.1: both SSID fields carry the Session-Sender Identifier
+    // from the received test packet (the reflector tracks sessions by SSID).
     ReflectedPacketUnauthenticated {
         sess_sender_timestamp: packet.timestamp,
         sess_sender_err_estimate: packet.error_estimate,
         sess_sender_seq_number: packet.sequence_number,
+        sess_sender_ssid: packet.ssid,
         sess_sender_ttl: ttl,
         sequence_number: reflector_seq.unwrap_or(packet.sequence_number),
         error_estimate: reflector_error_estimate,
         timestamp: generate_timestamp(cs),
         receive_timestamp: rcvt,
-        mbz1: 0,
-        mbz2: 0,
+        ssid: packet.ssid,
         mbz3: [0; 3],
     }
 }
@@ -826,16 +828,18 @@ pub fn assemble_auth_answer(
         sess_sender_timestamp: packet.timestamp,
         sess_sender_err_estimate: packet.error_estimate,
         sess_sender_seq_number: packet.sequence_number,
+        sess_sender_ssid: packet.ssid,
         sess_sender_ttl: ttl,
         sequence_number: reflector_seq.unwrap_or(packet.sequence_number),
         error_estimate: reflector_error_estimate,
         timestamp: generate_timestamp(cs),
         receive_timestamp: rcvt,
+        ssid: packet.ssid,
         mbz0: [0u8; 12],
-        mbz1: [0u8; 6],
+        mbz1: [0u8; 4],
         mbz2: [0u8; 8],
         mbz3: [0u8; 12],
-        mbz4: [0u8; 6],
+        mbz4: [0u8; 4],
         mbz5: [0u8; 15],
         hmac: [0u8; 16],
     };
@@ -1315,7 +1319,8 @@ mod tests {
             sequence_number: 42,
             timestamp: 123456789,
             error_estimate: 100,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let rcvt = 987654321u64;
@@ -1352,7 +1357,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let rcvt = 500u64;
@@ -1367,7 +1373,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 0,
             error_estimate: 0,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let reflected = assemble_unauth_answer(&sender_packet, ClockFormat::NTP, 0, 64, 0, None);
@@ -1409,7 +1416,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 123456789,
             error_estimate: 100,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0xab; 16],
@@ -1450,7 +1458,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 2,
             error_estimate: 3,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Test various TTL values
@@ -1468,7 +1477,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 2,
             error_estimate: 3,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -1489,7 +1499,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 123456789,
             error_estimate: 100,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -1517,7 +1528,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 123456789,
             error_estimate: 100,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -1543,7 +1555,8 @@ mod tests {
             sequence_number: 42,
             timestamp: 123456789,
             error_estimate: 100,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Test with independent reflector sequence number
@@ -1569,7 +1582,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 123456789,
             error_estimate: 100,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -1598,7 +1612,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Create original data with extra bytes beyond base 44
@@ -1628,7 +1643,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -1661,7 +1677,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Original data is exactly base size
@@ -1691,7 +1708,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Create packet with TLV extension
@@ -1727,7 +1745,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Create packet with TLV extension
@@ -1763,7 +1782,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let mut original_data = sender_packet.to_bytes().to_vec();
@@ -1796,7 +1816,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Create packet with unknown TLV type
@@ -1834,7 +1855,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -1875,7 +1897,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -1916,7 +1939,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -1957,7 +1981,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Create packet with TLV extension (no HMAC)
@@ -2087,7 +2112,8 @@ mod tests {
             sequence_number: 0x12345678,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let base_bytes = sender_packet.to_bytes();
 
@@ -2157,7 +2183,8 @@ mod tests {
             sequence_number: 0x12345678,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let base_bytes = sender_packet.to_bytes();
 
@@ -2223,7 +2250,8 @@ mod tests {
             sequence_number: 0x12345678,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let base_bytes = sender_packet.to_bytes();
 
@@ -2276,7 +2304,8 @@ mod tests {
             sequence_number: 0x12345678,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let base_bytes = sender_packet.to_bytes();
 
@@ -2332,7 +2361,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Create packet with CoS TLV (sender requests DSCP=46 EF, ECN=0)
@@ -2400,7 +2430,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -2465,7 +2496,8 @@ mod tests {
             sequence_number: 42,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let mut original_data = sender_packet.to_bytes().to_vec();
         let cos_tlv = ClassOfServiceTlv::new(46, 2); // DSCP=46, ECN=2
@@ -2509,7 +2541,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -2554,7 +2587,8 @@ mod tests {
             sequence_number: 42,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let mut response = sender_packet.to_bytes().to_vec();
 
@@ -2573,7 +2607,8 @@ mod tests {
             sequence_number: 42,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let mut response = sender_packet.to_bytes().to_vec();
 
@@ -2610,7 +2645,8 @@ mod tests {
             sequence_number: 0x12345678,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let base_bytes = sender_packet.to_bytes();
 
@@ -2699,7 +2735,8 @@ mod tests {
             sequence_number: 42,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
         let mut data = sender_packet.to_bytes().to_vec();
@@ -2722,7 +2759,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let addr: std::net::IpAddr = "192.168.1.1".parse().unwrap();
@@ -2762,7 +2800,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let addr: std::net::IpAddr = "192.168.1.1".parse().unwrap();
@@ -2801,7 +2840,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let rp_tlv = ReturnPathTlv::with_control_code(0x0);
@@ -2836,7 +2876,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let alt_addr: std::net::IpAddr = "10.0.0.5".parse().unwrap();
@@ -2876,7 +2917,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let rp_tlv = ReturnPathTlv::with_sr_mpls_labels(&[100, 200]);
@@ -2913,7 +2955,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let rp_tlv = ReturnPathTlv::with_return_address("10.0.0.5".parse().unwrap());
@@ -2935,7 +2978,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         let mut data = sender_packet.to_bytes().to_vec();
@@ -2954,7 +2998,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Build packet with Micro-session ID TLV (sender_id=42, reflector_id=0)
@@ -3002,7 +3047,8 @@ mod tests {
             sequence_number: 1,
             timestamp: 100,
             error_estimate: 10,
-            mbz: [0; 30],
+            ssid: 0,
+            mbz: [0; 28],
         };
 
         // Build packet with Micro-session ID TLV (sender_id=42, reflector_id=50 — mismatch)
@@ -3043,7 +3089,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],
@@ -3093,7 +3140,8 @@ mod tests {
             mbz0: [0; 12],
             timestamp: 100,
             error_estimate: 10,
-            mbz1a: [0; 32],
+            ssid: 0,
+            mbz1a: [0; 30],
             mbz1b: [0; 32],
             mbz1c: [0; 6],
             hmac: [0; 16],

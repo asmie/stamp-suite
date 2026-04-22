@@ -40,7 +40,7 @@ pub use self::core::{
 pub use list::TlvList;
 
 // Type 1 — Extra Padding
-pub use typed::{ExtraPaddingTlv, SessionSenderId};
+pub use typed::ExtraPaddingTlv;
 
 // Type 2 — Location
 pub use typed::{LocationSubTlv, LocationSubType, LocationTlv, PacketAddressInfo};

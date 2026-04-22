@@ -158,8 +158,9 @@ pub struct Configuration {
     #[clap(long)]
     pub verify_tlv_hmac: bool,
 
-    /// Session-Sender Identifier to include in sender packets (RFC 8972).
-    /// Will be encoded in an Extra Padding TLV.
+    /// Session-Sender Identifier to include in sender packets (RFC 8972 §3).
+    /// Encoded in the two octets of the base STAMP header immediately after
+    /// Error Estimate (bytes 14-15 unauth / 26-27 auth).
     #[clap(long)]
     pub ssid: Option<u16>,
 

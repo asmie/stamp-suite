@@ -17,7 +17,7 @@ mod return_path;
 mod timestamp_info;
 
 // Type 1 — Extra Padding
-pub use extra_padding::{ExtraPaddingTlv, SessionSenderId};
+pub use extra_padding::ExtraPaddingTlv;
 
 // Type 2 — Location
 pub use location::{LocationSubTlv, LocationSubType, LocationTlv, PacketAddressInfo};

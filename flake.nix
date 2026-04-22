@@ -15,12 +15,12 @@
         packages = {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "stamp-suite";
-            version = "0.5.1";
+            version = "0.6.0";
 
             src = self;
 
 
-            cargoHash = "sha256-qP1FpTq1/KhOFaLpKhE2N7OOEdaJIMw6VRQDAzRc0/w=";
+            cargoHash = "sha256-iSiTptqAlzFFwbZ1r/6NuTKDP2gcVJ2r05/nyyV+RCM=";
 
             meta = with pkgs.lib; {
               description = "Simple Two-Way Active Measurement Protocol (STAMP) implementation";
