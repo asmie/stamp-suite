@@ -516,6 +516,66 @@ impl TlvList {
         }
     }
 
+    /// Processes Reflected IPv6 Extension Header Data (Type 246) and
+    /// Reflected Fixed Header Data (Type 247) TLVs per
+    /// draft-ietf-ippm-stamp-ext-hdr.
+    ///
+    /// When `captured` is `Some`, the reflector copies the captured bytes
+    /// into each matching TLV's Value. When `captured` is `None`, the
+    /// backend cannot observe raw IP headers — the TLVs are echoed empty
+    /// with the U-flag set per RFC 8972 §4.2.
+    ///
+    /// `captured_fixed` supplies the IP fixed header (IPv4 20 bytes, IPv6
+    /// 40 bytes). `captured_ext_headers` supplies concatenated IPv6
+    /// Hop-by-Hop/Destination Options, each prefixed with NextHeader and
+    /// HdrLen bytes exactly as on the wire.
+    pub fn process_reflected_headers(
+        &mut self,
+        captured_fixed: Option<&[u8]>,
+        captured_ext_headers: Option<&[u8]>,
+    ) {
+        Self::apply_reflected_headers(&mut self.tlvs, captured_fixed, captured_ext_headers);
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            Self::apply_reflected_headers(wire_order, captured_fixed, captured_ext_headers);
+        }
+    }
+
+    fn apply_reflected_headers(
+        tlvs: &mut [RawTlv],
+        captured_fixed: Option<&[u8]>,
+        captured_ext_headers: Option<&[u8]>,
+    ) {
+        for tlv in tlvs {
+            match tlv.tlv_type {
+                TlvType::ReflectedFixedHdr => match captured_fixed {
+                    Some(bytes) if !bytes.is_empty() => {
+                        tlv.value = bytes.to_vec();
+                    }
+                    _ => {
+                        tlv.value.clear();
+                        tlv.set_unrecognized();
+                        log_reflected_hdr_unsupported_once();
+                    }
+                },
+                TlvType::ReflectedIpv6ExtHdr => match captured_ext_headers {
+                    // Empty ext_headers is legitimate for an IPv4 packet or an
+                    // IPv6 packet without Hop-by-Hop/Destination options. Only
+                    // set U-flag when the backend cannot observe the IP layer
+                    // at all (captured_ext_headers is None).
+                    Some(bytes) => {
+                        tlv.value = bytes.to_vec();
+                    }
+                    None => {
+                        tlv.value.clear();
+                        tlv.set_unrecognized();
+                        log_reflected_hdr_unsupported_once();
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
     fn mark_ber_tlvs_unrecognized(tlvs: &mut [RawTlv]) {
         for tlv in tlvs {
             if matches!(
@@ -560,6 +620,21 @@ impl TlvList {
             }
         }
         true
+    }
+}
+
+/// Emits a one-time warning when the reflector receives an extension-header
+/// reflection request (TLV 246/247) but the backend cannot observe raw IP
+/// headers. Fired from `apply_reflected_headers`.
+fn log_reflected_hdr_unsupported_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "Reflected Fixed/IPv6 Ext Header TLV (Types 247/246) requested but \
+             this backend cannot observe raw IP headers — echoing with U-flag. \
+             Rebuild with --features ttl-pnet to enable draft-ietf-ippm-stamp-ext-hdr reflection."
+        );
     }
 }
 
@@ -1147,6 +1222,100 @@ mod tests {
         list.push(ExtraPaddingTlv::new_zeros(4).to_raw()).unwrap();
 
         assert!(list.get_reflected_control_request().is_none());
+    }
+
+    // --- Reflected Fixed/IPv6 Ext Header Data (draft-ippm-stamp-ext-hdr) tests ---
+
+    #[test]
+    fn test_reflected_fixed_hdr_populated_when_captured() {
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut list = TlvList::new();
+        list.push(ReflectedFixedHdrTlv::request().to_raw()).unwrap();
+
+        let mut captured = vec![0u8; 20];
+        captured[0] = 0x45; // IPv4 version + IHL
+        captured[1] = 0x00; // TOS
+        list.process_reflected_headers(Some(&captured), Some(&[]));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.tlv_type, TlvType::ReflectedFixedHdr);
+        assert_eq!(tlv.value, captured);
+        assert!(!tlv.is_unrecognized());
+    }
+
+    #[test]
+    fn test_reflected_fixed_hdr_u_flag_when_backend_cant_capture() {
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut list = TlvList::new();
+        list.push(ReflectedFixedHdrTlv::request().to_raw()).unwrap();
+
+        // None = backend cannot observe IP layer (nix UDP-socket backend).
+        list.process_reflected_headers(None, None);
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert!(tlv.value.is_empty(), "value must be cleared on U-flag path");
+        assert!(tlv.is_unrecognized(), "U-flag must be set when backend cannot capture");
+    }
+
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
+        use crate::tlv::ReflectedIpv6ExtHdrTlv;
+        let mut list = TlvList::new();
+        list.push(ReflectedIpv6ExtHdrTlv::request().to_raw())
+            .unwrap();
+
+        // Fake Hop-by-Hop header: NextHeader=60 (Destination Opts), HdrExtLen=0, 6 bytes body.
+        let captured_ext = vec![60u8, 0u8, 0x01, 0x02, 0x03, 0x04, 0x00, 0x00];
+        list.process_reflected_headers(Some(&[]), Some(&captured_ext));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.value, captured_ext);
+        assert!(!tlv.is_unrecognized());
+    }
+
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_empty_capture_is_not_u_flag() {
+        // An IPv4 packet or an IPv6 packet without ext headers produces an
+        // empty captured_ext_headers slice — that's legitimate, not "backend
+        // can't observe". U-flag stays clear.
+        use crate::tlv::ReflectedIpv6ExtHdrTlv;
+        let mut list = TlvList::new();
+        list.push(ReflectedIpv6ExtHdrTlv::request().to_raw())
+            .unwrap();
+
+        list.process_reflected_headers(Some(&[0x45]), Some(&[]));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert!(tlv.value.is_empty());
+        assert!(
+            !tlv.is_unrecognized(),
+            "empty ext-header list on IPv4 packet must not set U-flag"
+        );
+    }
+
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_u_flag_when_backend_cant_capture() {
+        use crate::tlv::ReflectedIpv6ExtHdrTlv;
+        let mut list = TlvList::new();
+        list.push(ReflectedIpv6ExtHdrTlv::request().to_raw())
+            .unwrap();
+
+        list.process_reflected_headers(None, None);
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert!(tlv.value.is_empty());
+        assert!(tlv.is_unrecognized());
+    }
+
+    #[test]
+    fn test_reflected_headers_noop_when_no_tlvs() {
+        // Packet with only Extra Padding — should not flag anything.
+        let mut list = TlvList::new();
+        list.push(ExtraPaddingTlv::new_zeros(4).to_raw()).unwrap();
+
+        list.process_reflected_headers(None, None);
+
+        assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
     }
 
     #[test]

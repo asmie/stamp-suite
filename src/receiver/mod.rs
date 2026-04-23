@@ -68,6 +68,61 @@ use crate::{
     },
 };
 
+/// Returns the list of local IP addresses used for Destination Node Address
+/// TLV matching (RFC 9503 §4).
+///
+/// When `bind_addr` is a wildcard (`0.0.0.0` or `::`), enumerates every
+/// interface address on the system. Otherwise returns just `bind_addr`.
+///
+/// Interface enumeration uses the `nix` crate on Unix and `pnet::datalink` on
+/// Windows — both produce the same logical output.
+pub fn build_local_addresses(bind_addr: std::net::IpAddr) -> Vec<std::net::IpAddr> {
+    let is_wildcard = match bind_addr {
+        std::net::IpAddr::V4(v4) => v4.is_unspecified(),
+        std::net::IpAddr::V6(v6) => v6.is_unspecified(),
+    };
+    if !is_wildcard {
+        return vec![bind_addr];
+    }
+
+    let addrs = enumerate_interface_addresses();
+    if addrs.is_empty() {
+        log::warn!(
+            "Could not enumerate local addresses; Destination Node Address matching may fail"
+        );
+        vec![bind_addr]
+    } else {
+        addrs
+    }
+}
+
+#[cfg(unix)]
+fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
+    let mut addrs = Vec::new();
+    if let Ok(ifaddrs) = ::nix::ifaddrs::getifaddrs() {
+        for ifaddr in ifaddrs {
+            if let Some(addr) = ifaddr.address {
+                if let Some(v4) = addr.as_sockaddr_in() {
+                    addrs.push(std::net::IpAddr::V4(v4.ip()));
+                } else if let Some(v6) = addr.as_sockaddr_in6() {
+                    addrs.push(std::net::IpAddr::V6(v6.ip()));
+                }
+            }
+        }
+    }
+    addrs
+}
+
+#[cfg(not(unix))]
+fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
+    // Windows has no `getifaddrs`; fall back to pnet's datalink enumeration.
+    // pnet is always a build dependency on Windows (default ttl-pnet backend).
+    pnet::datalink::interfaces()
+        .into_iter()
+        .flat_map(|iface| iface.ips.into_iter().map(|n| n.ip()))
+        .collect()
+}
+
 /// Loads the HMAC key from configuration (hex string or file).
 pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
     if let Some(ref hex_key) = conf.hmac_key {
@@ -494,6 +549,28 @@ pub struct ProcessingContext<'a> {
     pub sender_port: u16,
     /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
     pub reflector_member_link_id: Option<u16>,
+    /// Raw bytes of the received IP fixed header and IPv6 extension headers,
+    /// for draft-ietf-ippm-stamp-ext-hdr Reflected Fixed/Ext Header TLVs
+    /// (Types 247/246). `None` on backends that cannot observe the IP layer
+    /// (UDP-socket `nix` backend): the reflector then echoes the TLV with the
+    /// U-flag set.
+    pub captured_headers: Option<&'a CapturedHeaders>,
+}
+
+/// Raw IP-layer bytes captured at receive time for reflecting back to the
+/// sender via TLV Types 246 and 247 (draft-ietf-ippm-stamp-ext-hdr).
+///
+/// Populated only by backends that capture at the datalink layer (pnet).
+/// UDP-socket backends (nix) cannot observe these bytes and leave the
+/// struct unset; the reflector sets the U-flag on any 246/247 request.
+#[derive(Debug, Clone, Default)]
+pub struct CapturedHeaders {
+    /// Raw IP fixed header (20 bytes for IPv4, 40 bytes for IPv6).
+    pub fixed_header: Vec<u8>,
+    /// Concatenated IPv6 Hop-by-Hop (NextHeader 0) and Destination Options
+    /// (NextHeader 60) extension headers, each prefixed with its NextHeader
+    /// byte and HdrLen byte, exactly as received on the wire.
+    pub ipv6_ext_headers: Vec<u8>,
 }
 
 /// Processes a STAMP packet and returns the response.
@@ -960,6 +1037,22 @@ fn apply_semantic_tlv_processing(
     // compute Bit Error Count and Max Burst against the companion Extra Padding.
     tlvs.process_ber();
 
+    // Process Reflected Fixed / IPv6 Extension Header TLVs
+    // (draft-ietf-ippm-stamp-ext-hdr §§3–4). If the backend captured raw IP
+    // bytes, copy them into the TLV Value; otherwise set the U-flag per
+    // RFC 8972 §4.2 and echo an empty TLV. A nix UDP-socket backend hands us
+    // `captured_headers = None`, so this correctly advertises "unsupported"
+    // to senders that requested header reflection.
+    let (captured_fixed, captured_ext): (Option<&[u8]>, Option<&[u8]>) = match ctx.captured_headers
+    {
+        Some(h) => (
+            Some(h.fixed_header.as_slice()),
+            Some(h.ipv6_ext_headers.as_slice()),
+        ),
+        None => (None, None),
+    };
+    tlvs.process_reflected_headers(captured_fixed, captured_ext);
+
     // Process Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts §3).
     // We don't honour the requested per-packet length in this implementation — if the
     // sender asks for a specific length we set the C flag on the echoed TLV to indicate
@@ -1284,6 +1377,7 @@ mod tests {
             local_addresses: &[],
             sender_port: 0,
             reflector_member_link_id: None,
+            captured_headers: None,
         }
     }
 

@@ -515,6 +515,9 @@ impl TlvList {
                 TlvType::BerPattern => false, // variable length, empty is valid (default pattern)
                 TlvType::BerCount => tlv.value.len() != BER_COUNT_TLV_VALUE_SIZE,
                 TlvType::BerBurst => tlv.value.len() != BER_BURST_TLV_VALUE_SIZE,
+                // 246/247 (draft-ippm-stamp-ext-hdr): empty = sender request,
+                // populated = reflector-filled raw header bytes. Variable length is valid.
+                TlvType::ReflectedIpv6ExtHdr | TlvType::ReflectedFixedHdr => false,
                 _ => false,
             };
             if malformed {

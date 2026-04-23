@@ -274,6 +274,14 @@ pub enum TlvType {
     /// BER Max Bit Error Burst Size TLV (242) - draft-gandhi-ippm-stamp-ber §3.4.
     /// Type number is TBD in the draft; 242 used from RFC 8972 experimental range.
     BerBurst = 242,
+    /// Reflected IPv6 Extension Header Data TLV (246) -
+    /// draft-ietf-ippm-stamp-ext-hdr §3. Reflects received Hop-by-Hop and
+    /// Destination Options extension headers; requires raw-capture backend.
+    ReflectedIpv6ExtHdr = 246,
+    /// Reflected Fixed Header Data TLV (247) -
+    /// draft-ietf-ippm-stamp-ext-hdr §4. Reflects the raw IPv4/IPv6 fixed
+    /// header (20/40 bytes); requires raw-capture backend.
+    ReflectedFixedHdr = 247,
     /// Unknown type.
     Unknown(u8),
 }
@@ -299,6 +307,8 @@ impl TlvType {
             240 => Self::BerPattern,
             241 => Self::BerCount,
             242 => Self::BerBurst,
+            246 => Self::ReflectedIpv6ExtHdr,
+            247 => Self::ReflectedFixedHdr,
             n => Self::Unknown(n),
         }
     }
@@ -323,6 +333,8 @@ impl TlvType {
             Self::BerPattern => 240,
             Self::BerCount => 241,
             Self::BerBurst => 242,
+            Self::ReflectedIpv6ExtHdr => 246,
+            Self::ReflectedFixedHdr => 247,
             Self::Unknown(n) => n,
         }
     }

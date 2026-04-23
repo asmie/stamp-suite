@@ -205,7 +205,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
 
     // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     // Start with the configured bind address; if wildcard, enumerate interface addresses.
-    let local_addresses = build_local_addresses(conf.local_addr);
+    let local_addresses = super::build_local_addresses(conf.local_addr);
 
     println!(
         "STAMP Reflector listening on {} (nix mode, real TTL)",
@@ -361,6 +361,10 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     local_addresses: &local_addresses,
                     sender_port: src_addr.port(),
                     reflector_member_link_id: conf.reflector_member_link_id,
+                    // nix UDP-socket backend cannot observe raw IP headers.
+                    // draft-ietf-ippm-stamp-ext-hdr TLV 246/247 requests are
+                    // echoed with U-flag set (done in apply_semantic_tlv_processing).
+                    captured_headers: None,
                 };
 
                 if let Some(mut response) =
@@ -705,40 +709,5 @@ fn extract_dst_addr_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>)
     None
 }
 
-/// Builds the list of local IP addresses for Destination Node Address TLV matching.
-///
-/// If the bind address is a wildcard (0.0.0.0 or ::), enumerates all interface addresses
-/// via `nix::ifaddrs::getifaddrs()`. Otherwise, returns just the configured address.
-fn build_local_addresses(bind_addr: IpAddr) -> Vec<IpAddr> {
-    let is_wildcard = match bind_addr {
-        IpAddr::V4(v4) => v4.is_unspecified(),
-        IpAddr::V6(v6) => v6.is_unspecified(),
-    };
-
-    if !is_wildcard {
-        return vec![bind_addr];
-    }
-
-    // Enumerate interface addresses
-    let mut addrs = Vec::new();
-    if let Ok(ifaddrs) = nix::ifaddrs::getifaddrs() {
-        for ifaddr in ifaddrs {
-            if let Some(addr) = ifaddr.address {
-                if let Some(v4) = addr.as_sockaddr_in() {
-                    addrs.push(IpAddr::V4(v4.ip()));
-                } else if let Some(v6) = addr.as_sockaddr_in6() {
-                    addrs.push(IpAddr::V6(v6.ip()));
-                }
-            }
-        }
-    }
-
-    if addrs.is_empty() {
-        log::warn!(
-            "Could not enumerate local addresses; Destination Node Address matching may fail"
-        );
-        vec![bind_addr]
-    } else {
-        addrs
-    }
-}
+// `build_local_addresses` now lives in `receiver::mod` and is shared between
+// backends (see [`super::build_local_addresses`]).

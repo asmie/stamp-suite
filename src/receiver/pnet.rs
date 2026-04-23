@@ -228,7 +228,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let output_format = conf.output_format;
 
     // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
-    let local_addresses = build_local_addresses(conf.local_addr);
+    let local_addresses = super::build_local_addresses(conf.local_addr);
 
     // Build capture config with all values needed by the blocking loop
     let capture_config = CaptureConfig {
@@ -366,6 +366,20 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                 if header.get_next_level_protocol() == IpNextHeaderProtocols::Udp {
                     if let Some(udp) = UdpPacket::new(header.payload()) {
                         if udp.get_destination() == config.local_port {
+                            // Capture the raw 20-byte IPv4 fixed header for
+                            // Reflected Fixed Header Data TLV (Type 247).
+                            // IHL * 4 gives the total IPv4 header length
+                            // (including options); the draft reflects only
+                            // the fixed 20-byte header, so clamp to that.
+                            let ipv4_bytes = header.packet();
+                            let fixed_len = std::cmp::min(
+                                ipv4_bytes.len(),
+                                crate::tlv::IPV4_FIXED_HEADER_SIZE,
+                            );
+                            let captured = super::CapturedHeaders {
+                                fixed_header: ipv4_bytes[..fixed_len].to_vec(),
+                                ipv6_ext_headers: Vec::new(),
+                            };
                             let pkt = PacketMeta {
                                 src: SocketAddr::new(
                                     IpAddr::V4(header.get_source()),
@@ -375,6 +389,7 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                                 ttl: header.get_ttl(),
                                 dscp: header.get_dscp(),
                                 ecn: header.get_ecn(),
+                                captured,
                             };
                             handle_stamp_packet(udp.payload(), &pkt, config, send_ctx);
                         }
@@ -384,11 +399,27 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
         }
         EtherTypes::Ipv6 => {
             if let Some(header) = Ipv6Packet::new(ethernet.payload()) {
-                if header.get_next_header() == IpNextHeaderProtocols::Udp {
-                    if let Some(udp) = UdpPacket::new(header.payload()) {
+                // Capture the 40-byte IPv6 fixed header and any Hop-by-Hop
+                // (NextHeader=0) or Destination Options (NextHeader=60)
+                // extension headers for TLV Types 247/246.
+                let ipv6_bytes = header.packet();
+                let fixed_len = std::cmp::min(
+                    ipv6_bytes.len(),
+                    crate::tlv::IPV6_FIXED_HEADER_SIZE,
+                );
+                let fixed_header = ipv6_bytes[..fixed_len].to_vec();
+                let (ext_headers, final_next, payload_offset) =
+                    extract_ipv6_ext_headers(&header);
+
+                if final_next == IpNextHeaderProtocols::Udp {
+                    let payload = &ipv6_bytes[payload_offset..];
+                    if let Some(udp) = UdpPacket::new(payload) {
                         if udp.get_destination() == config.local_port {
-                            // IPv6 Traffic Class contains DSCP (upper 6 bits) and ECN (lower 2 bits)
                             let traffic_class = header.get_traffic_class();
+                            let captured = super::CapturedHeaders {
+                                fixed_header,
+                                ipv6_ext_headers: ext_headers,
+                            };
                             let pkt = PacketMeta {
                                 src: SocketAddr::new(
                                     IpAddr::V6(header.get_source()),
@@ -398,6 +429,7 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                                 ttl: header.get_hop_limit(),
                                 dscp: (traffic_class >> 2) & 0x3F,
                                 ecn: traffic_class & 0x03,
+                                captured,
                             };
                             handle_stamp_packet(udp.payload(), &pkt, config, send_ctx);
                         }
@@ -407,6 +439,63 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
         }
         _ => {}
     }
+}
+
+/// Walks IPv6 extension headers (Hop-by-Hop = 0, Destination Options = 60)
+/// after the 40-byte fixed header, returning:
+/// - concatenated extension-header bytes, each prefixed with the preceding
+///   NextHeader byte and its HdrLen byte (wire format);
+/// - the final NextHeader protocol number (UDP if the chain leads to UDP);
+/// - the byte offset into the full IPv6 packet where the upper-layer payload
+///   (e.g. UDP) begins.
+///
+/// Stops on the first non-option header (e.g. Routing, Fragment, ESP, AH) —
+/// those are out of scope for draft-ietf-ippm-stamp-ext-hdr.
+fn extract_ipv6_ext_headers(
+    header: &Ipv6Packet,
+) -> (Vec<u8>, pnet::packet::ip::IpNextHeaderProtocol, usize) {
+    use pnet::packet::ip::IpNextHeaderProtocol;
+
+    const HOP_BY_HOP: u8 = 0;
+    const DESTINATION_OPTS: u8 = 60;
+
+    let payload = header.payload();
+    let mut next_header_byte = header.get_next_header().0;
+    let mut offset_in_payload = 0usize;
+    let mut out = Vec::new();
+
+    loop {
+        if next_header_byte != HOP_BY_HOP && next_header_byte != DESTINATION_OPTS {
+            break;
+        }
+        // Need at least 2 bytes for NextHeader + HdrExtLen fields.
+        if payload.len().saturating_sub(offset_in_payload) < 2 {
+            break;
+        }
+        let this_next = payload[offset_in_payload];
+        let hdr_ext_len = payload[offset_in_payload + 1];
+        // RFC 8200: option header length in 8-octet units, excluding first 8.
+        let ext_len_bytes = (hdr_ext_len as usize + 1) * 8;
+        if payload.len().saturating_sub(offset_in_payload) < ext_len_bytes {
+            break;
+        }
+        // Emit: previous NextHeader byte | HdrExtLen byte | remaining option bytes.
+        out.push(next_header_byte);
+        out.push(hdr_ext_len);
+        out.extend_from_slice(
+            &payload[offset_in_payload + 2..offset_in_payload + ext_len_bytes],
+        );
+
+        next_header_byte = this_next;
+        offset_in_payload += ext_len_bytes;
+    }
+
+    (
+        out,
+        IpNextHeaderProtocol(next_header_byte),
+        // 40-byte fixed header + walked extension-header bytes.
+        40 + offset_in_payload,
+    )
 }
 
 /// Sets the IP TOS (Type of Service) / IPv6 Traffic Class on a socket.
@@ -489,6 +578,10 @@ struct PacketMeta {
     ttl: u8,
     dscp: u8,
     ecn: u8,
+    /// Raw IP-layer bytes for draft-ietf-ippm-stamp-ext-hdr TLV reflection
+    /// (Types 246/247). Captured at the datalink layer; always available
+    /// when using this backend.
+    captured: super::CapturedHeaders,
 }
 
 fn handle_stamp_packet(
@@ -551,6 +644,7 @@ fn handle_stamp_packet(
         local_addresses: &config.local_addresses,
         sender_port: pkt.src.port(),
         reflector_member_link_id: config.reflector_member_link_id,
+        captured_headers: Some(&pkt.captured),
     };
 
     if let Some(mut response) = process_stamp_packet(data, pkt.src, pkt.ttl, config.use_auth, &ctx)
@@ -726,34 +820,5 @@ fn handle_stamp_packet(
     }
 }
 
-/// Builds the list of local IP addresses for Destination Node Address TLV matching.
-///
-/// If the bind address is a wildcard (0.0.0.0 or ::), enumerates all interface addresses
-/// via `pnet::datalink::interfaces()`. Otherwise, returns just the configured address.
-fn build_local_addresses(bind_addr: IpAddr) -> Vec<IpAddr> {
-    let is_wildcard = match bind_addr {
-        IpAddr::V4(v4) => v4.is_unspecified(),
-        IpAddr::V6(v6) => v6.is_unspecified(),
-    };
-
-    if !is_wildcard {
-        return vec![bind_addr];
-    }
-
-    // Enumerate interface addresses via pnet
-    let mut addrs = Vec::new();
-    for iface in datalink::interfaces() {
-        for ip_net in &iface.ips {
-            addrs.push(ip_net.ip());
-        }
-    }
-
-    if addrs.is_empty() {
-        log::warn!(
-            "Could not enumerate local addresses; Destination Node Address matching may fail"
-        );
-        vec![bind_addr]
-    } else {
-        addrs
-    }
-}
+// `build_local_addresses` now lives in `receiver::mod` and is shared between
+// backends (see [`super::build_local_addresses`]).

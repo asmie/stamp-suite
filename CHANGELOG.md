@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **draft-ietf-ippm-stamp-ext-hdr Reflected Fixed / IPv6 Extension Header Data
+  TLVs (Types 247 / 246)**: let the sender ask the reflector to echo the raw
+  bytes of the received IP fixed header (Type 247 — 20 B IPv4 or 40 B IPv6)
+  and IPv6 Hop-by-Hop / Destination Options extension headers (Type 246),
+  which allows end-to-end diagnostics of DSCP remarking, TTL decrement,
+  Flow Label rewriting, and in-path tampering with IPv6 options.
+  - New typed TLVs `ReflectedFixedHdrTlv` and `ReflectedIpv6ExtHdrTlv`
+    implementing `TypedTlv`, plus `TlvType::ReflectedFixedHdr` /
+    `ReflectedIpv6ExtHdr` enum variants and length validation that treats
+    the Value as variable-length (empty = sender request, populated =
+    reflector response).
+  - New `CapturedHeaders` struct threaded through `ProcessingContext` so the
+    reflector's TLV processing can see the raw IP-layer bytes captured at
+    receive time.
+  - New `TlvList::process_reflected_headers()` invoked from
+    `apply_semantic_tlv_processing` — copies captured bytes into the TLV or
+    sets the U-flag when the backend cannot observe the IP layer.
+  - `pnet` backend populates `CapturedHeaders` from `Ipv4Packet` / `Ipv6Packet`
+    and walks Hop-by-Hop (NextHeader=0) / Destination Options (NextHeader=60)
+    in wire format (NextHeader byte + HdrExtLen byte + body, per RFC 8200);
+    non-options headers (Routing, Fragment, ESP, AH) stop the walk, matching
+    the draft's scope. For IPv4 only the fixed 20-byte header is copied —
+    IPv4 options are intentionally dropped.
+  - `nix` backend passes `captured_headers: None` unconditionally; the
+    reflector echoes the TLV empty with the U-flag set per RFC 8972 §4.2
+    and emits a one-time log warning suggesting a rebuild with
+    `--features ttl-pnet` if header reflection is genuinely required. An
+    empty Value on an IPv4 packet or an IPv6 packet without extension
+    headers is legitimate and does **not** set the U-flag.
+  - Sender CLI: `--reflected-fixed-hdr`, `--reflected-ipv6-ext-hdr` (plus
+    matching `FileConfiguration` TOML fields). Sender attaches empty-request
+    TLVs; reflector fills them on the pnet backend or U-flags them on nix.
+
+### Changed
+
+- **Shared `build_local_addresses` between backends**: the interface-address
+  enumeration used for Destination Node Address TLV matching (RFC 9503 §4)
+  was duplicated in `receiver/nix.rs` and `receiver/pnet.rs` with platform-
+  specific implementations. Consolidated into a single
+  `receiver::build_local_addresses()` with `cfg(unix)` / `cfg(not(unix))`
+  internals — `nix::ifaddrs::getifaddrs` on Unix, `pnet::datalink::interfaces`
+  on Windows. Removes ~60 lines of near-duplicate code and a class of
+  drift bugs.
+
+### Documentation
+
+- README gained a **Receiver Backends** section explaining the two capture
+  paths (nix UDP socket + cmsg vs pnet datalink capture), why `nix` stays
+  the default on Linux/macOS (unprivileged execution, no libpcap runtime
+  dependency, kernel-side UDP demultiplex, firewall integration, kernel-
+  handled checksums / fragmentation / ARP, socket observability), and what
+  the tradeoff is (TLV 246/247 only on the pnet backend; two capture loops
+  to maintain).
+
 ## [0.6.0] - 2026-04-22
 
 ### Added

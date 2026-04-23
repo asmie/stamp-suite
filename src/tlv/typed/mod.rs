@@ -13,6 +13,8 @@ mod hmac;
 mod location;
 mod micro_session;
 mod reflected_control;
+mod reflected_fixed_hdr;
+mod reflected_ipv6_ext_hdr;
 mod return_path;
 mod timestamp_info;
 
@@ -60,3 +62,11 @@ pub use ber_count::BerCountTlv;
 
 // Type 242 — BER Max Bit Error Burst Size (draft-gandhi-ippm-stamp-ber)
 pub use ber_burst::BerBurstTlv;
+
+// Type 246 — Reflected IPv6 Extension Header Data (draft-ietf-ippm-stamp-ext-hdr)
+pub use reflected_ipv6_ext_hdr::ReflectedIpv6ExtHdrTlv;
+
+// Type 247 — Reflected Fixed Header Data (draft-ietf-ippm-stamp-ext-hdr)
+pub use reflected_fixed_hdr::{
+    ReflectedFixedHdrTlv, IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE,
+};

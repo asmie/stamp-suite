@@ -326,6 +326,22 @@ pub struct Configuration {
     /// Ignored unless `--reflected-control-count` > 1.
     #[clap(long, default_value_t = 1_000_000)]
     pub reflected_control_interval_ns: u32,
+
+    /// Request that the reflector copy the received IP fixed header
+    /// (IPv4: 20 bytes, IPv6: 40 bytes) back via TLV Type 247
+    /// (draft-ietf-ippm-stamp-ext-hdr §4). Reflectors built with the
+    /// `ttl-nix` backend cannot observe the IP header and will echo the
+    /// TLV with the U-flag set.
+    #[clap(long)]
+    pub reflected_fixed_hdr: bool,
+
+    /// Request that the reflector copy IPv6 Hop-by-Hop and Destination
+    /// Options extension headers back via TLV Type 246
+    /// (draft-ietf-ippm-stamp-ext-hdr §3). Reflectors built with the
+    /// `ttl-nix` backend cannot observe extension headers and will echo
+    /// the TLV with the U-flag set.
+    #[clap(long)]
+    pub reflected_ipv6_ext_hdr: bool,
 }
 
 impl Configuration {
@@ -602,6 +618,8 @@ impl Configuration {
         merge!(reflected_control_count);
         merge!(reflected_control_length);
         merge!(reflected_control_interval_ns);
+        merge!(reflected_fixed_hdr);
+        merge!(reflected_ipv6_ext_hdr);
     }
 }
 
@@ -678,6 +696,8 @@ pub struct FileConfiguration {
     pub reflected_control_count: Option<u16>,
     pub reflected_control_length: Option<u16>,
     pub reflected_control_interval_ns: Option<u32>,
+    pub reflected_fixed_hdr: Option<bool>,
+    pub reflected_ipv6_ext_hdr: Option<bool>,
 }
 
 /// Checks if authenticated mode is enabled.

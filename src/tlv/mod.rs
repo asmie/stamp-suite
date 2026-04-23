@@ -83,3 +83,9 @@ pub use typed::BerCountTlv;
 
 // Type 242 — BER Max Bit Error Burst Size (draft-gandhi-ippm-stamp-ber)
 pub use typed::BerBurstTlv;
+
+// Type 246 — Reflected IPv6 Extension Header Data (draft-ietf-ippm-stamp-ext-hdr)
+pub use typed::ReflectedIpv6ExtHdrTlv;
+
+// Type 247 — Reflected Fixed Header Data (draft-ietf-ippm-stamp-ext-hdr)
+pub use typed::{ReflectedFixedHdrTlv, IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE};

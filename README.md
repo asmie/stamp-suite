@@ -19,6 +19,7 @@ stamp-suite is a Rust implementation of the Simple Two-Way Active Measurement Pr
 - RFC 9534 Micro-session ID TLV for LAG per-member-link measurement
 - Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts-14, Type 12) for asymmetrical reply measurement
 - Bit Error Rate TLVs (draft-gandhi-ippm-stamp-ber-05, Types 240/241/242) for residual BER measurement against a known padding pattern
+- Reflected Fixed/IPv6 Extension Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr, Types 247/246) for header-transparency diagnostics — feature-gated to the pnet backend, gracefully U-flagged on the default nix backend
 - Class of Service (CoS) TLV support with DSCP/ECN measurement (RFC 8972 §5.2)
 - Location, Timestamp Info, Direct Measurement, Access Report, and Follow-Up Telemetry TLVs
 - HMAC authentication support
@@ -77,6 +78,90 @@ nix develop
 | `ttl-pnet` | Force pnet raw socket backend (requires root/admin) |
 | `metrics` | Enable Prometheus metrics endpoint |
 | `snmp` | Enable SNMP AgentX sub-agent (Unix only) |
+
+### Receiver Backends
+
+The reflector has two receive-path backends. They differ in how they extract
+per-packet metadata (TTL, DSCP/ECN, destination address, raw IP headers), not in
+STAMP protocol behaviour — both go through the same `process_stamp_packet`
+pipeline.
+
+**`nix` backend (default on Linux and macOS)**
+
+Binds a normal `tokio::net::UdpSocket` and attaches `IP_RECVTTL`,
+`IP_RECVTOS`, and `IP_PKTINFO` (with IPv6 equivalents) so the kernel hands
+per-packet metadata through `recvmsg` control messages. The kernel performs UDP
+demultiplexing and checksum validation; userspace only sees traffic destined
+for the bound port.
+
+**`pnet` backend (default on Windows, opt-in elsewhere)**
+
+Captures frames at the datalink layer via libpcap / Npcap, parses Ethernet /
+IPv4 / IPv6 / UDP manually, and sends replies through a separate `UdpSocket`.
+Sees full IP headers, including IPv6 extension headers.
+
+#### Why nix is the default where it works
+
+Picking `pnet` everywhere would simplify the codebase slightly (one capture
+loop instead of two), but it would regress every Linux/macOS deployment on
+several independent axes:
+
+1. **Privileges.** The `nix` backend runs as an unprivileged user — it binds a
+   UDP port and that is it. The `pnet` backend needs `CAP_NET_RAW` (or
+   `setcap cap_net_raw=eip` on the binary, or plain root). That matters for
+   container images, systemd hardening, CI runners, SaaS deployments, and
+   anywhere security policy limits capabilities.
+
+2. **Runtime dependencies.** `nix` only needs libc. `pnet` links against
+   libpcap on Unix and Npcap on Windows; these must be installed out-of-band
+   before the binary will start. A statically-linked `nix` build drops into
+   minimal containers and immutable OS images without extra packaging work.
+
+3. **Kernel packet filtering.** With `nix`, the kernel demultiplexes UDP by
+   destination port before userspace wakes up — stamp-suite only ever sees
+   its own traffic. With `pnet`, every frame on the interface reaches
+   userspace; we then discard everything that is not UDP to our port. On a
+   10 Gb/s link carrying unrelated traffic this wastes CPU and causes
+   scheduling jitter that pollutes delay measurements.
+
+4. **Interaction with the host firewall.** `nix` goes through the normal
+   socket path, so `iptables` / `nftables` INPUT rules and per-socket
+   accounting behave exactly as the operator expects. `pnet` bypasses INPUT
+   on receive and can bypass OUTPUT on raw send, so host-level policy is
+   silently skipped.
+
+5. **Kernel does the heavy lifting.** `nix` lets the kernel handle UDP
+   checksum, fragmentation, path MTU discovery, ICMP unreachable, ARP /
+   NDP for the next hop, and routing-table changes. A pnet-everywhere
+   design would have to re-implement or work around each of these.
+
+6. **Observability.** The `nix` backend has a real socket visible to
+   `ss -u`, `netstat`, `lsof`, tracing tools, and systemd socket accounting.
+   The pnet backend has none of these handles.
+
+#### Tradeoff
+
+Keeping two backends has a real cost: packet-processing changes that touch
+the capture path have to be mirrored in both files. We mitigate this by
+keeping all STAMP-level logic (TLV parsing, HMAC, Return Path handling,
+session tracking, counter updates) in `receiver/mod.rs` — the two backends
+differ only in how they capture packets and whether they send over an async
+tokio socket or a blocking std socket.
+
+The other consequence is that a handful of features that genuinely require
+raw IP-header visibility — currently just the Reflected Fixed Header Data
+(Type 247) and Reflected IPv6 Extension Header Data (Type 246) TLVs from
+draft-ietf-ippm-stamp-ext-hdr — are only populated on the pnet backend.
+On the nix backend the reflector echoes the TLV with the U-flag set per
+RFC 8972 §4.2, and logs a one-time warning suggesting a rebuild with
+`--features ttl-pnet` if header reflection is actually needed. This
+follows the draft's own "may be unsupported by the reflector" semantics,
+so the sender sees a spec-compliant response either way.
+
+If you specifically need TLV 246/247 reflection, or you want to craft
+outgoing packets with non-default IPv6 extension headers, build with
+`--no-default-features --features ttl-pnet` and accept the tradeoffs
+above.
 
 ## Usage
 
@@ -418,8 +503,10 @@ The implementation supports RFC 8972 TLV (Type-Length-Value) extensions, which a
 | 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-05) | Experimental |
 | 241 | BER Bit Error Count | u32 error-bit count, computed by reflector | Experimental |
 | 242 | BER Max Bit Error Burst Size | u32 longest consecutive error run, computed by reflector | Experimental |
+| 246 | Reflected IPv6 Extension Header Data | Reflects received IPv6 Hop-by-Hop / Destination Options headers (draft-ietf-ippm-stamp-ext-hdr) | Experimental (pnet backend only) |
+| 247 | Reflected Fixed Header Data | Reflects the raw 20-byte IPv4 or 40-byte IPv6 fixed header (draft-ietf-ippm-stamp-ext-hdr) | Experimental (pnet backend only) |
 
-**Status**: Full = structured parsing, validation, and reflector field population. Experimental = implements an active IETF draft; wire format and type numbers for BER (240/241/242) are TBD in the draft (experimental-range picks) while Reflected Control (Type 12) is IANA-assigned. SR-MPLS/SRv6 forwarding is echoed with U-flag (actual segment routing is out of scope for userspace UDP).
+**Status**: Full = structured parsing, validation, and reflector field population. Experimental = implements an active IETF draft; wire format and type numbers for BER (240/241/242) and ext-hdr reflection (246/247) are TBD in the draft (experimental-range picks) while Reflected Control (Type 12) is IANA-assigned. SR-MPLS/SRv6 forwarding is echoed with U-flag (actual segment routing is out of scope for userspace UDP). Types 246/247 require raw IP-header visibility which the default `nix` UDP-socket backend cannot provide; on that backend they are echoed with the U-flag set and a one-time warning is logged — see [Receiver Backends](#receiver-backends) for why the default remains `nix`.
 
 ### TLV Handling Modes
 
@@ -605,6 +692,49 @@ stamp-suite --remote-addr 192.168.1.100 --ber --ber-pattern aa55 --ber-padding-s
 ```
 
 The reflector XORs the received padding against the expected pattern (from the Bit Pattern TLV, or 0xFF00 if absent), counts error bits and the longest consecutive error run across byte boundaries, and writes the results into Types 241 and 242. Per draft §3, duplicate BER TLVs or a missing companion Extra Padding TLV cause the reflector to set the U-flag on all BER TLVs and skip the computation.
+
+### Reflected Fixed / IPv6 Extension Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr)
+
+Two experimental TLVs let the sender ask the reflector to echo the bytes of the
+received IP headers — useful for diagnosing DSCP remarking, TTL decrement,
+Flow Label rewriting, or tampering with IPv6 Hop-by-Hop / Destination Options
+by intermediate routers.
+
+| Type | Name | Content |
+|------|------|---------|
+| 246 | Reflected IPv6 Extension Header Data | Concatenated Hop-by-Hop (NextHeader 0) and Destination Options (NextHeader 60) extension headers, each prefixed with its NextHeader byte and HdrExtLen byte as they appeared on the wire |
+| 247 | Reflected Fixed Header Data | Raw 20-byte IPv4 or 40-byte IPv6 fixed header as received |
+
+Type numbers are TBD in the draft; this implementation uses 246/247 from RFC
+8972's experimental range.
+
+```bash
+# Ask the reflector to reflect the IPv4/IPv6 fixed header
+stamp-suite --remote-addr 192.168.1.100 --reflected-fixed-hdr
+
+# IPv6 test with reflected extension headers
+stamp-suite --remote-addr 2001:db8::1 --reflected-ipv6-ext-hdr
+```
+
+**Backend requirement:** these TLVs require the reflector to copy raw IP-header
+bytes into the response, which is only possible when the reflector captures at
+the datalink layer. Only the `pnet` backend can do this (see
+[Receiver Backends](#receiver-backends)).
+
+- On the **pnet** backend (Windows default, or `--features ttl-pnet` on Unix):
+  the reflector populates the TLV Value with the captured bytes. For IPv4
+  packets the TLV is truncated to the fixed 20-byte header, so IPv4 options
+  are not reflected.
+- On the **nix** backend (Linux/macOS default): the kernel hides raw IP
+  headers from the application, so the reflector has nothing to copy. The
+  TLVs are echoed with an empty Value and the U-flag set per RFC 8972 §4.2,
+  and a one-time warning is logged telling the operator to rebuild with
+  `--features ttl-pnet` if header reflection is required. The sender sees a
+  protocol-compliant response either way.
+- A sender-requested Type 246 TLV on an IPv4 packet, or on an IPv6 packet
+  without any extension headers, legitimately produces an empty Value — this
+  is **not** the same as the U-flag case and is treated as a valid "no data"
+  response.
 
 ## Prometheus Metrics
 

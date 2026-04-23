@@ -26,8 +26,9 @@ use crate::{
     tlv::{
         AccessReportTlv, BerBurstTlv, BerCountTlv, BerPatternTlv, ClassOfServiceTlv,
         DestinationNodeAddressTlv, DirectMeasurementTlv, ExtraPaddingTlv, FollowUpTelemetryTlv,
-        LocationTlv, MicroSessionIdTlv, RawTlv, ReflectedControlTlv, ReturnPathTlv, SyncSource,
-        TimestampInfoTlv, TimestampMethod, TlvList, TypedTlv,
+        LocationTlv, MicroSessionIdTlv, RawTlv, ReflectedControlTlv, ReflectedFixedHdrTlv,
+        ReflectedIpv6ExtHdrTlv, ReturnPathTlv, SyncSource, TimestampInfoTlv, TimestampMethod,
+        TlvList, TypedTlv,
     },
 };
 
@@ -263,6 +264,19 @@ pub async fn run_sender(
             conf.ber_padding_size,
             conf.ber_pattern.as_deref().unwrap_or("ff00")
         );
+    }
+
+    // Reflected Fixed / IPv6 Extension Header Data TLVs
+    // (draft-ietf-ippm-stamp-ext-hdr §§3–4). Sender sends them empty; the
+    // reflector populates them when it has raw-capture access to IP headers,
+    // or echoes them with U-flag otherwise.
+    if conf.reflected_fixed_hdr {
+        extra_tlvs.push(ReflectedFixedHdrTlv::request().to_raw());
+        log::info!("Reflected Fixed Header TLV (Type 247) requested");
+    }
+    if conf.reflected_ipv6_ext_hdr {
+        extra_tlvs.push(ReflectedIpv6ExtHdrTlv::request().to_raw());
+        log::info!("Reflected IPv6 Ext Header TLV (Type 246) requested");
     }
 
     // Check if we need to include TLV extensions.
