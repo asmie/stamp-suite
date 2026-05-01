@@ -28,7 +28,8 @@ use crate::{
         DestinationNodeAddressTlv, DirectMeasurementTlv, ExtraPaddingTlv, FollowUpTelemetryTlv,
         LocationTlv, MicroSessionIdTlv, RawTlv, ReflectedControlTlv, ReflectedFixedHdrTlv,
         ReflectedIpv6ExtHdrTlv, ReturnPathTlv, SyncSource, TimestampInfoTlv, TimestampMethod,
-        TlvList, TypedTlv,
+        TlvList, TypedTlv, DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY, IPV4_FIXED_HEADER_SIZE,
+        IPV6_FIXED_HEADER_SIZE,
     },
 };
 
@@ -271,12 +272,18 @@ pub async fn run_sender(
     // reflector populates them when it has raw-capture access to IP headers,
     // or echoes them with U-flag otherwise.
     if conf.reflected_fixed_hdr {
-        extra_tlvs.push(ReflectedFixedHdrTlv::request().to_raw());
-        log::info!("Reflected Fixed Header TLV (Type 247) requested");
+        extra_tlvs.push(ReflectedFixedHdrTlv::request_for(conf.remote_addr).to_raw());
+        let bytes = if conf.remote_addr.is_ipv4() {
+            IPV4_FIXED_HEADER_SIZE
+        } else {
+            IPV6_FIXED_HEADER_SIZE
+        };
+        log::info!("Reflected Fixed Header TLV (Type 247) requested ({bytes} header bytes)");
     }
     if conf.reflected_ipv6_ext_hdr {
-        extra_tlvs.push(ReflectedIpv6ExtHdrTlv::request().to_raw());
-        log::info!("Reflected IPv6 Ext Header TLV (Type 246) requested");
+        let cap = DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY;
+        extra_tlvs.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(cap).to_raw());
+        log::info!("Reflected IPv6 Ext Header TLV (Type 246) requested ({cap}-byte capacity)");
     }
 
     // Check if we need to include TLV extensions.

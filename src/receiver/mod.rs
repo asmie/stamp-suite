@@ -1088,10 +1088,12 @@ fn apply_semantic_tlv_processing(
         }
     });
 
-    // Compute fresh HMAC for response (must be last, after all TLV mutations)
+    // Compute fresh HMAC for response (must be last, after all TLV mutations).
+    // Use the reflector variant so the regenerated HMAC TLV carries U=0 per
+    // RFC 8972 §4.4.1 — the reflector recognizes the HMAC type by construction.
     if let Some(key) = tlv_hmac_key {
         let response_seq_bytes = &base_bytes[..4];
-        tlvs.set_hmac(key, response_seq_bytes);
+        tlvs.set_hmac_response(key, response_seq_bytes);
     }
 
     Some(SemanticResult {
@@ -3055,10 +3057,14 @@ mod tests {
 
         let rp_tlv = ReturnPathTlv::with_return_address("10.0.0.5".parse().unwrap());
 
+        let mut raw = rp_tlv.to_raw();
+        // Simulate post-clear state (apply_reflector_flags has already run);
+        // sender default is U=1 per RFC 8972 §4.4.1, but the U-flag toggle
+        // tested here is the send-path "set after clear" path.
+        raw.clear_reflector_flags();
         let mut data = sender_packet.to_bytes().to_vec();
-        data.extend_from_slice(&rp_tlv.to_raw().to_bytes());
+        data.extend_from_slice(&raw.to_bytes());
 
-        // U-flag should not be set initially
         assert_eq!(data[UNAUTH_BASE_SIZE] & 0x80, 0);
 
         let updated = set_return_path_u_flag_in_response(&mut data, UNAUTH_BASE_SIZE);

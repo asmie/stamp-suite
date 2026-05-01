@@ -225,13 +225,16 @@ impl TlvFlags {
         }
     }
 
-    /// Creates flags for sender-originated TLVs per RFC 8972.
+    /// Creates flags for sender-originated TLVs per RFC 8972 §4.4.1.
     ///
-    /// Per RFC 8972, the Session-Sender initializes all flags to 0.
-    /// The Session-Reflector may modify these flags based on processing results.
+    /// The Session-Sender MUST set U=1, M=0, I=0 before transmitting; the
+    /// Session-Reflector overwrites all three based on its own processing.
     #[must_use]
     pub fn for_sender() -> Self {
-        Self::default() // U=0, M=0, I=0
+        Self {
+            unrecognized: true,
+            ..Self::default()
+        }
     }
 }
 
@@ -355,7 +358,15 @@ impl TlvType {
 /// A raw TLV with unparsed value bytes.
 ///
 /// This is the basic building block for TLV parsing and serialization.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// # Equality
+///
+/// `PartialEq` is implemented manually and compares only the on-wire identity
+/// (flags, type, value, wire_length). The internal `parser_marked_malformed`
+/// marker is parse-time bookkeeping and intentionally excluded so a
+/// hand-built TLV compares equal to a parser-built TLV with identical
+/// bytes-on-the-wire.
+#[derive(Debug, Clone, Eq)]
 pub struct RawTlv {
     /// TLV flags.
     pub flags: TlvFlags,
@@ -366,12 +377,24 @@ pub struct RawTlv {
     /// Original wire length for truncated TLVs (when different from value.len()).
     /// Used to echo malformed TLVs byte-exactly per RFC 8972 §4.8.
     wire_length: Option<u16>,
+    /// Parser-detected structural error preserved across the reflector
+    /// flag-clear pass (RFC 8972 §4.4.1). See `mark_malformed_by_parser`.
+    parser_marked_malformed: bool,
+}
+
+impl PartialEq for RawTlv {
+    fn eq(&self, other: &Self) -> bool {
+        self.flags == other.flags
+            && self.tlv_type == other.tlv_type
+            && self.value == other.value
+            && self.wire_length == other.wire_length
+    }
 }
 
 impl RawTlv {
     /// Creates a new RawTlv with the given type and value.
     ///
-    /// Flags are initialized to 0 (U=0, M=0, I=0) per RFC 8972 for sender use.
+    /// Flags are initialized for sender use per RFC 8972 §4.4.1: U=1, M=0, I=0.
     #[must_use]
     pub fn new(tlv_type: TlvType, value: Vec<u8>) -> Self {
         Self {
@@ -379,6 +402,7 @@ impl RawTlv {
             tlv_type,
             value,
             wire_length: None,
+            parser_marked_malformed: false,
         }
     }
 
@@ -390,6 +414,7 @@ impl RawTlv {
             tlv_type,
             value,
             wire_length: None,
+            parser_marked_malformed: false,
         }
     }
 
@@ -436,6 +461,7 @@ impl RawTlv {
                 tlv_type,
                 value,
                 wire_length: None,
+                parser_marked_malformed: false,
             },
             total_size,
         ))
@@ -484,6 +510,7 @@ impl RawTlv {
                 tlv_type,
                 value,
                 wire_length,
+                parser_marked_malformed: malformed,
             },
             consumed,
             malformed,
@@ -542,6 +569,22 @@ impl RawTlv {
         self.flags.malformed = true;
     }
 
+    /// Marks this TLV as malformed by the parser (structural/positional error
+    /// — truncation, TLV after HMAC, bad HMAC length). Sets the M-flag and
+    /// records that the parser detected the malformed-ness so the reflector's
+    /// flag-clear pass can re-derive M without losing the parser's signal.
+    pub(crate) fn mark_malformed_by_parser(&mut self) {
+        self.flags.malformed = true;
+        self.parser_marked_malformed = true;
+    }
+
+    /// True when the parser already determined this TLV is malformed (used by
+    /// `validate_known_tlv_lengths` to re-set M after the clear pass).
+    #[must_use]
+    pub(crate) fn is_parser_marked_malformed(&self) -> bool {
+        self.parser_marked_malformed
+    }
+
     /// Sets the integrity_failed flag (I-flag).
     pub fn set_integrity_failed(&mut self) {
         self.flags.integrity_failed = true;
@@ -552,6 +595,16 @@ impl RawTlv {
     /// Reflected Test Packet Control TLV (Type 12).
     pub fn set_conformant_reflected(&mut self) {
         self.flags.conformant_reflected = true;
+    }
+
+    /// Clears the U, M, and I flags so the reflector can re-derive them
+    /// per RFC 8972 §4.4.1. The C-flag, reserved bits, and the
+    /// `parser_marked_malformed` marker (used to re-set M for parser-detected
+    /// structural errors) are all preserved.
+    pub fn clear_reflector_flags(&mut self) {
+        self.flags.unrecognized = false;
+        self.flags.malformed = false;
+        self.flags.integrity_failed = false;
     }
 }
 
@@ -671,14 +724,14 @@ mod tests {
         let tlv = RawTlv::new(TlvType::ExtraPadding, vec![0x01, 0x02]);
         assert_eq!(tlv.tlv_type, TlvType::ExtraPadding);
         assert_eq!(tlv.value, vec![0x01, 0x02]);
-        assert_eq!(tlv.flags.to_byte(), 0);
+        assert_eq!(tlv.flags.to_byte(), 0x80);
     }
 
     #[test]
     fn test_raw_tlv_to_bytes() {
         let tlv = RawTlv::new(TlvType::ExtraPadding, vec![0xAB, 0xCD]);
         let bytes = tlv.to_bytes();
-        assert_eq!(bytes[0], 0x00);
+        assert_eq!(bytes[0], 0x80);
         assert_eq!(bytes[1], 0x01);
         assert_eq!(bytes[2], 0x00);
         assert_eq!(bytes[3], 0x02);
@@ -761,15 +814,15 @@ mod tests {
     #[test]
     fn test_tlv_flags_for_sender() {
         let flags = TlvFlags::for_sender();
-        assert!(!flags.unrecognized);
+        assert!(flags.unrecognized);
         assert!(!flags.malformed);
         assert!(!flags.integrity_failed);
-        assert_eq!(flags.to_byte(), 0x00);
+        assert_eq!(flags.to_byte(), 0x80);
     }
 
     #[test]
     fn test_raw_tlv_flag_setters() {
-        let mut tlv = RawTlv::new(TlvType::ExtraPadding, vec![]);
+        let mut tlv = RawTlv::with_flags(TlvFlags::default(), TlvType::ExtraPadding, vec![]);
         assert!(!tlv.is_unrecognized());
         assert!(!tlv.is_malformed());
         assert!(!tlv.is_integrity_failed());
@@ -781,6 +834,74 @@ mod tests {
         tlv.set_integrity_failed();
         assert!(tlv.is_integrity_failed());
         assert_eq!(tlv.flags.to_byte(), 0xE0);
+    }
+
+    #[test]
+    fn test_raw_tlv_clear_reflector_flags() {
+        let mut tlv =
+            RawTlv::with_flags(TlvFlags::from_byte(0xF0), TlvType::ReflectedControl, vec![]);
+        tlv.clear_reflector_flags();
+        // U/M/I cleared, C-flag preserved.
+        assert_eq!(tlv.flags.to_byte(), 0x10);
+    }
+
+    #[test]
+    fn test_parser_marked_malformed_survives_clear() {
+        // Truncated TLV from parse_lenient → parser_marked_malformed = true,
+        // which must survive clear_reflector_flags so the reflector can
+        // re-set M during the rederive pass.
+        let buf = [0x00, 0x02, 0x00, 0x64, 0xAA]; // declared length 100, 1 byte available
+        let (mut tlv, _, malformed) = RawTlv::parse_lenient(&buf).unwrap();
+        assert!(malformed);
+        assert!(tlv.is_parser_marked_malformed());
+        assert!(tlv.is_malformed());
+
+        tlv.clear_reflector_flags();
+        assert!(!tlv.is_malformed(), "M-flag is cleared by clear pass");
+        assert!(tlv.is_parser_marked_malformed(), "marker must persist");
+    }
+
+    #[test]
+    fn test_mark_malformed_by_parser_sets_both_flag_and_marker() {
+        let mut tlv = RawTlv::with_flags(TlvFlags::default(), TlvType::Hmac, vec![0; 8]);
+        assert!(!tlv.is_parser_marked_malformed());
+        tlv.mark_malformed_by_parser();
+        assert!(tlv.is_malformed());
+        assert!(tlv.is_parser_marked_malformed());
+    }
+
+    #[test]
+    fn test_partialeq_excludes_parser_marker() {
+        // Two TLVs with identical on-wire identity (flags, type, value,
+        // wire_length) compare equal regardless of parse-time marker state.
+        let mut hand_built =
+            RawTlv::with_flags(TlvFlags::default(), TlvType::ExtraPadding, vec![0xAA; 4]);
+        hand_built.set_malformed();
+
+        // Simulate a parser-built TLV with the same on-wire shape but the
+        // marker set.
+        let buf = [0x40, 0x01, 0x00, 0x04, 0xAA, 0xAA, 0xAA, 0xAA];
+        let (parser_built, _) = RawTlv::parse(&buf).unwrap();
+        let mut parser_built = parser_built;
+        parser_built.mark_malformed_by_parser();
+
+        assert!(parser_built.is_parser_marked_malformed());
+        assert!(!hand_built.is_parser_marked_malformed());
+        assert_eq!(
+            hand_built, parser_built,
+            "marker is internal; on-wire-equivalent TLVs compare equal"
+        );
+    }
+
+    #[test]
+    fn test_plain_set_malformed_does_not_set_parser_marker() {
+        // set_malformed (without _by_parser) is for type/length validators
+        // that re-derive M on every pass — they don't need the persistent
+        // marker.
+        let mut tlv = RawTlv::with_flags(TlvFlags::default(), TlvType::ClassOfService, vec![0; 4]);
+        tlv.set_malformed();
+        assert!(tlv.is_malformed());
+        assert!(!tlv.is_parser_marked_malformed());
     }
 
     #[test]

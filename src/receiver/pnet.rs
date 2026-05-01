@@ -372,10 +372,8 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                             // (including options); the draft reflects only
                             // the fixed 20-byte header, so clamp to that.
                             let ipv4_bytes = header.packet();
-                            let fixed_len = std::cmp::min(
-                                ipv4_bytes.len(),
-                                crate::tlv::IPV4_FIXED_HEADER_SIZE,
-                            );
+                            let fixed_len =
+                                std::cmp::min(ipv4_bytes.len(), crate::tlv::IPV4_FIXED_HEADER_SIZE);
                             let captured = super::CapturedHeaders {
                                 fixed_header: ipv4_bytes[..fixed_len].to_vec(),
                                 ipv6_ext_headers: Vec::new(),
@@ -403,13 +401,9 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                 // (NextHeader=0) or Destination Options (NextHeader=60)
                 // extension headers for TLV Types 247/246.
                 let ipv6_bytes = header.packet();
-                let fixed_len = std::cmp::min(
-                    ipv6_bytes.len(),
-                    crate::tlv::IPV6_FIXED_HEADER_SIZE,
-                );
+                let fixed_len = std::cmp::min(ipv6_bytes.len(), crate::tlv::IPV6_FIXED_HEADER_SIZE);
                 let fixed_header = ipv6_bytes[..fixed_len].to_vec();
-                let (ext_headers, final_next, payload_offset) =
-                    extract_ipv6_ext_headers(&header);
+                let (ext_headers, final_next, payload_offset) = extract_ipv6_ext_headers(&header);
 
                 if final_next == IpNextHeaderProtocols::Udp {
                     let payload = &ipv6_bytes[payload_offset..];
@@ -482,9 +476,7 @@ fn extract_ipv6_ext_headers(
         // Emit: previous NextHeader byte | HdrExtLen byte | remaining option bytes.
         out.push(next_header_byte);
         out.push(hdr_ext_len);
-        out.extend_from_slice(
-            &payload[offset_in_payload + 2..offset_in_payload + ext_len_bytes],
-        );
+        out.extend_from_slice(&payload[offset_in_payload + 2..offset_in_payload + ext_len_bytes]);
 
         next_header_byte = this_next;
         offset_in_payload += ext_len_bytes;

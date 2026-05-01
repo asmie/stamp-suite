@@ -275,12 +275,14 @@ pub struct Configuration {
 
     /// Sender micro-session member link ID for LAG measurement (RFC 9534).
     /// When set, includes a Micro-session ID TLV in test packets.
-    #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
+    /// Accepts decimal (e.g. `255`) or `0x`-prefixed hex (e.g. `0xff`).
+    #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex)]
     pub micro_session_id: Option<u16>,
 
     /// Reflector member link ID for LAG micro-sessions (RFC 9534).
     /// When set, the reflector fills this ID into reflected Micro-session ID TLVs.
-    #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
+    /// Accepts decimal (e.g. `171`) or `0x`-prefixed hex (e.g. `0xab`).
+    #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex)]
     pub reflector_member_link_id: Option<u16>,
 
     /// Maximum packets per second per source (0 = unlimited).
@@ -704,6 +706,29 @@ pub struct FileConfiguration {
 #[inline]
 pub fn is_auth(mode: AuthMode) -> bool {
     mode.is_authenticated()
+}
+
+/// clap value_parser: parse a u16 from decimal or `0x`-prefixed hex, rejecting 0.
+///
+/// Accepts: `255`, `0xff`, `0XFF`, `0x00ab`. Rejects: `0`, `0x0`, empty, `ff`,
+/// out-of-range. Used by LAG identifier flags where the RFC 9534 wire field is
+/// commonly written in hex.
+fn parse_u16_nonzero_dec_or_hex(s: &str) -> Result<u16, String> {
+    let trimmed = s.trim();
+    let parsed = if let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u16::from_str_radix(rest, 16).map_err(|e| format!("invalid hex value `{s}`: {e}"))?
+    } else {
+        trimmed
+            .parse::<u16>()
+            .map_err(|e| format!("invalid value `{s}`: {e}"))?
+    };
+    if parsed == 0 {
+        return Err(format!("value `{s}` must be in range 1..=65535"));
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -1540,6 +1565,80 @@ mod tests {
         let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
             .expect_err("reflector_member_link_id == 0 must fail");
         assert!(err.to_string().contains("reflector_member_link_id"));
+    }
+
+    #[test]
+    fn test_parse_u16_nonzero_dec_or_hex_accepts_decimal() {
+        assert_eq!(parse_u16_nonzero_dec_or_hex("1").unwrap(), 1);
+        assert_eq!(parse_u16_nonzero_dec_or_hex("255").unwrap(), 255);
+        assert_eq!(parse_u16_nonzero_dec_or_hex("65535").unwrap(), 65535);
+    }
+
+    #[test]
+    fn test_parse_u16_nonzero_dec_or_hex_accepts_hex() {
+        assert_eq!(parse_u16_nonzero_dec_or_hex("0x1").unwrap(), 1);
+        assert_eq!(parse_u16_nonzero_dec_or_hex("0xff").unwrap(), 255);
+        assert_eq!(parse_u16_nonzero_dec_or_hex("0xFF").unwrap(), 255);
+        assert_eq!(parse_u16_nonzero_dec_or_hex("0X00ab").unwrap(), 0xab);
+        assert_eq!(parse_u16_nonzero_dec_or_hex("0xffff").unwrap(), 65535);
+    }
+
+    #[test]
+    fn test_parse_u16_nonzero_dec_or_hex_rejects_zero() {
+        assert!(parse_u16_nonzero_dec_or_hex("0").is_err());
+        assert!(parse_u16_nonzero_dec_or_hex("0x0").is_err());
+        assert!(parse_u16_nonzero_dec_or_hex("0x0000").is_err());
+    }
+
+    #[test]
+    fn test_parse_u16_nonzero_dec_or_hex_rejects_garbage() {
+        assert!(parse_u16_nonzero_dec_or_hex("").is_err());
+        assert!(parse_u16_nonzero_dec_or_hex("ff").is_err()); // hex without 0x prefix
+        assert!(parse_u16_nonzero_dec_or_hex("0x1g").is_err());
+        assert!(parse_u16_nonzero_dec_or_hex("0x10000").is_err()); // > u16::MAX
+        assert!(parse_u16_nonzero_dec_or_hex("65536").is_err());
+        // Empty string after stripping `0x` prefix → from_str_radix rejects.
+        assert!(parse_u16_nonzero_dec_or_hex("0x").is_err());
+        assert!(parse_u16_nonzero_dec_or_hex("0X").is_err());
+    }
+
+    #[test]
+    fn test_parse_u16_nonzero_dec_or_hex_handles_whitespace() {
+        // clap doesn't usually pass whitespace, but the parser trims defensively
+        // (e.g. when values are loaded from the TOML config file).
+        assert_eq!(parse_u16_nonzero_dec_or_hex(" 0xff").unwrap(), 0xff);
+        assert_eq!(parse_u16_nonzero_dec_or_hex("0xff ").unwrap(), 0xff);
+        assert_eq!(parse_u16_nonzero_dec_or_hex(" 255 ").unwrap(), 255);
+        assert_eq!(parse_u16_nonzero_dec_or_hex("\t0x1\n").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_micro_session_id_accepts_hex_on_cli() {
+        let conf = load_from_args(&[
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--micro-session-id",
+            "0xff",
+            "--reflector-member-link-id",
+            "0xab",
+        ])
+        .unwrap();
+        assert_eq!(conf.micro_session_id, Some(0xff));
+        assert_eq!(conf.reflector_member_link_id, Some(0xab));
+    }
+
+    #[test]
+    fn test_micro_session_id_accepts_decimal_on_cli() {
+        let conf = load_from_args(&[
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--micro-session-id",
+            "255",
+        ])
+        .unwrap();
+        assert_eq!(conf.micro_session_id, Some(255));
     }
 
     #[test]

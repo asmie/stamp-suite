@@ -10,6 +10,10 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+
+        # Cargo features compiled into the nix-built binary and exercised
+        # by the check phase. Mirrors `cargo build/test --all-features`.
+        allFeatures = [ "ttl-nix" "ttl-pnet" "metrics" "snmp" ];
       in
       {
         packages = {
@@ -19,16 +23,49 @@
 
             src = self;
 
-
             cargoHash = "sha256-9xwRzJyuz2BMk+1ThemzKqO/gVsX+aLhBL2oLWMyVwc=";
+
+            buildFeatures = allFeatures;
+            # Honour --all-features for the cargo test phase too so the
+            # metrics / snmp feature-gated tests run alongside the rest.
+            cargoTestFlags = [ "--all-features" ];
 
             meta = with pkgs.lib; {
               description = "Simple Two-Way Active Measurement Protocol (STAMP) implementation";
               homepage = "https://github.com/asmie/stamp-suite";
               license = licenses.mit;
               mainProgram = "stamp-suite";
+              platforms = platforms.unix;
             };
           };
+        };
+
+        # `nix flake check` exercises the package build (which includes the
+        # cargo test phase) plus a clippy-with-warnings-as-errors gate that
+        # mirrors CI.
+        checks = {
+          build = self.packages.${system}.default;
+
+          clippy = pkgs.rustPlatform.buildRustPackage {
+            pname = "stamp-suite-clippy";
+            version = "0.6.1";
+            src = self;
+            cargoHash = "sha256-9xwRzJyuz2BMk+1ThemzKqO/gVsX+aLhBL2oLWMyVwc=";
+            buildFeatures = allFeatures;
+            nativeBuildInputs = [ pkgs.clippy ];
+            buildPhase = ''
+              cargo clippy --all --all-features --tests -- -D warnings
+            '';
+            doCheck = false;
+            installPhase = "mkdir -p $out";
+          };
+
+          fmt = pkgs.runCommand "stamp-suite-fmt"
+            { nativeBuildInputs = [ pkgs.rustfmt pkgs.cargo ]; } ''
+            cd ${self}
+            cargo fmt --all -- --check
+            touch $out
+          '';
         };
 
         devShells.default = pkgs.mkShell {
@@ -37,6 +74,7 @@
             rustc
             rustfmt
             clippy
+            rust-analyzer
           ];
         };
       }

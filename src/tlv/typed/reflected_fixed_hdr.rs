@@ -1,15 +1,16 @@
 //! Reflected Fixed Header Data TLV (Type 247) per
 //! draft-ietf-ippm-stamp-ext-hdr §4.
 //!
-//! Sender transmits this TLV with an empty Value field to request that the
-//! reflector copy the bytes of the received IP fixed header (20 bytes for
-//! IPv4, 40 bytes for IPv6) into the response. When the reflector backend
-//! cannot capture raw IP headers (nix UDP-socket backend), the reflector
-//! sets the U-flag and echoes the TLV with an empty Value.
+//! The Session-Sender transmits this TLV with the Length set to the IP
+//! header length (20 for IPv4, 40 for IPv6) and the Value initialised to
+//! zeros, per the draft. The reflector overwrites those zero bytes with
+//! the bytes of the received IP fixed header. When the reflector backend
+//! cannot capture raw IP headers (nix UDP-socket backend) it sets the
+//! U-flag and clears the Value.
 //!
-//! The reflected bytes are the fixed header exactly as received, in wire
-//! order and network byte order. Receivers identify IPv4 vs IPv6 by the
-//! Version nibble in the first byte.
+//! Receivers identify IPv4 vs IPv6 by the Version nibble in the first byte.
+
+use std::net::IpAddr;
 
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
@@ -23,15 +24,31 @@ pub const IPV6_FIXED_HEADER_SIZE: usize = 40;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReflectedFixedHdrTlv {
     /// Raw fixed-header bytes (IPv4: 20 octets; IPv6: 40 octets).
-    /// Empty when sent by the sender as a request.
+    /// Filled with zeros when sent by the sender as a request.
     pub header: Vec<u8>,
 }
 
 impl ReflectedFixedHdrTlv {
-    /// Creates an empty request TLV for the sender to attach.
+    /// Creates a sender request TLV with `bytes` zero-filled Value bytes.
     #[must_use]
-    pub fn request() -> Self {
-        Self::default()
+    pub fn request_with_capacity(bytes: usize) -> Self {
+        Self {
+            header: vec![0u8; bytes],
+        }
+    }
+
+    /// Creates a sender request TLV sized for the destination's IP family.
+    ///
+    /// Per draft-ietf-ippm-stamp-ext-hdr §4 the sender pre-allocates 20
+    /// (IPv4) or 40 (IPv6) zero bytes for the reflector to overwrite.
+    /// Only the address family is consulted; the address bytes are unused.
+    #[must_use]
+    pub fn request_for(dest: IpAddr) -> Self {
+        let bytes = match dest {
+            IpAddr::V4(_) => IPV4_FIXED_HEADER_SIZE,
+            IpAddr::V6(_) => IPV6_FIXED_HEADER_SIZE,
+        };
+        Self::request_with_capacity(bytes)
     }
 
     /// Creates a response TLV carrying a raw fixed IP header.
@@ -82,12 +99,20 @@ mod tests {
     }
 
     #[test]
-    fn test_request_is_empty() {
-        let tlv = ReflectedFixedHdrTlv::request();
-        assert!(tlv.header.is_empty());
+    fn test_request_with_capacity_is_zero_filled() {
+        let tlv = ReflectedFixedHdrTlv::request_with_capacity(IPV4_FIXED_HEADER_SIZE);
+        assert_eq!(tlv.header, vec![0u8; IPV4_FIXED_HEADER_SIZE]);
         let raw = tlv.to_raw();
         assert_eq!(raw.tlv_type, TlvType::ReflectedFixedHdr);
-        assert_eq!(raw.value.len(), 0);
+        assert_eq!(raw.value.len(), IPV4_FIXED_HEADER_SIZE);
+    }
+
+    #[test]
+    fn test_request_for_picks_size_by_family() {
+        let v4 = ReflectedFixedHdrTlv::request_for("127.0.0.1".parse().unwrap());
+        let v6 = ReflectedFixedHdrTlv::request_for("::1".parse().unwrap());
+        assert_eq!(v4.header.len(), IPV4_FIXED_HEADER_SIZE);
+        assert_eq!(v6.header.len(), IPV6_FIXED_HEADER_SIZE);
     }
 
     #[test]
@@ -115,8 +140,10 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_request_is_neither_v4_nor_v6() {
-        let tlv = ReflectedFixedHdrTlv::request();
+    fn test_zero_filled_request_is_neither_v4_nor_v6_until_reflector_fills_it() {
+        // Zero-filled request has the right length but Version=0, so neither
+        // is_ipv4 nor is_ipv6 returns true until the reflector overwrites.
+        let tlv = ReflectedFixedHdrTlv::request_for("127.0.0.1".parse().unwrap());
         assert!(!tlv.is_ipv4());
         assert!(!tlv.is_ipv6());
     }

@@ -549,10 +549,14 @@ impl TlvList {
             match tlv.tlv_type {
                 TlvType::ReflectedFixedHdr => match captured_fixed {
                     Some(bytes) if !bytes.is_empty() => {
-                        tlv.value = bytes.to_vec();
+                        Self::fill_within_capacity(&mut tlv.value, bytes);
                     }
                     _ => {
-                        tlv.value.clear();
+                        // Backend cannot observe the IP layer. Per
+                        // draft-ietf-ippm-stamp-ext-hdr the response keeps
+                        // the sender-advertised length; just zero-fill
+                        // the capacity and raise the U-flag.
+                        tlv.value.fill(0);
                         tlv.set_unrecognized();
                         log_reflected_hdr_unsupported_once();
                     }
@@ -560,13 +564,11 @@ impl TlvList {
                 TlvType::ReflectedIpv6ExtHdr => match captured_ext_headers {
                     // Empty ext_headers is legitimate for an IPv4 packet or an
                     // IPv6 packet without Hop-by-Hop/Destination options. Only
-                    // set U-flag when the backend cannot observe the IP layer
+                    // raise U-flag when the backend cannot observe the IP layer
                     // at all (captured_ext_headers is None).
-                    Some(bytes) => {
-                        tlv.value = bytes.to_vec();
-                    }
+                    Some(bytes) => Self::fill_within_capacity(&mut tlv.value, bytes),
                     None => {
-                        tlv.value.clear();
+                        tlv.value.fill(0);
                         tlv.set_unrecognized();
                         log_reflected_hdr_unsupported_once();
                     }
@@ -574,6 +576,15 @@ impl TlvList {
                 _ => {}
             }
         }
+    }
+
+    /// Copies `src` into `dst` in-place, preserving `dst`'s length:
+    /// truncate if `src` exceeds capacity, zero-pad the tail if shorter.
+    /// Honors the sender's advertised Length per draft-ietf-ippm-stamp-ext-hdr.
+    fn fill_within_capacity(dst: &mut [u8], src: &[u8]) {
+        let copy_len = src.len().min(dst.len());
+        dst[..copy_len].copy_from_slice(&src[..copy_len]);
+        dst[copy_len..].fill(0);
     }
 
     fn mark_ber_tlvs_unrecognized(tlvs: &mut [RawTlv]) {
@@ -684,6 +695,16 @@ mod tests {
         BerBurstTlv, BerCountTlv, BerPatternTlv, DirectMeasurementTlv, ExtraPaddingTlv,
         FollowUpTelemetryTlv, LocationTlv, ReflectedControlTlv, TimestampInfoTlv,
     };
+
+    /// Builds a single-TLV list and runs the reflector clear pass on it,
+    /// mimicking the production pipeline state at the point each
+    /// `process_*` function would normally run.
+    fn list_with_cleared(tlv: RawTlv) -> TlvList {
+        let mut list = TlvList::new();
+        list.push(tlv).unwrap();
+        list.clear_reflector_flags();
+        list
+    }
 
     #[test]
     fn test_update_timestamp_info_tlvs() {
@@ -831,9 +852,7 @@ mod tests {
     #[test]
     fn test_process_destination_node_address_match() {
         let addr: std::net::IpAddr = "192.168.1.1".parse().unwrap();
-        let tlv = DestinationNodeAddressTlv::new(addr);
-        let mut list = TlvList::new();
-        list.push(tlv.to_raw()).unwrap();
+        let mut list = list_with_cleared(DestinationNodeAddressTlv::new(addr).to_raw());
 
         let local_addrs = vec![addr];
         let matched = list.process_destination_node_address(&local_addrs);
@@ -872,9 +891,7 @@ mod tests {
         // does. Pre-emptively setting U-flag here would falsely mark those
         // responses "unsupported". The U-flag decision belongs in the send
         // path once the backend knows what happened.
-        let rp = ReturnPathTlv::with_control_code(0x1);
-        let mut list = TlvList::new();
-        list.push(rp.to_raw()).unwrap();
+        let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0x1).to_raw());
 
         let action = list.process_return_path(1234);
         assert_eq!(action, ReturnPathAction::Normal);
@@ -907,9 +924,7 @@ mod tests {
         // RFC 9503: only bit 0 matters; reserved bits are ignored.
         // 0xFF has bit 0 set → same-link request; U-flag is not pre-set
         // since on single-homed paths the backend already satisfies it.
-        let rp = ReturnPathTlv::with_control_code(0xFF);
-        let mut list = TlvList::new();
-        list.push(rp.to_raw()).unwrap();
+        let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0xFF).to_raw());
 
         let action = list.process_return_path(1234);
         assert_eq!(action, ReturnPathAction::Normal);
@@ -1193,8 +1208,7 @@ mod tests {
     #[test]
     fn test_process_ber_no_ber_tlvs_noop() {
         // Packet without any BER TLVs — process_ber should be a no-op.
-        let mut list = TlvList::new();
-        list.push(ExtraPaddingTlv::new_zeros(8).to_raw()).unwrap();
+        let mut list = list_with_cleared(ExtraPaddingTlv::new_zeros(8).to_raw());
 
         list.process_ber();
 
@@ -1229,8 +1243,7 @@ mod tests {
     #[test]
     fn test_reflected_fixed_hdr_populated_when_captured() {
         use crate::tlv::ReflectedFixedHdrTlv;
-        let mut list = TlvList::new();
-        list.push(ReflectedFixedHdrTlv::request().to_raw()).unwrap();
+        let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
 
         let mut captured = vec![0u8; 20];
         captured[0] = 0x45; // IPv4 version + IHL
@@ -1246,23 +1259,39 @@ mod tests {
     #[test]
     fn test_reflected_fixed_hdr_u_flag_when_backend_cant_capture() {
         use crate::tlv::ReflectedFixedHdrTlv;
-        let mut list = TlvList::new();
-        list.push(ReflectedFixedHdrTlv::request().to_raw()).unwrap();
+        let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
 
         // None = backend cannot observe IP layer (nix UDP-socket backend).
         list.process_reflected_headers(None, None);
 
         let tlv = &list.non_hmac_tlvs()[0];
-        assert!(tlv.value.is_empty(), "value must be cleared on U-flag path");
-        assert!(tlv.is_unrecognized(), "U-flag must be set when backend cannot capture");
+        assert_eq!(tlv.value.len(), 20, "sender-advertised length is preserved");
+        assert!(tlv.value.iter().all(|&b| b == 0), "value zero-filled");
+        assert!(
+            tlv.is_unrecognized(),
+            "U-flag must be set when backend cannot capture"
+        );
+    }
+
+    #[test]
+    fn test_reflected_fixed_hdr_truncates_capture_to_capacity() {
+        // Defensive: if the captured buffer somehow exceeds the sender's
+        // advertised length, response stays at advertised length.
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
+
+        let oversized = vec![0xAAu8; 40];
+        list.process_reflected_headers(Some(&oversized), Some(&[]));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.value.len(), 20);
+        assert_eq!(tlv.value, vec![0xAA; 20]);
     }
 
     #[test]
     fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
-        let mut list = TlvList::new();
-        list.push(ReflectedIpv6ExtHdrTlv::request().to_raw())
-            .unwrap();
+        let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
 
         // Fake Hop-by-Hop header: NextHeader=60 (Destination Opts), HdrExtLen=0, 6 bytes body.
         let captured_ext = vec![60u8, 0u8, 0x01, 0x02, 0x03, 0x04, 0x00, 0x00];
@@ -1274,19 +1303,20 @@ mod tests {
     }
 
     #[test]
-    fn test_reflected_ipv6_ext_hdr_empty_capture_is_not_u_flag() {
-        // An IPv4 packet or an IPv6 packet without ext headers produces an
-        // empty captured_ext_headers slice — that's legitimate, not "backend
-        // can't observe". U-flag stays clear.
+    fn test_reflected_ipv6_ext_hdr_empty_capture_keeps_capacity() {
+        // IPv4 path or IPv6 without ext headers: captured slice is empty.
+        // That's legitimate — keep the sender-advertised capacity, no U-flag.
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
-        let mut list = TlvList::new();
-        list.push(ReflectedIpv6ExtHdrTlv::request().to_raw())
-            .unwrap();
+        let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
 
         list.process_reflected_headers(Some(&[0x45]), Some(&[]));
 
         let tlv = &list.non_hmac_tlvs()[0];
-        assert!(tlv.value.is_empty());
+        assert_eq!(tlv.value.len(), 8, "advertised capacity preserved");
+        assert!(
+            tlv.value.iter().all(|&b| b == 0),
+            "no captured bytes → zeros"
+        );
         assert!(
             !tlv.is_unrecognized(),
             "empty ext-header list on IPv4 packet must not set U-flag"
@@ -1296,22 +1326,47 @@ mod tests {
     #[test]
     fn test_reflected_ipv6_ext_hdr_u_flag_when_backend_cant_capture() {
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
-        let mut list = TlvList::new();
-        list.push(ReflectedIpv6ExtHdrTlv::request().to_raw())
-            .unwrap();
+        let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
 
         list.process_reflected_headers(None, None);
 
         let tlv = &list.non_hmac_tlvs()[0];
-        assert!(tlv.value.is_empty());
+        assert_eq!(tlv.value.len(), 8, "advertised capacity preserved");
+        assert!(tlv.value.iter().all(|&b| b == 0));
         assert!(tlv.is_unrecognized());
+    }
+
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_pads_short_capture_with_zeros() {
+        use crate::tlv::ReflectedIpv6ExtHdrTlv;
+        let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
+
+        let captured = vec![60u8, 0u8, 0xAA, 0xBB]; // 4 bytes < 8 capacity
+        list.process_reflected_headers(Some(&[]), Some(&captured));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.value.len(), 8, "capacity preserved");
+        assert_eq!(&tlv.value[..4], captured.as_slice());
+        assert!(tlv.value[4..].iter().all(|&b| b == 0), "tail zero-padded");
+        assert!(!tlv.is_unrecognized());
+    }
+
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_truncates_long_capture() {
+        use crate::tlv::ReflectedIpv6ExtHdrTlv;
+        let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(4).to_raw());
+
+        let captured = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66]; // 6 > 4 capacity
+        list.process_reflected_headers(Some(&[]), Some(&captured));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.value, vec![0x11, 0x22, 0x33, 0x44]);
     }
 
     #[test]
     fn test_reflected_headers_noop_when_no_tlvs() {
         // Packet with only Extra Padding — should not flag anything.
-        let mut list = TlvList::new();
-        list.push(ExtraPaddingTlv::new_zeros(4).to_raw()).unwrap();
+        let mut list = list_with_cleared(ExtraPaddingTlv::new_zeros(4).to_raw());
 
         list.process_reflected_headers(None, None);
 

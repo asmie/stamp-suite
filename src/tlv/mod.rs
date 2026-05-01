@@ -85,7 +85,7 @@ pub use typed::BerCountTlv;
 pub use typed::BerBurstTlv;
 
 // Type 246 — Reflected IPv6 Extension Header Data (draft-ietf-ippm-stamp-ext-hdr)
-pub use typed::ReflectedIpv6ExtHdrTlv;
+pub use typed::{ReflectedIpv6ExtHdrTlv, DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY};
 
 // Type 247 — Reflected Fixed Header Data (draft-ietf-ippm-stamp-ext-hdr)
 pub use typed::{ReflectedFixedHdrTlv, IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE};

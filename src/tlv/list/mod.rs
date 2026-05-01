@@ -3,7 +3,7 @@
 mod processing;
 
 use crate::crypto::HmacKey;
-use crate::tlv::core::{RawTlv, TlvError, TlvType, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
+use crate::tlv::core::{RawTlv, TlvError, TlvFlags, TlvType, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
 
 /// A list of TLVs with special handling for HMAC TLV.
 ///
@@ -88,6 +88,15 @@ impl TlvList {
         &self.tlvs
     }
 
+    /// Returns the wire-order TLVs (preserved when the lenient parser saw
+    /// a malformed packet, per RFC 8972 §4.8). Test-only — production code
+    /// reads `self.wire_order_tlvs` directly within this submodule.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn wire_order_tlvs(&self) -> Option<&[RawTlv]> {
+        self.wire_order_tlvs.as_deref()
+    }
+
     /// Parses a TLV list from a buffer.
     ///
     /// # Errors
@@ -156,7 +165,11 @@ impl TlvList {
                     }
 
                     if found_hmac {
-                        tlv.set_malformed();
+                        // RFC 8972: HMAC TLV must be last. TLVs appearing
+                        // after it are positionally malformed; mark via the
+                        // parser variant so the marker survives the
+                        // reflector's clear-and-rederive pass.
+                        tlv.mark_malformed_by_parser();
                         any_malformed = true;
                     }
 
@@ -166,7 +179,7 @@ impl TlvList {
                         }
                         found_hmac = true;
                         if tlv.value.len() != HMAC_TLV_VALUE_SIZE {
-                            tlv.set_malformed();
+                            tlv.mark_malformed_by_parser();
                             any_malformed = true;
                         }
                     }
@@ -397,23 +410,41 @@ impl TlvList {
         (unrecognized, malformed, integrity_failed)
     }
 
-    /// Computes and sets the HMAC TLV per RFC 8972 §4.8.
+    /// Computes and sets the HMAC TLV per RFC 8972 §4.8 for the **sender** path.
+    ///
+    /// The resulting HMAC TLV carries sender-default flags (U=1, M=0, I=0)
+    /// per RFC 8972 §4.4.1. Reflectors regenerating an HMAC for a response
+    /// should call [`Self::set_hmac_response`] instead.
     pub fn set_hmac(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) {
+        // wire_order_tlvs holds a separate clone of the HMAC TLV for the
+        // RFC 8972 §4.8 echo path; we only update self.hmac_tlv here so
+        // calling on a wire-order list would desync the two copies.
+        debug_assert!(
+            self.wire_order_tlvs.is_none(),
+            "HMAC regeneration on a wire-order list would desync hmac_tlv from wire_order_tlvs"
+        );
+
         let tlvs_size: usize = self.tlvs.iter().map(|t| t.wire_size()).sum();
         let mut data = Vec::with_capacity(4 + tlvs_size);
-
-        if sequence_number_bytes.len() >= 4 {
-            data.extend_from_slice(&sequence_number_bytes[..4]);
-        } else {
-            data.extend_from_slice(sequence_number_bytes);
-        }
-
+        let seq_len = sequence_number_bytes.len().min(4);
+        data.extend_from_slice(&sequence_number_bytes[..seq_len]);
         for tlv in &self.tlvs {
             tlv.write_to(&mut data);
         }
 
         let hmac = key.compute(&data);
         self.hmac_tlv = Some(RawTlv::new(TlvType::Hmac, hmac.to_vec()));
+    }
+
+    /// Computes and sets the HMAC TLV for the **reflector** response path.
+    ///
+    /// The reflector recognizes the HMAC type by construction, so per
+    /// RFC 8972 §4.4.1 the U flag must be 0.
+    pub fn set_hmac_response(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) {
+        self.set_hmac(key, sequence_number_bytes);
+        if let Some(hmac) = self.hmac_tlv.as_mut() {
+            hmac.flags = TlvFlags::default();
+        }
     }
 
     /// Marks unrecognized TLV types with the U flag.
@@ -457,6 +488,10 @@ impl TlvList {
         tlv_bytes: &[u8],
         require_hmac_tlv: bool,
     ) -> bool {
+        // RFC 8972 §4.4.1: the reflector overwrites U/M/I. The "Otherwise"
+        // clauses require setting each to 0 when the named condition does not
+        // hold, so clear them first and let the setters below raise as needed.
+        self.clear_reflector_flags();
         self.mark_unrecognized_types();
         self.validate_known_tlv_lengths();
 
@@ -478,9 +513,42 @@ impl TlvList {
         }
     }
 
-    /// Validates known TLV types for correct value sizes and sets M-flag on mismatches.
+    /// Clears U, M, and I on every TLV (preserving the C/Conformant bit and
+    /// any reserved bits) so the setters in `apply_reflector_flags_strict`
+    /// can re-derive each flag per RFC 8972 §4.4.1.
+    pub fn clear_reflector_flags(&mut self) {
+        for tlv in &mut self.tlvs {
+            tlv.clear_reflector_flags();
+        }
+        if let Some(ref mut hmac) = self.hmac_tlv {
+            hmac.clear_reflector_flags();
+        }
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order {
+                tlv.clear_reflector_flags();
+            }
+        }
+    }
+
+    /// Re-derives the M-flag on every TLV held by this list, per RFC 8972 §4.4.1.
+    ///
+    /// For each TLV, sets M=1 when **either**:
+    /// - the parser previously detected a structural / positional error and
+    ///   recorded it via `mark_malformed_by_parser` (truncation, TLV after
+    ///   HMAC, bad HMAC length — preserved across the reflector's flag-clear
+    ///   pass via the parser-marker), or
+    /// - the value length doesn't match the type's RFC-defined size for
+    ///   recognized types.
+    ///
+    /// Iterates `self.tlvs`, the dedicated `self.hmac_tlv` slot, and the
+    /// `wire_order_tlvs` echo copy if present, so all three storage views stay
+    /// consistent with the reflector-side flag rules.
     pub fn validate_known_tlv_lengths(&mut self) {
         Self::validate_known_tlv_lengths_slice(&mut self.tlvs);
+
+        if let Some(ref mut hmac) = self.hmac_tlv {
+            Self::validate_known_tlv_lengths_slice(std::slice::from_mut(hmac));
+        }
 
         if let Some(ref mut wire_order) = self.wire_order_tlvs {
             Self::validate_known_tlv_lengths_slice(wire_order);
@@ -498,7 +566,7 @@ impl TlvList {
         };
 
         for tlv in tlvs {
-            let malformed = match tlv.tlv_type {
+            let bad_length = match tlv.tlv_type {
                 TlvType::ClassOfService => tlv.value.len() != COS_TLV_VALUE_SIZE,
                 TlvType::AccessReport => tlv.value.len() != ACCESS_REPORT_TLV_VALUE_SIZE,
                 TlvType::TimestampInfo => tlv.value.len() != TIMESTAMP_INFO_TLV_VALUE_SIZE,
@@ -510,17 +578,19 @@ impl TlvList {
                         && tlv.value.len() != DEST_NODE_ADDR_IPV6_SIZE
                 }
                 TlvType::ReturnPath => tlv.value.len() < TLV_HEADER_SIZE,
+                TlvType::Hmac => tlv.value.len() != HMAC_TLV_VALUE_SIZE,
                 TlvType::MicroSessionId => tlv.value.len() != MICRO_SESSION_ID_TLV_VALUE_SIZE,
                 TlvType::ReflectedControl => tlv.value.len() < REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,
-                TlvType::BerPattern => false, // variable length, empty is valid (default pattern)
+                // BerPattern: empty = default pattern. 246/247: variable Value
+                // is valid (request: zeros sized to header; response: filled).
+                TlvType::BerPattern | TlvType::ReflectedIpv6ExtHdr | TlvType::ReflectedFixedHdr => {
+                    false
+                }
                 TlvType::BerCount => tlv.value.len() != BER_COUNT_TLV_VALUE_SIZE,
                 TlvType::BerBurst => tlv.value.len() != BER_BURST_TLV_VALUE_SIZE,
-                // 246/247 (draft-ippm-stamp-ext-hdr): empty = sender request,
-                // populated = reflector-filled raw header bytes. Variable length is valid.
-                TlvType::ReflectedIpv6ExtHdr | TlvType::ReflectedFixedHdr => false,
                 _ => false,
             };
-            if malformed {
+            if tlv.is_parser_marked_malformed() || bad_length {
                 tlv.set_malformed();
             }
         }
@@ -629,12 +699,27 @@ mod tests {
 
     #[test]
     fn test_tlv_list_mark_unrecognized() {
+        // Cleared flags isolate the U-flag behavior under test;
+        // sender-default U=1 (RFC 8972 §4.4.1) would otherwise mask it.
         let mut list = TlvList::new();
-        list.push(RawTlv::new(TlvType::ExtraPadding, vec![]))
-            .unwrap();
-        list.push(RawTlv::new(TlvType::Unknown(10), vec![]))
-            .unwrap();
-        list.push(RawTlv::new(TlvType::Reserved, vec![])).unwrap();
+        list.push(RawTlv::with_flags(
+            TlvFlags::default(),
+            TlvType::ExtraPadding,
+            vec![],
+        ))
+        .unwrap();
+        list.push(RawTlv::with_flags(
+            TlvFlags::default(),
+            TlvType::Unknown(10),
+            vec![],
+        ))
+        .unwrap();
+        list.push(RawTlv::with_flags(
+            TlvFlags::default(),
+            TlvType::Reserved,
+            vec![],
+        ))
+        .unwrap();
 
         list.mark_unrecognized_types();
 
@@ -647,16 +732,20 @@ mod tests {
     fn test_count_error_flags() {
         let mut list = TlvList::new();
 
-        let mut unrecognized_tlv = RawTlv::new(TlvType::Unknown(99), vec![1, 2]);
+        let mut unrecognized_tlv =
+            RawTlv::with_flags(TlvFlags::default(), TlvType::Unknown(99), vec![1, 2]);
         unrecognized_tlv.set_unrecognized();
 
-        let mut malformed_tlv = RawTlv::new(TlvType::ExtraPadding, vec![]);
+        let mut malformed_tlv =
+            RawTlv::with_flags(TlvFlags::default(), TlvType::ExtraPadding, vec![]);
         malformed_tlv.set_malformed();
 
-        let mut integrity_failed_tlv = RawTlv::new(TlvType::Location, vec![1, 2, 3, 4]);
+        let mut integrity_failed_tlv =
+            RawTlv::with_flags(TlvFlags::default(), TlvType::Location, vec![1, 2, 3, 4]);
         integrity_failed_tlv.set_integrity_failed();
 
-        let normal_tlv = RawTlv::new(TlvType::ClassOfService, vec![0; 4]);
+        let normal_tlv =
+            RawTlv::with_flags(TlvFlags::default(), TlvType::ClassOfService, vec![0; 4]);
 
         list.push(unrecognized_tlv).unwrap();
         list.push(malformed_tlv).unwrap();
@@ -672,7 +761,7 @@ mod tests {
     #[test]
     fn test_count_error_flags_includes_hmac() {
         let mut list = TlvList::new();
-        let mut hmac_tlv = RawTlv::new(TlvType::Hmac, vec![0xAB; 16]);
+        let mut hmac_tlv = RawTlv::with_flags(TlvFlags::default(), TlvType::Hmac, vec![0xAB; 16]);
         hmac_tlv.set_integrity_failed();
         list.push(hmac_tlv).unwrap();
 
@@ -680,6 +769,233 @@ mod tests {
         assert_eq!(u, 0);
         assert_eq!(m, 0);
         assert_eq!(i, 1, "HMAC TLV integrity flag should be counted");
+    }
+
+    #[test]
+    fn test_apply_reflector_flags_overwrites_uim() {
+        // RFC 8972 §4.4.1: the reflector MUST set U=0 when the type is
+        // recognized (and M=0 / I=0 absent the named conditions). Sender
+        // sends U=1 by mandate, so an "echo" must not preserve it.
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::ClassOfService, vec![0; 4]))
+            .unwrap();
+        let raw = list.to_bytes();
+
+        list.apply_reflector_flags(None, &[0u8; 4], &raw);
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert!(!tlv.is_unrecognized());
+        assert!(!tlv.is_malformed());
+        assert!(!tlv.is_integrity_failed());
+    }
+
+    #[test]
+    fn test_apply_reflector_flags_preserves_c_flag() {
+        // The C (Conformant-Reflected) flag belongs to the asymmetric-pkts
+        // draft and is not part of RFC 8972's U/M/I; the clear pass must
+        // leave it intact so the reflector can communicate request rejections.
+        let mut list = TlvList::new();
+        let mut tlv = RawTlv::new(TlvType::ReflectedControl, vec![0; 8]);
+        tlv.set_conformant_reflected();
+        list.push(tlv).unwrap();
+        let raw = list.to_bytes();
+
+        list.apply_reflector_flags(None, &[0u8; 4], &raw);
+
+        let echoed = &list.non_hmac_tlvs()[0];
+        assert!(!echoed.is_unrecognized());
+        assert!(echoed.flags.conformant_reflected);
+    }
+
+    #[test]
+    fn test_apply_reflector_flags_clears_uim_then_sets_i_on_hmac_failure() {
+        // Verifies the clear-then-rederive pipeline survives the HMAC branch:
+        // even when the sender sets U=1 on a recognized TLV (per RFC mandate),
+        // the reflector must end up with U=0 (recognized) and I=1 (HMAC fail)
+        // — not U=1 (echoed-from-sender) plus I=1.
+        let key_sender = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let key_refl = HmacKey::new(vec![0xCD; 32]).unwrap();
+        let base_packet = vec![0x01, 0x02, 0x03, 0x04];
+
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::ClassOfService, vec![0; 4]))
+            .unwrap();
+        list.set_hmac(&key_sender, &base_packet);
+        let tlv_bytes = list.to_bytes();
+
+        let result = list.apply_reflector_flags(Some(&key_refl), &base_packet, &tlv_bytes);
+
+        assert!(!result, "HMAC verification must fail with mismatched keys");
+        let cos = &list.non_hmac_tlvs()[0];
+        assert!(!cos.is_unrecognized(), "U must be 0 for recognized type");
+        assert!(!cos.is_malformed(), "M must be 0 for valid TLV");
+        assert!(cos.is_integrity_failed(), "I must be 1 on HMAC failure");
+        assert!(list.hmac_tlv().unwrap().is_integrity_failed());
+    }
+
+    #[test]
+    fn test_apply_reflector_flags_preserves_parser_m_on_truncated_tlv() {
+        // parse_lenient marks the truncated TLV as malformed via the parser
+        // marker. The clear-then-rederive pass in apply_reflector_flags must
+        // re-set M so the echoed response advertises malformed-ness to peers
+        // and metrics, per RFC 8972 §4.4.1 + §4.8.
+        let mut buf = Vec::new();
+        // ExtraPadding TLV with declared length 100 but only 4 bytes available.
+        buf.push(0x00);
+        buf.push(0x01);
+        buf.extend_from_slice(&100u16.to_be_bytes());
+        buf.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let (mut list, any_malformed) = TlvList::parse_lenient(&buf);
+        assert!(any_malformed);
+        assert!(list.non_hmac_tlvs()[0].is_malformed());
+
+        let raw = list.to_bytes();
+        list.apply_reflector_flags(None, &[0u8; 4], &raw);
+
+        let echoed = &list.non_hmac_tlvs()[0];
+        assert!(
+            echoed.is_malformed(),
+            "M-flag must be preserved across the reflector clear pass"
+        );
+    }
+
+    #[test]
+    fn test_apply_reflector_flags_preserves_parser_m_on_after_hmac_tlv() {
+        // RFC 8972 §4.5: HMAC TLV must be last. A TLV after HMAC is
+        // positionally malformed — that signal must reach the echoed response.
+        let mut buf = Vec::new();
+        // Valid HMAC TLV (16-byte value).
+        buf.push(0x00);
+        buf.push(0x08); // HMAC type
+        buf.extend_from_slice(&16u16.to_be_bytes());
+        buf.extend_from_slice(&[0xAA; 16]);
+        // ExtraPadding TLV after the HMAC — illegal position.
+        buf.push(0x00);
+        buf.push(0x01); // ExtraPadding
+        buf.extend_from_slice(&4u16.to_be_bytes());
+        buf.extend_from_slice(&[0xBB; 4]);
+
+        let (mut list, any_malformed) = TlvList::parse_lenient(&buf);
+        assert!(any_malformed);
+
+        let raw = list.to_bytes();
+        list.apply_reflector_flags(None, &[0u8; 4], &raw);
+
+        // The post-HMAC TLV lives in wire_order_tlvs because parse_lenient
+        // routed everything there once it detected malformed-ness.
+        let wire_order = list
+            .wire_order_tlvs()
+            .expect("malformed packet preserves wire order");
+        let post_hmac = wire_order
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ExtraPadding)
+            .expect("post-HMAC TLV preserved");
+        assert!(
+            post_hmac.is_malformed(),
+            "TLV after HMAC must keep M-flag through the clear pass"
+        );
+    }
+
+    #[test]
+    fn test_apply_reflector_flags_preserves_parser_m_on_bad_hmac_length() {
+        // HMAC TLV with the wrong Value length is structurally malformed.
+        // parse_lenient marks it via the parser marker; apply_reflector_flags
+        // must re-set M after clearing.
+        let mut buf = Vec::new();
+        buf.push(0x00);
+        buf.push(0x08); // HMAC type
+        buf.extend_from_slice(&8u16.to_be_bytes()); // wrong: 8 instead of 16
+        buf.extend_from_slice(&[0xAA; 8]);
+
+        let (mut list, any_malformed) = TlvList::parse_lenient(&buf);
+        assert!(any_malformed);
+
+        let raw = list.to_bytes();
+        list.apply_reflector_flags(None, &[0u8; 4], &raw);
+
+        let hmac = list.hmac_tlv().expect("HMAC TLV stored");
+        assert!(hmac.is_malformed(), "bad-length HMAC must keep M-flag");
+    }
+
+    #[test]
+    fn test_set_hmac_sender_variant_uses_u1() {
+        // Sender path: per RFC 8972 §4.4.1 the sender MUST set U=1.
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let mut list = TlvList::new();
+        list.set_hmac(&key, &[0u8; 4]);
+        let hmac = list.hmac_tlv().unwrap();
+        assert!(hmac.is_unrecognized(), "sender HMAC TLV must have U=1");
+        assert!(!hmac.is_malformed());
+        assert!(!hmac.is_integrity_failed());
+    }
+
+    #[test]
+    fn test_set_hmac_variants_compute_identical_bytes() {
+        // `set_hmac_response` is a thin wrapper over `set_hmac` that only
+        // mutates the flags byte; the HMAC value bytes must stay identical.
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let seq = [0x01, 0x02, 0x03, 0x04];
+
+        let mut sender = TlvList::new();
+        sender
+            .push(RawTlv::new(TlvType::ClassOfService, vec![0; 4]))
+            .unwrap();
+        sender.set_hmac(&key, &seq);
+
+        let mut response = TlvList::new();
+        response
+            .push(RawTlv::new(TlvType::ClassOfService, vec![0; 4]))
+            .unwrap();
+        response.set_hmac_response(&key, &seq);
+
+        let s_hmac = sender.hmac_tlv().unwrap();
+        let r_hmac = response.hmac_tlv().unwrap();
+
+        assert_eq!(s_hmac.value, r_hmac.value, "HMAC bytes must match");
+        assert_ne!(
+            s_hmac.flags, r_hmac.flags,
+            "flags must differ (sender U=1, response U=0)"
+        );
+        assert!(s_hmac.is_unrecognized()); // sender variant
+        assert!(!r_hmac.is_unrecognized()); // response variant
+    }
+
+    #[test]
+    fn test_set_hmac_response_variant_uses_u0() {
+        // Reflector path: HMAC type is recognized, so U=0 per RFC 8972 §4.4.1.
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let mut list = TlvList::new();
+        list.set_hmac_response(&key, &[0u8; 4]);
+        let hmac = list.hmac_tlv().unwrap();
+        assert!(
+            !hmac.is_unrecognized(),
+            "reflector-regenerated HMAC TLV must have U=0"
+        );
+        assert!(!hmac.is_malformed());
+        assert!(!hmac.is_integrity_failed());
+    }
+
+    #[test]
+    fn test_apply_reflector_flags_clears_uim_and_keeps_i_zero_on_hmac_ok() {
+        // Same pipeline, matched keys: U/M/I should all be 0 after the pass.
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let base_packet = vec![0x01, 0x02, 0x03, 0x04];
+
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::ClassOfService, vec![0; 4]))
+            .unwrap();
+        list.set_hmac(&key, &base_packet);
+        let tlv_bytes = list.to_bytes();
+
+        let result = list.apply_reflector_flags(Some(&key), &base_packet, &tlv_bytes);
+
+        assert!(result, "matched keys must verify");
+        let cos = &list.non_hmac_tlvs()[0];
+        assert!(!cos.is_unrecognized());
+        assert!(!cos.is_malformed());
+        assert!(!cos.is_integrity_failed());
+        assert!(!list.hmac_tlv().unwrap().is_integrity_failed());
     }
 
     #[test]

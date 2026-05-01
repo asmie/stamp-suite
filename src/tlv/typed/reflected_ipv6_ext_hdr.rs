@@ -1,12 +1,17 @@
 //! Reflected IPv6 Extension Header Data TLV (Type 246) per
 //! draft-ietf-ippm-stamp-ext-hdr §3.
 //!
-//! Sender transmits this TLV with an empty Value field to request that the
-//! reflector copy the bytes of received IPv6 Hop-by-Hop Options (NextHeader 0)
-//! and/or Destination Options (NextHeader 60) extension headers into the
-//! response. When the reflector backend cannot capture raw IP headers (nix
-//! UDP-socket backend), the reflector sets the U-flag and echoes the TLV with
-//! an empty Value.
+//! The sender pre-allocates a zero-filled Value of the size it expects the
+//! reflector to fill (one octet pair per extension-header option, plus body
+//! bytes). The reflector replaces those zeros with the bytes of received
+//! IPv6 Hop-by-Hop Options (NextHeader 0) and/or Destination Options
+//! (NextHeader 60) extension headers. When the reflector backend cannot
+//! capture raw IP headers (nix UDP-socket backend) it sets the U-flag and
+//! clears the Value.
+//!
+//! Capacity choice is the sender's: too small drops trailing options, too
+//! large just pads with zeros. IPv4 paths have no IPv6 extension headers,
+//! so the reflector returns the Value unchanged in that case.
 //!
 //! # Wire Format
 //!
@@ -27,19 +32,32 @@
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
 
+/// Default zero-fill capacity when the sender requests Type 246 without
+/// knowing the path's extension-header chain. Holds one standard 8-byte
+/// option (NextHeader + HdrLen + 6 body bytes); the reflector overwrites
+/// fewer / more bytes as the actual chain dictates.
+pub const DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY: usize = 8;
+
 /// Reflected IPv6 Extension Header Data TLV (Type 246).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReflectedIpv6ExtHdrTlv {
     /// Concatenated extension-header bytes as received on the wire.
-    /// Empty when sent by the sender as a request.
+    /// Zero-filled when sent by the sender as a request.
     pub data: Vec<u8>,
 }
 
 impl ReflectedIpv6ExtHdrTlv {
-    /// Creates an empty request TLV for the sender to attach.
+    /// Creates a sender request TLV with `bytes` zero octets of Value.
+    ///
+    /// Per draft-ietf-ippm-stamp-ext-hdr §3 the sender sets the Length to
+    /// the IPv6 extension-header length the reflector will populate; the
+    /// caller picks `bytes` from the largest extension-header chain it
+    /// expects on the path.
     #[must_use]
-    pub fn request() -> Self {
-        Self::default()
+    pub fn request_with_capacity(bytes: usize) -> Self {
+        Self {
+            data: vec![0u8; bytes],
+        }
     }
 
     /// Creates a response TLV populated with captured extension-header bytes.
@@ -68,12 +86,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_request_is_empty() {
-        let tlv = ReflectedIpv6ExtHdrTlv::request();
-        assert!(tlv.data.is_empty());
+    fn test_request_with_capacity_is_zero_filled() {
+        let tlv = ReflectedIpv6ExtHdrTlv::request_with_capacity(8);
+        assert_eq!(tlv.data, vec![0u8; 8]);
         let raw = tlv.to_raw();
         assert_eq!(raw.tlv_type, TlvType::ReflectedIpv6ExtHdr);
-        assert_eq!(raw.value.len(), 0);
+        assert_eq!(raw.value.len(), 8);
+    }
+
+    #[test]
+    fn test_request_with_capacity_zero_for_ipv4_path() {
+        let tlv = ReflectedIpv6ExtHdrTlv::request_with_capacity(0);
+        assert!(tlv.data.is_empty());
+        assert_eq!(tlv.to_raw().value.len(), 0);
     }
 
     #[test]

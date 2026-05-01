@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New typed TLVs `ReflectedFixedHdrTlv` and `ReflectedIpv6ExtHdrTlv`
     implementing `TypedTlv`, plus `TlvType::ReflectedFixedHdr` /
     `ReflectedIpv6ExtHdr` enum variants and length validation that treats
-    the Value as variable-length (empty = sender request, populated =
-    reflector response).
+    the Value as variable-length (sender pre-allocates a zero-filled
+    Value sized to the expected header length per draft-ietf-ippm-stamp-ext-hdr;
+    populated bytes on response).
   - New `CapturedHeaders` struct threaded through `ProcessingContext` so the
     reflector's TLV processing can see the raw IP-layer bytes captured at
     receive time.
@@ -39,8 +40,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     empty Value on an IPv4 packet or an IPv6 packet without extension
     headers is legitimate and does **not** set the U-flag.
   - Sender CLI: `--reflected-fixed-hdr`, `--reflected-ipv6-ext-hdr` (plus
-    matching `FileConfiguration` TOML fields). Sender attaches empty-request
-    TLVs; reflector fills them on the pnet backend or U-flags them on nix.
+    matching `FileConfiguration` TOML fields). Sender attaches a zero-filled
+    request TLV sized to the destination's IP family for Type 247 and an
+    8-byte default (one option's worth) for Type 246; reflector fills them
+    on the pnet backend or U-flags them on nix.
+
+### Fixed
+
+- **RFC 8972 §4.4.1 sender flag default**: `TlvFlags::for_sender()` now
+  returns `U=1, M=0, I=0` instead of all-zero. The RFC requires the
+  Session-Sender to send every TLV with the U flag set; the reflector then
+  overwrites it. Sender-built TLVs (`RawTlv::new`) inherit the corrected
+  default. Visible on the wire as the leading flag byte of every outgoing
+  TLV flipping from `0x00` to `0x80`.
+- **RFC 8972 §4.4.1 reflector flag overwrite**: the reflector now clears
+  U, M, and I on every parsed TLV before the type-recognition / length-
+  validation / HMAC-verification pass re-derives them. Previously each
+  flag was only ever set to 1; the RFC's three "Otherwise … MUST set …
+  to 0" clauses require them to be cleared as well. Practically: an
+  echoed CoS TLV (or any other recognized type) now reports `U=0` to the
+  sender even when the sender obeyed the §4.4.1 mandate to send `U=1`.
+  The C-flag (`conformant_reflected`, draft-ietf-ippm-asymmetrical-pkts)
+  and parser-detected truncation M-flag are preserved across the clear.
+- **draft-ietf-ippm-stamp-ext-hdr Type 246 / 247 sender request encoding**:
+  Session-Sender now pre-allocates the Value field with zeros sized to the
+  expected header length (20 for IPv4 fixed header, 40 for IPv6 fixed
+  header, 8-byte capacity for IPv6 ext-header chain) per the draft.
+  Previously sent length=0; conforming reflectors that validate the
+  request's Length field rejected it as malformed.
 
 ### Changed
 
@@ -52,6 +79,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   internals — `nix::ifaddrs::getifaddrs` on Unix, `pnet::datalink::interfaces`
   on Windows. Removes ~60 lines of near-duplicate code and a class of
   drift bugs.
+- `--micro-session-id` and `--reflector-member-link-id` (RFC 9534 LAG
+  identifiers) now accept `0x`-prefixed hex (`0xff`, `0XFF`, `0x00ab`)
+  in addition to decimal. Aligns with the conventional way these wire
+  fields are written.
+
+### Breaking
+
+- `ReflectedFixedHdrTlv::request()` removed; replaced by
+  `ReflectedFixedHdrTlv::request_for(IpAddr)` (chooses 20 / 40 bytes from
+  the destination address family) or
+  `ReflectedFixedHdrTlv::request_with_capacity(usize)` (explicit zero-fill
+  size). The old API produced an empty-Value TLV that did not match the
+  draft's request format.
+- `ReflectedIpv6ExtHdrTlv::request()` removed; replaced by
+  `ReflectedIpv6ExtHdrTlv::request_with_capacity(usize)` so the caller
+  picks the zero-filled Value size to match the path's expected
+  extension-header chain. The default size for the sender flag
+  (`--reflected-ipv6-ext-hdr`) is exposed as
+  `tlv::DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY` (8 bytes — one option).
+- Reflector behavior change: when populating Type 246 / 247 responses,
+  the reflector now preserves the sender-advertised Length, zero-padding
+  short captures and truncating long ones. Callers that depended on the
+  response length matching the captured-bytes length should size the
+  request appropriately.
 
 ### Documentation
 
