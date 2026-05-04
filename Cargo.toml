@@ -68,3 +68,58 @@ pnet = "0.35"
 
 [dev-dependencies]
 tempfile = "3"
+
+[package.metadata.deb]
+maintainer = "Piotr Olszewski <asmie@asmie.pl>"
+copyright = "2024, Piotr Olszewski <asmie@asmie.pl>"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+stamp-suite is a Rust implementation of the Simple Two-Way Active \
+Measurement Protocol (STAMP) as defined in RFC 8762 and RFC 8972. \
+It provides a client-server application pair for measuring packet \
+loss and network delays."""
+section = "net"
+priority = "optional"
+depends = "$auto, adduser"
+features = ["ttl-nix", "ttl-pnet", "metrics", "snmp"]
+maintainer-scripts = "dist/debian/"
+assets = [
+    ["target/release/stamp-suite",                "usr/bin/",                                  "755"],
+    ["dist/systemd/stamp-suite.service",          "lib/systemd/system/",                       "644"],
+    ["mibs/STAMP-SUITE-MIB.mib",                  "usr/share/snmp/mibs/",                      "644"],
+    ["README.md",                                 "usr/share/doc/stamp-suite/README.md",       "644"],
+]
+
+[package.metadata.generate-rpm]
+license = "MIT"
+summary = "Simple Two-Way Active Measurement Protocol (STAMP)"
+assets = [
+    { source = "target/release/stamp-suite",       dest = "/usr/bin/stamp-suite",                         mode = "755" },
+    { source = "dist/systemd/stamp-suite.service", dest = "/usr/lib/systemd/system/stamp-suite.service",  mode = "644", config = false },
+    { source = "mibs/STAMP-SUITE-MIB.mib",         dest = "/usr/share/snmp/mibs/STAMP-SUITE-MIB.mib",     mode = "644" },
+    { source = "LICENSE",                          dest = "/usr/share/doc/stamp-suite/LICENSE",           mode = "644", doc = true },
+    { source = "README.md",                        dest = "/usr/share/doc/stamp-suite/README.md",         mode = "644", doc = true },
+]
+pre_install_script = """
+getent group stamp >/dev/null || groupadd -r stamp
+getent passwd stamp >/dev/null || useradd -r -g stamp -s /sbin/nologin -d /nonexistent -c "STAMP Suite service account" stamp
+exit 0
+"""
+post_install_script = """
+systemctl daemon-reload || :
+systemctl preset stamp-suite.service || :
+"""
+pre_uninstall_script = """
+if [ $1 -eq 0 ]; then
+    systemctl --no-reload disable --now stamp-suite.service || :
+fi
+"""
+post_uninstall_script = """
+systemctl daemon-reload || :
+if [ $1 -ge 1 ]; then
+    systemctl try-restart stamp-suite.service || :
+fi
+"""
+
+[package.metadata.generate-rpm.requires]
+shadow-utils = "*"

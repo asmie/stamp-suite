@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Install RPM tools
+        run: sudo apt-get update && sudo apt-get install -y rpm
+      - name: Install packagers
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+      - name: Build release binary
+        run: cargo build --release --all-features --target ${{ matrix.target }}
+      - name: Build DEB
+        run: cargo deb --no-build --target ${{ matrix.target }}
+      - name: Build RPM
+        run: cargo generate-rpm --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/debian/*.deb
+            target/${{ matrix.target }}/generate-rpm/*.rpm
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: packages-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

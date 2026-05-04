@@ -18,3 +18,7 @@
 
 /.idea
 stamp-suite.iml
+
+# Nix build output symlinks (`nix build`, `nix build .#foo`)
+/result
+/result-*
