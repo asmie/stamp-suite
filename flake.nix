@@ -19,11 +19,11 @@
         packages = {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "stamp-suite";
-            version = "0.6.1";
+            version = "0.7.0";
 
             src = self;
 
-            cargoHash = "sha256-9xwRzJyuz2BMk+1ThemzKqO/gVsX+aLhBL2oLWMyVwc=";
+            cargoHash = "sha256-5vNX7e0MLRK7Z+hNqJ4ded1cBYMBi1FOAU7XgiNhsns=";
 
             buildFeatures = allFeatures;
             # Honour --all-features for the cargo test phase too so the
@@ -48,9 +48,9 @@
 
           clippy = pkgs.rustPlatform.buildRustPackage {
             pname = "stamp-suite-clippy";
-            version = "0.6.1";
+            version = "0.7.0";
             src = self;
-            cargoHash = "sha256-9xwRzJyuz2BMk+1ThemzKqO/gVsX+aLhBL2oLWMyVwc=";
+            cargoHash = "sha256-5vNX7e0MLRK7Z+hNqJ4ded1cBYMBi1FOAU7XgiNhsns=";
             buildFeatures = allFeatures;
             nativeBuildInputs = [ pkgs.clippy ];
             buildPhase = ''

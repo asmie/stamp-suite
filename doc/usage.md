@@ -106,7 +106,7 @@ Failures are reported with actionable messages:
 
 ## Full CLI reference
 
-The canonical reference is `stamp-suite --help` (this list is generated from the same `clap` definitions). The flags below match `stamp-suite 0.6.1`.
+The canonical reference is `stamp-suite --help` (this list is generated from the same `clap` definitions). The flags below match `stamp-suite 0.7.0`.
 
 ### General
 

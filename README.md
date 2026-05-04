@@ -37,7 +37,7 @@ The Session-Sender transmits test packets to the Session-Reflector, which timest
 Pre-built `.deb` and `.rpm` packages for x86_64 and aarch64 are attached to each tagged release on [GitHub Releases](https://github.com/asmie/stamp-suite/releases). The packages install to `/usr/bin/stamp-suite`, ship a hardened systemd unit, and create a dedicated `stamp` system user.
 
 ```bash
-# Debian / Ubuntu (filename embeds the version, e.g. stamp-suite_0.6.1-1_amd64.deb)
+# Debian / Ubuntu (filename embeds the version, e.g. stamp-suite_0.7.0-1_amd64.deb)
 sudo apt install ./stamp-suite_*_amd64.deb
 
 # Fedora / RHEL
