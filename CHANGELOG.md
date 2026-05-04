@@ -113,6 +113,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handled checksums / fragmentation / ARP, socket observability), and what
   the tradeoff is (TLV 246/247 only on the pnet backend; two capture loops
   to maintain).
+- **README split** into a slim landing page (~200 lines) and three deep
+  references under `doc/`:
+  - `doc/usage.md` — TOML configuration file format, supported keys,
+    validation behavior, and the full grouped CLI flag reference.
+  - `doc/architecture.md` — module layout, receiver backends, packet
+    processing pipeline, session management, full TLV reference,
+    Prometheus and SNMP subsystems.
+  - `doc/security.md` — threat model, HMAC and TLV integrity, key
+    sourcing precedence (with the `STAMP_HMAC_KEY` + `hmac_key_file`
+    mutual-exclusion caveat), config and key file permissions, the
+    `stamp` system user, an annotated walkthrough of the systemd unit's
+    hardening directives, the capability model, and a step-by-step
+    procedure for switching the packaged systemd unit from open to
+    authenticated mode before exposing UDP/862. Top-level `SECURITY.md`
+    pointer added for GitHub auto-discovery.
+- Cargo packaging (`cargo deb` / `cargo generate-rpm`) ships the three
+  new docs at `/usr/share/doc/stamp-suite/` alongside `README.md`.
 
 ## [0.6.0] - 2026-04-22
 

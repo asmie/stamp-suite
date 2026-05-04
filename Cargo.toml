@@ -88,6 +88,9 @@ assets = [
     ["dist/systemd/stamp-suite.service",          "lib/systemd/system/",                       "644"],
     ["mibs/STAMP-SUITE-MIB.mib",                  "usr/share/snmp/mibs/",                      "644"],
     ["README.md",                                 "usr/share/doc/stamp-suite/README.md",       "644"],
+    ["doc/usage.md",                              "usr/share/doc/stamp-suite/usage.md",        "644"],
+    ["doc/architecture.md",                       "usr/share/doc/stamp-suite/architecture.md", "644"],
+    ["doc/security.md",                           "usr/share/doc/stamp-suite/security.md",     "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -99,6 +102,9 @@ assets = [
     { source = "mibs/STAMP-SUITE-MIB.mib",         dest = "/usr/share/snmp/mibs/STAMP-SUITE-MIB.mib",     mode = "644" },
     { source = "LICENSE",                          dest = "/usr/share/doc/stamp-suite/LICENSE",           mode = "644", doc = true },
     { source = "README.md",                        dest = "/usr/share/doc/stamp-suite/README.md",         mode = "644", doc = true },
+    { source = "doc/usage.md",                     dest = "/usr/share/doc/stamp-suite/usage.md",          mode = "644", doc = true },
+    { source = "doc/architecture.md",              dest = "/usr/share/doc/stamp-suite/architecture.md",   mode = "644", doc = true },
+    { source = "doc/security.md",                  dest = "/usr/share/doc/stamp-suite/security.md",       mode = "644", doc = true },
 ]
 pre_install_script = """
 getent group stamp >/dev/null || groupadd -r stamp
