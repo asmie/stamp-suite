@@ -117,7 +117,9 @@ fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
 fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
     // Windows has no `getifaddrs`; fall back to pnet's datalink enumeration.
     // pnet is always a build dependency on Windows (default ttl-pnet backend).
-    pnet::datalink::interfaces()
+    // Use absolute `::pnet` so we resolve the external crate, not the
+    // sibling `crate::receiver::pnet` submodule.
+    ::pnet::datalink::interfaces()
         .into_iter()
         .flat_map(|iface| iface.ips.into_iter().map(|n| n.ip()))
         .collect()
