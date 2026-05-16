@@ -252,6 +252,11 @@ pub struct ReceiverSharedState {
     pub session_manager: Arc<SessionManager>,
     pub start_time: Instant,
     pub rate_limiter: Option<Arc<RateLimiter>>,
+    /// Flag observable by a future readiness probe (and the pnet
+    /// `spawn_blocking` join path). Set to `false` when the capture / receive
+    /// loop exits unexpectedly so external monitors can distinguish
+    /// "process alive but not reflecting" from "process alive and healthy".
+    pub capture_alive: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Creates the shared state for the receiver, using configuration values.
@@ -273,6 +278,7 @@ pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
         session_manager: Arc::new(SessionManager::new(session_timeout, None)),
         start_time: Instant::now(),
         rate_limiter,
+        capture_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     }
 }
 

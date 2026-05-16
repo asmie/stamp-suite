@@ -109,10 +109,11 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let interface = match interface {
         Some(iface) => iface,
         None => {
-            eprintln!(
-                "Error: No interface found with IP address {}",
+            log::error!(
+                "No interface found with IP address {}; reflector cannot start",
                 conf.local_addr
             );
+            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
             return;
         }
     };
@@ -141,14 +142,20 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let (_, rx) = match datalink::channel(&interface, config) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => {
-            eprintln!(
-                "Error: Unhandled channel type for interface {}",
+            log::error!(
+                "Unhandled channel type for interface {}; reflector cannot start",
                 interface.name
             );
+            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
             return;
         }
         Err(e) => {
-            eprintln!("Error: Unable to create capture channel: {}", e);
+            log::error!(
+                "Unable to create capture channel on {}: {}; reflector cannot start",
+                interface.name,
+                e
+            );
+            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
             return;
         }
     };
@@ -159,7 +166,11 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let send_socket_v4 = match std::net::UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Error: Cannot bind IPv4 send socket: {}", e);
+            log::error!(
+                "Cannot bind IPv4 send socket: {}; reflector cannot start",
+                e
+            );
+            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
             return;
         }
     };
@@ -173,9 +184,11 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
 
     // Validate: authenticated mode requires HMAC key
     if use_auth && hmac_key.is_none() {
-        eprintln!(
-            "Error: Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file)"
+        log::error!(
+            "Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file); \
+             reflector cannot start"
         );
+        shared.capture_alive.store(false, AtomicOrdering::Relaxed);
         return;
     }
 
@@ -263,13 +276,21 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     // Spawn the blocking packet capture loop on a dedicated thread.
     // This prevents starvation of the async runtime which may be running
     // other tasks like the metrics HTTP server.
+    let capture_alive_for_loop = Arc::clone(&shared.capture_alive);
     let result = tokio::task::spawn_blocking(move || {
         run_capture_loop(rx, capture_config, send_ctx, iface_props);
     })
     .await;
 
+    // The capture thread should normally return cleanly on shutdown flag.
+    // A panic propagated through the JoinHandle (`result == Err`) means an
+    // unhandled invariant fired; surface it to logs and to the readiness flag
+    // so systemd / external monitors can react. We still return cleanly so
+    // the process exits with a normal status — systemd will restart us per
+    // unit configuration.
     if let Err(e) = result {
-        eprintln!("Capture thread panicked: {}", e);
+        log::error!("Capture thread terminated abnormally: {}", e);
+        capture_alive_for_loop.store(false, AtomicOrdering::Relaxed);
     }
 
     // Print reflector stats on shutdown
@@ -352,7 +373,7 @@ fn run_capture_loop(
                 if e.kind() != std::io::ErrorKind::TimedOut
                     && e.kind() != std::io::ErrorKind::WouldBlock
                 {
-                    eprintln!("packetdump: unable to receive packet: {}", e);
+                    log::warn!("Capture receive failed: {}", e);
                 }
             }
         }
@@ -743,13 +764,13 @@ fn handle_stamp_packet(
                 match try_send(&response.data, pkt.src) {
                     Ok(_) => true,
                     Err(e2) => {
-                        eprintln!("Failed to send response to {}: {}", pkt.src, e2);
+                        log::warn!("Failed to send response to {}: {}", pkt.src, e2);
                         false
                     }
                 }
             }
             Err(e) => {
-                eprintln!("Failed to send response to {}: {}", send_target, e);
+                log::warn!("Failed to send response to {}: {}", send_target, e);
                 false
             }
         };
@@ -814,3 +835,40 @@ fn handle_stamp_packet(
 
 // `build_local_addresses` now lives in `receiver::mod` and is shared between
 // backends (see [`super::build_local_addresses`]).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::receiver::create_shared_state;
+    use clap::Parser;
+
+    /// `run_receiver` must return cleanly (not panic) when the configured
+    /// local address is not bound to any interface, and the shared
+    /// `capture_alive` flag must transition to `false` so an external
+    /// readiness probe can observe the dead capture.
+    ///
+    /// 192.0.2.1 is in TEST-NET-1 (RFC 5737) and is not bound to any
+    /// real interface under normal conditions.
+    #[tokio::test]
+    async fn run_receiver_clears_capture_alive_on_missing_interface() {
+        let conf = Configuration::parse_from([
+            "stamp-suite",
+            "--remote-addr",
+            "127.0.0.1",
+            "--local-addr",
+            "192.0.2.1",
+            "--is-reflector",
+        ]);
+        let shared = create_shared_state(&conf);
+
+        assert!(shared.capture_alive.load(AtomicOrdering::Relaxed));
+
+        // run_receiver returns immediately when no interface matches.
+        run_receiver(&conf, &shared).await;
+
+        assert!(
+            !shared.capture_alive.load(AtomicOrdering::Relaxed),
+            "capture_alive must clear when capture cannot start"
+        );
+    }
+}

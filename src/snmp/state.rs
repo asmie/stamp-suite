@@ -111,6 +111,9 @@ impl SenderSnmpStats {
     pub fn loss_pct_x100(&self) -> u32 {
         let sent = self.packets_sent.load(Ordering::Relaxed) as u64;
         let lost = self.packets_lost.load(Ordering::Relaxed) as u64;
+        // `sent > 0` guards the division; clippy 1.95 prefers `checked_div`
+        // but the divisor is already verified non-zero.
+        #[allow(clippy::manual_checked_ops)]
         if sent > 0 {
             (lost * 10000 / sent) as u32
         } else {
@@ -138,6 +141,7 @@ impl SenderSnmpStats {
         // Update running average
         let new_sum = self.rtt_sum_us.fetch_add(rtt_us as u64, Ordering::Relaxed) + rtt_us as u64;
         let count = self.packets_received.load(Ordering::Relaxed) as u64;
+        #[allow(clippy::manual_checked_ops)]
         if count > 0 {
             self.rtt_avg_us
                 .store((new_sum / count) as u32, Ordering::Relaxed);
