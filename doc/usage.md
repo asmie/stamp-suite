@@ -124,6 +124,7 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
   -R                               Print per-packet statistics
   -i, --is-reflector               Run as Session-Reflector instead of Session-Sender
       --output-format <text|json|csv>  Statistics output format [default: text]
+      --log-format <text|json>     Diagnostic log format [default: text]
       --report-interval <SEC>      Periodic reporting interval, sender only (0 = disabled) [default: 0]
       --max-pps <PPS>              Reflector rate limit per source (0 = unlimited) [default: 0]
   -h, --help                       Print help
