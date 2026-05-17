@@ -33,6 +33,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>, strict: bool) -> ProcessingContex
         clock_source: ClockFormat::NTP,
         error_estimate_wire: 0,
         hmac_key,
+        hmac_key_set: None,
         require_hmac: false,
         session_manager: None,
         tlv_mode: TlvHandlingMode::Echo,

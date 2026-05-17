@@ -127,6 +127,15 @@ pub struct Configuration {
     #[clap(long, conflicts_with = "hmac_key")]
     pub hmac_key_file: Option<PathBuf>,
 
+    /// Path to a directory of per-SSID HMAC key files. Each file's name
+    /// (minus extension) is interpreted as the SSID in hex; a file named
+    /// `default.key` becomes the fallback for unknown SSIDs. Mutually
+    /// exclusive with `--hmac-key` and `--hmac-key-file`. Lets a single
+    /// reflector serve multiple senders without sharing a key, and
+    /// enables key rotation by re-running with a new directory.
+    #[clap(long, conflicts_with_all = ["hmac_key", "hmac_key_file"])]
+    pub hmac_key_dir: Option<PathBuf>,
+
     /// Require HMAC key to be configured (error if missing in auth mode).
     /// Note: When an HMAC key is present, verification is always mandatory per RFC 8762 §4.4.
     #[clap(long)]
@@ -390,9 +399,13 @@ impl Configuration {
         }
 
         // Validate --verify-tlv-hmac requires HMAC key to be configured
-        if self.verify_tlv_hmac && self.hmac_key.is_none() && self.hmac_key_file.is_none() {
+        if self.verify_tlv_hmac
+            && self.hmac_key.is_none()
+            && self.hmac_key_file.is_none()
+            && self.hmac_key_dir.is_none()
+        {
             return Err(ConfigurationError::InvalidConfiguration(
-                "--verify-tlv-hmac requires --hmac-key or --hmac-key-file to be specified"
+                "--verify-tlv-hmac requires --hmac-key, --hmac-key-file, or --hmac-key-dir"
                     .to_string(),
             ));
         }
@@ -401,6 +414,7 @@ impl Configuration {
         if self.auth_mode.is_authenticated()
             && self.hmac_key.is_none()
             && self.hmac_key_file.is_none()
+            && self.hmac_key_dir.is_none()
         {
             let mode_desc = if self.is_reflector {
                 "reflector"
@@ -408,7 +422,7 @@ impl Configuration {
                 "sender"
             };
             return Err(ConfigurationError::InvalidConfiguration(format!(
-                "Authenticated mode {} (-A A) requires --hmac-key or --hmac-key-file",
+                "Authenticated mode {} (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir",
                 mode_desc
             )));
         }
@@ -488,6 +502,12 @@ impl Configuration {
         if self.hmac_key.is_some() && self.hmac_key_file.is_some() {
             return Err(ConfigurationError::InvalidConfiguration(
                 "hmac_key and hmac_key_file are mutually exclusive".to_string(),
+            ));
+        }
+        if self.hmac_key_dir.is_some() && (self.hmac_key.is_some() || self.hmac_key_file.is_some())
+        {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "hmac_key_dir cannot be combined with hmac_key or hmac_key_file".to_string(),
             ));
         }
         if self.return_path_cc.is_some() {
@@ -615,6 +635,7 @@ impl Configuration {
         merge!(error_multiplier);
         merge!(clock_synchronized);
         merge_opt!(hmac_key_file);
+        merge_opt!(hmac_key_dir);
         merge!(require_hmac);
         merge!(strict_packets);
         merge!(stateful_reflector);
@@ -697,6 +718,7 @@ pub struct FileConfiguration {
     pub error_multiplier: Option<u8>,
     pub clock_synchronized: Option<bool>,
     pub hmac_key_file: Option<PathBuf>,
+    pub hmac_key_dir: Option<PathBuf>,
     pub require_hmac: Option<bool>,
     pub strict_packets: Option<bool>,
     pub stateful_reflector: Option<bool>,
