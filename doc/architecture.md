@@ -198,7 +198,7 @@ Status labels used in this table — kept aligned with the (forthcoming) standar
 | 9 | Destination Node Address | Verify intended reflector identity (RFC 9503 §4) | supported |
 | 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | partial — SR-MPLS / SRv6 echoed with U-flag (segment-routing forwarding out of scope for userspace UDP) |
 | 11 | Micro-session ID | LAG member link identifiers for per-link measurement (RFC 9534 §3.1) | supported |
-| 12 | Reflected Test Packet Control | Asymmetrical reply request — count, length, interval (draft-ietf-ippm-asymmetrical-pkts-14, IANA-assigned) | partial — emission supported; requested reply length not yet honoured (C flag set) and L2/L3 Address Group sub-TLVs not yet parsed |
+| 12 | Reflected Test Packet Control | Asymmetrical reply request — count, length, interval (draft-ietf-ippm-asymmetrical-pkts-14, IANA-assigned) | supported — emission, length padding (up to `--reflected-control-max-size`), L3 Address Group sub-TLV match; L2 sub-TLV present sets U-flag on backends without MAC visibility |
 | 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-05) | experimental |
 | 241 | BER Bit Error Count | u32 error-bit count, computed by reflector | experimental |
 | 242 | BER Max Bit Error Burst Size | u32 longest consecutive error run, computed by reflector | experimental — **wire-format collision with teaparty Heartbeat (same Type 242)**; see note below |
@@ -370,16 +370,15 @@ stamp-suite --remote-addr 192.168.1.100 \
     --reflected-control-interval-ns 1000000
 ```
 
-Reflector behaviour:
-- Emits up to 16 reply packets per request (hard cap in `REFLECTED_CONTROL_MAX_COUNT`); excess requests are clamped and the **C flag** (Conformant Reflected Packet, bit 3 of the TLV flags byte) is set on the echoed TLV to indicate non-conformance. The C flag's bit position is now IANA-assigned (bit 3); earlier revisions of the draft left it TBA.
-- Clamps the inter-packet interval to at least 1 µs.
-- A non-zero requested packet length is not honoured in this implementation (the reply is not re-padded); the C flag is set to signal this.
-- On the `nix` backend extra copies are sent on a spawned tokio task so the recv loop is never blocked; the `pnet` backend sleeps inline on its capture thread.
+Reflector behaviour (aligned with draft-14 §3 as of this release):
 
-**Known gaps tracked for completion against draft-14:**
-- Minimum TLV length raised from 8 to 12 octets per draft §3 (current parser still accepts 8).
-- Reply-length padding: the reply is currently not padded to the requested length; the C flag is set instead. Honoring the requested length is in progress.
-- Sub-TLV parsing: the Layer-2 Address Group (sub-TLV Type 10) and Layer-3 Address Group (sub-TLV Type 11) filters are not yet parsed; sub-TLV bytes are carried as opaque payload.
+- Emits up to `--reflected-control-max-count` reply packets per request (default 16); excess requests are clamped and the **C flag** (Conformant Reflected Packet, bit 3 of the TLV flags byte, mask 0x10) is set on the echoed TLV to indicate non-conformance.
+- Clamps the inter-packet interval up to at least `--reflected-control-min-interval-ns` (default 1 µs).
+- Honours the requested reply-packet length up to `--reflected-control-max-size` (default 1500 bytes, typical Ethernet MTU) by appending an Extra Padding TLV (Type 1) before the HMAC TLV. When the request exceeds the cap, the C flag is set; the reply still pads to the cap.
+- Parses **Layer-3 Address Group sub-TLV** (sub-TLV Type 11): the reflector applies the requested prefix mask to each of its local IP addresses; if none matches, the packet is dropped per draft §3 ("MUST stop processing the received packet"). The drop surfaces to the backend as `ReturnPathAction::SuppressReply`.
+- Parses **Layer-2 Address Group sub-TLV** (sub-TLV Type 10) but cannot evaluate it on the UDP-socket backends (no MAC-address visibility). When this sub-TLV is present, the reflector sets the U flag on the echoed Type 12 TLV and continues processing the rest of the packet — the U flag signals "filter not honoured" without claiming the match passed.
+- Enforces the draft-14 §3 minimum value-field size of 12 octets at parse time. The sender path (`ReflectedControlTlv::encode_value`) emits 4-byte zero placeholders to satisfy this when no real sub-TLV is attached.
+- On the `nix` backend extra copies are sent on a spawned tokio task so the recv loop is never blocked; the `pnet` backend sleeps inline on its capture thread.
 
 ### Bit Error Rate TLVs (draft-gandhi-ippm-stamp-ber)
 

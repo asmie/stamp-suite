@@ -58,6 +58,9 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         sender_port: 12345,
         reflector_member_link_id: None,
         captured_headers: None,
+        reflected_control_max_count: 16,
+        reflected_control_max_size: 1500,
+        reflected_control_min_interval_ns: 1_000,
     }
 }
 
@@ -360,13 +363,15 @@ fn i_flag_not_set_on_valid_tlv_hmac() {
 
 #[test]
 fn c_flag_set_when_reflected_control_request_exceeds_local_caps() {
-    // Type 12 wire format (8 bytes — pre-A1 floor):
+    // Type 12 wire format (draft-14 §3 minimum 12 octets):
     //   length_of_reflected_packet (u16) | number_of_reflected_packets (u16)
-    //   | interval_nanoseconds (u32)
-    let mut value = Vec::with_capacity(8);
+    //   | interval_nanoseconds (u32) | one placeholder sub-TLV header (4 zero
+    //   octets) so the value field reaches the mandatory 12-octet floor.
+    let mut value = Vec::with_capacity(12);
     value.extend_from_slice(&0u16.to_be_bytes()); // length: don't request padding
     value.extend_from_slice(&1000u16.to_be_bytes()); // count: well above cap
     value.extend_from_slice(&1_000_000u32.to_be_bytes()); // interval: 1 ms
+    value.extend_from_slice(&[0u8; 4]); // 4-byte sub-TLV placeholder (flags=0, type=0, length=0)
 
     let raw = RawTlv::new(TlvType::ReflectedControl, value);
     let packet = build_unauth_packet(&tlv_to_chain(&raw));
@@ -388,11 +393,13 @@ fn c_flag_set_when_reflected_control_request_exceeds_local_caps() {
 
 #[test]
 fn c_flag_clear_when_reflected_control_request_within_caps() {
-    // Request 2 packets, 1 ms — within REFLECTED_CONTROL_MAX_COUNT.
-    let mut value = Vec::with_capacity(8);
+    // Request 2 packets, 1 ms — within REFLECTED_CONTROL_MAX_COUNT. The
+    // 12-byte minimum is honoured by the placeholder sub-TLV header below.
+    let mut value = Vec::with_capacity(12);
     value.extend_from_slice(&0u16.to_be_bytes()); // length
     value.extend_from_slice(&2u16.to_be_bytes()); // count: 2
     value.extend_from_slice(&1_000_000u32.to_be_bytes()); // interval
+    value.extend_from_slice(&[0u8; 4]); // sub-TLV placeholder
 
     let raw = RawTlv::new(TlvType::ReflectedControl, value);
     let packet = build_unauth_packet(&tlv_to_chain(&raw));
@@ -463,5 +470,166 @@ fn tlv_header_size_is_four_octets() {
     assert_eq!(
         TLV_HEADER_SIZE, 4,
         "RFC 8972 §4.2.1: flags(1) + type(1) + length(2) = 4 octets"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A1: Reflected Test Packet Control draft-14 extras.
+
+/// 8-byte Type 12 value (pre-draft-14) must be rejected as malformed.
+#[test]
+fn a1_reflected_control_min_length_12_pre_14_rejected() {
+    let mut value = Vec::with_capacity(8);
+    value.extend_from_slice(&0u16.to_be_bytes()); // length
+    value.extend_from_slice(&1u16.to_be_bytes()); // count
+    value.extend_from_slice(&0u32.to_be_bytes()); // interval
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let ctx = make_ctx(None);
+    let parsed = reflect_unauth(&packet, &ctx);
+
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Type 12 must be echoed");
+    assert!(
+        echoed.is_malformed(),
+        "8-byte Type 12 value must be rejected with M-flag per draft-14 §3 \
+         (MUST NOT be smaller than 12 octets)"
+    );
+}
+
+/// Requested reply length within cap → response is padded to at least that
+/// size via an Extra Padding TLV, and C flag is clear.
+#[test]
+fn a1_reflected_control_length_padding_within_cap() {
+    let target_length = 200u16;
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&target_length.to_be_bytes()); // length: pad to 200 bytes
+    value.extend_from_slice(&1u16.to_be_bytes()); // count: 1
+    value.extend_from_slice(&0u32.to_be_bytes()); // interval
+    value.extend_from_slice(&[0u8; 4]); // sub-TLV placeholder
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let ctx = make_ctx(None);
+
+    let response = stamp_suite::receiver::process_stamp_packet(
+        &packet,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        ),
+        64,
+        false,
+        &ctx,
+    )
+    .expect("must reflect");
+
+    assert!(
+        response.data.len() >= target_length as usize,
+        "padded response must be at least {} bytes; got {}",
+        target_length,
+        response.data.len()
+    );
+
+    let parsed =
+        TlvList::parse(&response.data[stamp_suite::receiver::UNAUTH_BASE_SIZE..]).expect("parse");
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Type 12 must be echoed");
+    assert_eq!(
+        echoed.flags.to_byte() & 0x10,
+        0x00,
+        "C flag must be clear when length is honourable within the cap"
+    );
+
+    // An Extra Padding TLV must have been inserted to reach the target.
+    let pad = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ExtraPadding));
+    assert!(
+        pad.is_some(),
+        "Extra Padding TLV must be present in response"
+    );
+}
+
+/// Requested reply length exceeds the cap → C flag is set; we still pad up
+/// to the cap (best-effort).
+#[test]
+fn a1_reflected_control_length_request_exceeds_cap_sets_c_flag() {
+    let target_length = 9000u16; // larger than default cap (1500)
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&target_length.to_be_bytes());
+    value.extend_from_slice(&1u16.to_be_bytes());
+    value.extend_from_slice(&0u32.to_be_bytes());
+    value.extend_from_slice(&[0u8; 4]);
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let ctx = make_ctx(None);
+    let parsed = reflect_unauth(&packet, &ctx);
+
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Type 12 must be echoed");
+    assert_eq!(
+        echoed.flags.to_byte() & 0x10,
+        0x10,
+        "C flag must be set when requested length exceeds local cap"
+    );
+}
+
+/// L3 Address Group sub-TLV present but no local address matches → packet
+/// processing stops per draft §3 ("MUST stop processing the received
+/// packet"). The backend observes `ReturnPathAction::SuppressReply` and
+/// does not transmit a reply.
+#[test]
+fn a1_reflected_control_l3_mismatch_suppresses_reply() {
+    use stamp_suite::tlv::ReturnPathAction;
+
+    // Build a Type 12 with an L3 sub-TLV requiring a specific IPv4 prefix.
+    // The reflector's local_addresses is empty in make_ctx (no match
+    // possible), so it must suppress.
+    let mut value = Vec::with_capacity(20);
+    value.extend_from_slice(&0u16.to_be_bytes()); // length
+    value.extend_from_slice(&1u16.to_be_bytes()); // count
+    value.extend_from_slice(&0u32.to_be_bytes()); // interval
+                                                  // L3 Address Group sub-TLV: flags=0, type=11, length=8, prefix_len=24,
+                                                  // reserved=0x000000, prefix=192.0.2.0.
+    let sub_tlv = [
+        0u8, 11, 0x00, 0x08, // header
+        24, 0x00, 0x00, 0x00, // prefix_len + reserved
+        192, 0, 2, 0, // prefix
+    ];
+    value.extend_from_slice(&sub_tlv);
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let ctx = make_ctx(None); // local_addresses is empty
+
+    let response = stamp_suite::receiver::process_stamp_packet(
+        &packet,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        ),
+        64,
+        false,
+        &ctx,
+    )
+    .expect("packet still parsed, only reply is suppressed");
+
+    assert!(
+        matches!(response.return_path_action, ReturnPathAction::SuppressReply),
+        "L3 sub-TLV mismatch must cause the reflector to suppress the reply \
+         per draft-ietf-ippm-asymmetrical-pkts §3"
     );
 }

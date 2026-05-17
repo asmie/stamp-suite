@@ -56,6 +56,9 @@ fn make_ctx<'a>() -> ProcessingContext<'a> {
         sender_port: 12345,
         reflector_member_link_id: None,
         captured_headers: None,
+        reflected_control_max_count: 16,
+        reflected_control_max_size: 1500,
+        reflected_control_min_interval_ns: 1_000,
     }
 }
 

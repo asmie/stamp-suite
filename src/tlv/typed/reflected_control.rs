@@ -7,7 +7,10 @@
 //! nanoseconds. Optional sub-TLVs filter which reflector groups should
 //! respond.
 
-use crate::tlv::core::{TlvError, TlvType, REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE};
+use crate::tlv::core::{
+    TlvError, TlvType, REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE,
+    REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,
+};
 use crate::tlv::traits::TypedTlv;
 
 /// Reflected Test Packet Control TLV (Type 12).
@@ -26,11 +29,16 @@ use crate::tlv::traits::TypedTlv;
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// ```
 ///
-/// The Conformant-Reflected-Packet (C) flag in the TLV's flags byte is set by
-/// the reflector when it could not honour the request (MTU exceeded, rate /
-/// volume cap). The draft leaves the C flag's exact bit position TBA; this
-/// implementation places it at bit 3 of the STAMP TLV Flags octet (0x10),
-/// the first bit position unused by RFC 8972's U/M/I triple.
+/// Per draft-14 §3 the value field "MUST NOT be smaller than 12 octets" —
+/// 8 fixed-field bytes plus at least one 4-byte sub-TLV header. Senders
+/// that don't carry an actual filter sub-TLV emit a placeholder
+/// (all-zeros) 4-byte sub-TLV header to reach the minimum.
+///
+/// The Conformant-Reflected-Packet (C) flag (mask 0x10, bit 3 of the
+/// STAMP TLV Flags octet) is set by the reflector when it could not
+/// honour the request (MTU exceeded, count clamped, interval clamped,
+/// or local policy). The IANA registry assigns this bit; earlier
+/// revisions of the draft left the position TBA.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReflectedControlTlv {
     /// Requested reply packet length in octets.
@@ -39,12 +47,17 @@ pub struct ReflectedControlTlv {
     pub number_of_reflected_packets: u16,
     /// Gap between successive reply packets, in nanoseconds.
     pub interval_nanoseconds: u32,
-    /// Raw sub-TLV bytes (Layer 2 / Layer 3 Address Group filters, opaque here).
+    /// Raw sub-TLV bytes (Layer 2 / Layer 3 Address Group filters,
+    /// parsed lazily by callers via the reflector pipeline).
     pub sub_tlvs: Vec<u8>,
 }
 
 impl ReflectedControlTlv {
-    /// Creates a new Reflected Control TLV with no sub-TLVs.
+    /// Creates a new Reflected Control TLV with no real sub-TLVs.
+    ///
+    /// The encoder still emits 12 bytes total (8 fixed + 4-byte placeholder
+    /// sub-TLV header of all zeros) to satisfy draft-14 §3's "MUST NOT be
+    /// smaller than 12 octets" requirement.
     #[must_use]
     pub fn new(length: u16, count: u16, interval_ns: u32) -> Self {
         Self {
@@ -77,7 +90,7 @@ impl TypedTlv for ReflectedControlTlv {
         let length_of_reflected_packet = u16::from_be_bytes([value[0], value[1]]);
         let number_of_reflected_packets = u16::from_be_bytes([value[2], value[3]]);
         let interval_nanoseconds = u32::from_be_bytes([value[4], value[5], value[6], value[7]]);
-        let sub_tlvs = value[REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE..].to_vec();
+        let sub_tlvs = value[REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE..].to_vec();
         Ok(Self {
             length_of_reflected_packet,
             number_of_reflected_packets,
@@ -91,6 +104,17 @@ impl TypedTlv for ReflectedControlTlv {
         out.extend_from_slice(&self.number_of_reflected_packets.to_be_bytes());
         out.extend_from_slice(&self.interval_nanoseconds.to_be_bytes());
         out.extend_from_slice(&self.sub_tlvs);
+        // Pad to the draft-14 §3 minimum of 12 octets if no caller-supplied
+        // sub-TLV bytes filled the trailing 4 bytes. The 4 zero octets
+        // function as a placeholder sub-TLV header (flags=0, type=0,
+        // length=0) and are ignored by conformant reflectors.
+        let fixed_plus_subs = REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE + self.sub_tlvs.len();
+        if fixed_plus_subs < REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE {
+            out.extend(std::iter::repeat_n(
+                0u8,
+                REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE - fixed_plus_subs,
+            ));
+        }
     }
 }
 
@@ -119,24 +143,34 @@ mod tests {
     }
 
     #[test]
-    fn test_reflected_control_wire_format() {
+    fn test_reflected_control_wire_format_pads_to_min_12_bytes() {
         let tlv = ReflectedControlTlv::new(0x0100, 0x0200, 0x0300_0400);
         let raw = tlv.to_raw();
-        // 2 bytes length + 2 bytes count + 4 bytes interval = 8 bytes minimum
-        assert_eq!(raw.value.len(), 8);
+        // draft-14 §3: value MUST NOT be smaller than 12 octets. With no
+        // explicit sub-TLVs we still emit 12 (8 fixed + 4 zero placeholder).
+        assert_eq!(raw.value.len(), 12);
         assert_eq!(&raw.value[0..2], &0x0100u16.to_be_bytes());
         assert_eq!(&raw.value[2..4], &0x0200u16.to_be_bytes());
         assert_eq!(&raw.value[4..8], &0x0300_0400u32.to_be_bytes());
+        assert_eq!(
+            &raw.value[8..12],
+            &[0u8; 4],
+            "trailing 4 bytes are zero-filled sub-TLV placeholder"
+        );
     }
 
     #[test]
-    fn test_reflected_control_invalid_length() {
-        let raw = RawTlv::new(TlvType::ReflectedControl, vec![0; 4]);
-        let result = ReflectedControlTlv::from_raw(&raw);
-        assert!(matches!(
-            result,
-            Err(TlvError::InvalidReflectedControlLength(4))
-        ));
+    fn test_reflected_control_invalid_length_rejected() {
+        // 8-byte value was acceptable in earlier draft revisions; draft-14
+        // §3 raises the minimum to 12 octets. Anything below must error.
+        for len in 0..REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE {
+            let raw = RawTlv::new(TlvType::ReflectedControl, vec![0; len]);
+            let result = ReflectedControlTlv::from_raw(&raw);
+            assert!(
+                matches!(result, Err(TlvError::InvalidReflectedControlLength(_))),
+                "value of {len} bytes must be rejected by draft-14 minimum"
+            );
+        }
     }
 
     #[test]
