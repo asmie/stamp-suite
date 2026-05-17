@@ -12,6 +12,20 @@
 //! # Custom AgentX socket path
 //! stamp-suite -i --snmp --snmp-socket /var/agentx/master
 //! ```
+//!
+//! # Production-path panic audit
+//!
+//! All buffer indexing in the AgentX decoder (`agentx::decode_header`,
+//! `agentx::decode_oid`, `agentx::decode_search_range`,
+//! `agentx::AgentXSession::handle_get_bulk`) is preceded by an explicit length
+//! check that returns `AgentXError::Protocol`. The `MibHandler` dispatch
+//! (`handler::StampMibHandler::get`/`get_next`) bounds-checks OIDs via
+//! `Oid::starts_with` before any `oid.0[i]` indexing. There are no `unwrap()`,
+//! `expect()`, `panic!`, or `unreachable!()` reachable from the AgentX event
+//! loop in `agentx.rs`, `handler.rs`, or `state.rs` outside `#[cfg(test)]`.
+//!
+//! For belt-and-braces, the `spawn_blocking` join handle is observed by a
+//! supervisor task that logs panics rather than silently dropping them.
 
 pub mod agentx;
 mod handler;
@@ -67,12 +81,31 @@ pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServ
 
     log::info!("SNMP AgentX sub-agent connected to {}", socket_path);
 
-    // Spawn the event loop in a blocking task (synchronous socket I/O)
-    tokio::task::spawn_blocking(move || {
+    // Spawn the event loop in a blocking task (synchronous socket I/O).
+    // A separate supervisor `tokio::spawn` awaits the JoinHandle so that an
+    // unforeseen panic in the handler dispatch is logged rather than silently
+    // dropped on the floor (which would leave the SNMP sub-agent dead with no
+    // signal to operators).
+    let cancel_for_supervisor = Arc::clone(&cancel);
+    let join = tokio::task::spawn_blocking(move || {
         let handler = StampMibHandler::new(state);
         if let Err(e) = session.run_loop(&handler, &cancel_clone) {
             if !cancel_clone.load(Ordering::Relaxed) {
                 log::error!("AgentX event loop error: {}", e);
+            }
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(join_err) = join.await {
+            if !cancel_for_supervisor.load(Ordering::Relaxed) {
+                if join_err.is_panic() {
+                    log::error!(
+                        "AgentX event loop panicked: {}; SNMP sub-agent is down",
+                        join_err
+                    );
+                } else {
+                    log::error!("AgentX event loop terminated abnormally: {}", join_err);
+                }
             }
         }
     });
