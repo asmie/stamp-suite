@@ -549,13 +549,25 @@ impl TlvList {
             match tlv.tlv_type {
                 TlvType::ReflectedFixedHdr => match captured_fixed {
                     Some(bytes) if !bytes.is_empty() => {
-                        Self::fill_within_capacity(&mut tlv.value, bytes);
+                        // draft-ietf-ippm-stamp-ext-hdr-08 §5.2: the TLV
+                        // Length MUST equal the IP fixed-header length (20
+                        // for IPv4, 40 for IPv6). If the sender's requested
+                        // length doesn't match the captured header length,
+                        // the reflector MUST mark the TLV unrecognized
+                        // instead of silently truncating or zero-padding.
+                        if tlv.value.len() != bytes.len() {
+                            tlv.value.fill(0);
+                            tlv.set_unrecognized();
+                            log_reflected_hdr_length_mismatch_once();
+                        } else {
+                            Self::fill_within_capacity(&mut tlv.value, bytes);
+                        }
                     }
                     _ => {
                         // Backend cannot observe the IP layer. Per
-                        // draft-ietf-ippm-stamp-ext-hdr the response keeps
-                        // the sender-advertised length; just zero-fill
-                        // the capacity and raise the U-flag.
+                        // draft-ietf-ippm-stamp-ext-hdr §3.2 the response
+                        // keeps the sender-advertised length; zero-fill the
+                        // capacity and raise the U-flag.
                         tlv.value.fill(0);
                         tlv.set_unrecognized();
                         log_reflected_hdr_unsupported_once();
@@ -645,6 +657,23 @@ fn log_reflected_hdr_unsupported_once() {
             "Reflected Fixed/IPv6 Ext Header TLV (Types 247/246) requested but \
              this backend cannot observe raw IP headers — echoing with U-flag. \
              Rebuild with --features ttl-pnet to enable draft-ietf-ippm-stamp-ext-hdr reflection."
+        );
+    }
+}
+
+/// Emits a one-time warning when a Reflected Fixed Header Data TLV (Type 247)
+/// arrives with a requested Length that doesn't match the captured IP
+/// header size (e.g. 20 bytes requested for an IPv6 packet). Per
+/// draft-ietf-ippm-stamp-ext-hdr §5.2 the reflector MUST set the U-flag in
+/// that case rather than silently truncating or zero-padding.
+fn log_reflected_hdr_length_mismatch_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "Reflected Fixed Header Data TLV (Type 247) length does not match the \
+             captured IP header (sender requested wrong address family?); echoing \
+             with U-flag per draft-ietf-ippm-stamp-ext-hdr §5.2."
         );
     }
 }
@@ -1274,18 +1303,43 @@ mod tests {
     }
 
     #[test]
-    fn test_reflected_fixed_hdr_truncates_capture_to_capacity() {
-        // Defensive: if the captured buffer somehow exceeds the sender's
-        // advertised length, response stays at advertised length.
+    fn test_reflected_fixed_hdr_length_mismatch_sets_u_flag() {
+        // draft-ietf-ippm-stamp-ext-hdr-08 §5.2: when the sender-advertised
+        // Length does not match the captured header size (e.g. 20-byte
+        // request but the packet is IPv6 with a 40-byte fixed header),
+        // the reflector MUST set U and zero-fill, not silently truncate.
         use crate::tlv::ReflectedFixedHdrTlv;
         let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
 
-        let oversized = vec![0xAAu8; 40];
-        list.process_reflected_headers(Some(&oversized), Some(&[]));
+        let ipv6_header = vec![0x60u8; 40];
+        list.process_reflected_headers(Some(&ipv6_header), Some(&[]));
 
         let tlv = &list.non_hmac_tlvs()[0];
-        assert_eq!(tlv.value.len(), 20);
-        assert_eq!(tlv.value, vec![0xAA; 20]);
+        assert_eq!(tlv.value.len(), 20, "sender-advertised length preserved");
+        assert!(
+            tlv.value.iter().all(|&b| b == 0),
+            "length mismatch → zero-fill, not silently truncate"
+        );
+        assert!(
+            tlv.is_unrecognized(),
+            "U-flag must be set on length mismatch per draft §5.2"
+        );
+    }
+
+    #[test]
+    fn test_reflected_fixed_hdr_ipv6_request_with_ipv6_capture_populated() {
+        // Positive companion to the length-mismatch test: 40-byte request +
+        // 40-byte captured header → populated normally, no U-flag.
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(40).to_raw());
+
+        let mut captured = vec![0u8; 40];
+        captured[0] = 0x60; // IPv6 version
+        list.process_reflected_headers(Some(&captured), Some(&[]));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.value, captured);
+        assert!(!tlv.is_unrecognized());
     }
 
     #[test]
