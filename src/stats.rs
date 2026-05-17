@@ -600,4 +600,193 @@ mod tests {
         assert_eq!(stats.active_sessions, 2);
         assert_eq!(stats.sessions.len(), 2);
     }
+
+    // -----------------------------------------------------------------------
+    // C11: RFC 3550 jitter and percentile edge cases.
+
+    /// Empty collector: percentile_ns over any p must return None, never
+    /// panic with a sort-empty / index-out-of-bounds.
+    #[test]
+    fn test_percentile_empty_set_returns_none_for_any_p() {
+        let c = RttCollector::new();
+        for p in [0.0, 50.0, 99.0, 100.0, -10.0, 200.0, f64::NAN] {
+            assert!(
+                c.percentile_ns(p).is_none(),
+                "percentile_ns({p}) on empty collector must be None"
+            );
+        }
+    }
+
+    /// Single sample: jitter and std_dev are undefined per RFC 3550. Our
+    /// implementation returns None for both rather than 0 or NaN.
+    #[test]
+    fn test_single_sample_jitter_and_stddev_undefined() {
+        let mut c = RttCollector::new();
+        c.record(RttSample {
+            seq: 0,
+            rtt_ns: 5_000_000,
+            ttl: 64,
+        });
+        assert_eq!(c.jitter_ns(), None, "RFC 3550 jitter requires ≥ 2 samples");
+        assert_eq!(
+            c.std_dev_ns(),
+            None,
+            "std dev requires ≥ 2 samples for the n-1 (or n) denominator"
+        );
+    }
+
+    /// Zero-jitter sequence: 10 identical RTTs produce jitter = 0 and
+    /// std_dev = 0 exactly (no floating-point drift).
+    #[test]
+    fn test_zero_jitter_constant_rtts() {
+        let mut c = RttCollector::new();
+        for i in 0..10 {
+            c.record(RttSample {
+                seq: i,
+                rtt_ns: 5_000_000,
+                ttl: 64,
+            });
+        }
+        assert_eq!(c.jitter_ns(), Some(0));
+        let sd = c.std_dev_ns().expect("std dev defined for ≥ 2 samples");
+        assert!(
+            sd.abs() < 1e-3,
+            "constant RTTs must produce std_dev = 0 (got {sd})"
+        );
+    }
+
+    /// Negative-skew sequence: RTTs that decrease across the window. RFC
+    /// 3550 jitter uses |Δ| so the result must be positive and equal to
+    /// the abs-difference mean.
+    #[test]
+    fn test_negative_skew_jitter_uses_abs_diff() {
+        let mut c = RttCollector::new();
+        // RTTs: 5, 4, 3, 2, 1 ms. |Δ| sequence: 1,1,1,1 → jitter = 1 ms.
+        for i in (1..=5).rev() {
+            c.record(RttSample {
+                seq: 6 - i,
+                rtt_ns: i as u64 * 1_000_000,
+                ttl: 64,
+            });
+        }
+        assert_eq!(c.jitter_ns(), Some(1_000_000));
+        assert_eq!(c.min_ns, Some(1_000_000));
+        assert_eq!(c.max_ns, Some(5_000_000));
+    }
+
+    /// Percentile at p=0 and p=100 must be min and max respectively.
+    /// Percentile at fractional p (e.g. 37.5) must not panic.
+    #[test]
+    fn test_percentile_boundary_values() {
+        let mut c = RttCollector::new();
+        for i in 1..=10 {
+            c.record(RttSample {
+                seq: i,
+                rtt_ns: i as u64 * 1000,
+                ttl: 64,
+            });
+        }
+        assert_eq!(c.percentile_ns(0.0), Some(1000));
+        assert_eq!(c.percentile_ns(100.0), Some(10_000));
+        // Out-of-range p: implementation clamps to last index, must not
+        // panic.
+        let _ = c.percentile_ns(150.0);
+        let _ = c.percentile_ns(-25.0);
+        // Fractional p: rounds to nearest index.
+        let p375 = c
+            .percentile_ns(37.5)
+            .expect("must be defined for 10 samples");
+        assert!((1000..=10_000).contains(&p375));
+    }
+
+    /// Alternating high/low RTTs produce mean |Δ| = (h - l). The classic
+    /// "telecoms jitter" testcase.
+    #[test]
+    fn test_alternating_jitter() {
+        let mut c = RttCollector::new();
+        let pattern = [10_000_000u64, 1_000_000, 10_000_000, 1_000_000];
+        for (i, &rtt) in pattern.iter().enumerate() {
+            c.record(RttSample {
+                seq: i as u32,
+                rtt_ns: rtt,
+                ttl: 64,
+            });
+        }
+        // |Δ| sequence: 9_000_000, 9_000_000, 9_000_000 → mean 9 ms.
+        assert_eq!(c.jitter_ns(), Some(9_000_000));
+    }
+
+    /// Two-sample std dev must be defined (boundary case for the n ≥ 2
+    /// check) and equal half the absolute difference (population formula).
+    #[test]
+    fn test_two_sample_std_dev_defined() {
+        let mut c = RttCollector::new();
+        c.record(RttSample {
+            seq: 0,
+            rtt_ns: 1_000_000,
+            ttl: 64,
+        });
+        c.record(RttSample {
+            seq: 1,
+            rtt_ns: 3_000_000,
+            ttl: 64,
+        });
+        // Population variance of {1e6, 3e6} = ((1e6-2e6)^2 + (3e6-2e6)^2)/2 = 1e12
+        // → std_dev = 1e6.
+        let sd = c.std_dev_ns().expect("defined for 2 samples");
+        assert!(
+            (sd - 1_000_000.0).abs() < 1.0,
+            "expected ~1e6 ns std dev, got {sd}"
+        );
+    }
+
+    /// Large RTT samples (sub-second but at the multi-billion-ns scale)
+    /// must not overflow the u128 accumulators. Pin numerical stability.
+    #[test]
+    fn test_large_rtt_no_overflow() {
+        let mut c = RttCollector::new();
+        // 1000 samples at ~3 seconds each — within u32::MAX seconds but
+        // accumulated as u128 ns to avoid overflow.
+        for i in 0..1000 {
+            c.record(RttSample {
+                seq: i,
+                rtt_ns: 3_000_000_000,
+                ttl: 64,
+            });
+        }
+        assert_eq!(c.jitter_ns(), Some(0));
+        assert_eq!(c.std_dev_ns(), Some(0.0));
+        let snap = c.snapshot(1000, 0);
+        assert!(
+            (snap.avg_rtt_ms.unwrap() - 3000.0).abs() < 0.001,
+            "expected ~3000ms avg, got {:?}",
+            snap.avg_rtt_ms
+        );
+    }
+
+    /// Percentile on a single-sample collector must return that sample for
+    /// every valid p — no off-by-one in the index calculation.
+    #[test]
+    fn test_single_sample_percentile_returns_that_sample() {
+        let mut c = RttCollector::new();
+        c.record(RttSample {
+            seq: 0,
+            rtt_ns: 7_777_777,
+            ttl: 64,
+        });
+        for p in [0.0, 25.0, 50.0, 95.0, 99.0, 100.0] {
+            assert_eq!(c.percentile_ns(p), Some(7_777_777));
+        }
+    }
+
+    /// Loss percent edge case: zero packets sent → no division-by-zero,
+    /// no NaN in the loss_percent field. The snapshot uses `packets_sent.max(1)`
+    /// internally; verify it produces 0.0.
+    #[test]
+    fn test_snapshot_zero_sent_zero_loss() {
+        let c = RttCollector::new();
+        let snap = c.snapshot(0, 0);
+        assert!(snap.loss_percent.is_finite());
+        assert!((snap.loss_percent - 0.0).abs() < 0.01);
+    }
 }
