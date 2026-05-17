@@ -309,9 +309,21 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     }
                 };
 
-                // Rate limit check: drop packet if source exceeds max PPS
+                // Rate limit check: drop packet if source exceeds the
+                // per-client token bucket. Distinct from the generic
+                // packets_dropped counter so operators can tell rate-limit
+                // pressure from parse/HMAC failures.
                 if let Some(ref limiter) = shared.rate_limiter {
                     if !limiter.allow(src_addr.ip()) {
+                        log::debug!("Rate-limited packet from {}", src_addr);
+                        shared
+                            .counters
+                            .packets_rate_limited
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .counters
+                            .packets_dropped
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
                 }
@@ -506,18 +518,37 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                         // Reflected Test Packet Control multi-send
                         // (draft-ietf-ippm-asymmetrical-pkts §3). Emit the
                         // additional copies asynchronously so the main recv
-                        // loop is not blocked by the inter-packet gap.
+                        // loop is not blocked by the inter-packet gap. Each
+                        // extra copy consumes one rate-limit token; the
+                        // loop breaks early when the bucket runs out so a
+                        // sender asking for an asymmetric burst can't
+                        // exceed its per-client budget.
                         if let Some(behavior) = response.reflected_control {
                             if behavior.extra_copies > 0 {
                                 let sock = Arc::clone(&tokio_socket);
                                 let data = response.data.clone();
                                 let target = send_target;
                                 let counters_for_task = Arc::clone(&counters);
+                                let limiter_for_task = shared.rate_limiter.as_ref().map(Arc::clone);
+                                let limiter_key = src_addr.ip();
                                 tokio::spawn(async move {
                                     let interval =
                                         Duration::from_nanos(behavior.interval_ns as u64);
                                     for _ in 0..behavior.extra_copies {
                                         tokio::time::sleep(interval).await;
+                                        if let Some(ref limiter) = limiter_for_task {
+                                            if !limiter.allow(limiter_key) {
+                                                counters_for_task.packets_rate_limited.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                counters_for_task.packets_dropped.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                break;
+                                            }
+                                        }
                                         match sock.send_to(&data, target).await {
                                             Ok(_) => {
                                                 counters_for_task.packets_reflected.fetch_add(

@@ -286,8 +286,17 @@ pub struct Configuration {
     pub reflector_member_link_id: Option<u16>,
 
     /// Maximum packets per second per source (0 = unlimited).
+    /// Implemented as a per-(source IP, SSID) token bucket; see
+    /// `--reflector-rate-burst` for the bucket capacity. Kept under the
+    /// historic `--max-pps` name for backward compatibility.
     #[clap(long, default_value_t = 0)]
     pub max_pps: u32,
+
+    /// Per-client token-bucket burst capacity in packets. 0 = use
+    /// `--max-pps` (one-second worth of capacity), which matches the
+    /// classic fixed-window behaviour. Ignored when `--max-pps` is 0.
+    #[clap(long, default_value_t = 0)]
+    pub reflector_rate_burst: u32,
 
     /// Enable the BER TLVs (draft-gandhi-ippm-stamp-ber-05):
     /// Bit Pattern in Padding (Type 240), Bit Error Count (Type 241), and
@@ -636,6 +645,7 @@ impl Configuration {
         merge_opt!(micro_session_id);
         merge_opt!(reflector_member_link_id);
         merge!(max_pps);
+        merge!(reflector_rate_burst);
         merge!(ber);
         merge_opt!(ber_pattern);
         merge!(ber_padding_size);
@@ -717,6 +727,7 @@ pub struct FileConfiguration {
     pub micro_session_id: Option<u16>,
     pub reflector_member_link_id: Option<u16>,
     pub max_pps: Option<u32>,
+    pub reflector_rate_burst: Option<u32>,
     pub ber: Option<bool>,
     pub ber_pattern: Option<String>,
     pub ber_padding_size: Option<usize>,
