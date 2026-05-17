@@ -545,4 +545,54 @@ mod tests {
             _ => panic!("Expected Gauge32"),
         }
     }
+
+    // ------------------------------------------------------------------
+    // B1 audit follow-up: OID boundary coverage.
+
+    /// Empty OID must produce NoSuchObject, not a panic from `oid.0[0]`.
+    #[test]
+    fn test_get_empty_oid() {
+        let state = make_test_state(true);
+        let handler = StampMibHandler::new(state);
+        let vb = handler.get(&Oid::from_slice(&[]));
+        assert!(matches!(vb.value, VarBindValue::NoSuchObject));
+    }
+
+    /// OID one element shorter than the session-table-entry prefix must
+    /// not enter the `oid.0[prefix.len()]` indexing path.
+    #[test]
+    fn test_get_session_entry_short_oid_rejected() {
+        let state = make_test_state(true);
+        let handler = StampMibHandler::new(state);
+        let prefix = oids::stamp_refl_session_table_prefix();
+        // OID equal in length to the prefix but missing column + index.
+        let vb = handler.get(&prefix);
+        assert!(matches!(vb.value, VarBindValue::NoSuchObject));
+    }
+
+    /// OID one element longer than expected (prefix + col + index + extra)
+    /// must also be rejected without indexing past the buffer.
+    #[test]
+    fn test_get_session_entry_oversized_oid_rejected() {
+        let state = make_test_state(true);
+        let handler = StampMibHandler::new(state);
+        let prefix = oids::stamp_refl_session_table_prefix();
+        let mut subs = prefix.0.clone();
+        subs.extend_from_slice(&[1, 1, 99]); // col=1, idx=1, extra=99
+        let vb = handler.get(&Oid::from_slice(&subs));
+        assert!(matches!(vb.value, VarBindValue::NoSuchObject));
+    }
+
+    /// Adversarial: get_next on an empty OID must return a valid varbind
+    /// (the very first OID in the MIB) without panicking.
+    #[test]
+    fn test_get_next_empty_oid_returns_first() {
+        let state = make_test_state(true);
+        let handler = StampMibHandler::new(state);
+        let vb = handler.get_next(&Oid::from_slice(&[]), &Oid::from_slice(&[]));
+        // Must produce some valid scalar — not NoSuchObject or panic.
+        // (Could be Integer/Counter/Gauge depending on first sorted OID;
+        // we just require it's not the "nothing here" sentinel.)
+        assert!(!matches!(vb.value, VarBindValue::NoSuchObject));
+    }
 }

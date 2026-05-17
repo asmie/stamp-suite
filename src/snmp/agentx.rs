@@ -821,4 +821,98 @@ mod tests {
         // prefix byte
         assert_eq!(encoded[4], 4);
     }
+
+    // ------------------------------------------------------------------
+    // B1 audit follow-up: malformed-input coverage.
+    //
+    // Each test below feeds the decoder a hostile or truncated buffer and
+    // asserts it returns Err(AgentXError) rather than panicking. Buffer
+    // indexing in agentx.rs production paths is preceded by explicit length
+    // checks; these tests lock that invariant in.
+
+    #[test]
+    fn test_decode_header_rejects_empty_buffer() {
+        assert!(decode_header(&[]).is_err());
+    }
+
+    #[test]
+    fn test_decode_header_rejects_short_buffer() {
+        for len in 0..PDU_HEADER_SIZE {
+            let buf = vec![0u8; len];
+            assert!(
+                decode_header(&buf).is_err(),
+                "header decode must reject {len}-byte buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_header_rejects_bad_version() {
+        let mut buf = vec![0u8; PDU_HEADER_SIZE];
+        buf[0] = 99; // not AGENTX_VERSION
+        assert!(decode_header(&buf).is_err());
+    }
+
+    #[test]
+    fn test_decode_oid_rejects_truncated_subidentifier_list() {
+        // n_subid says 3, but only 4 bytes (one sub-id) of data follow.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&3u32.to_be_bytes()); // n_subid = 3
+        buf.push(0); // prefix
+        buf.push(0); // include
+        buf.push(0); // reserved
+        buf.push(0); // reserved
+        buf.extend_from_slice(&1u32.to_be_bytes()); // only one sub-id
+        assert!(decode_oid(&buf).is_err());
+    }
+
+    #[test]
+    fn test_decode_oid_rejects_length_overflow() {
+        // n_subid = u32::MAX would overflow when multiplied by 4 + 8.
+        let mut buf = Vec::with_capacity(8);
+        buf.extend_from_slice(&u32::MAX.to_be_bytes());
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        assert!(decode_oid(&buf).is_err());
+    }
+
+    #[test]
+    fn test_decode_search_range_rejects_when_end_oid_truncated() {
+        // A valid start OID followed by nothing — end OID can't decode.
+        let start = Oid::from_slice(&[1, 2, 3]);
+        let encoded_start = encode_oid(&start, false);
+        assert!(decode_search_range(&encoded_start).is_err());
+    }
+
+    #[test]
+    fn test_get_bulk_handler_rejects_short_payload() {
+        // The handle_get_bulk path is only callable via run_loop, but we
+        // can exercise the length-check directly by encoding a malformed
+        // payload and verifying the error path is taken via a public
+        // helper. Since handle_get_bulk is private, we cover the same
+        // invariant by feeding decode_search_range a sub-4-byte buffer.
+        for len in 0..4 {
+            let buf = vec![0u8; len];
+            assert!(decode_search_range(&buf).is_err());
+        }
+    }
+
+    #[test]
+    fn test_decoders_never_panic_on_random_short_buffers() {
+        // Black-box: feed a range of fixed bit patterns to every decoder.
+        // None must panic, even on adversarial input. This complements the
+        // libfuzzer target added later in C5.
+        let patterns: [&[u8]; 6] = [
+            &[],
+            &[0xff],
+            &[0xff; 4],
+            &[0xff; 7],
+            &[0xff; 19],
+            &[0xff; 32],
+        ];
+        for p in patterns {
+            let _ = decode_header(p);
+            let _ = decode_oid(p);
+            let _ = decode_search_range(p);
+        }
+    }
 }
