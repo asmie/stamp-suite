@@ -136,6 +136,36 @@ Both backends, after capturing a packet, hand it to the same shared pipeline in 
 
 The `ProcessingContext` struct carries per-packet shared state (counters, optional `SessionManager` reference, local addresses, sender port). `ReceiverSharedState` (counters, session manager, start time) lives at the receiver level and is created once via `create_shared_state()` before `run_receiver()`.
 
+## Operational Characteristics
+
+A few cross-cutting operational invariants are worth pinning down separately, since they affect every code path that touches the network or the optional subsystems.
+
+### Packet-receive contract: `--strict-packets`
+
+The reflector's packet-parse path has two modes:
+
+- **Lenient (default)** — short packets are zero-filled to the canonical size per RFC 8762 §4.6, then parsed. HMAC, when present, is verified against the canonical (zero-padded) buffer. This is the interop-friendly mode and matches the behaviour TWAMP-Light senders expect.
+- **Strict (`--strict-packets`)** — short packets are rejected at the parser. The HMAC, MBZ, and `require_hmac` checks are independent of strictness — strict mode only changes how short packets are treated.
+
+The contract is exhaustively pinned by `strict_packets_*` tests in `src/receiver/mod.rs`, including the explicit RFC 8762 §4.1.1 case that **non-zero MBZ on receipt is always ignored in both modes** (the RFC mandates "MUST be ignored on receipt"). Both modes also tolerate a zero-byte buffer without panicking.
+
+### Capture-thread liveness signal
+
+`ReceiverSharedState` carries `capture_alive: Arc<AtomicBool>` (initialised `true`). Both backends clear this flag when their receive loop exits unexpectedly (`nix`: socket creation or bind failure; `pnet`: missing interface, channel-init failure, send-socket bind failure, or a `spawn_blocking` panic propagated up through the JoinHandle). The flag exists so a future `/healthz` endpoint (and external monitors today, via SNMP or signal) can distinguish "process alive but not reflecting" from "process alive and healthy" without scraping stdout. Operationally this means a single dead capture loop never goes silent — it surfaces as `false` on this flag and as `log::error!` lines in the journal.
+
+### Observability subsystem failure semantics (`--metrics` vs `--snmp`)
+
+The two optional subsystems handle initialisation failure asymmetrically by design:
+
+- **`--metrics` fails fast.** If the operator explicitly requested a Prometheus endpoint and the bind fails (`AddrInUse`, `AddrNotAvailable`, `PermissionDenied`, …), `main.rs` exits with a specific error message naming the `io::ErrorKind`. The reasoning: silently disabling the endpoint would leave dashboards and alerts running blind without any signal that they are.
+- **`--snmp` degrades gracefully.** If the AgentX master socket is absent or unreachable (e.g. `net-snmpd` hasn't started yet during boot), `main.rs` logs a warning and continues with `None`. The reflector's primary duty — forwarding STAMP packets — is unaffected by the SNMP sub-agent being down. Operators who want SNMP-required-to-start semantics can wrap `stamp-suite.service` with a systemd ordering directive (`After=snmpd.service`, `Requires=snmpd.service`).
+
+The same asymmetry is documented for end-users in [usage.md](usage.md#failure-semantics).
+
+### AgentX sub-agent panic-resistance
+
+The AgentX event loop runs inside `tokio::task::spawn_blocking`. A separate supervisor `tokio::spawn` task awaits the JoinHandle and logs panics (`JoinError::is_panic()`) and abnormal terminations rather than dropping them silently. The decoder itself was audited for production-path panics; every buffer-indexing site (`agentx::decode_header`, `decode_oid`, `decode_search_range`, `AgentXSession::handle_get_bulk`) is preceded by an explicit length check returning `AgentXError::Protocol`. The `MibHandler` dispatch (`StampMibHandler::get`/`get_next`) bounds-checks OIDs via `Oid::starts_with` before any indexing. Coverage is locked in by the malformed-input tests in `src/snmp/agentx.rs` and `src/snmp/handler.rs`.
+
 ## Session Management
 
 `SessionManager` is **always** instantiated, regardless of the `--stateful-reflector` flag. The flag only controls one thing: whether the assembler uses per-client sequence numbering (`ProcessingContext.session_manager: Option<&Arc<SessionManager>>`) instead of a global counter. Per-client packet counters and last-reflection tracking — needed by the Direct Measurement (Type 5) and Follow-Up Telemetry (Type 7) TLVs — run unconditionally because the TLV semantics require them.
@@ -148,27 +178,38 @@ The implementation supports RFC 8972 TLV (Type-Length-Value) extensions, which a
 
 ### Supported TLV Types
 
+Status labels used in this table — kept aligned with the (forthcoming) standards matrix:
+
+- **supported** — structured parsing, validation, and reflector-side field population are complete and conform to the spec.
+- **partial** — implemented to the spec on most paths but with a named gap (sub-TLV, sub-field, or backend-restricted feature). The gap is explicit in the table row.
+- **experimental** — implements an active IETF draft. Wire format or type number may change before standardisation; treat as best-effort interop only.
+- **interop-only** — present solely to interoperate with another implementation's non-standard extension. Off in default builds.
+
 | Type | Name | Description | Status |
 |------|------|-------------|--------|
-| 1 | Extra Padding | Can carry Session-Sender ID (SSID) in first 2 bytes | Full |
-| 2 | Location | Source/destination addresses and ports (RFC 8972 §4.2) | Full |
-| 3 | Timestamp Info | Sync source and timestamping method (RFC 8972 §4.3) | Full |
-| 4 | Class of Service | DSCP/ECN measurement (RFC 8972 §5.2) | Full |
-| 5 | Direct Measurement | Sender/reflector packet counters (RFC 8972 §4.5) | Full |
-| 6 | Access Report | Access identifier and return code (RFC 8972 §4.6) | Full |
-| 7 | Follow-Up Telemetry | Previous reflection seq/timestamp (RFC 8972 §4.7) | Full |
-| 8 | HMAC | TLV integrity verification (must be last) | Full |
-| 9 | Destination Node Address | Verify intended reflector identity (RFC 9503 §4) | Full |
-| 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | Full |
-| 11 | Micro-session ID | LAG member link identifiers for per-link measurement (RFC 9534 §3.1) | Full |
-| 12 | Reflected Test Packet Control | Asymmetrical reply request — count, length, interval (draft-ietf-ippm-asymmetrical-pkts-14) | Experimental |
-| 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-05) | Experimental |
-| 241 | BER Bit Error Count | u32 error-bit count, computed by reflector | Experimental |
-| 242 | BER Max Bit Error Burst Size | u32 longest consecutive error run, computed by reflector | Experimental |
-| 246 | Reflected IPv6 Extension Header Data | Reflects received IPv6 Hop-by-Hop / Destination Options headers (draft-ietf-ippm-stamp-ext-hdr) | Experimental (pnet backend only) |
-| 247 | Reflected Fixed Header Data | Reflects the raw 20-byte IPv4 or 40-byte IPv6 fixed header (draft-ietf-ippm-stamp-ext-hdr) | Experimental (pnet backend only) |
+| 1 | Extra Padding | Can carry Session-Sender ID (SSID) in first 2 bytes | supported |
+| 2 | Location | Source/destination addresses and ports (RFC 8972 §4.2) | supported |
+| 3 | Timestamp Info | Sync source and timestamping method (RFC 8972 §4.3) | supported |
+| 4 | Class of Service | DSCP/ECN measurement (RFC 8972 §5.2) | supported |
+| 5 | Direct Measurement | Sender/reflector packet counters (RFC 8972 §4.5) | supported |
+| 6 | Access Report | Access identifier and return code (RFC 8972 §4.6) | supported |
+| 7 | Follow-Up Telemetry | Previous reflection seq/timestamp (RFC 8972 §4.7) | supported |
+| 8 | HMAC | TLV integrity verification (must be last) | supported |
+| 9 | Destination Node Address | Verify intended reflector identity (RFC 9503 §4) | supported |
+| 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | partial — SR-MPLS / SRv6 echoed with U-flag (segment-routing forwarding out of scope for userspace UDP) |
+| 11 | Micro-session ID | LAG member link identifiers for per-link measurement (RFC 9534 §3.1) | supported |
+| 12 | Reflected Test Packet Control | Asymmetrical reply request — count, length, interval (draft-ietf-ippm-asymmetrical-pkts-14, IANA-assigned) | partial — emission supported; requested reply length not yet honoured (C flag set) and L2/L3 Address Group sub-TLVs not yet parsed |
+| 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-05) | experimental |
+| 241 | BER Bit Error Count | u32 error-bit count, computed by reflector | experimental |
+| 242 | BER Max Bit Error Burst Size | u32 longest consecutive error run, computed by reflector | experimental — **wire-format collision with teaparty Heartbeat (same Type 242)**; see note below |
+| 246 | Reflected IPv6 Extension Header Data | Reflects received IPv6 Hop-by-Hop / Destination Options headers (draft-ietf-ippm-stamp-ext-hdr) | partial — pnet backend only (nix backend echoes with U-flag) |
+| 247 | Reflected Fixed Header Data | Reflects the raw 20-byte IPv4 or 40-byte IPv6 fixed header (draft-ietf-ippm-stamp-ext-hdr) | partial — pnet backend only (nix backend echoes with U-flag) |
 
-**Status**: Full = structured parsing, validation, and reflector field population. Experimental = implements an active IETF draft; wire format and type numbers for BER (240/241/242) and ext-hdr reflection (246/247) are TBD in the draft (experimental-range picks) while Reflected Control (Type 12) is IANA-assigned. SR-MPLS/SRv6 forwarding is echoed with U-flag (actual segment routing is out of scope for userspace UDP). Types 246/247 require raw IP-header visibility which the default `nix` UDP-socket backend cannot provide; on that backend they are echoed with the U-flag set and a one-time warning is logged — see [Receiver Backends](#receiver-backends) for why the default remains `nix`.
+**IANA registry**: Type 12 and the C flag (bit 3 of TLV flags) are IANA-assigned per draft-ietf-ippm-asymmetrical-pkts-14. Types 240–251 are *Experimental Use* per RFC 8972 §6 — picks by individual implementations.
+
+**Type 242 collision**: stamp-suite uses Type 242 for *BER Max Bit Error Burst Size* (draft-gandhi-ippm-stamp-ber-05); teaparty uses the same Type 242 for an experimental *Heartbeat* TLV. Both are within the Experimental Use range so neither is wrong per IANA, but the wire formats are mutually incompatible. Until an explicit `experimental-teaparty-compat` build path exists, deployments that mix the two implementations should disable BER on stamp-suite or Heartbeat on teaparty rather than relying on which one wins the byte race.
+
+**Backend restriction on Types 246/247**: Both require the reflector to copy raw IP-header bytes into the response, which is only possible when the capture path sees full IP headers. The default `nix` UDP-socket backend cannot provide this — see [Receiver Backends](#receiver-backends) for why the default remains `nix`. On the `nix` backend these TLVs are echoed with the U-flag set per RFC 8972 §4.2 and a one-time warning is logged.
 
 ### TLV Handling Modes
 
@@ -330,10 +371,15 @@ stamp-suite --remote-addr 192.168.1.100 \
 ```
 
 Reflector behaviour:
-- Emits up to 16 reply packets per request (hard cap in `REFLECTED_CONTROL_MAX_COUNT`); excess requests are clamped and the **C flag** (Conformant Reflected Packet, bit 3 of the TLV flags byte) is set on the echoed TLV to indicate non-conformance.
+- Emits up to 16 reply packets per request (hard cap in `REFLECTED_CONTROL_MAX_COUNT`); excess requests are clamped and the **C flag** (Conformant Reflected Packet, bit 3 of the TLV flags byte) is set on the echoed TLV to indicate non-conformance. The C flag's bit position is now IANA-assigned (bit 3); earlier revisions of the draft left it TBA.
 - Clamps the inter-packet interval to at least 1 µs.
 - A non-zero requested packet length is not honoured in this implementation (the reply is not re-padded); the C flag is set to signal this.
 - On the `nix` backend extra copies are sent on a spawned tokio task so the recv loop is never blocked; the `pnet` backend sleeps inline on its capture thread.
+
+**Known gaps tracked for completion against draft-14:**
+- Minimum TLV length raised from 8 to 12 octets per draft §3 (current parser still accepts 8).
+- Reply-length padding: the reply is currently not padded to the requested length; the C flag is set instead. Honoring the requested length is in progress.
+- Sub-TLV parsing: the Layer-2 Address Group (sub-TLV Type 10) and Layer-3 Address Group (sub-TLV Type 11) filters are not yet parsed; sub-TLV bytes are carried as opaque payload.
 
 ### Bit Error Rate TLVs (draft-gandhi-ippm-stamp-ber)
 
