@@ -126,6 +126,9 @@ fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
 }
 
 /// Loads the HMAC key from configuration (hex string or file).
+///
+/// Single-key path retained for backward compatibility. Operators using
+/// per-SSID keys should call `load_hmac_key_set` instead — see B6.
 pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
     if let Some(ref hex_key) = conf.hmac_key {
         match HmacKey::from_hex(hex_key) {
@@ -148,6 +151,77 @@ pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
     }
 
     None
+}
+
+/// Loads the HMAC key *set* from configuration, supporting the three
+/// mutually-exclusive sources (`--hmac-key`, `--hmac-key-file`,
+/// `--hmac-key-dir`).
+///
+/// - Single key (`--hmac-key` / `--hmac-key-file`) → set with that key
+///   as the `default`, no per-SSID overrides. The reflector then uses
+///   this key for every SSID, preserving the existing behaviour.
+/// - Key directory (`--hmac-key-dir`) → per-SSID map plus optional
+///   `default.key` fallback (see `crypto::HmacKeySet::from_dir`).
+/// - None of the three → returns `None`. Auth-mode validation in
+///   `Configuration::validate` already rejects this case at startup.
+pub fn load_hmac_key_set(conf: &Configuration) -> Option<crate::crypto::HmacKeySet> {
+    use crate::crypto::HmacKeySet;
+
+    if let Some(ref dir) = conf.hmac_key_dir {
+        match HmacKeySet::from_dir(dir) {
+            Ok(set) => {
+                if set.is_empty() {
+                    log::error!(
+                        "HMAC key directory {:?} contained no usable keys",
+                        dir.display()
+                    );
+                    return None;
+                }
+                return Some(set);
+            }
+            Err(e) => {
+                log::error!(
+                    "Failed to load HMAC key directory {:?}: {}",
+                    dir.display(),
+                    e
+                );
+                return None;
+            }
+        }
+    }
+
+    load_hmac_key(conf).map(HmacKeySet::with_default)
+}
+
+/// Peeks the SSID (RFC 8972 §3) field out of an incoming packet without
+/// fully parsing the rest. Returns 0 if the buffer is too short — which
+/// matches the RFC 8972 §4.1 "SSID 0 = unused" convention and is the
+/// correct fallback for the per-SSID HMAC key lookup.
+///
+/// Offsets:
+/// - Unauthenticated: bytes 14..16 (after seq, timestamp, error_estimate).
+/// - Authenticated: bytes 26..28 (after seq, 12-byte MBZ, timestamp,
+///   error_estimate).
+fn peek_ssid(data: &[u8], use_auth: bool) -> u16 {
+    let offset = if use_auth { 26 } else { 14 };
+    if data.len() >= offset + 2 {
+        u16::from_be_bytes([data[offset], data[offset + 1]])
+    } else {
+        0
+    }
+}
+
+/// Resolves the HMAC key to use for an incoming packet.
+///
+/// Precedence (B6): if `ctx.hmac_key_set` is `Some`, that set is
+/// authoritative — its `for_ssid(ssid)` lookup (with built-in default
+/// fallback) determines the key. If `None`, the legacy single
+/// `ctx.hmac_key` is used.
+fn resolve_hmac_key<'a>(ctx: &'a ProcessingContext, ssid: u16) -> Option<&'a HmacKey> {
+    if let Some(set) = ctx.hmac_key_set {
+        return set.for_ssid(ssid);
+    }
+    ctx.hmac_key
 }
 
 /// Aggregate packet counters for the reflector.
@@ -702,8 +776,16 @@ pub struct ProcessingContext<'a> {
     pub clock_source: ClockFormat,
     /// Error estimate in wire format.
     pub error_estimate_wire: u16,
-    /// HMAC key for authentication.
+    /// Single HMAC key (legacy single-tenant path). Used when no
+    /// `hmac_key_set` is configured. Operators using `--hmac-key-dir`
+    /// should populate `hmac_key_set` instead and leave this `None`.
     pub hmac_key: Option<&'a HmacKey>,
+    /// Per-SSID HMAC key set (B6). When `Some`, the reflector resolves
+    /// the verification + response-HMAC key against the incoming
+    /// packet's SSID via [`crypto::HmacKeySet::for_ssid`]; on no match
+    /// the packet is rejected as if the wrong key was supplied. When
+    /// `None`, the receiver falls back to `hmac_key`.
+    pub hmac_key_set: Option<&'a crate::crypto::HmacKeySet>,
     /// Whether HMAC is required.
     pub require_hmac: bool,
     /// Session manager for stateful mode.
@@ -816,11 +898,17 @@ pub fn process_stamp_packet(
     };
     let has_tlvs = data.len() > base_size;
 
+    // Resolve the HMAC key for this packet (B6: per-SSID lookup). Falls
+    // back to `ctx.hmac_key` when no `hmac_key_set` is configured,
+    // preserving the single-key path.
+    let ssid = peek_ssid(data, use_auth);
+    let resolved_hmac_key = resolve_hmac_key(ctx, ssid);
+
     // TLV HMAC key for responses (only if we're not ignoring TLVs)
     // Per RFC 8972 §4.8: on HMAC verification failure, TLVs are echoed
     // with I-flag set rather than dropping the packet
     let tlv_hmac_key = if ctx.tlv_mode != TlvHandlingMode::Ignore {
-        ctx.hmac_key
+        resolved_hmac_key
     } else {
         None
     };
@@ -828,7 +916,7 @@ pub fn process_stamp_packet(
     // Determine whether to verify incoming TLV HMAC:
     // - Always verify if --verify-tlv-hmac is set
     // - Auto-verify when HMAC key is configured (regardless of auth mode)
-    let verify_tlv_hmac = ctx.verify_tlv_hmac || ctx.hmac_key.is_some();
+    let verify_tlv_hmac = ctx.verify_tlv_hmac || resolved_hmac_key.is_some();
 
     let result = if use_auth {
         process_auth_packet(
@@ -837,6 +925,7 @@ pub fn process_stamp_packet(
             ttl,
             rcvt,
             has_tlvs,
+            resolved_hmac_key,
             tlv_hmac_key,
             verify_tlv_hmac,
             ctx,
@@ -869,6 +958,10 @@ pub fn process_stamp_packet(
 }
 
 /// Processes an authenticated STAMP packet.
+///
+/// `resolved_hmac_key` is the per-SSID key already resolved by
+/// `process_stamp_packet`; it shadows `ctx.hmac_key` so the auth path
+/// behaves correctly under B6's `--hmac-key-dir` configuration.
 #[allow(clippy::too_many_arguments)]
 fn process_auth_packet(
     data: &[u8],
@@ -876,6 +969,7 @@ fn process_auth_packet(
     ttl: u8,
     rcvt: u64,
     has_tlvs: bool,
+    resolved_hmac_key: Option<&HmacKey>,
     tlv_hmac_key: Option<&HmacKey>,
     verify_tlv_hmac: bool,
     ctx: &ProcessingContext,
@@ -911,7 +1005,7 @@ fn process_auth_packet(
     let hmac = packet.hmac;
 
     // Verify HMAC against canonical buffer - mandatory when key is present (RFC 8762 §4.4)
-    if let Some(key) = ctx.hmac_key {
+    if let Some(key) = resolved_hmac_key {
         if !verify_packet_hmac(key, &canonical_buf, AUTH_PACKET_HMAC_OFFSET, &hmac) {
             log::warn!("HMAC verification failed for packet from {}", src);
             #[cfg(feature = "metrics")]
@@ -947,7 +1041,7 @@ fn process_auth_packet(
             rcvt,
             ttl,
             ctx.error_estimate_wire,
-            ctx.hmac_key,
+            resolved_hmac_key,
             reflector_seq,
             ctx.tlv_mode,
             tlv_hmac_key,
@@ -1638,6 +1732,7 @@ mod tests {
             clock_source: ClockFormat::NTP,
             error_estimate_wire: 0,
             hmac_key: None,
+            hmac_key_set: None,
             require_hmac: false,
             session_manager: None,
             tlv_mode: TlvHandlingMode::Echo,

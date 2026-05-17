@@ -60,6 +60,9 @@ struct CaptureConfig {
     use_auth: bool,
     error_estimate_wire: u16,
     hmac_key: Option<HmacKey>,
+    /// Per-SSID key set (B6). When `Some`, overrides `hmac_key` and the
+    /// reflector resolves the per-packet key via the incoming SSID.
+    hmac_key_set: Option<Arc<crate::crypto::HmacKeySet>>,
     session_manager: Arc<SessionManager>,
     /// Whether stateful per-client sequence numbering is enabled.
     stateful_reflector: bool,
@@ -184,13 +187,19 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     // Check if authenticated mode is used
     let use_auth = is_auth(conf.auth_mode);
 
-    // Load HMAC key if configured
-    let hmac_key = load_hmac_key(conf);
+    // Load HMAC keys (B6: prefer the multi-key set path; fall back to a
+    // single legacy key if --hmac-key-dir is not set).
+    let hmac_key_set = super::load_hmac_key_set(conf);
+    let hmac_key = if hmac_key_set.is_none() {
+        load_hmac_key(conf)
+    } else {
+        None
+    };
 
-    // Validate: authenticated mode requires HMAC key
-    if use_auth && hmac_key.is_none() {
+    // Validate: authenticated mode requires some HMAC key (single or set).
+    if use_auth && hmac_key.is_none() && hmac_key_set.is_none() {
         log::error!(
-            "Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file); \
+            "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir; \
              reflector cannot start"
         );
         shared.capture_alive.store(false, AtomicOrdering::Relaxed);
@@ -255,6 +264,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         use_auth,
         error_estimate_wire,
         hmac_key,
+        hmac_key_set: hmac_key_set.map(Arc::new),
         session_manager: Arc::clone(&session_manager),
         stateful_reflector: conf.stateful_reflector,
         tlv_mode: conf.tlv_mode,
@@ -656,6 +666,7 @@ fn handle_stamp_packet(
         clock_source: config.clock_source,
         error_estimate_wire: config.error_estimate_wire,
         hmac_key: config.hmac_key.as_ref(),
+        hmac_key_set: config.hmac_key_set.as_deref(),
         require_hmac: config.require_hmac,
         session_manager: if config.stateful_reflector {
             Some(&config.session_manager)

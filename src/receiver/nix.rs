@@ -165,12 +165,21 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let use_auth = is_auth(conf.auth_mode);
 
     // Load HMAC key if configured
-    let hmac_key = load_hmac_key(conf);
+    // B6: prefer the key *set* path (which transparently handles both
+    // single-key configs and `--hmac-key-dir`); keep `hmac_key` as a
+    // legacy fallback in case `load_hmac_key_set` produced None.
+    let hmac_key_set = super::load_hmac_key_set(conf);
+    let hmac_key = if hmac_key_set.is_none() {
+        load_hmac_key(conf)
+    } else {
+        None
+    };
 
-    // Validate: authenticated mode requires HMAC key
-    if use_auth && hmac_key.is_none() {
-        eprintln!(
-            "Error: Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file)"
+    // Validate: authenticated mode requires HMAC key (either single-key
+    // legacy path or B6 per-SSID key set).
+    if use_auth && hmac_key.is_none() && hmac_key_set.is_none() {
+        log::error!(
+            "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir"
         );
         return;
     }
@@ -353,6 +362,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     clock_source: conf.clock_source,
                     error_estimate_wire,
                     hmac_key: hmac_key.as_ref(),
+                    hmac_key_set: hmac_key_set.as_ref(),
                     require_hmac: conf.require_hmac,
                     session_manager: if conf.stateful_reflector {
                         Some(&session_manager)

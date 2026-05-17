@@ -3,7 +3,7 @@
 //! This module provides HMAC-SHA256 computation and verification for
 //! authenticated STAMP packets as defined in RFC 8762.
 
-use std::{fs, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
@@ -169,6 +169,119 @@ impl HmacKey {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+/// A set of HMAC keys, optionally keyed by SSID (RFC 8972 §4.1 Session
+/// Sender Identifier). Lets a single reflector serve multiple senders
+/// without sharing a single key across all of them — useful for
+/// multi-tenant deployments and key rotation.
+///
+/// Lookup order in `for_ssid(s)`:
+/// 1. Per-SSID entry for `s` (if present).
+/// 2. The `default` key (if set).
+/// 3. `None`.
+///
+/// A receiver configured only with `--hmac-key` / `--hmac-key-file`
+/// produces a set with `default: Some(_)` and an empty per-SSID map,
+/// which preserves the existing single-key behaviour for SSID 0 and any
+/// other SSID.
+#[derive(Default)]
+pub struct HmacKeySet {
+    default: Option<HmacKey>,
+    per_ssid: HashMap<u16, HmacKey>,
+}
+
+impl HmacKeySet {
+    /// Creates an empty key set (no keys at all). Callers should add a
+    /// default and/or per-SSID entries before use.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Wraps a single key as the default. Used when the operator passes
+    /// `--hmac-key` / `--hmac-key-file` and no `--hmac-key-dir`.
+    #[must_use]
+    pub fn with_default(key: HmacKey) -> Self {
+        Self {
+            default: Some(key),
+            per_ssid: HashMap::new(),
+        }
+    }
+
+    /// Inserts (or replaces) the per-SSID key for `ssid`.
+    pub fn insert(&mut self, ssid: u16, key: HmacKey) {
+        self.per_ssid.insert(ssid, key);
+    }
+
+    /// Sets the fallback key used when no per-SSID entry matches.
+    pub fn set_default(&mut self, key: HmacKey) {
+        self.default = Some(key);
+    }
+
+    /// Returns true when no keys are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.default.is_none() && self.per_ssid.is_empty()
+    }
+
+    /// Returns the key to use for the given SSID, falling back to the
+    /// default if no per-SSID entry exists.
+    #[must_use]
+    pub fn for_ssid(&self, ssid: u16) -> Option<&HmacKey> {
+        self.per_ssid.get(&ssid).or(self.default.as_ref())
+    }
+
+    /// Builds a key set by reading every regular file in `dir`. File
+    /// names are interpreted as the SSID (hex; trailing `.key` /
+    /// `.bin` extensions stripped). A file named `default.key` becomes
+    /// the fallback key for SSIDs without an explicit entry.
+    ///
+    /// File contents follow the same hex-or-bytes contract as
+    /// `HmacKey::from_file`.
+    ///
+    /// # Errors
+    /// Returns `HmacError::FileReadError` if the directory cannot be
+    /// listed; per-file decode errors are logged and skipped so a
+    /// malformed file doesn't take down the whole reflector.
+    pub fn from_dir(dir: &Path) -> Result<Self, HmacError> {
+        let entries = fs::read_dir(dir).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+        let mut set = HmacKeySet::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let key = match HmacKey::from_file(&path) {
+                Ok(k) => k,
+                Err(e) => {
+                    log::warn!("Skipping HMAC key file {:?}: {}", path.display(), e);
+                    continue;
+                }
+            };
+            if stem.eq_ignore_ascii_case("default") {
+                set.default = Some(key);
+                continue;
+            }
+            match u16::from_str_radix(stem, 16) {
+                Ok(ssid) => {
+                    set.insert(ssid, key);
+                }
+                Err(_) => {
+                    log::warn!(
+                        "Skipping HMAC key file {:?}: filename stem {:?} is \
+                         not a hex u16 SSID or 'default'",
+                        path.display(),
+                        stem
+                    );
+                }
+            }
+        }
+        Ok(set)
     }
 }
 
@@ -354,5 +467,84 @@ mod tests {
         let key = HmacKey::new(vec![0u8; 32]).unwrap();
         assert_eq!(key.len(), 32);
         assert!(!key.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // B6: HmacKeySet — per-SSID HMAC keys.
+
+    #[test]
+    fn test_keyset_empty_returns_none() {
+        let set = HmacKeySet::new();
+        assert!(set.is_empty());
+        assert!(set.for_ssid(0).is_none());
+        assert!(set.for_ssid(1234).is_none());
+    }
+
+    #[test]
+    fn test_keyset_default_only_returns_default_for_all_ssids() {
+        let set = HmacKeySet::with_default(HmacKey::new(vec![0xAA; 16]).unwrap());
+        assert!(!set.is_empty());
+        let k1 = set.for_ssid(0).expect("default returned for SSID 0");
+        let k2 = set
+            .for_ssid(0xFFFF)
+            .expect("default returned for SSID 0xFFFF");
+        // Same bytes — same key.
+        assert_eq!(k1.compute(b"x"), k2.compute(b"x"));
+    }
+
+    #[test]
+    fn test_keyset_per_ssid_overrides_default() {
+        let mut set = HmacKeySet::with_default(HmacKey::new(vec![0xAA; 16]).unwrap());
+        set.insert(42, HmacKey::new(vec![0xBB; 16]).unwrap());
+
+        // SSID 42 → BB key; SSID 0 → AA default.
+        let k_default = set.for_ssid(0).unwrap().compute(b"x");
+        let k_42 = set.for_ssid(42).unwrap().compute(b"x");
+        let k_99 = set.for_ssid(99).unwrap().compute(b"x");
+        assert_ne!(k_default, k_42, "per-SSID key must differ from default");
+        assert_eq!(k_default, k_99, "fallback to default for unknown SSID");
+    }
+
+    #[test]
+    fn test_keyset_unknown_ssid_falls_back_to_default() {
+        let mut set = HmacKeySet::new();
+        set.insert(7, HmacKey::new(vec![0xCC; 16]).unwrap());
+
+        // No default → unknown SSIDs return None.
+        assert!(set.for_ssid(0).is_none());
+        assert!(set.for_ssid(99).is_none());
+        assert!(set.for_ssid(7).is_some());
+
+        // Add default → unknown SSIDs now resolve.
+        set.set_default(HmacKey::new(vec![0xDD; 16]).unwrap());
+        assert!(set.for_ssid(0).is_some());
+        assert!(set.for_ssid(99).is_some());
+    }
+
+    #[test]
+    fn test_keyset_from_dir_round_trip() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("create tempdir");
+
+        // Write three keys: one default + two per-SSID.
+        let write = |name: &str, content: &str| {
+            let path = dir.path().join(name);
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(content.as_bytes()).unwrap();
+        };
+        write("default.key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        write("002a.key", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); // SSID 42
+        write("ffff.key", "cccccccccccccccccccccccccccccccc"); // SSID 65535
+                                                               // Add an unparseable file — must be skipped, not fatal.
+        write("notes.txt", "this is a comment file");
+
+        let set = HmacKeySet::from_dir(dir.path()).expect("load");
+        assert!(set.for_ssid(42).is_some());
+        assert!(set.for_ssid(0xFFFF).is_some());
+        assert!(set.for_ssid(0).is_some(), "default key resolves SSID 0");
+        // Per-SSID and default must differ.
+        let default_digest = set.for_ssid(0).unwrap().compute(b"x");
+        let ssid42_digest = set.for_ssid(42).unwrap().compute(b"x");
+        assert_ne!(default_digest, ssid42_digest);
     }
 }
