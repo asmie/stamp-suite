@@ -1,0 +1,70 @@
+[package]
+name = "stamp-suite-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Not part of the main workspace — see the [workspace] exclude in the
+# top-level Cargo.toml. cargo-fuzz builds this with its own nightly
+# toolchain via `cargo +nightly fuzz run <target>`.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.stamp-suite]
+path = ".."
+# The fuzz harnesses prefer pnet to keep recvmsg types out of fuzzed code
+# paths, but the parsers themselves are backend-independent.
+default-features = false
+features = ["snmp"]
+
+[[bin]]
+name = "tlv_list_parse"
+path = "fuzz_targets/tlv_list_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tlv_list_parse_lenient"
+path = "fuzz_targets/tlv_list_parse_lenient.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raw_tlv_parse"
+path = "fuzz_targets/raw_tlv_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_unauth_parse"
+path = "fuzz_targets/packet_unauth_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_auth_parse"
+path = "fuzz_targets/packet_auth_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agentx_decode_header"
+path = "fuzz_targets/agentx_decode_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agentx_decode_oid"
+path = "fuzz_targets/agentx_decode_oid.rs"
+test = false
+doc = false
+bench = false

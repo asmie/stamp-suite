@@ -68,6 +68,13 @@ pnet = "0.35"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+# Exclude the fuzz package from the workspace — it has its own
+# (libfuzzer-based) build profile, requires nightly rustc, and shouldn't
+# be built by default `cargo build` / `cargo test` runs.
+[workspace]
+exclude = ["fuzz"]
 
 [package.metadata.deb]
 maintainer = "Piotr Olszewski <asmie@asmie.pl>"
