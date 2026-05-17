@@ -782,7 +782,7 @@ pub struct ProcessingContext<'a> {
     pub hmac_key: Option<&'a HmacKey>,
     /// Per-SSID HMAC key set (B6). When `Some`, the reflector resolves
     /// the verification + response-HMAC key against the incoming
-    /// packet's SSID via [`crypto::HmacKeySet::for_ssid`]; on no match
+    /// packet's SSID via [`crate::crypto::HmacKeySet::for_ssid`]; on no match
     /// the packet is rejected as if the wrong key was supplied. When
     /// `None`, the receiver falls back to `hmac_key`.
     pub hmac_key_set: Option<&'a crate::crypto::HmacKeySet>,
