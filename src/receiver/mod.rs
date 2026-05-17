@@ -492,15 +492,129 @@ pub struct ReflectedControlBehavior {
     pub interval_ns: u32,
 }
 
-/// Hard cap on total reply packets emitted for a single Reflected Control
-/// request. Protects against request amplification / DoS. The C flag is set
-/// when the requested count exceeds this cap.
+/// Default hard cap on total reply packets emitted for a single Reflected
+/// Control request. Protects against request amplification / DoS. The C flag
+/// is set when the requested count exceeds this cap. Operators can override
+/// at runtime via `--reflected-control-max-count`.
 pub const REFLECTED_CONTROL_MAX_COUNT: u16 = 16;
 
-/// Minimum inter-packet gap honoured by the backend; smaller requested values
-/// are clamped up to this floor to avoid tight busy-loops. The C flag is set
-/// when clamping actually changes the interval.
+/// Default reflector cap on the reply packet size (in octets) the reflector
+/// will pad up to when honouring a Reflected Control TLV `length` request.
+/// The C flag is set when the requested length exceeds this cap.
+/// Defaults to a typical Ethernet MTU. Operators can override at runtime via
+/// `--reflected-control-max-size`.
+pub const REFLECTED_CONTROL_MAX_SIZE: u16 = 1500;
+
+/// Default minimum inter-packet gap (nanoseconds) honoured by the backend;
+/// smaller requested values are clamped up to this floor to avoid tight
+/// busy-loops. The C flag is set when clamping actually changes the
+/// interval. Operators can override at runtime via
+/// `--reflected-control-min-interval-ns`.
 pub const REFLECTED_CONTROL_MIN_INTERVAL_NS: u32 = 1_000;
+
+/// Reflected Control sub-TLV types per draft-ietf-ippm-asymmetrical-pkts §3.
+const REFLECTED_CONTROL_SUBTLV_L2_GROUP: u8 = 10;
+const REFLECTED_CONTROL_SUBTLV_L3_GROUP: u8 = 11;
+
+/// Parsed Reflected Control sub-TLV per draft-ietf-ippm-asymmetrical-pkts §3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReflectedControlSubTlv {
+    /// Layer 2 Address Group (sub-TLV type 10) — filter by MAC mask/group.
+    /// Body is opaque to the UDP-socket backends, carried for completeness.
+    L2Group {
+        #[allow(dead_code)]
+        body: Vec<u8>,
+    },
+    /// Layer 3 Address Group (sub-TLV type 11) — IP prefix match.
+    L3Group { prefix_len: u8, prefix: Vec<u8> },
+    /// Anything else (including the 4-byte zero placeholder that pads the
+    /// TLV to the draft-14 §3 12-octet minimum). Ignored by the reflector.
+    Unknown {
+        #[allow(dead_code)]
+        type_byte: u8,
+    },
+}
+
+/// Parses a chain of Reflected Control sub-TLVs from a raw byte slice. Uses
+/// the standard 4-byte STAMP sub-TLV header (flags + type + length).
+/// Returns an empty vec if the body is empty, malformed, or contains only
+/// the all-zeros placeholder.
+fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedControlSubTlv> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while offset + TLV_HEADER_SIZE <= body.len() {
+        let _flags = body[offset];
+        let type_byte = body[offset + 1];
+        let length = u16::from_be_bytes([body[offset + 2], body[offset + 3]]) as usize;
+        let value_start = offset + TLV_HEADER_SIZE;
+        let value_end = value_start.saturating_add(length);
+        if value_end > body.len() {
+            // Truncated; stop parsing here.
+            break;
+        }
+        let value = &body[value_start..value_end];
+        match type_byte {
+            REFLECTED_CONTROL_SUBTLV_L2_GROUP => {
+                out.push(ReflectedControlSubTlv::L2Group {
+                    body: value.to_vec(),
+                });
+            }
+            REFLECTED_CONTROL_SUBTLV_L3_GROUP => {
+                // Draft §3: prefix_len(1) + reserved(3) + prefix(4 or 16).
+                if value.len() >= 4 + 4 || value.len() >= 4 + 16 {
+                    let prefix_len = value[0];
+                    let prefix = value[4..].to_vec();
+                    out.push(ReflectedControlSubTlv::L3Group { prefix_len, prefix });
+                }
+            }
+            // The all-zeros 4-byte header is a draft-14 §3 placeholder.
+            0 if length == 0 => {}
+            other => out.push(ReflectedControlSubTlv::Unknown { type_byte: other }),
+        }
+        offset = value_end;
+    }
+    out
+}
+
+/// Returns true if the L3 Address Group prefix matches any of the
+/// reflector's local addresses. Per draft §3, the comparison is "bitwise
+/// AND the prefix mask with each local address and check equality with
+/// the prefix field." Empty `locals` is treated as "no match" (drop).
+fn l3_group_matches_any_local(prefix_len: u8, prefix: &[u8], locals: &[std::net::IpAddr]) -> bool {
+    use std::net::IpAddr;
+    for local in locals {
+        let local_bytes: Vec<u8> = match local {
+            IpAddr::V4(v4) => v4.octets().to_vec(),
+            IpAddr::V6(v6) => v6.octets().to_vec(),
+        };
+        if local_bytes.len() != prefix.len() {
+            continue; // family mismatch
+        }
+        let prefix_bits = prefix_len as usize;
+        if prefix_bits > local_bytes.len() * 8 {
+            continue;
+        }
+        let full_bytes = prefix_bits / 8;
+        let extra_bits = prefix_bits % 8;
+        let mut matched = true;
+        for i in 0..full_bytes {
+            if local_bytes[i] != prefix[i] {
+                matched = false;
+                break;
+            }
+        }
+        if matched && extra_bits > 0 {
+            let mask = 0xFFu8 << (8 - extra_bits);
+            if (local_bytes[full_bytes] & mask) != (prefix[full_bytes] & mask) {
+                matched = false;
+            }
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
+}
 
 /// Response from STAMP packet processing, including optional CoS request.
 #[derive(Debug)]
@@ -563,6 +677,18 @@ pub struct ProcessingContext<'a> {
     /// (UDP-socket `nix` backend): the reflector then echoes the TLV with the
     /// U-flag set.
     pub captured_headers: Option<&'a CapturedHeaders>,
+    /// Reflector-side amplification cap on the Reflected Test Packet Control
+    /// (Type 12) request: maximum number of reply packets the reflector
+    /// will emit. Exceeding clamps the count and sets the C flag.
+    pub reflected_control_max_count: u16,
+    /// Reflector-side amplification cap: maximum reply packet size in
+    /// octets the reflector will pad up to when honouring the TLV
+    /// `length` request. Exceeding sets the C flag.
+    pub reflected_control_max_size: u16,
+    /// Reflector-side amplification cap: minimum inter-packet interval
+    /// in nanoseconds. Requested intervals shorter than this are clamped
+    /// up and the C flag is set.
+    pub reflected_control_min_interval_ns: u32,
 }
 
 /// Raw IP-layer bytes captured at receive time for reflecting back to the
@@ -1067,39 +1193,111 @@ fn apply_semantic_tlv_processing(
     tlvs.process_reflected_headers(captured_fixed, captured_ext);
 
     // Process Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts §3).
-    // We don't honour the requested per-packet length in this implementation — if the
-    // sender asks for a specific length we set the C flag on the echoed TLV to indicate
-    // non-conformance. Count is clamped to REFLECTED_CONTROL_MAX_COUNT and the interval
-    // is clamped up to REFLECTED_CONTROL_MIN_INTERVAL_NS; either clamp sets the C flag.
-    let reflected_control = tlvs.get_reflected_control_request().map(|req| {
-        let requested_count = req.number_of_reflected_packets;
-        let effective_count = requested_count.min(REFLECTED_CONTROL_MAX_COUNT);
-        let effective_interval = req
-            .interval_nanoseconds
-            .max(REFLECTED_CONTROL_MIN_INTERVAL_NS);
+    // Count is clamped to ctx.reflected_control_max_count; the interval is clamped
+    // up to ctx.reflected_control_min_interval_ns; either clamp sets the C flag.
+    // A non-zero requested length triggers Extra Padding TLV insertion below up to
+    // ctx.reflected_control_max_size; exceeding that cap sets the C flag.
+    //
+    // Per draft §3, when an L3 Address Group sub-TLV is present and no local
+    // address matches, the reflector MUST stop processing the packet — we
+    // signal that by returning a SuppressReply action. L2 Address Group
+    // sub-TLVs require MAC-address visibility (link-layer access), which the
+    // UDP-socket backends don't have; we set the U-flag on the echoed Type 12
+    // and continue.
+    let reflected_control = match tlvs.get_reflected_control_request() {
+        Some(req) => {
+            // Pre-check sub-TLVs: L3 mismatch → drop the packet entirely.
+            let sub_chain = parse_reflected_control_sub_tlvs(&req.sub_tlvs);
+            let mut l2_present = false;
+            let mut l3_matches: Option<bool> = None;
+            for sub in &sub_chain {
+                match sub {
+                    ReflectedControlSubTlv::L2Group { .. } => l2_present = true,
+                    ReflectedControlSubTlv::L3Group { prefix_len, prefix } => {
+                        l3_matches = Some(l3_group_matches_any_local(
+                            *prefix_len,
+                            prefix,
+                            ctx.local_addresses,
+                        ));
+                    }
+                    ReflectedControlSubTlv::Unknown { .. } => {}
+                }
+            }
+            if l3_matches == Some(false) {
+                // draft §3: "If no matches are found, the Session-Reflector
+                // MUST stop processing the received packet."
+                log::debug!(
+                    "Reflected Control L3 Address Group did not match any local \
+                     address; dropping packet per draft-ietf-ippm-asymmetrical-pkts §3"
+                );
+                return None;
+            }
+            if l2_present {
+                // We can't evaluate L2 match without link-layer visibility.
+                // Set U on the echoed Type 12 TLV to signal "unable to
+                // honour this sub-TLV" without claiming we passed the filter.
+                tlvs.set_reflected_control_u_flag();
+            }
 
-        let mut non_conformant = false;
-        if effective_count != requested_count {
-            non_conformant = true;
-        }
-        if effective_interval != req.interval_nanoseconds && requested_count > 1 {
-            non_conformant = true;
-        }
-        // A requested length of 0 means "don't pad". Anything else, we can't honour.
-        if req.length_of_reflected_packet != 0 {
-            non_conformant = true;
-        }
+            let requested_count = req.number_of_reflected_packets;
+            let effective_count = requested_count.min(ctx.reflected_control_max_count);
+            let effective_interval = req
+                .interval_nanoseconds
+                .max(ctx.reflected_control_min_interval_ns);
 
-        if non_conformant {
-            tlvs.set_reflected_control_c_flag();
-        }
+            let mut non_conformant = false;
+            if effective_count != requested_count {
+                non_conformant = true;
+            }
+            if effective_interval != req.interval_nanoseconds && requested_count > 1 {
+                non_conformant = true;
+            }
+            // Requested length handling: 0 = don't pad (sender opt-out).
+            // Otherwise try to pad the response with an Extra Padding TLV to
+            // reach the requested total reply size, up to the local cap.
+            let requested_length = req.length_of_reflected_packet;
+            if requested_length > 0 {
+                let target = requested_length as usize;
+                let cap = ctx.reflected_control_max_size as usize;
+                let base_size = if tlv_hmac_key.is_some() {
+                    AUTH_BASE_SIZE
+                } else {
+                    UNAUTH_BASE_SIZE
+                };
+                let current = base_size + tlvs.wire_size();
+                let would_be = target.min(cap);
+                // Need at least 4 bytes (TLV header) to insert an Extra
+                // Padding TLV. The padding value carries (delta - 4) octets
+                // of zeros.
+                if would_be > current && would_be - current >= TLV_HEADER_SIZE {
+                    let pad_bytes = would_be - current - TLV_HEADER_SIZE;
+                    let pad_tlv = crate::tlv::ExtraPaddingTlv::new_zeros(pad_bytes).to_raw();
+                    // push() places non-HMAC TLVs before the HMAC TLV in
+                    // wire order so the chain remains spec-compliant.
+                    let _ = tlvs.push(pad_tlv);
+                    if target > cap {
+                        // Clamped below request → C flag.
+                        non_conformant = true;
+                    }
+                } else {
+                    // Couldn't pad (request smaller than current size, or
+                    // delta is too small to fit a TLV header). Signal C.
+                    non_conformant = true;
+                }
+            }
 
-        let extra_copies = effective_count.saturating_sub(1);
-        ReflectedControlBehavior {
-            extra_copies,
-            interval_ns: effective_interval,
+            if non_conformant {
+                tlvs.set_reflected_control_c_flag();
+            }
+
+            let extra_copies = effective_count.saturating_sub(1);
+            Some(ReflectedControlBehavior {
+                extra_copies,
+                interval_ns: effective_interval,
+            })
         }
-    });
+        None => None,
+    };
 
     // Compute fresh HMAC for response (must be last, after all TLV mutations).
     // Use the reflector variant so the regenerated HMAC TLV carries U=0 per
@@ -1393,6 +1591,9 @@ mod tests {
             sender_port: 0,
             reflector_member_link_id: None,
             captured_headers: None,
+            reflected_control_max_count: REFLECTED_CONTROL_MAX_COUNT,
+            reflected_control_max_size: REFLECTED_CONTROL_MAX_SIZE,
+            reflected_control_min_interval_ns: REFLECTED_CONTROL_MIN_INTERVAL_NS,
         }
     }
 

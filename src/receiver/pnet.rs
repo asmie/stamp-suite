@@ -80,6 +80,11 @@ struct CaptureConfig {
     reflector_member_link_id: Option<u16>,
     /// Per-source rate limiter.
     rate_limiter: Option<Arc<super::RateLimiter>>,
+    /// Reflector caps for Reflected Test Packet Control TLV (Type 12)
+    /// per draft-ietf-ippm-asymmetrical-pkts §3.
+    reflected_control_max_count: u16,
+    reflected_control_max_size: u16,
+    reflected_control_min_interval_ns: u32,
 }
 
 /// Interface properties needed for macOS special handling.
@@ -264,6 +269,9 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         local_addresses,
         reflector_member_link_id: conf.reflector_member_link_id,
         rate_limiter: shared.rate_limiter.as_ref().map(Arc::clone),
+        reflected_control_max_count: conf.reflected_control_max_count,
+        reflected_control_max_size: conf.reflected_control_max_size,
+        reflected_control_min_interval_ns: conf.reflected_control_min_interval_ns,
     };
 
     // Spawn async task to listen for Ctrl+C and set shutdown flag
@@ -658,6 +666,9 @@ fn handle_stamp_packet(
         sender_port: pkt.src.port(),
         reflector_member_link_id: config.reflector_member_link_id,
         captured_headers: Some(&pkt.captured),
+        reflected_control_max_count: config.reflected_control_max_count,
+        reflected_control_max_size: config.reflected_control_max_size,
+        reflected_control_min_interval_ns: config.reflected_control_min_interval_ns,
     };
 
     if let Some(mut response) = process_stamp_packet(data, pkt.src, pkt.ttl, config.use_auth, &ctx)

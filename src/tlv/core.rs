@@ -43,7 +43,16 @@ pub const MICRO_SESSION_ID_TLV_VALUE_SIZE: usize = 4;
 ///
 /// The fixed portion is 8 bytes (Length-of-Reflected-Packet u16,
 /// Number-of-Reflected-Packets u16, Interval u32). Sub-TLVs are optional.
-pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 8;
+/// Reflected Test Packet Control TLV minimum value-field size, per
+/// draft-ietf-ippm-asymmetrical-pkts-14 §3: "The value is variable, and MUST
+/// NOT be smaller than 12 octets." The first 8 octets carry the fixed
+/// fields (length, count, interval); the remaining ≥ 4 octets carry at
+/// least one sub-TLV header (sub-TLV flags + type + length).
+pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 12;
+
+/// Number of fixed bytes at the head of the Reflected Test Packet Control
+/// TLV value field (length(2) + count(2) + interval(4)). Sub-TLVs follow.
+pub const REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE: usize = 8;
 
 /// BER Bit Error Count TLV value size
 /// (draft-gandhi-ippm-stamp-ber §3.3: single u32).

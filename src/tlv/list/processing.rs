@@ -379,6 +379,28 @@ impl TlvList {
         None
     }
 
+    /// Marks the first Reflected Test Packet Control TLV with the U flag.
+    /// Called when the reflector cannot evaluate a sub-TLV filter (e.g. an
+    /// L2 Address Group sub-TLV on a backend without MAC-address access);
+    /// the packet is still reflected but the U flag signals "this filter
+    /// was not honoured."
+    pub fn set_reflected_control_u_flag(&mut self) {
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::ReflectedControl {
+                tlv.set_unrecognized();
+                break;
+            }
+        }
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            for tlv in wire_order.iter_mut() {
+                if tlv.tlv_type == TlvType::ReflectedControl {
+                    tlv.set_unrecognized();
+                    break;
+                }
+            }
+        }
+    }
+
     /// Marks the first Reflected Test Packet Control TLV with the C flag
     /// (Conformant Reflected Packet, draft-ietf-ippm-asymmetrical-pkts §3).
     /// Call this when the reflector cannot fully honour the request

@@ -329,6 +329,28 @@ pub struct Configuration {
     #[clap(long, default_value_t = 1_000_000)]
     pub reflected_control_interval_ns: u32,
 
+    /// Reflector-side amplification cap: maximum number of reply packets
+    /// the reflector will emit in response to a single Reflected Test
+    /// Packet Control TLV request, regardless of what the sender requests.
+    /// When the sender requests more than this, the count is clamped and
+    /// the C flag is set on the echoed TLV. Default 16.
+    #[clap(long, default_value_t = 16)]
+    pub reflected_control_max_count: u16,
+
+    /// Reflector-side amplification cap: maximum reply packet size (in
+    /// bytes) the reflector will pad up to when honouring a Reflected
+    /// Test Packet Control TLV `length` request. When the requested
+    /// length exceeds this, the C flag is set on the echoed TLV. Default
+    /// 1500 (typical Ethernet MTU).
+    #[clap(long, default_value_t = 1500)]
+    pub reflected_control_max_size: u16,
+
+    /// Reflector-side amplification cap: minimum inter-packet interval
+    /// in nanoseconds. Requested intervals shorter than this are clamped
+    /// up and the C flag is set on the echoed TLV. Default 1000 (1 µs).
+    #[clap(long, default_value_t = 1_000)]
+    pub reflected_control_min_interval_ns: u32,
+
     /// Request that the reflector copy the received IP fixed header
     /// (IPv4: 20 bytes, IPv6: 40 bytes) back via TLV Type 247
     /// (draft-ietf-ippm-stamp-ext-hdr §4). Reflectors built with the
@@ -620,6 +642,9 @@ impl Configuration {
         merge!(reflected_control_count);
         merge!(reflected_control_length);
         merge!(reflected_control_interval_ns);
+        merge!(reflected_control_max_count);
+        merge!(reflected_control_max_size);
+        merge!(reflected_control_min_interval_ns);
         merge!(reflected_fixed_hdr);
         merge!(reflected_ipv6_ext_hdr);
     }
@@ -698,6 +723,9 @@ pub struct FileConfiguration {
     pub reflected_control_count: Option<u16>,
     pub reflected_control_length: Option<u16>,
     pub reflected_control_interval_ns: Option<u32>,
+    pub reflected_control_max_count: Option<u16>,
+    pub reflected_control_max_size: Option<u16>,
+    pub reflected_control_min_interval_ns: Option<u32>,
     pub reflected_fixed_hdr: Option<bool>,
     pub reflected_ipv6_ext_hdr: Option<bool>,
 }

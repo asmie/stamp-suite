@@ -365,6 +365,9 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     // draft-ietf-ippm-stamp-ext-hdr TLV 246/247 requests are
                     // echoed with U-flag set (done in apply_semantic_tlv_processing).
                     captured_headers: None,
+                    reflected_control_max_count: conf.reflected_control_max_count,
+                    reflected_control_max_size: conf.reflected_control_max_size,
+                    reflected_control_min_interval_ns: conf.reflected_control_min_interval_ns,
                 };
 
                 if let Some(mut response) =
