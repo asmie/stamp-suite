@@ -6,10 +6,44 @@ extern crate log;
 use stamp_suite::configuration::*;
 use stamp_suite::{receiver, sender};
 
+/// Initialise diagnostic logging via `tracing-subscriber`. Bridges
+/// existing `log::*` call sites via `tracing-log` (enabled by the
+/// `tracing-log` feature in Cargo.toml) so the migration from
+/// `env_logger` is transparent to the rest of the codebase.
+///
+/// Verbosity continues to be controlled by `RUST_LOG`; the new
+/// `--log-format` flag selects between human-readable text (default,
+/// matches the historic `env_logger` output) and one-line JSON for
+/// structured log shippers.
+fn init_logging(format: LogFormat) {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match format {
+        LogFormat::Text => {
+            // Returns Err if a subscriber is already installed (e.g. by
+            // a test process in the same address space); discard that
+            // case so re-init doesn't panic.
+            let _ = fmt().with_env_filter(filter).with_target(true).try_init();
+        }
+        LogFormat::Json => {
+            let _ = fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_target(true)
+                .with_current_span(false)
+                .with_span_list(false)
+                .try_init();
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    env_logger::init();
-
+    // Parse args BEFORE initialising logging so we know the user's
+    // --log-format choice. Errors from Configuration::load are printed
+    // raw to stderr; the tracing layer isn't up yet.
     let conf = match Configuration::load() {
         Ok(c) => c,
         Err(e) => {
@@ -17,6 +51,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    init_logging(conf.log_format);
 
     if std::env::var("STAMP_HMAC_KEY").is_ok() && conf.hmac_key.is_some() {
         log::warn!(

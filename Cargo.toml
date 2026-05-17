@@ -32,6 +32,8 @@ chrono = "0.4.44"
 clap = { version = "4.6", features = ["derive", "env"] }
 env_logger = "0.11"
 log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "tracing-log"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }

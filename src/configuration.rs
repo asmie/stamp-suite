@@ -6,6 +6,29 @@ use thiserror::Error;
 pub use crate::clock_format::ClockFormat;
 pub use crate::stats::OutputFormat;
 
+/// Diagnostic log output format. Selected via `--log-format`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    clap::ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Human-readable single-line output (the default; matches the
+    /// historic `env_logger` style).
+    #[default]
+    Text,
+    /// Structured JSON, one event per line. Suitable for ingestion by
+    /// log shippers (Fluent Bit, Vector, journald JSON forwarder).
+    Json,
+}
+
 /// STAMP authentication mode per RFC 8762.
 ///
 /// A STAMP session is either authenticated or unauthenticated (open), not both.
@@ -243,6 +266,13 @@ pub struct Configuration {
     /// Output format for statistics (text, json, csv).
     #[clap(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
+
+    /// Diagnostic log format — `text` (default) for journalctl-friendly
+    /// human-readable lines, `json` for structured one-line-per-event
+    /// output suitable for log aggregators. `RUST_LOG` continues to
+    /// control verbosity in both modes.
+    #[clap(long, value_enum, default_value_t = LogFormat::Text)]
+    pub log_format: LogFormat,
 
     /// Periodic reporting interval in seconds (0 = disabled, sender only).
     #[clap(long, default_value_t = 0)]
@@ -657,6 +687,7 @@ impl Configuration {
         merge!(snmp);
         merge!(snmp_socket);
         merge!(output_format);
+        merge!(log_format);
         merge!(report_interval);
         merge_opt!(dest_node_addr);
         merge_opt!(return_path_cc);
@@ -740,6 +771,7 @@ pub struct FileConfiguration {
     pub snmp: Option<bool>,
     pub snmp_socket: Option<String>,
     pub output_format: Option<OutputFormat>,
+    pub log_format: Option<LogFormat>,
     pub report_interval: Option<u32>,
     pub dest_node_addr: Option<std::net::IpAddr>,
     pub return_path_cc: Option<u32>,
@@ -1113,6 +1145,44 @@ mod tests {
 
         // Default is false (lenient mode is default per RFC 8762 §4.6)
         assert!(!conf.strict_packets);
+    }
+
+    #[test]
+    fn test_log_format_default_text() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_log_format_explicit_json() {
+        let args = vec!["test", "--log-format", "json"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.log_format, LogFormat::Json);
+    }
+
+    #[test]
+    fn test_log_format_explicit_text() {
+        let args = vec!["test", "--log-format", "text"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_log_format_rejects_invalid() {
+        let args = vec!["test", "--log-format", "yaml"];
+        let result = Configuration::try_parse_from(args);
+        assert!(result.is_err(), "unknown log format must be rejected");
+    }
+
+    #[test]
+    fn test_log_format_toml_round_trip() {
+        let toml_str = r#"
+            remote_addr = "127.0.0.1"
+            log_format = "json"
+        "#;
+        let file: FileConfiguration = toml::from_str(toml_str).expect("parse");
+        assert_eq!(file.log_format, Some(LogFormat::Json));
     }
 
     #[test]
