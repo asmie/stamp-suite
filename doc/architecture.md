@@ -435,14 +435,32 @@ the datalink layer. Only the `pnet` backend can do this (see
   are not reflected.
 - On the **nix** backend (Linux/macOS default): the kernel hides raw IP
   headers from the application, so the reflector has nothing to copy. The
-  TLVs are echoed with an empty Value and the U-flag set per RFC 8972 §4.2,
-  and a one-time warning is logged telling the operator to rebuild with
-  `--features ttl-pnet` if header reflection is required. The sender sees a
-  protocol-compliant response either way.
+  TLVs are echoed with the sender-advertised Length preserved (zero-filled
+  Value) and the U-flag set per RFC 8972 §4.2 and draft §3.1/§3.2 ("If, for
+  any reason, the Session-Reflector does not use the received TLV for
+  reflecting data, it MUST return the TLV as unrecognized"). A one-time
+  warning tells the operator to rebuild with `--features ttl-pnet` if
+  header reflection is required. The sender sees a protocol-compliant
+  response either way.
 - A sender-requested Type 246 TLV on an IPv4 packet, or on an IPv6 packet
-  without any extension headers, legitimately produces an empty Value — this
-  is **not** the same as the U-flag case and is treated as a valid "no data"
-  response.
+  without any extension headers, legitimately produces a zero-filled Value
+  at the sender-advertised capacity — this is **not** the same as the
+  U-flag case and is treated as a valid "no data" response.
+- Per draft-ietf-ippm-stamp-ext-hdr-08 §5.2, the Type 247 TLV Length MUST
+  equal 20 (IPv4) or 40 (IPv6). If the sender's requested Length does not
+  match the captured header (e.g. a 20-byte request reaches an IPv6
+  reflector), the reflector zero-fills the Value and sets the U-flag
+  rather than silently truncating or zero-padding. This conformance check
+  ships in stamp-suite as of this release.
+- **Not yet implemented:** the §3.1/§3.2 "non-zero first 4 bytes"
+  disambiguation rule. When the sender pre-populates the first 4 bytes of
+  a Type 246 TLV with header data to ask the reflector for a *specific*
+  extension header (e.g. one of two same-length Hop-by-Hop options), the
+  reflector is required to match against that pattern. Today we
+  concatenate every captured extension header into the TLV Value
+  regardless of the first-4-byte pattern. Tracked separately; safe today
+  for senders that send a single TLV-instance per packet with the value
+  field zeroed.
 
 ## Prometheus Metrics
 
