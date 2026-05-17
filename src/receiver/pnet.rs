@@ -611,9 +611,20 @@ fn handle_stamp_packet(
     config: &CaptureConfig,
     send_ctx: &PnetSendContext,
 ) {
-    // Rate limit check: drop packet if source exceeds max PPS
+    // Rate limit check: drop packet if source exceeds the per-client
+    // token bucket. Distinct counter so operators can tell rate-limit
+    // drops from parse/HMAC failures.
     if let Some(ref limiter) = config.rate_limiter {
         if !limiter.allow(pkt.src.ip()) {
+            log::debug!("Rate-limited packet from {}", pkt.src);
+            config
+                .counters
+                .packets_rate_limited
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            config
+                .counters
+                .packets_dropped
+                .fetch_add(1, AtomicOrdering::Relaxed);
             return;
         }
     }
@@ -816,6 +827,23 @@ fn handle_stamp_packet(
                     let interval = std::time::Duration::from_nanos(behavior.interval_ns as u64);
                     for _ in 0..behavior.extra_copies {
                         std::thread::sleep(interval);
+                        // Each extra send consumes one rate-limit token;
+                        // bucket exhaustion breaks the loop early so a
+                        // sender's asymmetric burst cannot exceed its
+                        // per-client budget.
+                        if let Some(ref limiter) = config.rate_limiter {
+                            if !limiter.allow(pkt.src.ip()) {
+                                config
+                                    .counters
+                                    .packets_rate_limited
+                                    .fetch_add(1, AtomicOrdering::Relaxed);
+                                config
+                                    .counters
+                                    .packets_dropped
+                                    .fetch_add(1, AtomicOrdering::Relaxed);
+                                break;
+                            }
+                        }
                         match try_send(&response.data, send_target) {
                             Ok(_) => {
                                 config

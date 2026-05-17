@@ -155,6 +155,10 @@ pub struct ReflectorCounters {
     pub packets_received: AtomicU64,
     pub packets_reflected: AtomicU64,
     pub packets_dropped: AtomicU64,
+    /// Subset of `packets_dropped`: packets refused because the per-client
+    /// token bucket was empty. Distinguishing this from generic drops lets
+    /// operators tell rate-limit pressure from parse / HMAC failures.
+    pub packets_rate_limited: AtomicU64,
 }
 
 impl ReflectorCounters {
@@ -163,6 +167,7 @@ impl ReflectorCounters {
             packets_received: AtomicU64::new(0),
             packets_reflected: AtomicU64::new(0),
             packets_dropped: AtomicU64::new(0),
+            packets_rate_limited: AtomicU64::new(0),
         }
     }
 }
@@ -173,34 +178,72 @@ impl Default for ReflectorCounters {
     }
 }
 
-/// Simple per-source rate limiter using a fixed 1-second window.
+/// Per-client token-bucket rate limiter.
+///
+/// Keys buckets by `(source_ip, ssid)` so multiple sessions from the same
+/// host can share an IP without starving each other (and so a single
+/// runaway SSID doesn't burn another client's budget). Each bucket
+/// refills at `rate` tokens/second up to a maximum of `burst` tokens.
+///
+/// The default `allow()` consumes 1 token per call (one inbound packet).
+/// `allow_n()` lets callers consume more — used by the Reflected Test
+/// Packet Control (Type 12, draft-ietf-ippm-asymmetrical-pkts) extra-copy
+/// emission so a request asking for N replies costs N tokens.
 pub struct RateLimiter {
-    /// Maximum packets per second per source.
-    max_pps: u32,
-    /// Tracked sources with periodic eviction of inactive buckets.
+    rate: u32,
+    burst: u32,
     state: std::sync::Mutex<RateLimiterState>,
 }
 
 struct RateLimiterState {
     last_cleanup: Instant,
-    sources: StdHashMap<std::net::IpAddr, SourceBucket>,
+    sources: StdHashMap<RateLimiterKey, Bucket>,
 }
 
-struct SourceBucket {
-    window_start: Instant,
+/// Bucket key — `(source_ip, ssid)` tuple. SSID 0 is the common case
+/// when the sender doesn't set it explicitly (RFC 8972 §4.1: SSID 0
+/// means "no session identifier").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RateLimiterKey {
+    pub src: std::net::IpAddr,
+    pub ssid: u16,
+}
+
+impl RateLimiterKey {
+    /// Convenience: build a key from just the source IP (SSID = 0).
+    #[must_use]
+    pub fn from_src(src: std::net::IpAddr) -> Self {
+        Self { src, ssid: 0 }
+    }
+}
+
+struct Bucket {
+    tokens: f64,
+    last_refill: Instant,
     last_seen: Instant,
-    packet_count: u32,
 }
 
 impl RateLimiter {
-    const WINDOW: Duration = Duration::from_secs(1);
     const BUCKET_TTL: Duration = Duration::from_secs(60);
     const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 
-    pub fn new(max_pps: u32) -> Self {
+    /// Creates a limiter with `rate` tokens/second and a burst capacity
+    /// equal to `rate` (one-second worth). Equivalent to the historic
+    /// fixed-window limiter when traffic is steady, but more lenient on
+    /// bursty traffic — matches the user-visible behaviour of the older
+    /// `--max-pps` flag.
+    pub fn new(rate: u32) -> Self {
+        Self::with_burst(rate, rate)
+    }
+
+    /// Creates a limiter with an explicit token-bucket burst capacity.
+    /// `burst` of 0 falls back to `rate` to match the simple-flag semantic.
+    pub fn with_burst(rate: u32, burst: u32) -> Self {
+        let burst = if burst == 0 { rate } else { burst };
         let now = Instant::now();
         RateLimiter {
-            max_pps,
+            rate,
+            burst,
             state: std::sync::Mutex::new(RateLimiterState {
                 last_cleanup: now,
                 sources: StdHashMap::new(),
@@ -208,27 +251,45 @@ impl RateLimiter {
         }
     }
 
-    /// Returns true if the packet should be allowed, false if rate-limited.
+    /// Returns true if a single packet should be allowed for the given
+    /// source IP. SSID defaults to 0 — callers that have SSID context
+    /// should use `allow_keyed()` instead.
     pub fn allow(&self, src: std::net::IpAddr) -> bool {
+        self.allow_n(RateLimiterKey::from_src(src), 1)
+    }
+
+    /// Returns true if a packet should be allowed for the given
+    /// (source IP, SSID) bucket.
+    pub fn allow_keyed(&self, key: RateLimiterKey) -> bool {
+        self.allow_n(key, 1)
+    }
+
+    /// Returns true if `cost` tokens can be consumed from the bucket. On
+    /// false the bucket is left unchanged (no partial consumption).
+    pub fn allow_n(&self, key: RateLimiterKey, cost: u32) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         Self::cleanup_expired_buckets(&mut state, now);
 
-        let bucket = state.sources.entry(src).or_insert(SourceBucket {
-            window_start: now,
+        let burst = self.burst as f64;
+        let rate = self.rate as f64;
+        let bucket = state.sources.entry(key).or_insert(Bucket {
+            tokens: burst,
+            last_refill: now,
             last_seen: now,
-            packet_count: 0,
         });
+        // Refill since last touch.
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * rate).min(burst);
+        bucket.last_refill = now;
         bucket.last_seen = now;
 
-        if now.duration_since(bucket.window_start) >= Self::WINDOW {
-            bucket.window_start = now;
-            bucket.packet_count = 1;
-            return true;
+        if bucket.tokens >= cost as f64 {
+            bucket.tokens -= cost as f64;
+            true
+        } else {
+            false
         }
-
-        bucket.packet_count += 1;
-        bucket.packet_count <= self.max_pps
     }
 
     fn cleanup_expired_buckets(state: &mut RateLimiterState, now: Instant) {
@@ -268,7 +329,10 @@ pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
     };
 
     let rate_limiter = if conf.max_pps > 0 {
-        Some(Arc::new(RateLimiter::new(conf.max_pps)))
+        Some(Arc::new(RateLimiter::with_burst(
+            conf.max_pps,
+            conf.reflector_rate_burst,
+        )))
     } else {
         None
     };
@@ -1706,7 +1770,8 @@ mod tests {
         {
             let mut state = limiter.state.lock().unwrap_or_else(|e| e.into_inner());
             state.last_cleanup = Instant::now() - RateLimiter::CLEANUP_INTERVAL;
-            let stale_bucket = state.sources.get_mut(&stale).unwrap();
+            let key = RateLimiterKey::from_src(stale);
+            let stale_bucket = state.sources.get_mut(&key).unwrap();
             stale_bucket.last_seen =
                 Instant::now() - RateLimiter::BUCKET_TTL - Duration::from_secs(1);
         }
@@ -1714,9 +1779,129 @@ mod tests {
         assert!(limiter.allow(trigger));
 
         let state = limiter.state.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(!state.sources.contains_key(&stale));
-        assert!(state.sources.contains_key(&fresh));
-        assert!(state.sources.contains_key(&trigger));
+        assert!(!state.sources.contains_key(&RateLimiterKey::from_src(stale)));
+        assert!(state.sources.contains_key(&RateLimiterKey::from_src(fresh)));
+        assert!(state
+            .sources
+            .contains_key(&RateLimiterKey::from_src(trigger)));
+    }
+
+    // -----------------------------------------------------------------------
+    // B4: token-bucket per-client rate limiting.
+
+    /// Synthetic burst exceeding the bucket size must produce exactly
+    /// `burst` accepts then deny — no off-by-one in the consume logic.
+    #[test]
+    fn test_rate_limiter_burst_exhausts_then_denies() {
+        let limiter = RateLimiter::with_burst(/* rate */ 1, /* burst */ 5);
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        // First 5 calls consume one token each — accepted.
+        for i in 0..5 {
+            assert!(limiter.allow(src), "call {i} must be accepted within burst");
+        }
+        // 6th call: bucket empty (no time has passed → no refill yet),
+        // must be denied.
+        assert!(
+            !limiter.allow(src),
+            "burst+1 call must be denied when bucket is empty"
+        );
+    }
+
+    /// Multi-client isolation: one greedy source MUST NOT drain another's
+    /// budget. Both clients see the same independent burst capacity.
+    #[test]
+    fn test_rate_limiter_multi_client_isolation() {
+        let limiter = RateLimiter::with_burst(1, 3);
+        let greedy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let polite = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        // Greedy client drains its bucket.
+        for _ in 0..3 {
+            assert!(limiter.allow(greedy));
+        }
+        assert!(!limiter.allow(greedy), "greedy client is now rate-limited");
+
+        // Polite client must still have its full bucket available.
+        for _ in 0..3 {
+            assert!(
+                limiter.allow(polite),
+                "polite client's bucket must be unaffected by greedy client"
+            );
+        }
+    }
+
+    /// Per-(IP, SSID) isolation: same IP with two different SSIDs gets
+    /// two independent buckets.
+    #[test]
+    fn test_rate_limiter_per_ssid_isolation() {
+        let limiter = RateLimiter::with_burst(1, 2);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let session_a = RateLimiterKey { src: ip, ssid: 1 };
+        let session_b = RateLimiterKey { src: ip, ssid: 2 };
+
+        for _ in 0..2 {
+            assert!(limiter.allow_keyed(session_a));
+        }
+        assert!(!limiter.allow_keyed(session_a), "session A exhausted");
+
+        // Same IP but different SSID → independent bucket.
+        for _ in 0..2 {
+            assert!(
+                limiter.allow_keyed(session_b),
+                "session B must have its own bucket"
+            );
+        }
+    }
+
+    /// `allow_n` consumes N tokens atomically: insufficient → leave bucket
+    /// alone and return false.
+    #[test]
+    fn test_rate_limiter_allow_n_atomic() {
+        let limiter = RateLimiter::with_burst(1, 5);
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let key = RateLimiterKey::from_src(src);
+
+        // Bucket has 5 tokens — asking for 6 must fail without consuming.
+        assert!(!limiter.allow_n(key, 6));
+        // Bucket still full — we can consume all 5.
+        assert!(limiter.allow_n(key, 5));
+        // Now empty.
+        assert!(!limiter.allow_n(key, 1));
+    }
+
+    /// Sustained rate at the configured `rate` value must be sustainable
+    /// (no false denies once the bucket is empty and the refill kicks in).
+    /// Uses a real sleep so the test is timing-sensitive — keep the rate
+    /// and sleep small.
+    #[test]
+    fn test_rate_limiter_sustained_rate_refills() {
+        let limiter = RateLimiter::with_burst(100, 1);
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+        // Drain the bucket.
+        assert!(limiter.allow(src));
+        assert!(!limiter.allow(src));
+
+        // After ~15 ms the bucket should have refilled ≥ 1 token at
+        // 100/sec.
+        std::thread::sleep(Duration::from_millis(15));
+        assert!(
+            limiter.allow(src),
+            "bucket must refill after at least one token's worth of time"
+        );
+    }
+
+    /// Burst=0 in the explicit constructor falls back to `rate`,
+    /// preserving backward compatibility with the old `--max-pps` flag.
+    #[test]
+    fn test_rate_limiter_burst_zero_falls_back_to_rate() {
+        let limiter = RateLimiter::with_burst(7, 0);
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        // The bucket has 7 tokens initially.
+        for _ in 0..7 {
+            assert!(limiter.allow(src));
+        }
+        assert!(!limiter.allow(src));
     }
 
     #[test]
