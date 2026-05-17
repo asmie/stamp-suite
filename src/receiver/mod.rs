@@ -131,7 +131,7 @@ pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
         match HmacKey::from_hex(hex_key) {
             Ok(key) => return Some(key),
             Err(e) => {
-                eprintln!("Failed to parse HMAC key: {}", e);
+                log::error!("Failed to parse HMAC key: {}", e);
                 return None;
             }
         }
@@ -141,7 +141,7 @@ pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
         match HmacKey::from_file(path) {
             Ok(key) => return Some(key),
             Err(e) => {
-                eprintln!("Failed to load HMAC key from file: {}", e);
+                log::error!("Failed to load HMAC key from file: {}", e);
                 return None;
             }
         }
@@ -701,9 +701,10 @@ fn process_auth_packet(
                 (p, buf)
             }
             Err(e) => {
-                eprintln!(
-                    "Failed to deserialize authenticated packet from {}: {}",
-                    src, e
+                log::warn!(
+                    "Failed to deserialize authenticated packet from {}: {} (strict mode)",
+                    src,
+                    e
                 );
                 #[cfg(feature = "metrics")]
                 if ctx.metrics_enabled {
@@ -722,7 +723,7 @@ fn process_auth_packet(
     // Verify HMAC against canonical buffer - mandatory when key is present (RFC 8762 §4.4)
     if let Some(key) = ctx.hmac_key {
         if !verify_packet_hmac(key, &canonical_buf, AUTH_PACKET_HMAC_OFFSET, &hmac) {
-            eprintln!("HMAC verification failed for packet from {}", src);
+            log::warn!("HMAC verification failed for packet from {}", src);
             #[cfg(feature = "metrics")]
             if ctx.metrics_enabled {
                 crate::metrics::reflector_metrics::record_hmac_failure();
@@ -731,7 +732,10 @@ fn process_auth_packet(
             return None;
         }
     } else if ctx.require_hmac {
-        eprintln!("HMAC key required but not configured");
+        log::warn!(
+            "HMAC key required but not configured; dropping packet from {}",
+            src
+        );
         #[cfg(feature = "metrics")]
         if ctx.metrics_enabled {
             crate::metrics::reflector_metrics::record_packet_dropped("hmac_required");
@@ -837,9 +841,10 @@ fn process_unauth_packet(
             }
         }
         Err(e) => {
-            eprintln!(
-                "Failed to deserialize unauthenticated packet from {}: {}",
-                src, e
+            log::warn!(
+                "Failed to deserialize unauthenticated packet from {}: {} (strict mode)",
+                src,
+                e
             );
             #[cfg(feature = "metrics")]
             if ctx.metrics_enabled {
@@ -3281,5 +3286,183 @@ mod tests {
             response.return_path_action,
             ReturnPathAction::SuppressReply
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // B7: --strict-packets coverage.
+    //
+    // Lenient mode (default) zero-fills short packets per RFC 8762 §4.6 so
+    // we can interop with TWAMP-Light senders that emit < 44 bytes.
+    // Strict mode (--strict-packets) rejects any packet that doesn't match
+    // the exact wire layout. These tests pin the contract in both
+    // directions so a future refactor doesn't silently flip it.
+
+    fn loopback_src() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345)
+    }
+
+    /// Full-size unauthenticated packet — both modes accept.
+    #[test]
+    fn strict_packets_unauth_full_size_both_modes_accept() {
+        let packet = PacketUnauthenticated {
+            sequence_number: 7,
+            timestamp: 100,
+            error_estimate: 10,
+            ssid: 0,
+            mbz: [0; 28],
+        };
+        let data = packet.to_bytes();
+
+        for strict in [false, true] {
+            let mut ctx = test_ctx(0, 0);
+            ctx.strict_packets = strict;
+            let r = process_stamp_packet(&data, loopback_src(), 64, false, &ctx);
+            assert!(r.is_some(), "strict={strict} must accept full-size packet");
+        }
+    }
+
+    /// Short unauthenticated packet (40 bytes < 44). Lenient zero-fills and
+    /// accepts; strict rejects without panicking.
+    #[test]
+    fn strict_packets_unauth_short_rejected_only_in_strict() {
+        let data = [0u8; 40];
+
+        let mut ctx_lenient = test_ctx(0, 0);
+        ctx_lenient.strict_packets = false;
+        assert!(
+            process_stamp_packet(&data, loopback_src(), 64, false, &ctx_lenient).is_some(),
+            "lenient mode must accept short packet"
+        );
+
+        let mut ctx_strict = test_ctx(0, 0);
+        ctx_strict.strict_packets = true;
+        assert!(
+            process_stamp_packet(&data, loopback_src(), 64, false, &ctx_strict).is_none(),
+            "strict mode must reject short packet"
+        );
+    }
+
+    /// Full-size authenticated packet — both modes accept (no HMAC key
+    /// configured here, so HMAC verification is skipped).
+    #[test]
+    fn strict_packets_auth_full_size_both_modes_accept() {
+        let packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 200,
+            error_estimate: 0,
+            ssid: 0,
+            mbz1a: [0; 30],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+        let data = packet.to_bytes();
+
+        for strict in [false, true] {
+            let mut ctx = test_ctx(0, 0);
+            ctx.strict_packets = strict;
+            let r = process_stamp_packet(&data, loopback_src(), 64, true, &ctx);
+            assert!(
+                r.is_some(),
+                "strict={strict} must accept full-size auth packet"
+            );
+        }
+    }
+
+    /// Short authenticated packet (100 bytes < 112). Lenient zero-fills
+    /// against canonical buffer per RFC 8762 §4.6; strict rejects.
+    #[test]
+    fn strict_packets_auth_short_rejected_only_in_strict() {
+        let data = [0u8; 100];
+
+        let mut ctx_lenient = test_ctx(0, 0);
+        ctx_lenient.strict_packets = false;
+        // No HMAC key → verification is skipped, lenient parser succeeds.
+        assert!(
+            process_stamp_packet(&data, loopback_src(), 64, true, &ctx_lenient).is_some(),
+            "lenient mode must accept short auth packet (zero-filled)"
+        );
+
+        let mut ctx_strict = test_ctx(0, 0);
+        ctx_strict.strict_packets = true;
+        assert!(
+            process_stamp_packet(&data, loopback_src(), 64, true, &ctx_strict).is_none(),
+            "strict mode must reject short auth packet"
+        );
+    }
+
+    /// Empty packet (0 bytes) — strict mode must reject without panicking.
+    /// Lenient mode happens to accept it (everything zero), which is by
+    /// design per RFC 8762 §4.6.
+    #[test]
+    fn strict_packets_empty_buffer_no_panic() {
+        let data: [u8; 0] = [];
+
+        let mut ctx_strict = test_ctx(0, 0);
+        ctx_strict.strict_packets = true;
+        assert!(process_stamp_packet(&data, loopback_src(), 64, false, &ctx_strict).is_none());
+        assert!(process_stamp_packet(&data, loopback_src(), 64, true, &ctx_strict).is_none());
+
+        let mut ctx_lenient = test_ctx(0, 0);
+        ctx_lenient.strict_packets = false;
+        // Lenient unauth accepts; lenient auth also accepts (HMAC skipped).
+        // The point of this test is "no panic on hostile zero-byte input."
+        let _ = process_stamp_packet(&data, loopback_src(), 64, false, &ctx_lenient);
+        let _ = process_stamp_packet(&data, loopback_src(), 64, true, &ctx_lenient);
+    }
+
+    /// `require_hmac` + auth mode with no key configured: rejected in both
+    /// strict and lenient modes. The `require_hmac` policy is independent
+    /// of the packet-length strictness.
+    #[test]
+    fn strict_packets_require_hmac_rejects_regardless_of_mode() {
+        let packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 200,
+            error_estimate: 0,
+            ssid: 0,
+            mbz1a: [0; 30],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+        let data = packet.to_bytes();
+
+        for strict in [false, true] {
+            let mut ctx = test_ctx(0, 0);
+            ctx.strict_packets = strict;
+            ctx.require_hmac = true;
+            // hmac_key stays None — require_hmac without a key drops.
+            assert!(
+                process_stamp_packet(&data, loopback_src(), 64, true, &ctx).is_none(),
+                "strict={strict} + require_hmac without key must drop"
+            );
+        }
+    }
+
+    /// Non-zero MBZ bytes — RFC 8762 §4.1.1 requires receivers to *ignore*
+    /// MBZ on receipt. Both modes must accept (strict mode does not extend
+    /// to MBZ enforcement).
+    #[test]
+    fn strict_packets_nonzero_mbz_accepted_per_rfc_8762() {
+        let packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            mbz: [0xff; 28], // intentionally non-zero
+        };
+        let data = packet.to_bytes();
+
+        for strict in [false, true] {
+            let mut ctx = test_ctx(0, 0);
+            ctx.strict_packets = strict;
+            assert!(
+                process_stamp_packet(&data, loopback_src(), 64, false, &ctx).is_some(),
+                "strict={strict} must ignore non-zero MBZ per RFC 8762 §4.1.1"
+            );
+        }
     }
 }
