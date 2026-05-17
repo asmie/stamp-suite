@@ -28,13 +28,32 @@ async fn main() {
 
     info!("Configuration valid. Starting up...");
 
-    // Initialize metrics server if enabled
+    // Initialize metrics server if enabled.
+    //
+    // Metrics is fail-fast: if the operator passed --metrics they want
+    // observability, and silently disabling the endpoint would hide that
+    // their dashboards and alerts are running blind. Surface the underlying
+    // bind error (port in use vs. address not available vs. permission
+    // denied) so the cause is obvious in journalctl.
     #[cfg(feature = "metrics")]
     let _metrics_server = if conf.metrics {
         match stamp_suite::metrics::init(conf.metrics_addr).await {
             Ok(server) => {
                 info!("Metrics server started on {}", conf.metrics_addr);
                 Some(server)
+            }
+            Err(stamp_suite::metrics::MetricsError::BindError(io_err)) => {
+                let detail = match io_err.kind() {
+                    std::io::ErrorKind::AddrInUse => "address already in use",
+                    std::io::ErrorKind::AddrNotAvailable => "address not available on this host",
+                    std::io::ErrorKind::PermissionDenied => "permission denied (privileged port?)",
+                    _ => "bind failed",
+                };
+                eprintln!(
+                    "Failed to start metrics server on {}: {} ({})",
+                    conf.metrics_addr, detail, io_err
+                );
+                std::process::exit(1);
             }
             Err(e) => {
                 eprintln!("Failed to start metrics server: {}", e);
@@ -87,8 +106,16 @@ async fn main() {
                     Some(server)
                 }
                 Err(e) => {
-                    eprintln!("Failed to start SNMP sub-agent: {}", e);
-                    std::process::exit(1);
+                    // SNMP is graceful: if the AgentX master is absent
+                    // (e.g. net-snmpd not running yet during boot, or the
+                    // socket is unreachable), the reflector's primary duty
+                    // — forwarding STAMP packets — is unaffected. Log the
+                    // failure and continue without SNMP rather than killing
+                    // the daemon. Operators who want SNMP-required-to-start
+                    // semantics can wrap stamp-suite in a systemd unit
+                    // ordered after snmpd.service.
+                    log::warn!("SNMP sub-agent disabled: {} (continuing without SNMP)", e);
+                    None
                 }
             }
         } else {
@@ -146,8 +173,16 @@ async fn main() {
                     Some(server)
                 }
                 Err(e) => {
-                    eprintln!("Failed to start SNMP sub-agent: {}", e);
-                    std::process::exit(1);
+                    // SNMP is graceful: if the AgentX master is absent
+                    // (e.g. net-snmpd not running yet during boot, or the
+                    // socket is unreachable), the reflector's primary duty
+                    // — forwarding STAMP packets — is unaffected. Log the
+                    // failure and continue without SNMP rather than killing
+                    // the daemon. Operators who want SNMP-required-to-start
+                    // semantics can wrap stamp-suite in a systemd unit
+                    // ordered after snmpd.service.
+                    log::warn!("SNMP sub-agent disabled: {} (continuing without SNMP)", e);
+                    None
                 }
             }
         } else {

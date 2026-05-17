@@ -140,4 +140,33 @@ mod tests {
         }
         // If it fails due to recorder already installed, that's expected in test suites
     }
+
+    /// Operators expect `--metrics` to fail fast when the bind port is
+    /// already taken — silent disable would leave dashboards blind. This
+    /// test pre-binds a port, then asserts `init` returns
+    /// `MetricsError::BindError(AddrInUse)` so `main.rs` can surface the
+    /// specific error class. The recorder may also fail to install if a
+    /// prior test in the same process did so; treat that as an acceptable
+    /// alternative outcome rather than a flaky assertion.
+    #[tokio::test]
+    async fn test_metrics_bind_conflict_returns_bind_error() {
+        let pre_bind = TcpListener::bind("127.0.0.1:0").await.expect("pre-bind");
+        let taken = pre_bind.local_addr().expect("local_addr");
+
+        match init(taken).await {
+            Err(MetricsError::BindError(io_err)) => {
+                assert_eq!(
+                    io_err.kind(),
+                    std::io::ErrorKind::AddrInUse,
+                    "expected AddrInUse, got {:?}",
+                    io_err.kind()
+                );
+            }
+            Err(MetricsError::RecorderBuild(_)) => {
+                // Acceptable: recorder may already be installed by a
+                // prior test in the same process.
+            }
+            Ok(_) => panic!("init succeeded against a pre-bound port"),
+        }
+    }
 }

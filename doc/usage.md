@@ -197,6 +197,13 @@ All flags in this group are compiled out unless the matching Cargo feature is bu
       --snmp-socket <PATH>         AgentX master socket [default: /var/agentx/master]
 ```
 
+#### Failure semantics
+
+The two observability subsystems handle initialization failure differently, by design:
+
+- **`--metrics` fails fast.** If the operator explicitly requested a Prometheus endpoint and the bind fails (`AddrInUse`, `AddrNotAvailable`, `PermissionDenied`, …), `stamp-suite` exits non-zero with a specific error message. The reasoning: silently disabling the endpoint would leave dashboards and alerts running blind without any signal that they are.
+- **`--snmp` degrades gracefully.** If the AgentX master socket is absent or unreachable (e.g. `net-snmpd` hasn't started yet during boot), `stamp-suite` logs a warning and continues. The reflector's primary duty — forwarding STAMP packets — is unaffected. Operators who want SNMP-required-to-start semantics can wrap `stamp-suite.service` with a systemd ordering directive (`After=snmpd.service`, `Requires=snmpd.service`).
+
 ## See Also
 
 - [README](../README.md) — install and quick-start.
