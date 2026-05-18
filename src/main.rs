@@ -52,6 +52,14 @@ async fn main() {
         }
     };
 
+    // --print-config-schema: dump the JSON Schema and exit. Side-stepping
+    // logger init is intentional — this path is for tooling, not for
+    // operators tailing journalctl.
+    if conf.print_config_schema {
+        println!("{}", stamp_suite::configuration::CONFIG_JSON_SCHEMA);
+        return;
+    }
+
     init_logging(conf.log_format);
 
     if std::env::var("STAMP_HMAC_KEY").is_ok() && conf.hmac_key.is_some() {

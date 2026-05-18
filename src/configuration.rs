@@ -96,6 +96,17 @@ pub struct Configuration {
     /// override them.
     #[clap(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+
+    /// Print the JSON Schema for the TOML configuration file to stdout
+    /// and exit. The schema can be fed to validators like the
+    /// `jsonschema` CLI or used by IDE plugins for autocomplete:
+    ///
+    /// `stamp-suite --print-config-schema > stamp-suite-config.schema.json`
+    ///
+    /// Then `jsonschema -i my-config.toml stamp-suite-config.schema.json`
+    /// (after a TOML→JSON conversion via `taplo`/`yj`).
+    #[clap(long, exclusive = true)]
+    pub print_config_schema: bool,
     /// Remote address for Session Reflector
     #[clap(short, long, default_value = "0.0.0.0")]
     pub remote_addr: std::net::IpAddr,
@@ -795,6 +806,85 @@ pub struct FileConfiguration {
     pub reflected_ipv6_ext_hdr: Option<bool>,
 }
 
+/// JSON Schema (draft 2020-12) for the TOML config file accepted by
+/// `--config`. Returned by the `--print-config-schema` CLI flag so
+/// external tooling (taplo, `jsonschema` CLI, IDE auto-completion) can
+/// validate config files before deployment.
+///
+/// Maintained by hand alongside [`FileConfiguration`]; adding a field
+/// there requires adding a property here. The schema deliberately
+/// matches `#[serde(deny_unknown_fields)]` on `FileConfiguration` so
+/// extra keys fail validation in the same way they fail at runtime.
+pub const CONFIG_JSON_SCHEMA: &str = r##"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/asmie/stamp-suite/schema/stamp-suite-config.json",
+  "title": "stamp-suite TOML configuration",
+  "description": "Schema for the file consumed by `stamp-suite --config <PATH>`. Keys map 1:1 to CLI flags (long form with underscores instead of dashes).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "remote_addr": { "type": "string", "format": "ipvanyaddress" },
+    "local_addr":  { "type": "string", "format": "ipvanyaddress" },
+    "remote_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "local_port":  { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "clock_source": { "enum": ["NTP", "PTP"] },
+    "send_delay":  { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "count":       { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "timeout":     { "type": "integer", "minimum": 0, "maximum": 255 },
+    "auth_mode":   { "enum": ["A", "O"] },
+    "print_stats": { "type": "boolean" },
+    "is_reflector": { "type": "boolean" },
+    "error_scale": { "type": "integer", "minimum": 0, "maximum": 63 },
+    "error_multiplier": { "type": "integer", "minimum": 0, "maximum": 255 },
+    "clock_synchronized": { "type": "boolean" },
+    "hmac_key_file": { "type": "string" },
+    "hmac_key_dir":  { "type": "string" },
+    "require_hmac":  { "type": "boolean" },
+    "strict_packets": { "type": "boolean" },
+    "stateful_reflector": { "type": "boolean" },
+    "session_timeout": { "type": "integer", "minimum": 0 },
+    "tlv_mode": { "enum": ["echo", "ignore"] },
+    "verify_tlv_hmac": { "type": "boolean" },
+    "ssid": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "metrics": { "type": "boolean" },
+    "metrics_addr": { "type": "string" },
+    "cos": { "type": "boolean" },
+    "dscp": { "type": "integer", "minimum": 0, "maximum": 63 },
+    "ecn":  { "type": "integer", "minimum": 0, "maximum": 3 },
+    "access_report": { "type": "integer", "minimum": 0, "maximum": 15 },
+    "access_return_code": { "type": "integer", "minimum": 0, "maximum": 15 },
+    "timestamp_info": { "type": "boolean" },
+    "direct_measurement": { "type": "boolean" },
+    "location": { "type": "boolean" },
+    "follow_up_telemetry": { "type": "boolean" },
+    "snmp": { "type": "boolean" },
+    "snmp_socket": { "type": "string" },
+    "output_format": { "enum": ["text", "json", "csv"] },
+    "log_format": { "enum": ["text", "json"] },
+    "report_interval": { "type": "integer", "minimum": 0 },
+    "dest_node_addr": { "type": "string", "format": "ipvanyaddress" },
+    "return_path_cc": { "type": "integer", "minimum": 0, "maximum": 1 },
+    "return_address": { "type": "string", "format": "ipvanyaddress" },
+    "return_sr_mpls_labels": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+    "return_srv6_sids": { "type": "array", "items": { "type": "string", "format": "ipv6" } },
+    "micro_session_id": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "reflector_member_link_id": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "max_pps": { "type": "integer", "minimum": 0 },
+    "reflector_rate_burst": { "type": "integer", "minimum": 0 },
+    "ber": { "type": "boolean" },
+    "ber_pattern": { "type": "string", "pattern": "^[0-9a-fA-F]+$" },
+    "ber_padding_size": { "type": "integer", "minimum": 0 },
+    "reflected_control_count": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "reflected_control_length": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "reflected_control_interval_ns": { "type": "integer", "minimum": 0 },
+    "reflected_control_max_count": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "reflected_control_max_size":  { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "reflected_control_min_interval_ns": { "type": "integer", "minimum": 0 },
+    "reflected_fixed_hdr":    { "type": "boolean" },
+    "reflected_ipv6_ext_hdr": { "type": "boolean" }
+  }
+}"##;
+
 /// Checks if authenticated mode is enabled.
 #[inline]
 pub fn is_auth(mode: AuthMode) -> bool {
@@ -1183,6 +1273,126 @@ mod tests {
         "#;
         let file: FileConfiguration = toml::from_str(toml_str).expect("parse");
         assert_eq!(file.log_format, Some(LogFormat::Json));
+    }
+
+    // -----------------------------------------------------------------------
+    // D4: --print-config-schema.
+
+    /// The exported schema is well-formed JSON.
+    #[test]
+    fn test_config_schema_is_valid_json() {
+        let v: serde_json::Value =
+            serde_json::from_str(CONFIG_JSON_SCHEMA).expect("schema must parse as JSON");
+        assert!(v.is_object(), "schema root must be an object");
+        let obj = v.as_object().unwrap();
+        assert_eq!(
+            obj.get("$schema").and_then(|s| s.as_str()),
+            Some("https://json-schema.org/draft/2020-12/schema"),
+            "must declare draft 2020-12"
+        );
+        assert_eq!(obj.get("type").and_then(|s| s.as_str()), Some("object"));
+        assert_eq!(
+            obj.get("additionalProperties").and_then(|b| b.as_bool()),
+            Some(false),
+            "schema must mirror FileConfiguration's deny_unknown_fields"
+        );
+    }
+
+    /// Every field in FileConfiguration appears in the schema's
+    /// properties block — guards against forgetting to update the
+    /// schema when adding a new field.
+    #[test]
+    fn test_config_schema_covers_every_file_config_field() {
+        let v: serde_json::Value = serde_json::from_str(CONFIG_JSON_SCHEMA).unwrap();
+        let props = v
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("schema must have a properties object");
+
+        // Hand-maintained list of every FileConfiguration field. Update
+        // this list when adding a new field to FileConfiguration and
+        // CONFIG_JSON_SCHEMA — the test guarantees both stay in sync.
+        let expected = [
+            "remote_addr",
+            "local_addr",
+            "remote_port",
+            "local_port",
+            "clock_source",
+            "send_delay",
+            "count",
+            "timeout",
+            "auth_mode",
+            "print_stats",
+            "is_reflector",
+            "error_scale",
+            "error_multiplier",
+            "clock_synchronized",
+            "hmac_key_file",
+            "hmac_key_dir",
+            "require_hmac",
+            "strict_packets",
+            "stateful_reflector",
+            "session_timeout",
+            "tlv_mode",
+            "verify_tlv_hmac",
+            "ssid",
+            "metrics",
+            "metrics_addr",
+            "cos",
+            "dscp",
+            "ecn",
+            "access_report",
+            "access_return_code",
+            "timestamp_info",
+            "direct_measurement",
+            "location",
+            "follow_up_telemetry",
+            "snmp",
+            "snmp_socket",
+            "output_format",
+            "log_format",
+            "report_interval",
+            "dest_node_addr",
+            "return_path_cc",
+            "return_address",
+            "return_sr_mpls_labels",
+            "return_srv6_sids",
+            "micro_session_id",
+            "reflector_member_link_id",
+            "max_pps",
+            "reflector_rate_burst",
+            "ber",
+            "ber_pattern",
+            "ber_padding_size",
+            "reflected_control_count",
+            "reflected_control_length",
+            "reflected_control_interval_ns",
+            "reflected_control_max_count",
+            "reflected_control_max_size",
+            "reflected_control_min_interval_ns",
+            "reflected_fixed_hdr",
+            "reflected_ipv6_ext_hdr",
+        ];
+        for name in expected {
+            assert!(
+                props.contains_key(name),
+                "schema is missing property '{name}'; update CONFIG_JSON_SCHEMA"
+            );
+        }
+    }
+
+    #[test]
+    fn test_print_config_schema_flag_parses() {
+        let args = vec!["test", "--print-config-schema"];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.print_config_schema);
+    }
+
+    #[test]
+    fn test_print_config_schema_default_false() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+        assert!(!conf.print_config_schema);
     }
 
     #[test]
