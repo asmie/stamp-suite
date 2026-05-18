@@ -5,6 +5,227 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-05-18
+
+### Added
+
+- **Per-SSID HMAC key set (B6)** — `--hmac-key-dir <DIR>` flag and new
+  `crypto::HmacKeySet` type let a single reflector serve multiple
+  senders without sharing a key. Each file's name (minus extension) is
+  the SSID in hex; an optional `default.key` is the fallback for
+  unknown SSIDs. Mutually exclusive with `--hmac-key` /
+  `--hmac-key-file`; the legacy single-key path is preserved. The
+  reflector peeks the incoming packet's SSID, resolves the per-SSID
+  key, and uses it for both verification and response HMAC.
+- **Per-client token-bucket rate limiting (B4)** — rewrote `RateLimiter`
+  from a fixed-window counter to a true token bucket keyed by
+  `(source_ip, ssid)`. New `--reflector-rate-burst` flag tunes bucket
+  capacity independently of `--max-pps` (which retains its old
+  semantic of "tokens / second"; `burst = 0` falls back to `rate` for
+  backward compat). New `packets_rate_limited` counter distinguishes
+  rate-limit drops from generic drops in metrics and SNMP. Reflected
+  Test Packet Control (Type 12) extra-copy emission consumes one
+  token per extra send and breaks the loop early on bucket
+  exhaustion, so an asymmetric burst cannot exceed the per-client
+  budget.
+- **Reflected Test Packet Control Type 12 — draft-14 alignment (A1)** —
+  the reflector now honours the requested reply length by inserting an
+  `ExtraPaddingTlv` ahead of the HMAC TLV up to a configurable cap;
+  parses Layer-3 Address Group sub-TLV (Type 11) and drops the packet
+  (via `ReturnPathAction::SuppressReply`) when no local address
+  matches the requested prefix per draft §3; parses Layer-2 Address
+  Group sub-TLV (Type 10) and sets the U flag on the echoed Type 12
+  when MAC visibility isn't available (UDP-socket backends). New
+  CLI flags `--reflected-control-max-count`,
+  `--reflected-control-max-size`,
+  `--reflected-control-min-interval-ns` expose the previously
+  compile-time amplification caps as runtime config. Minimum
+  value-field size raised from 8 to 12 octets per draft §3; the
+  encoder zero-pads short emissions to 12 bytes (placeholder sub-TLV
+  header) so existing single-TLV senders stay on the wire.
+- **`draft-ietf-ippm-stamp-ext-hdr-08` Type 247 length-mismatch
+  conformance (A3)** — the Reflected Fixed Header Data TLV's Length
+  MUST equal 20 (IPv4) or 40 (IPv6) per §5.2. If the sender's
+  requested Length doesn't match the captured header size (e.g. a
+  20-byte request reaches an IPv6 reflector), the reflector now
+  zero-fills the Value and sets the U-flag rather than silently
+  truncating or padding. New `log_reflected_hdr_length_mismatch_once`
+  helper emits a one-time warning citing draft §5.2.
+- **Structured logging via `tracing-subscriber` (D5)** — new
+  `--log-format text|json` flag selects between the historic
+  human-readable single-line output (default) and one-line-per-event
+  JSON suitable for Fluent Bit, Vector, or journald JSON forwarding.
+  `tracing-log` bridges existing `log::*` call sites so the
+  conversion is transparent. `RUST_LOG` continues to control
+  verbosity in both modes.
+- **`--print-config-schema` for TOML config validation (D4)** — dumps
+  a hand-maintained JSON Schema (draft 2020-12) for the
+  `FileConfiguration` accepted by `--config`. Pair with the
+  `jsonschema` CLI or an IDE plugin for autocomplete /
+  pre-deployment validation. Hand-maintained alongside the struct;
+  a coverage test fails loudly when a new TOML field has no
+  corresponding schema property.
+- **Defensive hardware-timestamping scaffold (F1)** — new `hwtstamp`
+  Cargo feature (default-off), `--hwtstamp auto|on|off` flag,
+  `crypto::HwTsMode` enum, capability probe stub, and
+  `effective_method` resolver that picks `HwAssist` vs `SwLocal` per
+  direction. `auto` (default) silently falls back to software when
+  the kernel/NIC doesn't advertise support; `on` fails-fast at
+  startup; `off` always uses software. The kernel-side
+  `SO_TIMESTAMPING` / `MSG_ERRQUEUE` wiring is a tracked follow-up;
+  the public API is in place so call sites won't change when it
+  lands.
+- **Capture-thread liveness signal (B2)** — new `capture_alive: Arc<AtomicBool>`
+  on `ReceiverSharedState`. Both backends clear the flag when their
+  receive loop exits unexpectedly (interface-not-found, channel-init
+  failure, send-socket bind failure, `spawn_blocking` panic) so a
+  future readiness probe and `systemd`'s `MonitorPolicy` can tell
+  "process alive but not reflecting" from "process alive and
+  healthy." Every `eprintln!` in the pnet capture path replaced with
+  structured `log::error!` / `log::warn!`.
+- **AgentX sub-agent panic-resistance (B1)** — audited every
+  `unwrap()` / `panic!` / `unreachable!()` reachable from the AgentX
+  event loop (`agentx::decode_header`, `decode_oid`,
+  `decode_search_range`, `handle_get_bulk`, `MibHandler::get` /
+  `get_next`); confirmed every buffer-indexing site is preceded by
+  an explicit length check returning `AgentXError::Protocol`. Added
+  a supervisor task that observes the `spawn_blocking` JoinHandle so
+  an unforeseen panic logs `JoinError::is_panic()` instead of being
+  silently dropped. Module-level doc comment in `src/snmp/mod.rs`
+  records the audit conclusion so a future reader doesn't redo it.
+- **Asymmetric observability failure semantics (B3)** — `--metrics`
+  fails fast on bind error with the specific `io::ErrorKind`
+  (AddrInUse / AddrNotAvailable / PermissionDenied) in the exit
+  message; `--snmp` degrades gracefully on missing AgentX master,
+  logs a warning, and continues. Reasoning: silent metrics disable
+  leaves dashboards blind; silent SNMP disable doesn't affect the
+  reflector's primary duty. Documented in `doc/usage.md`.
+
+### Changed
+
+- **`apply_semantic_tlv_processing` thread the resolved HMAC key** —
+  `process_auth_packet` now takes an explicit `resolved_hmac_key`
+  parameter set by `process_stamp_packet` after a per-SSID lookup,
+  replacing the previous direct read of `ctx.hmac_key`. Required by
+  the new `HmacKeySet` path; the single-key path is unchanged because
+  the legacy field still feeds `resolve_hmac_key()` when no set is
+  configured.
+- **`REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE` constant** — added
+  alongside the raised-to-12 minimum so the parser can address the
+  fixed header (length + count + interval) and the sub-TLV chain
+  separately without re-deriving the offset.
+- **TLV reference table in `doc/architecture.md`** — adopt
+  `supported / partial / experimental / interop-only` labels.
+  Type 10 → partial (SR-MPLS / SRv6 echoed with U-flag). Type 12 →
+  supported (post-A1). Types 246 / 247 → partial (pnet backend only).
+  Type 242 documented as having a wire-format collision with
+  teaparty's Heartbeat use of the same byte; both implementations
+  are in the experimental range so neither is wrong per IANA, but
+  mixed deployments need to pick one.
+- **Operational characteristics section** (new in `doc/architecture.md`):
+  `--strict-packets` contract, `capture_alive` semantics, metrics
+  fail-fast vs SNMP graceful, AgentX panic-audit results, and the
+  new `--hwtstamp` modes.
+
+### Fixed
+
+- **RFC 8972 §3 `set_reflected_control_u_flag`** — when a Layer-2
+  Address Group sub-TLV arrives on a backend without MAC visibility,
+  the reflector now sets the U flag on the echoed Type 12 TLV and
+  continues processing. Previously the sub-TLV was silently ignored,
+  giving the sender no signal that the filter wasn't honoured.
+
+### Tests
+
+- **Malformed-input suite (C6)** — 12 hand-crafted hostile byte
+  sequences across base-packet length boundaries (RFC 8762 §4.1.x),
+  TLV-header length-field abuses (overflow, u16::MAX, truncated
+  header), HMAC ordering violations (TLV after HMAC, wrong-length
+  HMAC value, corrupted digest → I-flag on every TLV per §4.8),
+  Return Path sub-TLV nesting overflow, and high-entropy spot
+  checks. Implementation handles every case correctly — no
+  production change.
+- **TLV flag-semantics audit (A7)** — 15 tests pinning the
+  RFC 8972 §3 / §4.8 + draft-asymmetrical §3 U/M/I/C wire bit
+  positions (0x80 / 0x40 / 0x20 / 0x10), unknown-type echo with U,
+  length-mismatch with M, HMAC failure with I on every TLV
+  (packet still echoed), Reflected Control clamping with C, plus
+  flag-independence negative controls.
+- **BER on-wire regression (A4)** — 6 tests covering clean
+  channel, single-bit flip, intra-byte 3-bit burst, cross-byte
+  4-bit burst (exercises the MSB-first bit walker), sender
+  hex-dump verification, and a custom non-default pattern.
+- **PTP timestamp end-to-end (A8)** — 6 tests covering wire-encoding
+  distinction (NTP-vs-PTP epoch offset), Type 3 TLV
+  `sync_src_out` reporting under PTP and NTP reflector modes,
+  mixed-mode preservation of sender-declared sync source, and
+  big-endian timestamp placement at byte offset 4..12.
+- **Stats edge cases (C11)** — 10 tests covering RFC 3550 jitter
+  on single-sample / zero-jitter / negative-skew / alternating
+  patterns, two-sample std-dev boundary, large-RTT u128 overflow
+  safety, percentile of empty set and out-of-range p, single-sample
+  percentile off-by-one, and zero-sent loss_percent NaN guard.
+- **IPv6 TLV-by-TLV parity (C4)** — 10 tests driving every major
+  reflector code path with an IPv6 source: unauth + auth round
+  trips, CoS DSCP/ECN echo, RFC 9503 Destination Node Address
+  match / mismatch, Micro-session ID, BER trio, Location sub-TLVs,
+  combined auth+CoS, unknown-TLV U-flag.
+- **Multi-key HMAC integration (B6)** — 6 tests: legacy single-key
+  SSID=0 / non-zero compat, per-SSID happy path, wrong-key-for-SSID
+  rejection, unknown-SSID + `require_hmac` drop, default-key
+  fallback for missing per-SSID entries.
+- **pnet backend integration (C10)** — 3 `#[ignore]`'d tests that
+  spin up a real pnet receiver on the `lo` interface and round-trip
+  open mode, authenticated mode, and a TLV chain. Self-skip when
+  the process lacks `CAP_NET_RAW`. Gated by
+  `target_os = "linux" + feature = "ttl-pnet" + not ttl-nix`.
+  `tests/README.md` documents the privileged-run invocation.
+- **AgentX malformed-PDU coverage (C9)** — 8 tests on the public
+  decoders + 4 OID-boundary tests on the handler dispatch, locking
+  in the B1 audit invariant that every buffer index is bounds-checked.
+- **Rate-limit isolation (B4)** — 7 tests: burst exhaustion,
+  multi-client isolation (greedy client doesn't drain a polite
+  one), per-SSID isolation (same IP, different SSIDs → independent
+  buckets), atomic `allow_n`, sustained-rate refill, backward-compat
+  burst=0, expired-bucket reaping.
+- **`--strict-packets` contract (B7)** — 7 tests pinning the
+  lenient-vs-strict asymmetry across short / full / empty buffers
+  in both modes, MBZ-always-ignored per RFC 8762 §4.1.1, and
+  require_hmac interactions.
+- **Property-based + libfuzzer harnesses (C5)** — 16 proptest cases
+  (default `cargo test` run) covering typed-TLV round-trips and
+  arbitrary-bytes no-panic invariants for every parser. Seven
+  cargo-fuzz targets under `fuzz/` (workspace-excluded, nightly-only)
+  exercise the same code paths via libfuzzer. New manual /
+  weekly GitHub Actions workflow runs each fuzz target for 60s
+  and uploads crashes as artifacts.
+- **Criterion benchmark suite (E2)** — `benches/reflector_hotpath.rs`
+  measures `process_stamp_packet` end-to-end without UDP: open mode
+  no-TLV (~100 ns/op), one TLV, full chain, authenticated mode HMAC
+  success path, authenticated full chain. Reference numbers in
+  `doc/architecture.md` for regression triage.
+
+### CI / build
+
+- **`mib-lint` job** — runs `smilint -l 4` against
+  `mibs/STAMP-SUITE-MIB.mib` on every push/PR. Package install
+  tries `smitools` (Ubuntu 24.04+) then falls back to
+  `libsmi2-bin` for older base images.
+- **`fuzz.yml` workflow** — manual / weekly cron; matrix-builds and
+  runs each of the seven cargo-fuzz targets for 60s. Failures
+  upload `fuzz/artifacts/` + `fuzz/corpus/`.
+- **`windows-2022` pin** — Windows test and build-release jobs pin
+  to `windows-2022` instead of `windows-latest`. The
+  `windows-2025` rollover dropped the bundled tooling that was
+  satisfying pnet's load-time `wpcap.dll` / `Packet.dll` imports,
+  and the Npcap silent installer hangs on Server 2025 (UAC +
+  driver-signing prompts). Long-term answer is to gate pnet behind
+  a Cargo feature on Windows.
+- **Documentation refresh** — `doc/architecture.md` reorganised
+  with a new "Operational Characteristics" section, a Hardware-
+  Assisted Timestamping section, a Benchmarks section, and an
+  updated TLV table.
+
 ## [0.7.0] - 2026-05-04
 
 ### Added
