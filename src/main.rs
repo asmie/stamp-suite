@@ -62,6 +62,21 @@ async fn main() {
 
     init_logging(conf.log_format);
 
+    // F1: when the operator explicitly requested HW timestamping via
+    // --hwtstamp on, fail-fast if the host probe says it's unavailable.
+    // `auto` and `off` always continue; `auto` will silently use SW.
+    if matches!(conf.hwtstamp, stamp_suite::configuration::HwTsMode::On) {
+        let cap = stamp_suite::hwtstamp::probe(None);
+        if !cap.any_hw_supported() {
+            eprintln!(
+                "--hwtstamp on requires hardware timestamping but the host probe \
+                 reported no capability. Build with --features hwtstamp on a \
+                 capable NIC, or use --hwtstamp auto/off to fall back to software."
+            );
+            std::process::exit(1);
+        }
+    }
+
     if std::env::var("STAMP_HMAC_KEY").is_ok() && conf.hmac_key.is_some() {
         log::warn!(
             "HMAC key loaded from STAMP_HMAC_KEY environment variable. \

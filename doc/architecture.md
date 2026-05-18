@@ -509,6 +509,44 @@ Sender statistics are updated live during the measurement run (not just at compl
 
 **Note**: The `snmp` feature requires a Unix platform (Linux/macOS) because AgentX uses Unix domain sockets. On non-Unix platforms, `--snmp` prints an error and exits.
 
+## Hardware-Assisted Timestamping
+
+Optional support for `SO_TIMESTAMPING` / `ETHTOOL_GET_TS_INFO` on
+Linux, gated behind the `hwtstamp` Cargo feature. Selected at runtime
+via `--hwtstamp auto|on|off` (default `auto`).
+
+**Defensive contract.** Hardware timestamping is a per-NIC capability —
+some adapters support RX, some both, most consumer NICs neither. The
+implementation:
+
+- Never panics if HW support is missing.
+- Never refuses to start the binary on a host without a capable NIC,
+  *unless* the operator explicitly asked via `--hwtstamp on`.
+- Reports the actual method on a per-direction basis in the Type 3
+  Timestamp Information TLV: `HwAssist` only when the NIC really
+  provided the timestamp, otherwise `SwLocal`.
+
+**Modes.**
+
+- `auto` *(default)* — try HW when available, fall back silently to
+  software. Safe on every host.
+- `on` — fail-fast at startup if the host probe reports no
+  capability. For operators who'd rather know than guess.
+- `off` — always use software timestamps, even when HW is available.
+  Useful for A/B comparisons or as a known-good fallback.
+
+**Capability probe.** `stamp_suite::hwtstamp::probe(interface)` queries
+the kernel for HW timestamping support. Without the `hwtstamp`
+feature, or on non-Linux platforms, the probe always returns
+"not supported" — `auto` then behaves like `off` and `on` fails-fast.
+
+**Status.** As of this release the capability probe and `--hwtstamp`
+flag are in place; the actual `SCM_TIMESTAMPING` cmsg read and
+`MSG_ERRQUEUE` poll wiring on the receive/send sockets is a planned
+follow-up. The public `effective_method` API and Type 3 TLV reporting
+are already structured so the kernel-side work can land without
+touching call sites.
+
 ## Benchmarks
 
 `benches/reflector_hotpath.rs` is a Criterion harness that drives

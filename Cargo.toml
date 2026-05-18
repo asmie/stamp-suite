@@ -26,6 +26,11 @@ ttl-nix = ["dep:nix"]
 ttl-pnet = ["dep:pnet"]
 metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", "dep:tokio-util"]
 snmp = []
+# Hardware-assisted timestamping (Linux SO_TIMESTAMPING / ETHTOOL_GET_TS_INFO).
+# Currently provides only the capability probe + CLI plumbing; the actual
+# kernel-cmsg read path is a follow-up. Default-off so default builds run on
+# any platform without the kernel headers it depends on.
+hwtstamp = []
 
 [dependencies]
 chrono = "0.4.44"
