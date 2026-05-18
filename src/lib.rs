@@ -23,6 +23,12 @@ pub mod configuration;
 pub mod crypto;
 /// Error estimate encoding/decoding for timestamps.
 pub mod error_estimate;
+/// Hardware-assisted timestamping capability probe and mode selection
+/// (F1). Defensive: returns "not supported" on every platform unless
+/// the `hwtstamp` feature is on and the host actually advertises HW
+/// timestamping via ETHTOOL_GET_TS_INFO. See `doc/architecture.md`
+/// for operator details.
+pub mod hwtstamp;
 /// STAMP packet structures and serialization.
 pub mod packets;
 /// Session Reflector implementations.

@@ -4,6 +4,7 @@ use clap::{Parser, ValueEnum};
 use thiserror::Error;
 
 pub use crate::clock_format::ClockFormat;
+pub use crate::hwtstamp::HwTsMode;
 pub use crate::stats::OutputFormat;
 
 /// Diagnostic log output format. Selected via `--log-format`.
@@ -284,6 +285,20 @@ pub struct Configuration {
     /// control verbosity in both modes.
     #[clap(long, value_enum, default_value_t = LogFormat::Text)]
     pub log_format: LogFormat,
+
+    /// Hardware-assisted timestamping selection (F1). `auto` (default)
+    /// uses HW timestamping when the kernel + NIC advertises it via
+    /// `ETHTOOL_GET_TS_INFO`, otherwise falls back to software
+    /// timestamps silently. `on` requires HW timestamping and
+    /// fails-fast at startup if the probe reports no capability —
+    /// for operators who'd rather know than guess. `off` always uses
+    /// software timestamps.
+    ///
+    /// Requires the `hwtstamp` build feature for the actual kernel
+    /// path; without it the probe always reports "not supported" so
+    /// `auto` is equivalent to `off` and `on` fails-fast.
+    #[clap(long, value_enum, default_value_t = HwTsMode::Auto)]
+    pub hwtstamp: HwTsMode,
 
     /// Periodic reporting interval in seconds (0 = disabled, sender only).
     #[clap(long, default_value_t = 0)]
@@ -699,6 +714,7 @@ impl Configuration {
         merge!(snmp_socket);
         merge!(output_format);
         merge!(log_format);
+        merge!(hwtstamp);
         merge!(report_interval);
         merge_opt!(dest_node_addr);
         merge_opt!(return_path_cc);
@@ -783,6 +799,7 @@ pub struct FileConfiguration {
     pub snmp_socket: Option<String>,
     pub output_format: Option<OutputFormat>,
     pub log_format: Option<LogFormat>,
+    pub hwtstamp: Option<HwTsMode>,
     pub report_interval: Option<u32>,
     pub dest_node_addr: Option<std::net::IpAddr>,
     pub return_path_cc: Option<u32>,
@@ -861,6 +878,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "snmp_socket": { "type": "string" },
     "output_format": { "enum": ["text", "json", "csv"] },
     "log_format": { "enum": ["text", "json"] },
+    "hwtstamp":   { "enum": ["auto", "on", "off"] },
     "report_interval": { "type": "integer", "minimum": 0 },
     "dest_node_addr": { "type": "string", "format": "ipvanyaddress" },
     "return_path_cc": { "type": "integer", "minimum": 0, "maximum": 1 },
@@ -1351,6 +1369,7 @@ mod tests {
             "snmp_socket",
             "output_format",
             "log_format",
+            "hwtstamp",
             "report_interval",
             "dest_node_addr",
             "return_path_cc",
@@ -1393,6 +1412,47 @@ mod tests {
         let args = vec!["test"];
         let conf = Configuration::parse_from(args);
         assert!(!conf.print_config_schema);
+    }
+
+    // -----------------------------------------------------------------------
+    // F1: --hwtstamp.
+
+    #[test]
+    fn test_hwtstamp_default_auto() {
+        let args = vec!["test"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.hwtstamp, HwTsMode::Auto);
+    }
+
+    #[test]
+    fn test_hwtstamp_explicit_on() {
+        let args = vec!["test", "--hwtstamp", "on"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.hwtstamp, HwTsMode::On);
+    }
+
+    #[test]
+    fn test_hwtstamp_explicit_off() {
+        let args = vec!["test", "--hwtstamp", "off"];
+        let conf = Configuration::parse_from(args);
+        assert_eq!(conf.hwtstamp, HwTsMode::Off);
+    }
+
+    #[test]
+    fn test_hwtstamp_rejects_invalid_value() {
+        let args = vec!["test", "--hwtstamp", "always"];
+        let result = Configuration::try_parse_from(args);
+        assert!(result.is_err(), "unknown hwtstamp mode must be rejected");
+    }
+
+    #[test]
+    fn test_hwtstamp_toml_round_trip() {
+        let toml_str = r#"
+            remote_addr = "127.0.0.1"
+            hwtstamp = "on"
+        "#;
+        let file: FileConfiguration = toml::from_str(toml_str).expect("parse");
+        assert_eq!(file.hwtstamp, Some(HwTsMode::On));
     }
 
     #[test]
