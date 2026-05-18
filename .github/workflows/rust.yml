@@ -246,3 +246,21 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  mib-lint:
+    name: MIB Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libsmi tools
+        # The package supplying `smilint` is named `smitools` on Ubuntu
+        # 24.04+ and `libsmi2-bin` on older Debian/Ubuntu. Try the new
+        # name first; fall back so the job survives a base-image bump.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y smitools || sudo apt-get install -y libsmi2-bin
+      - name: Lint STAMP-SUITE-MIB
+        # Lint level 4 = errors and major warnings (style nits like missing
+        # DESCRIPTION clauses are ignored). Raise to -l 6 once the MIB is
+        # clean at level 5.
+        run: smilint -l 4 mibs/STAMP-SUITE-MIB.mib
