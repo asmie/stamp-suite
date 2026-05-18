@@ -509,6 +509,42 @@ Sender statistics are updated live during the measurement run (not just at compl
 
 **Note**: The `snmp` feature requires a Unix platform (Linux/macOS) because AgentX uses Unix domain sockets. On non-Unix platforms, `--snmp` prints an error and exits.
 
+## Benchmarks
+
+`benches/reflector_hotpath.rs` is a Criterion harness that drives
+`process_stamp_packet` end-to-end through the in-process pipeline (no
+real UDP). It measures parse + HMAC + TLV processing + response
+assembly without the kernel scheduler in the loop — useful for catching
+performance regressions in the parser, HMAC code, or TLV walkers
+without socket-level noise.
+
+Run:
+
+```bash
+cargo bench --bench reflector_hotpath
+# or a single bench:
+cargo bench --bench reflector_hotpath -- unauth_full_chain
+```
+
+HTML reports land under `target/criterion/<bench>/report/`.
+
+Bench cases:
+
+- `unauth_no_tlvs` — 44-byte open-mode baseline.
+- `unauth_one_tlv` — open mode + a CoS TLV.
+- `unauth_full_chain` — open mode + CoS + Location + Direct Measurement
+  + Follow-Up Telemetry + Timestamp Info + Access Report.
+- `auth_no_tlvs` — 112-byte authenticated baseline with HMAC
+  verification on the success path.
+- `auth_full_chain` — authenticated mode + the same TLV chain.
+
+Reference numbers on a 2024-era x86_64 laptop (Intel i7, single core,
+release build): `unauth_no_tlvs` ≈ 100 ns/op (~10 Mpps single-threaded
+parse-and-assemble); `auth_no_tlvs` ≈ 1.5–2 µs/op dominated by HMAC.
+Real numbers vary with CPU, OpenSSL/RustCrypto build, and tokio
+runtime overhead in the receive path. Treat the benches as a
+regression signal, not as headline marketing figures.
+
 ## See Also
 
 - [README](../README.md) — install and quick-start.
