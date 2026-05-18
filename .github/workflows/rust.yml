@@ -67,7 +67,15 @@ jobs:
           - os: macos-latest
             rust: stable
             features: ""
-          - os: windows-latest
+          # Pinned to windows-2022 (rather than windows-latest) because
+          # the windows-2025 rollover dropped the bundled tooling that
+          # was satisfying pnet's wpcap.dll / Packet.dll load-time
+          # imports. The Npcap installer's /S silent mode hangs on
+          # Server 2025 (UAC + driver-signing prompts), so the
+          # surgical fix is the image pin. Tracked separately:
+          # gate pnet behind a Cargo feature on Windows so default
+          # builds don't link it at all.
+          - os: windows-2022
             rust: stable
             features: ""
     steps:
@@ -79,7 +87,7 @@ jobs:
         with:
           key: test-${{ matrix.os }}-${{ matrix.rust }}
       - name: Install Npcap SDK (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-2022'
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile "$env:TEMP/npcap-sdk.zip"
@@ -125,7 +133,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: x86_64-apple-darwin
-          - os: windows-latest
+          # See pin rationale on the test job above.
+          - os: windows-2022
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
@@ -136,7 +145,7 @@ jobs:
         with:
           key: release-${{ matrix.target }}
       - name: Install Npcap SDK (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-2022'
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile "$env:TEMP/npcap-sdk.zip"
