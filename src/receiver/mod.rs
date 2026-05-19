@@ -699,7 +699,12 @@ fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedControlSubTlv> 
             }
             REFLECTED_CONTROL_SUBTLV_L3_GROUP => {
                 // Draft §3: prefix_len(1) + reserved(3) + prefix(4 or 16).
-                if value.len() >= 4 + 4 || value.len() >= 4 + 16 {
+                // Exactly 8 octets (IPv4) or 20 octets (IPv6); anything
+                // else is malformed and we skip it rather than guess
+                // (an earlier `>= 4 + 4 || >= 4 + 16` check was a
+                // tautology that accepted any length ≥ 8).
+                let len = value.len();
+                if len == 4 + 4 || len == 4 + 16 {
                     let prefix_len = value[0];
                     let prefix = value[4..].to_vec();
                     out.push(ReflectedControlSubTlv::L3Group { prefix_len, prefix });
@@ -1057,7 +1062,11 @@ fn process_auth_packet(
                 rcvt,
                 ttl,
                 ctx.error_estimate_wire,
-                ctx.hmac_key,
+                // B6: use the per-SSID-resolved key (falls back to
+                // ctx.hmac_key when no HmacKeySet is configured). Using
+                // ctx.hmac_key directly here would emit unsigned
+                // responses when --hmac-key-dir is the key source.
+                resolved_hmac_key,
                 reflector_seq,
             ),
             cos_request: None,

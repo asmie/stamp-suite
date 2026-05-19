@@ -10,6 +10,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Default to a read-only token. Jobs that need to upload artifacts or
+# create check-runs should opt in explicitly with their own `permissions:`
+# block; today nothing on this workflow writes back to the repo.
+permissions:
+  contents: read
+
 jobs:
   fmt:
     name: Rustfmt
