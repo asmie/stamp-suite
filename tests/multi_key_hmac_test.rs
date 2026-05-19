@@ -192,3 +192,35 @@ fn per_ssid_key_set_unknown_ssid_falls_back_to_default() {
         .expect("default key must verify when SSID has no explicit entry");
     assert!(response.data.len() >= AUTH_BASE_SIZE);
 }
+
+/// Regression for the bug Cursor's bugbot caught in PR #5: the
+/// non-TLV authenticated response path used to pass `ctx.hmac_key`
+/// instead of the per-SSID-resolved key, so when `--hmac-key-dir`
+/// was the key source (ctx.hmac_key = None), authenticated packets
+/// without TLVs got responses signed with no key at all.
+///
+/// This test sends a no-TLV authenticated packet, verifies via
+/// per-SSID lookup, and asserts the response's last 16 bytes are
+/// not all zero — they're the response HMAC, which is None-keyed
+/// in the buggy version and therefore left at the initial zeros.
+#[test]
+fn per_ssid_key_set_signs_no_tlv_response() {
+    let key = HmacKey::new(vec![0xCC; 16]).unwrap();
+    let mut set = HmacKeySet::new();
+    set.insert(7, key.clone());
+
+    // Build a signed auth packet with SSID=7, no TLVs.
+    let packet = build_signed_auth_packet(7, &key);
+    assert_eq!(packet.len(), 112, "no-TLV auth packet is exactly 112 bytes");
+
+    let ctx = make_ctx(None, Some(&set));
+    let response = process_stamp_packet(&packet, src(), 64, true, &ctx).expect("must reflect");
+    // Reflected authenticated packet HMAC lives in the last 16 bytes
+    // of the 112-byte base. The buggy path left these zero.
+    let hmac_field = &response.data[response.data.len() - 16..];
+    assert!(
+        hmac_field.iter().any(|&b| b != 0),
+        "response HMAC must be non-zero (real signature, not the \
+         placeholder left by an unkeyed assembler)"
+    );
+}
