@@ -246,6 +246,14 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    # Override the workflow-default contents-read token so the
+    # rustsec/audit-check action can post its findings as a check-run
+    # (it needs checks:write) and open issues for new advisories
+    # (issues:write — optional but harmless).
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2

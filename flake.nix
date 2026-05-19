@@ -23,7 +23,7 @@
 
             src = self;
 
-            cargoHash = "sha256-5HS9+/8qmPX0ZxncJDW55vkw0Z9yi0w3kAK9tFWspEE=";
+            cargoHash = "sha256-CDRH9tyEh6c6cww6qQYUUfT/rAltFssD8ogo3pwVLow=";
 
             buildFeatures = allFeatures;
             # Honour --all-features for the cargo test phase too so the
@@ -50,7 +50,7 @@
             pname = "stamp-suite-clippy";
             version = "0.8.0";
             src = self;
-            cargoHash = "sha256-5HS9+/8qmPX0ZxncJDW55vkw0Z9yi0w3kAK9tFWspEE=";
+            cargoHash = "sha256-CDRH9tyEh6c6cww6qQYUUfT/rAltFssD8ogo3pwVLow=";
             buildFeatures = allFeatures;
             nativeBuildInputs = [ pkgs.clippy ];
             buildPhase = ''
