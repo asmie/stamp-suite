@@ -292,17 +292,13 @@ pub struct Configuration {
     #[clap(long, value_enum, default_value_t = LogFormat::Text)]
     pub log_format: LogFormat,
 
-    /// Hardware-assisted timestamping selection (F1). `auto` (default)
-    /// uses HW timestamping when the kernel + NIC advertises it via
-    /// `ETHTOOL_GET_TS_INFO`, otherwise falls back to software
-    /// timestamps silently. `on` requires HW timestamping and
-    /// fails-fast at startup if the probe reports no capability —
-    /// for operators who'd rather know than guess. `off` always uses
-    /// software timestamps.
-    ///
-    /// Requires the `hwtstamp` build feature for the actual kernel
-    /// path; without it the probe always reports "not supported" so
-    /// `auto` is equivalent to `off` and `on` fails-fast.
+    /// Hardware-assisted timestamping selection (F1). EXPERIMENTAL and not
+    /// yet functional: hardware/kernel timestamping is not implemented, so
+    /// every mode currently uses software timestamps. `auto` (default) and
+    /// `off` use software silently; `on` prefers hardware and warns at
+    /// startup that it is falling back to software (it no longer aborts).
+    /// The `ETHTOOL_GET_TS_INFO` / `SO_TIMESTAMPING` kernel path is a
+    /// planned follow-up.
     #[clap(long, value_enum, default_value_t = HwTsMode::Auto)]
     pub hwtstamp: HwTsMode,
 

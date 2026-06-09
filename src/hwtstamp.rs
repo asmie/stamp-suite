@@ -5,18 +5,20 @@
 //! advertise in the RFC 8972 §4.3 Timestamp Information TLV.
 //!
 //! **Defensive posture.** Per the project's hardware-dependent
-//! contract: this module never panics, never refuses to start the
-//! binary on a host without HW support, and silently falls back to
-//! software timestamping. The only path that intentionally fails-fast
-//! is `--hwtstamp on`, which is documented as an "operator-explicit"
-//! mode for advanced users who'd rather know than guess.
+//! contract: this module never panics and never refuses to start the
+//! binary. Every `--hwtstamp` mode currently falls back to software
+//! timestamping; `--hwtstamp on` additionally emits a one-line warning
+//! so an operator who explicitly asked for hardware isn't misled into
+//! thinking they got it (see [`startup_action`]).
 //!
-//! **Current scope.** The capability probe is feature-gated under
-//! `hwtstamp`; without the feature it compiles to a stub returning
-//! "not supported" so the rest of the pipeline keeps working unchanged.
-//! Wiring `SO_TIMESTAMPING` / `MSG_ERRQUEUE` into the actual recvmsg /
-//! sendmsg paths is a follow-up — the structure is in place so that
-//! work can land without touching every TLV-builder call site.
+//! **Current scope — experimental / not yet functional.** Hardware and
+//! kernel timestamping are **not implemented**: [`probe`] always reports
+//! "not supported" and [`effective_method`] therefore always resolves to
+//! [`TimestampMethod::SwLocal`]. The capability probe, `HwTsMode`, and
+//! `effective_method` are scaffolding so that wiring `SO_TIMESTAMPING` /
+//! `MSG_ERRQUEUE` into the recvmsg / sendmsg paths can land later without
+//! touching every TLV-builder call site. Until then the CLI surface is
+//! deliberately honest that this is a no-op beyond software timestamps.
 
 use clap::ValueEnum;
 use serde::Deserialize;
@@ -30,12 +32,14 @@ use crate::tlv::TimestampMethod;
 pub enum HwTsMode {
     /// Use hardware timestamping when the capability probe finds it
     /// available; transparently fall back to software otherwise. This
-    /// is the default — safe to leave on every host.
+    /// is the default — safe to leave on every host. (Today HW is never
+    /// available, so this is always software.)
     #[default]
     Auto,
-    /// Demand hardware timestamping. Fails-fast at startup when the
-    /// probe says no, so operators who explicitly want HW timestamping
-    /// don't silently get software measurements.
+    /// Prefer hardware timestamping and warn (rather than fail) when it
+    /// isn't available, so operators who explicitly want HW are told they
+    /// are getting software instead. Because HW timestamping is not yet
+    /// implemented, this currently always warns and uses software.
     On,
     /// Always use software timestamping, even when HW is available.
     /// Useful for A/B-style measurement comparisons or as a fallback
@@ -45,9 +49,9 @@ pub enum HwTsMode {
 
 /// Result of the per-host hardware-timestamping capability probe.
 ///
-/// Constructed at startup by [`probe`]; consumed by the
-/// `--hwtstamp on` validator and by the future recvmsg/sendmsg paths
-/// that will choose between HW and SW timestamping per packet.
+/// Constructed by [`probe`] (currently always all-false) for the future
+/// recvmsg/sendmsg paths that will choose between HW and SW timestamping
+/// per packet.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HwTsCapability {
     /// True when the kernel + NIC pair reports support for
@@ -63,9 +67,9 @@ pub struct HwTsCapability {
 }
 
 impl HwTsCapability {
-    /// True when at least one of rx_hw / tx_hw is supported. The
-    /// `--hwtstamp on` fail-fast check uses this; `auto` uses it to
-    /// decide whether to attempt the kernel cmsg path.
+    /// True when at least one of rx_hw / tx_hw is supported. Reserved for
+    /// the future cmsg path's decision of whether to attempt HW timestamping;
+    /// today the probe never reports support, so this is always false.
     #[must_use]
     pub fn any_hw_supported(&self) -> bool {
         self.rx_hw || self.tx_hw
@@ -141,6 +145,40 @@ pub fn effective_method(
 pub enum Direction {
     Receive,
     Transmit,
+}
+
+/// What the binary should do at startup for a given `--hwtstamp` mode.
+///
+/// Hardware timestamping is not yet wired into the recvmsg/sendmsg paths,
+/// so no mode can actually deliver HW timestamps today. This type keeps the
+/// CLI honest: instead of `--hwtstamp on` aborting (which falsely implied a
+/// real capability gate), the binary always continues with software
+/// timestamping and merely warns when the operator explicitly asked for HW.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupAction {
+    /// Proceed with software timestamping, no message needed.
+    Continue,
+    /// Proceed with software timestamping, but first emit this
+    /// operator-facing warning (they requested HW, which isn't available).
+    ContinueWithWarning(&'static str),
+}
+
+/// Decides the startup behaviour for the requested `--hwtstamp` mode.
+///
+/// Because the kernel `SO_TIMESTAMPING` path is not implemented yet, this is
+/// intentionally independent of [`probe`]: `on` warns-and-continues rather
+/// than failing fast, and `auto`/`off` continue silently (both already use
+/// software timestamps).
+#[must_use]
+pub fn startup_action(mode: HwTsMode) -> StartupAction {
+    match mode {
+        HwTsMode::On => StartupAction::ContinueWithWarning(
+            "--hwtstamp on requested, but hardware/kernel timestamping is not yet \
+             implemented (experimental); falling back to software timestamps. \
+             Use --hwtstamp auto or off to silence this warning.",
+        ),
+        HwTsMode::Auto | HwTsMode::Off => StartupAction::Continue,
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +283,39 @@ mod tests {
             effective_method(HwTsMode::On, cap, Direction::Transmit),
             TimestampMethod::SwLocal
         );
+    }
+
+    #[test]
+    fn on_mode_warns_and_continues_instead_of_failing() {
+        // Hardware timestamping is not yet implemented, so `--hwtstamp on`
+        // must NOT abort the process. It downgrades to software timestamping
+        // and surfaces an operator-facing warning explaining why.
+        match startup_action(HwTsMode::On) {
+            StartupAction::ContinueWithWarning(msg) => {
+                let msg = msg.to_lowercase();
+                assert!(
+                    msg.contains("software"),
+                    "warning should mention software fallback: {msg}"
+                );
+                assert!(
+                    msg.contains("not") || msg.contains("experimental"),
+                    "warning should flag HW timestamping as unavailable/experimental: {msg}"
+                );
+            }
+            StartupAction::Continue => panic!("`on` mode must warn, not continue silently"),
+        }
+    }
+
+    #[test]
+    fn auto_and_off_continue_without_warning() {
+        assert!(matches!(
+            startup_action(HwTsMode::Auto),
+            StartupAction::Continue
+        ));
+        assert!(matches!(
+            startup_action(HwTsMode::Off),
+            StartupAction::Continue
+        ));
     }
 
     #[test]

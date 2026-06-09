@@ -515,37 +515,42 @@ Optional support for `SO_TIMESTAMPING` / `ETHTOOL_GET_TS_INFO` on
 Linux, gated behind the `hwtstamp` Cargo feature. Selected at runtime
 via `--hwtstamp auto|on|off` (default `auto`).
 
+> **Experimental / not yet functional.** Hardware and kernel
+> timestamping are **not implemented**. The probe always reports "not
+> supported", so every mode currently uses software timestamps and the
+> Type 3 TLV always advertises `SwLocal`. The flag and surrounding API
+> are scaffolding for the planned kernel work described under *Status*.
+
 **Defensive contract.** Hardware timestamping is a per-NIC capability —
 some adapters support RX, some both, most consumer NICs neither. The
 implementation:
 
 - Never panics if HW support is missing.
-- Never refuses to start the binary on a host without a capable NIC,
-  *unless* the operator explicitly asked via `--hwtstamp on`.
+- Never refuses to start the binary, even with `--hwtstamp on`: that mode
+  now *warns* that it is falling back to software rather than aborting.
 - Reports the actual method on a per-direction basis in the Type 3
   Timestamp Information TLV: `HwAssist` only when the NIC really
-  provided the timestamp, otherwise `SwLocal`.
+  provided the timestamp (never, today), otherwise `SwLocal`.
 
 **Modes.**
 
-- `auto` *(default)* — try HW when available, fall back silently to
-  software. Safe on every host.
-- `on` — fail-fast at startup if the host probe reports no
-  capability. For operators who'd rather know than guess.
+- `auto` *(default)* — use HW when available, fall back silently to
+  software. Safe on every host. (Today: always software.)
+- `on` — prefer HW and warn at startup when it is unavailable, so an
+  operator who explicitly asked for HW is told they got software. (Today:
+  always warns and uses software.)
 - `off` — always use software timestamps, even when HW is available.
   Useful for A/B comparisons or as a known-good fallback.
 
-**Capability probe.** `stamp_suite::hwtstamp::probe(interface)` queries
-the kernel for HW timestamping support. Without the `hwtstamp`
-feature, or on non-Linux platforms, the probe always returns
-"not supported" — `auto` then behaves like `off` and `on` fails-fast.
+**Capability probe.** `stamp_suite::hwtstamp::probe(interface)` is the
+intended query point for kernel HW-timestamping support. It currently
+returns "not supported" unconditionally on every platform and build.
 
-**Status.** As of this release the capability probe and `--hwtstamp`
-flag are in place; the actual `SCM_TIMESTAMPING` cmsg read and
-`MSG_ERRQUEUE` poll wiring on the receive/send sockets is a planned
-follow-up. The public `effective_method` API and Type 3 TLV reporting
-are already structured so the kernel-side work can land without
-touching call sites.
+**Status.** As of this release the `--hwtstamp` flag, `effective_method`
+API, and Type 3 TLV reporting are in place but the feature is inert: the
+`SCM_TIMESTAMPING` cmsg read, `MSG_ERRQUEUE` poll, and `ETHTOOL_GET_TS_INFO`
+probe are a planned follow-up. The API is structured so the kernel-side
+work can land without touching call sites.
 
 ## Benchmarks
 

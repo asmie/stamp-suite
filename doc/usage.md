@@ -126,6 +126,8 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --output-format <text|json|csv>  Statistics output format [default: text]
       --log-format <text|json>     Diagnostic log format [default: text]
       --hwtstamp <auto|on|off>     Hardware timestamping selection [default: auto]
+                                   (EXPERIMENTAL: not yet implemented; all
+                                   modes currently use software timestamps)
       --print-config-schema        Print JSON Schema for the TOML config and exit
       --report-interval <SEC>      Periodic reporting interval, sender only (0 = disabled) [default: 0]
       --max-pps <PPS>              Reflector rate limit per source (0 = unlimited) [default: 0]
