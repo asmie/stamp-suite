@@ -85,6 +85,19 @@ impl fmt::Display for TlvHandlingMode {
     }
 }
 
+/// Selects the kind of deliberately malformed TLV the sender injects (for
+/// conformance-testing a reflector's RFC 8972 §4.2 malformed/flag handling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MalformedMode {
+    /// A structurally valid TLV whose flags octet has reserved bits set
+    /// (RFC 8972 §4.2 requires reserved bits to be zero).
+    BadFlags,
+    /// A TLV whose Length field far exceeds the bytes actually present, so a
+    /// conformant reflector must set the M-flag and stop processing.
+    BadLength,
+}
+
 /// Command-line configuration for the STAMP application.
 ///
 /// This struct defines all configurable parameters for both sender and reflector modes,
@@ -239,6 +252,13 @@ pub struct Configuration {
     /// this to the egress socket (Linux/macOS only).
     #[clap(long, value_parser = clap::value_parser!(u8).range(1..=255))]
     pub ttl: Option<u8>,
+
+    /// Diagnostic: append a deliberately malformed TLV to every sent packet to
+    /// test a reflector's RFC 8972 §4.2 handling. `bad-flags` sets reserved
+    /// flag bits; `bad-length` declares a TLV length that overruns the packet.
+    /// Not for normal measurements.
+    #[clap(long, value_enum)]
+    pub malformed: Option<MalformedMode>,
 
     /// Enable Access Report TLV (RFC 8972 §4.6) with the given Access ID (0-15).
     /// The reflector echoes this TLV unchanged.
@@ -712,6 +732,7 @@ impl Configuration {
         merge!(dscp);
         merge!(ecn);
         merge_opt!(ttl);
+        merge_opt!(malformed);
         merge_opt!(access_report);
         merge!(access_return_code);
         merge!(timestamp_info);
@@ -798,6 +819,7 @@ pub struct FileConfiguration {
     pub dscp: Option<u8>,
     pub ecn: Option<u8>,
     pub ttl: Option<u8>,
+    pub malformed: Option<MalformedMode>,
     pub access_report: Option<u8>,
     pub access_return_code: Option<u8>,
     pub timestamp_info: Option<bool>,
@@ -878,6 +900,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "dscp": { "type": "integer", "minimum": 0, "maximum": 63 },
     "ecn":  { "type": "integer", "minimum": 0, "maximum": 3 },
     "ttl":  { "type": "integer", "minimum": 1, "maximum": 255 },
+    "malformed": { "enum": ["bad-flags", "bad-length"] },
     "access_report": { "type": "integer", "minimum": 0, "maximum": 15 },
     "access_return_code": { "type": "integer", "minimum": 0, "maximum": 15 },
     "timestamp_info": { "type": "boolean" },
@@ -1370,6 +1393,7 @@ mod tests {
             "dscp",
             "ecn",
             "ttl",
+            "malformed",
             "access_report",
             "access_return_code",
             "timestamp_info",

@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 
 use crate::{
     clock_format::ClockFormat,
-    configuration::{is_auth, Configuration},
+    configuration::{is_auth, Configuration, MalformedMode},
     crypto::{compute_packet_hmac, verify_packet_hmac, HmacKey},
     error_estimate::ErrorEstimate,
     packets::{
@@ -116,6 +116,25 @@ fn apply_egress_ip_options(
     Ok(())
 }
 
+/// Builds the wire bytes of one deliberately malformed TLV, used by the
+/// `--malformed` conformance-testing switch to exercise a reflector's
+/// RFC 8972 §4.2 handling. The TLV is appended after the packet's regular
+/// content; the sender does not otherwise rely on or parse it.
+fn malformed_tlv_bytes(mode: MalformedMode) -> Vec<u8> {
+    // Flags, Type, Length(hi), Length(lo), then Value. Type 1 = Extra Padding.
+    const U_FLAG: u8 = 0x80;
+    const PADDING_TYPE: u8 = 1;
+    match mode {
+        // Structurally valid (length matches the 4 value octets) but with
+        // reserved flag bits set — `U_FLAG | 0x07` lights the three lowest
+        // reserved bits while still asserting U as a sender must.
+        MalformedMode::BadFlags => vec![U_FLAG | 0x07, PADDING_TYPE, 0x00, 0x04, 0, 0, 0, 0],
+        // Length field claims 0xFFFF octets but only four follow, so the
+        // declared length overruns the packet (RFC 8972 §4.2 → M-flag).
+        MalformedMode::BadLength => vec![U_FLAG, PADDING_TYPE, 0xFF, 0xFF, 0, 0, 0, 0],
+    }
+}
+
 /// Runs the STAMP sender, transmitting test packets and collecting statistics.
 ///
 /// Sends packets to the configured remote address and waits for reflected responses.
@@ -218,6 +237,13 @@ pub async fn run_sender(
 
     if hmac_key.is_some() {
         log::info!("HMAC authentication enabled");
+    }
+
+    if let Some(mode) = conf.malformed {
+        log::warn!(
+            "Diagnostic mode: appending a deliberately malformed TLV ({mode:?}) \
+             to every packet — for reflector conformance testing only"
+        );
     }
 
     let sess = Session::new(0);
@@ -449,46 +475,49 @@ pub async fn run_sender(
             &extra_tlvs
         };
 
-        let send_result = match &send_mode {
-            SendMode::AuthTlv { key } => {
-                let buf = build_auth_packet_with_tlvs(
-                    seq_num,
-                    send_timestamp,
-                    error_estimate_wire,
-                    key,
-                    conf.ssid,
-                    all_extra_tlvs,
-                    Some(*key),
-                );
-                socket.send(&buf).await
-            }
+        let mut buf: Vec<u8> = match &send_mode {
+            SendMode::AuthTlv { key } => build_auth_packet_with_tlvs(
+                seq_num,
+                send_timestamp,
+                error_estimate_wire,
+                key,
+                conf.ssid,
+                all_extra_tlvs,
+                Some(*key),
+            ),
             SendMode::AuthBase { key } => {
                 let mut packet = assemble_auth_packet(error_estimate_wire);
                 packet.sequence_number = seq_num;
                 packet.timestamp = send_timestamp;
                 packet.ssid = conf.ssid.unwrap_or(0);
                 finalize_auth_packet(&mut packet, key);
-                socket.send(&packet.to_bytes()).await
+                packet.to_bytes().to_vec()
             }
-            SendMode::OpenTlv { tlv_key } => {
-                let buf = build_unauth_packet_with_tlvs(
-                    seq_num,
-                    send_timestamp,
-                    error_estimate_wire,
-                    conf.ssid,
-                    all_extra_tlvs,
-                    *tlv_key,
-                );
-                socket.send(&buf).await
-            }
+            SendMode::OpenTlv { tlv_key } => build_unauth_packet_with_tlvs(
+                seq_num,
+                send_timestamp,
+                error_estimate_wire,
+                conf.ssid,
+                all_extra_tlvs,
+                *tlv_key,
+            ),
             SendMode::OpenBase => {
                 let mut packet = assemble_unauth_packet(error_estimate_wire);
                 packet.sequence_number = seq_num;
                 packet.timestamp = send_timestamp;
                 packet.ssid = conf.ssid.unwrap_or(0);
-                socket.send(&packet.to_bytes()).await
+                packet.to_bytes().to_vec()
             }
         };
+
+        // Diagnostic: append a deliberately malformed TLV (RFC 8972 §4.2) to
+        // exercise the reflector's malformed/flag handling. Sent last, after
+        // any HMAC TLV.
+        if let Some(mode) = conf.malformed {
+            buf.extend_from_slice(&malformed_tlv_bytes(mode));
+        }
+
+        let send_result = socket.send(&buf).await;
 
         if let Err(e) = send_result {
             eprintln!("Failed to send packet {}: {}", seq_num, e);
@@ -1644,6 +1673,30 @@ mod tests {
         .expect("status produced");
 
         assert!(!status.contains("MSID"));
+    }
+
+    #[test]
+    fn malformed_bad_length_overruns_declared_length() {
+        use crate::tlv::TLV_HEADER_SIZE;
+        let bytes = malformed_tlv_bytes(MalformedMode::BadLength);
+        assert!(bytes.len() >= TLV_HEADER_SIZE);
+        let declared = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+        let actual_value = bytes.len() - TLV_HEADER_SIZE;
+        assert!(
+            declared > actual_value,
+            "declared length {declared} must overrun actual {actual_value}"
+        );
+    }
+
+    #[test]
+    fn malformed_bad_flags_sets_reserved_bits_but_valid_length() {
+        use crate::tlv::TLV_HEADER_SIZE;
+        let bytes = malformed_tlv_bytes(MalformedMode::BadFlags);
+        // Reserved bits live below the C flag (0x10), i.e. mask 0x0F.
+        assert_ne!(bytes[0] & 0x0F, 0, "reserved flag bits must be set");
+        // This variant is malformed *only* in its flags: length stays correct.
+        let declared = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+        assert_eq!(declared, bytes.len() - TLV_HEADER_SIZE);
     }
 
     #[test]

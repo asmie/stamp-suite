@@ -194,6 +194,10 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --ber                        Enable BER TLVs (draft-gandhi-ippm-stamp-ber, Types 240/241/242)
       --ber-pattern <HEX>          Padding bit pattern (default: ff00)
       --ber-padding-size <BYTES>   Extra Padding length used with --ber [default: 64]
+      --malformed <bad-flags|bad-length>
+                                   Diagnostic: append a deliberately malformed
+                                   TLV to test a reflector's RFC 8972 §4.2
+                                   handling (conformance testing only)
 ```
 
 ### Observability
