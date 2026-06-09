@@ -9,12 +9,12 @@
 //! binary. Every `--hwtstamp` mode currently falls back to software
 //! timestamping; `--hwtstamp on` additionally emits a one-line warning
 //! so an operator who explicitly asked for hardware isn't misled into
-//! thinking they got it (see [`startup_action`]).
+//! thinking they got it (see `startup_action`).
 //!
 //! **Current scope — experimental / not yet functional.** Hardware and
-//! kernel timestamping are **not implemented**: [`probe`] always reports
-//! "not supported" and [`effective_method`] therefore always resolves to
-//! [`TimestampMethod::SwLocal`]. The capability probe, `HwTsMode`, and
+//! kernel timestamping are **not implemented**: `probe` always reports
+//! "not supported" and `effective_method` therefore always resolves to
+//! `TimestampMethod::SwLocal`. The capability probe, `HwTsMode`, and
 //! `effective_method` are scaffolding so that wiring `SO_TIMESTAMPING` /
 //! `MSG_ERRQUEUE` into the recvmsg / sendmsg paths can land later without
 //! touching every TLV-builder call site. Until then the CLI surface is

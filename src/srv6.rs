@@ -6,12 +6,12 @@
 //! attaching an `IPV6_RTHDR` ancillary message to a `sendmsg` call.
 //!
 //! **Defensive contract.** This is opt-in (`--srv6-return-forwarding`) and
-//! capability-gated: [`srh_supported`] probes the running kernel once, and the
+//! capability-gated: `srh_supported` probes the running kernel once, and the
 //! reflector silently falls back to the safe "reply normally + set the Return
 //! Path U-flag" behaviour when SRv6 is unavailable (non-Linux, IPv4 reply, no
 //! seg6 support, or any send error). It never requires SRv6 and never panics.
 //!
-//! **Verification boundary.** The SRH byte construction ([`build_srh`]) is
+//! **Verification boundary.** The SRH byte construction (`build_srh`) is
 //! pinned by unit tests against RFC 8754. The live kernel send path can only
 //! be exercised on an SRv6-capable multi-hop testbed, so it is intentionally
 //! gated behind the probe and the opt-in flag.
