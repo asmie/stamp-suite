@@ -234,6 +234,12 @@ pub struct Configuration {
     #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..4))]
     pub ecn: u8,
 
+    /// IP TTL (IPv4) / Hop Limit (IPv6) for outgoing test packets (1-255).
+    /// When unset the operating-system default is used. The sender applies
+    /// this to the egress socket (Linux/macOS only).
+    #[clap(long, value_parser = clap::value_parser!(u8).range(1..=255))]
+    pub ttl: Option<u8>,
+
     /// Enable Access Report TLV (RFC 8972 §4.6) with the given Access ID (0-15).
     /// The reflector echoes this TLV unchanged.
     #[clap(long, value_parser = clap::value_parser!(u8).range(0..16))]
@@ -527,6 +533,11 @@ impl Configuration {
                 self.ecn
             )));
         }
+        if self.ttl == Some(0) {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "ttl value 0 is invalid (must be 1-255)".to_string(),
+            ));
+        }
         if let Some(id) = self.access_report {
             if id > 15 {
                 return Err(ConfigurationError::InvalidConfiguration(format!(
@@ -704,6 +715,7 @@ impl Configuration {
         merge!(cos);
         merge!(dscp);
         merge!(ecn);
+        merge_opt!(ttl);
         merge_opt!(access_report);
         merge!(access_return_code);
         merge!(timestamp_info);
@@ -789,6 +801,7 @@ pub struct FileConfiguration {
     pub cos: Option<bool>,
     pub dscp: Option<u8>,
     pub ecn: Option<u8>,
+    pub ttl: Option<u8>,
     pub access_report: Option<u8>,
     pub access_return_code: Option<u8>,
     pub timestamp_info: Option<bool>,
@@ -868,6 +881,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "cos": { "type": "boolean" },
     "dscp": { "type": "integer", "minimum": 0, "maximum": 63 },
     "ecn":  { "type": "integer", "minimum": 0, "maximum": 3 },
+    "ttl":  { "type": "integer", "minimum": 1, "maximum": 255 },
     "access_report": { "type": "integer", "minimum": 0, "maximum": 15 },
     "access_return_code": { "type": "integer", "minimum": 0, "maximum": 15 },
     "timestamp_info": { "type": "boolean" },
@@ -1359,6 +1373,7 @@ mod tests {
             "cos",
             "dscp",
             "ecn",
+            "ttl",
             "access_report",
             "access_return_code",
             "timestamp_info",

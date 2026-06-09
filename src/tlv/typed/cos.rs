@@ -61,6 +61,15 @@ impl ClassOfServiceTlv {
         }
     }
 
+    /// Packs DSCP1/ECN1 into the single octet used by the IPv4 TOS /
+    /// IPv6 Traffic Class field, so a sender can mark its egress IP header to
+    /// match what this TLV advertises (RFC 8972 §4.4). This is identical to the
+    /// first byte produced by [`encode_value`](Self::encode_value).
+    #[must_use]
+    pub const fn wire_tos(&self) -> u8 {
+        ((self.dscp1 & 0x3F) << 2) | (self.ecn1 & 0x03)
+    }
+
     /// Returns true if the reflector's policy rejected the requested DSCP.
     #[must_use]
     pub fn policy_rejected(&self) -> bool {
@@ -183,6 +192,32 @@ mod tests {
         let cos = ClassOfServiceTlv::for_response(46, 2, 10, 1, false);
         assert_eq!(cos.effective_dscp(false), 46);
         assert_eq!(cos.effective_dscp(true), 10);
+    }
+
+    #[test]
+    fn test_wire_tos_packs_dscp_and_ecn() {
+        // EF (DSCP 46) with ECN(0) => (46 << 2) | 0 = 0xB8
+        assert_eq!(ClassOfServiceTlv::new(46, 0).wire_tos(), 0xB8);
+        // EF (DSCP 46) with CE (ECN 3) => (46 << 2) | 3 = 0xBB
+        assert_eq!(ClassOfServiceTlv::new(46, 3).wire_tos(), 0xBB);
+        // ECN-only
+        assert_eq!(ClassOfServiceTlv::new(0, 3).wire_tos(), 0x03);
+        // Maximum values saturate the whole byte
+        assert_eq!(ClassOfServiceTlv::new(63, 3).wire_tos(), 0xFF);
+        // Out-of-range inputs are masked by new()
+        assert_eq!(ClassOfServiceTlv::new(0xFF, 0xFF).wire_tos(), 0xFF);
+    }
+
+    #[test]
+    fn test_wire_tos_matches_encoded_first_byte() {
+        // wire_tos() MUST equal the first encoded value byte (DSCP1|ECN1),
+        // i.e. the octet that belongs in the IP TOS / IPv6 Traffic Class field.
+        for dscp in [0u8, 10, 18, 26, 34, 46, 63] {
+            for ecn in 0u8..=3 {
+                let cos = ClassOfServiceTlv::new(dscp, ecn);
+                assert_eq!(cos.wire_tos(), cos.to_raw().value[0]);
+            }
+        }
     }
 
     #[test]

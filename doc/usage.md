@@ -164,9 +164,14 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
 
 ```
       --ssid <ID>                  Session-Sender Identifier (RFC 8972 §3)
-      --cos                        Class of Service TLV (RFC 8972 §4.4)
+      --cos                        Class of Service TLV (RFC 8972 §4.4).
+                                   Also marks the egress IP header (TOS /
+                                   IPv6 Traffic Class) to match DSCP/ECN
+                                   (Linux/macOS).
       --dscp <0..63>               DSCP requested via CoS TLV [default: 0]
       --ecn <0..3>                 ECN requested via CoS TLV [default: 0]
+      --ttl <1..255>               IP TTL / IPv6 Hop Limit for outgoing test
+                                   packets [default: OS default] (Linux/macOS)
       --location                   Location TLV (RFC 8972 §4.2)
       --timestamp-info             Timestamp Information TLV (RFC 8972 §4.3)
       --direct-measurement         Direct Measurement TLV (RFC 8972 §4.5)

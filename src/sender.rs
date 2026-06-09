@@ -59,6 +59,62 @@ struct SenderRecvContext<'a> {
     snmp_stats: Option<&'a crate::snmp::state::SenderSnmpStats>,
 }
 
+/// Applies the egress IP header options — DSCP/ECN (packed into the TOS /
+/// IPv6 Traffic Class octet) and an optional TTL / Hop Limit — directly to the
+/// raw socket `fd`, so the *wire* IP header matches what the Class of Service
+/// TLV advertises (RFC 8972 §4.4). Each option is independently optional;
+/// `None` leaves the kernel default untouched.
+///
+/// Only available on Linux/macOS, where `nix` (and thus `libc`) is guaranteed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn apply_egress_ip_options(
+    fd: std::os::fd::RawFd,
+    is_ipv6: bool,
+    tos: Option<u8>,
+    ttl: Option<u8>,
+) -> std::io::Result<()> {
+    use nix::libc;
+
+    // SAFETY: `fd` is an open socket owned by the caller for the duration of
+    // the call; the option value outlives the syscall and its length is passed
+    // explicitly, so `setsockopt` reads exactly `size_of::<c_int>()` bytes.
+    let set_int =
+        |level: libc::c_int, name: libc::c_int, value: libc::c_int| -> std::io::Result<()> {
+            let rc = unsafe {
+                libc::setsockopt(
+                    fd,
+                    level,
+                    name,
+                    std::ptr::addr_of!(value).cast(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if rc < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        };
+
+    if let Some(tos) = tos {
+        let (level, name) = if is_ipv6 {
+            (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+        } else {
+            (libc::IPPROTO_IP, libc::IP_TOS)
+        };
+        set_int(level, name, libc::c_int::from(tos))?;
+    }
+    if let Some(ttl) = ttl {
+        let (level, name) = if is_ipv6 {
+            (libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS)
+        } else {
+            (libc::IPPROTO_IP, libc::IP_TTL)
+        };
+        set_int(level, name, libc::c_int::from(ttl))?;
+    }
+    Ok(())
+}
+
 /// Runs the STAMP sender, transmitting test packets and collecting statistics.
 ///
 /// Sends packets to the configured remote address and waits for reflected responses.
@@ -92,6 +148,47 @@ pub async fn run_sender(
     if let Err(e) = socket.connect(remote_addr).await {
         eprintln!("Cannot connect to address {}: {}", remote_addr, e);
         return empty_snapshot();
+    }
+
+    // Mark the egress IP header so the on-the-wire DSCP/ECN matches the Class
+    // of Service TLV advertisement (RFC 8972 §4.4) and honour the configured
+    // TTL / Hop Limit. Without this the CoS TLV would be advisory only and
+    // forward-path DSCP remapping could not be measured truthfully.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::fd::AsRawFd;
+
+        let egress_tos = conf
+            .cos
+            .then(|| ClassOfServiceTlv::new(conf.dscp, conf.ecn).wire_tos());
+
+        if egress_tos.is_some() || conf.ttl.is_some() {
+            let is_ipv6 = socket.local_addr().is_ok_and(|a| a.is_ipv6());
+            match apply_egress_ip_options(socket.as_raw_fd(), is_ipv6, egress_tos, conf.ttl) {
+                Ok(()) => {
+                    if let Some(tos) = egress_tos {
+                        log::info!(
+                            "Egress IP marking set: TOS/Traffic-Class=0x{tos:02x} (DSCP={}, ECN={})",
+                            conf.dscp,
+                            conf.ecn
+                        );
+                    }
+                    if let Some(ttl) = conf.ttl {
+                        log::info!("Egress IP TTL/Hop-Limit set to {ttl}");
+                    }
+                }
+                Err(e) => log::warn!("Failed to set egress IP options (DSCP/ECN/TTL): {e}"),
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        if conf.cos || conf.ttl.is_some() {
+            log::warn!(
+                "Egress DSCP/ECN/TTL marking is only supported on Linux/macOS; \
+                 the outgoing IP header will use OS defaults"
+            );
+        }
     }
 
     // Build error estimate from configuration with Z flag set based on clock source
@@ -1129,6 +1226,79 @@ pub fn create_extended_auth_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn getsockopt_int(
+        fd: std::os::fd::RawFd,
+        level: nix::libc::c_int,
+        name: nix::libc::c_int,
+    ) -> nix::libc::c_int {
+        use nix::libc;
+        let mut val: libc::c_int = -1;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                level,
+                name,
+                &mut val as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "getsockopt(level={level}, name={name}) failed: {}",
+            std::io::Error::last_os_error()
+        );
+        val
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn test_apply_egress_ip_options_sets_tos_and_ttl_v4() {
+        use nix::libc;
+        use std::os::fd::AsRawFd;
+
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind v4");
+        let fd = sock.as_raw_fd();
+
+        // DSCP 46 (EF) / ECN 0 => 0xB8, hop limit 7.
+        apply_egress_ip_options(fd, false, Some(0xB8), Some(7)).expect("apply v4 opts");
+
+        assert_eq!(getsockopt_int(fd, libc::IPPROTO_IP, libc::IP_TOS), 0xB8);
+        assert_eq!(getsockopt_int(fd, libc::IPPROTO_IP, libc::IP_TTL), 7);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn test_apply_egress_ip_options_sets_tclass_and_hops_v6() {
+        use nix::libc;
+        use std::os::fd::AsRawFd;
+
+        let sock = std::net::UdpSocket::bind("[::1]:0").expect("bind v6");
+        let fd = sock.as_raw_fd();
+
+        apply_egress_ip_options(fd, true, Some(0x20), Some(9)).expect("apply v6 opts");
+
+        assert_eq!(
+            getsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_TCLASS),
+            0x20
+        );
+        assert_eq!(
+            getsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS),
+            9
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn test_apply_egress_ip_options_none_is_noop() {
+        use std::os::fd::AsRawFd;
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind v4");
+        // Passing no options must not error and must leave defaults untouched.
+        apply_egress_ip_options(sock.as_raw_fd(), false, None, None).expect("noop");
+    }
 
     #[test]
     fn test_parse_hex_pattern_basic() {
