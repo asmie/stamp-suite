@@ -142,6 +142,7 @@ impl RttCollector {
             p99_rtt_ms: self.percentile_ns(99.0).map(ns_to_ms),
             jitter_ms: self.jitter_ns().map(ns_to_ms),
             std_dev_ms: self.std_dev_ns().map(|ns| ns / 1_000_000.0),
+            owd: None,
         }
     }
 }
@@ -154,6 +155,119 @@ impl Default for RttCollector {
 
 fn ns_to_ms(ns: u64) -> f64 {
     ns as f64 / 1_000_000.0
+}
+
+fn ns_i64_to_ms(ns: i64) -> f64 {
+    ns as f64 / 1_000_000.0
+}
+
+/// A single one-way-delay measurement derived from the four STAMP timestamps.
+///
+/// Both directions are **signed**: when the sender and reflector clocks are
+/// not synchronised the constant clock offset adds to one direction and
+/// subtracts from the other, which can make a value negative. We preserve the
+/// sign so the asymmetry remains visible rather than masking a clock problem.
+pub struct OwdSample {
+    /// Sequence number of the measured packet.
+    pub seq: u32,
+    /// Forward one-way delay `T2 − T1` (sender → reflector), nanoseconds.
+    pub forward_ns: i64,
+    /// Reverse one-way delay `T4 − T3` (reflector → sender), nanoseconds.
+    pub reverse_ns: i64,
+}
+
+/// Accumulates the samples for one OWD direction and derives min/max/mean/median.
+#[derive(Default)]
+struct OwdDirection {
+    samples: Vec<i64>,
+    min_ns: Option<i64>,
+    max_ns: Option<i64>,
+    sum_ns: i128,
+}
+
+impl OwdDirection {
+    fn record(&mut self, v: i64) {
+        self.min_ns = Some(self.min_ns.map_or(v, |m| m.min(v)));
+        self.max_ns = Some(self.max_ns.map_or(v, |m| m.max(v)));
+        self.sum_ns += i128::from(v);
+        self.samples.push(v);
+    }
+
+    fn mean_ns(&self) -> Option<f64> {
+        let n = self.samples.len();
+        (n > 0).then(|| self.sum_ns as f64 / n as f64)
+    }
+
+    /// Median using the same nearest-rank rounding as [`RttCollector::percentile_ns`].
+    fn median_ns(&self) -> Option<i64> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut sorted = self.samples.clone();
+        sorted.sort_unstable();
+        let idx = (0.5 * (sorted.len() - 1) as f64).round() as usize;
+        Some(sorted[idx])
+    }
+}
+
+/// Collects per-packet one-way-delay samples (both directions) and produces an
+/// [`OwdSummary`]. Fed from the sender's response path, where all four STAMP
+/// timestamps (T1..T4) are available.
+#[derive(Default)]
+pub struct OwdCollector {
+    forward: OwdDirection,
+    reverse: OwdDirection,
+    count: u32,
+}
+
+impl OwdCollector {
+    /// Creates a new empty collector.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one packet's forward and reverse one-way delays.
+    pub fn record(&mut self, sample: OwdSample) {
+        self.forward.record(sample.forward_ns);
+        self.reverse.record(sample.reverse_ns);
+        self.count += 1;
+    }
+
+    /// Summarises the collected samples, or `None` if none were recorded.
+    #[must_use]
+    pub fn summary(&self) -> Option<OwdSummary> {
+        Some(OwdSummary {
+            samples: self.count,
+            forward_min_ms: ns_i64_to_ms(self.forward.min_ns?),
+            forward_avg_ms: self.forward.mean_ns()? / 1_000_000.0,
+            forward_max_ms: ns_i64_to_ms(self.forward.max_ns?),
+            forward_median_ms: ns_i64_to_ms(self.forward.median_ns()?),
+            reverse_min_ms: ns_i64_to_ms(self.reverse.min_ns?),
+            reverse_avg_ms: self.reverse.mean_ns()? / 1_000_000.0,
+            reverse_max_ms: ns_i64_to_ms(self.reverse.max_ns?),
+            reverse_median_ms: ns_i64_to_ms(self.reverse.median_ns()?),
+        })
+    }
+}
+
+/// Aggregated one-way-delay statistics (milliseconds), both directions.
+///
+/// Values assume the sender and reflector clocks are synchronised (e.g. via
+/// NTP/PTP); without synchronisation the forward/reverse split reflects the
+/// clock offset rather than true path delay, though their sum stays consistent
+/// with the round-trip time.
+#[derive(serde::Serialize)]
+pub struct OwdSummary {
+    pub samples: u32,
+    pub forward_min_ms: f64,
+    pub forward_avg_ms: f64,
+    pub forward_max_ms: f64,
+    pub forward_median_ms: f64,
+    pub reverse_min_ms: f64,
+    pub reverse_avg_ms: f64,
+    pub reverse_max_ms: f64,
+    pub reverse_median_ms: f64,
 }
 
 /// Serializable sender statistics snapshot.
@@ -171,9 +285,21 @@ pub struct StatsSnapshot {
     pub p99_rtt_ms: Option<f64>,
     pub jitter_ms: Option<f64>,
     pub std_dev_ms: Option<f64>,
+    /// One-way-delay summary, present once at least one response with usable
+    /// timestamps has been measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owd: Option<OwdSummary>,
 }
 
 impl StatsSnapshot {
+    /// Attaches one-way-delay statistics from `owd` to this snapshot. A no-op
+    /// (leaves `owd` as `None`) when the collector has no samples.
+    #[must_use]
+    pub fn with_owd(mut self, owd: &OwdCollector) -> Self {
+        self.owd = owd.summary();
+        self
+    }
+
     /// Prints the final summary in the given format.
     pub fn print(&self, format: OutputFormat) {
         match format {
@@ -224,6 +350,28 @@ impl StatsSnapshot {
         if let Some(v) = self.std_dev_ms {
             println!("{}Std Dev: {:.3} ms", prefix, v);
         }
+        if let Some(owd) = &self.owd {
+            println!(
+                "{}One-way delay (assumes synchronized clocks, n={}):",
+                prefix, owd.samples
+            );
+            println!(
+                "{}  Forward (sender→reflector): min {:.3} / avg {:.3} / med {:.3} / max {:.3} ms",
+                prefix,
+                owd.forward_min_ms,
+                owd.forward_avg_ms,
+                owd.forward_median_ms,
+                owd.forward_max_ms
+            );
+            println!(
+                "{}  Reverse (reflector→sender): min {:.3} / avg {:.3} / med {:.3} / max {:.3} ms",
+                prefix,
+                owd.reverse_min_ms,
+                owd.reverse_avg_ms,
+                owd.reverse_median_ms,
+                owd.reverse_max_ms
+            );
+        }
     }
 
     fn print_json(&self, interim: bool) {
@@ -244,14 +392,17 @@ impl StatsSnapshot {
     }
 
     fn print_csv(&self) {
-        // Header + data row
+        // Header + data row. OWD columns are always present but left empty
+        // when no one-way-delay samples were collected.
         println!(
             "packets_sent,packets_received,packets_lost,loss_percent,\
              min_rtt_ms,max_rtt_ms,avg_rtt_ms,median_rtt_ms,\
-             p95_rtt_ms,p99_rtt_ms,jitter_ms,std_dev_ms"
+             p95_rtt_ms,p99_rtt_ms,jitter_ms,std_dev_ms,\
+             owd_fwd_min_ms,owd_fwd_avg_ms,owd_fwd_max_ms,\
+             owd_rev_min_ms,owd_rev_avg_ms,owd_rev_max_ms"
         );
         println!(
-            "{},{},{},{:.2},{},{},{},{},{},{},{},{}",
+            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.packets_sent,
             self.packets_received,
             self.packets_lost,
@@ -264,6 +415,12 @@ impl StatsSnapshot {
             fmt_opt(self.p99_rtt_ms),
             fmt_opt(self.jitter_ms),
             fmt_opt(self.std_dev_ms),
+            fmt_opt(self.owd.as_ref().map(|o| o.forward_min_ms)),
+            fmt_opt(self.owd.as_ref().map(|o| o.forward_avg_ms)),
+            fmt_opt(self.owd.as_ref().map(|o| o.forward_max_ms)),
+            fmt_opt(self.owd.as_ref().map(|o| o.reverse_min_ms)),
+            fmt_opt(self.owd.as_ref().map(|o| o.reverse_avg_ms)),
+            fmt_opt(self.owd.as_ref().map(|o| o.reverse_max_ms)),
         );
     }
 }
@@ -472,6 +629,7 @@ mod tests {
             p99_rtt_ms: Some(4.9),
             jitter_ms: Some(0.5),
             std_dev_ms: Some(1.2),
+            owd: None,
         };
         // Should not panic
         snap.print(OutputFormat::Text);
@@ -492,6 +650,7 @@ mod tests {
             p99_rtt_ms: Some(4.9),
             jitter_ms: Some(0.5),
             std_dev_ms: Some(1.2),
+            owd: None,
         };
         // Should not panic
         snap.print(OutputFormat::Json);
@@ -512,6 +671,7 @@ mod tests {
             p99_rtt_ms: Some(4.9),
             jitter_ms: Some(0.5),
             std_dev_ms: Some(1.2),
+            owd: None,
         };
         // Should not panic
         snap.print(OutputFormat::Csv);
@@ -532,6 +692,7 @@ mod tests {
             p99_rtt_ms: None,
             jitter_ms: None,
             std_dev_ms: None,
+            owd: None,
         };
         snap.print(OutputFormat::Json);
     }
@@ -788,5 +949,68 @@ mod tests {
         let snap = c.snapshot(0, 0);
         assert!(snap.loss_percent.is_finite());
         assert!((snap.loss_percent - 0.0).abs() < 0.01);
+    }
+
+    // -----------------------------------------------------------------------
+    // One-way delay aggregation.
+
+    #[test]
+    fn owd_empty_summary_is_none() {
+        assert!(OwdCollector::new().summary().is_none());
+    }
+
+    #[test]
+    fn owd_records_forward_and_reverse() {
+        let mut c = OwdCollector::new();
+        // forward: 1,2,3 ms; reverse: 4,5,6 ms
+        for i in 0..3 {
+            c.record(OwdSample {
+                seq: i,
+                forward_ns: (i as i64 + 1) * 1_000_000,
+                reverse_ns: (i as i64 + 4) * 1_000_000,
+            });
+        }
+        let s = c.summary().expect("summary present");
+        assert_eq!(s.samples, 3);
+        assert!((s.forward_min_ms - 1.0).abs() < 1e-9);
+        assert!((s.forward_avg_ms - 2.0).abs() < 1e-9);
+        assert!((s.forward_max_ms - 3.0).abs() < 1e-9);
+        assert!((s.forward_median_ms - 2.0).abs() < 1e-9);
+        assert!((s.reverse_min_ms - 4.0).abs() < 1e-9);
+        assert!((s.reverse_avg_ms - 5.0).abs() < 1e-9);
+        assert!((s.reverse_max_ms - 6.0).abs() < 1e-9);
+        assert!((s.reverse_median_ms - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn owd_preserves_negative_offset() {
+        // Unsynchronised clocks can yield a negative one-way delay; it must be
+        // preserved (not clamped to zero) so the directional asymmetry shows.
+        let mut c = OwdCollector::new();
+        c.record(OwdSample {
+            seq: 0,
+            forward_ns: -2_000_000,
+            reverse_ns: 8_000_000,
+        });
+        let s = c.summary().unwrap();
+        assert!((s.forward_min_ms - (-2.0)).abs() < 1e-9);
+        assert!((s.forward_avg_ms - (-2.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn owd_summary_attaches_to_snapshot() {
+        let mut owd = OwdCollector::new();
+        owd.record(OwdSample {
+            seq: 0,
+            forward_ns: 1_000_000,
+            reverse_ns: 2_000_000,
+        });
+        let snap = RttCollector::new().snapshot(1, 0).with_owd(&owd);
+        assert!(snap.owd.is_some());
+        // Without samples, with_owd leaves it None (does not attach).
+        let empty = RttCollector::new()
+            .snapshot(0, 0)
+            .with_owd(&OwdCollector::new());
+        assert!(empty.owd.is_none());
     }
 }

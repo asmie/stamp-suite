@@ -25,6 +25,25 @@ pub fn generate_timestamp(cs: ClockFormat) -> u64 {
     }
 }
 
+/// Converts a wire STAMP timestamp back to nanoseconds since its clock epoch
+/// (NTP: 1900-01-01, PTP: 1970-01-01), so two timestamps of the **same**
+/// format can be subtracted to obtain a one-way delay. The upper 32 bits are
+/// whole seconds in both formats; the lower 32 bits are an NTP binary fraction
+/// or PTP nanoseconds respectively. Returns `u128` to keep the
+/// `seconds * 10^9` product exact for the full 32-bit seconds range.
+#[must_use]
+pub fn timestamp_to_nanos(value: u64, cs: ClockFormat) -> u128 {
+    let secs = u128::from(value >> 32);
+    let frac = u128::from(value & 0xFFFF_FFFF);
+    let subsec_nanos = match cs {
+        // NTP fraction → nanoseconds: frac * 10^9 / 2^32.
+        ClockFormat::NTP => (frac * 1_000_000_000) >> 32,
+        // PTP lower word already holds nanoseconds.
+        ClockFormat::PTP => frac,
+    };
+    secs * 1_000_000_000 + subsec_nanos
+}
+
 fn convert_dt_to_ntp(date: DateTime<Utc>) -> u64 {
     let secs = (date.timestamp() + NTP_UNIX_OFFSET) as u32;
     // NTP fraction: nanoseconds * 2^32 / 10^9
@@ -90,6 +109,44 @@ mod tests {
         assert_conversion(1_525_987, 0);
         assert_conversion(0, 0);
         assert_conversion(2_584_229, 25_003_600);
+    }
+
+    #[test]
+    fn timestamp_to_nanos_ptp_exact() {
+        // PTP packs (secs << 32) | nanos directly.
+        let v = (5u64 << 32) | 250_000_000;
+        assert_eq!(timestamp_to_nanos(v, ClockFormat::PTP), 5_250_000_000);
+    }
+
+    #[test]
+    fn timestamp_to_nanos_ntp_half_second() {
+        // NTP fraction 2^31 == 0.5 s.
+        let v = (1u64 << 32) | (1u64 << 31);
+        assert_eq!(timestamp_to_nanos(v, ClockFormat::NTP), 1_500_000_000);
+    }
+
+    #[test]
+    fn timestamp_to_nanos_round_trips_ptp_generate() {
+        let dt = DateTime::<Utc>::from_timestamp(2_584_229, 25_003_600).unwrap();
+        let ptp = convert_dt_to_ptp(dt);
+        assert_eq!(
+            timestamp_to_nanos(ptp, ClockFormat::PTP),
+            2_584_229_025_003_600
+        );
+    }
+
+    #[test]
+    fn timestamp_to_nanos_ntp_round_trips_within_tolerance() {
+        // A timestamp from convert_dt_to_ntp converts back to ns-since-NTP-epoch
+        // within the ~0.23 ns NTP fractional resolution.
+        let dt = DateTime::<Utc>::from_timestamp(2_584_229, 151_000_000).unwrap();
+        let ntp = convert_dt_to_ntp(dt);
+        let expected = (2_584_229u128 + NTP_UNIX_OFFSET as u128) * 1_000_000_000 + 151_000_000;
+        let got = timestamp_to_nanos(ntp, ClockFormat::NTP);
+        assert!(
+            (got as i128 - expected as i128).abs() <= 1,
+            "expected ~{expected} ns, got {got}"
+        );
     }
 
     #[test]

@@ -21,8 +21,8 @@ use crate::{
         load_hmac_key, AUTH_BASE_SIZE, REFLECTED_AUTH_PACKET_HMAC_OFFSET, UNAUTH_BASE_SIZE,
     },
     session::Session,
-    stats::{RttCollector, RttSample, StatsSnapshot},
-    time::generate_timestamp,
+    stats::{OwdCollector, OwdSample, RttCollector, RttSample, StatsSnapshot},
+    time::{generate_timestamp, timestamp_to_nanos},
     tlv::{
         AccessReportTlv, BerBurstTlv, BerCountTlv, BerPatternTlv, ClassOfServiceTlv,
         DestinationNodeAddressTlv, DirectMeasurementTlv, ExtraPaddingTlv, FollowUpTelemetryTlv,
@@ -37,8 +37,8 @@ use crate::{
 struct PendingPacket {
     /// Wall-clock time when the packet was sent.
     send_time: Instant,
-    /// STAMP timestamp embedded in the sent packet.
-    #[allow(dead_code)]
+    /// STAMP timestamp (T1) embedded in the sent packet, used to compute the
+    /// forward one-way delay against the reflector's receive timestamp (T2).
     send_timestamp: u64,
 }
 
@@ -46,6 +46,7 @@ struct PendingPacket {
 struct SenderRecvContext<'a> {
     pending: &'a mut HashMap<u32, PendingPacket>,
     rtt_collector: &'a mut RttCollector,
+    owd_collector: &'a mut OwdCollector,
     packets_received: &'a mut u32,
     print_stats: bool,
     hmac_key: Option<&'a HmacKey>,
@@ -226,6 +227,7 @@ pub async fn run_sender(
     // deadlines are naturally ordered. Lazy deletion skips already-received entries.
     let mut expiry_queue: VecDeque<(Instant, u32)> = VecDeque::new();
     let mut rtt_collector = RttCollector::new();
+    let mut owd_collector = OwdCollector::new();
     let mut packets_sent: u32 = 0;
     let mut packets_received: u32 = 0;
     let mut packets_lost: u32 = 0;
@@ -528,6 +530,7 @@ pub async fn run_sender(
                             let mut ctx = SenderRecvContext {
                                 pending: &mut pending,
                                 rtt_collector: &mut rtt_collector,
+                                owd_collector: &mut owd_collector,
                                 packets_received: &mut packets_received,
                                 print_stats: conf.print_stats,
                                 hmac_key: hmac_key.as_ref(),
@@ -564,7 +567,9 @@ pub async fn run_sender(
                         std::future::pending::<tokio::time::Instant>().await
                     }
                 } => {
-                    let interim = rtt_collector.snapshot(packets_sent, packets_lost);
+                    let interim = rtt_collector
+                        .snapshot(packets_sent, packets_lost)
+                        .with_owd(&owd_collector);
                     interim.print_interim(output_format);
                 }
             }
@@ -605,6 +610,7 @@ pub async fn run_sender(
                 let mut ctx = SenderRecvContext {
                     pending: &mut pending,
                     rtt_collector: &mut rtt_collector,
+                    owd_collector: &mut owd_collector,
                     packets_received: &mut packets_received,
                     print_stats: conf.print_stats,
                     hmac_key: hmac_key.as_ref(),
@@ -642,17 +648,22 @@ pub async fn run_sender(
         stats.inc_lost_by(remaining_lost);
     }
 
-    rtt_collector.snapshot(packets_sent, packets_lost)
+    rtt_collector
+        .snapshot(packets_sent, packets_lost)
+        .with_owd(&owd_collector)
 }
 
 fn process_response(
     data: &[u8],
     use_auth: bool,
     use_tlvs: bool,
-    _clock_source: ClockFormat,
+    clock_source: ClockFormat,
     ctx: &mut SenderRecvContext,
 ) {
     let recv_time = Instant::now();
+    // T4: the sender's wall-clock receive timestamp, captured as early as
+    // possible (before parsing) for the reverse one-way-delay computation.
+    let sender_recv_ts = generate_timestamp(clock_source);
 
     // Parse response and validate TLVs if extension mode is enabled
     // Use lenient parsing per RFC 8762 §4.6 to handle short packets
@@ -806,6 +817,20 @@ fn process_response(
             seq: seq_num,
             rtt_ns,
             ttl: sender_ttl,
+        });
+
+        // One-way delays from the four STAMP timestamps (signed: an
+        // unsynchronised clock offset shifts the split between directions).
+        //   forward = T2 − T1 (sender → reflector)
+        //   reverse = T4 − T3 (reflector → sender)
+        let t1 = timestamp_to_nanos(pending_packet.send_timestamp, clock_source) as i128;
+        let t2 = timestamp_to_nanos(reflector_recv_ts, clock_source) as i128;
+        let t3 = timestamp_to_nanos(reflector_send_ts, clock_source) as i128;
+        let t4 = timestamp_to_nanos(sender_recv_ts, clock_source) as i128;
+        ctx.owd_collector.record(OwdSample {
+            seq: seq_num,
+            forward_ns: (t2 - t1) as i64,
+            reverse_ns: (t4 - t3) as i64,
         });
 
         #[cfg(all(unix, feature = "snmp"))]
@@ -1622,6 +1647,68 @@ mod tests {
     }
 
     #[test]
+    fn test_process_response_records_forward_one_way_delay() {
+        use crate::packets::ReflectedPacketUnauthenticated;
+
+        // PTP timestamps (secs << 32 | nanos) make the conversion exact.
+        // T1 = 1.000 s (in pending), T2 = 1.003 s (reflector receive) ⇒ the
+        // forward one-way delay is exactly 3 ms regardless of the (live) T4.
+        let t1 = 1u64 << 32;
+        let t2 = (1u64 << 32) | 3_000_000;
+        let t3 = (1u64 << 32) | 4_000_000;
+
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 7,
+            timestamp: t3,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: t2,
+            sess_sender_seq_number: 7,
+            sess_sender_timestamp: t1,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 64,
+            mbz3: [0; 3],
+        };
+        let buf = reflected.to_bytes();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            7,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: t1,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut ctx = SenderRecvContext {
+            pending: &mut pending,
+            rtt_collector: &mut rtt_collector,
+            owd_collector: &mut owd_collector,
+            packets_received: &mut packets_received,
+            print_stats: false,
+            hmac_key: None,
+            expected_sender_msid: None,
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
+            #[cfg(all(unix, feature = "snmp"))]
+            snmp_stats: None,
+        };
+
+        process_response(&buf, false, false, ClockFormat::PTP, &mut ctx);
+
+        let owd = owd_collector.summary().expect("one OWD sample recorded");
+        assert_eq!(owd.samples, 1);
+        assert!(
+            (owd.forward_avg_ms - 3.0).abs() < 1e-6,
+            "forward OWD must be T2 − T1 = 3 ms, got {}",
+            owd.forward_avg_ms
+        );
+    }
+
+    #[test]
     fn test_process_response_drops_packet_on_msid_mismatch() {
         use crate::packets::{
             ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated,
@@ -1659,10 +1746,12 @@ mod tests {
             },
         );
         let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
         let mut packets_received = 0u32;
         let mut ctx = SenderRecvContext {
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
+            owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
             hmac_key: None,
@@ -1728,10 +1817,12 @@ mod tests {
             },
         );
         let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
         let mut packets_received = 0u32;
         let mut ctx = SenderRecvContext {
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
+            owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
             hmac_key: None,
