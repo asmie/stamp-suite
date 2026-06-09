@@ -630,10 +630,14 @@ pub struct ReflectedControlBehavior {
     pub interval_ns: u32,
 }
 
-/// Default hard cap on total reply packets emitted for a single Reflected
-/// Control request. Protects against request amplification / DoS. The C flag
-/// is set when the requested count exceeds this cap. Operators can override
-/// at runtime via `--reflected-control-max-count`.
+/// Example hard cap on total reply packets emitted for a single Reflected
+/// Control request when the feature is enabled. Protects against request
+/// amplification / DoS; the C flag is set when the requested count exceeds it.
+///
+/// Note: this is **not** the production default. The CLI default for
+/// `--reflected-control-max-count` is 0 (asymmetric reflection disabled, per
+/// draft-ietf-ippm-asymmetrical-pkts); this constant is the enabled-path cap
+/// used by tests and as a suggested opt-in value.
 pub const REFLECTED_CONTROL_MAX_COUNT: u16 = 16;
 
 /// Default reflector cap on the reply packet size (in octets) the reflector

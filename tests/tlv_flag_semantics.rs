@@ -420,6 +420,47 @@ fn c_flag_clear_when_reflected_control_request_within_caps() {
     );
 }
 
+#[test]
+fn reflected_control_disabled_by_default_emits_no_extra_copies() {
+    // With reflected_control_max_count = 0 (the production default), a Type 12
+    // request must not amplify: zero extra copies, and the C flag set to tell
+    // the sender the request was not honoured.
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&0u16.to_be_bytes()); // length
+    value.extend_from_slice(&8u16.to_be_bytes()); // count: 8 reply packets
+    value.extend_from_slice(&1_000_000u32.to_be_bytes()); // interval
+    value.extend_from_slice(&[0u8; 4]); // sub-TLV placeholder
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let mut ctx = make_ctx(None);
+    ctx.reflected_control_max_count = 0; // disabled (production default)
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("reflector should still produce the single normal reply");
+
+    // No amplification: either no behavior recorded, or zero extra copies.
+    let extra = response.reflected_control.map_or(0, |b| b.extra_copies);
+    assert_eq!(
+        extra, 0,
+        "disabled reflector must emit no extra reply packets"
+    );
+
+    // C flag set on the echoed Type 12 TLV (request not honoured).
+    let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..])
+        .expect("response TLV chain must be parseable");
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Reflected Control TLV must be echoed");
+    assert_eq!(
+        echoed.flags.to_byte() & 0x10,
+        0x10,
+        "C flag must be set when the reflector cannot honour the request"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Independence — U/M/I bits must not bleed into each other.
 

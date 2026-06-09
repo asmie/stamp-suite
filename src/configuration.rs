@@ -429,8 +429,14 @@ pub struct Configuration {
     /// the reflector will emit in response to a single Reflected Test
     /// Packet Control TLV request, regardless of what the sender requests.
     /// When the sender requests more than this, the count is clamped and
-    /// the C flag is set on the echoed TLV. Default 16.
-    #[clap(long, default_value_t = 16)]
+    /// the C flag is set on the echoed TLV.
+    ///
+    /// Default 0, which **disables** asymmetric reflection — the reflector
+    /// sends only the single normal reply and sets the C flag. This honours
+    /// draft-ietf-ippm-asymmetrical-pkts, which requires the feature be
+    /// administratively controllable and disabled by default. Set a positive
+    /// value to opt in (e.g. 16); pair with `--max-pps` to bound amplification.
+    #[clap(long, default_value_t = 0)]
     pub reflected_control_max_count: u16,
 
     /// Reflector-side amplification cap: maximum reply packet size (in
@@ -1457,6 +1463,18 @@ mod tests {
         let args = vec!["test"];
         let conf = Configuration::parse_from(args);
         assert_eq!(conf.hwtstamp, HwTsMode::Auto);
+    }
+
+    #[test]
+    fn test_reflected_control_max_count_defaults_to_zero() {
+        // draft-ietf-ippm-asymmetrical-pkts: the reflected-packet feature MUST
+        // be disabled by default. A zero cap means no amplification unless the
+        // operator opts in via --reflected-control-max-count.
+        let conf = Configuration::parse_from(["test"]);
+        assert_eq!(
+            conf.reflected_control_max_count, 0,
+            "Type 12 reflection must be disabled by default"
+        );
     }
 
     #[test]

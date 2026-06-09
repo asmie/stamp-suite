@@ -372,7 +372,7 @@ stamp-suite --remote-addr 192.168.1.100 \
 
 Reflector behaviour (aligned with draft-14 §3 as of this release):
 
-- Emits up to `--reflected-control-max-count` reply packets per request (default 16); excess requests are clamped and the **C flag** (Conformant Reflected Packet, bit 3 of the TLV flags byte, mask 0x10) is set on the echoed TLV to indicate non-conformance.
+- **Disabled by default** (`--reflected-control-max-count` defaults to 0), per draft-ietf-ippm-asymmetrical-pkts, which requires the feature be administratively controllable and off by default: the reflector then sends only the single normal reply and sets the **C flag** (Conformant Reflected Packet, bit 3 of the TLV flags byte, mask 0x10) to signal the request was not honoured. Set a positive `--reflected-control-max-count` (e.g. 16) to opt in; the reflector then emits up to that many reply packets per request and clamps/​C-flags anything above it. Pair with `--max-pps` to bound amplification.
 - Clamps the inter-packet interval up to at least `--reflected-control-min-interval-ns` (default 1 µs).
 - Honours the requested reply-packet length up to `--reflected-control-max-size` (default 1500 bytes, typical Ethernet MTU) by appending an Extra Padding TLV (Type 1) before the HMAC TLV. When the request exceeds the cap, the C flag is set; the reply still pads to the cap.
 - Parses **Layer-3 Address Group sub-TLV** (sub-TLV Type 11): the reflector applies the requested prefix mask to each of its local IP addresses; if none matches, the packet is dropped per draft §3 ("MUST stop processing the received packet"). The drop surfaces to the backend as `ReturnPathAction::SuppressReply`.
