@@ -405,7 +405,9 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                             continue;
                         }
                         ReturnPathAction::AlternateAddress(addr) => *addr,
-                        ReturnPathAction::Normal | ReturnPathAction::UnsupportedSr => src_addr,
+                        ReturnPathAction::Normal
+                        | ReturnPathAction::UnsupportedSr
+                        | ReturnPathAction::Srv6Forward(_) => src_addr,
                     };
 
                     // Determine TOS value: use CoS TLV request if present, otherwise default (0).
@@ -469,17 +471,35 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                         }
                     }
 
-                    let sent_ok = match tokio_socket.send_to(&response.data, send_target).await {
-                        Ok(_) => true,
-                        Err(e) if send_target != src_addr => {
-                            // Alternate-address send failed — set U-flag on Return Path TLV
-                            // and fall back to original source (RFC 9503 §5).
-                            log::debug!(
-                                "Return Path: alternate send to {} failed ({}), falling back to {}",
-                                send_target,
-                                e,
-                                src_addr
-                            );
+                    // SRv6 return-path best-effort forwarding (RFC 9503 §5 +
+                    // RFC 8754). When enabled and the kernel supports it, insert
+                    // a Segment Routing Header on the IPv6 reply; otherwise fall
+                    // back to a normal reply with the Return Path U-flag set.
+                    let mut srv6_sent = false;
+                    if let ReturnPathAction::Srv6Forward(sids) = &response.return_path_action {
+                        if conf.srv6_return_forwarding && crate::srv6::srh_supported() {
+                            if let SocketAddr::V6(v6) = send_target {
+                                if let Some(srh) = crate::srv6::build_srh(sids) {
+                                    match crate::srv6::send_with_srh(
+                                        tokio_socket.as_raw_fd(),
+                                        &response.data,
+                                        v6,
+                                        &srh,
+                                    ) {
+                                        Ok(_) => srv6_sent = true,
+                                        Err(e) => log::debug!(
+                                            "SRv6 return-path send to {} failed ({}); \
+                                             falling back to U-flag reply",
+                                            v6,
+                                            e
+                                        ),
+                                    }
+                                }
+                            }
+                        }
+                        if !srv6_sent {
+                            // Could not honour the SR return path — signal via
+                            // the U-flag (RFC 8972 §4.2) and reply normally.
                             let base_size = if use_auth {
                                 AUTH_BASE_SIZE
                             } else {
@@ -490,17 +510,53 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                                     recompute_response_tlv_hmac(&mut response.data, base_size, key);
                                 }
                             }
-                            match tokio_socket.send_to(&response.data, src_addr).await {
-                                Ok(_) => true,
-                                Err(e2) => {
-                                    eprintln!("Failed to send response to {}: {}", src_addr, e2);
-                                    false
+                        }
+                    }
+
+                    let sent_ok = if srv6_sent {
+                        true
+                    } else {
+                        match tokio_socket.send_to(&response.data, send_target).await {
+                            Ok(_) => true,
+                            Err(e) if send_target != src_addr => {
+                                // Alternate-address send failed — set U-flag on Return Path TLV
+                                // and fall back to original source (RFC 9503 §5).
+                                log::debug!(
+                                "Return Path: alternate send to {} failed ({}), falling back to {}",
+                                send_target,
+                                e,
+                                src_addr
+                            );
+                                let base_size = if use_auth {
+                                    AUTH_BASE_SIZE
+                                } else {
+                                    UNAUTH_BASE_SIZE
+                                };
+                                if set_return_path_u_flag_in_response(&mut response.data, base_size)
+                                {
+                                    if let Some(ref key) = hmac_key {
+                                        recompute_response_tlv_hmac(
+                                            &mut response.data,
+                                            base_size,
+                                            key,
+                                        );
+                                    }
+                                }
+                                match tokio_socket.send_to(&response.data, src_addr).await {
+                                    Ok(_) => true,
+                                    Err(e2) => {
+                                        eprintln!(
+                                            "Failed to send response to {}: {}",
+                                            src_addr, e2
+                                        );
+                                        false
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to send response: {}", e);
-                            false
+                            Err(e) => {
+                                eprintln!("Failed to send response: {}", e);
+                                false
+                            }
                         }
                     };
 

@@ -706,8 +706,30 @@ fn handle_stamp_packet(
                 return;
             }
             ReturnPathAction::AlternateAddress(addr) => *addr,
-            ReturnPathAction::Normal | ReturnPathAction::UnsupportedSr => pkt.src,
+            ReturnPathAction::Normal
+            | ReturnPathAction::UnsupportedSr
+            | ReturnPathAction::Srv6Forward(_) => pkt.src,
         };
+
+        // The pnet/raw backend cannot insert an SRv6 Segment Routing Header, so
+        // an SRv6 return path is treated as unsupported: set the Return Path
+        // U-flag (RFC 8972 §4.2) and reply over the normal path. (SRv6 SRH
+        // insertion is implemented only on the Linux `nix` UDP-socket backend.)
+        if matches!(
+            response.return_path_action,
+            ReturnPathAction::Srv6Forward(_)
+        ) {
+            let base_size = if config.use_auth {
+                AUTH_BASE_SIZE
+            } else {
+                UNAUTH_BASE_SIZE
+            };
+            if set_return_path_u_flag_in_response(&mut response.data, base_size) {
+                if let Some(ref key) = config.hmac_key {
+                    recompute_response_tlv_hmac(&mut response.data, base_size, key);
+                }
+            }
+        }
 
         // Determine TOS value: use CoS TLV request if present, otherwise default (0).
         let (tos, has_cos_request) = match response.cos_request {

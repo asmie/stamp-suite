@@ -37,6 +37,8 @@ pub mod receiver;
 pub mod sender;
 /// Session state management.
 pub mod session;
+/// Best-effort SRv6 return-path forwarding (RFC 9503 §5 + RFC 8754).
+pub mod srv6;
 /// Statistics collection and reporting.
 pub mod stats;
 /// Timestamp generation utilities.

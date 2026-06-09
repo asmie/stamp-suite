@@ -142,6 +142,9 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --session-timeout <SEC>      Idle session reaping for stateful mode [default: 300]
       --tlv-mode <ignore|echo>     How to treat incoming TLVs [default: echo]
       --reflector-member-link-id <ID>  RFC 9534 LAG member link ID (decimal or 0x-hex)
+      --srv6-return-forwarding     Best-effort SRv6 Return Path SRH forwarding
+                                   (RFC 9503 §5; Linux+IPv6; off by default,
+                                   graceful U-flag fallback when unsupported)
       --strict-packets             Reject short packets instead of zero-filling (RFC 8762 §4.6)
       --require-hmac               Error out at startup if no HMAC key is configured
       --verify-tlv-hmac            Verify HMAC TLV (RFC 8972) on incoming packets

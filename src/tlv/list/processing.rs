@@ -309,8 +309,18 @@ impl TlvList {
             ));
         }
 
-        // Check for SR-MPLS or SRv6 — unsupported in userspace
-        if rp.has_sr_mpls() || rp.has_srv6() {
+        // SRv6 return path (RFC 9503 §5): hand the segment list to the send
+        // path, which attempts best-effort SRH forwarding (RFC 8754) when
+        // enabled and kernel-supported, or sets the U-flag on fallback. We do
+        // NOT set the U-flag here — whether the request is honoured is decided
+        // at send time, mirroring the Control Code reply-request handling above.
+        if let Some(sids) = rp.get_srv6_sids() {
+            return ReturnPathAction::Srv6Forward(sids);
+        }
+
+        // SR-MPLS cannot be forwarded from a userspace UDP socket: echo with
+        // the U-flag set and reply normally.
+        if rp.has_sr_mpls() {
             self.set_return_path_u_flag();
             return ReturnPathAction::UnsupportedSr;
         }
@@ -1011,6 +1021,33 @@ mod tests {
         let action = list.process_return_path(862);
         assert_eq!(action, ReturnPathAction::UnsupportedSr);
         assert!(list.non_hmac_tlvs()[0].is_unrecognized());
+    }
+
+    #[test]
+    fn test_process_return_path_srv6_returns_segment_list_without_premature_u_flag() {
+        let sids = [
+            std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2),
+        ];
+        let rp = ReturnPathTlv::with_srv6_sids(&sids);
+        let mut list = TlvList::new();
+        list.push(rp.to_raw()).unwrap();
+        // Simulate the reflector pipeline, which clears the sender's U-flag
+        // before semantic TLV processing runs.
+        list.clear_reflector_flags();
+
+        let action = list.process_return_path(862);
+        assert_eq!(
+            action,
+            ReturnPathAction::Srv6Forward(vec![sids[0], sids[1]]),
+            "SRv6 return path must surface the segment list for the send path"
+        );
+        // The U-flag decision is deferred to the send path (it depends on
+        // kernel capability + the opt-in), so it must NOT be set here.
+        assert!(
+            !list.non_hmac_tlvs()[0].is_unrecognized(),
+            "SRv6 must not be pre-flagged unrecognized during TLV processing"
+        );
     }
 
     #[test]
