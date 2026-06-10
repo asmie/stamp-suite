@@ -335,24 +335,21 @@ pub async fn run_sender(
         log::info!("Micro-session ID TLV enabled (sender_id={})", sender_id);
     }
 
-    // Build Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts §3).
-    // Only emit when the sender actually requests multiple replies, to avoid
-    // amplifying trivial single-packet measurements.
-    if conf.reflected_control_count > 1 {
-        extra_tlvs.push(
-            ReflectedControlTlv::new(
-                conf.reflected_control_length,
-                conf.reflected_control_count,
-                conf.reflected_control_interval_ns,
-            )
-            .to_raw(),
-        );
+    // Build Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts-14 §3).
+    if let Some(control) = build_reflected_control_tlv(
+        conf.reflected_control_length,
+        conf.reflected_control_count,
+        conf.reflected_control_interval_ns,
+        conf.reflected_control_no_ext_hdr,
+    ) {
         log::info!(
-            "Reflected Control TLV enabled (length={}, count={}, interval={}ns)",
+            "Reflected Control TLV enabled (length={}, count={}, interval={}ns, one-way-ext-hdr={})",
             conf.reflected_control_length,
             conf.reflected_control_count,
-            conf.reflected_control_interval_ns
+            conf.reflected_control_interval_ns,
+            conf.reflected_control_no_ext_hdr
         );
+        extra_tlvs.push(control.to_raw());
     }
 
     // Build BER TLVs (draft-gandhi-ippm-stamp-ber §3). All three are emitted
@@ -1065,6 +1062,39 @@ fn validate_reflected_tlvs(
 
 /// Parses an ASCII hex string (with optional `0x` prefix) into a byte vector.
 /// Empty input is rejected because an empty BER pattern is meaningless.
+/// Builds the Reflected Test Packet Control TLV
+/// (draft-ietf-ippm-asymmetrical-pkts-14 §3) when the configuration requests
+/// asymmetric replies (count > 1) and/or one-way extension-header mode
+/// (draft-ietf-ippm-stamp-ext-hdr-08 §5.3). Returns `None` for plain
+/// symmetric measurements so trivial sessions are not amplified.
+fn build_reflected_control_tlv(
+    length: u16,
+    count: u16,
+    interval_ns: u32,
+    no_ext_hdr: bool,
+) -> Option<ReflectedControlTlv> {
+    if count <= 1 && !no_ext_hdr {
+        return None;
+    }
+    if no_ext_hdr {
+        // Presence-only IPv6 Extension Header Control sub-TLV:
+        // flags=0, type (experimental stand-in for TBA3), length=0.
+        Some(ReflectedControlTlv::with_sub_tlvs(
+            length,
+            count,
+            interval_ns,
+            vec![
+                0x00,
+                crate::tlv::REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL,
+                0x00,
+                0x00,
+            ],
+        ))
+    } else {
+        Some(ReflectedControlTlv::new(length, count, interval_ns))
+    }
+}
+
 fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
     let trimmed = s.strip_prefix("0x").unwrap_or(s);
     if trimmed.is_empty() {
@@ -1280,6 +1310,23 @@ pub fn create_extended_auth_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_reflected_control_tlv_only_when_requested() {
+        // Symmetric single-reply measurement, no one-way request → no TLV.
+        assert!(build_reflected_control_tlv(0, 1, 1_000_000, false).is_none());
+
+        // Multiple replies requested → TLV without sub-TLVs.
+        let tlv = build_reflected_control_tlv(0, 4, 1_000_000, false).expect("TLV for count > 1");
+        assert!(tlv.sub_tlvs.is_empty());
+        assert_eq!(tlv.number_of_reflected_packets, 4);
+
+        // One-way mode requested → TLV emitted even at count 1, carrying the
+        // presence-only IPv6 Extension Header Control sub-TLV
+        // (draft-ietf-ippm-stamp-ext-hdr-08 §5.3; experimental type 240).
+        let tlv = build_reflected_control_tlv(0, 1, 1_000_000, true).expect("TLV for one-way mode");
+        assert_eq!(tlv.sub_tlvs, vec![0x00, 240, 0x00, 0x00]);
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn getsockopt_int(

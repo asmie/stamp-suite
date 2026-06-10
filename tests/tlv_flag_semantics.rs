@@ -478,6 +478,84 @@ fn reflected_control_value(length: u16, count: u16, interval_ns: u32) -> Vec<u8>
     value
 }
 
+/// Builds a Type 12 value with the IPv6 Extension Header Control sub-TLV
+/// (draft-ietf-ippm-stamp-ext-hdr-08 §5.3) appended after the fixed fields:
+/// flags=0, type=240 (experimental stand-in for TBA3), length=0.
+fn reflected_control_value_with_ext_hdr_control(
+    length: u16,
+    count: u16,
+    interval_ns: u32,
+) -> Vec<u8> {
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&length.to_be_bytes());
+    value.extend_from_slice(&count.to_be_bytes());
+    value.extend_from_slice(&interval_ns.to_be_bytes());
+    value.extend_from_slice(&[0x00, 240, 0x00, 0x00]);
+    value
+}
+
+#[test]
+fn reflected_control_ext_hdr_control_requests_one_way_mode() {
+    // draft-ietf-ippm-stamp-ext-hdr-08 §5.3: the IPv6 Extension Header
+    // Control sub-TLV asks the reflector NOT to attach received IPv6
+    // extension headers to its reply packets (one-way measurement mode).
+    let raw = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value_with_ext_hdr_control(0, 2, 1_000_000),
+    );
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let ctx = make_ctx(None);
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("request with ext-hdr-control sub-TLV must be reflected");
+    let behavior = response
+        .reflected_control
+        .expect("behavior must be recorded");
+    assert!(
+        behavior.suppress_reply_ext_headers,
+        "sub-TLV presence must request one-way mode"
+    );
+    assert_eq!(behavior.extra_copies, 1, "count must still be honoured");
+
+    // The sub-TLV is recognized and trivially honoured (we attach no
+    // extension headers to replies), so neither U nor C may be set.
+    let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).expect("parse");
+    let flags = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Type 12 echoed")
+        .flags
+        .to_byte();
+    assert_eq!(
+        flags & 0x90,
+        0x00,
+        "recognized + conformant: U and C must both be clear"
+    );
+}
+
+#[test]
+fn reflected_control_one_way_mode_defaults_off() {
+    // Without the sub-TLV the reflector follows the draft default
+    // (two-way mode).
+    let raw = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value(0, 2, 1_000_000),
+    );
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let ctx = make_ctx(None);
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("plain request must be reflected");
+    let behavior = response
+        .reflected_control
+        .expect("behavior must be recorded");
+    assert!(
+        !behavior.suppress_reply_ext_headers,
+        "one-way mode must be off when the sub-TLV is absent"
+    );
+}
+
 #[test]
 fn reflected_control_count_zero_suppresses_reply() {
     // draft-14 §3: "If the Number of Reflected Packets field is set to zero,
