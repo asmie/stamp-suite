@@ -24,9 +24,9 @@ use crate::{
 use crate::tlv::ReturnPathAction;
 
 use super::{
-    load_hmac_key, print_reflector_stats, process_stamp_packet, recompute_response_tlv_hmac,
-    set_cos_policy_rejected, set_return_path_u_flag_in_response, ProcessingContext,
-    ReceiverSharedState, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
+    recompute_response_tlv_hmac, set_cos_policy_rejected, set_return_path_u_flag_in_response,
+    ProcessingContext, ReceiverSharedState, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
@@ -393,8 +393,11 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     reflected_control_min_interval_ns: conf.reflected_control_min_interval_ns,
                 };
 
+                // Panic-isolated: a panic in processing must not unwind out of
+                // the receive loop and kill the process (remote DoS). On panic
+                // the packet is dropped (None) and the loop continues.
                 if let Some(mut response) =
-                    process_stamp_packet(data, src_addr, ttl, use_auth, &ctx)
+                    process_stamp_packet_isolated(data, src_addr, ttl, use_auth, &ctx)
                 {
                     // Handle Return Path action (RFC 9503 §5)
                     let send_target = match &response.return_path_action {
