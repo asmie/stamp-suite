@@ -268,7 +268,8 @@ fn valid_cos_does_not_set_m_flag() {
         ecn1: 2,
         dscp2: 0,
         ecn2: 0,
-        rp: 0,
+        rpd: 0,
+        rpe: 0,
     };
     let raw = cos.to_raw();
     let packet = build_unauth_packet(&tlv_to_chain(&raw));
@@ -286,6 +287,33 @@ fn valid_cos_does_not_set_m_flag() {
     );
 }
 
+#[test]
+fn cos_tlv_reflector_fills_ec2_rpd_rpe_at_draft_positions() {
+    // Byte-exact pin of draft-ietf-ippm-stamp-cos-ecn-00 §3.2 reflector
+    // behaviour on the RFC 8972 §4.4 wire layout: DSCP2/EC2 copied from the
+    // received IP header, RPD=0b00 (no policy rejection), RPE=0b11 (reply
+    // ECN set to EC1). Sender requests DSCP1=46, EC1=2; the reflector
+    // ingress sees DSCP=10, ECN=1:
+    //   byte0 = 46<<2 | (10 >> 4)        = 0xB8
+    //   byte1 = (10 & 0xF)<<4 | 1<<2 | 0 = 0xA4
+    //   byte2 = 2<<6 | 0b11<<4           = 0xB0
+    let cos = ClassOfServiceTlv::new(46, 2);
+    let packet = build_unauth_packet(&cos.to_raw().to_bytes());
+    let mut ctx = make_ctx(None);
+    ctx.received_dscp = 10;
+    ctx.received_ecn = 1;
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("CoS packet must be reflected");
+    let value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE;
+    let value = &response.data[value_start..value_start + 4];
+    assert_eq!(
+        value,
+        &[0xB8, 0xA4, 0xB0, 0x00],
+        "echoed CoS value must follow the RFC 8972 + cos-ecn-00 bit layout"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // I-flag — HMAC TLV verification failure marks all TLVs.
 
@@ -300,7 +328,8 @@ fn i_flag_set_on_corrupted_tlv_hmac() {
         ecn1: 0,
         dscp2: 0,
         ecn2: 0,
-        rp: 0,
+        rpd: 0,
+        rpe: 0,
     }
     .to_raw();
 
@@ -335,7 +364,8 @@ fn i_flag_not_set_on_valid_tlv_hmac() {
         ecn1: 0,
         dscp2: 0,
         ecn2: 0,
-        rp: 0,
+        rpd: 0,
+        rpe: 0,
     }
     .to_raw();
     let cos_bytes = cos.to_bytes();

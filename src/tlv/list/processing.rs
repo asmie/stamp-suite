@@ -56,20 +56,32 @@ impl TlvList {
 
     /// Updates any Class of Service TLVs with the received DSCP/ECN values.
     ///
-    /// Per RFC 8972 §5.2, the Session-Reflector fills in DSCP2 and ECN2 fields
-    /// with the values received at its ingress before reflecting the packet.
+    /// Per RFC 8972 §4.4 (with verified erratum 8199) the Session-Reflector
+    /// copies the received DSCP and ECN into DSCP2/EC2, and per
+    /// draft-ietf-ippm-stamp-cos-ecn-00 §3.2 it reports via RPD whether the
+    /// requested DSCP1 was used for the reply and via RPE whether the
+    /// reply's ECN was set to EC1.
     ///
-    /// Updates bytes in-place to avoid allocation overhead. The CoS TLV layout:
-    /// - Byte 0: DSCP1 (6 bits) | ECN1 (2 bits) - preserved
-    /// - Byte 1: DSCP2 (6 bits) | ECN2 (2 bits) - updated
-    /// - Byte 2: RP (2 bits) | Reserved (6 bits) - RP updated if policy_rejected
+    /// Updates bytes in-place to avoid allocation overhead. The CoS TLV
+    /// layout (`| DSCP1 | DSCP2 |EC2|RPD|EC1|RPE| Reserved |`):
+    /// - Byte 0: DSCP1 (6 bits, preserved) | DSCP2 bits 5:4 (updated)
+    /// - Byte 1: DSCP2 bits 3:0 | EC2 (2 bits) | RPD (2 bits) - updated
+    /// - Byte 2: EC1 (2 bits, preserved) | RPE (2 bits, updated) | Reserved
     /// - Byte 3: Reserved - preserved
     ///
     /// # Arguments
     /// * `received_dscp` - DSCP value received at reflector's ingress (6 bits, 0-63)
     /// * `received_ecn` - ECN value received at reflector's ingress (2 bits, 0-3)
     /// * `policy_rejected` - True if local policy rejected the requested DSCP1
-    pub fn update_cos_tlvs(&mut self, received_dscp: u8, received_ecn: u8, policy_rejected: bool) {
+    /// * `reply_ecn_applied` - True if the reply packet's ECN field is set to
+    ///   EC1 (RPE = 0b11); false sets RPE = 0b10 ("unable")
+    pub fn update_cos_tlvs(
+        &mut self,
+        received_dscp: u8,
+        received_ecn: u8,
+        policy_rejected: bool,
+        reply_ecn_applied: bool,
+    ) {
         self.for_each_matching_tlv(
             |tlv| tlv.tlv_type == TlvType::ClassOfService && tlv.value.len() == COS_TLV_VALUE_SIZE,
             |tlv| {
@@ -78,6 +90,7 @@ impl TlvList {
                     received_dscp,
                     received_ecn,
                     policy_rejected,
+                    reply_ecn_applied,
                 );
             },
         );
@@ -85,21 +98,27 @@ impl TlvList {
 
     /// Updates CoS TLV value bytes in-place.
     ///
-    /// Modifies DSCP2/ECN2/RP fields without allocating a new value buffer.
-    /// Assumes value is exactly `COS_TLV_VALUE_SIZE` (4) bytes.
+    /// Modifies DSCP2/EC2/RPD/RPE without allocating a new value buffer,
+    /// preserving the sender's DSCP1/EC1 bits. Assumes value is exactly
+    /// `COS_TLV_VALUE_SIZE` (4) bytes.
     #[inline]
     fn update_cos_value_in_place(
         value: &mut [u8],
         received_dscp: u8,
         received_ecn: u8,
         policy_rejected: bool,
+        reply_ecn_applied: bool,
     ) {
-        // Byte 1: DSCP2 (6 bits) | ECN2 (2 bits)
-        value[1] = ((received_dscp & 0x3F) << 2) | (received_ecn & 0x03);
+        // Byte 0: keep DSCP1 (bits 7:2), write DSCP2's upper 2 bits.
+        value[0] = (value[0] & 0xFC) | ((received_dscp >> 4) & 0x03);
 
-        // Byte 2: RP (2 bits) | Reserved (6 bits) - preserve reserved bits
-        let rp_bits = if policy_rejected { 0x40 } else { 0x00 }; // RP=1 in bits 7-6
-        value[2] = rp_bits | (value[2] & 0x3F);
+        // Byte 1: DSCP2's lower 4 bits | EC2 | RPD.
+        let rpd = if policy_rejected { 0b01 } else { 0b00 };
+        value[1] = ((received_dscp & 0x0F) << 4) | ((received_ecn & 0x03) << 2) | rpd;
+
+        // Byte 2: keep EC1 (bits 7:6) and reserved bits 3:0, write RPE.
+        let rpe = if reply_ecn_applied { 0b11 } else { 0b10 };
+        value[2] = (value[2] & 0xCF) | (rpe << 4);
     }
 
     /// Updates Timestamp Information TLVs with the reflector's sync source and method.
