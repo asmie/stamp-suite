@@ -131,7 +131,7 @@ fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
 /// per-SSID keys should call `load_hmac_key_set` instead — see B6.
 pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
     if let Some(ref hex_key) = conf.hmac_key {
-        match HmacKey::from_hex(hex_key) {
+        match HmacKey::from_hex(hex_key.as_str()) {
             Ok(key) => return Some(key),
             Err(e) => {
                 log::error!("Failed to parse HMAC key: {}", e);
