@@ -19,6 +19,19 @@ const AGENTX_RESPONSE_PDU: u8 = 18;
 const AGENTX_GET_PDU: u8 = 5;
 const AGENTX_GETNEXT_PDU: u8 = 6;
 const AGENTX_GETBULK_PDU: u8 = 7;
+const AGENTX_TESTSET_PDU: u8 = 8;
+const AGENTX_COMMITSET_PDU: u8 = 9;
+const AGENTX_UNDOSET_PDU: u8 = 10;
+const AGENTX_CLEANUPSET_PDU: u8 = 11;
+
+// PDU header flag bits (RFC 2741 §6.1). We only emit/inspect NETWORK_BYTE_ORDER.
+const AGENTX_FLAG_NETWORK_BYTE_ORDER: u8 = 0x10;
+
+// res.error values for Response PDUs (RFC 2741 §6.2.2.1 / SNMPv2 error-status).
+// This sub-agent is read-only, so any SET-phase request is rejected.
+const RES_ERROR_NOT_WRITABLE: u16 = 17;
+const RES_ERROR_COMMIT_FAILED: u16 = 14;
+const RES_ERROR_UNDO_FAILED: u16 = 15;
 
 // Close reasons (RFC 2741 §6.2.6)
 const REASON_SHUTDOWN: u8 = 1;
@@ -150,7 +163,12 @@ pub fn encode_pdu(
     let mut buf = Vec::with_capacity(PDU_HEADER_SIZE + payload.len());
     buf.push(AGENTX_VERSION);
     buf.push(pdu_type);
-    buf.push(flags);
+    // All multi-byte fields below are big-endian (network byte order), so we
+    // MUST advertise NETWORK_BYTE_ORDER (RFC 2741 §6.1). The sub-agent chooses
+    // the session byte order in its Open PDU; the master then uses it in both
+    // directions. Previously this byte was left 0, which falsely declared
+    // little-endian.
+    buf.push(flags | AGENTX_FLAG_NETWORK_BYTE_ORDER);
     buf.push(0); // reserved
     buf.extend_from_slice(&session_id.to_be_bytes());
     buf.extend_from_slice(&transaction_id.to_be_bytes());
@@ -538,6 +556,19 @@ impl AgentXSession {
 
             let header = decode_header(&header_buf)?;
 
+            // We negotiated network byte order in our Open PDU and only decode
+            // multi-byte fields big-endian. A conformant master echoes that for
+            // the whole session; a PDU in the other byte order would be silently
+            // misinterpreted, so reject it explicitly. (connect()/register() use
+            // big-endian unconditionally and are unaffected, so startup is never
+            // blocked by this check.)
+            if header.flags & AGENTX_FLAG_NETWORK_BYTE_ORDER == 0 {
+                return Err(AgentXError::Protocol(format!(
+                    "master sent PDU type {} in little-endian byte order, which is unsupported",
+                    header.pdu_type
+                )));
+            }
+
             if header.payload_length > MAX_PDU_PAYLOAD {
                 return Err(AgentXError::Protocol(format!(
                     "PDU payload too large: {} bytes (max {})",
@@ -566,6 +597,31 @@ impl AgentXSession {
                 AGENTX_CLOSE_PDU => {
                     log::info!("Master agent closed session");
                     return Ok(());
+                }
+                // SET sequence (RFC 2741 §6.2.4–6.2.6). This sub-agent is
+                // read-only, so we reject the request with the appropriate
+                // error instead of silently dropping it — a silent drop leaves
+                // the master waiting for a Response until it times out.
+                AGENTX_TESTSET_PDU => {
+                    log::debug!("Rejecting SET (TestSet): STAMP-SUITE-MIB is read-only");
+                    let resp =
+                        self.build_response_with_status(&header, RES_ERROR_NOT_WRITABLE, 1, &[]);
+                    self.stream.write_all(&resp)?;
+                }
+                AGENTX_COMMITSET_PDU => {
+                    // Should not occur once TestSet is refused, but answer anyway.
+                    let resp =
+                        self.build_response_with_status(&header, RES_ERROR_COMMIT_FAILED, 1, &[]);
+                    self.stream.write_all(&resp)?;
+                }
+                AGENTX_UNDOSET_PDU => {
+                    let resp =
+                        self.build_response_with_status(&header, RES_ERROR_UNDO_FAILED, 1, &[]);
+                    self.stream.write_all(&resp)?;
+                }
+                AGENTX_CLEANUPSET_PDU => {
+                    // RFC 2741 §6.2.6: no Response is sent for CleanupSet.
+                    log::debug!("CleanupSet received; no response required");
                 }
                 other => {
                     log::warn!("Ignoring unknown PDU type {}", other);
@@ -660,13 +716,26 @@ impl AgentXSession {
         Ok(self.build_response(header, &varbinds_buf))
     }
 
-    /// Builds a Response PDU with the given varbinds.
+    /// Builds a Response PDU with the given varbinds and `res.error = noError`.
     fn build_response(&self, request_header: &PduHeader, varbinds: &[u8]) -> Vec<u8> {
+        self.build_response_with_status(request_header, 0, 0, varbinds)
+    }
+
+    /// Builds a Response PDU with an explicit `res.error` / `res.index`
+    /// (RFC 2741 §6.2.2.1). Used to reject SET-phase requests on this read-only
+    /// sub-agent.
+    fn build_response_with_status(
+        &self,
+        request_header: &PduHeader,
+        res_error: u16,
+        res_index: u16,
+        varbinds: &[u8],
+    ) -> Vec<u8> {
         // Response payload: sysUpTime(4) + res.error(2) + res.index(2) + varbinds
         let mut response_payload = Vec::with_capacity(8 + varbinds.len());
         response_payload.extend_from_slice(&[0, 0, 0, 0]); // sysUpTime (unused by sub-agent)
-        response_payload.extend_from_slice(&[0, 0]); // res.error = noError
-        response_payload.extend_from_slice(&[0, 0]); // res.index
+        response_payload.extend_from_slice(&res_error.to_be_bytes());
+        response_payload.extend_from_slice(&res_index.to_be_bytes());
         response_payload.extend_from_slice(varbinds);
 
         encode_pdu(
@@ -733,6 +802,54 @@ mod tests {
         assert_eq!(header.transaction_id, 7);
         assert_eq!(header.packet_id, 99);
         assert_eq!(header.payload_length, 4);
+    }
+
+    #[test]
+    fn test_encode_pdu_sets_network_byte_order_flag() {
+        // We encode every multi-byte field big-endian, so every emitted PDU
+        // must advertise NETWORK_BYTE_ORDER (RFC 2741 §6.1).
+        let pdu = encode_pdu(AGENTX_GET_PDU, 0, 1, 2, 3, &[]);
+        let header = decode_header(&pdu).unwrap();
+        assert_ne!(
+            header.flags & AGENTX_FLAG_NETWORK_BYTE_ORDER,
+            0,
+            "emitted PDUs must declare network byte order"
+        );
+    }
+
+    #[test]
+    fn test_set_rejection_response_carries_error() {
+        // A SET-phase request on this read-only sub-agent must be answered with
+        // a Response PDU carrying a non-zero res.error (not silently dropped).
+        let (a, _b) = UnixStream::pair().unwrap();
+        let session = AgentXSession {
+            stream: a,
+            session_id: 7,
+            packet_id: AtomicU32::new(1),
+        };
+        let header = PduHeader {
+            version: AGENTX_VERSION,
+            pdu_type: AGENTX_TESTSET_PDU,
+            flags: AGENTX_FLAG_NETWORK_BYTE_ORDER,
+            session_id: 7,
+            transaction_id: 9,
+            packet_id: 11,
+            payload_length: 0,
+        };
+        let resp = session.build_response_with_status(&header, RES_ERROR_NOT_WRITABLE, 1, &[]);
+
+        let rh = decode_header(&resp).unwrap();
+        assert_eq!(rh.pdu_type, AGENTX_RESPONSE_PDU);
+        assert_eq!(rh.session_id, 7);
+        assert_eq!(rh.transaction_id, 9);
+        assert_eq!(rh.packet_id, 11);
+
+        // Payload layout: sysUpTime(4) + res.error(2) + res.index(2).
+        let payload = &resp[PDU_HEADER_SIZE..];
+        let res_error = u16::from_be_bytes([payload[4], payload[5]]);
+        let res_index = u16::from_be_bytes([payload[6], payload[7]]);
+        assert_eq!(res_error, RES_ERROR_NOT_WRITABLE);
+        assert_eq!(res_index, 1);
     }
 
     #[test]
