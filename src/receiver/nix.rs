@@ -144,6 +144,47 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         );
     }
 
+    // Kernel timestamping (feature "hwtstamp"): enable SO_TIMESTAMPING per
+    // the --hwtstamp mode. `auto` requests the kernel-software tier only
+    // (no NIC reconfiguration, no privileges needed); `on` additionally
+    // attempts NIC hardware filters (SIOCSHWTSTAMP, needs CAP_NET_ADMIN)
+    // and falls back to the software tier when that fails.
+    #[cfg(feature = "hwtstamp")]
+    let kernel_ts = {
+        use crate::hwtstamp::{self, HwTsMode};
+        if conf.hwtstamp == HwTsMode::Off {
+            hwtstamp::EnabledTimestamping::default()
+        } else {
+            #[cfg(target_os = "linux")]
+            let want_hw = conf.hwtstamp == HwTsMode::On && {
+                let iface = hwtstamp::interface_for_addr(conf.local_addr);
+                let cap = hwtstamp::probe(iface.as_deref());
+                cap.any_hw_supported()
+                    && iface
+                        .as_deref()
+                        .map(hwtstamp::request_nic_hw_timestamping)
+                        .unwrap_or(false)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let want_hw = false;
+            let enabled = hwtstamp::enable_socket_timestamping(fd, true, true, want_hw);
+            log::info!(
+                "kernel timestamping: rx_kernel={} rx_hw={} tx_kernel={} tx_hw={}",
+                enabled.rx_kernel,
+                enabled.rx_hw,
+                enabled.tx_kernel,
+                enabled.tx_hw
+            );
+            enabled
+        }
+    };
+    #[cfg(feature = "hwtstamp")]
+    let tx_method_cfg = if kernel_ts.tx_hw {
+        crate::tlv::TimestampMethod::HwAssist
+    } else {
+        crate::tlv::TimestampMethod::SwLocal
+    };
+
     // Set non-blocking for tokio
     if let Err(e) = std_socket.set_nonblocking(true) {
         eprintln!("Error: Failed to set socket non-blocking: {}", e);
@@ -222,7 +263,24 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     );
 
     let mut buf = [0u8; 1024];
-    let mut cmsg_buf = vec![0u8; 256];
+    // 512 bytes: TTL + TOS + PKTINFO plus the 64-byte SCM_TIMESTAMPING
+    // cmsg (feature "hwtstamp") with headroom.
+    let mut cmsg_buf = vec![0u8; 512];
+
+    // Kernel TX-timestamp correlation (feature "hwtstamp"): every
+    // successful send on this socket consumes one SOF_TIMESTAMPING_OPT_ID
+    // counter value in the kernel, so the userspace counter is bumped at
+    // *every* send site (main reply, alternate-address fallback, SRv6,
+    // Reflected Control extra copies). Only the main reply's counter value
+    // is mapped to (client, seq) — the others' timestamps are dropped on
+    // drain. The extra-copy tasks share the socket concurrently, so their
+    // attribution can race the main reply by one slot; corrections are
+    // best-effort and Type 12 multi-send is off by default.
+    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+    let tx_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+    let mut tx_id_map: std::collections::HashMap<u32, (SocketAddr, u32)> =
+        std::collections::HashMap::new();
 
     // Session cleanup interval: run at half the timeout period, minimum 1 second
     // When session_timeout is 0, checked_div returns None, disabling cleanup
@@ -237,6 +295,29 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let mut last_tos: u8 = 0;
 
     loop {
+        // Apply kernel TX timestamps that arrived on the error queue since
+        // the last iteration: correct the Follow-Up Telemetry record of the
+        // matching reflection (RFC 8972 §4.7 reports the *previous* reply's
+        // TX time, so the one-iteration delay is inherent to the TLV).
+        #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+        if kernel_ts.tx_kernel {
+            for report in
+                crate::hwtstamp::drain_tx_timestamps(tokio_socket.as_raw_fd(), conf.clock_source)
+            {
+                if let Some((client, seq)) = tx_id_map.remove(&report.opt_id) {
+                    if let Some(session) = session_manager.get_session(client) {
+                        session.correct_reflection_timestamp(seq, report.timestamp);
+                    }
+                }
+            }
+            if tx_id_map.len() > 4096 {
+                // Defensive: timestamps stopped arriving (e.g. qdisc drops);
+                // don't let the correlation map grow unbounded.
+                log::debug!("TX-timestamp map overflow; clearing {}", tx_id_map.len());
+                tx_id_map.clear();
+            }
+        }
+
         // Wait for socket to be readable, cleanup timer, or shutdown signal.
         // Use unbiased select to ensure fair scheduling - biased select
         // would starve the cleanup timer under heavy packet load.
@@ -299,6 +380,33 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                 // Extract actual destination address from packet info (for Location TLV).
                 // Falls back to configured bind address if pktinfo is unavailable.
                 let dst_addr = extract_dst_addr_from_cmsgs(&msg).unwrap_or(conf.local_addr);
+
+                // Extract the kernel receive timestamp (T2) when enabled.
+                // Must happen here while `msg` (and its cmsg buffer) is alive.
+                #[cfg(feature = "hwtstamp")]
+                let (rx_timestamp, rx_method) = if kernel_ts.rx_kernel {
+                    match msg
+                        .cmsgs()
+                        .ok()
+                        .and_then(crate::hwtstamp::extract_kernel_rx_timestamp)
+                    {
+                        Some(k) => (
+                            Some(crate::time::timestamp_from_parts(
+                                k.secs,
+                                k.nanos,
+                                conf.clock_source,
+                            )),
+                            if k.hardware {
+                                crate::tlv::TimestampMethod::HwAssist
+                            } else {
+                                crate::tlv::TimestampMethod::SwLocal
+                            },
+                        ),
+                        None => (None, crate::tlv::TimestampMethod::SwLocal),
+                    }
+                } else {
+                    (None, crate::tlv::TimestampMethod::SwLocal)
+                };
 
                 // Convert source address for session lookup and response
                 let src_addr: SocketAddr = match src_storage {
@@ -391,6 +499,18 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     reflected_control_max_count: conf.reflected_control_max_count,
                     reflected_control_max_size: conf.reflected_control_max_size,
                     reflected_control_min_interval_ns: conf.reflected_control_min_interval_ns,
+                    #[cfg(feature = "hwtstamp")]
+                    rx_timestamp,
+                    #[cfg(not(feature = "hwtstamp"))]
+                    rx_timestamp: None,
+                    #[cfg(feature = "hwtstamp")]
+                    rx_method,
+                    #[cfg(not(feature = "hwtstamp"))]
+                    rx_method: crate::tlv::TimestampMethod::SwLocal,
+                    #[cfg(feature = "hwtstamp")]
+                    tx_method: tx_method_cfg,
+                    #[cfg(not(feature = "hwtstamp"))]
+                    tx_method: crate::tlv::TimestampMethod::SwLocal,
                 };
 
                 // Panic-isolated: a panic in processing must not unwind out of
@@ -479,6 +599,8 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     // RFC 8754). When enabled and the kernel supports it, insert
                     // a Segment Routing Header on the IPv6 reply; otherwise fall
                     // back to a normal reply with the Return Path U-flag set.
+                    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                    let mut sent_opt_id: Option<u32> = None;
                     let mut srv6_sent = false;
                     if let ReturnPathAction::Srv6Forward(sids) = &response.return_path_action {
                         if conf.srv6_return_forwarding && crate::srv6::srh_supported() {
@@ -490,7 +612,16 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                                         v6,
                                         &srh,
                                     ) {
-                                        Ok(_) => srv6_sent = true,
+                                        Ok(_) => {
+                                            srv6_sent = true;
+                                            #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                                            if kernel_ts.tx_kernel {
+                                                sent_opt_id = Some(tx_counter.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                ));
+                                            }
+                                        }
                                         Err(e) => log::debug!(
                                             "SRv6 return-path send to {} failed ({}); \
                                              falling back to U-flag reply",
@@ -521,7 +652,16 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                         true
                     } else {
                         match tokio_socket.send_to(&response.data, send_target).await {
-                            Ok(_) => true,
+                            Ok(_) => {
+                                #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                                if kernel_ts.tx_kernel {
+                                    sent_opt_id = Some(
+                                        tx_counter
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                    );
+                                }
+                                true
+                            }
                             Err(e) if send_target != src_addr => {
                                 // Alternate-address send failed — set U-flag on Return Path TLV
                                 // and fall back to original source (RFC 9503 §5).
@@ -547,7 +687,16 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                                     }
                                 }
                                 match tokio_socket.send_to(&response.data, src_addr).await {
-                                    Ok(_) => true,
+                                    Ok(_) => {
+                                        #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                                        if kernel_ts.tx_kernel {
+                                            sent_opt_id = Some(tx_counter.fetch_add(
+                                                1,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            ));
+                                        }
+                                        true
+                                    }
                                     Err(e2) => {
                                         eprintln!(
                                             "Failed to send response to {}: {}",
@@ -583,6 +732,13 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                             ]);
                             let send_ts = crate::time::generate_timestamp(conf.clock_source);
                             session.record_reflection(reflected_seq, send_ts);
+                            // Map this send's OPT_ID to (client, seq) so the
+                            // error-queue drain can replace the userspace
+                            // timestamp above with the kernel TX timestamp.
+                            #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                            if let Some(id) = sent_opt_id {
+                                tx_id_map.insert(id, (src_addr, reflected_seq));
+                            }
                         }
 
                         // Reflected Test Packet Control multi-send
@@ -599,6 +755,12 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                                 let data = response.data.clone();
                                 let target = send_target;
                                 let counters_for_task = Arc::clone(&counters);
+                                // Keep the kernel OPT_ID counter in sync: each
+                                // extra copy consumes one counter slot even
+                                // though its timestamp is not correlated.
+                                #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                                let tx_counter_task =
+                                    kernel_ts.tx_kernel.then(|| Arc::clone(&tx_counter));
                                 let limiter_for_task = shared.rate_limiter.as_ref().map(Arc::clone);
                                 let limiter_key = src_addr.ip();
                                 tokio::spawn(async move {
@@ -625,6 +787,16 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                                                     1,
                                                     std::sync::atomic::Ordering::Relaxed,
                                                 );
+                                                #[cfg(all(
+                                                    feature = "hwtstamp",
+                                                    target_os = "linux"
+                                                ))]
+                                                if let Some(ref c) = tx_counter_task {
+                                                    c.fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                }
                                             }
                                             Err(e) => {
                                                 log::debug!(

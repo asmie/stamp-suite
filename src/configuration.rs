@@ -349,13 +349,14 @@ pub struct Configuration {
     #[clap(long, value_enum, default_value_t = LogFormat::Text)]
     pub log_format: LogFormat,
 
-    /// Hardware timestamp handling (F1). The capability probe
-    /// (ETHTOOL_GET_TS_INFO, Linux) is functional and runs against the
-    /// interface owning --local-addr: `auto` (default) probes silently,
-    /// `on` probes and warns when hardware timestamps cannot be used,
-    /// `off` opts out. Packet timestamps themselves are still taken in
-    /// software — the kernel SCM_TIMESTAMPING read path is a planned
-    /// follow-up, so `on` always warns (with the true reason).
+    /// Kernel/hardware timestamp handling (requires the "hwtstamp" build
+    /// feature for the read paths). `auto` (default): kernel software
+    /// timestamps — precise T2/T4 and error-queue TX correction on Linux,
+    /// SO_TIMESTAMP receive timestamps on macOS; no privileges, no NIC
+    /// changes. `on`: additionally attempt NIC hardware timestamping
+    /// (SIOCSHWTSTAMP + raw-hardware tier; needs CAP_NET_ADMIN and a
+    /// synchronized PHC), warning + software fallback when unavailable.
+    /// `off`: userspace timestamps only.
     #[clap(long, value_enum, default_value_t = HwTsMode::Auto)]
     pub hwtstamp: HwTsMode,
 

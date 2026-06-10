@@ -518,19 +518,45 @@ Sender statistics are updated live during the measurement run (not just at compl
 Support for Linux NIC timestamping capabilities, selected at runtime via
 `--hwtstamp auto|on|off` (default `auto`).
 
-**Current status.**
+**Current status** (kernel read paths gated behind the `hwtstamp` cargo
+feature; no extra dependencies).
 
 - Capability probe ✅ — `ETHTOOL_GET_TS_INFO` via the `SIOCETHTOOL`
   ioctl, run at startup against the interface owning `--local-addr`
   (resolved with `getifaddrs`; wildcard binds skip the probe). The
   result is logged: `hwtstamp probe: interface=… rx_hw=… tx_hw=… ptp=…`.
-- Honest reporting ✅ — `--hwtstamp on` warns with the *actual* reason
-  hardware timestamps aren't in use: either the NIC lacks support, or
-  the NIC supports it but the kernel read path is not yet implemented.
-- Kernel RX/TX timestamps ❌ — the `SCM_TIMESTAMPING` cmsg read on
-  recvmsg and the `MSG_ERRQUEUE` TX poll are a planned follow-up. All
-  four STAMP timestamps are still taken in software, so the Type 3 TLV
-  correctly advertises `SwLocal` everywhere.
+- Kernel RX timestamps ✅ (Linux + macOS) — the reflector's T2 and the
+  sender's T4 come from `SCM_TIMESTAMPING` cmsgs (Linux) or
+  `SCM_TIMESTAMP` (macOS, software tier, µs resolution) instead of a
+  post-wakeup userspace clock read. Over loopback this cuts the
+  measured forward OWD from ~50–150 µs of scheduler noise to single-digit
+  microseconds.
+- Kernel TX timestamps ✅ (Linux) — `MSG_ERRQUEUE` with
+  `SOF_TIMESTAMPING_OPT_ID` correlation. On the sender, the stored T1
+  used for forward OWD is corrected retroactively before the response is
+  processed. On the reflector, the Follow-Up Telemetry record (RFC 8972
+  §4.7) is corrected, so the FUT TLV reports the previous reply's kernel
+  TX time. Note: T3 *inside* a reflected packet is physically
+  uncorrectable (the timestamp is serialized before the send) — that is
+  exactly the gap FUT exists to close.
+- NIC hardware tier ✅ (Linux, `--hwtstamp on`) — sets NIC filters via
+  `SIOCSHWTSTAMP` (needs CAP_NET_ADMIN) and requests the raw-hardware
+  timestamp slots; every failure falls back to the kernel software tier
+  with a warning. The Timestamp Information TLV reports `HwAssist` only
+  when **both** directions use hardware timestamps; the FUT mode byte
+  reports the TX method.
+- Windows ❌ — the pnet receiver captures at the datalink layer (no
+  socket to timestamp) and a sender-side `SIO_TIMESTAMPING` port is
+  future work; the feature compiles to a graceful no-op there.
+
+> **PHC clock-domain caveat (hardware tier).** NIC hardware timestamps
+> are taken on the PTP hardware clock, not CLOCK_REALTIME. One-way
+> delays mix the local timestamp domain with the peer's, so hardware
+> timestamps are only meaningful for OWD when the PHC is disciplined to
+> the same timescale as the peer (ptp4l + phc2sys). Round-trip
+> quantities that subtract two timestamps from the same clock
+> (T4−T1, T3−T2) remain valid regardless. `--hwtstamp on` leaves this
+> responsibility with the operator; `auto` never uses the hardware tier.
 
 **Defensive contract.** Hardware timestamping is a per-NIC capability —
 some adapters support RX, some both, most consumer NICs neither. The
