@@ -79,6 +79,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--hwtstamp` now performs a real capability probe.** At startup the
+  reflector/sender queries `ETHTOOL_GET_TS_INFO` (via `SIOCETHTOOL`) on the
+  interface owning `--local-addr` and logs the NIC's actual timestamping
+  capabilities (`rx_hw`, `tx_hw`, PHC presence). `--hwtstamp on` still always
+  warns — packet timestamps remain software; the kernel `SCM_TIMESTAMPING`
+  read path is a planned follow-up — but the warning now states the true
+  reason: NIC without hardware support vs. not-yet-implemented read path.
+  Wildcard binds, unknown interfaces, and non-Linux platforms degrade
+  gracefully to "no capabilities"; the probe never fails startup.
+
 - **IPv6 Extension Header Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-08
   §5.3).** The reflector now recognizes the presence-only sub-TLV inside a
   Reflected Test Packet Control TLV as a request for one-way measurement mode

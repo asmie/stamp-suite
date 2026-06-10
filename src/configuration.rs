@@ -349,13 +349,13 @@ pub struct Configuration {
     #[clap(long, value_enum, default_value_t = LogFormat::Text)]
     pub log_format: LogFormat,
 
-    /// Hardware-assisted timestamping selection (F1). EXPERIMENTAL and not
-    /// yet functional: hardware/kernel timestamping is not implemented, so
-    /// every mode currently uses software timestamps. `auto` (default) and
-    /// `off` use software silently; `on` prefers hardware and warns at
-    /// startup that it is falling back to software (it no longer aborts).
-    /// The `ETHTOOL_GET_TS_INFO` / `SO_TIMESTAMPING` kernel path is a
-    /// planned follow-up.
+    /// Hardware timestamp handling (F1). The capability probe
+    /// (ETHTOOL_GET_TS_INFO, Linux) is functional and runs against the
+    /// interface owning --local-addr: `auto` (default) probes silently,
+    /// `on` probes and warns when hardware timestamps cannot be used,
+    /// `off` opts out. Packet timestamps themselves are still taken in
+    /// software — the kernel SCM_TIMESTAMPING read path is a planned
+    /// follow-up, so `on` always warns (with the true reason).
     #[clap(long, value_enum, default_value_t = HwTsMode::Auto)]
     pub hwtstamp: HwTsMode,
 
