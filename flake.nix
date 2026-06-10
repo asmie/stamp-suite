@@ -13,7 +13,7 @@
 
         # Cargo features compiled into the nix-built binary and exercised
         # by the check phase. Mirrors `cargo build/test --all-features`.
-        allFeatures = [ "ttl-nix" "ttl-pnet" "metrics" "snmp" ];
+        allFeatures = [ "ttl-nix" "ttl-pnet" "metrics" "snmp" "hwtstamp" "control" ];
       in
       {
         packages = {
@@ -25,7 +25,7 @@
 
             # Regenerate after any Cargo.lock change: set to pkgs.lib.fakeHash,
             # run `nix build .#default`, and copy the `got:` hash from the error.
-            cargoHash = "sha256-/HHpt2wz8PycXoQQkU6Gh+hT7DRuIlx1kKOIjwrZnGg=";
+            cargoHash = "sha256-xeUTHWkX4+os76+VlwYv59K7B4HQ1d1agwqK9B6njFM=";
 
             buildFeatures = allFeatures;
             # Honour --all-features for the cargo test phase too so the
@@ -54,7 +54,7 @@
             src = self;
             # Regenerate after any Cargo.lock change: set to pkgs.lib.fakeHash,
             # run `nix build .#default`, and copy the `got:` hash from the error.
-            cargoHash = "sha256-/HHpt2wz8PycXoQQkU6Gh+hT7DRuIlx1kKOIjwrZnGg=";
+            cargoHash = "sha256-xeUTHWkX4+os76+VlwYv59K7B4HQ1d1agwqK9B6njFM=";
             buildFeatures = allFeatures;
             nativeBuildInputs = [ pkgs.clippy ];
             buildPhase = ''

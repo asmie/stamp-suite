@@ -107,7 +107,7 @@ loss and network delays."""
 section = "net"
 priority = "optional"
 depends = "$auto, adduser"
-features = ["ttl-nix", "ttl-pnet", "metrics", "snmp", "hwtstamp"]
+features = ["ttl-nix", "ttl-pnet", "metrics", "snmp", "hwtstamp", "control"]
 maintainer-scripts = "dist/debian/"
 assets = [
     ["target/release/stamp-suite",                "usr/bin/",                                  "755"],
