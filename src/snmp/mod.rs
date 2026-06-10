@@ -165,7 +165,9 @@ fn reconnect(socket_path: &str, cancel: &AtomicBool) -> Option<agentx::AgentXSes
                 }
             },
             Err(e) => {
-                log::debug!("AgentX reconnect to {socket_path} failed: {e}; retrying in {backoff:?}");
+                log::debug!(
+                    "AgentX reconnect to {socket_path} failed: {e}; retrying in {backoff:?}"
+                );
             }
         }
         sleep_cancellable(backoff, cancel);

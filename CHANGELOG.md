@@ -77,6 +77,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packets. The previous fuzz targets covered only the low-level parsers in
   isolation, not the in-place TLV mutators and length arithmetic.
 
+### Changed
+
+- **Reflected Test Packet Control (Type 12) processing now follows
+  draft-ietf-ippm-asymmetrical-pkts-14 §3 exactly.** Behavioral changes on the
+  reflector (only when asymmetric reflection is enabled, i.e.
+  `--reflected-control-max-count > 0`):
+  - A request exceeding the volume limit (`--reflected-control-max-count`) or
+    the rate limit (`--reflected-control-min-interval-ns`) now gets the C flag
+    and a **single** reflected packet, as the draft mandates — previously the
+    count/interval were silently clamped and a reduced burst was sent.
+  - A request with `count = 0` now suppresses the reply entirely ("MUST NOT
+    send any reflected packets").
+  - Echoed Extra Padding TLVs are stripped before computing the reply length
+    (§3 rule a), so a sender can request replies *shorter* than its test
+    packet; the requested length is honoured aligned up to a 4-octet boundary
+    (§3 rule b). The padding target is now computed from the actual reflected
+    base size instead of being inferred from the presence of a TLV-HMAC key.
+  - The C flag received from the wire is ignored and re-derived by the
+    reflector (§3); previously a sender-set C leaked into the echo.
+  - Combining a Return Path "no reply requested" control code with a non-zero
+    Type 12 TLV (a sender error per §4.3) now yields a single normal reply
+    with the U flag set on both TLVs, plus a warning log. The sender-side
+    configuration rejects `--return-path-cc 0` together with
+    `--reflected-control-count > 1` up front.
+
 ### Fixed
 
 - **SNMP sub-agent now reconnects to the AgentX master.** Previously, if

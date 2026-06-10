@@ -71,6 +71,20 @@ impl TlvList {
         Ok(())
     }
 
+    /// Removes every Extra Padding TLV from the reply chain (both the
+    /// separated and wire-order lists).
+    ///
+    /// Used by Reflected Test Packet Control processing: rule (a) of
+    /// draft-ietf-ippm-asymmetrical-pkts-14 §3 computes the reflected length
+    /// "excluding any Extra Padding TLVs" so a Session-Sender can request
+    /// replies *shorter* than its test packet.
+    pub fn remove_extra_padding_tlvs(&mut self) {
+        self.tlvs.retain(|t| t.tlv_type != TlvType::ExtraPadding);
+        if let Some(ref mut wire_order) = self.wire_order_tlvs {
+            wire_order.retain(|t| t.tlv_type != TlvType::ExtraPadding);
+        }
+    }
+
     /// Returns an iterator over all TLVs (non-HMAC first, then HMAC).
     pub fn iter(&self) -> impl Iterator<Item = &RawTlv> {
         self.tlvs.iter().chain(self.hmac_tlv.iter())
@@ -790,10 +804,11 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_reflector_flags_preserves_c_flag() {
-        // The C (Conformant-Reflected) flag belongs to the asymmetric-pkts
-        // draft and is not part of RFC 8972's U/M/I; the clear pass must
-        // leave it intact so the reflector can communicate request rejections.
+    fn test_apply_reflector_flags_drops_incoming_c_flag() {
+        // draft-ietf-ippm-asymmetrical-pkts-14 §3: the Session-Sender MUST
+        // zero the C flag on transmission and the Session-Reflector MUST
+        // ignore its received value — C is reflector-owned output, re-derived
+        // by Reflected Test Packet Control processing after this clear pass.
         let mut list = TlvList::new();
         let mut tlv = RawTlv::new(TlvType::ReflectedControl, vec![0; 8]);
         tlv.set_conformant_reflected();
@@ -804,7 +819,7 @@ mod tests {
 
         let echoed = &list.non_hmac_tlvs()[0];
         assert!(!echoed.is_unrecognized());
-        assert!(echoed.flags.conformant_reflected);
+        assert!(!echoed.flags.conformant_reflected);
     }
 
     #[test]

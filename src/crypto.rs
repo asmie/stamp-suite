@@ -292,7 +292,8 @@ impl HmacKeySet {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let metadata = fs::metadata(dir).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+            let metadata =
+                fs::metadata(dir).map_err(|e| HmacError::FileReadError(e.to_string()))?;
             let mode = metadata.permissions().mode();
             if mode & 0o022 != 0 {
                 return Err(HmacError::InsecurePermissions {
@@ -598,7 +599,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
 
         // Write three keys: one default + two per-SSID (owner-only perms).
-        write_key_file(dir.path(), "default.key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        write_key_file(
+            dir.path(),
+            "default.key",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
         write_key_file(dir.path(), "002a.key", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); // SSID 42
         write_key_file(dir.path(), "ffff.key", "cccccccccccccccccccccccccccccccc"); // SSID 65535
                                                                                     // Unparseable file — must be skipped, not fatal.
@@ -652,7 +657,11 @@ mod tests {
     fn test_from_dir_rejects_group_or_other_writable_dir() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("create tempdir");
-        write_key_file(dir.path(), "default.key", "00112233445566778899aabbccddeeff");
+        write_key_file(
+            dir.path(),
+            "default.key",
+            "00112233445566778899aabbccddeeff",
+        );
 
         // Group-writable directory → key injection risk → rejected.
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
@@ -670,7 +679,11 @@ mod tests {
     fn test_from_dir_allows_group_readable_dir() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("create tempdir");
-        write_key_file(dir.path(), "default.key", "00112233445566778899aabbccddeeff");
+        write_key_file(
+            dir.path(),
+            "default.key",
+            "00112233445566778899aabbccddeeff",
+        );
 
         // Group-readable but not writable (0750, the recommended layout) is OK.
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o750)).unwrap();

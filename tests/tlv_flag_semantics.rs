@@ -26,7 +26,8 @@ use stamp_suite::crypto::HmacKey;
 use stamp_suite::packets::PacketUnauthenticated;
 use stamp_suite::receiver::{process_stamp_packet, ProcessingContext, UNAUTH_BASE_SIZE};
 use stamp_suite::tlv::{
-    ClassOfServiceTlv, RawTlv, TlvFlags, TlvList, TlvType, TypedTlv, TLV_HEADER_SIZE,
+    ClassOfServiceTlv, ExtraPaddingTlv, RawTlv, ReturnPathAction, ReturnPathTlv, TlvFlags, TlvList,
+    TlvType, TypedTlv, TLV_HEADER_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -459,6 +460,253 @@ fn reflected_control_disabled_by_default_emits_no_extra_copies() {
         echoed.flags.to_byte() & 0x10,
         0x10,
         "C flag must be set when the reflector cannot honour the request"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// draft-ietf-ippm-asymmetrical-pkts-14 §3 processing rules.
+
+/// Builds the 12-octet Type 12 value: length | count | interval plus the
+/// 4-byte placeholder sub-TLV header that pads to the mandatory 12-octet
+/// floor.
+fn reflected_control_value(length: u16, count: u16, interval_ns: u32) -> Vec<u8> {
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&length.to_be_bytes());
+    value.extend_from_slice(&count.to_be_bytes());
+    value.extend_from_slice(&interval_ns.to_be_bytes());
+    value.extend_from_slice(&[0u8; 4]);
+    value
+}
+
+#[test]
+fn reflected_control_count_zero_suppresses_reply() {
+    // draft-14 §3: "If the Number of Reflected Packets field is set to zero,
+    // the Session-Reflector MUST NOT send any reflected packets", and SHOULD
+    // discard the received test packet.
+    let raw = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value(0, 0, 1_000_000),
+    );
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let ctx = make_ctx(None);
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("processing still yields a (suppressed) response object");
+    assert_eq!(
+        response.return_path_action,
+        ReturnPathAction::SuppressReply,
+        "count=0 must suppress the reply entirely"
+    );
+}
+
+#[test]
+fn reflected_control_count_above_cap_collapses_to_single_reply() {
+    // draft-14 §3: a request that would exceed the reflector's volume limit
+    // gets C=1 and "a single reflected packet" — not a clamped burst.
+    let raw = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value(0, 1000, 1_000_000),
+    );
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let ctx = make_ctx(None); // cap = 16
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("over-limit request still produces the single reply");
+    let extra = response.reflected_control.map_or(0, |b| b.extra_copies);
+    assert_eq!(extra, 0, "volume violation must collapse to a single reply");
+}
+
+#[test]
+fn reflected_control_interval_below_floor_collapses_to_single_reply() {
+    // draft-14 §3: exceeding the configured *rate* limit (interval floor)
+    // also means C=1 plus a single reflected packet.
+    let raw = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value(0, 2, 10), // 10 ns << 1 µs floor
+    );
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let ctx = make_ctx(None);
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("rate-violating request still produces the single reply");
+    let extra = response.reflected_control.map_or(0, |b| b.extra_copies);
+    assert_eq!(extra, 0, "rate violation must collapse to a single reply");
+
+    let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).expect("parse");
+    let flags = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Type 12 echoed")
+        .flags
+        .to_byte();
+    assert_eq!(
+        flags & 0x10,
+        0x10,
+        "C flag must accompany the rate violation"
+    );
+}
+
+#[test]
+fn reflected_control_strips_echoed_extra_padding() {
+    // draft-14 §3 rule (a): the reflected length is computed "excluding any
+    // Extra Padding TLVs" so a sender can request replies SHORTER than its
+    // test packet. The echoed chain must not contain the sender's padding.
+    let padding = ExtraPaddingTlv::new_zeros(100).to_raw();
+    let control = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value(0, 2, 1_000_000),
+    );
+    let mut chain = Vec::new();
+    chain.extend_from_slice(&padding.to_bytes());
+    chain.extend_from_slice(&control.to_bytes());
+
+    let packet = build_unauth_packet(&chain);
+    let ctx = make_ctx(None);
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("conformant request must be reflected");
+    let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).expect("parse");
+    assert!(
+        !parsed
+            .non_hmac_tlvs()
+            .iter()
+            .any(|t| matches!(t.tlv_type, TlvType::ExtraPadding)),
+        "echoed Extra Padding must be stripped when Type 12 is processed"
+    );
+    assert_eq!(
+        response.data.len(),
+        UNAUTH_BASE_SIZE + TLV_HEADER_SIZE + 12,
+        "reply must shrink to base + Type 12 once padding is stripped"
+    );
+}
+
+#[test]
+fn reflected_control_pads_to_four_octet_aligned_length() {
+    // draft-14 §3 rule (b): the requested length is taken "aligned at a
+    // four-octet boundary" — 101 must round up to 104.
+    let raw = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value(101, 1, 0),
+    );
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let ctx = make_ctx(None);
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("padding request must be reflected");
+    assert_eq!(
+        response.data.len(),
+        104,
+        "requested length 101 must be honoured as the aligned 104 octets"
+    );
+}
+
+#[test]
+fn incoming_c_flag_on_request_is_ignored() {
+    // draft-14 §3: "the Session-Reflector MUST ignore its value on the
+    // receipt" — a sender-set C must not leak into a conformant echo.
+    let raw = RawTlv::with_flags(
+        TlvFlags::from_byte(0x90), // U (sender-mandated) + bogus C
+        TlvType::ReflectedControl,
+        reflected_control_value(0, 2, 1_000_000),
+    );
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let ctx = make_ctx(None);
+    let parsed = reflect_unauth(&packet, &ctx);
+
+    let flags = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Type 12 echoed")
+        .flags
+        .to_byte();
+    assert_eq!(
+        flags & 0x10,
+        0x00,
+        "reflector must derive C itself; the incoming value is ignored"
+    );
+}
+
+#[test]
+fn return_path_no_reply_conflict_sets_u_on_both_tlvs() {
+    // draft-14 §4.3: Return Path "no reply requested" combined with a
+    // non-zero Reflected Test Packet Control TLV is a sender error; the
+    // reflector "MUST set the U flag to 1 in Return Path and Reflected Test
+    // Packet Control TLVs in the reflected STAMP packet" — so a reply IS
+    // sent, and no asymmetric behaviour happens.
+    let rp = ReturnPathTlv::with_control_code(0x0).to_raw(); // no reply requested
+    let control = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value(0, 2, 1_000_000),
+    );
+    let mut chain = Vec::new();
+    chain.extend_from_slice(&rp.to_bytes());
+    chain.extend_from_slice(&control.to_bytes());
+
+    let packet = build_unauth_packet(&chain);
+    let ctx = make_ctx(None);
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("conflicting packet must still be reflected");
+    assert_eq!(
+        response.return_path_action,
+        ReturnPathAction::Normal,
+        "the no-reply request must not be honoured in the conflict case"
+    );
+    let extra = response.reflected_control.map_or(0, |b| b.extra_copies);
+    assert_eq!(extra, 0, "no asymmetric behaviour in the conflict case");
+
+    let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).expect("parse");
+    for wanted in [TlvType::ReturnPath, TlvType::ReflectedControl] {
+        let flags = parsed
+            .non_hmac_tlvs()
+            .iter()
+            .find(|t| t.tlv_type == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} must be echoed"))
+            .flags
+            .to_byte();
+        assert_eq!(
+            flags & 0x80,
+            0x80,
+            "{wanted:?} must carry U=1 in the conflict case"
+        );
+    }
+}
+
+#[test]
+fn reflected_control_padding_uses_real_base_size_with_tlv_hmac() {
+    // The padding target must be computed from the actual reflected base
+    // packet size (44 octets unauth), not inferred from the presence of a
+    // TLV-HMAC key. Request 200 octets; the reply must be exactly 200.
+    let key = HmacKey::new(vec![0x11; 32]).expect("test key");
+
+    let control = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value(200, 2, 1_000_000),
+    );
+    let control_bytes = control.to_bytes();
+
+    let seq_bytes = 1u32.to_be_bytes();
+    let mut hmac_input = Vec::new();
+    hmac_input.extend_from_slice(&seq_bytes);
+    hmac_input.extend_from_slice(&control_bytes);
+    let digest = key.compute(&hmac_input);
+    let hmac_tlv = RawTlv::new(TlvType::Hmac, digest.to_vec());
+
+    let mut chain = Vec::new();
+    chain.extend_from_slice(&control_bytes);
+    chain.extend_from_slice(&hmac_tlv.to_bytes());
+
+    let packet = build_unauth_packet(&chain);
+    let ctx = make_ctx(Some(&key));
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("valid HMAC packet must be reflected");
+    assert_eq!(
+        response.data.len(),
+        200,
+        "unauth reply must be padded to exactly the requested 200 octets"
     );
 }
 

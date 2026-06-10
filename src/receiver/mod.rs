@@ -649,17 +649,19 @@ pub struct ReflectedControlBehavior {
 pub const REFLECTED_CONTROL_MAX_COUNT: u16 = 16;
 
 /// Default reflector cap on the reply packet size (in octets) the reflector
-/// will pad up to when honouring a Reflected Control TLV `length` request.
-/// The C flag is set when the requested length exceeds this cap.
-/// Defaults to a typical Ethernet MTU. Operators can override at runtime via
+/// will pad up to when honouring a Reflected Control TLV `length` request —
+/// the operator's stand-in for the egress-interface MTU in
+/// draft-ietf-ippm-asymmetrical-pkts-14 §3. A longer request gets a single
+/// reply padded to this cap with the C flag set. Defaults to a typical
+/// Ethernet MTU. Operators can override at runtime via
 /// `--reflected-control-max-size`.
 pub const REFLECTED_CONTROL_MAX_SIZE: u16 = 1500;
 
-/// Default minimum inter-packet gap (nanoseconds) honoured by the backend;
-/// smaller requested values are clamped up to this floor to avoid tight
-/// busy-loops. The C flag is set when clamping actually changes the
-/// interval. Operators can override at runtime via
-/// `--reflected-control-min-interval-ns`.
+/// Default minimum inter-packet gap (nanoseconds) — the per-request *rate*
+/// limit of draft-ietf-ippm-asymmetrical-pkts-14 §3, and a floor that avoids
+/// tight busy-loops in the backends. A multi-packet request with a shorter
+/// interval collapses to a single reply with the C flag set. Operators can
+/// override at runtime via `--reflected-control-min-interval-ns`.
 pub const REFLECTED_CONTROL_MIN_INTERVAL_NS: u32 = 1_000;
 
 /// Reflected Control sub-TLV types per draft-ietf-ippm-asymmetrical-pkts §3.
@@ -1403,8 +1405,10 @@ fn apply_semantic_tlv_processing(
         }
     }
 
-    // Process Return Path TLV (RFC 9503 §5)
-    let return_path_action =
+    // Process Return Path TLV (RFC 9503 §5). Mutable: the
+    // draft-ietf-ippm-asymmetrical-pkts-14 §4.3 conflict rule below may
+    // override a no-reply request.
+    let mut return_path_action =
         tlvs.process_return_path(ctx.sender_port, ctx.return_path_allow_alternate);
 
     // Process BER TLVs (draft-gandhi-ippm-stamp-ber §3):
@@ -1427,18 +1431,14 @@ fn apply_semantic_tlv_processing(
     };
     tlvs.process_reflected_headers(captured_fixed, captured_ext);
 
-    // Process Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts §3).
-    // Count is clamped to ctx.reflected_control_max_count; the interval is clamped
-    // up to ctx.reflected_control_min_interval_ns; either clamp sets the C flag.
-    // A non-zero requested length triggers Extra Padding TLV insertion below up to
-    // ctx.reflected_control_max_size; exceeding that cap sets the C flag.
+    // Process Reflected Test Packet Control TLV
+    // (draft-ietf-ippm-asymmetrical-pkts-14 §3).
     //
-    // Per draft §3, when an L3 Address Group sub-TLV is present and no local
-    // address matches, the reflector MUST stop processing the packet — we
-    // signal that by returning a SuppressReply action. L2 Address Group
-    // sub-TLVs require MAC-address visibility (link-layer access), which the
-    // UDP-socket backends don't have; we set the U-flag on the echoed Type 12
-    // and continue.
+    // Per §3.1, when an L3 Address Group sub-TLV is present and no local
+    // address matches, the reflector MUST stop processing the packet. L2
+    // Address Group sub-TLVs require MAC-address visibility (link-layer
+    // access), which the UDP-socket backends don't have; we set the U-flag
+    // on the echoed Type 12 and continue.
     let reflected_control = match tlvs.get_reflected_control_request() {
         Some(req) => {
             // Pre-check sub-TLVs: L3 mismatch → drop the packet entirely.
@@ -1459,11 +1459,11 @@ fn apply_semantic_tlv_processing(
                 }
             }
             if l3_matches == Some(false) {
-                // draft §3: "If no matches are found, the Session-Reflector
+                // §3.1.2: "If no matches are found, the Session-Reflector
                 // MUST stop processing the received packet."
                 log::debug!(
                     "Reflected Control L3 Address Group did not match any local \
-                     address; dropping packet per draft-ietf-ippm-asymmetrical-pkts §3"
+                     address; dropping packet per draft-ietf-ippm-asymmetrical-pkts-14 §3.1.2"
                 );
                 return None;
             }
@@ -1474,74 +1474,104 @@ fn apply_semantic_tlv_processing(
                 tlvs.set_reflected_control_u_flag();
             }
 
-            let requested_count = req.number_of_reflected_packets;
-            let effective_count = requested_count.min(ctx.reflected_control_max_count);
-            let effective_interval = req
-                .interval_nanoseconds
-                .max(ctx.reflected_control_min_interval_ns);
-
-            let mut non_conformant = false;
-            if effective_count != requested_count {
-                non_conformant = true;
-            }
-            if effective_interval != req.interval_nanoseconds && requested_count > 1 {
-                non_conformant = true;
-            }
-            // Requested length handling: 0 = don't pad (sender opt-out).
-            // Otherwise try to pad the response with an Extra Padding TLV to
-            // reach the requested total reply size, up to the local cap.
-            //
-            // Padding the reply *larger* than the request is amplification, so
-            // it is governed by the same administrative opt-in as extra copies:
-            // when `reflected_control_max_count == 0` (the default, "asymmetric
-            // reflection disabled" per draft-ietf-ippm-asymmetrical-pkts) the
-            // reflector refuses to pad and sets the C flag. Otherwise an
-            // unauthenticated peer could turn a tiny request into a 1500-byte
-            // reply and, combined with a Return Address sub-TLV, aim it at a
-            // victim.
-            let requested_length = req.length_of_reflected_packet;
-            if requested_length > 0 && ctx.reflected_control_max_count == 0 {
-                // Amplification disabled administratively: do not pad, signal C.
-                non_conformant = true;
-            } else if requested_length > 0 {
-                let target = requested_length as usize;
-                let cap = ctx.reflected_control_max_size as usize;
-                let base_size = if tlv_hmac_key.is_some() {
-                    AUTH_BASE_SIZE
-                } else {
-                    UNAUTH_BASE_SIZE
-                };
-                let current = base_size + tlvs.wire_size();
-                let would_be = target.min(cap);
-                // Need at least 4 bytes (TLV header) to insert an Extra
-                // Padding TLV. The padding value carries (delta - 4) octets
-                // of zeros.
-                if would_be > current && would_be - current >= TLV_HEADER_SIZE {
-                    let pad_bytes = would_be - current - TLV_HEADER_SIZE;
-                    let pad_tlv = crate::tlv::ExtraPaddingTlv::new_zeros(pad_bytes).to_raw();
-                    // push() places non-HMAC TLVs before the HMAC TLV in
-                    // wire order so the chain remains spec-compliant.
-                    let _ = tlvs.push(pad_tlv);
-                    if target > cap {
-                        // Clamped below request → C flag.
-                        non_conformant = true;
-                    }
-                } else {
-                    // Couldn't pad (request smaller than current size, or
-                    // delta is too small to fit a TLV header). Signal C.
+            if return_path_action == ReturnPathAction::SuppressReply
+                && req.number_of_reflected_packets != 0
+            {
+                // §4.3: combining a Return Path "no reply requested" control
+                // code with a non-zero Reflected Test Packet Control TLV is a
+                // sender error. The reflector MUST set U on both TLVs in the
+                // (single, normal) reflected packet and SHOULD log it.
+                log::warn!(
+                    "STAMP packet combines Return Path 'no reply requested' with a \
+                     non-zero Reflected Test Packet Control TLV; setting U on both \
+                     per draft-ietf-ippm-asymmetrical-pkts-14 §4.3"
+                );
+                tlvs.set_reflected_control_u_flag();
+                tlvs.set_return_path_u_flag();
+                return_path_action = ReturnPathAction::Normal;
+                None
+            } else if ctx.reflected_control_max_count == 0 {
+                // Administrative disable (the production default; §5 mandates
+                // support be off by default). Treated as a volume limit of
+                // zero: echo the TLV with the C flag and send the single
+                // normal reply, but never pad — otherwise an unauthenticated
+                // peer could turn a tiny request into a 1500-byte reply and,
+                // combined with a Return Address sub-TLV, aim it at a victim.
+                tlvs.set_reflected_control_c_flag();
+                None
+            } else if req.number_of_reflected_packets == 0 {
+                // §3: count 0 → "MUST NOT send any reflected packets", and
+                // SHOULD discard the received test packet. (RFC 9503's
+                // no-reply control code is the preferred way to request this.)
+                log::debug!(
+                    "Reflected Control count=0; suppressing reply per \
+                     draft-ietf-ippm-asymmetrical-pkts-14 §3"
+                );
+                return None;
+            } else {
+                let requested_count = req.number_of_reflected_packets;
+                let mut non_conformant = false;
+                // §3 + §5: the reflector MUST limit the rate and volume of
+                // the traffic it generates per incoming packet; a request
+                // exceeding either limit gets C=1 and a SINGLE reflected
+                // packet, not a clamped burst. `max_count` is the volume
+                // limit and the interval floor is the rate limit.
+                if requested_count > ctx.reflected_control_max_count {
                     non_conformant = true;
                 }
-            }
+                if requested_count > 1
+                    && req.interval_nanoseconds < ctx.reflected_control_min_interval_ns
+                {
+                    non_conformant = true;
+                }
 
-            if non_conformant {
-                tlvs.set_reflected_control_c_flag();
-            }
+                // §3 length rules: the reflected length is the larger of
+                //  (a) the base reply plus echoed TLVs *excluding* Extra
+                //      Padding TLVs (so replies can shrink below the
+                //      received packet's size), and
+                //  (b) the requested length aligned up to a 4-octet boundary,
+                // capped at max_size — the operator's stand-in for the
+                // egress-interface MTU; exceeding the cap is the C=1 "MTU"
+                // case and the reply is padded to the cap instead.
+                tlvs.remove_extra_padding_tlvs();
+                let current = base_bytes.len() + tlvs.wire_size();
+                let aligned_req = (req.length_of_reflected_packet as usize).div_ceil(4) * 4;
+                let cap = ctx.reflected_control_max_size as usize;
+                if aligned_req > cap {
+                    non_conformant = true;
+                }
+                let target = aligned_req.min(cap);
+                if target > current {
+                    let delta = target - current;
+                    if delta >= TLV_HEADER_SIZE {
+                        // The padding value carries (delta - 4) octets of
+                        // zeros; push() places it before the HMAC TLV in
+                        // wire order so the chain remains spec-compliant.
+                        let pad_tlv =
+                            crate::tlv::ExtraPaddingTlv::new_zeros(delta - TLV_HEADER_SIZE)
+                                .to_raw();
+                        let _ = tlvs.push(pad_tlv);
+                    } else {
+                        // Can't grow by less than one TLV header.
+                        non_conformant = true;
+                    }
+                }
 
-            let extra_copies = effective_count.saturating_sub(1);
-            Some(ReflectedControlBehavior {
-                extra_copies,
-                interval_ns: effective_interval,
-            })
+                if non_conformant {
+                    tlvs.set_reflected_control_c_flag();
+                }
+                let extra_copies = if non_conformant {
+                    0
+                } else {
+                    requested_count - 1
+                };
+                Some(ReflectedControlBehavior {
+                    extra_copies,
+                    interval_ns: req
+                        .interval_nanoseconds
+                        .max(ctx.reflected_control_min_interval_ns),
+                })
+            }
         }
         None => None,
     };

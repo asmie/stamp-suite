@@ -349,7 +349,12 @@ impl TlvList {
     }
 
     /// Sets the U-flag on the Return Path TLV in both separated and wire-order lists.
-    fn set_return_path_u_flag(&mut self) {
+    ///
+    /// Public so the receiver can flag the Return Path TLV in the
+    /// draft-ietf-ippm-asymmetrical-pkts-14 §4.3 conflict case (no-reply
+    /// control code combined with a non-zero Reflected Test Packet Control
+    /// TLV).
+    pub fn set_return_path_u_flag(&mut self) {
         for tlv in &mut self.tlvs {
             if tlv.tlv_type == TlvType::ReturnPath {
                 tlv.set_unrecognized();

@@ -607,13 +607,16 @@ impl RawTlv {
     }
 
     /// Clears the U, M, and I flags so the reflector can re-derive them
-    /// per RFC 8972 §4.4.1. The C-flag, reserved bits, and the
+    /// per RFC 8972 §4.4.1, and drops the C flag — the Session-Reflector
+    /// MUST ignore the received C value and derive its own
+    /// (draft-ietf-ippm-asymmetrical-pkts-14 §3). Reserved bits and the
     /// `parser_marked_malformed` marker (used to re-set M for parser-detected
-    /// structural errors) are all preserved.
+    /// structural errors) are preserved.
     pub fn clear_reflector_flags(&mut self) {
         self.flags.unrecognized = false;
         self.flags.malformed = false;
         self.flags.integrity_failed = false;
+        self.flags.conformant_reflected = false;
     }
 }
 
@@ -850,8 +853,10 @@ mod tests {
         let mut tlv =
             RawTlv::with_flags(TlvFlags::from_byte(0xF0), TlvType::ReflectedControl, vec![]);
         tlv.clear_reflector_flags();
-        // U/M/I cleared, C-flag preserved.
-        assert_eq!(tlv.flags.to_byte(), 0x10);
+        // U/M/I cleared. C is reflector-owned output: draft-ietf-ippm-
+        // asymmetrical-pkts-14 §3 says the incoming value MUST be ignored,
+        // so the clear pass drops it and processing re-derives it.
+        assert_eq!(tlv.flags.to_byte(), 0x00);
     }
 
     #[test]

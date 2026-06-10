@@ -494,31 +494,36 @@ pub struct Configuration {
     #[clap(long, default_value_t = 1_000_000)]
     pub reflected_control_interval_ns: u32,
 
-    /// Reflector-side amplification cap: maximum number of reply packets
-    /// the reflector will emit in response to a single Reflected Test
-    /// Packet Control TLV request, regardless of what the sender requests.
-    /// When the sender requests more than this, the count is clamped and
-    /// the C flag is set on the echoed TLV.
+    /// Reflector-side amplification cap (the per-request *volume* limit of
+    /// draft-ietf-ippm-asymmetrical-pkts-14 §3): maximum number of reply
+    /// packets the reflector will emit in response to a single Reflected
+    /// Test Packet Control TLV request. When the sender requests more, the
+    /// reflector sends a single reflected packet with the C flag set on the
+    /// echoed TLV, as the draft requires.
     ///
     /// Default 0, which **disables** asymmetric reflection — the reflector
     /// sends only the single normal reply and sets the C flag. This honours
-    /// draft-ietf-ippm-asymmetrical-pkts, which requires the feature be
+    /// draft-ietf-ippm-asymmetrical-pkts-14 §5, which requires the feature be
     /// administratively controllable and disabled by default. Set a positive
     /// value to opt in (e.g. 16); pair with `--max-pps` to bound amplification.
     #[clap(long, default_value_t = 0)]
     pub reflected_control_max_count: u16,
 
-    /// Reflector-side amplification cap: maximum reply packet size (in
-    /// bytes) the reflector will pad up to when honouring a Reflected
-    /// Test Packet Control TLV `length` request. When the requested
-    /// length exceeds this, the C flag is set on the echoed TLV. Default
-    /// 1500 (typical Ethernet MTU).
+    /// Reflector-side amplification cap, and the operator's stand-in for
+    /// the egress-interface MTU of draft-ietf-ippm-asymmetrical-pkts-14 §3:
+    /// maximum reply packet size (in bytes) the reflector will pad up to
+    /// when honouring a Reflected Test Packet Control TLV `length` request.
+    /// When the requested length exceeds this, a single reflected packet
+    /// padded to this cap is sent with the C flag set on the echoed TLV.
+    /// Default 1500 (typical Ethernet MTU); set to your real egress MTU.
     #[clap(long, default_value_t = 1500)]
     pub reflected_control_max_size: u16,
 
-    /// Reflector-side amplification cap: minimum inter-packet interval
-    /// in nanoseconds. Requested intervals shorter than this are clamped
-    /// up and the C flag is set on the echoed TLV. Default 1000 (1 µs).
+    /// Reflector-side amplification cap (the per-request *rate* limit of
+    /// draft-ietf-ippm-asymmetrical-pkts-14 §3): minimum inter-packet
+    /// interval in nanoseconds. A multi-packet request with a shorter
+    /// interval gets a single reflected packet with the C flag set on the
+    /// echoed TLV. Default 1000 (1 µs).
     #[clap(long, default_value_t = 1_000)]
     pub reflected_control_min_interval_ns: u32,
 
@@ -684,6 +689,17 @@ impl Configuration {
                     "return_path_cc conflicts with return_srv6_sids".to_string(),
                 ));
             }
+        }
+        // draft-ietf-ippm-asymmetrical-pkts-14 §4.3: a Session-Sender MUST NOT
+        // combine a "no reply requested" Return Path control code with a
+        // non-zero Reflected Test Packet Control TLV (the TLV is only emitted
+        // when reflected_control_count > 1).
+        if self.return_path_cc == Some(0) && self.reflected_control_count > 1 {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "return_path_cc 0 (no reply requested) cannot be combined with \
+                 reflected_control_count > 1 (draft-ietf-ippm-asymmetrical-pkts-14 §4.3)"
+                    .to_string(),
+            ));
         }
         if self.return_sr_mpls_labels.is_some() && self.return_srv6_sids.is_some() {
             return Err(ConfigurationError::InvalidConfiguration(
@@ -1102,6 +1118,40 @@ mod tests {
         let args = vec!["test", "--remote-addr", "invalid_addr"];
         let conf = Configuration::try_parse_from(args);
         assert!(conf.is_err());
+    }
+
+    #[test]
+    fn test_return_path_no_reply_conflicts_with_reflected_control() {
+        // draft-ietf-ippm-asymmetrical-pkts-14 §4.3: a sender MUST NOT
+        // combine a Return Path "no reply requested" control code with a
+        // non-zero Reflected Test Packet Control TLV.
+        let args = vec![
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--return-path-cc",
+            "0",
+            "--reflected-control-count",
+            "4",
+        ];
+        let conf = Configuration::parse_from(args);
+        assert!(
+            conf.validate().is_err(),
+            "no-reply control code + reflected-control-count > 1 must be rejected"
+        );
+
+        // cc=1 (reply requested) combines fine.
+        let args = vec![
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--return-path-cc",
+            "1",
+            "--reflected-control-count",
+            "4",
+        ];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.validate().is_ok());
     }
 
     #[test]
