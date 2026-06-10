@@ -449,10 +449,13 @@ pub fn print_reflector_stats(
 /// HMAC field offset in ReflectedPacketAuthenticated (bytes before HMAC field).
 pub const REFLECTED_AUTH_PACKET_HMAC_OFFSET: usize = 96;
 
-/// Updates the RP (policy rejected) flag in a CoS TLV within the response buffer.
+/// Marks the CoS TLV in a serialized response as "requested CoS not applied":
+/// RPD=0b01 (DSCP1 not used, RFC 8972 §4.4) and RPE=0b10 (unable to set the
+/// reply's ECN to EC1, draft-ietf-ippm-stamp-cos-ecn-00 §3.2).
 ///
-/// This should be called when setsockopt fails to apply the requested DSCP/ECN,
-/// per RFC 8972 §5.2 which requires setting RP=1 to indicate policy rejection.
+/// Called by the backends when setsockopt fails to apply the requested
+/// DSCP/ECN to the reply packet. The caller must recompute the TLV HMAC
+/// afterwards (see `recompute_response_tlv_hmac`).
 ///
 /// # Arguments
 /// * `response` - The response buffer containing TLVs after the base packet
@@ -484,11 +487,15 @@ pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> 
         let value_end = value_start + length.min(tlv_area.len() - value_start);
 
         if tlv_type == TlvType::ClassOfService && value_end >= value_start + 3 {
-            // CoS TLV found - set RP flag (bits 6-7 of byte 2 in value)
-            // RP=1 means policy rejected the DSCP request
-            let rp_byte_offset = value_start + 2;
-            // Set RP bits (upper 2 bits) to 01 (rejected), preserving reserved bits
-            tlv_area[rp_byte_offset] = (tlv_area[rp_byte_offset] & 0x3F) | 0x40;
+            // CoS TLV found. The backend failed to apply the requested TOS
+            // (DSCP1 + EC1) to the reply, so report both halves:
+            // - RPD (value byte 1, bits 1:0) = 0b01 — DSCP1 not used
+            //   (RFC 8972 §4.4 / draft-ietf-ippm-stamp-cos-ecn-00 §3.2);
+            // - RPE (value byte 2, bits 5:4) = 0b10 — unable to set the
+            //   reply's ECN to EC1 (cos-ecn-00 §3.2), overwriting the
+            //   optimistic 0b11 written during TLV processing.
+            tlv_area[value_start + 1] = (tlv_area[value_start + 1] & 0xFC) | 0b01;
+            tlv_area[value_start + 2] = (tlv_area[value_start + 2] & 0xCF) | (0b10 << 4);
             return true;
         }
 
@@ -1385,8 +1392,12 @@ fn apply_semantic_tlv_processing(
     // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS
     let cos_request = tlvs.get_cos_request();
 
-    // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §5.2)
-    tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false);
+    // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §4.4 +
+    // draft-ietf-ippm-stamp-cos-ecn-00 §3.2). No DSCP policy is configured
+    // (DSCP1 is always honoured → RPD=0b00), and both backends apply the
+    // requested DSCP1/EC1 to the reply's TOS via `cos_request`, so
+    // RPE=0b11 ("reply ECN set to EC1").
+    tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false, true);
 
     // Update Timestamp Information TLVs (RFC 8972 §4.3)
     let sync_src = match ctx.clock_source {
@@ -3129,23 +3140,20 @@ mod tests {
             TlvType::ClassOfService.to_byte()
         ); // Type
 
-        // Parse the value bytes
+        // Parse the value via the typed decoder (single source of truth for
+        // the RFC 8972 + cos-ecn-00 bit layout).
         let value_start = tlv_start + TLV_HEADER_SIZE;
-        // Byte 0: DSCP1 (6 bits) | ECN1 (2 bits) - should be preserved from sender
-        let dscp1 = (response.data[value_start] >> 2) & 0x3F;
-        let ecn1 = response.data[value_start] & 0x03;
-        assert_eq!(dscp1, 46, "DSCP1 should be preserved");
-        assert_eq!(ecn1, 0, "ECN1 should be preserved");
-
-        // Byte 1: DSCP2 (6 bits) | ECN2 (2 bits) - should be filled by reflector
-        let dscp2 = (response.data[value_start + 1] >> 2) & 0x3F;
-        let ecn2 = response.data[value_start + 1] & 0x03;
-        assert_eq!(dscp2, received_dscp, "DSCP2 should be received DSCP");
-        assert_eq!(ecn2, received_ecn, "ECN2 should be received ECN");
-
-        // Byte 2: RP (2 bits) - should be 0 (policy not rejected)
-        let rp = (response.data[value_start + 2] >> 6) & 0x03;
-        assert_eq!(rp, 0, "RP should be 0 (policy accepted)");
+        let raw = crate::tlv::RawTlv::new(
+            TlvType::ClassOfService,
+            response.data[value_start..value_start + COS_TLV_VALUE_SIZE].to_vec(),
+        );
+        let parsed = crate::tlv::ClassOfServiceTlv::from_raw(&raw).unwrap();
+        assert_eq!(parsed.dscp1, 46, "DSCP1 should be preserved");
+        assert_eq!(parsed.ecn1, 0, "EC1 should be preserved");
+        assert_eq!(parsed.dscp2, received_dscp, "DSCP2 should be received DSCP");
+        assert_eq!(parsed.ecn2, received_ecn, "EC2 should be received ECN");
+        assert_eq!(parsed.rpd, 0, "RPD should be 0 (policy accepted)");
+        assert_eq!(parsed.rpe, 0b11, "RPE should report reply ECN set to EC1");
     }
 
     #[test]
@@ -3203,17 +3211,18 @@ mod tests {
         );
 
         let value_start = tlv_start + TLV_HEADER_SIZE;
-        // DSCP1/ECN1 preserved
-        let dscp1 = (response.data[value_start] >> 2) & 0x3F;
-        let ecn1 = response.data[value_start] & 0x03;
-        assert_eq!(dscp1, 0);
-        assert_eq!(ecn1, 1);
-
-        // DSCP2/ECN2 filled by reflector
-        let dscp2 = (response.data[value_start + 1] >> 2) & 0x3F;
-        let ecn2 = response.data[value_start + 1] & 0x03;
-        assert_eq!(dscp2, received_dscp);
-        assert_eq!(ecn2, received_ecn);
+        let raw = crate::tlv::RawTlv::new(
+            TlvType::ClassOfService,
+            response.data[value_start..value_start + COS_TLV_VALUE_SIZE].to_vec(),
+        );
+        let parsed = crate::tlv::ClassOfServiceTlv::from_raw(&raw).unwrap();
+        // DSCP1/EC1 preserved
+        assert_eq!(parsed.dscp1, 0);
+        assert_eq!(parsed.ecn1, 1);
+        // DSCP2/EC2 filled by reflector, RPE reports reply ECN applied
+        assert_eq!(parsed.dscp2, received_dscp);
+        assert_eq!(parsed.ecn2, received_ecn);
+        assert_eq!(parsed.rpe, 0b11);
     }
 
     #[test]
@@ -3246,18 +3255,17 @@ mod tests {
             &test_ctx(0, 0),
         );
 
-        // Verify RP is initially 0
+        // Verify RPD (value byte 1, bits 1:0) is initially 0
         let value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE;
-        let rp_before = (response.data[value_start + 2] >> 6) & 0x03;
-        assert_eq!(rp_before, 0);
+        assert_eq!(response.data[value_start + 1] & 0x03, 0);
 
         // Simulate DSCP application failure by calling set_cos_policy_rejected
         let updated = set_cos_policy_rejected(&mut response.data, UNAUTH_BASE_SIZE);
         assert!(updated);
 
-        // Verify RP is now 1
-        let rp_after = (response.data[value_start + 2] >> 6) & 0x03;
-        assert_eq!(rp_after, 1);
+        // RPD=0b01 (DSCP1 not used) and RPE=0b10 (unable to set reply ECN)
+        assert_eq!(response.data[value_start + 1] & 0x03, 0b01);
+        assert_eq!((response.data[value_start + 2] >> 4) & 0x03, 0b10);
     }
 
     #[test]
@@ -3295,18 +3303,17 @@ mod tests {
             &test_ctx(0, 0),
         );
 
-        // Verify RP is initially 0
+        // Verify RPD (value byte 1, bits 1:0) is initially 0
         let value_start = AUTH_BASE_SIZE + TLV_HEADER_SIZE;
-        let rp_before = (response.data[value_start + 2] >> 6) & 0x03;
-        assert_eq!(rp_before, 0);
+        assert_eq!(response.data[value_start + 1] & 0x03, 0);
 
         // Simulate DSCP application failure
         let updated = set_cos_policy_rejected(&mut response.data, AUTH_BASE_SIZE);
         assert!(updated);
 
-        // Verify RP is now 1
-        let rp_after = (response.data[value_start + 2] >> 6) & 0x03;
-        assert_eq!(rp_after, 1);
+        // RPD=0b01 (DSCP1 not used) and RPE=0b10 (unable to set reply ECN)
+        assert_eq!(response.data[value_start + 1] & 0x03, 0b01);
+        assert_eq!((response.data[value_start + 2] >> 4) & 0x03, 0b10);
     }
 
     #[test]
@@ -3348,19 +3355,18 @@ mod tests {
         let cos_tlv = ClassOfServiceTlv::new(46, 2); // DSCP=46, ECN=2
         response.extend_from_slice(&cos_tlv.to_raw().to_bytes());
 
-        // Verify RP is initially 0
+        // Verify RPD (value byte 1, bits 1:0) is initially 0
         let cos_value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE + TLV_HEADER_SIZE; // Skip Reserved + CoS header
-        let rp_before = (response[cos_value_start + 2] >> 6) & 0x03;
-        assert_eq!(rp_before, 0);
+        assert_eq!(response[cos_value_start + 1] & 0x03, 0);
 
         // The Reserved TLV (00 00 00 00) should NOT stop iteration because
         // it's followed by non-zero data (the CoS TLV).
         let updated = set_cos_policy_rejected(&mut response, UNAUTH_BASE_SIZE);
         assert!(updated, "Should find CoS TLV after Reserved TLV");
 
-        // Verify RP is now 1
-        let rp_after = (response[cos_value_start + 2] >> 6) & 0x03;
-        assert_eq!(rp_after, 1);
+        // RPD=0b01 (DSCP1 not used) and RPE=0b10 (unable to set reply ECN)
+        assert_eq!(response[cos_value_start + 1] & 0x03, 0b01);
+        assert_eq!((response[cos_value_start + 2] >> 4) & 0x03, 0b10);
     }
 
     #[test]

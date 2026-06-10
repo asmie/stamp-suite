@@ -27,8 +27,8 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 256, .. ProptestConfig::default() })]
 
     #[test]
-    fn prop_cos_round_trip(dscp1 in 0u8..64, ecn1 in 0u8..4, dscp2 in 0u8..64, ecn2 in 0u8..4, rp in 0u8..4) {
-        let original = ClassOfServiceTlv { dscp1, ecn1, dscp2, ecn2, rp };
+    fn prop_cos_round_trip(dscp1 in 0u8..64, ecn1 in 0u8..4, dscp2 in 0u8..64, ecn2 in 0u8..4, rpd in 0u8..4, rpe in 0u8..4) {
+        let original = ClassOfServiceTlv { dscp1, ecn1, dscp2, ecn2, rpd, rpe };
         let raw = original.to_raw();
         let parsed = ClassOfServiceTlv::from_raw(&raw).expect("CoS round-trip parse");
         prop_assert_eq!(parsed, original);

@@ -119,6 +119,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CoS TLV (Type 4) wire format was incompatible with RFC 8972.** The
+  encoder packed `DSCP1|ECN` into value byte 0 and `DSCP2|ECN2` into byte 1;
+  RFC 8972 §4.4 places DSCP1 and DSCP2 adjacently (`| DSCP1 | DSCP2 |ECN|RP|`),
+  so every CoS field except DSCP1 landed in the wrong bits when talking to a
+  conformant peer (e.g. teaparty, Junos). The TLV now uses the correct layout,
+  extended with the **EC1/RPE reverse-path ECN fields of
+  draft-ietf-ippm-stamp-cos-ecn-00** (which occupy former Reserved bits and
+  are backward compatible): EC1 carries the ECN value requested for the
+  reflected packet (the existing `--ecn` flag, previously sent in the
+  home-grown byte-0 position), and the reflector reports RPE=0b11 when it set
+  the reply's ECN to EC1 or 0b10 when it could not (e.g. setsockopt failure,
+  which now also sets RPD=0b01). NOTE: pre-fix stamp-suite peers parse CoS
+  fields from the old positions, so mixed-version CoS measurements will
+  misreport DSCP2/ECN values — upgrade both ends.
+
 - **SNMP sub-agent now reconnects to the AgentX master.** Previously, if
   net-snmpd restarted or closed the session, the sub-agent exited and stayed
   down for the life of the process. The AgentX event loop now runs inside a
