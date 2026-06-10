@@ -32,9 +32,12 @@ mod handler;
 pub mod oids;
 pub mod state;
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use handler::StampMibHandler;
@@ -63,52 +66,152 @@ impl SnmpServer {
     }
 }
 
+/// Description string sent to the AgentX master on every (re)connect.
+const AGENTX_DESCRIPTION: &str = "stamp-suite SNMP sub-agent";
+
+/// Initial reconnect backoff after an AgentX session drops.
+const RECONNECT_BACKOFF_START: Duration = Duration::from_secs(1);
+
+/// Maximum reconnect backoff (cap for the exponential growth).
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
 /// Initializes the SNMP AgentX sub-agent.
 ///
 /// Connects to the master agent, registers the STAMP-SUITE-MIB subtree,
-/// and spawns a blocking task for the AgentX event loop.
+/// and spawns a blocking task for the AgentX event loop. If the master later
+/// closes the session or the socket errors (e.g. net-snmpd restarts), the
+/// background task reconnects with capped exponential backoff until shutdown
+/// is requested — the sub-agent no longer stays down for the life of the
+/// process after a single master restart.
+///
+/// The initial connect/register is performed synchronously so a misconfigured
+/// socket path is reported to the caller (fail-fast) rather than retried
+/// silently forever.
 ///
 /// # Arguments
 /// * `socket_path` - Path to the AgentX master agent Unix socket
 /// * `state` - Shared state for the MIB handler
 pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServer, SnmpError> {
     let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_clone = cancel.clone();
 
-    // Test connectivity before spawning the background task
-    let mut session = agentx::AgentXSession::connect(&socket_path, "stamp-suite SNMP sub-agent")?;
+    // Validate connectivity up front (fail-fast on a bad socket path).
+    let mut session = agentx::AgentXSession::connect(&socket_path, AGENTX_DESCRIPTION)?;
     session.register(&oids::stamp_suite_root())?;
 
     log::info!("SNMP AgentX sub-agent connected to {}", socket_path);
 
-    // Spawn the event loop in a blocking task (synchronous socket I/O).
-    // A separate supervisor `tokio::spawn` awaits the JoinHandle so that an
-    // unforeseen panic in the handler dispatch is logged rather than silently
-    // dropped on the floor (which would leave the SNMP sub-agent dead with no
-    // signal to operators).
-    let cancel_for_supervisor = Arc::clone(&cancel);
+    // Spawn the event loop in a blocking task (synchronous socket I/O), wrapped
+    // in a reconnect loop. The first iteration reuses the validated session.
+    let cancel_loop = Arc::clone(&cancel);
     let join = tokio::task::spawn_blocking(move || {
         let handler = StampMibHandler::new(state);
-        if let Err(e) = session.run_loop(&handler, &cancel_clone) {
-            if !cancel_clone.load(Ordering::Relaxed) {
-                log::error!("AgentX event loop error: {}", e);
+        let mut session = session;
+        loop {
+            if let Err(e) = session.run_loop(&handler, &cancel_loop) {
+                if !cancel_loop.load(Ordering::Relaxed) {
+                    log::warn!("AgentX event loop error: {e}; will attempt to reconnect");
+                }
+            }
+            // run_loop returned: either we were asked to shut down, or the
+            // master went away. Stop on shutdown; otherwise reconnect.
+            if cancel_loop.load(Ordering::Relaxed) {
+                break;
+            }
+            match reconnect(&socket_path, &cancel_loop) {
+                Some(s) => session = s,
+                None => break, // cancellation requested during backoff
             }
         }
+        log::info!("SNMP AgentX sub-agent stopped");
     });
+
+    // Supervisor: log a panic in the blocking task rather than dropping it
+    // silently (which would leave the sub-agent dead with no signal).
+    let cancel_for_supervisor = Arc::clone(&cancel);
     tokio::spawn(async move {
         if let Err(join_err) = join.await {
             if !cancel_for_supervisor.load(Ordering::Relaxed) {
                 if join_err.is_panic() {
-                    log::error!(
-                        "AgentX event loop panicked: {}; SNMP sub-agent is down",
-                        join_err
-                    );
+                    log::error!("AgentX event loop panicked: {join_err}; SNMP sub-agent is down");
                 } else {
-                    log::error!("AgentX event loop terminated abnormally: {}", join_err);
+                    log::error!("AgentX event loop terminated abnormally: {join_err}");
                 }
             }
         }
     });
 
     Ok(SnmpServer { cancel })
+}
+
+/// (Re)connects to the AgentX master and re-registers the subtree, retrying
+/// with capped exponential backoff until it succeeds or `cancel` is set.
+///
+/// Returns `None` if shutdown was requested before a connection was
+/// re-established.
+fn reconnect(socket_path: &str, cancel: &AtomicBool) -> Option<agentx::AgentXSession> {
+    let mut backoff = RECONNECT_BACKOFF_START;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        match agentx::AgentXSession::connect(socket_path, AGENTX_DESCRIPTION) {
+            Ok(mut session) => match session.register(&oids::stamp_suite_root()) {
+                Ok(()) => {
+                    log::info!("SNMP AgentX sub-agent reconnected to {socket_path}");
+                    return Some(session);
+                }
+                Err(e) => {
+                    log::warn!("AgentX re-registration failed: {e}; retrying in {backoff:?}");
+                }
+            },
+            Err(e) => {
+                log::debug!("AgentX reconnect to {socket_path} failed: {e}; retrying in {backoff:?}");
+            }
+        }
+        sleep_cancellable(backoff, cancel);
+        backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+    }
+}
+
+/// Sleeps for up to `dur`, returning early if `cancel` becomes set. Runs on the
+/// blocking thread, so it polls `cancel` in short steps to stay responsive to
+/// shutdown.
+fn sleep_cancellable(dur: Duration, cancel: &AtomicBool) {
+    let step = Duration::from_millis(200);
+    let mut remaining = dur;
+    while !remaining.is_zero() {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let s = remaining.min(step);
+        std::thread::sleep(s);
+        remaining -= s;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn test_sleep_cancellable_returns_early_when_cancelled() {
+        let cancel = AtomicBool::new(true);
+        let start = Instant::now();
+        sleep_cancellable(Duration::from_secs(10), &cancel);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "must return promptly when already cancelled"
+        );
+    }
+
+    #[test]
+    fn test_reconnect_returns_none_when_cancelled() {
+        // Already cancelled: reconnect must bail immediately without attempting
+        // (or blocking on) a connection.
+        let cancel = AtomicBool::new(true);
+        let start = Instant::now();
+        assert!(reconnect("/nonexistent/stamp-agentx.sock", &cancel).is_none());
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
 }

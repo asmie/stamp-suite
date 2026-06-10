@@ -77,6 +77,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packets. The previous fuzz targets covered only the low-level parsers in
   isolation, not the in-place TLV mutators and length arithmetic.
 
+### Fixed
+
+- **SNMP sub-agent now reconnects to the AgentX master.** Previously, if
+  net-snmpd restarted or closed the session, the sub-agent exited and stayed
+  down for the life of the process. The AgentX event loop now runs inside a
+  reconnect loop with capped exponential backoff (1 s → 30 s) that re-connects
+  and re-registers the MIB subtree, honouring the shutdown signal during
+  backoff. The initial connect remains synchronous so a misconfigured socket
+  path still fails fast at startup.
+
 ## [0.8.0] - 2026-05-18
 
 ### Added
