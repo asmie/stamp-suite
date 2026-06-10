@@ -349,7 +349,7 @@ pub struct Configuration {
     pub control_addr: SocketAddr,
 
     /// Path to a file containing a static bearer token. When set, every
-    /// control-plane request must carry "Authorization: Bearer <token>".
+    /// control-plane request must carry `Authorization: Bearer <token>`.
     #[clap(long, value_name = "PATH")]
     pub control_token_file: Option<PathBuf>,
 

@@ -12,9 +12,11 @@
 //! the operator's explicit hardware request cannot be honoured (see
 //! `startup_action`).
 //!
-//! **Current scope.** [`probe`] performs a real `ETHTOOL_GET_TS_INFO`
-//! ioctl (Linux) against the interface owning `--local-addr` (resolved
-//! via [`interface_for_addr`]). With the `hwtstamp` cargo feature, the
+//! **Current scope.** [`probe`](crate::hwtstamp::probe) performs a real
+//! `ETHTOOL_GET_TS_INFO` ioctl (Linux) against the interface owning
+//! `--local-addr` (resolved via
+//! [`interface_for_addr`](crate::hwtstamp::interface_for_addr)). With
+//! the `hwtstamp` cargo feature, the
 //! kernel read paths are active: RX timestamps via `SO_TIMESTAMPING` /
 //! `SCM_TIMESTAMPING` cmsgs (T2 on the reflector, T4 on the sender), TX
 //! timestamps via `MSG_ERRQUEUE` with `SOF_TIMESTAMPING_OPT_ID`
