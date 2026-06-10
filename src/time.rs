@@ -44,6 +44,23 @@ pub fn timestamp_to_nanos(value: u64, cs: ClockFormat) -> u128 {
     secs * 1_000_000_000 + subsec_nanos
 }
 
+/// Converts a raw `(seconds, nanoseconds)` pair — e.g. a kernel `timespec`
+/// from an `SCM_TIMESTAMPING` control message — into the STAMP wire format.
+/// `secs` is seconds since the Unix epoch (CLOCK_REALTIME domain); the
+/// arithmetic is identical to [`generate_timestamp`]'s, so kernel and
+/// userspace timestamps remain directly subtractable.
+#[must_use]
+pub fn timestamp_from_parts(secs: i64, nanos: u32, cs: ClockFormat) -> u64 {
+    match cs {
+        ClockFormat::NTP => {
+            let ntp_secs = (secs + NTP_UNIX_OFFSET) as u32;
+            let fraction = ((nanos as u64) << 32) / 1_000_000_000;
+            ((ntp_secs as u64) << 32) | fraction
+        }
+        ClockFormat::PTP => ((secs as u64) << 32) | nanos as u64,
+    }
+}
+
 fn convert_dt_to_ntp(date: DateTime<Utc>) -> u64 {
     let secs = (date.timestamp() + NTP_UNIX_OFFSET) as u32;
     // NTP fraction: nanoseconds * 2^32 / 10^9
@@ -147,6 +164,27 @@ mod tests {
             (got as i128 - expected as i128).abs() <= 1,
             "expected ~{expected} ns, got {got}"
         );
+    }
+
+    #[test]
+    fn timestamp_from_parts_matches_chrono_converters() {
+        // A kernel timespec converted via timestamp_from_parts must yield
+        // exactly the same wire value as the chrono-based converters for
+        // the same instant — kernel and userspace timestamps stay
+        // subtractable on the wire.
+        for &(secs, nanos) in &[(0i64, 0u32), (1_525_987, 0), (2_584_229, 151_000_000)] {
+            let dt = DateTime::<Utc>::from_timestamp(secs, nanos).unwrap();
+            assert_eq!(
+                timestamp_from_parts(secs, nanos, ClockFormat::NTP),
+                convert_dt_to_ntp(dt),
+                "NTP mismatch at {secs}.{nanos}"
+            );
+            assert_eq!(
+                timestamp_from_parts(secs, nanos, ClockFormat::PTP),
+                convert_dt_to_ptp(dt),
+                "PTP mismatch at {secs}.{nanos}"
+            );
+        }
     }
 
     #[test]

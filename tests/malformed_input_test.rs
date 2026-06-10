@@ -55,6 +55,9 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>, strict: bool) -> ProcessingContex
         reflected_control_max_count: 16,
         reflected_control_max_size: 1500,
         reflected_control_min_interval_ns: 1_000,
+        rx_timestamp: None,
+        rx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
+        tx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
     }
 }
 

@@ -82,12 +82,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--hwtstamp` now performs a real capability probe.** At startup the
   reflector/sender queries `ETHTOOL_GET_TS_INFO` (via `SIOCETHTOOL`) on the
   interface owning `--local-addr` and logs the NIC's actual timestamping
-  capabilities (`rx_hw`, `tx_hw`, PHC presence). `--hwtstamp on` still always
-  warns — packet timestamps remain software; the kernel `SCM_TIMESTAMPING`
-  read path is a planned follow-up — but the warning now states the true
-  reason: NIC without hardware support vs. not-yet-implemented read path.
-  Wildcard binds, unknown interfaces, and non-Linux platforms degrade
-  gracefully to "no capabilities"; the probe never fails startup.
+  capabilities (`rx_hw`, `tx_hw`, PHC presence). Wildcard binds, unknown
+  interfaces, and non-Linux platforms degrade gracefully to "no
+  capabilities"; the probe never fails startup.
+
+- **Kernel and hardware packet timestamping** (new cargo feature
+  `hwtstamp`, no extra dependencies; included in the Debian package build).
+  With the feature enabled and `--hwtstamp auto` (the default mode):
+  - **Linux RX:** the reflector's T2 and the sender's T4 come from
+    `SO_TIMESTAMPING` kernel timestamps (`SCM_TIMESTAMPING` cmsgs) taken at
+    packet arrival, removing scheduler-wakeup latency from one-way delays
+    (measured over loopback: forward OWD drops from tens of µs to
+    single-digit µs).
+  - **Linux TX:** transmit timestamps are recovered from the socket error
+    queue (`MSG_ERRQUEUE`, correlated via `SOF_TIMESTAMPING_OPT_ID`). The
+    sender retroactively corrects the stored T1 used for forward OWD; the
+    reflector corrects its Follow-Up Telemetry record so the FUT TLV
+    (RFC 8972 §4.7) carries the previous reply's kernel TX time.
+  - **macOS:** kernel software receive timestamps via `SO_TIMESTAMP`
+    (µs resolution). **Windows:** compiles to a no-op (the pnet receiver
+    has no socket to timestamp); `SIO_TIMESTAMPING` support is future work.
+  - `--hwtstamp on` additionally attempts NIC **hardware** timestamps:
+    `SIOCSHWTSTAMP` filters (CAP_NET_ADMIN) + the raw-hardware cmsg tier,
+    falling back to kernel software timestamps with a warning on any
+    failure. The Timestamp Information TLV reports `HwAssist` only when
+    both directions are hardware-timestamped; operators must keep the PHC
+    disciplined (ptp4l/phc2sys) for cross-clock OWD to be meaningful — see
+    the PHC caveat in `doc/architecture.md`.
+  - The startup warning for `--hwtstamp on` is now conditional and honest:
+    silent when hardware will genuinely be attempted, explicit about the
+    missing build feature or NIC capability otherwise.
 
 - **IPv6 Extension Header Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-08
   §5.3).** The reflector now recognizes the presence-only sub-TLV inside a

@@ -89,6 +89,21 @@ impl Session {
             self.last_reflected_timestamp.load(Ordering::Relaxed),
         )
     }
+
+    /// Replaces the recorded TX timestamp of the last reflection when `seq`
+    /// still matches — used when a kernel transmit timestamp for that reply
+    /// arrives from the socket error queue after the fact (feature
+    /// "hwtstamp"). Returns false (and changes nothing) when a newer
+    /// reflection has been recorded since.
+    pub fn correct_reflection_timestamp(&self, seq: u32, timestamp: u64) -> bool {
+        if self.last_reflected_seq.load(Ordering::Relaxed) == seq {
+            self.last_reflected_timestamp
+                .store(timestamp, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Entry in the session manager tracking a session and its activity.
@@ -196,6 +211,15 @@ impl SessionManager {
 
             session
         }
+    }
+
+    /// Returns the session for a client only if it already exists, without
+    /// creating one or refreshing its activity time. Used by the kernel
+    /// TX-timestamp drain to apply late corrections without resurrecting
+    /// expired sessions.
+    pub fn get_session(&self, client: SocketAddr) -> Option<Arc<Session>> {
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
+        sessions.get(&client).map(|e| Arc::clone(&e.session))
     }
 
     /// Gets the session for a client and generates the next sequence number.
@@ -354,6 +378,31 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn test_correct_reflection_timestamp_only_for_matching_seq() {
+        let session = Session::new(1);
+        session.record_reflection(42, 1000);
+
+        // Matching seq → timestamp replaced (kernel TX timestamp arrived).
+        assert!(session.correct_reflection_timestamp(42, 2000));
+        assert_eq!(session.get_last_reflection(), (42, 2000));
+
+        // A newer reflection was recorded since → stale correction dropped.
+        session.record_reflection(43, 3000);
+        assert!(!session.correct_reflection_timestamp(42, 9999));
+        assert_eq!(session.get_last_reflection(), (43, 3000));
+    }
+
+    #[test]
+    fn test_get_session_returns_only_existing() {
+        let mgr = SessionManager::new(None, None);
+        let addr: SocketAddr = "10.0.0.1:5000".parse().unwrap();
+        assert!(mgr.get_session(addr).is_none());
+        mgr.get_or_create_session(addr);
+        assert!(mgr.get_session(addr).is_some());
+        assert_eq!(mgr.session_count(), 1, "get_session must not create");
+    }
 
     #[test]
     fn test_sequence_number_starts_at_zero() {

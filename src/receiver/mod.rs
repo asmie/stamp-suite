@@ -882,6 +882,16 @@ pub struct ProcessingContext<'a> {
     /// in nanoseconds. Requested intervals shorter than this are clamped
     /// up and the C flag is set.
     pub reflected_control_min_interval_ns: u32,
+    /// Kernel-provided receive timestamp for this packet (STAMP wire
+    /// format), filled by backends with `SO_TIMESTAMPING` enabled
+    /// (feature "hwtstamp"). `None` → T2 is generated in userspace.
+    pub rx_timestamp: Option<u64>,
+    /// How T2 was produced (`HwAssist` only for NIC hardware timestamps;
+    /// kernel-software and userspace timestamps are both `SwLocal`).
+    pub rx_method: TimestampMethod,
+    /// How T3 (and the Follow-Up Telemetry record) is produced on the
+    /// reply path, per the socket's timestamping configuration.
+    pub tx_method: TimestampMethod,
 }
 
 /// Raw IP-layer bytes captured at receive time for reflecting back to the
@@ -985,7 +995,12 @@ pub fn process_stamp_packet(
         crate::metrics::reflector_metrics::record_packet_received();
     }
 
-    let rcvt = generate_timestamp(ctx.clock_source);
+    // T2: prefer the backend's kernel receive timestamp (taken when the
+    // packet entered the host) over a fresh userspace read, which would
+    // include scheduler-wakeup and bookkeeping latency.
+    let rcvt = ctx
+        .rx_timestamp
+        .unwrap_or_else(|| generate_timestamp(ctx.clock_source));
 
     // Determine if packet has TLVs
     let base_size = if use_auth {
@@ -1399,12 +1414,22 @@ fn apply_semantic_tlv_processing(
     // RPE=0b11 ("reply ECN set to EC1").
     tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false, true);
 
-    // Update Timestamp Information TLVs (RFC 8972 §4.3)
+    // Update Timestamp Information TLVs (RFC 8972 §4.3). The TLV carries a
+    // single method byte for the reflector, so report HwAssist only when
+    // BOTH the receive and transmit timestamps come from the NIC —
+    // anything mixed is conservatively SwLocal.
     let sync_src = match ctx.clock_source {
         ClockFormat::NTP => SyncSource::Ntp,
         ClockFormat::PTP => SyncSource::Ptp,
     };
-    tlvs.update_timestamp_info_tlvs(sync_src, TimestampMethod::SwLocal);
+    let reflector_method = if ctx.rx_method == TimestampMethod::HwAssist
+        && ctx.tx_method == TimestampMethod::HwAssist
+    {
+        TimestampMethod::HwAssist
+    } else {
+        TimestampMethod::SwLocal
+    };
+    tlvs.update_timestamp_info_tlvs(sync_src, reflector_method);
 
     // Update Direct Measurement TLVs (RFC 8972 §4.5)
     if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
@@ -1416,9 +1441,11 @@ fn apply_semantic_tlv_processing(
         tlvs.update_location_tlvs(addr_info);
     }
 
-    // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7)
+    // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7). The mode byte
+    // reports how the recorded TX timestamp of the previous reflection
+    // was produced.
     if let Some((last_seq, last_ts)) = ctx.last_reflection {
-        tlvs.update_follow_up_telemetry_tlvs(last_seq, last_ts, TimestampMethod::SwLocal);
+        tlvs.update_follow_up_telemetry_tlvs(last_seq, last_ts, ctx.tx_method);
     }
 
     // Process Destination Node Address TLV (RFC 9503 §4)
@@ -1903,6 +1930,9 @@ mod tests {
             reflected_control_max_count: REFLECTED_CONTROL_MAX_COUNT,
             reflected_control_max_size: REFLECTED_CONTROL_MAX_SIZE,
             reflected_control_min_interval_ns: REFLECTED_CONTROL_MIN_INTERVAL_NS,
+            rx_timestamp: None,
+            rx_method: TimestampMethod::SwLocal,
+            tx_method: TimestampMethod::SwLocal,
         }
     }
 

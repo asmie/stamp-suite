@@ -696,6 +696,9 @@ fn handle_stamp_packet(
         reflected_control_max_count: config.reflected_control_max_count,
         reflected_control_max_size: config.reflected_control_max_size,
         reflected_control_min_interval_ns: config.reflected_control_min_interval_ns,
+        rx_timestamp: None,
+        rx_method: crate::tlv::TimestampMethod::SwLocal,
+        tx_method: crate::tlv::TimestampMethod::SwLocal,
     };
 
     // Panic-isolated: a panic in processing must not unwind out of the capture

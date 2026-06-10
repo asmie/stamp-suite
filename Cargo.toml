@@ -26,10 +26,13 @@ ttl-nix = ["dep:nix"]
 ttl-pnet = ["dep:pnet"]
 metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", "dep:tokio-util"]
 snmp = []
-# Hardware-assisted timestamping (Linux SO_TIMESTAMPING / ETHTOOL_GET_TS_INFO).
-# The ETHTOOL_GET_TS_INFO capability probe is built unconditionally on Linux
-# (it has no extra dependencies); this feature is reserved for gating the
-# future kernel-cmsg timestamp read path (SCM_TIMESTAMPING / MSG_ERRQUEUE).
+# Kernel/hardware timestamping. Gates the SO_TIMESTAMPING read paths:
+# Linux gets kernel RX timestamps (SCM_TIMESTAMPING cmsgs) and TX timestamps
+# (MSG_ERRQUEUE + OPT_ID correlation) with an optional NIC-hardware tier
+# (--hwtstamp on → SIOCSHWTSTAMP); macOS gets kernel software RX timestamps
+# (SO_TIMESTAMP); other platforms compile to a graceful no-op. The
+# ETHTOOL_GET_TS_INFO capability probe is built unconditionally on Linux.
+# No extra dependencies.
 hwtstamp = []
 
 [dependencies]
@@ -100,7 +103,7 @@ loss and network delays."""
 section = "net"
 priority = "optional"
 depends = "$auto, adduser"
-features = ["ttl-nix", "ttl-pnet", "metrics", "snmp"]
+features = ["ttl-nix", "ttl-pnet", "metrics", "snmp", "hwtstamp"]
 maintainer-scripts = "dist/debian/"
 assets = [
     ["target/release/stamp-suite",                "usr/bin/",                                  "755"],

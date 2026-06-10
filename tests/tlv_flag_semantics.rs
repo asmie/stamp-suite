@@ -64,6 +64,9 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         reflected_control_max_count: 16,
         reflected_control_max_size: 1500,
         reflected_control_min_interval_ns: 1_000,
+        rx_timestamp: None,
+        rx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
+        tx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
     }
 }
 
@@ -311,6 +314,81 @@ fn cos_tlv_reflector_fills_ec2_rpd_rpe_at_draft_positions() {
         value,
         &[0xB8, 0xA4, 0xB0, 0x00],
         "echoed CoS value must follow the RFC 8972 + cos-ecn-00 bit layout"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Kernel timestamp seams — T2 override and per-direction method reporting.
+
+#[test]
+fn kernel_rx_timestamp_overrides_t2() {
+    // When the backend supplies a kernel receive timestamp, the reflected
+    // packet's Receive Timestamp field (bytes 16..24, RFC 8762 §4.3) must
+    // carry it verbatim instead of a fresh userspace timestamp.
+    let packet = build_unauth_packet(&[]);
+    let mut ctx = make_ctx(None);
+    ctx.rx_timestamp = Some(0x1122_3344_5566_7788);
+
+    let response =
+        process_stamp_packet(&packet, src(), 64, false, &ctx).expect("packet must be reflected");
+    let t2 = u64::from_be_bytes(response.data[16..24].try_into().unwrap());
+    assert_eq!(t2, 0x1122_3344_5566_7788);
+}
+
+#[test]
+fn timestamp_info_reports_hw_only_when_both_directions_hw() {
+    use stamp_suite::tlv::{SyncSource, TimestampInfoTlv, TimestampMethod};
+
+    let tlv = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::SwLocal).to_raw();
+
+    // Mixed methods → the single reflector method byte stays SwLocal.
+    let mut ctx = make_ctx(None);
+    ctx.rx_method = TimestampMethod::HwAssist;
+    ctx.tx_method = TimestampMethod::SwLocal;
+    let parsed = reflect_unauth(&build_unauth_packet(&tlv.to_bytes()), &ctx);
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::TimestampInfo))
+        .expect("Timestamp Info echoed");
+    assert_eq!(
+        echoed.value[3],
+        TimestampMethod::SwLocal.to_byte(),
+        "mixed rx/tx methods must report the conservative SwLocal"
+    );
+
+    // Both directions hardware → HwAssist.
+    let mut ctx = make_ctx(None);
+    ctx.rx_method = TimestampMethod::HwAssist;
+    ctx.tx_method = TimestampMethod::HwAssist;
+    let parsed = reflect_unauth(&build_unauth_packet(&tlv.to_bytes()), &ctx);
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::TimestampInfo))
+        .expect("Timestamp Info echoed");
+    assert_eq!(echoed.value[3], TimestampMethod::HwAssist.to_byte());
+}
+
+#[test]
+fn follow_up_telemetry_reports_tx_method() {
+    use stamp_suite::tlv::{FollowUpTelemetryTlv, TimestampMethod, TypedTlv as _};
+
+    let tlv = FollowUpTelemetryTlv::new().to_raw();
+    let mut ctx = make_ctx(None);
+    ctx.last_reflection = Some((7, 999));
+    ctx.tx_method = TimestampMethod::HwAssist;
+
+    let parsed = reflect_unauth(&build_unauth_packet(&tlv.to_bytes()), &ctx);
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::FollowUpTelemetry))
+        .expect("FUT echoed");
+    assert_eq!(
+        echoed.value[12],
+        TimestampMethod::HwAssist.to_byte(),
+        "FUT mode byte must report the reflector's TX timestamp method"
     );
 }
 

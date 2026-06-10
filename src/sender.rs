@@ -211,6 +211,54 @@ pub async fn run_sender(
         }
     }
 
+    // Kernel timestamping (feature "hwtstamp"): kernel RX timestamps give a
+    // precise T4; TX timestamps from the error queue retroactively correct
+    // the stored T1 used for forward one-way delay. `auto` uses the kernel
+    // software tier; `on` additionally attempts NIC hardware (Linux).
+    #[cfg(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos")))]
+    let sender_kernel_ts = {
+        use std::os::fd::AsRawFd;
+
+        use crate::hwtstamp::{self, HwTsMode};
+        if conf.hwtstamp == HwTsMode::Off {
+            hwtstamp::EnabledTimestamping::default()
+        } else {
+            #[cfg(target_os = "linux")]
+            let want_hw = conf.hwtstamp == HwTsMode::On && {
+                let iface = hwtstamp::interface_for_addr(conf.local_addr);
+                let cap = hwtstamp::probe(iface.as_deref());
+                cap.any_hw_supported()
+                    && iface
+                        .as_deref()
+                        .map(hwtstamp::request_nic_hw_timestamping)
+                        .unwrap_or(false)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let want_hw = false;
+            let enabled =
+                hwtstamp::enable_socket_timestamping(socket.as_raw_fd(), true, true, want_hw);
+            log::info!(
+                "sender kernel timestamping: rx_kernel={} rx_hw={} tx_kernel={} tx_hw={}",
+                enabled.rx_kernel,
+                enabled.rx_hw,
+                enabled.tx_kernel,
+                enabled.tx_hw
+            );
+            enabled
+        }
+    };
+    #[cfg(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos")))]
+    let kernel_rx_enabled = sender_kernel_ts.rx_kernel;
+    #[cfg(not(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos"))))]
+    let kernel_rx_enabled = false;
+    // OPT_ID correlation state: counter mirrors the kernel's per-send
+    // counter (the sender uses exactly one send site), map pairs it with
+    // the STAMP sequence number.
+    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+    let mut sender_tx_counter: u32 = 0;
+    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+    let mut tx_id_to_seq: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+
     // Build error estimate from configuration with Z flag set based on clock source
     let error_estimate = ErrorEstimate::with_clock_format(
         conf.clock_synchronized,
@@ -537,6 +585,17 @@ pub async fn run_sender(
                 send_timestamp,
             },
         );
+        // Pair this send's kernel OPT_ID with the sequence number so the
+        // error-queue drain can retroactively correct the stored T1.
+        #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+        if sender_kernel_ts.tx_kernel {
+            tx_id_to_seq.insert(sender_tx_counter, seq_num);
+            sender_tx_counter = sender_tx_counter.wrapping_add(1);
+            if tx_id_to_seq.len() > 4096 {
+                // Defensive: TX timestamps stopped arriving; reset.
+                tx_id_to_seq.clear();
+            }
+        }
         if timeout > Duration::ZERO {
             expiry_queue.push_back((send_time + timeout, seq_num));
         }
@@ -550,9 +609,20 @@ pub async fn run_sender(
             // responses and the send timer. Biased select would starve the timer
             // under heavy receive load, reducing packet send rates.
             tokio::select! {
-                result = socket.recv(&mut recv_buf) => {
+                result = recv_packet(&socket, &mut recv_buf, kernel_rx_enabled, conf.clock_source) => {
                     match result {
-                        Ok(len) => {
+                        Ok((len, kernel_t4)) => {
+                            // Apply pending kernel TX corrections first so the
+                            // corrected T1 is in place before OWD computation.
+                            #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                            if sender_kernel_ts.tx_kernel {
+                                use std::os::fd::AsRawFd;
+                                let reports = crate::hwtstamp::drain_tx_timestamps(
+                                    socket.as_raw_fd(),
+                                    conf.clock_source,
+                                );
+                                apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
+                            }
                             let mut ctx = SenderRecvContext {
                                 pending: &mut pending,
                                 rtt_collector: &mut rtt_collector,
@@ -571,8 +641,22 @@ pub async fn run_sender(
                                 use_auth,
                                 use_tlvs,
                                 conf.clock_source,
+                                kernel_t4,
                                 &mut ctx,
                             );
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Spurious readiness wake — typically a pending
+                            // error-queue event; drain it so readiness clears.
+                            #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                            if sender_kernel_ts.tx_kernel {
+                                use std::os::fd::AsRawFd;
+                                let reports = crate::hwtstamp::drain_tx_timestamps(
+                                    socket.as_raw_fd(),
+                                    conf.clock_source,
+                                );
+                                apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
+                            }
                         }
                         Err(e) => {
                             eprintln!("Receive error: {}", e);
@@ -631,8 +715,20 @@ pub async fn run_sender(
     let wait_start = Instant::now();
     while !pending.is_empty() && wait_start.elapsed() < timeout {
         let remaining = timeout.saturating_sub(wait_start.elapsed());
-        match tokio::time::timeout(remaining, socket.recv(&mut recv_buf)).await {
-            Ok(Ok(len)) => {
+        match tokio::time::timeout(
+            remaining,
+            recv_packet(&socket, &mut recv_buf, kernel_rx_enabled, conf.clock_source),
+        )
+        .await
+        {
+            Ok(Ok((len, kernel_t4))) => {
+                #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                if sender_kernel_ts.tx_kernel {
+                    use std::os::fd::AsRawFd;
+                    let reports =
+                        crate::hwtstamp::drain_tx_timestamps(socket.as_raw_fd(), conf.clock_source);
+                    apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
+                }
                 let mut ctx = SenderRecvContext {
                     pending: &mut pending,
                     rtt_collector: &mut rtt_collector,
@@ -651,8 +747,13 @@ pub async fn run_sender(
                     use_auth,
                     use_tlvs,
                     conf.clock_source,
+                    kernel_t4,
                     &mut ctx,
                 );
+            }
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Spurious wake during the final wait; nothing to read yet.
+                continue;
             }
             Ok(Err(e)) => {
                 eprintln!("Receive error during final wait: {}", e);
@@ -679,17 +780,86 @@ pub async fn run_sender(
         .with_owd(&owd_collector)
 }
 
+/// Receives one datagram. With kernel RX timestamping enabled (feature
+/// "hwtstamp") it uses recvmsg and returns the kernel receive timestamp
+/// (T4) in STAMP wire format alongside the length; otherwise a plain
+/// `recv`. May return `WouldBlock` on spurious readiness wakeups (e.g.
+/// pending error-queue events) — callers drain the error queue and retry.
+async fn recv_packet(
+    socket: &tokio::net::UdpSocket,
+    buf: &mut [u8],
+    kernel_rx: bool,
+    cs: ClockFormat,
+) -> std::io::Result<(usize, Option<u64>)> {
+    #[cfg(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos")))]
+    if kernel_rx {
+        use std::os::fd::AsRawFd;
+        socket.readable().await?;
+        let mut cmsg_buf = vec![0u8; 256];
+        let mut iov = [std::io::IoSliceMut::new(buf)];
+        return match nix::sys::socket::recvmsg::<nix::sys::socket::SockaddrStorage>(
+            socket.as_raw_fd(),
+            &mut iov,
+            Some(&mut cmsg_buf),
+            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+        ) {
+            Ok(msg) => {
+                let len = msg.bytes;
+                let ts = msg
+                    .cmsgs()
+                    .ok()
+                    .and_then(crate::hwtstamp::extract_kernel_rx_timestamp)
+                    .map(|k| crate::time::timestamp_from_parts(k.secs, k.nanos, cs));
+                Ok((len, ts))
+            }
+            Err(nix::errno::Errno::EAGAIN) => {
+                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+            }
+            Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
+        };
+    }
+    #[cfg(not(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos"))))]
+    let _ = cs;
+    let _ = kernel_rx;
+    let len = socket.recv(buf).await?;
+    Ok((len, None))
+}
+
+/// Applies kernel TX timestamps from the error queue to the pending-packet
+/// table: each report's OPT_ID resolves to a STAMP sequence number whose
+/// stored T1 (used for forward OWD) is replaced by the kernel timestamp.
+/// Returns how many corrections were applied.
+#[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+fn apply_tx_corrections(
+    reports: &[crate::hwtstamp::TxTimestampReport],
+    tx_id_to_seq: &mut std::collections::HashMap<u32, u32>,
+    pending: &mut HashMap<u32, PendingPacket>,
+) -> usize {
+    let mut applied = 0;
+    for report in reports {
+        if let Some(seq) = tx_id_to_seq.remove(&report.opt_id) {
+            if let Some(p) = pending.get_mut(&seq) {
+                p.send_timestamp = report.timestamp;
+                applied += 1;
+            }
+        }
+    }
+    applied
+}
+
 fn process_response(
     data: &[u8],
     use_auth: bool,
     use_tlvs: bool,
     clock_source: ClockFormat,
+    kernel_t4: Option<u64>,
     ctx: &mut SenderRecvContext,
 ) {
     let recv_time = Instant::now();
-    // T4: the sender's wall-clock receive timestamp, captured as early as
+    // T4: prefer the kernel receive timestamp (taken at packet arrival);
+    // otherwise the sender's wall-clock timestamp, captured as early as
     // possible (before parsing) for the reverse one-way-delay computation.
-    let sender_recv_ts = generate_timestamp(clock_source);
+    let sender_recv_ts = kernel_t4.unwrap_or_else(|| generate_timestamp(clock_source));
 
     // Parse response and validate TLVs if extension mode is enabled
     // Use lenient parsing per RFC 8762 §4.6 to handle short packets
@@ -1311,6 +1481,53 @@ pub fn create_extended_auth_packet(
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+    #[test]
+    fn apply_tx_corrections_updates_pending_t1() {
+        use crate::hwtstamp::TxTimestampReport;
+
+        let mut tx_map = std::collections::HashMap::new();
+        tx_map.insert(0u32, 5u32); // OPT_ID 0 → seq 5, still pending
+        tx_map.insert(1u32, 6u32); // OPT_ID 1 → seq 6, already answered
+
+        let mut pending = std::collections::HashMap::new();
+        pending.insert(
+            5u32,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 111,
+            },
+        );
+
+        let reports = [
+            TxTimestampReport {
+                opt_id: 0,
+                timestamp: 999,
+                hardware: false,
+            },
+            TxTimestampReport {
+                opt_id: 1,
+                timestamp: 888,
+                hardware: false,
+            },
+            TxTimestampReport {
+                opt_id: 7, // never mapped (e.g. counter desync) → ignored
+                timestamp: 777,
+                hardware: false,
+            },
+        ];
+        let applied = apply_tx_corrections(&reports, &mut tx_map, &mut pending);
+        assert_eq!(applied, 1, "only the still-pending packet is corrected");
+        assert_eq!(
+            pending[&5].send_timestamp, 999,
+            "kernel T1 replaces the userspace T1 used for forward OWD"
+        );
+        assert!(
+            !tx_map.contains_key(&0) && !tx_map.contains_key(&1),
+            "matched ids are consumed"
+        );
+    }
+
     #[test]
     fn build_reflected_control_tlv_only_when_requested() {
         // Symmetric single-reply measurement, no one-way request → no TLV.
@@ -1797,7 +2014,7 @@ mod tests {
             snmp_stats: None,
         };
 
-        process_response(&buf, false, false, ClockFormat::PTP, &mut ctx);
+        process_response(&buf, false, false, ClockFormat::PTP, None, &mut ctx);
 
         let owd = owd_collector.summary().expect("one OWD sample recorded");
         assert_eq!(owd.samples, 1);
@@ -1864,7 +2081,7 @@ mod tests {
             snmp_stats: None,
         };
 
-        process_response(&buf, false, true, ClockFormat::NTP, &mut ctx);
+        process_response(&buf, false, true, ClockFormat::NTP, None, &mut ctx);
 
         assert!(
             pending.contains_key(&42),
@@ -1933,7 +2150,7 @@ mod tests {
             snmp_stats: None,
         };
 
-        process_response(&buf, false, true, ClockFormat::NTP, &mut ctx);
+        process_response(&buf, false, true, ClockFormat::NTP, None, &mut ctx);
 
         assert!(!pending.contains_key(&42));
         assert_eq!(packets_received, 1);
