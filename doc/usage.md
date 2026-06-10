@@ -125,9 +125,10 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
   -i, --is-reflector               Run as Session-Reflector instead of Session-Sender
       --output-format <text|json|csv>  Statistics output format [default: text]
       --log-format <text|json>     Diagnostic log format [default: text]
-      --hwtstamp <auto|on|off>     Hardware timestamping selection [default: auto]
-                                   (EXPERIMENTAL: not yet implemented; all
-                                   modes currently use software timestamps)
+      --hwtstamp <auto|on|off>     Hardware timestamp handling [default: auto]
+                                   (capability probe via ETHTOOL_GET_TS_INFO is
+                                   functional; packet timestamps are still
+                                   software — `on` warns with the real reason)
       --print-config-schema        Print JSON Schema for the TOML config and exit
       --report-interval <SEC>      Periodic reporting interval, sender only (0 = disabled) [default: 0]
       --max-pps <PPS>              Reflector rate limit per source (0 = unlimited) [default: 0]

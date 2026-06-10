@@ -515,46 +515,54 @@ Sender statistics are updated live during the measurement run (not just at compl
 
 ## Hardware-Assisted Timestamping
 
-Optional support for `SO_TIMESTAMPING` / `ETHTOOL_GET_TS_INFO` on
-Linux, gated behind the `hwtstamp` Cargo feature. Selected at runtime
-via `--hwtstamp auto|on|off` (default `auto`).
+Support for Linux NIC timestamping capabilities, selected at runtime via
+`--hwtstamp auto|on|off` (default `auto`).
 
-> **Experimental / not yet functional.** Hardware and kernel
-> timestamping are **not implemented**. The probe always reports "not
-> supported", so every mode currently uses software timestamps and the
-> Type 3 TLV always advertises `SwLocal`. The flag and surrounding API
-> are scaffolding for the planned kernel work described under *Status*.
+**Current status.**
+
+- Capability probe ✅ — `ETHTOOL_GET_TS_INFO` via the `SIOCETHTOOL`
+  ioctl, run at startup against the interface owning `--local-addr`
+  (resolved with `getifaddrs`; wildcard binds skip the probe). The
+  result is logged: `hwtstamp probe: interface=… rx_hw=… tx_hw=… ptp=…`.
+- Honest reporting ✅ — `--hwtstamp on` warns with the *actual* reason
+  hardware timestamps aren't in use: either the NIC lacks support, or
+  the NIC supports it but the kernel read path is not yet implemented.
+- Kernel RX/TX timestamps ❌ — the `SCM_TIMESTAMPING` cmsg read on
+  recvmsg and the `MSG_ERRQUEUE` TX poll are a planned follow-up. All
+  four STAMP timestamps are still taken in software, so the Type 3 TLV
+  correctly advertises `SwLocal` everywhere.
 
 **Defensive contract.** Hardware timestamping is a per-NIC capability —
 some adapters support RX, some both, most consumer NICs neither. The
 implementation:
 
-- Never panics if HW support is missing.
-- Never refuses to start the binary, even with `--hwtstamp on`: that mode
-  now *warns* that it is falling back to software rather than aborting.
-- Reports the actual method on a per-direction basis in the Type 3
-  Timestamp Information TLV: `HwAssist` only when the NIC really
-  provided the timestamp (never, today), otherwise `SwLocal`.
+- Never panics and never fails the probe fatally: unknown interfaces,
+  rejected ioctls, and non-Linux platforms all degrade to "no
+  capabilities".
+- Never refuses to start the binary, even with `--hwtstamp on`: that
+  mode warns rather than aborts.
+- Is structured for per-direction reporting in the Type 3 Timestamp
+  Information TLV (`effective_method(mode, cap, direction)`): `HwAssist`
+  only when the NIC really provides the timestamp — which awaits the
+  kernel read path.
 
 **Modes.**
 
-- `auto` *(default)* — use HW when available, fall back silently to
-  software. Safe on every host. (Today: always software.)
-- `on` — prefer HW and warn at startup when it is unavailable, so an
-  operator who explicitly asked for HW is told they got software. (Today:
-  always warns and uses software.)
-- `off` — always use software timestamps, even when HW is available.
-  Useful for A/B comparisons or as a known-good fallback.
+- `auto` *(default)* — probe silently; use HW when the read path lands
+  and the NIC supports it, software otherwise. Safe on every host.
+- `on` — probe and warn at startup when hardware timestamps cannot be
+  used, so an operator who explicitly asked for HW is told what they
+  actually got and why.
+- `off` — software timestamps only; the probe result is informational.
 
-**Capability probe.** `stamp_suite::hwtstamp::probe(interface)` is the
-intended query point for kernel HW-timestamping support. It currently
-returns "not supported" unconditionally on every platform and build.
-
-**Status.** As of this release the `--hwtstamp` flag, `effective_method`
-API, and Type 3 TLV reporting are in place but the feature is inert: the
-`SCM_TIMESTAMPING` cmsg read, `MSG_ERRQUEUE` poll, and `ETHTOOL_GET_TS_INFO`
-probe are a planned follow-up. The API is structured so the kernel-side
-work can land without touching call sites.
+**Future phases.** Kernel software RX timestamps
+(`SOF_TIMESTAMPING_RX_SOFTWARE`, works on any interface including `lo`),
+hardware RX (`RX_HARDWARE` + `SIOCSHWTSTAMP` filters, CAP_NET_ADMIN),
+and TX via `MSG_ERRQUEUE` with `SOF_TIMESTAMPING_OPT_ID` correlation.
+Note the PHC clock-domain hazard: NIC hardware timestamps live on the
+PTP hardware clock, which is only meaningful against CLOCK_REALTIME
+T1/T4 when the PHC is synchronized (ptp4l/phc2sys) — the read path must
+gate on that or surface it via the Error Estimate S-bit.
 
 ## Benchmarks
 

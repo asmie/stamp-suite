@@ -24,9 +24,10 @@ pub mod crypto;
 /// Error estimate encoding/decoding for timestamps.
 pub mod error_estimate;
 /// Hardware-assisted timestamping capability probe and mode selection
-/// (F1). Defensive: returns "not supported" on every platform unless
-/// the `hwtstamp` feature is on and the host actually advertises HW
-/// timestamping via ETHTOOL_GET_TS_INFO. See `doc/architecture.md`
+/// (F1). The probe queries ETHTOOL_GET_TS_INFO on Linux (interface
+/// resolved from `--local-addr`); non-Linux platforms report "not
+/// supported". Packet timestamps themselves are still software — the
+/// kernel read path is a planned follow-up. See `doc/architecture.md`
 /// for operator details.
 pub mod hwtstamp;
 /// STAMP packet structures and serialization.

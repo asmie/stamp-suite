@@ -62,13 +62,22 @@ async fn main() {
 
     init_logging(conf.log_format);
 
-    // F1: hardware/kernel timestamping is not yet implemented, so every mode
-    // currently uses software timestamps. We no longer fail-fast on
-    // `--hwtstamp on` (that falsely implied a working capability gate); we
-    // just warn the operator who explicitly asked for HW that they're getting
-    // software instead.
+    // Probe the NIC's timestamping capabilities (ETHTOOL_GET_TS_INFO on the
+    // interface owning --local-addr) and report honestly. The kernel
+    // timestamp *read path* is still a follow-up, so every mode currently
+    // uses software timestamps; `--hwtstamp on` warns with the true reason
+    // (NIC limitation vs. unimplemented read path).
+    let hw_iface = stamp_suite::hwtstamp::interface_for_addr(conf.local_addr);
+    let hw_cap = stamp_suite::hwtstamp::probe(hw_iface.as_deref());
+    log::info!(
+        "hwtstamp probe: interface={} rx_hw={} tx_hw={} ptp={}",
+        hw_iface.as_deref().unwrap_or("<none/wildcard>"),
+        hw_cap.rx_hw,
+        hw_cap.tx_hw,
+        hw_cap.ptp_supported
+    );
     if let stamp_suite::hwtstamp::StartupAction::ContinueWithWarning(msg) =
-        stamp_suite::hwtstamp::startup_action(conf.hwtstamp)
+        stamp_suite::hwtstamp::startup_action(conf.hwtstamp, &hw_cap)
     {
         log::warn!("{msg}");
     }
