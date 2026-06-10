@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Breaking:** a key file previously accepted at `0640`/`0644` (with a warning)
   is now refused. Use `chmod 0400`/`0600` (owner-only). See
   [doc/security.md](doc/security.md#configuration-file-and-key-file-permissions).
+- **SNMP GETBULK/GETNEXT CPU-amplification hardening.** The AgentX sub-agent now
+  (a) caps the number of SearchRanges processed per PDU at 256, and (b) computes
+  the OID-space snapshot **once per PDU** instead of rebuilding and re-sorting it
+  on every `get_next` lookup. Previously a single GETBULK could pack ~65k ranges,
+  each multiplied by up to 100 repetitions, with every lookup rebuilding the full
+  (session-table-sized) OID list — heavy CPU and lock contention. (The master
+  agent is local/semi-trusted, so this is robustness hardening.)
 
 ### Added
 

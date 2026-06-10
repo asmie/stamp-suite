@@ -29,6 +29,13 @@ const AGENTX_VERSION: u8 = 1;
 // Maximum allowed PDU payload size (1 MB) to prevent unbounded allocation.
 const MAX_PDU_PAYLOAD: u32 = 1_048_576;
 
+// Maximum number of SearchRanges processed per GET/GETNEXT/GETBULK PDU.
+// A 1 MB PDU can pack ~65k SearchRanges (min 16 bytes each); combined with
+// GETBULK's per-range repetitions and the per-lookup OID-space scan, an
+// unbounded count is a CPU-amplification lever. Real master agents issue a
+// handful of ranges, so this ceiling is generous while bounding worst-case work.
+const MAX_SEARCH_RANGES_PER_PDU: usize = 256;
+
 // --- VarBind type constants (RFC 2741 §5.4) ---
 
 const VARBIND_INTEGER: u16 = 2;
@@ -331,6 +338,23 @@ pub fn decode_search_range(buf: &[u8]) -> Result<(Oid, Oid, usize), AgentXError>
     Ok((start_oid, end_oid, start_len + end_len))
 }
 
+/// Parses at most `max` SearchRanges from a PDU payload.
+///
+/// Bounding the count is a DoS guard: a 1 MB PDU could otherwise pack tens of
+/// thousands of SearchRanges (min 16 bytes each), and in GETBULK each range is
+/// multiplied by `max_repetitions` and an OID-space scan. `decode_search_range`
+/// always consumes ≥ 16 bytes, so the loop makes progress and terminates.
+fn parse_search_ranges(payload: &[u8], max: usize) -> Result<Vec<(Oid, Oid)>, AgentXError> {
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    while offset < payload.len() && ranges.len() < max {
+        let (start_oid, end_oid, consumed) = decode_search_range(&payload[offset..])?;
+        offset += consumed;
+        ranges.push((start_oid, end_oid));
+    }
+    Ok(ranges)
+}
+
 /// Encodes an octet string per RFC 2741 §5.3.
 fn encode_octet_string(s: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(4 + s.len() + 3);
@@ -350,6 +374,24 @@ pub trait MibHandler: Send + Sync {
 
     /// Handle a GETNEXT request. Return the next VarBind after the given OID.
     fn get_next(&self, oid: &Oid, end: &Oid) -> VarBind;
+
+    /// Returns a snapshot of the handler's OID space, computed **once** per
+    /// GETNEXT/GETBULK PDU and reused across every `get_next_snapshot` call in
+    /// that PDU. This avoids rebuilding and re-sorting a potentially large OID
+    /// list per repetition — which a single GETBULK could otherwise amplify
+    /// into heavy CPU and lock-contention work. The default is empty; handlers
+    /// with a costly OID space override this together with `get_next_snapshot`.
+    fn oid_snapshot(&self) -> Vec<Oid> {
+        Vec::new()
+    }
+
+    /// Like [`get_next`](Self::get_next) but resolves against a precomputed
+    /// snapshot from [`oid_snapshot`](Self::oid_snapshot). The default ignores
+    /// the snapshot and delegates to `get_next`, so handlers that don't
+    /// override it keep working unchanged.
+    fn get_next_snapshot(&self, oid: &Oid, end: &Oid, _snapshot: &[Oid]) -> VarBind {
+        self.get_next(oid, end)
+    }
 }
 
 // --- AgentX Session ---
@@ -540,14 +582,9 @@ impl AgentXSession {
         handler: &dyn MibHandler,
     ) -> Result<Vec<u8>, AgentXError> {
         let mut varbinds_buf = Vec::new();
-        let mut offset = 0;
-
-        // Parse SearchRanges and resolve each
-        while offset < payload.len() {
-            let (start_oid, _end_oid, consumed) = decode_search_range(&payload[offset..])?;
-            offset += consumed;
-
-            let vb = handler.get(&start_oid);
+        let ranges = parse_search_ranges(payload, MAX_SEARCH_RANGES_PER_PDU)?;
+        for (start_oid, _end_oid) in &ranges {
+            let vb = handler.get(start_oid);
             varbinds_buf.extend_from_slice(&encode_varbind(&vb));
         }
 
@@ -562,13 +599,13 @@ impl AgentXSession {
         handler: &dyn MibHandler,
     ) -> Result<Vec<u8>, AgentXError> {
         let mut varbinds_buf = Vec::new();
-        let mut offset = 0;
+        let ranges = parse_search_ranges(payload, MAX_SEARCH_RANGES_PER_PDU)?;
 
-        while offset < payload.len() {
-            let (start_oid, end_oid, consumed) = decode_search_range(&payload[offset..])?;
-            offset += consumed;
+        // Compute the OID-space snapshot once per PDU; reused for every range.
+        let snapshot = handler.oid_snapshot();
 
-            let vb = handler.get_next(&start_oid, &end_oid);
+        for (start_oid, end_oid) in &ranges {
+            let vb = handler.get_next_snapshot(start_oid, end_oid, &snapshot);
             varbinds_buf.extend_from_slice(&encode_varbind(&vb));
         }
 
@@ -593,19 +630,16 @@ impl AgentXSession {
         let max_repetitions = max_repetitions.min(100); // Cap to prevent DoS
 
         let mut varbinds_buf = Vec::new();
-        let mut ranges = Vec::new();
-        let mut offset = 4;
+        let ranges = parse_search_ranges(&payload[4..], MAX_SEARCH_RANGES_PER_PDU)?;
 
-        // Parse all search ranges
-        while offset < payload.len() {
-            let (start_oid, end_oid, consumed) = decode_search_range(&payload[offset..])?;
-            offset += consumed;
-            ranges.push((start_oid, end_oid));
-        }
+        // Compute the OID-space snapshot once for the whole PDU, instead of
+        // rebuilding it on every one of the (ranges × max_repetitions)
+        // get_next lookups below.
+        let snapshot = handler.oid_snapshot();
 
         // Process non-repeaters (single GetNext each)
         for range in ranges.iter().take(non_repeaters.min(ranges.len())) {
-            let vb = handler.get_next(&range.0, &range.1);
+            let vb = handler.get_next_snapshot(&range.0, &range.1, &snapshot);
             varbinds_buf.extend_from_slice(&encode_varbind(&vb));
         }
 
@@ -613,7 +647,7 @@ impl AgentXSession {
         for range in ranges.iter().skip(non_repeaters) {
             let mut current_oid = range.0.clone();
             for _ in 0..max_repetitions {
-                let vb = handler.get_next(&current_oid, &range.1);
+                let vb = handler.get_next_snapshot(&current_oid, &range.1, &snapshot);
                 let is_end = matches!(vb.value, VarBindValue::EndOfMibView);
                 varbinds_buf.extend_from_slice(&encode_varbind(&vb));
                 if is_end {
@@ -894,6 +928,28 @@ mod tests {
             let buf = vec![0u8; len];
             assert!(decode_search_range(&buf).is_err());
         }
+    }
+
+    #[test]
+    fn test_parse_search_ranges_caps_count() {
+        // Each minimal SearchRange is two empty OIDs = 16 zero bytes. A payload
+        // with far more than the cap must be truncated to the cap so a single
+        // PDU cannot drive unbounded per-range work.
+        let n = MAX_SEARCH_RANGES_PER_PDU + 50;
+        let payload = vec![0u8; 16 * n];
+        let ranges = parse_search_ranges(&payload, MAX_SEARCH_RANGES_PER_PDU).unwrap();
+        assert_eq!(
+            ranges.len(),
+            MAX_SEARCH_RANGES_PER_PDU,
+            "range count must be capped to bound CPU work"
+        );
+    }
+
+    #[test]
+    fn test_parse_search_ranges_under_cap_returns_all() {
+        let payload = vec![0u8; 16 * 3];
+        let ranges = parse_search_ranges(&payload, MAX_SEARCH_RANGES_PER_PDU).unwrap();
+        assert_eq!(ranges.len(), 3, "ranges below the cap are all returned");
     }
 
     #[test]

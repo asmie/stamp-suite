@@ -288,10 +288,20 @@ impl MibHandler for StampMibHandler {
     }
 
     fn get_next(&self, oid: &Oid, end: &Oid) -> VarBind {
+        // Single-lookup path: build the snapshot, then resolve against it. The
+        // batched GETNEXT/GETBULK path computes the snapshot once per PDU and
+        // calls get_next_snapshot directly (see AgentXSession).
         let all = self.all_valid_oids();
+        self.get_next_snapshot(oid, end, &all)
+    }
 
+    fn oid_snapshot(&self) -> Vec<Oid> {
+        self.all_valid_oids()
+    }
+
+    fn get_next_snapshot(&self, oid: &Oid, end: &Oid, snapshot: &[Oid]) -> VarBind {
         // Find the first OID strictly greater than the requested one
-        for candidate in &all {
+        for candidate in snapshot {
             if candidate > oid {
                 // Check if within range (end OID is exclusive upper bound)
                 if !end.is_empty() && candidate >= end {
@@ -372,6 +382,37 @@ mod tests {
             VarBindValue::Integer(v) => assert_eq!(v, 2), // disabled
             _ => panic!("Expected Integer"),
         }
+    }
+
+    #[test]
+    fn test_get_next_snapshot_matches_get_next() {
+        // The per-PDU snapshot path (get_next_snapshot over a precomputed
+        // oid_snapshot) must select exactly the same successors as the
+        // single-call get_next that rebuilds the list each time.
+        let state = make_test_state(true);
+        let handler = StampMibHandler::new(state);
+
+        let snapshot = handler.oid_snapshot();
+        assert!(!snapshot.is_empty(), "snapshot must contain scalar OIDs");
+
+        let empty = Oid(vec![]);
+        let mut cur = Oid(vec![1, 3, 6, 1]); // walk from below the enterprise tree
+        let mut steps = 0;
+        loop {
+            let a = handler.get_next(&cur, &empty);
+            let b = handler.get_next_snapshot(&cur, &empty, &snapshot);
+            assert_eq!(
+                a.oid, b.oid,
+                "snapshot path diverged from get_next at {cur:?}"
+            );
+            if matches!(a.value, VarBindValue::EndOfMibView) {
+                break;
+            }
+            cur = a.oid;
+            steps += 1;
+            assert!(steps < 10_000, "walk did not terminate");
+        }
+        assert!(steps > 0, "expected to traverse at least one OID");
     }
 
     #[test]
