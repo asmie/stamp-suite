@@ -86,6 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and re-registers the MIB subtree, honouring the shutdown signal during
   backoff. The initial connect remains synchronous so a misconfigured socket
   path still fails fast at startup.
+- **AgentX SET requests are now answered, and byte order is declared (RFC 2741
+  conformance).** The sub-agent is read-only; it now replies to a TestSet with
+  `notWritable` (and to Commit/UndoSet with the matching failure code, ignoring
+  CleanupSet) instead of silently dropping the PDU and leaving the master to
+  time out. Every emitted PDU now sets the `NETWORK_BYTE_ORDER` flag to match
+  its big-endian encoding (previously the flag byte was 0, falsely declaring
+  little-endian), and incoming request PDUs that declare a different byte order
+  are rejected rather than silently misinterpreted.
 
 ## [0.8.0] - 2026-05-18
 
