@@ -256,6 +256,30 @@ impl HmacKeySet {
         self.default = Some(key);
     }
 
+    /// Removes the per-SSID key. Returns true if a key was present.
+    /// The removed key zeroizes on drop.
+    pub fn remove_ssid(&mut self, ssid: u16) -> bool {
+        self.per_ssid.remove(&ssid).is_some()
+    }
+
+    /// Removes the default (fallback) key. Returns true if one was set.
+    pub fn clear_default(&mut self) -> bool {
+        self.default.take().is_some()
+    }
+
+    /// Returns true if a default (fallback) key is configured.
+    #[must_use]
+    pub fn has_default(&self) -> bool {
+        self.default.is_some()
+    }
+
+    /// Lists the SSIDs with dedicated keys (order unspecified).
+    /// Key bytes are deliberately not exposed.
+    #[must_use]
+    pub fn ssids(&self) -> Vec<u16> {
+        self.per_ssid.keys().copied().collect()
+    }
+
     /// Returns true when no keys are configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -402,6 +426,28 @@ pub fn verify_packet_hmac(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_keyset_remove_and_introspect() {
+        let mut set = HmacKeySet::new();
+        assert!(!set.has_default());
+        assert!(set.ssids().is_empty());
+
+        set.insert(42, HmacKey::new(vec![0xAA; 32]).unwrap());
+        set.insert(7, HmacKey::new(vec![0xBB; 32]).unwrap());
+        set.set_default(HmacKey::new(vec![0xCC; 32]).unwrap());
+
+        let mut ssids = set.ssids();
+        ssids.sort_unstable();
+        assert_eq!(ssids, vec![7, 42]);
+        assert!(set.has_default());
+
+        assert!(set.remove_ssid(42));
+        assert!(!set.remove_ssid(42), "second remove returns false");
+        assert!(set.for_ssid(42).is_some(), "falls back to default key");
+        assert!(set.clear_default());
+        assert!(set.for_ssid(42).is_none(), "no default, no per-SSID key");
+    }
 
     #[test]
     fn test_hmac_deterministic() {

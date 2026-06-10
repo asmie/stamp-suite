@@ -25,6 +25,9 @@ default = []
 ttl-nix = ["dep:nix"]
 ttl-pnet = ["dep:pnet"]
 metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", "dep:tokio-util"]
+# Runtime control-plane REST API (reflector only): localhost session/key
+# management, cap tuning, drain/shutdown. Design: doc/control-plane.md.
+control = ["dep:axum", "dep:tokio-util"]
 snmp = []
 # Kernel/hardware timestamping. Gates the SO_TIMESTAMPING read paths:
 # Linux gets kernel RX timestamps (SCM_TIMESTAMPING cmsgs) and TX timestamps
@@ -77,6 +80,7 @@ nix = { version = "0.31", default-features = false, features = ["socket", "uio",
 pnet = "0.35"
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }
 criterion = { version = "0.8", default-features = false, features = ["html_reports"] }

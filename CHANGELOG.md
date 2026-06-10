@@ -79,6 +79,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Runtime control-plane REST API** (new cargo feature `control`, reflector
+  only; reuses the already-optional axum/tokio-util — no new dependencies).
+  `--control` starts a localhost HTTP server (default `127.0.0.1:9091`,
+  `--control-addr` to change) exposing `/v1`: live status and session table,
+  session expiry, **runtime per-SSID HMAC key management** (write-only —
+  key bytes are never returned or logged, request strings are zeroized),
+  live cap tuning (`max_pps`, `rate_burst`, `max_sessions`, Type 12
+  amplification caps), drain mode (new clients still get replies but no
+  session state accretes), and graceful shutdown. Optional bearer-token
+  auth via `--control-token-file` (constant-time comparison); non-loopback
+  binds log a loud warning. Strict request validation: unknown JSON fields
+  are rejected. Full design: `doc/control-plane.md`.
+  - Supporting refactors: the per-SSID `HmacKeySet` moved into
+    `ReceiverSharedState` behind `Arc<RwLock<…>>` (packet loops take short
+    read guards that never cross an await); the `RateLimiter` is now always
+    constructed with atomically adjustable rate/burst (rate 0 = unlimited,
+    short-circuits without allocating buckets); Type 12 caps live in a
+    shared `RuntimeCaps` atomics struct; `SessionManager` gained
+    `expire_session`/drain/runtime `max_sessions`.
+
 - **`--hwtstamp` now performs a real capability probe.** At startup the
   reflector/sender queries `ETHTOOL_GET_TS_INFO` (via `SIOCETHTOOL`) on the
   interface owning `--local-addr` and logs the NIC's actual timestamping

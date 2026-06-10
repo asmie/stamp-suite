@@ -48,7 +48,7 @@ pub use pnet::run_receiver;
 
 use std::collections::HashMap as StdHashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -264,8 +264,11 @@ impl Default for ReflectorCounters {
 /// Packet Control (Type 12, draft-ietf-ippm-asymmetrical-pkts) extra-copy
 /// emission so a request asking for N replies costs N tokens.
 pub struct RateLimiter {
-    rate: u32,
-    burst: u32,
+    /// Tokens/second; 0 = unlimited (always allow, no bucket allocation).
+    /// Runtime-adjustable via the control plane.
+    rate: AtomicU32,
+    /// Bucket capacity. Kept equal to `rate` when configured as 0.
+    burst: AtomicU32,
     state: std::sync::Mutex<RateLimiterState>,
 }
 
@@ -316,13 +319,34 @@ impl RateLimiter {
         let burst = if burst == 0 { rate } else { burst };
         let now = Instant::now();
         RateLimiter {
-            rate,
-            burst,
+            rate: AtomicU32::new(rate),
+            burst: AtomicU32::new(burst),
             state: std::sync::Mutex::new(RateLimiterState {
                 last_cleanup: now,
                 sources: StdHashMap::new(),
             }),
         }
+    }
+
+    /// Adjusts the rate and burst at runtime (control plane). `burst` of 0
+    /// falls back to `rate`; `rate` of 0 disables limiting entirely.
+    pub fn set_rate(&self, rate: u32, burst: u32) {
+        let burst = if burst == 0 { rate } else { burst };
+        self.rate.store(rate, std::sync::atomic::Ordering::Relaxed);
+        self.burst
+            .store(burst, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Current rate (tokens/second); 0 = unlimited.
+    #[must_use]
+    pub fn rate(&self) -> u32 {
+        self.rate.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Current burst capacity.
+    #[must_use]
+    pub fn burst(&self) -> u32 {
+        self.burst.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns true if a single packet should be allowed for the given
@@ -341,12 +365,17 @@ impl RateLimiter {
     /// Returns true if `cost` tokens can be consumed from the bucket. On
     /// false the bucket is left unchanged (no partial consumption).
     pub fn allow_n(&self, key: RateLimiterKey, cost: u32) -> bool {
+        let rate_now = self.rate();
+        if rate_now == 0 {
+            // Unlimited: skip the lock and allocate no buckets.
+            return true;
+        }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         Self::cleanup_expired_buckets(&mut state, now);
 
-        let burst = self.burst as f64;
-        let rate = self.rate as f64;
+        let burst = self.burst() as f64;
+        let rate = rate_now as f64;
         let bucket = state.sources.entry(key).or_insert(Bucket {
             tokens: burst,
             last_refill: now,
@@ -378,20 +407,76 @@ impl RateLimiter {
     }
 }
 
+/// Reflector caps adjustable at runtime via the control plane.
+/// Loaded per packet with Relaxed ordering — these are tuning knobs,
+/// not synchronization points.
+#[derive(Debug)]
+pub struct RuntimeCaps {
+    /// Type 12 volume limit (max reply packets per request); 0 disables
+    /// asymmetric reflection.
+    pub reflected_control_max_count: std::sync::atomic::AtomicU16,
+    /// Type 12 reply-size cap in octets (egress-MTU stand-in).
+    pub reflected_control_max_size: std::sync::atomic::AtomicU16,
+    /// Type 12 rate limit: minimum inter-packet interval in nanoseconds.
+    pub reflected_control_min_interval_ns: AtomicU32,
+}
+
+impl RuntimeCaps {
+    /// Builds the caps from startup configuration.
+    #[must_use]
+    pub fn from_conf(conf: &Configuration) -> Self {
+        Self {
+            reflected_control_max_count: std::sync::atomic::AtomicU16::new(
+                conf.reflected_control_max_count,
+            ),
+            reflected_control_max_size: std::sync::atomic::AtomicU16::new(
+                conf.reflected_control_max_size,
+            ),
+            reflected_control_min_interval_ns: AtomicU32::new(
+                conf.reflected_control_min_interval_ns,
+            ),
+        }
+    }
+
+    /// CLI-default values (count 0 = disabled, size 1500, interval 1 µs);
+    /// used by tests and as a neutral baseline.
+    #[must_use]
+    pub fn from_defaults() -> Self {
+        Self {
+            reflected_control_max_count: std::sync::atomic::AtomicU16::new(0),
+            reflected_control_max_size: std::sync::atomic::AtomicU16::new(
+                REFLECTED_CONTROL_MAX_SIZE,
+            ),
+            reflected_control_min_interval_ns: AtomicU32::new(REFLECTED_CONTROL_MIN_INTERVAL_NS),
+        }
+    }
+}
+
 /// Shared state created externally and passed into receiver backends.
 ///
-/// This allows the SNMP sub-agent (and other subsystems) to access
-/// reflector counters and session state concurrently.
+/// This allows the SNMP sub-agent, the control plane, and other
+/// subsystems to access reflector counters and session state concurrently.
 pub struct ReceiverSharedState {
     pub counters: Arc<ReflectorCounters>,
     pub session_manager: Arc<SessionManager>,
     pub start_time: Instant,
-    pub rate_limiter: Option<Arc<RateLimiter>>,
+    /// Always constructed; `rate() == 0` means unlimited, so limiting can
+    /// be enabled at runtime via the control plane.
+    pub rate_limiter: Arc<RateLimiter>,
     /// Flag observable by a future readiness probe (and the pnet
     /// `spawn_blocking` join path). Set to `false` when the capture / receive
     /// loop exits unexpectedly so external monitors can distinguish
     /// "process alive but not reflecting" from "process alive and healthy".
     pub capture_alive: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-SSID HMAC keyset; runtime-mutable via the control plane. The
+    /// legacy single `--hmac-key` stays startup-immutable and backend-local.
+    /// Packet loops take short read guards that never cross an `.await`.
+    pub hmac_keys: Arc<std::sync::RwLock<Option<crate::crypto::HmacKeySet>>>,
+    /// Runtime-adjustable reflector caps (see [`RuntimeCaps`]).
+    pub caps: Arc<RuntimeCaps>,
+    /// Set by the control plane's shutdown endpoint; both backends poll it
+    /// and exit gracefully.
+    pub shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Creates the shared state for the receiver, using configuration values.
@@ -402,14 +487,12 @@ pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
         None
     };
 
-    let rate_limiter = if conf.max_pps > 0 {
-        Some(Arc::new(RateLimiter::with_burst(
-            conf.max_pps,
-            conf.reflector_rate_burst,
-        )))
-    } else {
-        None
-    };
+    // Always constructed: rate 0 short-circuits to "allow", and the
+    // control plane can raise the rate at runtime.
+    let rate_limiter = Arc::new(RateLimiter::with_burst(
+        conf.max_pps,
+        conf.reflector_rate_burst,
+    ));
 
     // Bound the session table so an unauthenticated peer cannot grow it until
     // the process is OOM-killed (0 = operator-disabled, unlimited).
@@ -425,6 +508,9 @@ pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
         start_time: Instant::now(),
         rate_limiter,
         capture_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        hmac_keys: Arc::new(std::sync::RwLock::new(load_hmac_key_set(conf))),
+        caps: Arc::new(RuntimeCaps::from_conf(conf)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
 }
 
@@ -2066,6 +2152,32 @@ mod tests {
 
     /// Synthetic burst exceeding the bucket size must produce exactly
     /// `burst` accepts then deny — no off-by-one in the consume logic.
+    #[test]
+    fn test_rate_limiter_runtime_adjust() {
+        // Starts unlimited (rate 0): always allows and allocates no buckets.
+        let limiter = RateLimiter::with_burst(0, 0);
+        let key = RateLimiterKey::from_src(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        for _ in 0..1000 {
+            assert!(limiter.allow_n(key, 1), "rate 0 = unlimited");
+        }
+
+        // Control plane turns limiting on at runtime.
+        limiter.set_rate(2, 2);
+        assert_eq!(limiter.rate(), 2);
+        assert_eq!(limiter.burst(), 2);
+        let key2 = RateLimiterKey::from_src(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert!(limiter.allow_n(key2, 1));
+        assert!(limiter.allow_n(key2, 1));
+        assert!(
+            !limiter.allow_n(key2, 1),
+            "fresh bucket holds `burst` tokens; third immediate packet drops"
+        );
+
+        // And back to unlimited.
+        limiter.set_rate(0, 0);
+        assert!(limiter.allow_n(key2, 1), "back to unlimited");
+    }
+
     #[test]
     fn test_rate_limiter_burst_exhausts_then_denies() {
         let limiter = RateLimiter::with_burst(/* rate */ 1, /* burst */ 5);
