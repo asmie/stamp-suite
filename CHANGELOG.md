@@ -38,6 +38,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture task. No reachable panic is known; this is defence-in-depth. The
   caught-panic message is logged once at `error`, then at `debug`, to avoid a
   log-amplification side channel.
+- **Key-file permissions are now enforced, not just warned.** `HmacKey::from_file`
+  rejects a key file with any group/other permission bit (`0o077`) instead of
+  logging a warning and using it anyway; in authenticated mode the daemon then
+  refuses to start (fail-closed) rather than silently running unauthenticated.
+  The check is done on the opened file descriptor (`fstat`), closing the
+  time-of-check/time-of-use gap and validating the real target's permissions
+  even when the path is a symlink. `O_NOFOLLOW` is intentionally not used so
+  Kubernetes / systemd-credential secret mounts (which expose secrets as
+  symlinks) keep working. `--hmac-key-dir` now also rejects a directory that is
+  group/other-writable (key-injection risk) while still allowing the
+  recommended group-readable `0750` layout.
+
+  **Breaking:** a key file previously accepted at `0640`/`0644` (with a warning)
+  is now refused. Use `chmod 0400`/`0600` (owner-only). See
+  [doc/security.md](doc/security.md#configuration-file-and-key-file-permissions).
 
 ### Added
 

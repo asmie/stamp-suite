@@ -33,6 +33,21 @@ pub enum HmacError {
     /// Failed to read key from file.
     #[error("Failed to read key file: {0}")]
     FileReadError(String),
+
+    /// Key file or directory has insecure (group/other-accessible) permissions.
+    #[error(
+        "Key path {path} has insecure permissions (mode {mode:04o}): {detail}. \
+         Refusing to use it — restrict it to the owner (key files: chmod 0400; \
+         key directory: chmod 0700, or 0750 if group read is required)"
+    )]
+    InsecurePermissions {
+        /// The offending path.
+        path: String,
+        /// The file mode (low 9 bits).
+        mode: u32,
+        /// Human-readable description of what is wrong.
+        detail: &'static str,
+    },
 }
 
 /// HMAC key for STAMP authentication.
@@ -87,30 +102,51 @@ impl HmacKey {
     /// If the file content is valid UTF-8 and parses as hex, it's treated as hex.
     /// Otherwise, it's treated as raw bytes.
     ///
+    /// On Unix the key file's permissions are checked on the *opened file
+    /// descriptor* (`fstat`), not via a second path lookup. This closes the
+    /// TOCTOU window between the check and the read, and — because it inspects
+    /// the mode of the exact inode the bytes are read from — also rejects a key
+    /// whose (possibly symlinked) target is group- or other-accessible. Any
+    /// group/other access bit (`0o077`) is rejected, because a key readable by
+    /// anyone but the owner is an exposed secret.
+    ///
+    /// `O_NOFOLLOW` is deliberately *not* used: secret-injection setups
+    /// (Kubernetes secret mounts, systemd credentials) commonly expose the key
+    /// file as a symlink, and the `fstat`-on-fd check already validates the
+    /// real target's permissions.
+    ///
     /// # Arguments
     /// * `path` - Path to the key file
     ///
     /// # Errors
     /// Returns `HmacError::FileReadError` if the file cannot be read.
+    /// Returns `HmacError::InsecurePermissions` if the file is group/other
+    /// accessible (Unix only).
     /// Returns `HmacError::KeyTooShort` if the key is less than 16 bytes.
     pub fn from_file(path: &Path) -> Result<Self, HmacError> {
-        let raw_bytes = fs::read(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+        use std::io::Read;
+
+        let mut file = fs::File::open(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let metadata =
-                fs::metadata(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+            let metadata = file
+                .metadata()
+                .map_err(|e| HmacError::FileReadError(e.to_string()))?;
             let mode = metadata.permissions().mode();
             if mode & 0o077 != 0 {
-                log::warn!(
-                    "HMAC key file {:?} has overly permissive permissions (mode {:o}). \
-                     Recommended: chmod 600",
-                    path,
-                    mode & 0o777
-                );
+                return Err(HmacError::InsecurePermissions {
+                    path: path.display().to_string(),
+                    mode: mode & 0o777,
+                    detail: "key file is accessible by group or other",
+                });
             }
         }
+
+        let mut raw_bytes = Vec::new();
+        file.read_to_end(&mut raw_bytes)
+            .map_err(|e| HmacError::FileReadError(e.to_string()))?;
 
         // Try to parse as hex if it's valid UTF-8
         if let Ok(content) = std::str::from_utf8(&raw_bytes) {
@@ -243,9 +279,30 @@ impl HmacKeySet {
     ///
     /// # Errors
     /// Returns `HmacError::FileReadError` if the directory cannot be
-    /// listed; per-file decode errors are logged and skipped so a
-    /// malformed file doesn't take down the whole reflector.
+    /// listed; per-file decode errors (including a key file with insecure
+    /// permissions) are logged and skipped so one bad file doesn't take down
+    /// the whole reflector.
+    /// Returns `HmacError::InsecurePermissions` if the directory itself is
+    /// writable by group or other (Unix only) — that would let another user
+    /// inject or replace key files.
     pub fn from_dir(dir: &Path) -> Result<Self, HmacError> {
+        // The directory may be group-readable (the recommended layout is
+        // `0750 root:stamp`), but it must not be group/other *writable*, or an
+        // attacker could drop in or replace per-SSID key files.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(dir).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+            let mode = metadata.permissions().mode();
+            if mode & 0o022 != 0 {
+                return Err(HmacError::InsecurePermissions {
+                    path: dir.display().to_string(),
+                    mode: mode & 0o777,
+                    detail: "key directory is writable by group or other",
+                });
+            }
+        }
+
         let entries = fs::read_dir(dir).map_err(|e| HmacError::FileReadError(e.to_string()))?;
         let mut set = HmacKeySet::new();
         for entry in entries.flatten() {
@@ -521,22 +578,31 @@ mod tests {
         assert!(set.for_ssid(99).is_some());
     }
 
+    /// Test helper: write `content` to `dir/name` with owner-only (0600)
+    /// permissions on Unix so `HmacKey::from_file`'s permission check accepts it.
+    fn write_key_file(dir: &Path, name: &str, content: &str) -> std::path::PathBuf {
+        use std::io::Write;
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path
+    }
+
     #[test]
     fn test_keyset_from_dir_round_trip() {
-        use std::io::Write;
         let dir = tempfile::tempdir().expect("create tempdir");
 
-        // Write three keys: one default + two per-SSID.
-        let write = |name: &str, content: &str| {
-            let path = dir.path().join(name);
-            let mut f = std::fs::File::create(&path).unwrap();
-            f.write_all(content.as_bytes()).unwrap();
-        };
-        write("default.key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        write("002a.key", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); // SSID 42
-        write("ffff.key", "cccccccccccccccccccccccccccccccc"); // SSID 65535
-                                                               // Add an unparseable file — must be skipped, not fatal.
-        write("notes.txt", "this is a comment file");
+        // Write three keys: one default + two per-SSID (owner-only perms).
+        write_key_file(dir.path(), "default.key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        write_key_file(dir.path(), "002a.key", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); // SSID 42
+        write_key_file(dir.path(), "ffff.key", "cccccccccccccccccccccccccccccccc"); // SSID 65535
+                                                                                    // Unparseable file — must be skipped, not fatal.
+        write_key_file(dir.path(), "notes.txt", "this is a comment file");
 
         let set = HmacKeySet::from_dir(dir.path()).expect("load");
         assert!(set.for_ssid(42).is_some());
@@ -546,5 +612,70 @@ mod tests {
         let default_digest = set.for_ssid(0).unwrap().compute(b"x");
         let ssid42_digest = set.for_ssid(42).unwrap().compute(b"x");
         assert_ne!(default_digest, ssid42_digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_from_file_accepts_owner_only_key() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_key_file(dir.path(), "k.key", "00112233445566778899aabbccddeeff");
+        assert!(HmacKey::from_file(&path).is_ok(), "0600 key must load");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_from_file_rejects_group_or_other_accessible_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_key_file(dir.path(), "k.key", "00112233445566778899aabbccddeeff");
+
+        // Group-readable (0640) must be rejected, not merely warned.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            matches!(
+                HmacKey::from_file(&path),
+                Err(HmacError::InsecurePermissions { .. })
+            ),
+            "group-readable key file must be rejected"
+        );
+
+        // World-readable (0604) likewise.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o604)).unwrap();
+        assert!(matches!(
+            HmacKey::from_file(&path),
+            Err(HmacError::InsecurePermissions { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_from_dir_rejects_group_or_other_writable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("create tempdir");
+        write_key_file(dir.path(), "default.key", "00112233445566778899aabbccddeeff");
+
+        // Group-writable directory → key injection risk → rejected.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+        let result = HmacKeySet::from_dir(dir.path());
+        // Restore a sane mode so the tempdir can be cleaned up.
+        let _ = std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700));
+        assert!(
+            matches!(result, Err(HmacError::InsecurePermissions { .. })),
+            "group/other-writable key dir must be rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_from_dir_allows_group_readable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("create tempdir");
+        write_key_file(dir.path(), "default.key", "00112233445566778899aabbccddeeff");
+
+        // Group-readable but not writable (0750, the recommended layout) is OK.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        let result = HmacKeySet::from_dir(dir.path());
+        let _ = std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700));
+        assert!(result.is_ok(), "0750 key dir must be accepted");
     }
 }

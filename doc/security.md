@@ -75,7 +75,7 @@ An HMAC key can be supplied through any of these inputs. From highest to lowest 
 
 The plaintext **`hmac_key` field is deliberately rejected** when it appears in the TOML config file — that would put a long-lived secret on disk in clear text. The `config` field is also rejected from the file (it would be recursive).
 
-If `hmac_key_file` is used, treat its file permissions exactly like the config file (see next section): owner-only, `chmod 600`. The HMAC key file is checked at load time (`HmacKey::from_file` in `src/crypto.rs`): any bit in `0o077` — i.e. *any* group or other permission, including read — triggers a warning. The config file uses a looser mask (`0o022`, write-only).
+If `hmac_key_file` is used, treat its file permissions exactly like the config file (see next section): owner-only, `chmod 600`. The HMAC key file is checked at load time (`HmacKey::from_file` in `src/crypto.rs`): any bit in `0o077` — i.e. *any* group or other permission, including read — is **rejected**, not merely warned. The key is not loaded, and in authenticated mode the daemon then refuses to start (fail-closed) rather than silently running unauthenticated. The check is performed on the opened file descriptor (`fstat`), so it closes the time-of-check/time-of-use gap and validates the real permissions of the file actually read — including when `hmac_key_file` is a symlink (`O_NOFOLLOW` is intentionally not used, so Kubernetes/systemd-credential secret mounts that expose the key as a symlink keep working). The `--hmac-key-dir` directory itself is also checked: it may be group-readable (the recommended `0750 root:stamp` layout) but is rejected if writable by group or other, which would allow key injection. The config file uses a looser mask (`0o022`, write-only).
 
 ## Configuration File and Key-File Permissions
 
@@ -91,7 +91,7 @@ chmod 600 /etc/stamp/hmac.key
 chown root:root /etc/stamp/hmac.key
 ```
 
-If you run stamp-suite as the `stamp` system user (created by the DEB/RPM packages — see below), make the key file owned by `stamp` so the daemon can read it without granting access to anyone else. The `0o077` check on the key file means even `chmod 640` (group read) will warn — the recommended setup is owner-only `0400`:
+If you run stamp-suite as the `stamp` system user (created by the DEB/RPM packages — see below), make the key file owned by `stamp` so the daemon can read it without granting access to anyone else. The `0o077` check on the key file means even `chmod 640` (group read) is **rejected** — the recommended setup is owner-only `0400`:
 
 ```bash
 chown stamp:stamp /etc/stamp/hmac.key
@@ -211,7 +211,7 @@ The DEB and RPM packages ship a unit with `ExecStart=/usr/bin/stamp-suite --is-r
    sudo journalctl -u stamp-suite -n 50
    ```
 
-   The journal should show the reflector starting in authenticated mode and the key file being loaded; no `WARN ... overly permissive permissions` line should appear (if it does, recheck `chmod 0400` and ownership).
+   The journal should show the reflector starting in authenticated mode and the key file being loaded. If the key file has group/other permissions the daemon **refuses to start** and logs an `insecure permissions` error instead — recheck `chmod 0400` and ownership.
 
 4. **Distribute the same key** to legitimate senders (the only entities that should be able to reach this reflector). Any peer that does not present a packet HMAC computed with this key is rejected.
 
