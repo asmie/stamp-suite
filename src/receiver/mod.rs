@@ -824,6 +824,11 @@ pub struct ProcessingContext<'a> {
     pub local_addresses: &'a [std::net::IpAddr],
     /// Sender's UDP port for Return Path alternate address replies (RFC 9503 §5).
     pub sender_port: u16,
+    /// Whether to honour a Return Path "Return Address" sub-TLV by replying to
+    /// the peer-chosen address (RFC 9503 §5). Off by default; when off the
+    /// reflector echoes the TLV with the U-flag and replies to the packet
+    /// source, preventing third-party traffic redirection / reflection.
+    pub return_path_allow_alternate: bool,
     /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
     pub reflector_member_link_id: Option<u16>,
     /// Raw bytes of the received IP fixed header and IPv6 extension headers,
@@ -1341,7 +1346,8 @@ fn apply_semantic_tlv_processing(
     }
 
     // Process Return Path TLV (RFC 9503 §5)
-    let return_path_action = tlvs.process_return_path(ctx.sender_port);
+    let return_path_action =
+        tlvs.process_return_path(ctx.sender_port, ctx.return_path_allow_alternate);
 
     // Process BER TLVs (draft-gandhi-ippm-stamp-ber §3):
     // compute Bit Error Count and Max Burst against the companion Extra Padding.
@@ -1426,8 +1432,20 @@ fn apply_semantic_tlv_processing(
             // Requested length handling: 0 = don't pad (sender opt-out).
             // Otherwise try to pad the response with an Extra Padding TLV to
             // reach the requested total reply size, up to the local cap.
+            //
+            // Padding the reply *larger* than the request is amplification, so
+            // it is governed by the same administrative opt-in as extra copies:
+            // when `reflected_control_max_count == 0` (the default, "asymmetric
+            // reflection disabled" per draft-ietf-ippm-asymmetrical-pkts) the
+            // reflector refuses to pad and sets the C flag. Otherwise an
+            // unauthenticated peer could turn a tiny request into a 1500-byte
+            // reply and, combined with a Return Address sub-TLV, aim it at a
+            // victim.
             let requested_length = req.length_of_reflected_packet;
-            if requested_length > 0 {
+            if requested_length > 0 && ctx.reflected_control_max_count == 0 {
+                // Amplification disabled administratively: do not pad, signal C.
+                non_conformant = true;
+            } else if requested_length > 0 {
                 let target = requested_length as usize;
                 let cap = ctx.reflected_control_max_size as usize;
                 let base_size = if tlv_hmac_key.is_some() {
@@ -1761,6 +1779,7 @@ mod tests {
             last_reflection: None,
             local_addresses: &[],
             sender_port: 0,
+            return_path_allow_alternate: false,
             reflector_member_link_id: None,
             captured_headers: None,
             reflected_control_max_count: REFLECTED_CONTROL_MAX_COUNT,
@@ -3491,6 +3510,8 @@ mod tests {
 
         let mut ctx = test_ctx(0, 0);
         ctx.sender_port = 12345;
+        // Opt in to alternate-address replies for this test.
+        ctx.return_path_allow_alternate = true;
 
         let response = assemble_unauth_answer_with_tlvs(
             &sender_packet,
@@ -3510,6 +3531,49 @@ mod tests {
             response.return_path_action,
             ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(alt_addr, 12345))
         );
+    }
+
+    #[test]
+    fn test_unauth_return_path_alternate_addr_denied_by_default() {
+        // Security: with return_path_allow_alternate = false (the default),
+        // a Return Address sub-TLV must NOT redirect the reply — otherwise an
+        // unauthenticated peer could aim the reflector's reply at a third party.
+        use crate::tlv::ReturnPathTlv;
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            ssid: 0,
+            mbz: [0; 28],
+        };
+
+        let alt_addr: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        let rp_tlv = ReturnPathTlv::with_return_address(alt_addr);
+
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&rp_tlv.to_raw().to_bytes());
+
+        let mut ctx = test_ctx(0, 0);
+        ctx.sender_port = 12345;
+        // return_path_allow_alternate defaults to false in test_ctx.
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        // No redirection: reply goes to the packet source (Normal).
+        assert_eq!(response.return_path_action, ReturnPathAction::Normal);
     }
 
     #[test]

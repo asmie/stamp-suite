@@ -382,6 +382,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     last_reflection,
                     local_addresses: &local_addresses,
                     sender_port: src_addr.port(),
+                    return_path_allow_alternate: conf.return_path_allow_alternate,
                     reflector_member_link_id: conf.reflector_member_link_id,
                     // nix UDP-socket backend cannot observe raw IP headers.
                     // draft-ietf-ippm-stamp-ext-hdr TLV 246/247 requests are

@@ -196,7 +196,7 @@ Status labels used in this table — kept aligned with the (forthcoming) standar
 | 7 | Follow-Up Telemetry | Previous reflection seq/timestamp (RFC 8972 §4.7) | supported |
 | 8 | HMAC | TLV integrity verification (must be last) | supported |
 | 9 | Destination Node Address | Verify intended reflector identity (RFC 9503 §4) | supported |
-| 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | supported — suppress / alternate address / SRv6 best-effort SRH forwarding (opt-in `--srv6-return-forwarding`, Linux+IPv6, graceful U-flag fallback); SR-MPLS echoed with U-flag (out of scope for userspace UDP) |
+| 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | supported — suppress / alternate address (opt-in `--return-path-allow-alternate`, U-flag fallback when off) / SRv6 best-effort SRH forwarding (opt-in `--srv6-return-forwarding`, Linux+IPv6, graceful U-flag fallback); SR-MPLS echoed with U-flag (out of scope for userspace UDP) |
 | 11 | Micro-session ID | LAG member link identifiers for per-link measurement (RFC 9534 §3.1) | supported |
 | 12 | Reflected Test Packet Control | Asymmetrical reply request — count, length, interval (draft-ietf-ippm-asymmetrical-pkts-14, IANA-assigned) | supported — emission, length padding (up to `--reflected-control-max-size`), L3 Address Group sub-TLV match; L2 sub-TLV present sets U-flag on backends without MAC visibility |
 | 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-05) | experimental |
@@ -345,7 +345,7 @@ stamp-suite --is-reflector --srv6-return-forwarding
 
 The reflector handles each sub-TLV type:
 - **Control Code**: Bit 0 controls reply behavior (0=suppress, 1=reply); reserved bits are ignored per RFC 9503
-- **Return Address**: Reflector sends the reply to the specified IP. On send failure, it sets the U-flag and falls back to the original source address
+- **Return Address**: Opt-in via `--return-path-allow-alternate` (off by default). When enabled, the reflector sends the reply to the specified IP; on send failure it sets the U-flag and falls back to the original source address. **When disabled (the default), the sub-TLV is echoed with the U-flag set and the reply goes to the packet source** — honouring arbitrary return addresses on an open reflector would make it a traffic-redirection / reflection gadget aimed at third parties (see [security.md](security.md#reflection-and-amplification-open-mode)).
 - **SRv6 Segment List**: Best-effort forwarding (RFC 9503 §5 + RFC 8754), opt-in via `--srv6-return-forwarding`. When enabled and the kernel supports it, the reflector builds an SRv6 Segment Routing Header (`src/srv6.rs`) and attaches it to the IPv6 reply via an `IPV6_RTHDR` ancillary message (`sendmsg`). A one-shot capability probe gates the attempt; on a non-Linux/IPv4 path, an unsupported kernel, or any send error it falls back to a normal reply with the Return Path **U-flag** set. Disabled by default. The SRH construction is unit-tested against RFC 8754; the live kernel send path requires an SRv6-capable testbed to exercise fully.
 - **SR-MPLS**: Echoed with U-flag set — forwarding an arbitrary MPLS label stack from a userspace UDP socket is out of scope (it requires raw `AF_PACKET` framing and next-hop resolution).
 

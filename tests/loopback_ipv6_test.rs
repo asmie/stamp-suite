@@ -56,6 +56,7 @@ fn make_ctx<'a>(
         last_reflection: None,
         local_addresses,
         sender_port: 12345,
+        return_path_allow_alternate: false,
         reflector_member_link_id: None,
         captured_headers: None,
         reflected_control_max_count: 16,

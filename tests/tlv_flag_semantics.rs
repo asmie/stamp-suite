@@ -57,6 +57,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         last_reflection: None,
         local_addresses: &[],
         sender_port: 12345,
+        return_path_allow_alternate: false,
         reflector_member_link_id: None,
         captured_headers: None,
         reflected_control_max_count: 16,
@@ -458,6 +459,78 @@ fn reflected_control_disabled_by_default_emits_no_extra_copies() {
         echoed.flags.to_byte() & 0x10,
         0x10,
         "C flag must be set when the reflector cannot honour the request"
+    );
+}
+
+#[test]
+fn reflected_control_length_padding_disabled_by_default() {
+    // Security (audit finding 1): with reflected_control_max_count = 0 (the
+    // production default) the reflector must NOT pad its reply up to a
+    // peer-requested length. Padding a tiny request into a large reply is
+    // amplification, and combined with a Return Address sub-TLV it becomes a
+    // reflection vector aimed at a third party. The request is refused (C flag)
+    // and the reply is left at its natural size.
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&1500u16.to_be_bytes()); // length: pad to 1500
+    value.extend_from_slice(&1u16.to_be_bytes()); // count: 1 (single reply)
+    value.extend_from_slice(&1_000_000u32.to_be_bytes()); // interval
+    value.extend_from_slice(&[0u8; 4]); // sub-TLV placeholder
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let mut ctx = make_ctx(None);
+    ctx.reflected_control_max_count = 0; // disabled (production default)
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("reflector should still produce the single normal reply");
+
+    // Not amplified: the reply must be far smaller than the requested 1500.
+    assert!(
+        response.data.len() < 200,
+        "reply must not be padded to the requested length when amplification \
+         is disabled (got {} bytes)",
+        response.data.len()
+    );
+
+    // C flag set on the echoed Type 12 TLV (length request not honoured).
+    let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..])
+        .expect("response TLV chain must be parseable");
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Reflected Control TLV must be echoed");
+    assert_eq!(
+        echoed.flags.to_byte() & 0x10,
+        0x10,
+        "C flag must be set when length padding is refused"
+    );
+}
+
+#[test]
+fn reflected_control_length_padding_honoured_when_enabled() {
+    // The counterpart to the above: when the operator opts in
+    // (reflected_control_max_count > 0) the length request is honoured and the
+    // reply is padded up to the requested size (bounded by max_size).
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&512u16.to_be_bytes()); // length: pad to 512
+    value.extend_from_slice(&1u16.to_be_bytes()); // count: 1
+    value.extend_from_slice(&1_000_000u32.to_be_bytes()); // interval
+    value.extend_from_slice(&[0u8; 4]); // sub-TLV placeholder
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let mut ctx = make_ctx(None);
+    ctx.reflected_control_max_count = 16; // opted in
+    ctx.reflected_control_max_size = 1500;
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("reflector should produce a padded reply");
+
+    assert_eq!(
+        response.data.len(),
+        512,
+        "reply must be padded up to the requested length when enabled"
     );
 }
 
