@@ -64,7 +64,7 @@ use crate::{
     time::generate_timestamp,
     tlv::{
         PacketAddressInfo, ReturnPathAction, SyncSource, TimestampMethod, TlvList, TlvType,
-        TLV_HEADER_SIZE,
+        REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, TLV_HEADER_SIZE,
     },
 };
 
@@ -636,6 +636,13 @@ pub struct ReflectedControlBehavior {
     pub extra_copies: u16,
     /// Nanoseconds between consecutive sends.
     pub interval_ns: u32,
+    /// One-way measurement mode requested via the IPv6 Extension Header
+    /// Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-08 §5.3): the
+    /// reflector must not attach received IPv6 extension headers to the
+    /// reply's IPv6 header. Neither backend attaches them today, so the
+    /// request is honoured trivially; the bit is recorded for the send
+    /// path once a reply-attachment capability exists.
+    pub suppress_reply_ext_headers: bool,
 }
 
 /// Example hard cap on total reply packets emitted for a single Reflected
@@ -679,6 +686,10 @@ enum ReflectedControlSubTlv {
     },
     /// Layer 3 Address Group (sub-TLV type 11) — IP prefix match.
     L3Group { prefix_len: u8, prefix: Vec<u8> },
+    /// IPv6 Extension Header Control (draft-ietf-ippm-stamp-ext-hdr-08
+    /// §5.3) — presence-only request for one-way mode: do not attach
+    /// received IPv6 extension headers to the reply's IPv6 header.
+    Ipv6ExtHdrControl,
     /// Anything else (including the 4-byte zero placeholder that pads the
     /// TLV to the draft-14 §3 12-octet minimum). Ignored by the reflector.
     Unknown {
@@ -723,6 +734,11 @@ fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedControlSubTlv> 
                     let prefix = value[4..].to_vec();
                     out.push(ReflectedControlSubTlv::L3Group { prefix_len, prefix });
                 }
+            }
+            // Presence-only; the draft defines no value fields, so any
+            // length is accepted and the value ignored.
+            REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL => {
+                out.push(ReflectedControlSubTlv::Ipv6ExtHdrControl);
             }
             // The all-zeros 4-byte header is a draft-14 §3 placeholder.
             0 if length == 0 => {}
@@ -1445,6 +1461,7 @@ fn apply_semantic_tlv_processing(
             let sub_chain = parse_reflected_control_sub_tlvs(&req.sub_tlvs);
             let mut l2_present = false;
             let mut l3_matches: Option<bool> = None;
+            let mut one_way_ext_headers = false;
             for sub in &sub_chain {
                 match sub {
                     ReflectedControlSubTlv::L2Group { .. } => l2_present = true,
@@ -1455,6 +1472,7 @@ fn apply_semantic_tlv_processing(
                             ctx.local_addresses,
                         ));
                     }
+                    ReflectedControlSubTlv::Ipv6ExtHdrControl => one_way_ext_headers = true,
                     ReflectedControlSubTlv::Unknown { .. } => {}
                 }
             }
@@ -1570,6 +1588,7 @@ fn apply_semantic_tlv_processing(
                     interval_ns: req
                         .interval_nanoseconds
                         .max(ctx.reflected_control_min_interval_ns),
+                    suppress_reply_ext_headers: one_way_ext_headers,
                 })
             }
         }

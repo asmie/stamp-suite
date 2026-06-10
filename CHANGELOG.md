@@ -77,6 +77,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packets. The previous fuzz targets covered only the low-level parsers in
   isolation, not the in-place TLV mutators and length arithmetic.
 
+### Added
+
+- **IPv6 Extension Header Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-08
+  §5.3).** The reflector now recognizes the presence-only sub-TLV inside a
+  Reflected Test Packet Control TLV as a request for one-way measurement mode
+  (do not attach received IPv6 extension headers to the reply's IPv6 header)
+  and records it in `ReflectedControlBehavior::suppress_reply_ext_headers`.
+  Since neither backend attaches extension headers to replies, the request is
+  honoured trivially today; the bit is plumbed for a future reply-attachment
+  path. The sender gains `--reflected-control-no-ext-hdr` to emit the sub-TLV
+  (implies emitting the Type 12 TLV even at count 1); combining it with
+  `--return-path-cc 0` is rejected per asymmetrical-pkts-14 §4.3. The sub-TLV
+  codepoint is TBA3 at IANA; until assignment we use 240 from the shared
+  STAMP Sub-TLV Types Experimental range — renumber when the RFC publishes.
+
 ### Changed
 
 - **Reflected Test Packet Control (Type 12) processing now follows

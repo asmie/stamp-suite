@@ -54,6 +54,16 @@ pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 12;
 /// TLV value field (length(2) + count(2) + interval(4)). Sub-TLVs follow.
 pub const REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE: usize = 8;
 
+/// Sub-TLV type for "IPv6 Extension Header Control" under the Reflected
+/// Test Packet Control TLV (draft-ietf-ippm-stamp-ext-hdr-08 §5.3).
+/// Presence-only: requests one-way mode (the reflector must not attach the
+/// received IPv6 extension headers to the reply's IPv6 header).
+///
+/// The IANA codepoint is still TBA3 in the draft; this is a stand-in from
+/// the shared "STAMP Sub-TLV Types" Experimental range (240-251). Renumber
+/// when the RFC publishes.
+pub const REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL: u8 = 240;
+
 /// BER Bit Error Count TLV value size
 /// (draft-gandhi-ippm-stamp-ber §3.3: single u32).
 pub const BER_COUNT_TLV_VALUE_SIZE: usize = 4;
