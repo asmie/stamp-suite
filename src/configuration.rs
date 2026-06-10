@@ -405,6 +405,18 @@ pub struct Configuration {
     #[clap(long, default_value_t = 0)]
     pub reflector_rate_burst: u32,
 
+    /// Maximum number of concurrently tracked client sessions (0 = unlimited).
+    /// The reflector creates a session entry per distinct source `IP:port` to
+    /// hold Direct Measurement / Follow-Up Telemetry counters, so without a cap
+    /// an unauthenticated peer spraying packets from many source ports (or
+    /// spoofed addresses) can grow the table until the process is OOM-killed.
+    /// When the cap is reached, new clients are still answered but not tracked
+    /// (transient counters); stale entries are reclaimed by the periodic
+    /// cleanup. Defaults to 65536. Raise it for very large measurement meshes,
+    /// or set 0 to disable the cap (not recommended on an open reflector).
+    #[clap(long, default_value_t = 65536)]
+    pub max_sessions: u32,
+
     /// Enable the BER TLVs (draft-gandhi-ippm-stamp-ber-05):
     /// Bit Pattern in Padding (Type 240), Bit Error Count (Type 241), and
     /// Max Bit Error Burst Size (Type 242). Sender-side only; the reflector
@@ -782,6 +794,7 @@ impl Configuration {
         merge_opt!(reflector_member_link_id);
         merge!(max_pps);
         merge!(reflector_rate_burst);
+        merge!(max_sessions);
         merge!(ber);
         merge_opt!(ber_pattern);
         merge!(ber_padding_size);
@@ -871,6 +884,7 @@ pub struct FileConfiguration {
     pub reflector_member_link_id: Option<u16>,
     pub max_pps: Option<u32>,
     pub reflector_rate_burst: Option<u32>,
+    pub max_sessions: Option<u32>,
     pub ber: Option<bool>,
     pub ber_pattern: Option<String>,
     pub ber_padding_size: Option<usize>,
@@ -954,6 +968,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "reflector_member_link_id": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "max_pps": { "type": "integer", "minimum": 0 },
     "reflector_rate_burst": { "type": "integer", "minimum": 0 },
+    "max_sessions": { "type": "integer", "minimum": 0 },
     "ber": { "type": "boolean" },
     "ber_pattern": { "type": "string", "pattern": "^[0-9a-fA-F]+$" },
     "ber_padding_size": { "type": "integer", "minimum": 0 },
@@ -1449,6 +1464,7 @@ mod tests {
             "reflector_member_link_id",
             "max_pps",
             "reflector_rate_burst",
+            "max_sessions",
             "ber",
             "ber_pattern",
             "ber_padding_size",

@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, RwLock,
     },
     time::{Duration, Instant},
@@ -112,6 +112,12 @@ pub struct SessionManager {
     session_timeout: Option<Duration>,
     /// Optional maximum number of sessions to prevent unbounded growth.
     max_sessions: Option<usize>,
+    /// True while the table is at its cap. Used to log the "cap reached"
+    /// warning exactly once per saturation episode instead of once per
+    /// rejected client — otherwise a flood would turn the log into its own
+    /// amplification DoS. Reset by `cleanup_stale_sessions` once the table
+    /// drops back below the cap.
+    saturated: AtomicBool,
 }
 
 impl SessionManager {
@@ -126,7 +132,22 @@ impl SessionManager {
             next_session_id: AtomicU32::new(0),
             session_timeout,
             max_sessions,
+            saturated: AtomicBool::new(false),
         }
+    }
+
+    /// Logs the "session table at cap" warning at most once per saturation
+    /// episode. Per-client rejections are logged at debug to avoid a
+    /// flood-driven log-amplification DoS.
+    fn note_saturated(&self, max: usize, client: SocketAddr) {
+        if !self.saturated.swap(true, Ordering::Relaxed) {
+            log::warn!(
+                "Session table reached its cap ({max}); new clients are still \
+                 answered but not tracked until stale entries expire. Raise \
+                 --max-sessions if this is legitimate load."
+            );
+        }
+        log::debug!("Session limit reached, not tracking new client {client}");
     }
 
     /// Generates and returns the next sequence number for a client's session.
@@ -151,11 +172,7 @@ impl SessionManager {
         } else {
             if let Some(max) = self.max_sessions {
                 if sessions.len() >= max {
-                    log::warn!(
-                        "Session limit ({}) reached, ignoring new client {}",
-                        max,
-                        client
-                    );
+                    self.note_saturated(max, client);
                     // Return a temporary session that won't be stored
                     return Arc::new(Session::new(u32::MAX));
                 }
@@ -197,11 +214,7 @@ impl SessionManager {
         } else {
             if let Some(max) = self.max_sessions {
                 if sessions.len() >= max {
-                    log::warn!(
-                        "Session limit ({}) reached, ignoring new client {}",
-                        max,
-                        client
-                    );
+                    self.note_saturated(max, client);
                     // Return a temporary session that won't be stored
                     let session = Arc::new(Session::new(u32::MAX));
                     return (0, session);
@@ -264,6 +277,14 @@ impl SessionManager {
             // Update active sessions gauge after cleanup
             #[cfg(feature = "metrics")]
             crate::metrics::reflector_metrics::set_active_sessions(sessions.len());
+        }
+
+        // Re-arm the one-shot "cap reached" warning once we drop back below the
+        // cap, so a later saturation episode is reported again.
+        if let Some(max) = self.max_sessions {
+            if sessions.len() < max {
+                self.saturated.store(false, Ordering::Relaxed);
+            }
         }
         removed
     }
@@ -521,6 +542,53 @@ mod tests {
 
         // Session is still active, should not be cleaned up
         assert_eq!(manager.cleanup_stale_sessions(), 0);
+        assert_eq!(manager.session_count(), 1);
+    }
+
+    #[test]
+    fn test_session_manager_enforces_max_sessions_cap() {
+        // Cap of 2: the first two distinct clients are tracked; a third is
+        // still answered (returns a session) but NOT stored, so an
+        // unauthenticated flood cannot grow the table without bound.
+        let manager = SessionManager::new(None, Some(2));
+        manager.generate_sequence_number(make_addr(1));
+        manager.generate_sequence_number(make_addr(2));
+        assert_eq!(manager.session_count(), 2);
+
+        // Third distinct client: over the cap → transient, unstored session.
+        let s = manager.get_or_create_session(make_addr(3));
+        assert_eq!(
+            s.get_id(),
+            u32::MAX,
+            "over-cap client must get a transient (unstored) session"
+        );
+        assert_eq!(
+            manager.session_count(),
+            2,
+            "table must not grow past the cap"
+        );
+
+        // Existing clients are still served from the table.
+        manager.generate_sequence_number(make_addr(1));
+        assert_eq!(manager.session_count(), 2);
+    }
+
+    #[test]
+    fn test_session_cap_reopens_after_cleanup_frees_space() {
+        let manager = SessionManager::new(Some(Duration::from_millis(50)), Some(1));
+        manager.generate_sequence_number(make_addr(1));
+        assert_eq!(manager.session_count(), 1);
+        // Over cap now — second client is not stored.
+        manager.generate_sequence_number(make_addr(2));
+        assert_eq!(manager.session_count(), 1);
+
+        // Let the first entry go stale and clean it up.
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(manager.cleanup_stale_sessions(), 1);
+        assert_eq!(manager.session_count(), 0);
+
+        // Space freed → a new client is tracked again.
+        manager.generate_sequence_number(make_addr(3));
         assert_eq!(manager.session_count(), 1);
     }
 }

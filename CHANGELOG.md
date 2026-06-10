@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`--reflected-control-max-count > 0`, default `0`). Previously the
     single-reply padding ran regardless of the count cap, allowing ~15×
     amplification. The request is now refused with the C flag when disabled.
+- **Bounded session table.** New `--max-sessions` flag (default `65536`, `0` =
+  unlimited) caps the per-client session table. Previously the reflector
+  created an unbounded session entry per distinct source `IP:port` on every
+  packet, so an unauthenticated peer could grow the table until the process was
+  OOM-killed. When the cap is reached, new clients are still answered but not
+  tracked, and stale entries are reclaimed by the periodic cleanup. The
+  "cap reached" warning is now logged once per saturation episode instead of
+  once per rejected client, closing a log-amplification side channel.
 
 ## [0.8.0] - 2026-05-18
 
