@@ -41,6 +41,19 @@ reflector in **authenticated mode** removes them entirely for unauthenticated
 peers. Open mode remains appropriate only for a closed lab network or behind a
 firewall, as noted below.
 
+### Bounded session state
+
+The reflector keeps a small per-client session entry (keyed by source
+`IP:port`) to hold Direct Measurement / Follow-Up Telemetry counters. Left
+unbounded, a peer spraying packets from many source ports — or spoofed source
+addresses — could grow that table until the process is OOM-killed. The table is
+therefore capped by `--max-sessions` (default `65536`): once full, new clients
+are still answered but not individually tracked, and the periodic cleanup
+reclaims idle entries. Pair this with `--max-pps` (per-source token-bucket rate
+limiting, off by default) to bound both the creation rate and the table size.
+Set `--max-sessions 0` only if you have another mechanism bounding the client
+population.
+
 ## HMAC Authentication
 
 stamp-suite supports two independent HMAC mechanisms:

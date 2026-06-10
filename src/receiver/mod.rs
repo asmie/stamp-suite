@@ -411,9 +411,17 @@ pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
         None
     };
 
+    // Bound the session table so an unauthenticated peer cannot grow it until
+    // the process is OOM-killed (0 = operator-disabled, unlimited).
+    let max_sessions = if conf.max_sessions > 0 {
+        Some(conf.max_sessions as usize)
+    } else {
+        None
+    };
+
     ReceiverSharedState {
         counters: Arc::new(ReflectorCounters::new()),
-        session_manager: Arc::new(SessionManager::new(session_timeout, None)),
+        session_manager: Arc::new(SessionManager::new(session_timeout, max_sessions)),
         start_time: Instant::now(),
         rate_limiter,
         capture_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
