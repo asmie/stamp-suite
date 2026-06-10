@@ -7,6 +7,37 @@ pub use crate::clock_format::ClockFormat;
 pub use crate::hwtstamp::HwTsMode;
 pub use crate::stats::OutputFormat;
 
+/// A secret string sourced from the CLI (`--hmac-key`) or the environment
+/// (`STAMP_HMAC_KEY`).
+///
+/// Wrapped so the plaintext key is (a) zeroized on drop — it cannot be
+/// recovered from a core dump or freed heap once the value is gone — and
+/// (b) redacted from `Debug`, so it never leaks through a `{:?}` of
+/// `Configuration`. A plain `String` would do neither.
+#[derive(Clone)]
+pub struct SecretString(zeroize::Zeroizing<String>);
+
+impl SecretString {
+    /// Borrows the secret as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for SecretString {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(zeroize::Zeroizing::new(s.to_owned())))
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretString(<redacted>)")
+    }
+}
+
 /// Diagnostic log output format. Selected via `--log-format`.
 #[derive(
     Debug,
@@ -168,8 +199,14 @@ pub struct Configuration {
     pub clock_synchronized: bool,
 
     /// HMAC key as hex string (32+ hex chars recommended).
+    ///
+    /// Note: a key passed on the command line is visible in `ps` /
+    /// `/proc/<pid>/cmdline` to other local users, and an env-var key is
+    /// visible to anyone who can read the process environment. Prefer
+    /// `--hmac-key-file` in production. The value is held zeroize-on-drop and
+    /// is redacted from debug output (see `SecretString`).
     #[clap(long, env = "STAMP_HMAC_KEY")]
-    pub hmac_key: Option<String>,
+    pub hmac_key: Option<SecretString>,
 
     /// Path to file containing HMAC key.
     #[clap(long, conflicts_with = "hmac_key")]
@@ -1292,10 +1329,33 @@ mod tests {
         let conf = Configuration::parse_from(args);
 
         assert_eq!(
-            conf.hmac_key,
-            Some("0123456789abcdef0123456789abcdef".to_string())
+            conf.hmac_key.as_ref().map(SecretString::as_str),
+            Some("0123456789abcdef0123456789abcdef")
         );
         assert!(conf.hmac_key_file.is_none());
+    }
+
+    #[test]
+    fn test_secret_string_redacts_debug_and_roundtrips() {
+        use std::str::FromStr;
+        let secret = "0123456789abcdef0123456789abcdef";
+        let s = SecretString::from_str(secret).unwrap();
+        assert_eq!(s.as_str(), secret, "as_str must roundtrip the value");
+
+        // Debug must NOT leak the secret (it is held redacted on purpose).
+        let dbg = format!("{s:?}");
+        assert!(
+            !dbg.contains(secret),
+            "Debug output must not contain the secret: {dbg}"
+        );
+        assert!(dbg.contains("redacted"));
+
+        // And through the Configuration struct's Debug as well.
+        let conf = Configuration::parse_from(vec!["test", "--hmac-key", secret]);
+        assert!(
+            !format!("{conf:?}").contains(secret),
+            "Configuration Debug must not leak the HMAC key"
+        );
     }
 
     #[test]

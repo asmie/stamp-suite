@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each multiplied by up to 100 repetitions, with every lookup rebuilding the full
   (session-table-sized) OID list — heavy CPU and lock contention. (The master
   agent is local/semi-trusted, so this is robustness hardening.)
+- **CLI/env HMAC key is now zeroized and redacted.** `--hmac-key` /
+  `STAMP_HMAC_KEY` are parsed into a new `SecretString` wrapper instead of a
+  plain `String`: the plaintext key is zeroized on drop (so it can't be
+  recovered from a core dump or freed heap) and redacted from `Debug` (so it
+  can't leak through a `{:?}` of `Configuration`). Previously the decoded
+  `HmacKey` was zeroized but the original hex string lingered in memory for the
+  whole process lifetime. (`--hmac-key-file` remains the recommended source; a
+  command-line key is still visible in `ps`/`/proc/<pid>/cmdline`.)
 
 ### Added
 
