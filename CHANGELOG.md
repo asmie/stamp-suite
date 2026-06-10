@@ -173,6 +173,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dockerfile was unbuildable and produced a non-running image.** Two
+  latent breaks: (1) the dependency-caching stub stage created only
+  `src/main.rs`, so cargo couldn't parse the manifest once the lib target
+  and the `reflector_hotpath` bench were declared — the stage now stubs
+  all three target files; (2) the `rust:*-slim` builder tag silently moved
+  to Debian trixie (glibc 2.38) while the runtime stage stayed on bookworm
+  (glibc 2.36), so the binary failed to start — both stages are now pinned
+  to the same Debian release. The image also builds with the production
+  feature set (overridable `ARG FEATURES`: ttl-nix, metrics, snmp,
+  hwtstamp, control) and documents the 9090/9091 ports. Verified
+  end-to-end: containerized reflector answered a host sender with 0% loss.
+  The nix flake's `cargoHash` was regenerated and its feature list now
+  includes `hwtstamp` and `control`; the Debian package gained `control`.
+
 - **CoS TLV (Type 4) wire format was incompatible with RFC 8972.** The
   encoder packed `DSCP1|ECN` into value byte 0 and `DSCP2|ECN2` into byte 1;
   RFC 8972 §4.4 places DSCP1 and DSCP2 adjacently (`| DSCP1 | DSCP2 |ECN|RP|`),
