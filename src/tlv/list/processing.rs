@@ -256,7 +256,17 @@ impl TlvList {
     ///
     /// # Arguments
     /// * `sender_port` - The sender's UDP port (used for alternate address replies)
-    pub fn process_return_path(&mut self, sender_port: u16) -> ReturnPathAction {
+    /// * `allow_alternate` - Whether honouring a Return Address sub-TLV (replying
+    ///   to a peer-chosen address) is permitted. When `false` (the default), a
+    ///   Return Address sub-TLV is treated as unsupported: the U-flag is set and
+    ///   the reply goes to the packet source. This prevents an open reflector
+    ///   from being used as a traffic-redirection / reflection gadget aimed at
+    ///   third parties (RFC 9503 Return Address is meant for controlled domains).
+    pub fn process_return_path(
+        &mut self,
+        sender_port: u16,
+        allow_alternate: bool,
+    ) -> ReturnPathAction {
         // Find the first Return Path TLV
         let rp_idx = self
             .tlvs
@@ -303,10 +313,18 @@ impl TlvList {
 
         // Check for Return Address sub-TLV
         if let Some(addr) = rp.get_return_address() {
-            return ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(
-                addr,
-                sender_port,
-            ));
+            if allow_alternate {
+                return ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(
+                    addr,
+                    sender_port,
+                ));
+            }
+            // Redirection not permitted (default): signal "unsupported" via the
+            // U-flag and reply normally to the packet source. Without this gate
+            // an unauthenticated peer could direct the reply (and any Type-12
+            // padding amplification) at an arbitrary victim.
+            self.set_return_path_u_flag();
+            return ReturnPathAction::Normal;
         }
 
         // SRv6 return path (RFC 9503 §5): hand the segment list to the send
@@ -940,7 +958,7 @@ mod tests {
         let mut list = TlvList::new();
         list.push(rp.to_raw()).unwrap();
 
-        let action = list.process_return_path(1234);
+        let action = list.process_return_path(1234, false);
         assert_eq!(action, ReturnPathAction::SuppressReply);
     }
 
@@ -954,7 +972,7 @@ mod tests {
         // path once the backend knows what happened.
         let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0x1).to_raw());
 
-        let action = list.process_return_path(1234);
+        let action = list.process_return_path(1234, false);
         assert_eq!(action, ReturnPathAction::Normal);
 
         let echoed = list
@@ -976,7 +994,7 @@ mod tests {
         let mut list = TlvList::new();
         list.push(rp.to_raw()).unwrap();
 
-        let action = list.process_return_path(1234);
+        let action = list.process_return_path(1234, false);
         assert_eq!(action, ReturnPathAction::SuppressReply);
     }
 
@@ -987,7 +1005,7 @@ mod tests {
         // since on single-homed paths the backend already satisfies it.
         let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0xFF).to_raw());
 
-        let action = list.process_return_path(1234);
+        let action = list.process_return_path(1234, false);
         assert_eq!(action, ReturnPathAction::Normal);
 
         let echoed = list
@@ -1005,10 +1023,35 @@ mod tests {
         let mut list = TlvList::new();
         list.push(rp.to_raw()).unwrap();
 
-        let action = list.process_return_path(862);
+        // allow_alternate = true: the operator opted in, so the reply is
+        // directed to the requested address.
+        let action = list.process_return_path(862, true);
         assert_eq!(
             action,
             ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(addr, 862))
+        );
+    }
+
+    #[test]
+    fn test_process_return_path_alternate_addr_denied_by_default() {
+        // allow_alternate = false (the default): a Return Address sub-TLV must
+        // NOT redirect the reply. The reflector echoes the TLV with the U-flag
+        // and replies normally to the packet source. This blocks open-reflector
+        // traffic-redirection / reflection aimed at arbitrary third parties.
+        let addr: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        let mut list = list_with_cleared(ReturnPathTlv::with_return_address(addr).to_raw());
+
+        let action = list.process_return_path(862, false);
+        assert_eq!(action, ReturnPathAction::Normal);
+
+        let echoed = list
+            .non_hmac_tlvs()
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ReturnPath)
+            .expect("return path TLV kept in response");
+        assert!(
+            echoed.is_unrecognized(),
+            "denied alternate address must set the U-flag on the echoed TLV"
         );
     }
 
@@ -1018,7 +1061,7 @@ mod tests {
         let mut list = TlvList::new();
         list.push(rp.to_raw()).unwrap();
 
-        let action = list.process_return_path(862);
+        let action = list.process_return_path(862, false);
         assert_eq!(action, ReturnPathAction::UnsupportedSr);
         assert!(list.non_hmac_tlvs()[0].is_unrecognized());
     }
@@ -1036,7 +1079,7 @@ mod tests {
         // before semantic TLV processing runs.
         list.clear_reflector_flags();
 
-        let action = list.process_return_path(862);
+        let action = list.process_return_path(862, false);
         assert_eq!(
             action,
             ReturnPathAction::Srv6Forward(vec![sids[0], sids[1]]),

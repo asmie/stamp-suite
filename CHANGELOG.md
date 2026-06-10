@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Reflection/amplification hardening (open mode).** The reflector no longer
+  redirects replies or amplifies reply size for unauthenticated peers by
+  default:
+  - A Return Path TLV "Return Address" sub-TLV (RFC 9503 §5) is now ignored
+    unless the operator opts in with the new `--return-path-allow-alternate`
+    flag. When off (the default) the reflector echoes the sub-TLV with the
+    U-flag and replies to the packet source, preventing an open reflector from
+    being used to aim traffic at a third party.
+  - A Reflected Test Packet Control TLV (Type 12) "length" request no longer
+    pads the single reply unless asymmetric reflection is enabled
+    (`--reflected-control-max-count > 0`, default `0`). Previously the
+    single-reply padding ran regardless of the count cap, allowing ~15×
+    amplification. The request is now refused with the C flag when disabled.
+
 ## [0.8.0] - 2026-05-18
 
 ### Added

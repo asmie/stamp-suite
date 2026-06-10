@@ -369,6 +369,17 @@ pub struct Configuration {
     #[clap(long)]
     pub srv6_return_forwarding: bool,
 
+    /// Reflector: honour a Return Path TLV "Return Address" sub-TLV (RFC 9503
+    /// §5) by sending the reply to the requested address instead of the packet
+    /// source. Disabled by default: an open reflector that honours arbitrary
+    /// return addresses can be abused as a traffic-redirection / reflection
+    /// gadget aimed at third parties. When off, a Return Address sub-TLV is
+    /// echoed with the U-flag set and the reply goes to the packet source.
+    /// Only enable inside a controlled (and preferably HMAC-authenticated)
+    /// measurement domain.
+    #[clap(long)]
+    pub return_path_allow_alternate: bool,
+
     /// Sender micro-session member link ID for LAG measurement (RFC 9534).
     /// When set, includes a Micro-session ID TLV in test packets.
     /// Accepts decimal (e.g. `255`) or `0x`-prefixed hex (e.g. `0xff`).
@@ -766,6 +777,7 @@ impl Configuration {
         merge_opt!(return_sr_mpls_labels);
         merge_opt!(return_srv6_sids);
         merge!(srv6_return_forwarding);
+        merge!(return_path_allow_alternate);
         merge_opt!(micro_session_id);
         merge_opt!(reflector_member_link_id);
         merge!(max_pps);
@@ -854,6 +866,7 @@ pub struct FileConfiguration {
     pub return_sr_mpls_labels: Option<Vec<u32>>,
     pub return_srv6_sids: Option<Vec<std::net::Ipv6Addr>>,
     pub srv6_return_forwarding: Option<bool>,
+    pub return_path_allow_alternate: Option<bool>,
     pub micro_session_id: Option<u16>,
     pub reflector_member_link_id: Option<u16>,
     pub max_pps: Option<u32>,
@@ -936,6 +949,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "return_sr_mpls_labels": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
     "return_srv6_sids": { "type": "array", "items": { "type": "string", "format": "ipv6" } },
     "srv6_return_forwarding": { "type": "boolean" },
+    "return_path_allow_alternate": { "type": "boolean" },
     "micro_session_id": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "reflector_member_link_id": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "max_pps": { "type": "integer", "minimum": 0 },
@@ -1430,6 +1444,7 @@ mod tests {
             "return_sr_mpls_labels",
             "return_srv6_sids",
             "srv6_return_forwarding",
+            "return_path_allow_alternate",
             "micro_session_id",
             "reflector_member_link_id",
             "max_pps",

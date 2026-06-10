@@ -14,6 +14,33 @@ What HMAC defends against: tampering with sequence numbers, timestamps, or TLV p
 
 If you're running stamp-suite on a host shared with untrusted users, the configuration file and HMAC key file are the assets to protect — see [Configuration File and Key-File Permissions](#configuration-file-and-key-file-permissions).
 
+### Reflection and amplification (open mode)
+
+An open-mode reflector replies to whoever sends it a STAMP packet, so — like any
+UDP responder — it can in principle be abused to bounce traffic off the reflector
+at a third party (the attacker names a victim and the reflector's reply is sourced
+from the reflector's own address). stamp-suite is hardened against the worst of
+this **by default**:
+
+- **No reply redirection by default.** A Return Path TLV "Return Address" sub-TLV
+  (RFC 9503 §5) asks the reflector to send its reply to an address *other than the
+  packet source*. That is a traffic-redirection primitive, so it is **off by
+  default**: the reflector echoes the sub-TLV with the U-flag set and replies to
+  the packet source. Enable it only inside a controlled (and preferably
+  HMAC-authenticated) measurement domain with `--return-path-allow-alternate`.
+  SRv6 return-path forwarding is similarly gated behind `--srv6-return-forwarding`.
+- **No reply-size amplification by default.** A Reflected Test Packet Control TLV
+  (Type 12) can ask the reflector to pad its reply to a larger size or emit
+  multiple copies. Both are amplification, so both are disabled unless the operator
+  opts in with `--reflected-control-max-count > 0` (default `0`). When disabled the
+  reflector refuses the request and sets the C flag; it never pads or duplicates.
+
+Because these amplifying behaviours are only honoured after a successful HMAC check
+(semantic TLV processing runs only when HMAC verification passes), running the
+reflector in **authenticated mode** removes them entirely for unauthenticated
+peers. Open mode remains appropriate only for a closed lab network or behind a
+firewall, as noted below.
+
 ## HMAC Authentication
 
 stamp-suite supports two independent HMAC mechanisms:

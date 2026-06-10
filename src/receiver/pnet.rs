@@ -81,6 +81,9 @@ struct CaptureConfig {
     local_addresses: Vec<IpAddr>,
     /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
     reflector_member_link_id: Option<u16>,
+    /// Whether to honour a Return Path "Return Address" sub-TLV (RFC 9503 §5).
+    /// Off by default to prevent third-party traffic redirection.
+    return_path_allow_alternate: bool,
     /// Per-source rate limiter.
     rate_limiter: Option<Arc<super::RateLimiter>>,
     /// Reflector caps for Reflected Test Packet Control TLV (Type 12)
@@ -278,6 +281,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         counters: Arc::clone(&counters),
         local_addresses,
         reflector_member_link_id: conf.reflector_member_link_id,
+        return_path_allow_alternate: conf.return_path_allow_alternate,
         rate_limiter: shared.rate_limiter.as_ref().map(Arc::clone),
         reflected_control_max_count: conf.reflected_control_max_count,
         reflected_control_max_size: conf.reflected_control_max_size,
@@ -686,6 +690,7 @@ fn handle_stamp_packet(
         last_reflection,
         local_addresses: &config.local_addresses,
         sender_port: pkt.src.port(),
+        return_path_allow_alternate: config.return_path_allow_alternate,
         reflector_member_link_id: config.reflector_member_link_id,
         captured_headers: Some(&pkt.captured),
         reflected_control_max_count: config.reflected_control_max_count,
