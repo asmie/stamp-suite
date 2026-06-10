@@ -136,6 +136,51 @@ async fn main() {
     if conf.is_reflector {
         let shared = receiver::create_shared_state(&conf);
 
+        // Control-plane REST API (feature "control"): fail-fast wiring like
+        // metrics — if the operator asked for it, running without it would
+        // hide an outage. Design: doc/control-plane.md.
+        #[cfg(feature = "control")]
+        let _control_server = if conf.control {
+            let token = match conf.control_token_file.as_deref() {
+                Some(path) => match std::fs::read_to_string(path) {
+                    Ok(t) => Some(t.trim().to_string()),
+                    Err(e) => {
+                        eprintln!("Failed to read --control-token-file: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            let state = stamp_suite::control::ControlState {
+                counters: std::sync::Arc::clone(&shared.counters),
+                session_manager: std::sync::Arc::clone(&shared.session_manager),
+                start_time: shared.start_time,
+                rate_limiter: std::sync::Arc::clone(&shared.rate_limiter),
+                hmac_keys: std::sync::Arc::clone(&shared.hmac_keys),
+                caps: std::sync::Arc::clone(&shared.caps),
+                shutdown_requested: std::sync::Arc::clone(&shared.shutdown_requested),
+                token,
+            };
+            match stamp_suite::control::init(conf.control_addr, state).await {
+                Ok(server) => Some(server),
+                Err(e) => {
+                    eprintln!(
+                        "Failed to start control-plane API on {}: {e}",
+                        conf.control_addr
+                    );
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
+
+        #[cfg(not(feature = "control"))]
+        if conf.control {
+            eprintln!("--control requires building with the \"control\" feature");
+            std::process::exit(1);
+        }
+
         #[cfg(all(unix, feature = "snmp"))]
         let _snmp_server = if conf.snmp {
             match stamp_suite::snmp::init(

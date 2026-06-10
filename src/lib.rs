@@ -47,6 +47,11 @@ pub mod time;
 /// TLV extension support per RFC 8972.
 pub mod tlv;
 
+/// Runtime control-plane REST API (requires "control" feature; reflector
+/// only). Design: doc/control-plane.md.
+#[cfg(feature = "control")]
+pub mod control;
+
 /// Prometheus metrics support (requires "metrics" feature).
 #[cfg(feature = "metrics")]
 pub mod metrics;

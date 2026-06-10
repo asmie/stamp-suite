@@ -60,9 +60,10 @@ struct CaptureConfig {
     use_auth: bool,
     error_estimate_wire: u16,
     hmac_key: Option<HmacKey>,
-    /// Per-SSID key set (B6). When `Some`, overrides `hmac_key` and the
+    /// Per-SSID key set (B6), shared with the control plane which may
+    /// mutate it at runtime. When populated it overrides `hmac_key` and the
     /// reflector resolves the per-packet key via the incoming SSID.
-    hmac_key_set: Option<Arc<crate::crypto::HmacKeySet>>,
+    hmac_keys: Arc<std::sync::RwLock<Option<crate::crypto::HmacKeySet>>>,
     session_manager: Arc<SessionManager>,
     /// Whether stateful per-client sequence numbering is enabled.
     stateful_reflector: bool,
@@ -84,13 +85,12 @@ struct CaptureConfig {
     /// Whether to honour a Return Path "Return Address" sub-TLV (RFC 9503 §5).
     /// Off by default to prevent third-party traffic redirection.
     return_path_allow_alternate: bool,
-    /// Per-source rate limiter.
-    rate_limiter: Option<Arc<super::RateLimiter>>,
-    /// Reflector caps for Reflected Test Packet Control TLV (Type 12)
-    /// per draft-ietf-ippm-asymmetrical-pkts §3.
-    reflected_control_max_count: u16,
-    reflected_control_max_size: u16,
-    reflected_control_min_interval_ns: u32,
+    /// Per-source rate limiter (always constructed; rate 0 = unlimited,
+    /// runtime-adjustable via the control plane).
+    rate_limiter: Arc<super::RateLimiter>,
+    /// Runtime-adjustable reflector caps (Reflected Test Packet Control
+    /// TLV limits, draft-ietf-ippm-asymmetrical-pkts-14 §3).
+    caps: Arc<super::RuntimeCaps>,
 }
 
 /// Interface properties needed for macOS special handling.
@@ -192,15 +192,19 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
 
     // Load HMAC keys (B6: prefer the multi-key set path; fall back to a
     // single legacy key if --hmac-key-dir is not set).
-    let hmac_key_set = super::load_hmac_key_set(conf);
-    let hmac_key = if hmac_key_set.is_none() {
+    let keyset_configured = shared
+        .hmac_keys
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
+    let hmac_key = if !keyset_configured {
         load_hmac_key(conf)
     } else {
         None
     };
 
     // Validate: authenticated mode requires some HMAC key (single or set).
-    if use_auth && hmac_key.is_none() && hmac_key_set.is_none() {
+    if use_auth && hmac_key.is_none() && !keyset_configured {
         log::error!(
             "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir; \
              reflector cannot start"
@@ -267,7 +271,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         use_auth,
         error_estimate_wire,
         hmac_key,
-        hmac_key_set: hmac_key_set.map(Arc::new),
+        hmac_keys: Arc::clone(&shared.hmac_keys),
         session_manager: Arc::clone(&session_manager),
         stateful_reflector: conf.stateful_reflector,
         tlv_mode: conf.tlv_mode,
@@ -282,16 +286,28 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         local_addresses,
         reflector_member_link_id: conf.reflector_member_link_id,
         return_path_allow_alternate: conf.return_path_allow_alternate,
-        rate_limiter: shared.rate_limiter.as_ref().map(Arc::clone),
-        reflected_control_max_count: conf.reflected_control_max_count,
-        reflected_control_max_size: conf.reflected_control_max_size,
-        reflected_control_min_interval_ns: conf.reflected_control_min_interval_ns,
+        rate_limiter: Arc::clone(&shared.rate_limiter),
+        caps: Arc::clone(&shared.caps),
     };
 
-    // Spawn async task to listen for Ctrl+C and set shutdown flag
+    // Spawn async task that funnels both Ctrl+C and the control plane's
+    // shutdown request (POST /v1/shutdown) into the capture loop's
+    // existing shutdown flag.
     let shutdown_flag = Arc::clone(&shutdown);
+    let control_shutdown = Arc::clone(&shared.shutdown_requested);
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => break,
+                _ = tick.tick() => {
+                    if control_shutdown.load(AtomicOrdering::Relaxed) {
+                        log::info!("shutdown requested via control plane");
+                        break;
+                    }
+                }
+            }
+        }
         shutdown_flag.store(true, AtomicOrdering::Relaxed);
     });
 
@@ -628,19 +644,17 @@ fn handle_stamp_packet(
     // Rate limit check: drop packet if source exceeds the per-client
     // token bucket. Distinct counter so operators can tell rate-limit
     // drops from parse/HMAC failures.
-    if let Some(ref limiter) = config.rate_limiter {
-        if !limiter.allow(pkt.src.ip()) {
-            log::debug!("Rate-limited packet from {}", pkt.src);
-            config
-                .counters
-                .packets_rate_limited
-                .fetch_add(1, AtomicOrdering::Relaxed);
-            config
-                .counters
-                .packets_dropped
-                .fetch_add(1, AtomicOrdering::Relaxed);
-            return;
-        }
+    if !config.rate_limiter.allow(pkt.src.ip()) {
+        log::debug!("Rate-limited packet from {}", pkt.src);
+        config
+            .counters
+            .packets_rate_limited
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        config
+            .counters
+            .packets_dropped
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        return;
     }
 
     config
@@ -666,46 +680,58 @@ fn handle_stamp_packet(
         dst_port: config.local_port,
     });
 
-    let ctx = ProcessingContext {
-        clock_source: config.clock_source,
-        error_estimate_wire: config.error_estimate_wire,
-        hmac_key: config.hmac_key.as_ref(),
-        hmac_key_set: config.hmac_key_set.as_deref(),
-        require_hmac: config.require_hmac,
-        session_manager: if config.stateful_reflector {
-            Some(&config.session_manager)
-        } else {
-            None
-        },
-        tlv_mode: config.tlv_mode,
-        verify_tlv_hmac: config.verify_tlv_hmac,
-        strict_packets: config.strict_packets,
-        #[cfg(feature = "metrics")]
-        metrics_enabled: config.metrics_enabled,
-        received_dscp: pkt.dscp,
-        received_ecn: pkt.ecn,
-        reflector_rx_count,
-        reflector_tx_count,
-        packet_addr_info,
-        last_reflection,
-        local_addresses: &config.local_addresses,
-        sender_port: pkt.src.port(),
-        return_path_allow_alternate: config.return_path_allow_alternate,
-        reflector_member_link_id: config.reflector_member_link_id,
-        captured_headers: Some(&pkt.captured),
-        reflected_control_max_count: config.reflected_control_max_count,
-        reflected_control_max_size: config.reflected_control_max_size,
-        reflected_control_min_interval_ns: config.reflected_control_min_interval_ns,
-        rx_timestamp: None,
-        rx_method: crate::tlv::TimestampMethod::SwLocal,
-        tx_method: crate::tlv::TimestampMethod::SwLocal,
-    };
-
     // Panic-isolated: a panic in processing must not unwind out of the capture
     // task and stop the reflector. On panic the packet is dropped (None).
-    if let Some(mut response) =
+    // The keyset read guard is scoped to this block (the capture loop is
+    // synchronous, but tight scoping keeps writer latency low).
+    let response_opt = {
+        let keys_guard = config.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
+        let ctx = ProcessingContext {
+            clock_source: config.clock_source,
+            error_estimate_wire: config.error_estimate_wire,
+            hmac_key: config.hmac_key.as_ref(),
+            hmac_key_set: keys_guard.as_ref(),
+            require_hmac: config.require_hmac,
+            session_manager: if config.stateful_reflector {
+                Some(&config.session_manager)
+            } else {
+                None
+            },
+            tlv_mode: config.tlv_mode,
+            verify_tlv_hmac: config.verify_tlv_hmac,
+            strict_packets: config.strict_packets,
+            #[cfg(feature = "metrics")]
+            metrics_enabled: config.metrics_enabled,
+            received_dscp: pkt.dscp,
+            received_ecn: pkt.ecn,
+            reflector_rx_count,
+            reflector_tx_count,
+            packet_addr_info,
+            last_reflection,
+            local_addresses: &config.local_addresses,
+            sender_port: pkt.src.port(),
+            return_path_allow_alternate: config.return_path_allow_alternate,
+            reflector_member_link_id: config.reflector_member_link_id,
+            captured_headers: Some(&pkt.captured),
+            reflected_control_max_count: config
+                .caps
+                .reflected_control_max_count
+                .load(AtomicOrdering::Relaxed),
+            reflected_control_max_size: config
+                .caps
+                .reflected_control_max_size
+                .load(AtomicOrdering::Relaxed),
+            reflected_control_min_interval_ns: config
+                .caps
+                .reflected_control_min_interval_ns
+                .load(AtomicOrdering::Relaxed),
+            rx_timestamp: None,
+            rx_method: crate::tlv::TimestampMethod::SwLocal,
+            tx_method: crate::tlv::TimestampMethod::SwLocal,
+        };
         process_stamp_packet_isolated(data, pkt.src, pkt.ttl, config.use_auth, &ctx)
-    {
+    };
+    if let Some(mut response) = response_opt {
         // Handle Return Path action (RFC 9503 §5)
         let send_target = match &response.return_path_action {
             ReturnPathAction::SuppressReply => {
@@ -875,18 +901,16 @@ fn handle_stamp_packet(
                         // bucket exhaustion breaks the loop early so a
                         // sender's asymmetric burst cannot exceed its
                         // per-client budget.
-                        if let Some(ref limiter) = config.rate_limiter {
-                            if !limiter.allow(pkt.src.ip()) {
-                                config
-                                    .counters
-                                    .packets_rate_limited
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                                config
-                                    .counters
-                                    .packets_dropped
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                                break;
-                            }
+                        if !config.rate_limiter.allow(pkt.src.ip()) {
+                            config
+                                .counters
+                                .packets_rate_limited
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                            config
+                                .counters
+                                .packets_dropped
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                            break;
                         }
                         match try_send(&response.data, send_target) {
                             Ok(_) => {

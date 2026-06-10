@@ -159,10 +159,37 @@ Max RTT: 1.203 ms
 Avg RTT: 0.521 ms
 ```
 
+### Runtime control plane
+
+Build with `--features control` and start the reflector with `--control`
+to get a localhost REST API (default `127.0.0.1:9091`) for runtime
+management — no restarts needed:
+
+```bash
+curl -s 127.0.0.1:9091/v1/status                       # uptime, counters, drain state
+curl -s 127.0.0.1:9091/v1/sessions                     # live session table
+curl -s -X PUT 127.0.0.1:9091/v1/keys/42 \
+     -H 'content-type: application/json' \
+     -d '{"key_hex":"<64 hex chars>"}'                 # add a per-SSID HMAC key
+curl -s -X PATCH 127.0.0.1:9091/v1/caps \
+     -H 'content-type: application/json' \
+     -d '{"max_pps":500}'                              # tune rate limits live
+curl -s -X POST 127.0.0.1:9091/v1/drain \
+     -H 'content-type: application/json' \
+     -d '{"draining":true}'                            # stop accepting new sessions
+curl -s -X POST 127.0.0.1:9091/v1/shutdown             # graceful shutdown
+```
+
+Key material is write-only (never returned or logged). Set
+`--control-token-file` to require a bearer token; keep the bind on
+loopback unless network-level access control is in place. Full API
+contract and security model: [doc/control-plane.md](doc/control-plane.md).
+
 ## Documentation
 
 - **[doc/usage.md](doc/usage.md)** — configuration file format, supported TOML keys, validation messages, full CLI flag reference.
 - **[doc/architecture.md](doc/architecture.md)** — module layout, receiver backends, packet processing pipeline, full TLV reference, Prometheus and SNMP subsystems.
+- **[doc/control-plane.md](doc/control-plane.md)** — runtime control-plane REST API: endpoints, concurrency model, security model.
 - **[doc/security.md](doc/security.md)** — threat model, HMAC and TLV integrity, key sourcing, file permissions, the `stamp` system user, systemd hardening, capability model, vulnerability reporting.
 
 ## Status

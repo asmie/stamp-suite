@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Arc, RwLock,
     },
     time::{Duration, Instant},
@@ -125,8 +125,13 @@ pub struct SessionManager {
     next_session_id: AtomicU32,
     /// Optional timeout after which inactive sessions may be cleaned up.
     session_timeout: Option<Duration>,
-    /// Optional maximum number of sessions to prevent unbounded growth.
-    max_sessions: Option<usize>,
+    /// Maximum number of sessions to prevent unbounded growth; 0 means
+    /// unlimited. Runtime-adjustable via the control plane.
+    max_sessions: AtomicUsize,
+    /// When true, unknown clients receive transient (unstored) sessions —
+    /// replies keep flowing but no new state accretes. Set by the control
+    /// plane's drain endpoint.
+    draining: AtomicBool,
     /// True while the table is at its cap. Used to log the "cap reached"
     /// warning exactly once per saturation episode instead of once per
     /// rejected client — otherwise a flood would turn the log into its own
@@ -146,9 +151,50 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             next_session_id: AtomicU32::new(0),
             session_timeout,
-            max_sessions,
+            max_sessions: AtomicUsize::new(max_sessions.unwrap_or(0)),
+            draining: AtomicBool::new(false),
             saturated: AtomicBool::new(false),
         }
+    }
+
+    /// Returns true when a new entry must not be stored: the table is at
+    /// its cap (logs the one-shot saturation warning) or the reflector is
+    /// draining.
+    fn reject_new_entry(&self, current_len: usize, client: SocketAddr) -> bool {
+        let cap = self.max_sessions.load(Ordering::Relaxed);
+        if cap != 0 && current_len >= cap {
+            self.note_saturated(cap, client);
+            return true;
+        }
+        self.draining.load(Ordering::Relaxed)
+    }
+
+    /// Removes the session for `client`. Returns true if it existed.
+    pub fn expire_session(&self, client: SocketAddr) -> bool {
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        sessions.remove(&client).is_some()
+    }
+
+    /// Enables or disables drain mode (see `draining`).
+    pub fn set_draining(&self, draining: bool) {
+        self.draining.store(draining, Ordering::Relaxed);
+    }
+
+    /// True while drain mode is active.
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Relaxed)
+    }
+
+    /// Sets the session-table cap; 0 means unlimited.
+    pub fn set_max_sessions(&self, cap: usize) {
+        self.max_sessions.store(cap, Ordering::Relaxed);
+    }
+
+    /// Current session-table cap; 0 means unlimited.
+    #[must_use]
+    pub fn max_sessions(&self) -> usize {
+        self.max_sessions.load(Ordering::Relaxed)
     }
 
     /// Logs the "session table at cap" warning at most once per saturation
@@ -185,12 +231,9 @@ impl SessionManager {
             entry.last_active = Instant::now();
             Arc::clone(&entry.session)
         } else {
-            if let Some(max) = self.max_sessions {
-                if sessions.len() >= max {
-                    self.note_saturated(max, client);
-                    // Return a temporary session that won't be stored
-                    return Arc::new(Session::new(u32::MAX));
-                }
+            if self.reject_new_entry(sessions.len(), client) {
+                // Return a temporary session that won't be stored
+                return Arc::new(Session::new(u32::MAX));
             }
             let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
             let session = Arc::new(Session::new(session_id));
@@ -236,13 +279,10 @@ impl SessionManager {
             entry.last_active = Instant::now();
             Arc::clone(&entry.session)
         } else {
-            if let Some(max) = self.max_sessions {
-                if sessions.len() >= max {
-                    self.note_saturated(max, client);
-                    // Return a temporary session that won't be stored
-                    let session = Arc::new(Session::new(u32::MAX));
-                    return (0, session);
-                }
+            if self.reject_new_entry(sessions.len(), client) {
+                // Return a temporary session that won't be stored
+                let session = Arc::new(Session::new(u32::MAX));
+                return (0, session);
             }
             // Create new session
             let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
@@ -305,10 +345,9 @@ impl SessionManager {
 
         // Re-arm the one-shot "cap reached" warning once we drop back below the
         // cap, so a later saturation episode is reported again.
-        if let Some(max) = self.max_sessions {
-            if sessions.len() < max {
-                self.saturated.store(false, Ordering::Relaxed);
-            }
+        let cap = self.max_sessions.load(Ordering::Relaxed);
+        if cap != 0 && sessions.len() < cap {
+            self.saturated.store(false, Ordering::Relaxed);
         }
         removed
     }
@@ -378,6 +417,48 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn test_expire_session() {
+        let mgr = SessionManager::new(None, None);
+        let addr: SocketAddr = "10.0.0.1:5000".parse().unwrap();
+        mgr.get_or_create_session(addr);
+        assert_eq!(mgr.session_count(), 1);
+        assert!(mgr.expire_session(addr));
+        assert_eq!(mgr.session_count(), 0);
+        assert!(!mgr.expire_session(addr), "second expire returns false");
+    }
+
+    #[test]
+    fn test_draining_blocks_new_sessions_only() {
+        let mgr = SessionManager::new(None, None);
+        let known: SocketAddr = "10.0.0.1:5000".parse().unwrap();
+        let new_client: SocketAddr = "10.0.0.2:5000".parse().unwrap();
+        mgr.get_or_create_session(known);
+
+        mgr.set_draining(true);
+        assert!(mgr.is_draining());
+        mgr.get_or_create_session(new_client);
+        assert_eq!(mgr.session_count(), 1, "draining: new clients not stored");
+        // Existing client still tracked.
+        mgr.get_or_create_session(known);
+        assert_eq!(mgr.session_count(), 1);
+
+        mgr.set_draining(false);
+        mgr.get_or_create_session(new_client);
+        assert_eq!(mgr.session_count(), 2);
+    }
+
+    #[test]
+    fn test_set_max_sessions_at_runtime() {
+        let mgr = SessionManager::new(None, Some(2));
+        assert_eq!(mgr.max_sessions(), 2);
+        mgr.set_max_sessions(1);
+        assert_eq!(mgr.max_sessions(), 1);
+        mgr.get_or_create_session("10.0.0.1:1".parse().unwrap());
+        mgr.get_or_create_session("10.0.0.2:2".parse().unwrap());
+        assert_eq!(mgr.session_count(), 1, "cap applies to new creations");
+    }
 
     #[test]
     fn test_correct_reflection_timestamp_only_for_matching_seq() {

@@ -338,6 +338,21 @@ pub struct Configuration {
     #[clap(long, default_value = "/var/agentx/master")]
     pub snmp_socket: String,
 
+    /// Enable the runtime control-plane REST API (reflector only;
+    /// requires the "control" build feature). Design: doc/control-plane.md.
+    #[clap(long)]
+    pub control: bool,
+
+    /// Address to bind the control-plane HTTP server. Keep this on
+    /// loopback unless network-level access control is in place.
+    #[clap(long, default_value = "127.0.0.1:9091", value_name = "ADDR")]
+    pub control_addr: SocketAddr,
+
+    /// Path to a file containing a static bearer token. When set, every
+    /// control-plane request must carry "Authorization: Bearer <token>".
+    #[clap(long, value_name = "PATH")]
+    pub control_token_file: Option<PathBuf>,
+
     /// Output format for statistics (text, json, csv).
     #[clap(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
@@ -700,6 +715,12 @@ impl Configuration {
                 ));
             }
         }
+        // The control plane manages reflector state; sender mode has none.
+        if self.control && !self.is_reflector {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "--control is only available in reflector mode".to_string(),
+            ));
+        }
         // draft-ietf-ippm-asymmetrical-pkts-14 §4.3: a Session-Sender MUST NOT
         // combine a "no reply requested" Return Path control code with a
         // non-zero Reflected Test Packet Control TLV. The TLV is emitted when
@@ -846,6 +867,9 @@ impl Configuration {
         merge!(follow_up_telemetry);
         merge!(snmp);
         merge!(snmp_socket);
+        merge!(control);
+        merge!(control_addr);
+        merge_opt!(control_token_file);
         merge!(output_format);
         merge!(log_format);
         merge!(hwtstamp);
@@ -937,6 +961,9 @@ pub struct FileConfiguration {
     pub follow_up_telemetry: Option<bool>,
     pub snmp: Option<bool>,
     pub snmp_socket: Option<String>,
+    pub control: Option<bool>,
+    pub control_addr: Option<SocketAddr>,
+    pub control_token_file: Option<PathBuf>,
     pub output_format: Option<OutputFormat>,
     pub log_format: Option<LogFormat>,
     pub hwtstamp: Option<HwTsMode>,
@@ -1022,6 +1049,9 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "follow_up_telemetry": { "type": "boolean" },
     "snmp": { "type": "boolean" },
     "snmp_socket": { "type": "string" },
+    "control": { "type": "boolean" },
+    "control_addr": { "type": "string" },
+    "control_token_file": { "type": "string" },
     "output_format": { "enum": ["text", "json", "csv"] },
     "log_format": { "enum": ["text", "json"] },
     "hwtstamp":   { "enum": ["auto", "on", "off"] },
@@ -1135,6 +1165,32 @@ mod tests {
         let args = vec!["test", "--remote-addr", "invalid_addr"];
         let conf = Configuration::try_parse_from(args);
         assert!(conf.is_err());
+    }
+
+    #[test]
+    fn test_control_plane_flags() {
+        let args = vec![
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--is-reflector",
+            "--control",
+            "--control-addr",
+            "127.0.0.1:9999",
+        ];
+        let conf = Configuration::parse_from(args);
+        assert!(conf.control);
+        assert_eq!(conf.control_addr, "127.0.0.1:9999".parse().unwrap());
+        assert!(conf.control_token_file.is_none());
+        assert!(conf.validate().is_ok());
+
+        // --control is reflector-only.
+        let args = vec!["test", "--remote-addr", "127.0.0.1", "--control"];
+        let conf = Configuration::parse_from(args);
+        assert!(
+            conf.validate().is_err(),
+            "--control without --is-reflector must be rejected"
+        );
     }
 
     #[test]
@@ -1592,6 +1648,9 @@ mod tests {
             "follow_up_telemetry",
             "snmp",
             "snmp_socket",
+            "control",
+            "control_addr",
+            "control_token_file",
             "output_format",
             "log_format",
             "hwtstamp",

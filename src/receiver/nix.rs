@@ -205,20 +205,23 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     // Check if authenticated mode is used
     let use_auth = is_auth(conf.auth_mode);
 
-    // Load HMAC key if configured
-    // B6: prefer the key *set* path (which transparently handles both
-    // single-key configs and `--hmac-key-dir`); keep `hmac_key` as a
-    // legacy fallback in case `load_hmac_key_set` produced None.
-    let hmac_key_set = super::load_hmac_key_set(conf);
-    let hmac_key = if hmac_key_set.is_none() {
-        load_hmac_key(conf)
-    } else {
+    // B6: the per-SSID keyset lives in shared state (runtime-mutable via
+    // the control plane); keep `hmac_key` as a legacy fallback when no
+    // keyset was configured at startup.
+    let keyset_configured = shared
+        .hmac_keys
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
+    let hmac_key = if keyset_configured {
         None
+    } else {
+        load_hmac_key(conf)
     };
 
     // Validate: authenticated mode requires HMAC key (either single-key
     // legacy path or B6 per-SSID key set).
-    if use_auth && hmac_key.is_none() && hmac_key_set.is_none() {
+    if use_auth && hmac_key.is_none() && !keyset_configured {
         log::error!(
             "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir"
         );
@@ -294,6 +297,10 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     // Sockets default to TOS=0, so we start with that assumption.
     let mut last_tos: u8 = 0;
 
+    // Poll for control-plane shutdown requests (cheap 250 ms tick; the
+    // first immediate tick is harmless — the flag starts false).
+    let mut shutdown_tick = interval(Duration::from_millis(250));
+
     loop {
         // Apply kernel TX timestamps that arrived on the error queue since
         // the last iteration: correct the Follow-Up Telemetry record of the
@@ -347,6 +354,19 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
             _ = tokio::signal::ctrl_c() => {
                 print_reflector_stats(&counters, &session_manager, start_time, output_format);
                 return;
+            }
+
+            _ = shutdown_tick.tick() => {
+                // Control-plane shutdown (POST /v1/shutdown) — graceful exit
+                // with the same stats dump as Ctrl-C.
+                if shared
+                    .shutdown_requested
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    log::info!("shutdown requested via control plane");
+                    print_reflector_stats(&counters, &session_manager, start_time, output_format);
+                    return;
+                }
             }
         }
 
@@ -429,20 +449,19 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                 // Rate limit check: drop packet if source exceeds the
                 // per-client token bucket. Distinct from the generic
                 // packets_dropped counter so operators can tell rate-limit
-                // pressure from parse/HMAC failures.
-                if let Some(ref limiter) = shared.rate_limiter {
-                    if !limiter.allow(src_addr.ip()) {
-                        log::debug!("Rate-limited packet from {}", src_addr);
-                        shared
-                            .counters
-                            .packets_rate_limited
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        shared
-                            .counters
-                            .packets_dropped
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        continue;
-                    }
+                // pressure from parse/HMAC failures. The limiter is always
+                // constructed; rate 0 short-circuits to "allow".
+                if !shared.rate_limiter.allow(src_addr.ip()) {
+                    log::debug!("Rate-limited packet from {}", src_addr);
+                    shared
+                        .counters
+                        .packets_rate_limited
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    shared
+                        .counters
+                        .packets_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
                 }
 
                 let data = &buf[..len];
@@ -466,59 +485,73 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     dst_port: conf.local_port,
                 });
 
-                let ctx = ProcessingContext {
-                    clock_source: conf.clock_source,
-                    error_estimate_wire,
-                    hmac_key: hmac_key.as_ref(),
-                    hmac_key_set: hmac_key_set.as_ref(),
-                    require_hmac: conf.require_hmac,
-                    session_manager: if conf.stateful_reflector {
-                        Some(&session_manager)
-                    } else {
-                        None
-                    },
-                    tlv_mode: conf.tlv_mode,
-                    verify_tlv_hmac: conf.verify_tlv_hmac,
-                    strict_packets: conf.strict_packets,
-                    #[cfg(feature = "metrics")]
-                    metrics_enabled: conf.metrics,
-                    received_dscp,
-                    received_ecn,
-                    reflector_rx_count,
-                    reflector_tx_count,
-                    packet_addr_info,
-                    last_reflection,
-                    local_addresses: &local_addresses,
-                    sender_port: src_addr.port(),
-                    return_path_allow_alternate: conf.return_path_allow_alternate,
-                    reflector_member_link_id: conf.reflector_member_link_id,
-                    // nix UDP-socket backend cannot observe raw IP headers.
-                    // draft-ietf-ippm-stamp-ext-hdr TLV 246/247 requests are
-                    // echoed with U-flag set (done in apply_semantic_tlv_processing).
-                    captured_headers: None,
-                    reflected_control_max_count: conf.reflected_control_max_count,
-                    reflected_control_max_size: conf.reflected_control_max_size,
-                    reflected_control_min_interval_ns: conf.reflected_control_min_interval_ns,
-                    #[cfg(feature = "hwtstamp")]
-                    rx_timestamp,
-                    #[cfg(not(feature = "hwtstamp"))]
-                    rx_timestamp: None,
-                    #[cfg(feature = "hwtstamp")]
-                    rx_method,
-                    #[cfg(not(feature = "hwtstamp"))]
-                    rx_method: crate::tlv::TimestampMethod::SwLocal,
-                    #[cfg(feature = "hwtstamp")]
-                    tx_method: tx_method_cfg,
-                    #[cfg(not(feature = "hwtstamp"))]
-                    tx_method: crate::tlv::TimestampMethod::SwLocal,
-                };
-
                 // Panic-isolated: a panic in processing must not unwind out of
                 // the receive loop and kill the process (remote DoS). On panic
                 // the packet is dropped (None) and the loop continues.
-                if let Some(mut response) =
+                //
+                // The keyset read guard is scoped to this block — it must
+                // never be held across an `.await` (std guard is not Send);
+                // the async sends below happen after it drops.
+                let response_opt = {
+                    let keys_guard = shared.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
+                    let ctx = ProcessingContext {
+                        clock_source: conf.clock_source,
+                        error_estimate_wire,
+                        hmac_key: hmac_key.as_ref(),
+                        hmac_key_set: keys_guard.as_ref(),
+                        require_hmac: conf.require_hmac,
+                        session_manager: if conf.stateful_reflector {
+                            Some(&session_manager)
+                        } else {
+                            None
+                        },
+                        tlv_mode: conf.tlv_mode,
+                        verify_tlv_hmac: conf.verify_tlv_hmac,
+                        strict_packets: conf.strict_packets,
+                        #[cfg(feature = "metrics")]
+                        metrics_enabled: conf.metrics,
+                        received_dscp,
+                        received_ecn,
+                        reflector_rx_count,
+                        reflector_tx_count,
+                        packet_addr_info,
+                        last_reflection,
+                        local_addresses: &local_addresses,
+                        sender_port: src_addr.port(),
+                        return_path_allow_alternate: conf.return_path_allow_alternate,
+                        reflector_member_link_id: conf.reflector_member_link_id,
+                        // nix UDP-socket backend cannot observe raw IP headers.
+                        // draft-ietf-ippm-stamp-ext-hdr TLV 246/247 requests are
+                        // echoed with U-flag set (done in apply_semantic_tlv_processing).
+                        captured_headers: None,
+                        reflected_control_max_count: shared
+                            .caps
+                            .reflected_control_max_count
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        reflected_control_max_size: shared
+                            .caps
+                            .reflected_control_max_size
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        reflected_control_min_interval_ns: shared
+                            .caps
+                            .reflected_control_min_interval_ns
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        #[cfg(feature = "hwtstamp")]
+                        rx_timestamp,
+                        #[cfg(not(feature = "hwtstamp"))]
+                        rx_timestamp: None,
+                        #[cfg(feature = "hwtstamp")]
+                        rx_method,
+                        #[cfg(not(feature = "hwtstamp"))]
+                        rx_method: crate::tlv::TimestampMethod::SwLocal,
+                        #[cfg(feature = "hwtstamp")]
+                        tx_method: tx_method_cfg,
+                        #[cfg(not(feature = "hwtstamp"))]
+                        tx_method: crate::tlv::TimestampMethod::SwLocal,
+                    };
                     process_stamp_packet_isolated(data, src_addr, ttl, use_auth, &ctx)
-                {
+                };
+                if let Some(mut response) = response_opt {
                     // Handle Return Path action (RFC 9503 §5)
                     let send_target = match &response.return_path_action {
                         ReturnPathAction::SuppressReply => {
@@ -761,25 +794,21 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                                 #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
                                 let tx_counter_task =
                                     kernel_ts.tx_kernel.then(|| Arc::clone(&tx_counter));
-                                let limiter_for_task = shared.rate_limiter.as_ref().map(Arc::clone);
+                                let limiter_for_task = Arc::clone(&shared.rate_limiter);
                                 let limiter_key = src_addr.ip();
                                 tokio::spawn(async move {
                                     let interval =
                                         Duration::from_nanos(behavior.interval_ns as u64);
                                     for _ in 0..behavior.extra_copies {
                                         tokio::time::sleep(interval).await;
-                                        if let Some(ref limiter) = limiter_for_task {
-                                            if !limiter.allow(limiter_key) {
-                                                counters_for_task.packets_rate_limited.fetch_add(
-                                                    1,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                                counters_for_task.packets_dropped.fetch_add(
-                                                    1,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                                break;
-                                            }
+                                        if !limiter_for_task.allow(limiter_key) {
+                                            counters_for_task
+                                                .packets_rate_limited
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            counters_for_task
+                                                .packets_dropped
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            break;
                                         }
                                         match sock.send_to(&data, target).await {
                                             Ok(_) => {
