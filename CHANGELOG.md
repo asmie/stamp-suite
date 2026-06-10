@@ -30,6 +30,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracked, and stale entries are reclaimed by the periodic cleanup. The
   "cap reached" warning is now logged once per saturation episode instead of
   once per rejected client, closing a log-amplification side channel.
+- **Per-packet panic isolation.** Both receive backends now run
+  `process_stamp_packet` through `process_stamp_packet_isolated`, which catches
+  any panic, drops the offending packet, and continues. Previously a panic in
+  the processing path would unwind out of the `nix` receive loop and terminate
+  the process (a remote, single-packet DoS) or permanently stop the `pnet`
+  capture task. No reachable panic is known; this is defence-in-depth. The
+  caught-panic message is logged once at `error`, then at `debug`, to avoid a
+  log-amplification side channel.
+
+### Added
+
+- **`process_stamp_packet` fuzz target.** New `fuzz/fuzz_targets/process_stamp_packet.rs`
+  drives the full reflector pipeline (parse → flag re-derive/HMAC → semantic TLV
+  processing → response assembly) for both authenticated and unauthenticated
+  packets. The previous fuzz targets covered only the low-level parsers in
+  isolation, not the in-place TLV mutators and length arithmetic.
 
 ## [0.8.0] - 2026-05-18
 

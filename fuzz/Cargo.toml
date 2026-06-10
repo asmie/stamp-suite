@@ -68,3 +68,10 @@ path = "fuzz_targets/agentx_decode_oid.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "process_stamp_packet"
+path = "fuzz_targets/process_stamp_packet.rs"
+test = false
+doc = false
+bench = false

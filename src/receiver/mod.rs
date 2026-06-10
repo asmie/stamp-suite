@@ -875,6 +875,56 @@ pub struct CapturedHeaders {
     pub ipv6_ext_headers: Vec<u8>,
 }
 
+/// Runs [`process_stamp_packet`] with panic isolation.
+///
+/// A panic while parsing/processing a single attacker-controlled packet must
+/// never unwind out of the receive loop — on the `nix` backend that would
+/// terminate the whole process (a remote, single-packet DoS), and on the
+/// `pnet` backend it would stop the capture task permanently. We have not found
+/// any reachable panic in the processing path, but this is defence-in-depth: if
+/// a future regression introduces one, the packet is dropped and the reflector
+/// keeps serving.
+///
+/// On panic the packet is dropped (returns `None`); the caller is responsible
+/// for bumping its drop counter. Shared mutable state behind the borrows in
+/// `ctx` (the session manager's `RwLock`) already tolerates poisoning via
+/// `unwrap_or_else(|e| e.into_inner())`, so continuing after a caught unwind is
+/// safe, which is why [`std::panic::AssertUnwindSafe`] is justified here.
+pub fn process_stamp_packet_isolated(
+    data: &[u8],
+    src: SocketAddr,
+    ttl: u8,
+    use_auth: bool,
+    ctx: &ProcessingContext,
+) -> Option<StampResponse> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        process_stamp_packet(data, src, ttl, use_auth, ctx)
+    }));
+    match result {
+        Ok(response) => response,
+        Err(_) => {
+            note_processing_panic(src);
+            None
+        }
+    }
+}
+
+/// Logs a caught packet-processing panic at most once at `error` level, then at
+/// `debug` for subsequent occurrences. A reachable panic under a flood would
+/// otherwise become its own log-amplification DoS.
+fn note_processing_panic(src: SocketAddr) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log::error!(
+            "panic while processing a packet from {src}; packet dropped. This is \
+             a bug — please report it. Further occurrences are logged at debug."
+        );
+    } else {
+        log::debug!("panic while processing packet from {src} (dropped)");
+    }
+}
+
 /// Processes a STAMP packet and returns the response.
 ///
 /// This is the shared packet processing logic used by both nix and pnet backends.
@@ -3885,6 +3935,32 @@ mod tests {
             let r = process_stamp_packet(&data, loopback_src(), 64, false, &ctx);
             assert!(r.is_some(), "strict={strict} must accept full-size packet");
         }
+    }
+
+    /// The panic-isolating wrapper must be transparent on the happy path: a
+    /// valid packet yields the same reply bytes as the raw entry point.
+    #[test]
+    fn process_stamp_packet_isolated_matches_raw_on_valid_packet() {
+        let packet = PacketUnauthenticated {
+            sequence_number: 7,
+            timestamp: 100,
+            error_estimate: 10,
+            ssid: 0,
+            mbz: [0; 28],
+        };
+        let data = packet.to_bytes();
+        let ctx = test_ctx(0, 0);
+
+        let raw = process_stamp_packet(&data, loopback_src(), 64, false, &ctx);
+        let isolated = process_stamp_packet_isolated(&data, loopback_src(), 64, false, &ctx);
+        assert!(raw.is_some() && isolated.is_some());
+        // The reply embeds a fresh receive timestamp, so the bytes differ
+        // between two calls; the structure (and hence the length) must not.
+        assert_eq!(
+            raw.map(|r| r.data.len()),
+            isolated.map(|r| r.data.len()),
+            "isolation wrapper must not alter the happy-path response shape"
+        );
     }
 
     /// Short unauthenticated packet (40 bytes < 44). Lenient zero-fills and

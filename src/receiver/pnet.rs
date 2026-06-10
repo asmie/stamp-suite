@@ -37,9 +37,9 @@ use crate::{
 use crate::tlv::ReturnPathAction;
 
 use super::{
-    load_hmac_key, print_reflector_stats, process_stamp_packet, recompute_response_tlv_hmac,
-    set_cos_policy_rejected, set_return_path_u_flag_in_response, ProcessingContext,
-    ReceiverSharedState, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
+    recompute_response_tlv_hmac, set_cos_policy_rejected, set_return_path_u_flag_in_response,
+    ProcessingContext, ReceiverSharedState, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Context for sending STAMP responses in pnet mode.
@@ -698,7 +698,10 @@ fn handle_stamp_packet(
         reflected_control_min_interval_ns: config.reflected_control_min_interval_ns,
     };
 
-    if let Some(mut response) = process_stamp_packet(data, pkt.src, pkt.ttl, config.use_auth, &ctx)
+    // Panic-isolated: a panic in processing must not unwind out of the capture
+    // task and stop the reflector. On panic the packet is dropped (None).
+    if let Some(mut response) =
+        process_stamp_packet_isolated(data, pkt.src, pkt.ttl, config.use_auth, &ctx)
     {
         // Handle Return Path action (RFC 9503 §5)
         let send_target = match &response.return_path_action {
