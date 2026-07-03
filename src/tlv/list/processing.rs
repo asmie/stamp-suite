@@ -633,6 +633,16 @@ impl TlvList {
                             tlv.value.fill(0);
                             tlv.set_unrecognized();
                             log_reflected_hdr_length_mismatch_once();
+                        } else if Self::reflected_hdr_selector(&tlv.value)
+                            .is_some_and(|sel| bytes.get(..4) != Some(&sel[..]))
+                        {
+                            // draft-ietf-ippm-stamp-ext-hdr §3.2: a non-zero
+                            // first-4-byte selector must match the received IP
+                            // header before copying; otherwise the reflector
+                            // does not use the TLV → U-flag.
+                            tlv.value.fill(0);
+                            tlv.set_unrecognized();
+                            log_reflected_hdr_selector_no_match_once();
                         } else {
                             Self::fill_within_capacity(&mut tlv.value, bytes);
                         }
@@ -652,7 +662,24 @@ impl TlvList {
                     // IPv6 packet without Hop-by-Hop/Destination options. Only
                     // raise U-flag when the backend cannot observe the IP layer
                     // at all (captured_ext_headers is None).
-                    Some(bytes) => Self::fill_within_capacity(&mut tlv.value, bytes),
+                    Some(bytes) => match Self::reflected_hdr_selector(&tlv.value) {
+                        // draft-ietf-ippm-stamp-ext-hdr §3.1: a non-zero
+                        // first-4-byte pattern disambiguates between multiple
+                        // extension headers of the same length. Match it (in the
+                        // reflected [type][HdrExtLen][body] representation) and
+                        // copy only the matching header; if none matches, the
+                        // reflector "does not use the TLV" → U-flag.
+                        Some(selector) => match Self::match_ext_header(bytes, selector) {
+                            Some(matched) => Self::fill_within_capacity(&mut tlv.value, matched),
+                            None => {
+                                tlv.value.fill(0);
+                                tlv.set_unrecognized();
+                                log_reflected_hdr_selector_no_match_once();
+                            }
+                        },
+                        // Zero selector: concatenate every captured header.
+                        None => Self::fill_within_capacity(&mut tlv.value, bytes),
+                    },
                     None => {
                         tlv.value.fill(0);
                         tlv.set_unrecognized();
@@ -671,6 +698,37 @@ impl TlvList {
         let copy_len = src.len().min(dst.len());
         dst[..copy_len].copy_from_slice(&src[..copy_len]);
         dst[copy_len..].fill(0);
+    }
+
+    /// Extracts the draft-ietf-ippm-stamp-ext-hdr §3.1/§3.2 match *selector*
+    /// from a request TLV value: the first 4 bytes, but only when they are
+    /// present and at least one is non-zero. `None` means "no selector", i.e.
+    /// the legacy copy-everything behavior.
+    fn reflected_hdr_selector(value: &[u8]) -> Option<[u8; 4]> {
+        let sel: [u8; 4] = value.get(..4)?.try_into().ok()?;
+        sel.iter().any(|&b| b != 0).then_some(sel)
+    }
+
+    /// Finds the captured IPv6 extension-header record whose first 4 bytes
+    /// match `selector` (draft §3.1). Records are `[type][HdrExtLen][body]`,
+    /// each `(HdrExtLen + 1) * 8` bytes, mirroring the layout produced by the
+    /// pnet backend's `extract_ipv6_ext_headers`. Defensive: stops without
+    /// panicking on any short or inconsistent trailing bytes.
+    fn match_ext_header(blob: &[u8], selector: [u8; 4]) -> Option<&[u8]> {
+        let mut offset = 0usize;
+        while offset + 2 <= blob.len() {
+            let rec_len = (blob[offset + 1] as usize + 1) * 8;
+            let end = offset.checked_add(rec_len)?;
+            if end > blob.len() {
+                break;
+            }
+            let record = &blob[offset..end];
+            if record[..4] == selector {
+                return Some(record);
+            }
+            offset = end;
+        }
+        None
     }
 
     fn mark_ber_tlvs_unrecognized(tlvs: &mut [RawTlv]) {
@@ -748,6 +806,21 @@ fn log_reflected_hdr_length_mismatch_once() {
             "Reflected Fixed Header Data TLV (Type 247) length does not match the \
              captured IP header (sender requested wrong address family?); echoing \
              with U-flag per draft-ietf-ippm-stamp-ext-hdr §5.2."
+        );
+    }
+}
+
+/// Emits a one-time warning when a Reflected Fixed/IPv6 Ext Header Data TLV
+/// (Type 246/247) carries a non-zero first-4-byte selector that matches none
+/// of the captured header(s). Per draft-ietf-ippm-stamp-ext-hdr §3.1/§3.2 the
+/// reflector then returns the TLV unrecognized (U-flag).
+fn log_reflected_hdr_selector_no_match_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "Reflected Fixed/IPv6 Ext Header TLV (Type 246/247) selector matched no \
+             captured header — echoing with U-flag per draft-ietf-ippm-stamp-ext-hdr §3.1/§3.2."
         );
     }
 }
@@ -1469,6 +1542,43 @@ mod tests {
     }
 
     #[test]
+    fn test_reflected_fixed_hdr_selector_match_populates() {
+        // draft §3.2: a non-zero selector that matches the captured IP header's
+        // first 4 bytes → normal copy, no U-flag.
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut captured = vec![0u8; 40];
+        captured[..4].copy_from_slice(&[0x60, 0x01, 0x02, 0x03]);
+
+        let mut list = list_with_cleared(
+            ReflectedFixedHdrTlv::request_with_selector(&[0x60, 0x01, 0x02, 0x03], 40).to_raw(),
+        );
+        list.process_reflected_headers(Some(&captured), Some(&[]));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.value, captured);
+        assert!(!tlv.is_unrecognized());
+    }
+
+    #[test]
+    fn test_reflected_fixed_hdr_selector_mismatch_sets_u_flag() {
+        // draft §3.2: length matches but the selector does NOT match the
+        // captured header → zero-fill + U-flag.
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut captured = vec![0u8; 40];
+        captured[..4].copy_from_slice(&[0x60, 0x01, 0x02, 0x03]);
+
+        let mut list = list_with_cleared(
+            ReflectedFixedHdrTlv::request_with_selector(&[0x60, 0xFF, 0xFF, 0xFF], 40).to_raw(),
+        );
+        list.process_reflected_headers(Some(&captured), Some(&[]));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.value.len(), 40, "advertised length preserved");
+        assert!(tlv.value.iter().all(|&b| b == 0), "mismatch → zero-filled");
+        assert!(tlv.is_unrecognized(), "selector mismatch → U-flag per §3.2");
+    }
+
+    #[test]
     fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
         let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
@@ -1541,6 +1651,85 @@ mod tests {
 
         let tlv = &list.non_hmac_tlvs()[0];
         assert_eq!(tlv.value, vec![0x11, 0x22, 0x33, 0x44]);
+    }
+
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_selector_matches_specific_header() {
+        // draft §3.1 disambiguation: two extension headers of the SAME length
+        // (both 8 bytes), differing only in their body. A non-zero first-4-byte
+        // selector must pick the matching one, not concatenate both.
+        use crate::tlv::ReflectedIpv6ExtHdrTlv;
+        let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+        let rec_b = [0x3Cu8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&rec_a);
+        blob.extend_from_slice(&rec_b);
+
+        // Selector = rec_b's first 4 bytes.
+        let mut list = list_with_cleared(
+            ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0xB1, 0xB2], 8).to_raw(),
+        );
+        list.process_reflected_headers(Some(&[]), Some(&blob));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(
+            tlv.value,
+            rec_b.to_vec(),
+            "must copy only the matched header"
+        );
+        assert!(!tlv.is_unrecognized());
+    }
+
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_selector_no_match_sets_u_flag() {
+        use crate::tlv::ReflectedIpv6ExtHdrTlv;
+        let blob = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+
+        let mut list = list_with_cleared(
+            ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0xFF, 0xFF], 8).to_raw(),
+        );
+        list.process_reflected_headers(Some(&[]), Some(&blob));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.value.len(), 8, "advertised capacity preserved");
+        assert!(tlv.value.iter().all(|&b| b == 0), "no match → zero-filled");
+        assert!(tlv.is_unrecognized(), "no selector match → U-flag per §3.1");
+    }
+
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_selector_no_match_on_empty_capture_sets_u_flag() {
+        // Non-zero selector but no captured ext headers (IPv4 / no options):
+        // the requested header isn't present, so U-flag (unlike the zero-
+        // selector case which is a valid "no data" response).
+        use crate::tlv::ReflectedIpv6ExtHdrTlv;
+        let mut list = list_with_cleared(
+            ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0x01, 0x02], 8).to_raw(),
+        );
+        list.process_reflected_headers(Some(&[0x45]), Some(&[]));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert!(tlv.is_unrecognized());
+        assert!(tlv.value.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_zero_selector_copies_whole_blob() {
+        // Regression: a zero-filled request (no selector) must still copy every
+        // captured extension header, concatenated, as before.
+        use crate::tlv::ReflectedIpv6ExtHdrTlv;
+        let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+        let rec_b = [0x00u8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&rec_a);
+        blob.extend_from_slice(&rec_b);
+
+        let mut list =
+            list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(16).to_raw());
+        list.process_reflected_headers(Some(&[]), Some(&blob));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert_eq!(tlv.value, blob, "zero selector → whole-blob concatenation");
+        assert!(!tlv.is_unrecognized());
     }
 
     #[test]

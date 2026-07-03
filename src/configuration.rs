@@ -567,6 +567,25 @@ pub struct Configuration {
     /// the TLV with the U-flag set.
     #[clap(long)]
     pub reflected_ipv6_ext_hdr: bool,
+
+    /// Selector for the Type 246 request (draft-ietf-ippm-stamp-ext-hdr §3.1).
+    /// Hex string (e.g. "3c000102"); its bytes are placed at the start of the
+    /// request Value so the reflector returns only the matching extension
+    /// header (disambiguating multiple same-length headers). Byte 0 is the
+    /// header TYPE — `00` = Hop-by-Hop, `3c` = Destination Options — matching
+    /// the reflected representation, not the on-wire Next Header pointer.
+    /// Must contain at least one non-zero byte. Requires
+    /// `--reflected-ipv6-ext-hdr`.
+    #[clap(long, value_name = "HEX")]
+    pub reflected_ipv6_ext_hdr_selector: Option<String>,
+
+    /// Selector for the Type 247 request (draft-ietf-ippm-stamp-ext-hdr §3.2).
+    /// Hex string whose bytes must match the start of the received IP fixed
+    /// header; on mismatch the reflector echoes the TLV with the U-flag set.
+    /// At most 20 bytes (IPv4) or 40 bytes (IPv6) by the destination family,
+    /// and at least one non-zero byte. Requires `--reflected-fixed-hdr`.
+    #[clap(long, value_name = "HEX")]
+    pub reflected_fixed_hdr_selector: Option<String>,
 }
 
 impl Configuration {
@@ -742,6 +761,49 @@ impl Configuration {
             ));
         }
 
+        // draft-ietf-ippm-stamp-ext-hdr §3.1/§3.2 header-reflection selectors.
+        if let Some(sel) = &self.reflected_ipv6_ext_hdr_selector {
+            if !self.reflected_ipv6_ext_hdr {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "--reflected-ipv6-ext-hdr-selector requires --reflected-ipv6-ext-hdr"
+                        .to_string(),
+                ));
+            }
+            let bytes = decode_selector(sel).map_err(|e| {
+                ConfigurationError::InvalidConfiguration(format!(
+                    "invalid --reflected-ipv6-ext-hdr-selector: {e}"
+                ))
+            })?;
+            if bytes.len() > MAX_IPV6_EXT_HDR_SELECTOR_BYTES {
+                return Err(ConfigurationError::InvalidConfiguration(format!(
+                    "--reflected-ipv6-ext-hdr-selector is {} bytes; the maximum is {} \
+                     (one IPv6 extension header)",
+                    bytes.len(),
+                    MAX_IPV6_EXT_HDR_SELECTOR_BYTES
+                )));
+            }
+        }
+        if let Some(sel) = &self.reflected_fixed_hdr_selector {
+            if !self.reflected_fixed_hdr {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "--reflected-fixed-hdr-selector requires --reflected-fixed-hdr".to_string(),
+                ));
+            }
+            let bytes = decode_selector(sel).map_err(|e| {
+                ConfigurationError::InvalidConfiguration(format!(
+                    "invalid --reflected-fixed-hdr-selector: {e}"
+                ))
+            })?;
+            let max = if self.remote_addr.is_ipv4() { 20 } else { 40 };
+            if bytes.len() > max {
+                return Err(ConfigurationError::InvalidConfiguration(format!(
+                    "--reflected-fixed-hdr-selector is {} bytes; the maximum for the \
+                     destination family is {max} (the IP fixed-header length)",
+                    bytes.len()
+                )));
+            }
+        }
+
         Ok(())
     }
 
@@ -898,6 +960,8 @@ impl Configuration {
         merge!(reflected_control_min_interval_ns);
         merge!(reflected_fixed_hdr);
         merge!(reflected_ipv6_ext_hdr);
+        merge_opt!(reflected_ipv6_ext_hdr_selector);
+        merge_opt!(reflected_fixed_hdr_selector);
     }
 }
 
@@ -992,6 +1056,8 @@ pub struct FileConfiguration {
     pub reflected_control_min_interval_ns: Option<u32>,
     pub reflected_fixed_hdr: Option<bool>,
     pub reflected_ipv6_ext_hdr: Option<bool>,
+    pub reflected_ipv6_ext_hdr_selector: Option<String>,
+    pub reflected_fixed_hdr_selector: Option<String>,
 }
 
 /// JSON Schema (draft 2020-12) for the TOML config file accepted by
@@ -1079,7 +1145,9 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "reflected_control_max_size":  { "type": "integer", "minimum": 0, "maximum": 65535 },
     "reflected_control_min_interval_ns": { "type": "integer", "minimum": 0 },
     "reflected_fixed_hdr":    { "type": "boolean" },
-    "reflected_ipv6_ext_hdr": { "type": "boolean" }
+    "reflected_ipv6_ext_hdr": { "type": "boolean" },
+    "reflected_ipv6_ext_hdr_selector": { "type": "string", "pattern": "^[0-9a-fA-F]+$" },
+    "reflected_fixed_hdr_selector":    { "type": "string", "pattern": "^[0-9a-fA-F]+$" }
   }
 }"##;
 
@@ -1087,6 +1155,29 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
 #[inline]
 pub fn is_auth(mode: AuthMode) -> bool {
     mode.is_authenticated()
+}
+
+/// Maximum length of a Type 246 selector: one full IPv6 extension header,
+/// `(255 + 1) * 8` bytes (draft-ietf-ippm-stamp-ext-hdr §3.1).
+pub(crate) const MAX_IPV6_EXT_HDR_SELECTOR_BYTES: usize = 2048;
+
+/// Decodes a hex selector string (optional `0x` prefix) into bytes for the
+/// draft-ietf-ippm-stamp-ext-hdr §3.1/§3.2 header-reflection request TLVs.
+/// Requires non-empty input with at least one non-zero byte — an all-zero
+/// selector would be indistinguishable from "no selector requested".
+pub(crate) fn decode_selector(s: &str) -> Result<Vec<u8>, String> {
+    let trimmed = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    if trimmed.is_empty() {
+        return Err("empty selector".to_string());
+    }
+    let bytes = hex::decode(trimmed).map_err(|e| format!("invalid hex `{s}`: {e}"))?;
+    if bytes.iter().all(|&b| b == 0) {
+        return Err("selector must contain at least one non-zero byte".to_string());
+    }
+    Ok(bytes)
 }
 
 /// clap value_parser: parse a u16 from decimal or `0x`-prefixed hex, rejecting 0.
@@ -1165,6 +1256,100 @@ mod tests {
         let args = vec!["test", "--remote-addr", "invalid_addr"];
         let conf = Configuration::try_parse_from(args);
         assert!(conf.is_err());
+    }
+
+    /// A known-good argument set that passes `validate()`, for tests that want
+    /// to isolate a single new validation rule.
+    fn base_valid_args() -> Vec<String> {
+        [
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--local-addr",
+            "0.0.0.0",
+            "--remote-port",
+            "862",
+            "--local-port",
+            "862",
+            "--clock-source",
+            "NTP",
+            "--send-delay",
+            "1000",
+            "--count",
+            "1000",
+            "--timeout",
+            "5",
+            "--auth-mode",
+            "A",
+            "--is-reflector",
+            "--hmac-key",
+            "0123456789abcdef0123456789abcdef",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+    }
+
+    #[test]
+    fn ext_hdr_selector_requires_enabling_flag() {
+        let mut args = base_valid_args();
+        args.extend([
+            "--reflected-ipv6-ext-hdr-selector".to_string(),
+            "3c000102".to_string(),
+        ]);
+        let conf = Configuration::try_parse_from(args).unwrap();
+        assert!(conf.validate().is_err());
+    }
+
+    #[test]
+    fn ext_hdr_selector_with_flag_is_accepted() {
+        let mut args = base_valid_args();
+        args.extend([
+            "--reflected-ipv6-ext-hdr".to_string(),
+            "--reflected-ipv6-ext-hdr-selector".to_string(),
+            "3c000102".to_string(),
+        ]);
+        let conf = Configuration::try_parse_from(args).unwrap();
+        assert!(conf.validate().is_ok());
+        assert_eq!(
+            conf.reflected_ipv6_ext_hdr_selector.as_deref(),
+            Some("3c000102")
+        );
+    }
+
+    #[test]
+    fn all_zero_ext_hdr_selector_is_rejected() {
+        let mut args = base_valid_args();
+        args.extend([
+            "--reflected-ipv6-ext-hdr".to_string(),
+            "--reflected-ipv6-ext-hdr-selector".to_string(),
+            "00000000".to_string(),
+        ]);
+        let conf = Configuration::try_parse_from(args).unwrap();
+        assert!(conf.validate().is_err());
+    }
+
+    #[test]
+    fn fixed_hdr_selector_requires_enabling_flag() {
+        let mut args = base_valid_args();
+        args.extend([
+            "--reflected-fixed-hdr-selector".to_string(),
+            "45000054".to_string(),
+        ]);
+        let conf = Configuration::try_parse_from(args).unwrap();
+        assert!(conf.validate().is_err());
+    }
+
+    #[test]
+    fn fixed_hdr_selector_too_long_for_ipv4_is_rejected() {
+        let mut args = base_valid_args();
+        args.extend([
+            "--reflected-fixed-hdr".to_string(),
+            "--reflected-fixed-hdr-selector".to_string(),
+            "01".repeat(21), // 21 bytes > 20-byte IPv4 fixed header
+        ]);
+        let conf = Configuration::try_parse_from(args).unwrap();
+        assert!(conf.validate().is_err());
     }
 
     #[test]

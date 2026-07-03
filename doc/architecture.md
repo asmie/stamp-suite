@@ -455,15 +455,29 @@ the datalink layer. Only the `pnet` backend can do this (see
   reflector), the reflector zero-fills the Value and sets the U-flag
   rather than silently truncating or zero-padding. This conformance check
   ships in stamp-suite as of this release.
-- **Not yet implemented:** the §3.1/§3.2 "non-zero first 4 bytes"
-  disambiguation rule. When the sender pre-populates the first 4 bytes of
-  a Type 246 TLV with header data to ask the reflector for a *specific*
-  extension header (e.g. one of two same-length Hop-by-Hop options), the
-  reflector is required to match against that pattern. Today we
-  concatenate every captured extension header into the TLV Value
-  regardless of the first-4-byte pattern. Tracked separately; safe today
-  for senders that send a single TLV-instance per packet with the value
-  field zeroed.
+- **§3.1/§3.2 "non-zero first 4 bytes" selector (implemented).** When the
+  sender pre-populates the first 4 bytes of the request Value with a non-zero
+  pattern, the reflector matches it against the captured header(s) before
+  copying. For Type 246 this disambiguates multiple extension headers of the
+  same length: the reflector walks the captured records (`[type][HdrExtLen][body]`,
+  `(HdrExtLen+1)*8` bytes each) and copies **only** the record whose first 4
+  bytes match the selector; if none matches it zero-fills and sets the U-flag.
+  For Type 247 (one fixed header) it is a validation gate: the selector must
+  equal the received header's first 4 bytes, else U-flag. A zero selector (the
+  default) preserves the legacy behavior — Type 246 concatenates every captured
+  header, Type 247 copies the fixed header. Senders opt in with
+  `--reflected-ipv6-ext-hdr-selector <hex>` / `--reflected-fixed-hdr-selector <hex>`;
+  this is dormant until a sender sets it, so no existing exchange changes.
+  - **Selector byte-0 caveat.** stamp-suite's reflected representation stores
+    each extension header's byte 0 as the header *type* (`0x00` Hop-by-Hop,
+    `0x3C` Destination Options — the protocol number from the preceding Next
+    Header field), with bytes 1..3 equal to the wire bytes. The reflector
+    matches the selector against this reflected representation (the only
+    internally-consistent choice, since that is what it copies back), so a
+    stamp-suite selector's byte 0 is the header type, not the on-wire Next
+    Header pointer. Fully wire-accurate matching would require reworking the
+    capture format and is deferred (Types 246/247 use experimental codepoints
+    that are already stamp-suite-specific).
 
 ## Prometheus Metrics
 

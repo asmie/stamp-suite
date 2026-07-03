@@ -9,6 +9,12 @@
 //! U-flag and clears the Value.
 //!
 //! Receivers identify IPv4 vs IPv6 by the Version nibble in the first byte.
+//!
+//! Per draft §3.2 the sender may pre-populate the first 4 bytes with a non-zero
+//! selector (see [`ReflectedFixedHdrTlv::request_with_selector`]); the
+//! reflector then copies the fixed header only if those 4 bytes match the
+//! received header, otherwise it sets the U-flag. A zero selector copies the
+//! header unconditionally.
 
 use std::net::IpAddr;
 
@@ -49,6 +55,16 @@ impl ReflectedFixedHdrTlv {
             IpAddr::V6(_) => IPV6_FIXED_HEADER_SIZE,
         };
         Self::request_with_capacity(bytes)
+    }
+
+    /// Creates a sender request TLV whose first bytes carry a match selector
+    /// (draft-ietf-ippm-stamp-ext-hdr §3.2), padded with zeros to `total_len`
+    /// (the IP fixed-header length). `total_len` is grown to fit `prefix`.
+    #[must_use]
+    pub fn request_with_selector(prefix: &[u8], total_len: usize) -> Self {
+        let mut header = vec![0u8; total_len.max(prefix.len())];
+        header[..prefix.len()].copy_from_slice(prefix);
+        Self { header }
     }
 
     /// Creates a response TLV carrying a raw fixed IP header.
@@ -146,5 +162,24 @@ mod tests {
         let tlv = ReflectedFixedHdrTlv::request_for("127.0.0.1".parse().unwrap());
         assert!(!tlv.is_ipv4());
         assert!(!tlv.is_ipv6());
+    }
+
+    #[test]
+    fn test_request_with_selector_fills_prefix_and_pads_to_len() {
+        // draft §3.2 selector: first 4 bytes carry the match pattern, the rest
+        // of the fixed-header length stays zero for the reflector to fill.
+        let tlv = ReflectedFixedHdrTlv::request_with_selector(
+            &[0x45, 0x00, 0x00, 0x54],
+            IPV4_FIXED_HEADER_SIZE,
+        );
+        assert_eq!(tlv.header.len(), IPV4_FIXED_HEADER_SIZE);
+        assert_eq!(&tlv.header[..4], &[0x45, 0x00, 0x00, 0x54]);
+        assert!(tlv.header[4..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_request_with_selector_grows_to_fit_prefix() {
+        let tlv = ReflectedFixedHdrTlv::request_with_selector(&[1, 2, 3, 4, 5], 4);
+        assert_eq!(tlv.header, vec![1, 2, 3, 4, 5]);
     }
 }

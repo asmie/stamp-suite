@@ -194,7 +194,9 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --reflected-control-length <LEN>  Requested reply packet length, 0 = don't pad [default: 0]
       --reflected-control-interval-ns <NS>  Inter-packet gap [default: 1_000_000]
       --reflected-fixed-hdr        Request reflected IPv4/IPv6 fixed header (TLV 247, draft-ietf-ippm-stamp-ext-hdr §4)
+      --reflected-fixed-hdr-selector <HEX>  §3.2 selector: first bytes must match the received IP header, else U-flag (requires --reflected-fixed-hdr)
       --reflected-ipv6-ext-hdr     Request reflected IPv6 extension headers (TLV 246, draft-ietf-ippm-stamp-ext-hdr §3)
+      --reflected-ipv6-ext-hdr-selector <HEX>  §3.1 selector: return only the matching extension header; byte 0 is the header type (00=Hop-by-Hop, 3c=Dest-Opts) (requires --reflected-ipv6-ext-hdr)
       --ber                        Enable BER TLVs (draft-gandhi-ippm-stamp-ber, Types 240/241/242)
       --ber-pattern <HEX>          Padding bit pattern (default: ff00)
       --ber-padding-size <BYTES>   Extra Padding length used with --ber [default: 64]

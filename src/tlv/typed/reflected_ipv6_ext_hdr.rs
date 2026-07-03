@@ -28,6 +28,17 @@
 //! Reflector concatenates every captured extension header starting with its
 //! NextHeader byte (protocol number from the preceding header) and its HdrLen
 //! byte followed by the remaining octets of that option header.
+//!
+//! # Selector (draft §3.1)
+//!
+//! When the sender pre-populates the first 4 bytes of the request Value with a
+//! non-zero pattern (see [`ReflectedIpv6ExtHdrTlv::request_with_selector`]),
+//! the reflector returns only the captured extension header whose first 4
+//! bytes match — disambiguating multiple headers of the same length — or sets
+//! the U-flag if none matches. Byte 0 of the selector is the header *type*
+//! (`0x00` Hop-by-Hop, `0x3C` Destination Options), matching the reflected
+//! representation above, not the on-wire Next Header pointer. A zero selector
+//! keeps the copy-everything behavior.
 
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
@@ -58,6 +69,21 @@ impl ReflectedIpv6ExtHdrTlv {
         Self {
             data: vec![0u8; bytes],
         }
+    }
+
+    /// Creates a sender request TLV whose first bytes carry a match selector
+    /// (draft-ietf-ippm-stamp-ext-hdr §3.1) followed by zeros the reflector
+    /// fills. `capacity` is grown to fit `prefix` so the selector is never
+    /// truncated.
+    ///
+    /// Byte 0 of the selector is the extension-header *type* (`0x00`
+    /// Hop-by-Hop, `0x3C` Destination Options), matching stamp-suite's
+    /// reflected representation — not the on-wire Next Header pointer.
+    #[must_use]
+    pub fn request_with_selector(prefix: &[u8], capacity: usize) -> Self {
+        let mut data = vec![0u8; capacity.max(prefix.len())];
+        data[..prefix.len()].copy_from_slice(prefix);
+        Self { data }
     }
 
     /// Creates a response TLV populated with captured extension-header bytes.
@@ -114,5 +140,21 @@ mod tests {
         let raw = crate::tlv::core::RawTlv::new(TlvType::Location, vec![]);
         let result = ReflectedIpv6ExtHdrTlv::from_raw(&raw);
         assert!(matches!(result, Err(TlvError::TypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_request_with_selector_prefixes_then_zero_pads() {
+        // draft §3.1 selector: first 4 bytes carry the match pattern, the
+        // rest of the requested capacity is zero for the reflector to fill.
+        let tlv = ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0x01, 0x02], 8);
+        assert_eq!(tlv.data, vec![0x3C, 0x00, 0x01, 0x02, 0, 0, 0, 0]);
+        assert_eq!(tlv.to_raw().value.len(), 8);
+    }
+
+    #[test]
+    fn test_request_with_selector_grows_capacity_to_fit_prefix() {
+        // A capacity smaller than the prefix must not truncate the selector.
+        let tlv = ReflectedIpv6ExtHdrTlv::request_with_selector(&[1, 2, 3, 4, 5, 6], 4);
+        assert_eq!(tlv.data, vec![1, 2, 3, 4, 5, 6]);
     }
 }
