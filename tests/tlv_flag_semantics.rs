@@ -24,10 +24,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use stamp_suite::configuration::{ClockFormat, TlvHandlingMode};
 use stamp_suite::crypto::HmacKey;
 use stamp_suite::packets::PacketUnauthenticated;
-use stamp_suite::receiver::{process_stamp_packet, ProcessingContext, UNAUTH_BASE_SIZE};
+use stamp_suite::receiver::{
+    process_stamp_packet, CapturedHeaders, ProcessingContext, UNAUTH_BASE_SIZE,
+};
 use stamp_suite::tlv::{
-    ClassOfServiceTlv, ExtraPaddingTlv, RawTlv, ReturnPathAction, ReturnPathTlv, TlvFlags, TlvList,
-    TlvType, TypedTlv, TLV_HEADER_SIZE,
+    ClassOfServiceTlv, ExtraPaddingTlv, RawTlv, ReflectedIpv6ExtHdrTlv, ReturnPathAction,
+    ReturnPathTlv, TlvFlags, TlvList, TlvType, TypedTlv, TLV_HEADER_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -1180,5 +1182,75 @@ fn a1_reflected_control_l3_mismatch_suppresses_reply() {
         matches!(response.return_path_action, ReturnPathAction::SuppressReply),
         "L3 sub-TLV mismatch must cause the reflector to suppress the reply \
          per draft-ietf-ippm-asymmetrical-pkts §3"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// draft-ietf-ippm-stamp-ext-hdr §3.1 first-4-bytes selector — end to end
+// (sender-built request TLV → reflector match against captured headers).
+
+#[test]
+fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
+    // Two extension-header records of the SAME length (both 8 bytes), differing
+    // only in body: the §3.1 disambiguation case. The sender's non-zero
+    // selector must pull back only the matching header.
+    let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+    let rec_b = [0x3Cu8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&rec_a);
+    blob.extend_from_slice(&rec_b);
+    let captured = CapturedHeaders {
+        fixed_header: Vec::new(),
+        ipv6_ext_headers: blob,
+    };
+
+    // Sender request carrying rec_b's first 4 bytes as the selector.
+    let request = ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0xB1, 0xB2], 8);
+    let packet = build_unauth_packet(&tlv_to_chain(&request.to_raw()));
+
+    let mut ctx = make_ctx(None);
+    ctx.captured_headers = Some(&captured);
+    let parsed = reflect_unauth(&packet, &ctx);
+
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| t.tlv_type == TlvType::ReflectedIpv6ExtHdr)
+        .expect("Type 246 must be echoed");
+    assert_eq!(
+        echoed.value,
+        rec_b.to_vec(),
+        "only the matched header returned"
+    );
+    assert_eq!(
+        echoed.flags.to_byte() & 0x80,
+        0x00,
+        "selector match → no U-flag"
+    );
+}
+
+#[test]
+fn reflected_ipv6_ext_hdr_selector_no_match_sets_u_flag_end_to_end() {
+    let captured = CapturedHeaders {
+        fixed_header: Vec::new(),
+        ipv6_ext_headers: vec![0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6],
+    };
+
+    let request = ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0xFF, 0xFF], 8);
+    let packet = build_unauth_packet(&tlv_to_chain(&request.to_raw()));
+
+    let mut ctx = make_ctx(None);
+    ctx.captured_headers = Some(&captured);
+    let parsed = reflect_unauth(&packet, &ctx);
+
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| t.tlv_type == TlvType::ReflectedIpv6ExtHdr)
+        .expect("Type 246 must be echoed");
+    assert_eq!(
+        echoed.flags.to_byte() & 0x80,
+        0x80,
+        "selector matching no captured header → U-flag per §3.1"
     );
 }

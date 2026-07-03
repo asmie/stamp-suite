@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 
 use crate::{
     clock_format::ClockFormat,
-    configuration::{is_auth, Configuration, MalformedMode},
+    configuration::{decode_selector, is_auth, Configuration, MalformedMode},
     crypto::{compute_packet_hmac, verify_packet_hmac, HmacKey},
     error_estimate::ErrorEstimate,
     packets::{
@@ -438,23 +438,10 @@ pub async fn run_sender(
     }
 
     // Reflected Fixed / IPv6 Extension Header Data TLVs
-    // (draft-ietf-ippm-stamp-ext-hdr §§3–4). Sender sends them empty; the
-    // reflector populates them when it has raw-capture access to IP headers,
-    // or echoes them with U-flag otherwise.
-    if conf.reflected_fixed_hdr {
-        extra_tlvs.push(ReflectedFixedHdrTlv::request_for(conf.remote_addr).to_raw());
-        let bytes = if conf.remote_addr.is_ipv4() {
-            IPV4_FIXED_HEADER_SIZE
-        } else {
-            IPV6_FIXED_HEADER_SIZE
-        };
-        log::info!("Reflected Fixed Header TLV (Type 247) requested ({bytes} header bytes)");
-    }
-    if conf.reflected_ipv6_ext_hdr {
-        let cap = DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY;
-        extra_tlvs.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(cap).to_raw());
-        log::info!("Reflected IPv6 Ext Header TLV (Type 246) requested ({cap}-byte capacity)");
-    }
+    // (draft-ietf-ippm-stamp-ext-hdr §§3–4). Sent zero-filled, or with a
+    // §3.1/§3.2 selector prefix when configured; the reflector populates them
+    // when it has raw-capture access to IP headers, or echoes with U-flag.
+    extra_tlvs.extend(reflected_header_request_tlvs(conf));
 
     // Check if we need to include TLV extensions.
     // SSID lives in the base header per RFC 8972 §3 — it alone does not force TLV mode.
@@ -1273,6 +1260,66 @@ fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
     hex::decode(trimmed).map_err(|e| e.to_string())
 }
 
+/// Builds the Reflected Fixed / IPv6 Extension Header request TLVs
+/// (draft-ietf-ippm-stamp-ext-hdr §§3–4) for the outgoing packet, honoring the
+/// optional §3.1/§3.2 selectors. Assumes `conf` has passed `validate()` (so
+/// any selector decodes and fits); a stray decode error degrades to the
+/// zero-filled request rather than panicking.
+fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
+    let mut out = Vec::new();
+
+    if conf.reflected_fixed_hdr {
+        let total = if conf.remote_addr.is_ipv4() {
+            IPV4_FIXED_HEADER_SIZE
+        } else {
+            IPV6_FIXED_HEADER_SIZE
+        };
+        let tlv = match selector_bytes(conf.reflected_fixed_hdr_selector.as_deref()) {
+            Some(sel) => ReflectedFixedHdrTlv::request_with_selector(&sel, total),
+            None => ReflectedFixedHdrTlv::request_with_capacity(total),
+        };
+        out.push(tlv.to_raw());
+        log::info!(
+            "Reflected Fixed Header TLV (Type 247) requested ({total} header bytes{})",
+            selector_note(conf.reflected_fixed_hdr_selector.as_deref())
+        );
+    }
+
+    if conf.reflected_ipv6_ext_hdr {
+        let tlv = match selector_bytes(conf.reflected_ipv6_ext_hdr_selector.as_deref()) {
+            Some(sel) => {
+                let cap = DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY.max(sel.len());
+                ReflectedIpv6ExtHdrTlv::request_with_selector(&sel, cap)
+            }
+            None => {
+                ReflectedIpv6ExtHdrTlv::request_with_capacity(DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY)
+            }
+        };
+        log::info!(
+            "Reflected IPv6 Ext Header TLV (Type 246) requested ({}-byte capacity{})",
+            tlv.data.len(),
+            selector_note(conf.reflected_ipv6_ext_hdr_selector.as_deref())
+        );
+        out.push(tlv.to_raw());
+    }
+
+    out
+}
+
+/// Decodes a validated selector string to bytes; `None` when absent or (post-
+/// `validate()`, which should not happen) unparseable.
+fn selector_bytes(sel: Option<&str>) -> Option<Vec<u8>> {
+    sel.and_then(|s| decode_selector(s).ok())
+}
+
+fn selector_note(sel: Option<&str>) -> &'static str {
+    if sel.is_some() {
+        ", with selector"
+    } else {
+        ""
+    }
+}
+
 /// Creates a new unauthenticated STAMP test packet with the specified error estimate.
 ///
 /// The caller should set the sequence number and timestamp before sending.
@@ -1480,6 +1527,63 @@ pub fn create_extended_auth_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reflected_header_tlvs_apply_selectors() {
+        use crate::tlv::TlvType;
+        use clap::Parser;
+        let conf = Configuration::try_parse_from([
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--reflected-ipv6-ext-hdr",
+            "--reflected-ipv6-ext-hdr-selector",
+            "3c000102",
+            "--reflected-fixed-hdr",
+            "--reflected-fixed-hdr-selector",
+            "45000054",
+        ])
+        .unwrap();
+
+        let tlvs = reflected_header_request_tlvs(&conf);
+
+        let fixed = tlvs
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ReflectedFixedHdr)
+            .unwrap();
+        assert_eq!(fixed.value.len(), IPV4_FIXED_HEADER_SIZE);
+        assert_eq!(&fixed.value[..4], &[0x45, 0x00, 0x00, 0x54]);
+        assert!(fixed.value[4..].iter().all(|&b| b == 0));
+
+        let ext = tlvs
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ReflectedIpv6ExtHdr)
+            .unwrap();
+        assert_eq!(&ext.value[..4], &[0x3c, 0x00, 0x01, 0x02]);
+        assert!(ext.value[4..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn reflected_header_tlvs_zero_fill_without_selector() {
+        use clap::Parser;
+        let conf = Configuration::try_parse_from([
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--reflected-ipv6-ext-hdr",
+            "--reflected-fixed-hdr",
+        ])
+        .unwrap();
+
+        let tlvs = reflected_header_request_tlvs(&conf);
+        assert_eq!(tlvs.len(), 2);
+        for t in &tlvs {
+            assert!(
+                t.value.iter().all(|&b| b == 0),
+                "no selector → zero-filled request"
+            );
+        }
+    }
 
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
     #[test]
