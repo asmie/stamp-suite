@@ -36,6 +36,7 @@ cargo +nightly fuzz run tlv_list_parse_lenient -- -max_total_time=60
 | `packet_auth_parse` | `PacketAuthenticated::from_bytes{,_lenient_with_canonical}`. |
 | `agentx_decode_header` | AgentX PDU header decode (RFC 2741 §6). |
 | `agentx_decode_oid` | AgentX OID + SearchRange decode. |
+| `process_stamp_packet` | Full reflector packet processing pipeline (parse → HMAC → TLV processing → response assembly) via the raw entry point. |
 
 ## Seed corpus
 
