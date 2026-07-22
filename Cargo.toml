@@ -84,6 +84,17 @@ tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }
 criterion = { version = "0.8", default-features = false, features = ["html_reports"] }
 
+# Linux-only: the privileged netns conformance tier (tests/netns_conformance.rs)
+# needs a handful of raw syscalls the standard library does not expose —
+# geteuid() for the root gate, setns()/CLONE_NEWNET to originate crafted
+# packets from inside the sender namespace (the Address Group filter scenario
+# has no sender-side CLI), and setsockopt(IPV6_DSTOPTS) for the ext-header
+# injection path. `libc` is already a transitive dependency on Linux (via
+# `nix`), so this adds no new crate to the build graph. Not referenced on other
+# platforms — the whole test target is `#![cfg(target_os = "linux")]`.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+
 [[bench]]
 name = "reflector_hotpath"
 harness = false
