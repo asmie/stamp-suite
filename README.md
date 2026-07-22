@@ -87,6 +87,20 @@ nix develop      # dev shell with cargo, rustc, rustfmt, clippy
 
 The receiver backend choice is consequential — privileges, runtime deps, kernel filtering, observability all differ. See [doc/architecture.md#receiver-backends](doc/architecture.md#receiver-backends) for the full comparison.
 
+### Versioning & MSRV
+
+stamp-suite follows [Semantic Versioning](http://semver.org/) starting at 1.0. For the 1.x series, the semver contract covers:
+
+- CLI flags and their observable behavior
+- the `--config` TOML file schema
+- default wire behavior (packet formats, TLV handling, reflector defaults)
+
+A breaking change to any of the above requires a major version bump. The Rust **library API is not covered** by this contract — stamp-suite is a binary-first crate; its modules are `pub` only so the crate's own tests, benches, and fuzz targets can reach them, and are marked `#[doc(hidden)]` and exempt from semver (see the crate-level rustdoc). They may change, move, or disappear in any 1.x release without notice. Depending on `stamp-suite` as a library is unsupported.
+
+**Exception — experimental TLV codepoints.** TLV Types 240–242 and 246–247 are experimental/pending-IANA allocations (see [doc/architecture.md](doc/architecture.md) for the per-TLV status table). Renumbering any of these on IANA assignment is treated as a release-noted **minor** version change, not a major one, even though it changes wire behavior.
+
+**MSRV.** The minimum supported Rust version is **1.93**, enforced in CI (`msrv` job in [rust.yml](.github/workflows/rust.yml)). MSRV may be raised in a minor release; any bump is called out in [CHANGELOG.md](CHANGELOG.md).
+
 ## Usage
 
 ### Reflector
