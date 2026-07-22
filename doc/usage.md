@@ -125,6 +125,8 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
   -i, --is-reflector               Run as Session-Reflector instead of Session-Sender
       --output-format <text|json|csv>  Statistics output format [default: text]
       --log-format <text|json>     Diagnostic log format [default: text]
+  -v, --verbose...                 Increase log verbosity (-v debug, -vv trace);
+                                   RUST_LOG overrides
       --hwtstamp <auto|on|off>     Kernel/hardware timestamp handling [default: auto]
                                    (build with --features hwtstamp; `auto` = kernel
                                    software timestamps, `on` = attempt NIC hardware
@@ -176,14 +178,32 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
                                    (Linux/macOS).
       --dscp <0..63>               DSCP requested via CoS TLV [default: 0]
       --ecn <0..3>                 ECN requested via CoS TLV [default: 0]
+      --ecn-backoff-factor <F>     AIMD congestion-response backoff factor
+                                   (draft-ietf-ippm-stamp-cos-ecn-01 §3.4);
+                                   must be > 1.0 [default: 2.0]
+      --ecn-max-delay <MS>         AIMD send-interval cap, milliseconds
+                                   (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)
+                                   [default: 30000]
+      --ecn-recovery-step <MS>     AIMD recovery step per clean reply,
+                                   milliseconds; interval never goes below
+                                   --send-delay
+                                   (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)
+                                   [default: 50]
       --ttl <1..255>               IP TTL / IPv6 Hop Limit for outgoing test
                                    packets [default: OS default] (Linux/macOS)
       --location                   Location TLV (RFC 8972 §4.2)
       --timestamp-info             Timestamp Information TLV (RFC 8972 §4.3)
       --direct-measurement         Direct Measurement TLV (RFC 8972 §4.5)
       --follow-up-telemetry        Follow-Up Telemetry TLV (RFC 8972 §4.7)
-      --access-report <0..15>      Access Report TLV with Access ID (RFC 8972 §4.6)
+      --access-report <1..15>      Access Report TLV with Access ID (RFC 8972 §4.6;
+                                   1=3GPP, 2=Non-3GPP are the only currently
+                                   defined values; 3-15 warn at startup)
       --access-return-code <CODE>  Return code for Access Report TLV [default: 1]
+      --access-report-timeout <SECS>  Access Report TLV retransmission timer,
+                                   in seconds (RFC 8972 §4.6) [default: 3]
+      --access-report-retries <N>  Max Access Report TLV retransmissions before
+                                   the procedure is aborted (RFC 8972 §4.6);
+                                   0 disables retransmission [default: 4]
       --dest-node-addr <IP>        Destination Node Address TLV (RFC 9503 §4, requires --ssid)
       --return-path-cc <0|1>       Return Path control code (RFC 9503 §5)
       --return-address <IP>        Return Path alternate reply address (RFC 9503 §5)
@@ -205,6 +225,10 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
                                    TLV to test a reflector's RFC 8972 §4.2
                                    handling (conformance testing only)
 ```
+
+**Note:** `--access-report`'s retransmission procedure (RFC 8972 §4.6) can extend the sender's total run time past what `--count`/`--send-delay` alone would predict. If the reflector never echoes the Access Report TLV back, the sender keeps retransmitting and waiting — independently of the main send loop — until the retry budget (`access-report-timeout * (1 + access-report-retries)`, up to 15 seconds at the defaults of 3s/4 retries) is exhausted, at which point the procedure aborts and the run ends (the measurement itself is unaffected either way). A run using `--count 1` with `--access-report` set will therefore take at least as long as that retry budget whenever the reflector doesn't support (or drops) the TLV.
+
+**Note (AIMD congestion response, draft-ietf-ippm-stamp-cos-ecn-01 §3.4):** whenever `--cos` is combined with `--ecn 1` (ECT1) or `--ecn 2` (ECT0), the sender activates an AIMD controller that dictates the inter-packet send interval instead of a fixed `--send-delay`. On each CE (Congestion Experienced) observation the interval is multiplied by `--ecn-backoff-factor` (capped at `--ecn-max-delay`); after each reply that was *not* CE-marked, the interval shrinks by `--ecn-recovery-step` back toward `--send-delay` (never faster). CE is detected from either direction the draft's §3.4 MUSTs cover: the reflected CoS TLV's EC2 field (forward path, sender→reflector) and the reply packet's own on-wire ECN (reverse path, reflector→sender). Reading the reply's on-wire ECN requires `IP_RECVTOS`/`IPV6_RECVTCLASS` support and is available on **Linux and macOS only**; on other platforms only the forward-path (EC2) direction is detected — a startup warning is logged. When a Reflected Test Packet Control TLV is also requested (`--reflected-control-count` > 1 or `--reflected-control-no-ext-hdr`), its `interval_nanoseconds` field is scaled by the same controller for future packets (§3.4-3). There is no flag to disable this response while ECN measurement is requested — the draft's MUST is unconditional in that case. Congestion-response counters (CE replies seen, backoffs applied, current/peak interval) appear in the stats output; see `--print-stats`/`--output-format`.
 
 ### Observability
 

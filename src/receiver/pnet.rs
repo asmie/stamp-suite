@@ -37,7 +37,7 @@ use crate::{
 use crate::tlv::ReturnPathAction;
 
 use super::{
-    load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
+    cos_unable_fallback_tos, load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
     recompute_response_tlv_hmac, set_cos_policy_rejected, set_return_path_u_flag_in_response,
     ProcessingContext, ReceiverSharedState, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
@@ -80,6 +80,10 @@ struct CaptureConfig {
     counters: Arc<ReflectorCounters>,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     local_addresses: Vec<IpAddr>,
+    /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
+    /// Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
+    /// §3.1.1).
+    local_macs: Vec<[u8; 6]>,
     /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
     reflector_member_link_id: Option<u16>,
     /// Whether to honour a Return Path "Return Address" sub-TLV (RFC 9503 §5).
@@ -264,6 +268,12 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     let local_addresses = super::build_local_addresses(conf.local_addr);
 
+    // Build local MAC addresses for the Reflected Test Packet Control TLV's
+    // L2 Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
+    // §3.1.1). Unlike `local_addresses`, this always enumerates every
+    // interface's hardware address regardless of the bind address.
+    let local_macs = super::build_local_macs();
+
     // Build capture config with all values needed by the blocking loop
     let capture_config = CaptureConfig {
         local_port: conf.local_port,
@@ -284,6 +294,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         shutdown: Arc::clone(&shutdown),
         counters: Arc::clone(&counters),
         local_addresses,
+        local_macs,
         reflector_member_link_id: conf.reflector_member_link_id,
         return_path_allow_alternate: conf.return_path_allow_alternate,
         rate_limiter: Arc::clone(&shared.rate_limiter),
@@ -496,8 +507,11 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
 
 /// Walks IPv6 extension headers (Hop-by-Hop = 0, Destination Options = 60)
 /// after the 40-byte fixed header, returning:
-/// - concatenated extension-header bytes, each prefixed with the preceding
-///   NextHeader byte and its HdrLen byte (wire format);
+/// - the extension-header bytes concatenated **verbatim as on the wire**: each
+///   record starts with its own Next Header octet (naming what follows), then
+///   HdrExtLen, then the option body — per draft-ietf-ippm-stamp-ext-hdr-11
+///   §3.1/§5.1 (the reflector's first-4-byte Requested selector matches these
+///   on-wire octets);
 /// - the final NextHeader protocol number (UDP if the chain leads to UDP);
 /// - the byte offset into the full IPv6 packet where the upper-layer payload
 ///   (e.g. UDP) begins.
@@ -513,18 +527,21 @@ fn extract_ipv6_ext_headers(
     const DESTINATION_OPTS: u8 = 60;
 
     let payload = header.payload();
-    let mut next_header_byte = header.get_next_header().0;
+    // Type of the header currently at `offset_in_payload` (named by the
+    // preceding Next Header field: the fixed header's, then each ext header's).
+    let mut this_header_type = header.get_next_header().0;
     let mut offset_in_payload = 0usize;
     let mut out = Vec::new();
 
     loop {
-        if next_header_byte != HOP_BY_HOP && next_header_byte != DESTINATION_OPTS {
+        if this_header_type != HOP_BY_HOP && this_header_type != DESTINATION_OPTS {
             break;
         }
         // Need at least 2 bytes for NextHeader + HdrExtLen fields.
         if payload.len().saturating_sub(offset_in_payload) < 2 {
             break;
         }
+        // This header's own Next Header field names the FOLLOWING header.
         let this_next = payload[offset_in_payload];
         let hdr_ext_len = payload[offset_in_payload + 1];
         // RFC 8200: option header length in 8-octet units, excluding first 8.
@@ -532,18 +549,17 @@ fn extract_ipv6_ext_headers(
         if payload.len().saturating_sub(offset_in_payload) < ext_len_bytes {
             break;
         }
-        // Emit: previous NextHeader byte | HdrExtLen byte | remaining option bytes.
-        out.push(next_header_byte);
-        out.push(hdr_ext_len);
-        out.extend_from_slice(&payload[offset_in_payload + 2..offset_in_payload + ext_len_bytes]);
+        // Emit the extension header verbatim (byte 0 = this header's own Next
+        // Header field, byte 1 = HdrExtLen, then the option body).
+        out.extend_from_slice(&payload[offset_in_payload..offset_in_payload + ext_len_bytes]);
 
-        next_header_byte = this_next;
+        this_header_type = this_next;
         offset_in_payload += ext_len_bytes;
     }
 
     (
         out,
-        IpNextHeaderProtocol(next_header_byte),
+        IpNextHeaderProtocol(this_header_type),
         // 40-byte fixed header + walked extension-header bytes.
         40 + offset_in_payload,
     )
@@ -697,6 +713,7 @@ fn handle_stamp_packet(
             } else {
                 None
             },
+            stateful_reflector: config.stateful_reflector,
             tlv_mode: config.tlv_mode,
             verify_tlv_hmac: config.verify_tlv_hmac,
             strict_packets: config.strict_packets,
@@ -709,6 +726,7 @@ fn handle_stamp_packet(
             packet_addr_info,
             last_reflection,
             local_addresses: &config.local_addresses,
+            local_macs: &config.local_macs,
             sender_port: pkt.src.port(),
             return_path_allow_alternate: config.return_path_allow_alternate,
             reflector_member_link_id: config.reflector_member_link_id,
@@ -811,8 +829,26 @@ fn handle_stamp_packet(
                                     recompute_response_tlv_hmac(&mut response.data, base_size, key);
                                 }
                             }
+
+                            // draft-ietf-ippm-stamp-cos-ecn-01 §3.2 MUST: even
+                            // though the requested DSCP1/EC1 TOS could not be
+                            // applied, best-effort re-apply with the reply's
+                            // ECN bits forced to 0b00 (Not-ECT) rather than
+                            // leaving the previous, possibly non-zero, ECN
+                            // value on the wire.
+                            let fallback_tos = cos_unable_fallback_tos(pkt.dscp);
+                            if fallback_tos != last_tos_cache.get() {
+                                match set_socket_tos(socket, fallback_tos, is_ipv6) {
+                                    Ok(()) => last_tos_cache.set(fallback_tos),
+                                    Err(e2) => log::debug!(
+                                        "cos-ecn-01 zero-ECN fallback TOS {} also failed: {}",
+                                        fallback_tos,
+                                        e2
+                                    ),
+                                }
+                            }
                         }
-                        // Don't update cache on failure - retry next time
+                        // Don't update cache further on failure - retry next time
                     }
                 }
             }
@@ -948,6 +984,38 @@ mod tests {
     use super::*;
     use crate::receiver::create_shared_state;
     use clap::Parser;
+
+    /// draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§5.1: captured extension headers
+    /// must be stored verbatim as on the wire — byte 0 is the header's OWN Next
+    /// Header field (naming what follows), NOT the header's own type (which is
+    /// carried in the preceding Next Header pointer). This is what the
+    /// reflector's first-4-byte Requested selector matches against.
+    #[test]
+    fn extract_ipv6_ext_headers_stores_records_verbatim_on_wire() {
+        // 40-byte IPv6 fixed header + one 8-byte Hop-by-Hop Options header.
+        let mut buf = vec![0u8; 48];
+        buf[0] = 0x60; // Version 6
+        buf[4] = 0x00; // Payload Length hi
+        buf[5] = 0x08; // Payload Length = 8 (the HBH header)
+        buf[6] = 0; // Next Header = 0 (Hop-by-Hop Options) — names the HBH header
+        buf[7] = 64; // Hop Limit
+                     // Hop-by-Hop Options header (on the wire, at offset 40):
+        buf[40] = 17; // its OWN Next Header = 17 (UDP) — names what follows
+        buf[41] = 0; // HdrExtLen = 0 → (0 + 1) * 8 = 8 octets
+        buf[42..48].copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6]);
+
+        let pkt = Ipv6Packet::new(&buf).expect("valid IPv6 packet");
+        let (records, final_next, payload_offset) = extract_ipv6_ext_headers(&pkt);
+
+        assert_eq!(
+            records,
+            vec![17, 0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6],
+            "record byte 0 must be the header's own Next Header field (17=UDP), \
+             not the header's type (0=HBH)"
+        );
+        assert_eq!(final_next.0, 17, "chain terminates at UDP");
+        assert_eq!(payload_offset, 48, "40-byte fixed + 8-byte HBH");
+    }
 
     /// `run_receiver` must return cleanly (not panic) when the configured
     /// local address is not bound to any interface, and the shared

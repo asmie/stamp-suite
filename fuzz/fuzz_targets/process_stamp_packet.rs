@@ -32,6 +32,7 @@ fuzz_target!(|data: &[u8]| {
         hmac_key_set: None,
         require_hmac: false,
         session_manager: None,
+        stateful_reflector: true,
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: false,
         strict_packets: false,

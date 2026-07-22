@@ -454,6 +454,33 @@ impl TlvList {
     ///
     /// The reflector recognizes the HMAC type by construction, so per
     /// RFC 8972 §4.4.1 the U flag must be 0.
+    ///
+    /// # Unsolicited HMAC TLV (adjudicated against RFC 8972 §4.8)
+    ///
+    /// Callers invoke this whenever a TLV HMAC key is configured and TLV
+    /// handling is not `Ignore` -- **unconditionally**, regardless of
+    /// whether the Session-Sender's request itself carried an HMAC TLV
+    /// (Type 8). This is deliberate, not an oversight. RFC 8972 §4.8
+    /// states: "All authenticated STAMP base packets (per Sections 4.2.2
+    /// and 4.3.2 of \[RFC8762\]) ... MUST additionally authenticate the
+    /// optional TLVs by including the keyed \[HMAC\] TLV, with the sole
+    /// exception of when there is only one TLV present and it is the
+    /// Extended Padding TLV," and separately, "The HMAC TLV MAY be used
+    /// to protect the integrity of STAMP extensions in the STAMP
+    /// unauthenticated mode. An implementation ... MUST provide controls
+    /// to enable [it]." Both clauses describe a *per-packet, per-role*
+    /// obligation/allowance ("Sections 4.2.2 and 4.3.2" cover the
+    /// Session-Sender's and the Session-Reflector's own authenticated
+    /// packet formats respectively) -- neither ties the reflector's
+    /// inclusion of Type 8 to the sender having included one. Configuring
+    /// a TLV HMAC key on the reflector *is* the "control to enable"
+    /// referenced for unauthenticated mode. Making this conditional on
+    /// mirroring the request would therefore be *more* restrictive than
+    /// the RFC requires (and, in authenticated mode with other TLVs
+    /// present, would violate the MUST). See
+    /// `receiver::tests::test_assemble_unauth_with_tlvs_adds_hmac` and
+    /// `receiver::tests::test_assemble_auth_with_tlvs_adds_hmac_even_when_request_has_none`
+    /// for pinning tests.
     pub fn set_hmac_response(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) {
         self.set_hmac(key, sequence_number_bytes);
         if let Some(hmac) = self.hmac_tlv.as_mut() {

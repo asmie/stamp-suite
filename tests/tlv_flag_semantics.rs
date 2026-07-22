@@ -47,6 +47,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         hmac_key_set: None,
         require_hmac: false,
         session_manager: None,
+        stateful_reflector: true,
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: hmac_key.is_some(),
         strict_packets: false,
@@ -59,6 +60,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         packet_addr_info: None,
         last_reflection: None,
         local_addresses: &[],
+        local_macs: &[],
         sender_port: 12345,
         return_path_allow_alternate: false,
         reflector_member_link_id: None,
@@ -588,30 +590,46 @@ fn reflected_control_value(length: u16, count: u16, interval_ns: u32) -> Vec<u8>
     value
 }
 
-/// Builds a Type 12 value with the IPv6 Extension Header Control sub-TLV
-/// (draft-ietf-ippm-stamp-ext-hdr-08 §5.3) appended after the fixed fields:
-/// flags=0, type=240 (experimental stand-in for TBA3), length=0.
-fn reflected_control_value_with_ext_hdr_control(
+/// Builds a Type 12 value with `n` IPv6 Extension Header Control sub-TLVs
+/// (draft-ietf-ippm-stamp-ext-hdr-11 §5.3) appended after the fixed fields:
+/// each is flags=0, type=240 (experimental stand-in for TBA3), length=0.
+fn reflected_control_value_with_ext_hdr_controls(
     length: u16,
     count: u16,
     interval_ns: u32,
+    n: usize,
 ) -> Vec<u8> {
-    let mut value = Vec::with_capacity(12);
+    let mut value = Vec::with_capacity(8 + 4 * n);
     value.extend_from_slice(&length.to_be_bytes());
     value.extend_from_slice(&count.to_be_bytes());
     value.extend_from_slice(&interval_ns.to_be_bytes());
-    value.extend_from_slice(&[0x00, 240, 0x00, 0x00]);
+    for _ in 0..n {
+        value.extend_from_slice(&[0x00, 240, 0x00, 0x00]);
+    }
     value
 }
 
+/// Returns the echoed Type 12 TLV's value from a reflected response.
+fn echoed_reflected_control_value(response_data: &[u8]) -> Vec<u8> {
+    let parsed = TlvList::parse(&response_data[UNAUTH_BASE_SIZE..]).expect("parse");
+    parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Type 12 echoed")
+        .value
+        .clone()
+}
+
 #[test]
-fn reflected_control_ext_hdr_control_requests_one_way_mode() {
-    // draft-ietf-ippm-stamp-ext-hdr-08 §5.3: the IPv6 Extension Header
-    // Control sub-TLV asks the reflector NOT to attach received IPv6
-    // extension headers to its reply packets (one-way measurement mode).
+fn reflected_control_single_ext_hdr_control_sets_c_on_subtlv() {
+    // draft-ietf-ippm-stamp-ext-hdr-11 §5.3 rule 4: a single IPv6 Extension
+    // Header Control sub-TLV asks the reflector to ADD matching IPv6 extension
+    // headers to its OWN reply. Neither backend can, so the C flag MUST be set
+    // in the sub-TLV's Sub-TLV Flags (not on the parent Type 12 TLV flags).
     let raw = RawTlv::new(
         TlvType::ReflectedControl,
-        reflected_control_value_with_ext_hdr_control(0, 2, 1_000_000),
+        reflected_control_value_with_ext_hdr_controls(0, 2, 1_000_000, 1),
     );
     let packet = build_unauth_packet(&tlv_to_chain(&raw));
     let ctx = make_ctx(None);
@@ -623,12 +641,19 @@ fn reflected_control_ext_hdr_control_requests_one_way_mode() {
         .expect("behavior must be recorded");
     assert!(
         behavior.suppress_reply_ext_headers,
-        "sub-TLV presence must request one-way mode"
+        "single sub-TLV presence recorded"
     );
     assert_eq!(behavior.extra_copies, 1, "count must still be honoured");
 
-    // The sub-TLV is recognized and trivially honoured (we attach no
-    // extension headers to replies), so neither U nor C may be set.
+    let value = echoed_reflected_control_value(&response.data);
+    // Sub-TLV Flags byte is the first octet after the 8-byte fixed fields.
+    assert_eq!(
+        value[8] & 0x10,
+        0x10,
+        "C flag MUST be set in the sub-TLV Flags (rule 4)"
+    );
+
+    // The C flag lives in the Sub-TLV Flags, NOT the parent Type 12 TLV flags.
     let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).expect("parse");
     let flags = parsed
         .non_hmac_tlvs()
@@ -640,7 +665,37 @@ fn reflected_control_ext_hdr_control_requests_one_way_mode() {
     assert_eq!(
         flags & 0x90,
         0x00,
-        "recognized + conformant: U and C must both be clear"
+        "parent Type 12 TLV flags: U and C must both be clear"
+    );
+}
+
+#[test]
+fn reflected_control_duplicate_ext_hdr_control_sets_c_on_all_copies() {
+    // draft-ietf-ippm-stamp-ext-hdr-11 §5.3 cardinality rule: more than one
+    // IPv6 Extension Header Control sub-TLV is a violation; the C flag MUST be
+    // set in the Sub-TLV Flags of EVERY offending copy.
+    let raw = RawTlv::new(
+        TlvType::ReflectedControl,
+        reflected_control_value_with_ext_hdr_controls(0, 2, 1_000_000, 2),
+    );
+    let packet = build_unauth_packet(&tlv_to_chain(&raw));
+    let ctx = make_ctx(None);
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("packet with duplicate sub-TLVs must still be reflected");
+
+    let value = echoed_reflected_control_value(&response.data);
+    // Two sub-TLVs at offsets 8 and 12; both Flags bytes must carry C.
+    assert_eq!(value[8] & 0x10, 0x10, "1st offending copy → C flag");
+    assert_eq!(value[12] & 0x10, 0x10, "2nd offending copy → C flag");
+
+    // Cardinality violation is not treated as an actionable one-way request.
+    let behavior = response
+        .reflected_control
+        .expect("behavior must be recorded");
+    assert!(
+        !behavior.suppress_reply_ext_headers,
+        "duplicate sub-TLVs are not actionable"
     );
 }
 
@@ -1185,15 +1240,251 @@ fn a1_reflected_control_l3_mismatch_suppresses_reply() {
     );
 }
 
+/// Builds an L2 Address Group sub-TLV (type 10) with a 12-octet value
+/// (6-byte mask + 6-byte group — the only length that can match a 6-byte
+/// EUI-48 local MAC).
+fn l2_group_sub_tlv(mask: [u8; 6], group: [u8; 6]) -> [u8; 16] {
+    let mut sub_tlv = [0u8; 16];
+    sub_tlv[0] = 0; // flags
+    sub_tlv[1] = 10; // sub-TLV type: L2 Address Group
+    sub_tlv[2..4].copy_from_slice(&12u16.to_be_bytes()); // length
+    sub_tlv[4..10].copy_from_slice(&mask);
+    sub_tlv[10..16].copy_from_slice(&group);
+    sub_tlv
+}
+
+fn reflected_control_value_with_sub_tlv(sub_tlv: &[u8]) -> Vec<u8> {
+    let mut value = Vec::with_capacity(8 + sub_tlv.len());
+    value.extend_from_slice(&0u16.to_be_bytes()); // length
+    value.extend_from_slice(&1u16.to_be_bytes()); // count
+    value.extend_from_slice(&0u32.to_be_bytes()); // interval
+    value.extend_from_slice(sub_tlv);
+    value
+}
+
+/// L2 Address Group sub-TLV present but no local MAC matches → packet
+/// processing stops per draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1 ("MUST
+/// stop processing the received packet"). `make_ctx`'s `local_macs` is
+/// empty, so no match is possible.
+#[test]
+fn a1_reflected_control_l2_mismatch_suppresses_reply() {
+    use stamp_suite::tlv::ReturnPathAction;
+
+    let sub_tlv = l2_group_sub_tlv([0xFF; 6], [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    let value = reflected_control_value_with_sub_tlv(&sub_tlv);
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let ctx = make_ctx(None); // local_macs is empty
+
+    let response = stamp_suite::receiver::process_stamp_packet(
+        &packet,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        ),
+        64,
+        false,
+        &ctx,
+    )
+    .expect("packet still parsed, only reply is suppressed");
+
+    assert!(
+        matches!(response.return_path_action, ReturnPathAction::SuppressReply),
+        "L2 sub-TLV mismatch must cause the reflector to suppress the reply \
+         per draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1"
+    );
+}
+
+/// L2 Address Group sub-TLV present and the mask/group matches one of the
+/// reflector's local MAC addresses → the packet is reflected normally, and
+/// the echoed Type 12 TLV must NOT carry the U-flag (the old "can't
+/// evaluate" fallback no longer applies now that real matching happens).
+#[test]
+fn a1_reflected_control_l2_match_replies_normally() {
+    use stamp_suite::tlv::ReturnPathAction;
+
+    let local_mac: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let sub_tlv = l2_group_sub_tlv([0xFF; 6], local_mac);
+    let value = reflected_control_value_with_sub_tlv(&sub_tlv);
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let local_macs = [local_mac];
+    let mut ctx = make_ctx(None);
+    ctx.local_macs = &local_macs;
+
+    let response = stamp_suite::receiver::process_stamp_packet(
+        &packet,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        ),
+        64,
+        false,
+        &ctx,
+    )
+    .expect("packet must be reflected");
+
+    assert_eq!(
+        response.return_path_action,
+        ReturnPathAction::Normal,
+        "matching L2 sub-TLV must not suppress the reply"
+    );
+
+    let parsed =
+        TlvList::parse(&response.data[stamp_suite::receiver::UNAUTH_BASE_SIZE..]).expect("parse");
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
+        .expect("Type 12 must be echoed");
+    assert_eq!(
+        echoed.flags.to_byte() & 0x80,
+        0x00,
+        "U-flag must NOT be set once the L2 filter is actually evaluated and passes"
+    );
+}
+
+/// A malformed L2 Address Group sub-TLV (Sub-TLV Length not 4/12/16) is
+/// skipped rather than gating the packet — mirroring the existing L3
+/// malformed-length handling, it simply does not participate in matching,
+/// so the packet is reflected normally with no drop and no flag set for it.
+#[test]
+fn a1_reflected_control_l2_malformed_length_does_not_drop() {
+    use stamp_suite::tlv::ReturnPathAction;
+
+    // Sub-TLV Length = 10 (not 4/12/16) → malformed, must be ignored.
+    let mut sub_tlv = [0u8; 14];
+    sub_tlv[1] = 10; // sub-TLV type: L2 Address Group
+    sub_tlv[2..4].copy_from_slice(&10u16.to_be_bytes());
+    let value = reflected_control_value_with_sub_tlv(&sub_tlv);
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let ctx = make_ctx(None); // local_macs empty; must not matter — sub-TLV is ignored
+
+    let response = stamp_suite::receiver::process_stamp_packet(
+        &packet,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        ),
+        64,
+        false,
+        &ctx,
+    )
+    .expect("packet must be reflected");
+
+    assert_eq!(
+        response.return_path_action,
+        ReturnPathAction::Normal,
+        "a malformed L2 sub-TLV length must not suppress the reply"
+    );
+}
+
+/// L2 and L3 Address Group sub-TLVs may appear on the same Type 12 TLV; each
+/// gates independently (draft §3.1.1/§3.1.2), so both must match for the
+/// packet to be reflected.
+#[test]
+fn a1_reflected_control_l2_and_l3_both_match_replies_normally() {
+    use stamp_suite::tlv::ReturnPathAction;
+
+    let local_mac: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let local_ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+
+    let l2 = l2_group_sub_tlv([0xFF; 6], local_mac);
+    let l3 = [
+        0u8, 11, 0x00, 0x08, // header: flags, type=11, length=8
+        24, 0x00, 0x00, 0x00, // prefix_len + reserved
+        192, 0, 2, 0, // prefix 192.0.2.0/24 — matches 192.0.2.1
+    ];
+    let mut sub_tlvs = Vec::new();
+    sub_tlvs.extend_from_slice(&l2);
+    sub_tlvs.extend_from_slice(&l3);
+    let value = reflected_control_value_with_sub_tlv(&sub_tlvs);
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let local_macs = [local_mac];
+    let local_addrs = [local_ip];
+    let mut ctx = make_ctx(None);
+    ctx.local_macs = &local_macs;
+    ctx.local_addresses = &local_addrs;
+
+    let response = stamp_suite::receiver::process_stamp_packet(
+        &packet,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        ),
+        64,
+        false,
+        &ctx,
+    )
+    .expect("packet must be reflected");
+
+    assert_eq!(
+        response.return_path_action,
+        ReturnPathAction::Normal,
+        "both L2 and L3 matching must reflect normally"
+    );
+}
+
+/// When L2 and L3 Address Group sub-TLVs are both present and only the L2
+/// one fails to match, the packet must still be dropped (each sub-TLV gates
+/// independently — an L3 match does not override an L2 mismatch).
+#[test]
+fn a1_reflected_control_l2_fails_l3_matches_still_suppresses() {
+    use stamp_suite::tlv::ReturnPathAction;
+
+    let local_ip: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+
+    // L2 group requires a MAC the reflector does not have (local_macs empty).
+    let l2 = l2_group_sub_tlv([0xFF; 6], [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    let l3 = [
+        0u8, 11, 0x00, 0x08, 24, 0x00, 0x00, 0x00, 192, 0, 2, 0, // 192.0.2.0/24
+    ];
+    let mut sub_tlvs = Vec::new();
+    sub_tlvs.extend_from_slice(&l2);
+    sub_tlvs.extend_from_slice(&l3);
+    let value = reflected_control_value_with_sub_tlv(&sub_tlvs);
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let local_addrs = [local_ip];
+    let mut ctx = make_ctx(None); // local_macs empty
+    ctx.local_addresses = &local_addrs;
+
+    let response = stamp_suite::receiver::process_stamp_packet(
+        &packet,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        ),
+        64,
+        false,
+        &ctx,
+    )
+    .expect("packet still parsed, only reply is suppressed");
+
+    assert!(
+        matches!(response.return_path_action, ReturnPathAction::SuppressReply),
+        "an L2 mismatch must suppress the reply even when the L3 sub-TLV matches"
+    );
+}
+
 // ---------------------------------------------------------------------------
-// draft-ietf-ippm-stamp-ext-hdr §3.1 first-4-bytes selector — end to end
+// draft-ietf-ippm-stamp-ext-hdr-11 §5.1 Requested-field selector — end to end
 // (sender-built request TLV → reflector match against captured headers).
 
 #[test]
 fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
     // Two extension-header records of the SAME length (both 8 bytes), differing
-    // only in body: the §3.1 disambiguation case. The sender's non-zero
-    // selector must pull back only the matching header.
+    // only in body: the §5.1 disambiguation case. The sender's non-zero
+    // Requested field must pull back only the matching header. Since the
+    // selector equals rec_b's first 4 on-wire octets, the reflected value is
+    // Requested(rec_b[..4]) + Reflected(rec_b[4..]) == rec_b.
     let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
     let rec_b = [0x3Cu8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
     let mut blob = Vec::new();
@@ -1204,7 +1495,7 @@ fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
         ipv6_ext_headers: blob,
     };
 
-    // Sender request carrying rec_b's first 4 bytes as the selector.
+    // Sender request carrying rec_b's first 4 on-wire bytes as the Requested field.
     let request = ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0xB1, 0xB2], 8);
     let packet = build_unauth_packet(&tlv_to_chain(&request.to_raw()));
 
@@ -1218,19 +1509,24 @@ fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
         .find(|t| t.tlv_type == TlvType::ReflectedIpv6ExtHdr)
         .expect("Type 246 must be echoed");
     assert_eq!(
-        echoed.value,
-        rec_b.to_vec(),
-        "only the matched header returned"
+        &echoed.value[..4],
+        &[0x3C, 0x00, 0xB1, 0xB2],
+        "Requested field preserved exactly as received"
     );
     assert_eq!(
-        echoed.flags.to_byte() & 0x80,
+        &echoed.value[4..],
+        &rec_b[4..],
+        "Reflected field = matched header[4..]"
+    );
+    assert_eq!(
+        echoed.flags.to_byte() & 0x90,
         0x00,
-        "selector match → no U-flag"
+        "selector match → neither U nor C flag"
     );
 }
 
 #[test]
-fn reflected_ipv6_ext_hdr_selector_no_match_sets_u_flag_end_to_end() {
+fn reflected_ipv6_ext_hdr_selector_no_match_sets_c_flag_end_to_end() {
     let captured = CapturedHeaders {
         fixed_header: Vec::new(),
         ipv6_ext_headers: vec![0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6],
@@ -1249,8 +1545,18 @@ fn reflected_ipv6_ext_hdr_selector_no_match_sets_u_flag_end_to_end() {
         .find(|t| t.tlv_type == TlvType::ReflectedIpv6ExtHdr)
         .expect("Type 246 must be echoed");
     assert_eq!(
+        echoed.flags.to_byte() & 0x10,
+        0x10,
+        "Requested field matching no captured header → C flag per -11 §5.1"
+    );
+    assert_eq!(
         echoed.flags.to_byte() & 0x80,
-        0x80,
-        "selector matching no captured header → U-flag per §3.1"
+        0x00,
+        "must NOT set the U flag under -11"
+    );
+    assert_eq!(
+        &echoed.value[..4],
+        &[0x3C, 0x00, 0xFF, 0xFF],
+        "Requested field preserved on failure"
     );
 }

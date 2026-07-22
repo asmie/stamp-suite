@@ -1,20 +1,42 @@
 //! Reflected Fixed Header Data TLV (Type 247) per
-//! draft-ietf-ippm-stamp-ext-hdr §4.
+//! draft-ietf-ippm-stamp-ext-hdr-11 §§3.2, 5.2.
 //!
-//! The Session-Sender transmits this TLV with the Length set to the IP
-//! header length (20 for IPv4, 40 for IPv6) and the Value initialised to
-//! zeros, per the draft. The reflector overwrites those zero bytes with
-//! the bytes of the received IP fixed header. When the reflector backend
-//! cannot capture raw IP headers (nix UDP-socket backend) it sets the
-//! U-flag and clears the Value.
+//! # Wire Format (-11 Figure 7)
 //!
-//! Receivers identify IPv4 vs IPv6 by the Version nibble in the first byte.
+//! ```text
+//!  0                   1                   2                   3
+//!  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |STAMP TLV Flags|  Type = 247   |         Length                |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |                  Requested Fixed Header Data                  |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |                  Reflected Fixed Header Data                  |
+//! ~                     (Length - 4 octets)                       ~
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! ```
 //!
-//! Per draft §3.2 the sender may pre-populate the first 4 bytes with a non-zero
-//! selector (see [`ReflectedFixedHdrTlv::request_with_selector`]); the
-//! reflector then copies the fixed header only if those 4 bytes match the
-//! received header, otherwise it sets the U-flag. A zero selector copies the
-//! header unconditionally.
+//! -11 splits the value into a fixed 4-octet **Requested** field and a
+//! **Reflected** field. Critically, `Length` stays 20 (IPv4) / 40 (IPv6) — it
+//! did NOT grow by 4 — so the Reflected field is only 16 / 36 octets and holds
+//! the IP header's bytes **from offset 4 onward**, never a full copy.
+//!
+//! The Session-Sender transmits the TLV with the Requested field set to either
+//! all zeros or a disambiguation selector (the target IP header's first 4
+//! octets) and the Reflected field zero-initialised. The reflector leaves the
+//! Requested field exactly as received and copies `header[4..]` into the
+//! Reflected field. When it cannot use the TLV (length mismatch, no data-plane
+//! access, or no header matches the Requested field) it sets the **C flag**
+//! (Conformance) and leaves the value as received — the pre-11 U-flag failure
+//! signalling is gone.
+//!
+//! Receivers identify IPv4 vs IPv6 by the Version nibble in the first byte
+//! (present only when the sender's Requested selector carried it).
+//!
+//! Per -11 §5.2 a non-zero Requested field (see
+//! [`ReflectedFixedHdrTlv::request_with_selector`]) disambiguates multiple IP
+//! headers of the same length by matching the header's first 4 octets; an
+//! all-zeros Requested field matches the first length-matching IP header.
 
 use std::net::IpAddr;
 
@@ -45,9 +67,11 @@ impl ReflectedFixedHdrTlv {
 
     /// Creates a sender request TLV sized for the destination's IP family.
     ///
-    /// Per draft-ietf-ippm-stamp-ext-hdr §4 the sender pre-allocates 20
-    /// (IPv4) or 40 (IPv6) zero bytes for the reflector to overwrite.
-    /// Only the address family is consulted; the address bytes are unused.
+    /// Per draft-ietf-ippm-stamp-ext-hdr-11 §5.2 the sender sets Length to 20
+    /// (IPv4) or 40 (IPv6): the first 4 octets are the all-zeros Requested
+    /// field and the remaining 16 / 36 are the zero-initialised Reflected
+    /// field. Only the address family is consulted; the address bytes are
+    /// unused.
     #[must_use]
     pub fn request_for(dest: IpAddr) -> Self {
         let bytes = match dest {
@@ -57,9 +81,11 @@ impl ReflectedFixedHdrTlv {
         Self::request_with_capacity(bytes)
     }
 
-    /// Creates a sender request TLV whose first bytes carry a match selector
-    /// (draft-ietf-ippm-stamp-ext-hdr §3.2), padded with zeros to `total_len`
-    /// (the IP fixed-header length). `total_len` is grown to fit `prefix`.
+    /// Creates a sender request TLV whose first 4 octets carry the Requested
+    /// selector (draft-ietf-ippm-stamp-ext-hdr-11 §5.2) — the target IP
+    /// header's first 4 octets — padded with the zero-initialised Reflected
+    /// field to `total_len` (the IP fixed-header length: 20 or 40).
+    /// `total_len` is grown to fit `prefix`.
     #[must_use]
     pub fn request_with_selector(prefix: &[u8], total_len: usize) -> Self {
         let mut header = vec![0u8; total_len.max(prefix.len())];

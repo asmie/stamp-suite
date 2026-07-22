@@ -43,6 +43,7 @@ fn make_ctx<'a>(
         hmac_key_set: None,
         require_hmac: false,
         session_manager: None,
+        stateful_reflector: true,
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: hmac_key.is_some(),
         strict_packets: false,
@@ -55,6 +56,7 @@ fn make_ctx<'a>(
         packet_addr_info: addr_info,
         last_reflection: None,
         local_addresses,
+        local_macs: &[],
         sender_port: 12345,
         return_path_allow_alternate: false,
         reflector_member_link_id: None,
@@ -269,8 +271,10 @@ fn ipv6_ber_clean_channel_zero_errors() {
 
 #[test]
 fn ipv6_location_tlv_populated_from_addr_info() {
-    use stamp_suite::tlv::LocationTlv;
-    let loc = LocationTlv::new().to_raw();
+    use stamp_suite::tlv::{LocationSubType, LocationTlv};
+    // RFC 8972 §4.2 request: generic Source IP (7) + Destination IP (4).
+    let loc = LocationTlv::request().to_raw();
+    let request_len = loc.value.len();
     let packet = build_unauth_packet(&loc.to_bytes());
 
     let addr_info = PacketAddressInfo {
@@ -289,11 +293,21 @@ fn ipv6_location_tlv_populated_from_addr_info() {
         .iter()
         .find(|t| t.tlv_type == TlvType::Location)
         .expect("Location TLV echoed");
-    // Reflector populates IPv6 sub-TLVs — at minimum the Value grew beyond
-    // the placeholder/empty sender request.
-    assert!(
-        !echoed.value.is_empty(),
-        "reflector must populate Location sub-TLVs with IPv6 addresses"
+    // §4.2.2: Length preserved, and the generic requests answered with the
+    // specific IPv6 variants (Source IPv6 = 9, Destination IPv6 = 6).
+    assert_eq!(
+        echoed.value.len(),
+        request_len,
+        "reflector must preserve the Location TLV Length"
+    );
+    let loc_parsed = LocationTlv::from_raw(echoed).expect("parse Location TLV");
+    assert_eq!(loc_parsed.dest_port, 862);
+    assert_eq!(loc_parsed.src_port, 12345);
+    assert_eq!(loc_parsed.sub_tlvs.len(), 2);
+    assert_eq!(loc_parsed.sub_tlvs[0].sub_type, LocationSubType::SourceIpv6);
+    assert_eq!(
+        loc_parsed.sub_tlvs[1].sub_type,
+        LocationSubType::DestinationIpv6
     );
 }
 

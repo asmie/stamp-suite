@@ -116,23 +116,46 @@ impl TimestampMethod {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimestampInfoTlv {
-    /// Synchronization source of the sender.
+    /// Synchronization source of the reflector's ingress timestamp (T2).
+    /// Per RFC 8972 §4.3 every field of this TLV describes the reflector;
+    /// there is no field for the sender's own clock.
     pub sync_src_in: SyncSource,
-    /// Timestamp method of the sender.
+    /// Timestamp method of the reflector's ingress timestamp (T2).
     pub timestamp_in: TimestampMethod,
-    /// Synchronization source of the reflector.
+    /// Synchronization source of the reflector's egress timestamp (T3).
     pub sync_src_out: SyncSource,
-    /// Timestamp method of the reflector.
+    /// Timestamp method of the reflector's egress timestamp (T3).
     pub timestamp_out: TimestampMethod,
 }
 
 impl TimestampInfoTlv {
-    /// Creates a new Timestamp Info TLV for the sender.
+    /// Creates a Timestamp Info TLV from explicit reflector clock information.
+    ///
+    /// The `sync_src`/`ts_method` arguments populate the ingress ("In") fields.
+    /// This is a reflector-/test-side constructor: senders MUST NOT use it to
+    /// build a request (see [`Self::request`]).
     #[must_use]
     pub fn new(sync_src: SyncSource, ts_method: TimestampMethod) -> Self {
         Self {
             sync_src_in: sync_src,
             timestamp_in: ts_method,
+            sync_src_out: SyncSource::Unknown(0),
+            timestamp_out: TimestampMethod::Unknown(0),
+        }
+    }
+
+    /// Builds the Session-Sender's request form of the TLV.
+    ///
+    /// Per RFC 8972 §4.3, the Session-Sender "MUST NOT fill any information
+    /// fields except for STAMP TLV Flags, Type, and Length. All other fields
+    /// MUST be filled with zeroes." All four value octets describe the
+    /// reflector's clocks, so the sender leaves every one of them zero; the
+    /// reflector fills them in on reflection.
+    #[must_use]
+    pub fn request() -> Self {
+        Self {
+            sync_src_in: SyncSource::Unknown(0),
+            timestamp_in: TimestampMethod::Unknown(0),
             sync_src_out: SyncSource::Unknown(0),
             timestamp_out: TimestampMethod::Unknown(0),
         }
@@ -220,6 +243,18 @@ mod tests {
         assert_eq!(TimestampMethod::SwLocal.to_byte(), 2);
         assert_eq!(TimestampMethod::ControlPlane.to_byte(), 3);
         assert_eq!(TimestampMethod::Unknown(0).to_byte(), 0);
+    }
+
+    #[test]
+    fn test_request_tlv_all_fields_zeroed() {
+        // RFC 8972 §4.3: "The Session-Sender MUST NOT fill any information
+        // fields except for STAMP TLV Flags, Type, and Length. All other
+        // fields MUST be filled with zeroes." All four value octets describe
+        // the reflector's ingress/egress clocks; the sender has no field of
+        // its own to fill, so the request TLV value MUST be all zeroes.
+        let raw = TimestampInfoTlv::request().to_raw();
+        assert_eq!(raw.tlv_type, TlvType::TimestampInfo);
+        assert_eq!(raw.value, vec![0, 0, 0, 0]);
     }
 
     #[test]

@@ -50,6 +50,11 @@ pub mod hwtstamp;
 /// STAMP packet structures and serialization.
 #[doc(hidden)]
 pub mod packets;
+/// AIMD congestion-response controller for CE-marked replies (F2,
+/// draft-ietf-ippm-stamp-cos-ecn-01 §3.4). Pure state machine; driven by
+/// `sender::run_sender`.
+#[doc(hidden)]
+pub mod rate_control;
 /// Session Reflector implementations.
 #[doc(hidden)]
 pub mod receiver;
