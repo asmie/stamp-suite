@@ -41,7 +41,6 @@ hwtstamp = []
 [dependencies]
 chrono = "0.4.44"
 clap = { version = "4.6", features = ["derive", "env"] }
-env_logger = "0.11"
 log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "tracing-log"] }

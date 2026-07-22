@@ -38,7 +38,7 @@ The Session-Sender transmits test packets to the Session-Reflector, which timest
 Pre-built `.deb` and `.rpm` packages for x86_64 and aarch64 are attached to each tagged release on [GitHub Releases](https://github.com/asmie/stamp-suite/releases). The packages install to `/usr/bin/stamp-suite`, ship a hardened systemd unit, and create a dedicated `stamp` system user.
 
 ```bash
-# Debian / Ubuntu (filename embeds the version, e.g. stamp-suite_0.8.0-1_amd64.deb)
+# Debian / Ubuntu (filename embeds the version, e.g. stamp-suite_<version>-1_amd64.deb)
 sudo apt install ./stamp-suite_*_amd64.deb
 
 # Fedora / RHEL
@@ -81,7 +81,9 @@ nix develop      # dev shell with cargo, rustc, rustfmt, clippy
 | `ttl-nix` | Force the nix backend (Linux/macOS/BSD) |
 | `ttl-pnet` | Force the pnet raw-socket backend (requires `CAP_NET_RAW`) |
 | `metrics` | Enable Prometheus metrics endpoint |
+| `control` | Runtime control-plane REST API for reflector session/key management |
 | `snmp` | Enable SNMP AgentX sub-agent (Unix only) |
+| `hwtstamp` | Kernel and hardware-assisted timestamping support |
 
 The receiver backend choice is consequential — privileges, runtime deps, kernel filtering, observability all differ. See [doc/architecture.md#receiver-backends](doc/architecture.md#receiver-backends) for the full comparison.
 
