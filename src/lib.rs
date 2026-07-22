@@ -23,12 +23,12 @@ pub mod configuration;
 pub mod crypto;
 /// Error estimate encoding/decoding for timestamps.
 pub mod error_estimate;
-/// Hardware-assisted timestamping capability probe and mode selection
-/// (F1). The probe queries ETHTOOL_GET_TS_INFO on Linux (interface
-/// resolved from `--local-addr`); non-Linux platforms report "not
-/// supported". Packet timestamps themselves are still software — the
-/// kernel read path is a planned follow-up. See `doc/architecture.md`
-/// for operator details.
+/// Hardware-assisted timestamping support (F1). On Linux, kernel RX+TX
+/// timestamps via `SO_TIMESTAMPING` and `MSG_ERRQUEUE` (read via cmsg),
+/// with optional NIC hardware timestamping under `--hwtstamp on` via
+/// `SIOCSHWTSTAMP` (graceful fallback). macOS supports kernel RX timestamps
+/// only via `SO_TIMESTAMP`. Windows is not supported. The probe queries
+/// ETHTOOL_GET_TS_INFO on Linux. See `doc/architecture.md` for details.
 pub mod hwtstamp;
 /// STAMP packet structures and serialization.
 pub mod packets;
