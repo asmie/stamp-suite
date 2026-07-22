@@ -8,8 +8,73 @@ permissions:
   contents: write
 
 jobs:
+  # First job in the workflow — every other job needs this one, directly
+  # or transitively, so a tag that doesn't match every version source (or
+  # doesn't even package cleanly) never reaches build, test, publish, or
+  # the GitHub Release.
+  release-preflight:
+    name: Release Preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-preflight
+      - name: Check version consistency
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          changelog_version="$(grep -m1 -oP '^## \[\K[0-9]+\.[0-9]+\.[0-9]+(?=\])' CHANGELOG.md || true)"
+          # Extract version from Debian changelog; regex assumes X.Y.Z-N revision-suffix format
+          debian_version="$(head -n1 dist/debian/changelog | grep -oP '\(\K[0-9]+\.[0-9]+\.[0-9]+(?=-)' || true)"
+          openwrt_version="$(grep -m1 -oP '^PKG_VERSION:=\K.+' dist/openwrt/Makefile || true)"
+
+          echo "tag=v$tag_version  Cargo.toml=$cargo_version  CHANGELOG.md=$changelog_version  dist/debian/changelog=$debian_version  dist/openwrt/Makefile=$openwrt_version"
+
+          fail=0
+          check() {
+            local label="$1" value="$2"
+            if [ -z "$value" ]; then
+              echo "::error::Could not extract a version from $label"
+              fail=1
+            elif [ "$value" != "$tag_version" ]; then
+              echo "::error::Version mismatch: tag is v$tag_version but $label has $value (expected $tag_version)"
+              fail=1
+            fi
+          }
+
+          check "Cargo.toml"              "$cargo_version"
+          check "CHANGELOG.md"            "$changelog_version"
+          check "dist/debian/changelog"   "$debian_version"
+          check "dist/openwrt/Makefile"   "$openwrt_version"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "One or more files are out of sync with tag v$tag_version — see the ::error:: annotations above. Fix the stale file(s) and re-tag." >&2
+            exit 1
+          fi
+
+          echo "All version sources agree: $tag_version"
+      - name: Dry-run crates.io packaging
+        # Catches packaging errors (missing files, bad manifest metadata,
+        # include/exclude mistakes) before any build/test time is spent.
+        # This does NOT publish anything.
+        env:
+          # cargo publish requires a token even with --dry-run; value is never transmitted
+          CARGO_REGISTRY_TOKEN: unused-dry-run-placeholder
+        run: cargo publish --dry-run --locked
+
+  # Linux DEB/RPM packages (existing) plus a plain tarball per target
+  # (new — see the "Artifacts" work item). Kept as one job since it
+  # already builds the release binary for these targets.
   package:
     name: Package ${{ matrix.target }}
+    needs: [release-preflight]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -37,6 +102,15 @@ jobs:
         run: cargo deb --no-build --target ${{ matrix.target }}
       - name: Build RPM
         run: cargo generate-rpm --target ${{ matrix.target }}
+      - name: Assemble tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="stamp-suite-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/stamp-suite" "$stage/"
+          cp LICENSE README.md "$stage/"
+          tar -czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.target }}
@@ -44,10 +118,133 @@ jobs:
             target/${{ matrix.target }}/debian/*.deb
             target/${{ matrix.target }}/generate-rpm/*.rpm
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: stamp-suite-*.tar.gz
+          if-no-files-found: error
+
+  # macOS tarballs — new (Windows is explicitly out of scope for this
+  # work item). No DEB/RPM here, macOS has neither.
+  #
+  # --all-features is known-broken when building for darwin (metrics ->
+  # aws-lc-sys needs a native C toolchain quirk that doesn't hold up
+  # here); build the explicit, metrics-free feature list instead so the
+  # CoS/HW-timestamp/SNMP/control-plane surface is still covered.
+  package-macos:
+    name: Package macOS (${{ matrix.target }})
+    needs: [release-preflight]
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ttl-nix,snmp,hwtstamp,control
+      - name: Assemble tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="stamp-suite-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/stamp-suite" "$stage/"
+          cp LICENSE README.md "$stage/"
+          tar -czf "${stage}.tar.gz" "$stage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: stamp-suite-*.tar.gz
+          if-no-files-found: error
+
+  # Full test suite + strict clippy on the tagged commit. Nothing has
+  # been proven to actually pass on this tag until this job is green;
+  # publish and release both depend on it (directly or transitively).
+  test-gate:
+    name: Test Gate
+    needs: [release-preflight]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-test-gate
+      - name: Test (all features)
+        run: cargo test --all-features
+      - name: Clippy (all features)
+        run: cargo clippy --all --all-features --tests -- -D warnings
+
+  # Publishes to crates.io. Gated by the `crates-io` GitHub Environment
+  # so a human has to click "approve" before this runs.
+  #
+  # ---- ONE-TIME REPO-OWNER SETUP (not performed by this workflow) ----
+  # 1. Settings -> Environments -> New environment -> name it exactly
+  #    `crates-io` -> add yourself (or the release approvers) as a
+  #    required reviewer. This is what makes the publish job wait for a
+  #    manual approval click before it runs.
+  # 2. On crates.io: crate "stamp-suite" -> Settings -> Trusted
+  #    Publishing -> add a GitHub Actions publisher with:
+  #      repository:  asmie/stamp-suite
+  #      workflow:    release.yml
+  #      environment: crates-io
+  #    This is what lets the OIDC exchange below (via
+  #    rust-lang/crates-io-auth-action) mint a short-lived publish
+  #    token — no long-lived API token is stored anywhere in the repo.
+  # ----------------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    needs: [test-gate]
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write # required for crates.io Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to crates.io (OIDC)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: cargo publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      # ---- FALLBACK — only if Trusted Publishing (OIDC) genuinely -----
+      # ---- cannot be enabled for this repo -----------------------------
+      # Remove the two steps above and the `id-token: write` permission,
+      # then publish with a long-lived token stored as a repo secret:
+      #
+      #   - name: cargo publish
+      #     run: cargo publish --locked
+      #     env:
+      #       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      #
+      # Trusted Publishing is strongly preferred: there is no secret to
+      # rotate or leak, and crates.io can attest the token only ever
+      # came from this exact repo/workflow/environment.
+      # -------------------------------------------------------------------
 
   release:
     name: Publish GitHub Release
-    needs: package
+    needs: [package, package-macos, publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -55,9 +252,21 @@ jobs:
           path: dist
           pattern: packages-*
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: tarball-*
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/**/*.deb
             dist/**/*.rpm
+            dist/**/*.tar.gz
+            dist/SHA256SUMS
           generate_release_notes: true
