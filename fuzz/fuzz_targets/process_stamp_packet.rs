@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 use stamp_suite::clock_format::ClockFormat;
 use stamp_suite::configuration::TlvHandlingMode;
 use stamp_suite::receiver::{process_stamp_packet, ProcessingContext};
-use stamp_suite::tlv::PacketAddressInfo;
+use stamp_suite::tlv::{PacketAddressInfo, TimestampMethod};
 
 // Exercises the full reflector processing pipeline end-to-end with
 // attacker-controlled bytes: parse -> reflector flag re-derive / HMAC ->
@@ -20,6 +20,7 @@ use stamp_suite::tlv::PacketAddressInfo;
 // panic-isolating wrapper) so libFuzzer surfaces any reachable panic.
 fuzz_target!(|data: &[u8]| {
     let local: [IpAddr; 1] = [IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))];
+    let local_macs: [[u8; 6]; 1] = [[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]];
     let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345);
 
     // Build a context with the optional/amplifying features turned on so those
@@ -46,7 +47,11 @@ fuzz_target!(|data: &[u8]| {
         }),
         last_reflection: Some((0, 0)),
         local_addresses: &local,
+        local_macs: &local_macs,
         sender_port: src.port(),
+        rx_timestamp: Some(1),
+        rx_method: TimestampMethod::SwLocal,
+        tx_method: TimestampMethod::SwLocal,
         return_path_allow_alternate: true,
         reflector_member_link_id: Some(1),
         captured_headers: None,
