@@ -284,6 +284,30 @@ pub struct Configuration {
     #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..4))]
     pub ecn: u8,
 
+    /// Multiplicative backoff factor for the AIMD congestion-response
+    /// controller (draft-ietf-ippm-stamp-cos-ecn-01 §3.4): each time a
+    /// CE-marked reply is observed, the send interval is multiplied by this
+    /// factor (capped at `--ecn-max-delay`). Must be > 1.0. Active only
+    /// when `--cos` is set and `--ecn` requests ECT0 (2) or ECT1 (1) —
+    /// see `--ecn-max-delay` / `--ecn-recovery-step` for the other two
+    /// AIMD parameters.
+    #[clap(long, default_value_t = 2.0)]
+    pub ecn_backoff_factor: f64,
+
+    /// Upper bound (milliseconds) on the AIMD-controlled send interval —
+    /// caps how far repeated CE observations can back the sender off
+    /// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4). Must be >= `--send-delay`
+    /// when the controller is active.
+    #[clap(long, default_value_t = 30_000)]
+    pub ecn_max_delay: u32,
+
+    /// Additive recovery step (milliseconds): after each reply that was
+    /// NOT CE-marked, the AIMD-controlled send interval shrinks by this
+    /// amount, down to (never below) `--send-delay`
+    /// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+    #[clap(long, default_value_t = 50)]
+    pub ecn_recovery_step: u32,
+
     /// IP TTL (IPv4) / Hop Limit (IPv6) for outgoing test packets (1-255).
     /// When unset the operating-system default is used. The sender applies
     /// this to the egress socket (Linux/macOS only).
@@ -297,15 +321,38 @@ pub struct Configuration {
     #[clap(long, value_enum)]
     pub malformed: Option<MalformedMode>,
 
-    /// Enable Access Report TLV (RFC 8972 §4.6) with the given Access ID (0-15).
+    /// Enable Access Report TLV (RFC 8972 §4.6) with the given Access ID
+    /// (1-15; the field is 4 bits wide). Only 1 (3GPP Network) and 2
+    /// (Non-3GPP Network) are currently defined; 0 is never valid and is
+    /// rejected. Values 3-15 are accepted (the field may gain further
+    /// definitions) but log a startup warning since they are not yet a
+    /// recognized Access ID.
     /// The reflector echoes this TLV unchanged.
-    #[clap(long, value_parser = clap::value_parser!(u8).range(0..16))]
+    #[clap(long, value_parser = clap::value_parser!(u8).range(1..=15))]
     pub access_report: Option<u8>,
 
     /// Return code for Access Report TLV (default: 1 = available).
     /// Only used when --access-report is enabled.
     #[clap(long, default_value_t = 1)]
     pub access_return_code: u8,
+
+    /// Access Report TLV retransmission timer, in seconds (RFC 8972 §4.6:
+    /// "The default value of the retransmission timer for the Access
+    /// Report TLV SHOULD be three seconds"). The sender arms this timer
+    /// after sending a packet carrying the Access Report TLV and
+    /// retransmits it in the next test packet(s) if the timer expires
+    /// before the reflector's echo is received. Only used when
+    /// --access-report is enabled.
+    #[clap(long, default_value_t = crate::sender::DEFAULT_ACCESS_REPORT_TIMEOUT.as_secs() as u32, value_parser = clap::value_parser!(u32).range(1..=3600))]
+    pub access_report_timeout: u32,
+
+    /// Maximum number of Access Report TLV retransmissions before the
+    /// procedure is aborted (RFC 8972 §4.6: "This retransmission SHOULD be
+    /// repeated up to four times before the procedure is aborted"). 0
+    /// disables retransmission: the procedure aborts on the first missed
+    /// acknowledgment. Only used when --access-report is enabled.
+    #[clap(long, default_value_t = crate::sender::DEFAULT_ACCESS_REPORT_RETRIES, value_parser = clap::value_parser!(u32).range(0..=255))]
+    pub access_report_retries: u32,
 
     /// Enable Timestamp Information TLV (RFC 8972 §4.3).
     /// The sender includes its sync source and timestamp method;
@@ -363,6 +410,15 @@ pub struct Configuration {
     /// control verbosity in both modes.
     #[clap(long, value_enum, default_value_t = LogFormat::Text)]
     pub log_format: LogFormat,
+
+    /// Increase log verbosity (-v debug, -vv trace); RUST_LOG overrides.
+    /// Repeatable: absent keeps the current default (`RUST_LOG` if set,
+    /// otherwise `info`), one `-v` raises it to `debug`, two or more
+    /// (`-vv`, `-vvv`, ...) raise it to `trace`. An explicit `RUST_LOG`
+    /// environment variable always wins over `-v`, at any count -- see
+    /// `resolve_log_filter`.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
 
     /// Kernel/hardware timestamp handling (requires the "hwtstamp" build
     /// feature for the read paths). `auto` (default): kernel software
@@ -511,9 +567,10 @@ pub struct Configuration {
     pub reflected_control_interval_ns: u32,
 
     /// Append the IPv6 Extension Header Control sub-TLV
-    /// (draft-ietf-ippm-stamp-ext-hdr §5.3) to the Reflected Test Packet
-    /// Control TLV, asking the reflector NOT to attach received IPv6
-    /// extension headers to its reply packets (one-way measurement mode).
+    /// (draft-ietf-ippm-stamp-ext-hdr-11 §5.3) to the Reflected Test Packet
+    /// Control TLV. Under -11 this sub-TLV asks the reflector to add matching
+    /// IPv6 extension headers to its own reply packets; a reflector that cannot
+    /// do so returns the sub-TLV with the C flag set in its Sub-TLV Flags.
     /// Implies emitting the Reflected Control TLV even when
     /// `--reflected-control-count` is 1.
     #[clap(long)]
@@ -554,36 +611,39 @@ pub struct Configuration {
 
     /// Request that the reflector copy the received IP fixed header
     /// (IPv4: 20 bytes, IPv6: 40 bytes) back via TLV Type 247
-    /// (draft-ietf-ippm-stamp-ext-hdr §4). Reflectors built with the
+    /// (draft-ietf-ippm-stamp-ext-hdr-11 §§3.2, 5.2). Reflectors built with the
     /// `ttl-nix` backend cannot observe the IP header and will echo the
-    /// TLV with the U-flag set.
+    /// TLV with the C flag (Conformance) set.
     #[clap(long)]
     pub reflected_fixed_hdr: bool,
 
     /// Request that the reflector copy IPv6 Hop-by-Hop and Destination
     /// Options extension headers back via TLV Type 246
-    /// (draft-ietf-ippm-stamp-ext-hdr §3). Reflectors built with the
+    /// (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 5.1). Reflectors built with the
     /// `ttl-nix` backend cannot observe extension headers and will echo
-    /// the TLV with the U-flag set.
+    /// the TLV with the C flag (Conformance) set.
     #[clap(long)]
     pub reflected_ipv6_ext_hdr: bool,
 
-    /// Selector for the Type 246 request (draft-ietf-ippm-stamp-ext-hdr §3.1).
-    /// Hex string (e.g. "3c000102"); its bytes are placed at the start of the
-    /// request Value so the reflector returns only the matching extension
-    /// header (disambiguating multiple same-length headers). Byte 0 is the
-    /// header TYPE — `00` = Hop-by-Hop, `3c` = Destination Options — matching
-    /// the reflected representation, not the on-wire Next Header pointer.
+    /// Selector for the Type 246 Requested field
+    /// (draft-ietf-ippm-stamp-ext-hdr-11 §5.1). Hex string (e.g. "11000102");
+    /// its bytes populate the 4-octet Requested field so the reflector returns
+    /// only the matching extension header (disambiguating multiple same-length
+    /// headers). These are the target header's on-wire first 4 octets: byte 0
+    /// is the header's own Next Header field (naming what follows it), byte 1 is
+    /// HdrExtLen, then the first 2 option octets — NOT the header's own type.
     /// Must contain at least one non-zero byte. Requires
     /// `--reflected-ipv6-ext-hdr`.
     #[clap(long, value_name = "HEX")]
     pub reflected_ipv6_ext_hdr_selector: Option<String>,
 
-    /// Selector for the Type 247 request (draft-ietf-ippm-stamp-ext-hdr §3.2).
-    /// Hex string whose bytes must match the start of the received IP fixed
-    /// header; on mismatch the reflector echoes the TLV with the U-flag set.
-    /// At most 20 bytes (IPv4) or 40 bytes (IPv6) by the destination family,
-    /// and at least one non-zero byte. Requires `--reflected-fixed-hdr`.
+    /// Selector for the Type 247 Requested field
+    /// (draft-ietf-ippm-stamp-ext-hdr-11 §5.2). Hex string whose bytes populate
+    /// the 4-octet Requested field and must match the start of the received IP
+    /// fixed header; on mismatch the reflector echoes the TLV with the C flag
+    /// (Conformance) set. At most 20 bytes (IPv4) or 40 bytes (IPv6) by the
+    /// destination family, and at least one non-zero byte. Requires
+    /// `--reflected-fixed-hdr`.
     #[clap(long, value_name = "HEX")]
     pub reflected_fixed_hdr_selector: Option<String>,
 }
@@ -673,18 +733,99 @@ impl Configuration {
                 self.ecn
             )));
         }
+        // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: the AIMD congestion-response
+        // controller's own parameters must describe an actual backoff/
+        // recovery cycle, regardless of whether the controller ends up
+        // active this run (mirrors dscp/ecn above, which are validated
+        // unconditionally too).
+        if !self.ecn_backoff_factor.is_finite() || self.ecn_backoff_factor <= 1.0 {
+            return Err(ConfigurationError::InvalidConfiguration(format!(
+                "ecn_backoff_factor value {} must be a finite number greater than 1.0 \
+                 (a CE observation must actually increase the send interval)",
+                self.ecn_backoff_factor
+            )));
+        }
+        if self.ecn_recovery_step == 0 {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "ecn_recovery_step must be >= 1 (millisecond); 0 would never recover \
+                 the send interval back toward --send-delay"
+                    .to_string(),
+            ));
+        }
+        if self.ecn_max_delay == 0 {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "ecn_max_delay must be >= 1 (millisecond)".to_string(),
+            ));
+        }
+        // Only checked when the controller is actually active: an
+        // unrelated `--send-delay` bump should not spuriously break a run
+        // that never touches --cos/--ecn.
+        if self.cos
+            && matches!(self.ecn, 1 | 2)
+            && (self.ecn_max_delay as u64) < (self.send_delay as u64)
+        {
+            return Err(ConfigurationError::InvalidConfiguration(format!(
+                "ecn_max_delay ({} ms) must be >= send_delay ({} ms) when the AIMD \
+                 congestion-response controller is active (--cos with --ecn 1 or 2)",
+                self.ecn_max_delay, self.send_delay
+            )));
+        }
         if self.ttl == Some(0) {
             return Err(ConfigurationError::InvalidConfiguration(
                 "ttl value 0 is invalid (must be 1-255)".to_string(),
             ));
         }
         if let Some(id) = self.access_report {
+            // RFC 8972 §4.6: the Access ID is a 4-bit field; 0 has no
+            // defined meaning and is never valid. Only 1 (3GPP Network)
+            // and 2 (Non-3GPP Network) are currently defined, but values
+            // up to the 4-bit maximum (15) are accepted so a future
+            // registry allocation is not blocked by this CLI — they just
+            // get a startup warning since they're not (yet) recognized.
+            if id == 0 {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "access_report value 0 is invalid: RFC 8972 §4.6 defines no Access ID 0 \
+                     (valid range is 1-15)"
+                        .to_string(),
+                ));
+            }
             if id > 15 {
                 return Err(ConfigurationError::InvalidConfiguration(format!(
                     "access_report value {} exceeds maximum of 15",
                     id
                 )));
             }
+            if id > 2 {
+                // validate() runs before init_logging(), so a log::warn! here
+                // would be silently dropped; pre-init diagnostics go to stderr
+                // like the other configuration messages on this path.
+                eprintln!(
+                    "warning: access_report Access ID {id} is not in the RFC 8972 §4.6 registry \
+                     (only 1=3GPP Network and 2=Non-3GPP Network are currently defined); \
+                     proceeding since it may be a future registry allocation"
+                );
+            }
+        }
+        // RFC 8972 §4.6: "An implementation MUST provide control of the
+        // retransmission timer value and the number of retransmissions."
+        // clap's `.range()` only runs on CLI-parsed values; duplicate the
+        // bounds here so a TOML-sourced value is validated too.
+        if self.access_report_timeout == 0 {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "access_report_timeout must be >= 1 (seconds)".to_string(),
+            ));
+        }
+        if self.access_report_timeout > 3600 {
+            return Err(ConfigurationError::InvalidConfiguration(format!(
+                "access_report_timeout value {} exceeds maximum of 3600 seconds",
+                self.access_report_timeout
+            )));
+        }
+        if self.access_report_retries > 255 {
+            return Err(ConfigurationError::InvalidConfiguration(format!(
+                "access_report_retries value {} exceeds maximum of 255",
+                self.access_report_retries
+            )));
         }
         if let Some(id) = self.micro_session_id {
             if id == 0 {
@@ -761,7 +902,7 @@ impl Configuration {
             ));
         }
 
-        // draft-ietf-ippm-stamp-ext-hdr §3.1/§3.2 header-reflection selectors.
+        // draft-ietf-ippm-stamp-ext-hdr-11 §5.1/§5.2 Requested-field selectors.
         if let Some(sel) = &self.reflected_ipv6_ext_hdr_selector {
             if !self.reflected_ipv6_ext_hdr {
                 return Err(ConfigurationError::InvalidConfiguration(
@@ -919,10 +1060,15 @@ impl Configuration {
         merge!(cos);
         merge!(dscp);
         merge!(ecn);
+        merge!(ecn_backoff_factor);
+        merge!(ecn_max_delay);
+        merge!(ecn_recovery_step);
         merge_opt!(ttl);
         merge_opt!(malformed);
         merge_opt!(access_report);
         merge!(access_return_code);
+        merge!(access_report_timeout);
+        merge!(access_report_retries);
         merge!(timestamp_info);
         merge!(direct_measurement);
         merge!(location);
@@ -1015,10 +1161,15 @@ pub struct FileConfiguration {
     pub cos: Option<bool>,
     pub dscp: Option<u8>,
     pub ecn: Option<u8>,
+    pub ecn_backoff_factor: Option<f64>,
+    pub ecn_max_delay: Option<u32>,
+    pub ecn_recovery_step: Option<u32>,
     pub ttl: Option<u8>,
     pub malformed: Option<MalformedMode>,
     pub access_report: Option<u8>,
     pub access_return_code: Option<u8>,
+    pub access_report_timeout: Option<u32>,
+    pub access_report_retries: Option<u32>,
     pub timestamp_info: Option<bool>,
     pub direct_measurement: Option<bool>,
     pub location: Option<bool>,
@@ -1105,10 +1256,15 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "cos": { "type": "boolean" },
     "dscp": { "type": "integer", "minimum": 0, "maximum": 63 },
     "ecn":  { "type": "integer", "minimum": 0, "maximum": 3 },
+    "ecn_backoff_factor": { "type": "number", "exclusiveMinimum": 1.0 },
+    "ecn_max_delay": { "type": "integer", "minimum": 1 },
+    "ecn_recovery_step": { "type": "integer", "minimum": 1 },
     "ttl":  { "type": "integer", "minimum": 1, "maximum": 255 },
     "malformed": { "enum": ["bad-flags", "bad-length"] },
-    "access_report": { "type": "integer", "minimum": 0, "maximum": 15 },
+    "access_report": { "type": "integer", "minimum": 1, "maximum": 15 },
     "access_return_code": { "type": "integer", "minimum": 0, "maximum": 15 },
+    "access_report_timeout": { "type": "integer", "minimum": 1, "maximum": 3600 },
+    "access_report_retries": { "type": "integer", "minimum": 0, "maximum": 255 },
     "timestamp_info": { "type": "boolean" },
     "direct_measurement": { "type": "boolean" },
     "location": { "type": "boolean" },
@@ -1157,14 +1313,45 @@ pub fn is_auth(mode: AuthMode) -> bool {
     mode.is_authenticated()
 }
 
+/// Resolves the effective `tracing-subscriber` env-filter directive from
+/// the `-v`/`-vv` repeat count and the current `RUST_LOG` value (or lack
+/// thereof).
+///
+/// Precedence (highest first):
+/// 1. `env`, when `Some` and non-empty: an operator who has already set
+///    `RUST_LOG` (possibly with per-module directives like
+///    `stamp_suite=trace,tower=warn`) is assumed to know what they want,
+///    and `-v` must not silently override it.
+/// 2. The verbosity count: `0` keeps the historic default (`"info"`),
+///    `1` (`-v`) raises it to `"debug"`, `2` or more (`-vv`, `-vvv`, ...)
+///    raises it to `"trace"`.
+///
+/// Pure and free of any global/subscriber/process-environment state, so
+/// it is unit-testable on its own; callers are expected to pass
+/// `std::env::var("RUST_LOG").ok()` for `env`.
+#[must_use]
+pub fn resolve_log_filter(verbose: u8, env: Option<&str>) -> String {
+    if let Some(value) = env {
+        if !value.is_empty() {
+            return value.to_string();
+        }
+    }
+    match verbose {
+        0 => "info",
+        1 => "debug",
+        _ => "trace",
+    }
+    .to_string()
+}
+
 /// Maximum length of a Type 246 selector: one full IPv6 extension header,
-/// `(255 + 1) * 8` bytes (draft-ietf-ippm-stamp-ext-hdr §3.1).
+/// `(255 + 1) * 8` bytes (draft-ietf-ippm-stamp-ext-hdr-11 §5.1).
 pub(crate) const MAX_IPV6_EXT_HDR_SELECTOR_BYTES: usize = 2048;
 
 /// Decodes a hex selector string (optional `0x` prefix) into bytes for the
-/// draft-ietf-ippm-stamp-ext-hdr §3.1/§3.2 header-reflection request TLVs.
+/// draft-ietf-ippm-stamp-ext-hdr-11 §5.1/§5.2 Requested-field request TLVs.
 /// Requires non-empty input with at least one non-zero byte — an all-zero
-/// selector would be indistinguishable from "no selector requested".
+/// Requested field would be indistinguishable from "no selector requested".
 pub(crate) fn decode_selector(s: &str) -> Result<Vec<u8>, String> {
     let trimmed = s
         .strip_prefix("0x")
@@ -1823,10 +2010,15 @@ mod tests {
             "cos",
             "dscp",
             "ecn",
+            "ecn_backoff_factor",
+            "ecn_max_delay",
+            "ecn_recovery_step",
             "ttl",
             "malformed",
             "access_report",
             "access_return_code",
+            "access_report_timeout",
+            "access_report_retries",
             "timestamp_info",
             "direct_measurement",
             "location",
@@ -2422,6 +2614,95 @@ mod tests {
         assert!(err.to_string().contains("ecn"));
     }
 
+    // ===== AIMD congestion-response (F2, draft-ietf-ippm-stamp-cos-ecn-01 §3.4) =====
+
+    #[test]
+    fn test_validate_rejects_ecn_backoff_factor_not_greater_than_one() {
+        let err = load_from_args(&["test", "--ecn-backoff-factor", "1.0"])
+            .expect_err("backoff factor of exactly 1.0 must fail (no actual backoff)");
+        assert!(err.to_string().contains("ecn_backoff_factor"));
+    }
+
+    #[test]
+    fn test_validate_rejects_ecn_backoff_factor_below_one() {
+        let err = load_from_args(&["test", "--ecn-backoff-factor", "0.5"])
+            .expect_err("backoff factor < 1.0 must fail");
+        assert!(err.to_string().contains("ecn_backoff_factor"));
+    }
+
+    #[test]
+    fn test_validate_rejects_ecn_backoff_factor_non_finite() {
+        let err = load_from_args(&["test", "--ecn-backoff-factor", "inf"])
+            .expect_err("non-finite backoff factor must fail");
+        assert!(err.to_string().contains("ecn_backoff_factor"));
+    }
+
+    #[test]
+    fn test_validate_rejects_ecn_recovery_step_zero() {
+        let err = load_from_args(&["test", "--ecn-recovery-step", "0"])
+            .expect_err("recovery step 0 must fail (would never recover)");
+        assert!(err.to_string().contains("ecn_recovery_step"));
+    }
+
+    #[test]
+    fn test_validate_rejects_ecn_max_delay_zero() {
+        let err =
+            load_from_args(&["test", "--ecn-max-delay", "0"]).expect_err("max delay 0 must fail");
+        assert!(err.to_string().contains("ecn_max_delay"));
+    }
+
+    #[test]
+    fn test_validate_rejects_ecn_max_delay_below_send_delay_when_active() {
+        let err = load_from_args(&[
+            "test",
+            "--cos",
+            "--ecn",
+            "1",
+            "--send-delay",
+            "50000",
+            "--ecn-max-delay",
+            "1000",
+        ])
+        .expect_err("ecn_max_delay below send_delay while the controller is active must fail");
+        assert!(err.to_string().contains("ecn_max_delay"));
+    }
+
+    #[test]
+    fn test_validate_allows_ecn_max_delay_below_send_delay_when_controller_inactive() {
+        // No --cos: the controller never activates, so the default
+        // ecn_max_delay (30000ms) being smaller than a large --send-delay
+        // must not spuriously fail validation.
+        let conf = load_from_args(&["test", "--send-delay", "50000"])
+            .expect("controller inactive, cross-check must not apply");
+        assert_eq!(conf.send_delay, 50000);
+    }
+
+    #[test]
+    fn test_validate_allows_ecn_max_delay_below_send_delay_when_ecn_zero() {
+        // --cos set but --ecn left at its default (0 = Not-ECT): the
+        // controller is inactive (activation requires ECT0/ECT1), so this
+        // must not fail either.
+        let conf = load_from_args(&[
+            "test",
+            "--cos",
+            "--send-delay",
+            "50000",
+            "--ecn-max-delay",
+            "1000",
+        ])
+        .expect("controller inactive when ecn=0, cross-check must not apply");
+        assert_eq!(conf.send_delay, 50000);
+    }
+
+    #[test]
+    fn test_validate_accepts_default_ecn_aimd_parameters() {
+        let conf = load_from_args(&["test", "--cos", "--ecn", "1"])
+            .expect("defaults must satisfy validate()");
+        assert!((conf.ecn_backoff_factor - 2.0).abs() < f64::EPSILON);
+        assert_eq!(conf.ecn_max_delay, 30_000);
+        assert_eq!(conf.ecn_recovery_step, 50);
+    }
+
     #[test]
     fn test_validate_rejects_out_of_range_access_report_from_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -2430,6 +2711,152 @@ mod tests {
         let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
             .expect_err("access_report > 15 must fail");
         assert!(err.to_string().contains("access_report"));
+    }
+
+    /// RFC 8972 §4.6: the Access ID field has no defined value of 0 — only
+    /// 1 (3GPP) and 2 (Non-3GPP) are defined. 0 must always be rejected,
+    /// whether supplied on the CLI (clap's `range` parser) or via the TOML
+    /// file (the duplicated `validate()` check).
+    ///
+    /// Uses `try_get_matches_from` rather than the `load_from_args` helper:
+    /// `Configuration::command().get_matches_from` calls `process::exit` on
+    /// a parse error instead of returning a `Result`, which would abort the
+    /// whole test binary.
+    #[test]
+    fn test_access_report_cli_rejects_zero() {
+        let result =
+            Configuration::command().try_get_matches_from(["test", "--access-report", "0"]);
+        assert!(
+            result.is_err(),
+            "--access-report 0 must be rejected by the CLI parser"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_access_report_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "access_report = 0\n").unwrap();
+        let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
+            .expect_err("access_report == 0 must fail (no defined Access ID 0, RFC 8972 §4.6)");
+        assert!(err.to_string().contains("access_report"));
+    }
+
+    /// Values 1 (3GPP) and 2 (Non-3GPP) are the RFC 8972 §4.6-defined
+    /// Access IDs and must be accepted without any error.
+    #[test]
+    fn test_access_report_accepts_defined_registry_values() {
+        for value in ["1", "2"] {
+            let conf = load_from_args(&["test", "--access-report", value])
+                .unwrap_or_else(|e| panic!("--access-report {value} must be accepted: {e}"));
+            assert_eq!(conf.access_report, Some(value.parse().unwrap()));
+        }
+    }
+
+    /// Values 3-15 are not currently defined by RFC 8972 §4.6, but the
+    /// field is a 4-bit wire value and a future registry allocation must
+    /// not be blocked by the CLI. They are accepted (with a startup
+    /// warning logged, not asserted here — no log-capture harness in this
+    /// crate) rather than rejected outright.
+    #[test]
+    fn test_access_report_accepts_undefined_registry_values_within_4_bits() {
+        for value in ["3", "15"] {
+            let conf = load_from_args(&["test", "--access-report", value])
+                .unwrap_or_else(|e| panic!("--access-report {value} must be accepted: {e}"));
+            assert_eq!(conf.access_report, Some(value.parse().unwrap()));
+        }
+    }
+
+    /// The field is 4 bits wide: 16 and above must still be rejected.
+    #[test]
+    fn test_access_report_cli_rejects_above_4_bit_range() {
+        let result =
+            Configuration::command().try_get_matches_from(["test", "--access-report", "16"]);
+        assert!(
+            result.is_err(),
+            "--access-report 16 exceeds the 4-bit field width and must be rejected"
+        );
+    }
+
+    /// RFC 8972 §4.6: "The default value of the retransmission timer for
+    /// the Access Report TLV SHOULD be three seconds."
+    #[test]
+    fn test_access_report_timeout_default_is_three_seconds() {
+        let conf = load_from_args(&["test"]).unwrap();
+        assert_eq!(conf.access_report_timeout, 3);
+    }
+
+    /// RFC 8972 §4.6: "This retransmission SHOULD be repeated up to four
+    /// times before the procedure is aborted."
+    #[test]
+    fn test_access_report_retries_default_is_four() {
+        let conf = load_from_args(&["test"]).unwrap();
+        assert_eq!(conf.access_report_retries, 4);
+    }
+
+    /// RFC 8972 §4.6: "An implementation MUST provide control of the
+    /// retransmission timer value and the number of retransmissions" —
+    /// both must be overridable via the CLI.
+    #[test]
+    fn test_access_report_timeout_and_retries_are_configurable() {
+        let conf = load_from_args(&[
+            "test",
+            "--access-report-timeout",
+            "10",
+            "--access-report-retries",
+            "2",
+        ])
+        .unwrap();
+        assert_eq!(conf.access_report_timeout, 10);
+        assert_eq!(conf.access_report_retries, 2);
+    }
+
+    #[test]
+    fn test_access_report_timeout_cli_rejects_zero() {
+        let result =
+            Configuration::command().try_get_matches_from(["test", "--access-report-timeout", "0"]);
+        assert!(
+            result.is_err(),
+            "--access-report-timeout 0 must be rejected by the CLI parser"
+        );
+    }
+
+    #[test]
+    fn test_access_report_retries_accepts_zero() {
+        // 0 is a legitimate operator choice: abort immediately on the first
+        // missed acknowledgment instead of retransmitting.
+        let conf = load_from_args(&["test", "--access-report-retries", "0"]).unwrap();
+        assert_eq!(conf.access_report_retries, 0);
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_access_report_timeout_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "access_report_timeout = 0\n").unwrap();
+        let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
+            .expect_err("access_report_timeout == 0 must fail");
+        assert!(err.to_string().contains("access_report_timeout"));
+    }
+
+    #[test]
+    fn test_validate_rejects_out_of_range_access_report_timeout_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "access_report_timeout = 99999\n").unwrap();
+        let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
+            .expect_err("access_report_timeout > 3600 must fail");
+        assert!(err.to_string().contains("access_report_timeout"));
+    }
+
+    #[test]
+    fn test_validate_rejects_out_of_range_access_report_retries_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "access_report_retries = 99999\n").unwrap();
+        let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
+            .expect_err("access_report_retries > 255 must fail");
+        assert!(err.to_string().contains("access_report_retries"));
     }
 
     #[test]
@@ -2616,5 +3043,65 @@ mod tests {
         .expect_err("hmac_key + hmac_key_file must be rejected");
         assert!(err.to_string().contains("hmac_key"));
         assert!(err.to_string().contains("hmac_key_file"));
+    }
+
+    #[test]
+    fn test_verbose_flag_defaults_to_zero() {
+        let conf = Configuration::parse_from(["test"]);
+        assert_eq!(conf.verbose, 0);
+    }
+
+    #[test]
+    fn test_verbose_flag_counts() {
+        let conf = Configuration::parse_from(["test", "-v"]);
+        assert_eq!(conf.verbose, 1);
+
+        let conf = Configuration::parse_from(["test", "-vv"]);
+        assert_eq!(conf.verbose, 2);
+
+        let conf = Configuration::parse_from(["test", "-vvv"]);
+        assert_eq!(conf.verbose, 3);
+
+        // Long form is repeatable too, and combines with the short form.
+        let conf = Configuration::parse_from(["test", "--verbose", "--verbose"]);
+        assert_eq!(conf.verbose, 2);
+        let conf = Configuration::parse_from(["test", "-v", "--verbose"]);
+        assert_eq!(conf.verbose, 2);
+    }
+
+    #[test]
+    fn test_resolve_log_filter_default_is_info() {
+        assert_eq!(resolve_log_filter(0, None), "info");
+    }
+
+    #[test]
+    fn test_resolve_log_filter_single_v_is_debug() {
+        assert_eq!(resolve_log_filter(1, None), "debug");
+    }
+
+    #[test]
+    fn test_resolve_log_filter_double_v_and_beyond_is_trace() {
+        assert_eq!(resolve_log_filter(2, None), "trace");
+        assert_eq!(resolve_log_filter(5, None), "trace");
+    }
+
+    #[test]
+    fn test_resolve_log_filter_rust_log_env_overrides_verbose() {
+        // An explicit, non-empty RUST_LOG always wins over -v/-vv, no
+        // matter how many times the flag was repeated.
+        assert_eq!(resolve_log_filter(0, Some("warn")), "warn");
+        assert_eq!(
+            resolve_log_filter(2, Some("stamp_suite=trace,tower=warn")),
+            "stamp_suite=trace,tower=warn"
+        );
+    }
+
+    #[test]
+    fn test_resolve_log_filter_empty_rust_log_env_falls_back_to_verbose() {
+        // An empty RUST_LOG (e.g. present in the environment but set to
+        // the empty string) must not be treated as "explicitly set" --
+        // fall back to the -v/-vv-derived level instead.
+        assert_eq!(resolve_log_filter(0, Some("")), "info");
+        assert_eq!(resolve_log_filter(1, Some("")), "debug");
     }
 }

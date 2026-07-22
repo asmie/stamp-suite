@@ -11,14 +11,16 @@ use stamp_suite::{receiver, sender};
 /// `tracing-log` feature in Cargo.toml) so the migration from
 /// `env_logger` is transparent to the rest of the codebase.
 ///
-/// Verbosity continues to be controlled by `RUST_LOG`; the new
+/// Verbosity is controlled by `RUST_LOG` when set, otherwise by the
+/// `-v`/`-vv` count (see `configuration::resolve_log_filter`); the
 /// `--log-format` flag selects between human-readable text (default,
 /// matches the historic `env_logger` output) and one-line JSON for
 /// structured log shippers.
-fn init_logging(format: LogFormat) {
+fn init_logging(format: LogFormat, verbose: u8) {
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter_str = resolve_log_filter(verbose, std::env::var("RUST_LOG").ok().as_deref());
+    let filter = EnvFilter::try_new(&filter_str).unwrap_or_else(|_| EnvFilter::new("info"));
 
     match format {
         LogFormat::Text => {
@@ -60,7 +62,7 @@ async fn main() {
         return;
     }
 
-    init_logging(conf.log_format);
+    init_logging(conf.log_format, conf.verbose);
 
     // Probe the NIC's timestamping capabilities (ETHTOOL_GET_TS_INFO on the
     // interface owning --local-addr) and report honestly. The kernel

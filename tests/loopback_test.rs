@@ -513,3 +513,116 @@ async fn test_loopback_ipv6() {
 
     assert!(reflector_handle.await.unwrap(), "Reflector should succeed");
 }
+
+/// RFC 8972 §4.2 Location TLV round trip over IPv4.
+///
+/// Mirrors `tests/loopback_ipv6_test.rs`'s
+/// `ipv6_location_tlv_populated_from_addr_info`, which exists but has no
+/// IPv4 counterpart. Regression coverage for a byte-reversed IPv4
+/// destination address found via cross-implementation testing (local):
+/// the nix backend's raw `IP_PKTINFO` extraction (`extract_dst_addr_from_cmsgs`
+/// in `src/receiver/nix.rs`) double-converted `ipi_addr.s_addr` (already
+/// network-order) through `to_be_bytes()`, turning 127.0.0.1 into
+/// 1.0.0.127. That specific code path is unit-tested directly in
+/// `src/receiver/nix.rs`'s test module (it needs a hand-built
+/// `libc::in_pktinfo`, unavailable from an integration test); this test
+/// instead drives `process_stamp_packet` directly and checks the
+/// Destination IPv4 sub-TLV octets end-to-end, guarding the higher layer
+/// that consumes the extracted address.
+#[test]
+fn test_location_tlv_ipv4_round_trip() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use stamp_suite::configuration::TlvHandlingMode;
+    use stamp_suite::receiver::{process_stamp_packet, ProcessingContext, UNAUTH_BASE_SIZE};
+    use stamp_suite::tlv::{
+        LocationSubType, LocationTlv, PacketAddressInfo, TimestampMethod, TlvList, TlvType,
+        TypedTlv,
+    };
+
+    let loc = LocationTlv::request().to_raw();
+    let request_len = loc.value.len();
+
+    let mut packet = assemble_unauth_packet(0);
+    packet.sequence_number = 1;
+    let mut data = packet.to_bytes().to_vec();
+    data.extend_from_slice(&loc.to_bytes());
+
+    let addr_info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        src_port: 12345,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        dst_port: 862,
+    };
+
+    let ctx = ProcessingContext {
+        clock_source: ClockFormat::NTP,
+        error_estimate_wire: 0,
+        hmac_key: None,
+        hmac_key_set: None,
+        require_hmac: false,
+        session_manager: None,
+        stateful_reflector: true,
+        tlv_mode: TlvHandlingMode::Echo,
+        verify_tlv_hmac: false,
+        strict_packets: false,
+        #[cfg(feature = "metrics")]
+        metrics_enabled: false,
+        received_dscp: 0,
+        received_ecn: 0,
+        reflector_rx_count: None,
+        reflector_tx_count: None,
+        packet_addr_info: Some(addr_info),
+        last_reflection: None,
+        local_addresses: &[],
+        local_macs: &[],
+        sender_port: 12345,
+        return_path_allow_alternate: false,
+        reflector_member_link_id: None,
+        captured_headers: None,
+        reflected_control_max_count: 16,
+        reflected_control_max_size: 1500,
+        reflected_control_min_interval_ns: 1_000,
+        rx_timestamp: None,
+        rx_method: TimestampMethod::SwLocal,
+        tx_method: TimestampMethod::SwLocal,
+    };
+
+    let src: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    let response =
+        process_stamp_packet(&data, src, 64, false, &ctx).expect("reflector must respond");
+    let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).expect("parse response");
+    let echoed = parsed
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| t.tlv_type == TlvType::Location)
+        .expect("Location TLV echoed");
+    assert_eq!(
+        echoed.value.len(),
+        request_len,
+        "reflector must preserve the Location TLV Length"
+    );
+
+    let loc_parsed = LocationTlv::from_raw(echoed).expect("parse Location TLV");
+    assert_eq!(loc_parsed.dest_port, 862);
+    assert_eq!(loc_parsed.src_port, 12345);
+    assert_eq!(loc_parsed.sub_tlvs.len(), 2);
+    assert_eq!(loc_parsed.sub_tlvs[0].sub_type, LocationSubType::SourceIpv4);
+    assert_eq!(
+        loc_parsed.sub_tlvs[1].sub_type,
+        LocationSubType::DestinationIpv4
+    );
+
+    // The regression: the Destination IPv4 octets must come back as
+    // 127.0.0.1, not byte-reversed (1.0.0.127).
+    assert_eq!(
+        &loc_parsed.sub_tlvs[1].value[0..4],
+        &[127, 0, 0, 1],
+        "Destination IPv4 sub-TLV must not be byte-reversed"
+    );
+    assert_eq!(
+        &loc_parsed.sub_tlvs[0].value[0..4],
+        &[127, 0, 0, 1],
+        "Source IPv4 sub-TLV must not be byte-reversed"
+    );
+}

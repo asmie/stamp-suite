@@ -24,7 +24,7 @@ use crate::{
 use crate::tlv::ReturnPathAction;
 
 use super::{
-    load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
+    cos_unable_fallback_tos, load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
     recompute_response_tlv_hmac, set_cos_policy_rejected, set_return_path_u_flag_in_response,
     ProcessingContext, ReceiverSharedState, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
@@ -259,6 +259,12 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     // Start with the configured bind address; if wildcard, enumerate interface addresses.
     let local_addresses = super::build_local_addresses(conf.local_addr);
+
+    // Build local MAC addresses for the Reflected Test Packet Control TLV's
+    // L2 Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
+    // §3.1.1). Unlike `local_addresses`, this always enumerates every
+    // interface's hardware address regardless of the bind address.
+    let local_macs = super::build_local_macs();
 
     println!(
         "STAMP Reflector listening on {} (nix mode, real TTL)",
@@ -505,6 +511,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                         } else {
                             None
                         },
+                        stateful_reflector: conf.stateful_reflector,
                         tlv_mode: conf.tlv_mode,
                         verify_tlv_hmac: conf.verify_tlv_hmac,
                         strict_packets: conf.strict_packets,
@@ -517,12 +524,14 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                         packet_addr_info,
                         last_reflection,
                         local_addresses: &local_addresses,
+                        local_macs: &local_macs,
                         sender_port: src_addr.port(),
                         return_path_allow_alternate: conf.return_path_allow_alternate,
                         reflector_member_link_id: conf.reflector_member_link_id,
                         // nix UDP-socket backend cannot observe raw IP headers.
-                        // draft-ietf-ippm-stamp-ext-hdr TLV 246/247 requests are
-                        // echoed with U-flag set (done in apply_semantic_tlv_processing).
+                        // draft-ietf-ippm-stamp-ext-hdr-11 TLV 246/247 requests are
+                        // echoed with the C flag (Conformance) set — case (b),
+                        // done in apply_semantic_tlv_processing.
                         captured_headers: None,
                         reflected_control_max_count: shared
                             .caps
@@ -576,55 +585,54 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     // Only call setsockopt if TOS value changed (reduces syscall overhead under load)
                     if tos != last_tos {
                         let fd = tokio_socket.as_raw_fd();
-                        let tos_val: libc::c_int = tos as libc::c_int;
-                        let result = if is_ipv6 {
-                            unsafe {
-                                libc::setsockopt(
-                                    fd,
-                                    libc::IPPROTO_IPV6,
-                                    libc::IPV6_TCLASS,
-                                    &tos_val as *const _ as *const libc::c_void,
-                                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                                )
+                        match apply_socket_tos(fd, is_ipv6, tos) {
+                            Ok(()) => {
+                                last_tos = tos;
                             }
-                        } else {
-                            unsafe {
-                                libc::setsockopt(
-                                    fd,
-                                    libc::IPPROTO_IP,
-                                    libc::IP_TOS,
-                                    &tos_val as *const _ as *const libc::c_void,
-                                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                                )
-                            }
-                        };
-                        if result < 0 {
-                            if has_cos_request {
-                                log::debug!(
-                                    "Failed to set IP_TOS/IPV6_TCLASS to {}: {}",
-                                    tos,
-                                    std::io::Error::last_os_error()
-                                );
-                                // Set RP flag in CoS TLV to indicate policy rejection (RFC 8972 §5.2)
-                                let base_size = if use_auth {
-                                    AUTH_BASE_SIZE
-                                } else {
-                                    UNAUTH_BASE_SIZE
-                                };
-                                if set_cos_policy_rejected(&mut response.data, base_size) {
-                                    // RP mutation invalidates the TLV HMAC — recompute
-                                    if let Some(ref key) = hmac_key {
-                                        recompute_response_tlv_hmac(
-                                            &mut response.data,
-                                            base_size,
-                                            key,
-                                        );
+                            Err(e) => {
+                                if has_cos_request {
+                                    log::debug!(
+                                        "Failed to set IP_TOS/IPV6_TCLASS to {}: {}",
+                                        tos,
+                                        e
+                                    );
+                                    // Set RP flag in CoS TLV to indicate policy rejection (RFC 8972 §5.2)
+                                    let base_size = if use_auth {
+                                        AUTH_BASE_SIZE
+                                    } else {
+                                        UNAUTH_BASE_SIZE
+                                    };
+                                    if set_cos_policy_rejected(&mut response.data, base_size) {
+                                        // RP mutation invalidates the TLV HMAC — recompute
+                                        if let Some(ref key) = hmac_key {
+                                            recompute_response_tlv_hmac(
+                                                &mut response.data,
+                                                base_size,
+                                                key,
+                                            );
+                                        }
+                                    }
+
+                                    // draft-ietf-ippm-stamp-cos-ecn-01 §3.2 MUST: even
+                                    // though the requested DSCP1/EC1 TOS could not be
+                                    // applied, best-effort re-apply with the reply's
+                                    // ECN bits forced to 0b00 (Not-ECT) rather than
+                                    // leaving the previous, possibly non-zero, ECN
+                                    // value on the wire.
+                                    let fallback_tos = cos_unable_fallback_tos(received_dscp);
+                                    if fallback_tos != last_tos {
+                                        match apply_socket_tos(fd, is_ipv6, fallback_tos) {
+                                            Ok(()) => last_tos = fallback_tos,
+                                            Err(e2) => log::debug!(
+                                                "cos-ecn-01 zero-ECN fallback TOS {} also failed: {}",
+                                                fallback_tos,
+                                                e2
+                                            ),
+                                        }
                                     }
                                 }
+                                // Don't update last_tos further on failure - retry next time
                             }
-                            // Don't update last_tos on failure - retry next time
-                        } else {
-                            last_tos = tos;
                         }
                     }
 
@@ -861,6 +869,40 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     }
 }
 
+/// Applies an IP TOS / IPv6 Traffic Class value to the reflector's egress
+/// socket. Shared by the primary CoS TLV (DSCP1/EC1) application attempt
+/// and the draft-ietf-ippm-stamp-cos-ecn-01 §3.2 zero-ECN fallback retry
+/// (see [`super::cos_unable_fallback_tos`]).
+fn apply_socket_tos(fd: std::os::fd::RawFd, is_ipv6: bool, tos: u8) -> std::io::Result<()> {
+    let tos_val: libc::c_int = tos as libc::c_int;
+    let result = if is_ipv6 {
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_TCLASS,
+                &tos_val as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        }
+    } else {
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_TOS,
+                &tos_val as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        }
+    };
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// Extract TTL from control messages received via recvmsg.
 ///
 /// Returns `None` if TTL/HopLimit could not be extracted from the control messages.
@@ -1001,8 +1043,7 @@ fn extract_dst_addr_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>)
     for cmsg in cmsgs {
         match cmsg {
             ControlMessageOwned::Ipv4PacketInfo(pktinfo) => {
-                let octets = pktinfo.ipi_addr.s_addr.to_be_bytes();
-                return Some(IpAddr::V4(Ipv4Addr::from(octets)));
+                return Some(IpAddr::V4(ipv4_addr_from_pktinfo(&pktinfo)));
             }
             ControlMessageOwned::Ipv6PacketInfo(pktinfo) => {
                 return Some(IpAddr::V6(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)));
@@ -1014,5 +1055,71 @@ fn extract_dst_addr_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>)
     None
 }
 
+/// Convert the destination address carried in an `IP_PKTINFO` control
+/// message into an [`Ipv4Addr`].
+///
+/// `libc::in_pktinfo::ipi_addr.s_addr` is filled in by the kernel and is
+/// already in network byte order (the raw in-memory bytes are the address
+/// octets in order, e.g. `[127, 0, 0, 1]`). It must NOT be round-tripped
+/// through [`u32::to_be_bytes`]: on a little-endian host that performs an
+/// extra, unwanted byte-order flip on top of the one the kernel already
+/// did, silently reversing the octets (127.0.0.1 becomes 1.0.0.127).
+/// [`u32::to_ne_bytes`] copies the underlying byte layout as-is and is
+/// correct on both little- and big-endian hosts — mirroring how the IPv6
+/// sibling path below reads `s6_addr` directly without any conversion.
+fn ipv4_addr_from_pktinfo(pktinfo: &libc::in_pktinfo) -> Ipv4Addr {
+    Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_ne_bytes())
+}
+
 // `build_local_addresses` now lives in `receiver::mod` and is shared between
 // backends (see [`super::build_local_addresses`]).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cross-implementation testing (local) surfaced a byte-reversed IPv4
+    /// destination address in the Location TLV: a packet sent to
+    /// 127.0.0.1 was reported as 1.0.0.127. Root cause was an extra
+    /// `to_be_bytes()` round trip on a value (`ipi_addr.s_addr`) that the
+    /// kernel already delivers in network byte order.
+    ///
+    /// This hand-builds a `libc::in_pktinfo` the way the kernel would fill
+    /// it in for a packet destined to 127.0.0.1 — `s_addr`'s raw bytes are
+    /// the octets in wire order — and asserts extraction recovers
+    /// 127.0.0.1 unchanged.
+    #[test]
+    fn ipv4_pktinfo_extraction_preserves_octet_order() {
+        let s_addr = u32::from(Ipv4Addr::new(127, 0, 0, 1)).to_be();
+        let pktinfo = libc::in_pktinfo {
+            ipi_ifindex: 0,
+            ipi_spec_dst: libc::in_addr { s_addr: 0 },
+            ipi_addr: libc::in_addr { s_addr },
+        };
+
+        let addr = ipv4_addr_from_pktinfo(&pktinfo);
+
+        assert_eq!(
+            addr,
+            Ipv4Addr::new(127, 0, 0, 1),
+            "extraction must not byte-reverse the destination address"
+        );
+    }
+
+    /// A second, non-palindromic-octet address makes any byte reversal
+    /// obvious (unlike 127.0.0.1's mostly-zero octets, though that case is
+    /// covered above since it was the exact regression report).
+    #[test]
+    fn ipv4_pktinfo_extraction_non_symmetric_address() {
+        let s_addr = u32::from(Ipv4Addr::new(192, 0, 2, 55)).to_be();
+        let pktinfo = libc::in_pktinfo {
+            ipi_ifindex: 0,
+            ipi_spec_dst: libc::in_addr { s_addr: 0 },
+            ipi_addr: libc::in_addr { s_addr },
+        };
+
+        let addr = ipv4_addr_from_pktinfo(&pktinfo);
+
+        assert_eq!(addr, Ipv4Addr::new(192, 0, 2, 55));
+    }
+}

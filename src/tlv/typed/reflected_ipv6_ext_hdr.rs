@@ -1,44 +1,45 @@
 //! Reflected IPv6 Extension Header Data TLV (Type 246) per
-//! draft-ietf-ippm-stamp-ext-hdr §3.
+//! draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 5.1.
 //!
-//! The sender pre-allocates a zero-filled Value of the size it expects the
-//! reflector to fill (one octet pair per extension-header option, plus body
-//! bytes). The reflector replaces those zeros with the bytes of received
-//! IPv6 Hop-by-Hop Options (NextHeader 0) and/or Destination Options
-//! (NextHeader 60) extension headers. When the reflector backend cannot
-//! capture raw IP headers (nix UDP-socket backend) it sets the U-flag and
-//! clears the Value.
-//!
-//! Capacity choice is the sender's: too small drops trailing options, too
-//! large just pads with zeros. IPv4 paths have no IPv6 extension headers,
-//! so the reflector returns the Value unchanged in that case.
-//!
-//! # Wire Format
+//! # Wire Format (-11 Figure 6)
 //!
 //! ```text
 //!  0                   1                   2                   3
 //!  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-//! | NextHeader=0  | HdrLen        |  ... Hop-by-Hop body ...      |
+//! |STAMP TLV Flags|  Type = 246   |         Length                |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-//! | NextHeader=60 | HdrLen        |  ... Destination body ...     |
+//! |               Requested IPv6 Extension Header Data            |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |               Reflected IPv6 Extension Header Data            |
+//! ~                     (Length - 4 octets)                       ~
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! ```
 //!
-//! Reflector concatenates every captured extension header starting with its
-//! NextHeader byte (protocol number from the preceding header) and its HdrLen
-//! byte followed by the remaining octets of that option header.
+//! -11 splits the value into two fields: a fixed 4-octet **Requested** field
+//! and a **Reflected** field of `Length - 4` octets, where `Length` equals the
+//! full target extension header's size (from its Next Header field onward).
 //!
-//! # Selector (draft §3.1)
+//! The sender sends the Requested field as either all zeros or a disambiguation
+//! selector (the target header's first 4 on-wire octets), with the Reflected
+//! field zero-initialised. The reflector leaves the Requested field exactly as
+//! received and copies the matched header's bytes **from offset 4 onward** into
+//! the Reflected field (`header[4..]`); the header's own first 4 octets are
+//! never written into the reply value. When the reflector cannot use the TLV
+//! (length mismatch, no data-plane access, or no header matches the Requested
+//! field) it sets the **C flag** (Conformance) and leaves the value as
+//! received — the pre-11 U-flag failure signalling is gone.
 //!
-//! When the sender pre-populates the first 4 bytes of the request Value with a
-//! non-zero pattern (see [`ReflectedIpv6ExtHdrTlv::request_with_selector`]),
-//! the reflector returns only the captured extension header whose first 4
-//! bytes match — disambiguating multiple headers of the same length — or sets
-//! the U-flag if none matches. Byte 0 of the selector is the header *type*
-//! (`0x00` Hop-by-Hop, `0x3C` Destination Options), matching the reflected
-//! representation above, not the on-wire Next Header pointer. A zero selector
-//! keeps the copy-everything behavior.
+//! # Selector / Requested field (-11 §5.1)
+//!
+//! A non-zero Requested field (see
+//! [`ReflectedIpv6ExtHdrTlv::request_with_selector`]) disambiguates multiple
+//! extension headers of the same length: the reflector matches it against the
+//! header's **on-wire first 4 octets** — byte 0 is the header's own Next Header
+//! field (naming what *follows* it), byte 1 is HdrExtLen, then the first 2
+//! option octets. An all-zeros Requested field matches the first
+//! length-matching header (for multiple Type 246 TLVs, the
+//! positionally-corresponding header in wire order, §3.1 rule 2).
 
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
@@ -60,10 +61,10 @@ pub struct ReflectedIpv6ExtHdrTlv {
 impl ReflectedIpv6ExtHdrTlv {
     /// Creates a sender request TLV with `bytes` zero octets of Value.
     ///
-    /// Per draft-ietf-ippm-stamp-ext-hdr §3 the sender sets the Length to
-    /// the IPv6 extension-header length the reflector will populate; the
-    /// caller picks `bytes` from the largest extension-header chain it
-    /// expects on the path.
+    /// Per draft-ietf-ippm-stamp-ext-hdr-11 §5.1 the sender sets the Length to
+    /// the target IPv6 extension-header size (from its Next Header field
+    /// onward). The first 4 octets are the all-zeros Requested field and the
+    /// remaining `bytes - 4` octets are the zero-initialised Reflected field.
     #[must_use]
     pub fn request_with_capacity(bytes: usize) -> Self {
         Self {
@@ -71,14 +72,15 @@ impl ReflectedIpv6ExtHdrTlv {
         }
     }
 
-    /// Creates a sender request TLV whose first bytes carry a match selector
-    /// (draft-ietf-ippm-stamp-ext-hdr §3.1) followed by zeros the reflector
-    /// fills. `capacity` is grown to fit `prefix` so the selector is never
-    /// truncated.
+    /// Creates a sender request TLV whose first 4 octets carry the Requested
+    /// selector (draft-ietf-ippm-stamp-ext-hdr-11 §5.1), followed by the
+    /// zero-initialised Reflected field the reflector fills. `capacity` is
+    /// grown to fit `prefix` so the selector is never truncated.
     ///
-    /// Byte 0 of the selector is the extension-header *type* (`0x00`
-    /// Hop-by-Hop, `0x3C` Destination Options), matching stamp-suite's
-    /// reflected representation — not the on-wire Next Header pointer.
+    /// The selector is the target header's **on-wire first 4 octets**: byte 0
+    /// is the header's own Next Header field (naming what follows it), byte 1
+    /// is HdrExtLen, then the first 2 option octets — NOT the header's own type
+    /// (which lives in the *preceding* Next Header pointer).
     #[must_use]
     pub fn request_with_selector(prefix: &[u8], capacity: usize) -> Self {
         let mut data = vec![0u8; capacity.max(prefix.len())];

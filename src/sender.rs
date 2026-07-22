@@ -17,19 +17,22 @@ use crate::{
         PacketAuthenticated, PacketUnauthenticated, ReflectedPacketAuthenticated,
         ReflectedPacketUnauthenticated,
     },
+    rate_control::{AimdController, AimdParams, AimdStats},
     receiver::{
         load_hmac_key, AUTH_BASE_SIZE, REFLECTED_AUTH_PACKET_HMAC_OFFSET, UNAUTH_BASE_SIZE,
     },
     session::Session,
-    stats::{OwdCollector, OwdSample, RttCollector, RttSample, StatsSnapshot},
+    stats::{
+        AccessReportOutcome, AccessReportSummary, CongestionSummary, OwdCollector, OwdSample,
+        RttCollector, RttSample, StatsSnapshot,
+    },
     time::{generate_timestamp, timestamp_to_nanos},
     tlv::{
         AccessReportTlv, BerBurstTlv, BerCountTlv, BerPatternTlv, ClassOfServiceTlv,
         DestinationNodeAddressTlv, DirectMeasurementTlv, ExtraPaddingTlv, FollowUpTelemetryTlv,
         LocationTlv, MicroSessionIdTlv, RawTlv, ReflectedControlTlv, ReflectedFixedHdrTlv,
-        ReflectedIpv6ExtHdrTlv, ReturnPathTlv, SyncSource, TimestampInfoTlv, TimestampMethod,
-        TlvList, TypedTlv, DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY, IPV4_FIXED_HEADER_SIZE,
-        IPV6_FIXED_HEADER_SIZE,
+        ReflectedIpv6ExtHdrTlv, ReturnPathTlv, TimestampInfoTlv, TlvList, TlvType, TypedTlv,
+        DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY, IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE,
     },
 };
 
@@ -54,10 +57,253 @@ struct SenderRecvContext<'a> {
     /// Used to validate that the reflector echoed the same sender ID back;
     /// `None` means the sender did not request Micro-session ID measurement.
     expected_sender_msid: Option<u16>,
+    /// Pre-known reflector member-link identifier (`--reflector-member-link-id`,
+    /// RFC 9534 §3.2-11/-12). When set, the reflected Reflector Micro-session ID
+    /// must equal it — validating the reflector's behaviour; a mismatching reply
+    /// is discarded. `None` means the reflector ID is not pre-known.
+    expected_reflector_msid: Option<u16>,
+    /// Zero-config latch for the Reflector Micro-session ID (RFC 9534
+    /// §3.2-11, unconditional requirement). When `expected_reflector_msid` is
+    /// `None` (no pre-known value configured), the first validly-received
+    /// reply's Reflector Micro-session ID is latched here and becomes the
+    /// expected value for the remainder of the session — subsequent replies
+    /// with a different reflector ID are discarded via the same
+    /// `ReflectorMsidMismatch` path used for the pre-known case. Persists
+    /// across `process_response` calls for the life of the sender session
+    /// (mirrors `pending`/`rtt_collector` below, not reset per packet).
+    latched_reflector_msid: &'a mut Option<u16>,
+    /// Access Report TLV retransmission state (RFC 8972 §4.6). `Some` only
+    /// when `--access-report` was set; `process_response` disarms its timer
+    /// when a reflected packet echoes the Access Report TLV (§4.6:
+    /// "This timer MUST be disarmed upon reception of the reflected STAMP
+    /// test packet that includes the Access Report TLV").
+    access_report_state: Option<&'a mut AccessReportRetransmitState>,
+    /// AIMD congestion-response state (draft-ietf-ippm-stamp-cos-ecn-01
+    /// §3.4). `Some` only when the sender requested ECN measurement;
+    /// `process_response` drives it with `on_ce_observed`/`on_clean_reply`
+    /// based on the reply's forward-path EC2 and/or reverse-path wire ECN.
+    congestion: Option<&'a mut CongestionState>,
     #[cfg(feature = "metrics")]
     metrics_enabled: bool,
     #[cfg(all(unix, feature = "snmp"))]
     snmp_stats: Option<&'a crate::snmp::state::SenderSnmpStats>,
+}
+
+/// RFC 8972 §4.6 default retransmission timer value: "The default value of
+/// the retransmission timer for the Access Report TLV SHOULD be three
+/// seconds." Single source of truth for both the state machine's own tests
+/// and the `--access-report-timeout` CLI default (`configuration.rs`).
+pub(crate) const DEFAULT_ACCESS_REPORT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// RFC 8972 §4.6 default retry budget: "This retransmission SHOULD be
+/// repeated up to four times before the procedure is aborted." Single
+/// source of truth for both the state machine's own tests and the
+/// `--access-report-retries` CLI default (`configuration.rs`).
+pub(crate) const DEFAULT_ACCESS_REPORT_RETRIES: u32 = 4;
+
+/// Retransmission state machine for the Access Report TLV (RFC 8972 §4.6).
+///
+/// Pure and socket-free: the sender's existing send/receive loop drives it
+/// with the `Instant` values it already has to hand via [`Self::tick`] (when
+/// deciding whether to attach the TLV to the packet about to be sent) and
+/// [`Self::acknowledge`] (when a reflected packet echoing the TLV is
+/// received). No timers, threads, or async machinery of its own — this is
+/// what makes it unit-testable without sockets or real waiting (`Instant`
+/// arithmetic is deterministic; tests advance time by adding a `Duration`
+/// rather than sleeping).
+///
+/// State machine, verbatim from RFC 8972 §4.6:
+/// > The Session-Sender MUST also arm a retransmission timer after sending
+/// > a test packet that includes the Access Report TLV. This timer MUST be
+/// > disarmed upon reception of the reflected STAMP test packet that
+/// > includes the Access Report TLV. In the event the timer expires before
+/// > such a packet is received, the Session-Sender MUST retransmit the
+/// > STAMP test packet that contains the Access Report TLV. This
+/// > retransmission SHOULD be repeated up to four times before the
+/// > procedure is aborted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AccessReportRetransmitState {
+    timeout: Duration,
+    max_retries: u32,
+    phase: AccessReportPhase,
+    retransmissions: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessReportPhase {
+    /// The Access Report TLV has not been sent yet.
+    NotStarted,
+    /// Sent (or retransmitted) and awaiting the reflected echo before
+    /// `deadline`. `attempt` is 0 for the original send, 1..=`max_retries`
+    /// for the Nth retransmission.
+    Armed { attempt: u32, deadline: Instant },
+    /// The reflector's echo was received before the retry budget was
+    /// exhausted; nothing further is sent.
+    Acknowledged,
+    /// The retry budget was exhausted without an acknowledgment; the
+    /// procedure is aborted and nothing further is sent (RFC 8972 §4.6:
+    /// "...before the procedure is aborted"). The measurement itself is
+    /// unaffected — only this sub-feature gives up.
+    Aborted,
+}
+
+impl AccessReportRetransmitState {
+    /// Creates a fresh, not-yet-armed state machine using the given
+    /// retransmission timer and retry budget (RFC 8972 §4.6: "An
+    /// implementation MUST provide control of the retransmission timer
+    /// value and the number of retransmissions").
+    fn new(timeout: Duration, max_retries: u32) -> Self {
+        Self {
+            timeout,
+            max_retries,
+            phase: AccessReportPhase::NotStarted,
+            retransmissions: 0,
+        }
+    }
+
+    /// Drives the state machine forward by one send-loop iteration. Call
+    /// this once per iteration, before deciding whether to build that
+    /// iteration's outgoing packet with the Access Report TLV attached.
+    ///
+    /// Returns `true` exactly when the TLV should be attached to *this*
+    /// packet: either the very first send, or a retransmission because the
+    /// timer expired without an acknowledgment. Returns `false` while
+    /// waiting on an armed timer that has not yet expired, and once the
+    /// procedure has been `Acknowledged` or `Aborted` (nothing further is
+    /// ever sent again).
+    fn tick(&mut self, now: Instant) -> bool {
+        match self.phase {
+            AccessReportPhase::NotStarted => {
+                self.phase = AccessReportPhase::Armed {
+                    attempt: 0,
+                    deadline: now + self.timeout,
+                };
+                true
+            }
+            AccessReportPhase::Armed { attempt, deadline } => {
+                if now < deadline {
+                    false
+                } else if attempt < self.max_retries {
+                    self.retransmissions += 1;
+                    self.phase = AccessReportPhase::Armed {
+                        attempt: attempt + 1,
+                        deadline: now + self.timeout,
+                    };
+                    true
+                } else {
+                    self.phase = AccessReportPhase::Aborted;
+                    false
+                }
+            }
+            AccessReportPhase::Acknowledged | AccessReportPhase::Aborted => false,
+        }
+    }
+
+    /// Disarms the retransmission timer on reception of a reflected packet
+    /// that echoes the Access Report TLV (RFC 8972 §4.6). A no-op unless
+    /// currently `Armed` — in particular, an ack cannot resurrect an already
+    /// `Aborted` procedure, and one arriving before anything was ever sent
+    /// (should not happen) is ignored rather than mis-recorded.
+    fn acknowledge(&mut self) {
+        if matches!(self.phase, AccessReportPhase::Armed { .. }) {
+            self.phase = AccessReportPhase::Acknowledged;
+        }
+    }
+
+    /// The current delivery outcome, for reporting in the sender's stats
+    /// summary. `NotStarted`/`Armed` both surface as `Pending` — from the
+    /// caller's perspective the report has not (yet) been confirmed
+    /// delivered either way.
+    fn outcome(&self) -> AccessReportOutcome {
+        match self.phase {
+            AccessReportPhase::Acknowledged => AccessReportOutcome::Acknowledged,
+            AccessReportPhase::Aborted => AccessReportOutcome::Aborted,
+            AccessReportPhase::NotStarted | AccessReportPhase::Armed { .. } => {
+                AccessReportOutcome::Pending
+            }
+        }
+    }
+
+    /// Number of retransmissions actually performed so far.
+    fn retransmissions(&self) -> u32 {
+        self.retransmissions
+    }
+
+    /// `true` once the procedure has reached a terminal state
+    /// (`Acknowledged` or `Aborted`) — nothing further will ever be sent or
+    /// waited for. Used by the sender's post-loop wait phase to know when
+    /// it can stop keeping the session alive on this state machine's
+    /// account (RFC 8972 §4.6).
+    fn is_terminal(&self) -> bool {
+        matches!(
+            self.phase,
+            AccessReportPhase::Acknowledged | AccessReportPhase::Aborted
+        )
+    }
+
+    /// The current retransmission deadline, if still `Armed`. Lets a caller
+    /// that just called [`Self::tick`] and got `false` back (not due yet)
+    /// know how long to sleep before calling `tick` again, instead of busy
+    /// polling.
+    fn armed_deadline(&self) -> Option<Instant> {
+        match self.phase {
+            AccessReportPhase::Armed { deadline, .. } => Some(deadline),
+            AccessReportPhase::NotStarted
+            | AccessReportPhase::Acknowledged
+            | AccessReportPhase::Aborted => None,
+        }
+    }
+
+    /// Builds the [`AccessReportSummary`] for [`StatsSnapshot::with_access_report`].
+    fn summary(&self) -> AccessReportSummary {
+        AccessReportSummary {
+            outcome: self.outcome(),
+            retransmissions: self.retransmissions(),
+        }
+    }
+}
+
+/// Congestion-response state driven by CE observations on reflected
+/// packets, per draft-ietf-ippm-stamp-cos-ecn-01 §3.4. `Some` only when the
+/// sender requested ECN measurement (`--cos` with `--ecn` requesting ECT0
+/// or ECT1) — the contexts in which reflected/reply CE feedback is
+/// meaningful, per the draft §3.4 activation conditions quoted on
+/// [`AimdController`].
+///
+/// Whether the same controller also scales the Reflected Test Packet
+/// Control TLV's interval (§3.4-3) is tracked separately by the send
+/// loop's own `scale_reflected_control` local — it needs to be known
+/// before this state exists (to decide whether the static TLV push at
+/// startup should be skipped), so duplicating it as a field here would
+/// just be a second, easily-desynced copy of the same bit.
+struct CongestionState {
+    controller: AimdController,
+}
+
+impl CongestionState {
+    fn new(params: AimdParams) -> Self {
+        Self {
+            controller: AimdController::new(params),
+        }
+    }
+
+    /// Builds the [`CongestionSummary`] for [`StatsSnapshot::with_congestion`].
+    fn summary(&self) -> CongestionSummary {
+        let AimdStats {
+            ce_observations,
+            backoffs_applied,
+            current_interval,
+            peak_interval,
+            base_interval,
+        } = self.controller.stats();
+        CongestionSummary {
+            ce_replies: ce_observations,
+            backoffs_applied,
+            current_interval_ms: current_interval.as_secs_f64() * 1000.0,
+            max_interval_reached_ms: peak_interval.as_secs_f64() * 1000.0,
+            base_interval_ms: base_interval.as_secs_f64() * 1000.0,
+        }
+    }
 }
 
 /// Applies the egress IP header options — DSCP/ECN (packed into the TOS /
@@ -116,6 +362,111 @@ fn apply_egress_ip_options(
     Ok(())
 }
 
+/// Enables `IP_RECVTOS` / `IPV6_RECVTCLASS` on the sender socket so a
+/// reply's on-wire ECN bits can be read back via `recvmsg` control
+/// messages — the reverse-path (reflector→sender) half of the congestion
+/// detection required by draft-ietf-ippm-stamp-cos-ecn-01 §3.4. Mirrors the
+/// receiver's own `IP_RECVTOS`/`IPV6_RECVTCLASS` setup
+/// (`receiver::nix::run_receiver`).
+///
+/// Best-effort: TOS reception is optional plumbing (see
+/// [`extract_reply_ecn_from_cmsgs`]), so a failure here only disables the
+/// reverse-path half of the congestion response — forward-path detection
+/// via the reflected CoS TLV's EC2 field (the "CoS:CE" marker in
+/// `validate_reflected_tlvs`'s status string) is unaffected either way.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn enable_reply_tos_reception(fd: std::os::fd::RawFd, is_ipv6: bool) -> std::io::Result<()> {
+    use nix::libc;
+
+    let enable: libc::c_int = 1;
+    let (level, name) = if is_ipv6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_RECVTCLASS)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_RECVTOS)
+    };
+    // SAFETY: `fd` is an open socket owned by the caller for the duration
+    // of the call; `enable` outlives the syscall and its length is passed
+    // explicitly.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            std::ptr::addr_of!(enable).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Extracts the on-wire TOS (IPv4) / Traffic Class (IPv6) byte from
+/// `recvmsg` control messages for a reply packet — the low 2 bits are the
+/// ECN codepoint a CE (0b11) value here signals reverse-path
+/// (reflector→sender) congestion, per draft-ietf-ippm-stamp-cos-ecn-01
+/// §3.4. Requires [`enable_reply_tos_reception`] to have been called on the
+/// socket first. Mirrors `receiver::nix::extract_tos_from_cmsgs` (Linux
+/// variant: `nix` exposes typed `ControlMessageOwned::Ipv4Tos`/`Ipv6TClass`
+/// cmsgs directly).
+#[cfg(target_os = "linux")]
+fn extract_reply_ecn_from_cmsgs(
+    msg: &nix::sys::socket::RecvMsg<nix::sys::socket::SockaddrStorage>,
+) -> Option<u8> {
+    use nix::sys::socket::ControlMessageOwned;
+
+    let cmsgs = msg.cmsgs().ok()?;
+    for cmsg in cmsgs {
+        match cmsg {
+            ControlMessageOwned::Ipv4Tos(tos) => return Some(tos & 0x03),
+            ControlMessageOwned::Ipv6TClass(tclass) => {
+                return Some((tclass.clamp(0, 255) as u8) & 0x03)
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// macOS variant of [`extract_reply_ecn_from_cmsgs`]: `nix` has no typed
+/// cmsg variant for `IP_RECVTOS`/`IPV6_RECVTCLASS` on this platform, so the
+/// raw `ControlMessageOwned::Unknown` payload is decoded by level/type,
+/// mirroring `receiver::nix::extract_tos_from_cmsgs`'s macOS variant.
+#[cfg(target_os = "macos")]
+fn extract_reply_ecn_from_cmsgs(
+    msg: &nix::sys::socket::RecvMsg<nix::sys::socket::SockaddrStorage>,
+) -> Option<u8> {
+    use nix::{libc, sys::socket::ControlMessageOwned};
+
+    let cmsgs = msg.cmsgs().ok()?;
+    for cmsg in cmsgs {
+        if let ControlMessageOwned::Unknown(ref ucmsg) = cmsg {
+            let level = ucmsg.cmsg_header.cmsg_level;
+            let cmsg_type = ucmsg.cmsg_header.cmsg_type;
+            let data = &ucmsg.data_bytes;
+
+            let tos = if level == libc::IPPROTO_IP && cmsg_type == libc::IP_RECVTOS {
+                Some(data)
+            } else if level == libc::IPPROTO_IPV6 && cmsg_type == libc::IPV6_TCLASS {
+                Some(data)
+            } else {
+                None
+            };
+            if let Some(data) = tos {
+                if data.len() >= 4 {
+                    let v = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+                    return Some((v.clamp(0, 255) as u8) & 0x03);
+                } else if !data.is_empty() {
+                    return Some(data[0] & 0x03);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Builds the wire bytes of one deliberately malformed TLV, used by the
 /// `--malformed` conformance-testing switch to exercise a reflector's
 /// RFC 8972 §4.2 handling. The TLV is appended after the packet's regular
@@ -154,6 +505,15 @@ pub async fn run_sender(
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let remote_addr: SocketAddr = (conf.remote_addr, conf.remote_port).into();
     let output_format = conf.output_format;
+
+    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: the AIMD congestion-response
+    // controller is active exactly when the sender requests ECN
+    // measurement — `--cos` with `--ecn` requesting ECT0 (2) or ECT1 (1).
+    // This single condition covers both directions the draft's MUSTs bind:
+    // the same `conf.ecn` value both marks the egress IP header (§3.4-1's
+    // "ECN field of the IP header") and becomes the CoS TLV's EC1 request
+    // field (§3.4-2/-3's "EC1 field").
+    let ecn_response_active = conf.cos && matches!(conf.ecn, 1 | 2);
 
     let empty_snapshot = || RttCollector::new().snapshot(0, 0);
 
@@ -200,6 +560,24 @@ pub async fn run_sender(
                 Err(e) => log::warn!("Failed to set egress IP options (DSCP/ECN/TTL): {e}"),
             }
         }
+
+        // draft-ietf-ippm-stamp-cos-ecn-01 §3.4 reverse-path detection:
+        // read back the reply packet's own on-wire ECN via recvmsg cmsgs
+        // (see `extract_reply_ecn_from_cmsgs`, used from `recv_packet`).
+        if ecn_response_active {
+            let is_ipv6 = socket.local_addr().is_ok_and(|a| a.is_ipv6());
+            match enable_reply_tos_reception(socket.as_raw_fd(), is_ipv6) {
+                Ok(()) => log::info!(
+                    "Reply ECN reception enabled (IP_RECVTOS/IPV6_RECVTCLASS) for \
+                     reverse-path congestion detection (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)"
+                ),
+                Err(e) => log::warn!(
+                    "Failed to enable reply ECN reception: {e} — reverse-path congestion \
+                     detection (wire ECN of replies) disabled; forward-path detection via the \
+                     reflected CoS TLV's EC2 field is unaffected"
+                ),
+            }
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -207,6 +585,13 @@ pub async fn run_sender(
             log::warn!(
                 "Egress DSCP/ECN/TTL marking is only supported on Linux/macOS; \
                  the outgoing IP header will use OS defaults"
+            );
+        }
+        if ecn_response_active {
+            log::warn!(
+                "Reverse-path ECN congestion detection (wire ECN of replies) requires \
+                 Linux/macOS; only forward-path detection via the reflected CoS TLV's EC2 \
+                 field is active on this platform (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)"
             );
         }
     }
@@ -305,8 +690,45 @@ pub async fn run_sender(
     let mut packets_sent: u32 = 0;
     let mut packets_received: u32 = 0;
     let mut packets_lost: u32 = 0;
+    // Zero-config latch for the Reflector Micro-session ID (RFC 9534
+    // §3.2-11): populated from the first validly-received reply when
+    // `--reflector-member-link-id` was not given; persists for the whole
+    // session so later replies are checked for self-consistency.
+    let mut latched_reflector_msid: Option<u16> = None;
     let mut recv_buf = [0u8; 1024];
     let timeout = Duration::from_secs(conf.timeout as u64);
+
+    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3: when the Reflected Test
+    // Packet Control TLV is also requested, its interval is scaled by the
+    // same AIMD controller — computed before the TLV-building section
+    // below so that section knows to skip its own (static) push and defer
+    // to the per-iteration scaled rebuild in the send loop instead.
+    let reflected_control_requested =
+        conf.reflected_control_count > 1 || conf.reflected_control_no_ext_hdr;
+    let scale_reflected_control = ecn_response_active && reflected_control_requested;
+
+    let mut congestion = ecn_response_active.then(|| {
+        let params = AimdParams {
+            base_interval: Duration::from_millis(conf.send_delay as u64),
+            backoff_factor: conf.ecn_backoff_factor,
+            max_interval: Duration::from_millis(conf.ecn_max_delay as u64),
+            recovery_step: Duration::from_millis(conf.ecn_recovery_step as u64),
+        };
+        log::info!(
+            "AIMD congestion-response controller enabled (draft-ietf-ippm-stamp-cos-ecn-01 \
+             §3.4): base={}ms backoff_factor={} max={}ms recovery_step={}ms{}",
+            conf.send_delay,
+            conf.ecn_backoff_factor,
+            conf.ecn_max_delay,
+            conf.ecn_recovery_step,
+            if scale_reflected_control {
+                " (also scaling --reflected-control-interval-ns per §3.4-3)"
+            } else {
+                ""
+            }
+        );
+        CongestionState::new(params)
+    });
 
     // Build all extra TLVs (once, before loop)
     let mut extra_tlvs: Vec<RawTlv> = Vec::new();
@@ -320,26 +742,42 @@ pub async fn run_sender(
         );
     }
 
-    if let Some(access_id) = conf.access_report {
-        extra_tlvs.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
+    // RFC 8972 §4.6: the Access Report TLV is event-driven and carries its
+    // own retransmission procedure, so (unlike the other extra TLVs above)
+    // it is NOT attached unconditionally to every packet here. Instead
+    // `access_report_state` decides, per send-loop iteration, whether this
+    // iteration's packet is the original send or a timed-out retransmission
+    // (see `AccessReportRetransmitState::tick`, used in the loop below).
+    let mut access_report_state = conf.access_report.map(|access_id| {
         log::info!(
-            "Access Report TLV enabled (id={}, code={})",
+            "Access Report TLV enabled (id={}, code={}); retransmission timer={}s, \
+             max_retries={} (RFC 8972 §4.6)",
             access_id,
-            conf.access_return_code
+            conf.access_return_code,
+            conf.access_report_timeout,
+            conf.access_report_retries
         );
-    }
+        AccessReportRetransmitState::new(
+            Duration::from_secs(conf.access_report_timeout as u64),
+            conf.access_report_retries,
+        )
+    });
 
     if conf.timestamp_info {
-        let sync_src = match conf.clock_source {
-            ClockFormat::NTP => SyncSource::Ntp,
-            ClockFormat::PTP => SyncSource::Ptp,
-        };
-        extra_tlvs.push(TimestampInfoTlv::new(sync_src, TimestampMethod::SwLocal).to_raw());
+        // RFC 8972 §4.3: the Session-Sender MUST send the Timestamp Info TLV
+        // value fully zeroed — all four octets describe the reflector's
+        // ingress/egress clocks, so there is no sender field to fill. The
+        // reflector fills them in on reflection.
+        extra_tlvs.push(TimestampInfoTlv::request().to_raw());
         log::info!("Timestamp Information TLV enabled");
     }
 
     if conf.location {
-        extra_tlvs.push(LocationTlv::new().to_raw());
+        // RFC 8972 §4.2: send a compliant request carrying generic Source IP
+        // and Destination IP sub-TLVs (zero-filled, correct Lengths, 4-octet
+        // headers); the reflector answers with the specific IPv4/IPv6 variants
+        // and fills in the observed ports so the sender can detect a NAT.
+        extra_tlvs.push(LocationTlv::request().to_raw());
         log::info!("Location TLV enabled");
     }
 
@@ -379,11 +817,21 @@ pub async fn run_sender(
 
     // Build Micro-session ID TLV (RFC 9534 §3.1)
     if let Some(sender_id) = conf.micro_session_id {
-        extra_tlvs.push(MicroSessionIdTlv::new(sender_id, 0).to_raw());
-        log::info!("Micro-session ID TLV enabled (sender_id={})", sender_id);
+        extra_tlvs.push(micro_session_request_tlv(
+            sender_id,
+            conf.reflector_member_link_id,
+        ));
+        log::info!(
+            "Micro-session ID TLV enabled (sender_id={}, reflector_id={:?})",
+            sender_id,
+            conf.reflector_member_link_id
+        );
     }
 
     // Build Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts-14 §3).
+    // When `scale_reflected_control` is set, the TLV is instead rebuilt
+    // fresh every send-loop iteration with an AIMD-scaled interval
+    // (§3.4-3) — skip the static push here so it isn't emitted twice.
     if let Some(control) = build_reflected_control_tlv(
         conf.reflected_control_length,
         conf.reflected_control_count,
@@ -391,13 +839,20 @@ pub async fn run_sender(
         conf.reflected_control_no_ext_hdr,
     ) {
         log::info!(
-            "Reflected Control TLV enabled (length={}, count={}, interval={}ns, one-way-ext-hdr={})",
+            "Reflected Control TLV enabled (length={}, count={}, interval={}ns, one-way-ext-hdr={}{})",
             conf.reflected_control_length,
             conf.reflected_control_count,
             conf.reflected_control_interval_ns,
-            conf.reflected_control_no_ext_hdr
+            conf.reflected_control_no_ext_hdr,
+            if scale_reflected_control {
+                ", AIMD-scaled per §3.4-3"
+            } else {
+                ""
+            }
         );
-        extra_tlvs.push(control.to_raw());
+        if !scale_reflected_control {
+            extra_tlvs.push(control.to_raw());
+        }
     }
 
     // Build BER TLVs (draft-gandhi-ippm-stamp-ber §3). All three are emitted
@@ -438,14 +893,19 @@ pub async fn run_sender(
     }
 
     // Reflected Fixed / IPv6 Extension Header Data TLVs
-    // (draft-ietf-ippm-stamp-ext-hdr §§3–4). Sent zero-filled, or with a
-    // §3.1/§3.2 selector prefix when configured; the reflector populates them
-    // when it has raw-capture access to IP headers, or echoes with U-flag.
+    // (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 3.2). The value is
+    // Requested(4) + Reflected(Length-4): sent with a zero (or selector)
+    // Requested field and a zero-initialised Reflected field; the reflector
+    // fills the Reflected field when it has raw-capture access to IP headers,
+    // or echoes with the C flag.
     extra_tlvs.extend(reflected_header_request_tlvs(conf));
 
     // Check if we need to include TLV extensions.
     // SSID lives in the base header per RFC 8972 §3 — it alone does not force TLV mode.
-    let use_tlvs = !extra_tlvs.is_empty() || conf.direct_measurement;
+    let use_tlvs = !extra_tlvs.is_empty()
+        || conf.direct_measurement
+        || access_report_state.is_some()
+        || scale_reflected_control;
     if let Some(ssid) = conf.ssid {
         log::info!("SSID enabled: {}", ssid);
     }
@@ -493,19 +953,62 @@ pub async fn run_sender(
         let send_time = Instant::now();
         let send_timestamp = generate_timestamp(conf.clock_source);
 
-        // Build per-packet TLVs (Direct Measurement changes each packet)
+        // RFC 8972 §4.6: decide, for *this* iteration only, whether the
+        // Access Report TLV should be attached — the original send, or a
+        // retransmission because the previous attempt's timer expired
+        // without an acknowledgment. `tick` also drives the retry bookkeeping
+        // forward (armed/retransmit/abort), piggybacking on this loop's
+        // existing send timing instead of a separate timer/task.
+        let attach_access_report = access_report_state
+            .as_mut()
+            .map(|state| state.tick(send_time))
+            .unwrap_or(false);
+
+        // Build per-packet TLVs (Direct Measurement changes each packet;
+        // Access Report is attached only on send/retransmission iterations;
+        // the Reflected Control TLV is rebuilt with an AIMD-scaled interval
+        // when `scale_reflected_control`, §3.4-3)
         let per_packet_tlvs: Vec<RawTlv>;
-        let all_extra_tlvs = if conf.direct_measurement {
-            let dm = DirectMeasurementTlv::new(packets_sent + 1);
-            per_packet_tlvs = extra_tlvs
-                .iter()
-                .cloned()
-                .chain(std::iter::once(dm.to_raw()))
-                .collect();
-            &per_packet_tlvs
-        } else {
-            &extra_tlvs
-        };
+        let all_extra_tlvs =
+            if conf.direct_measurement || attach_access_report || scale_reflected_control {
+                let mut tlvs = extra_tlvs.clone();
+                if conf.direct_measurement {
+                    tlvs.push(DirectMeasurementTlv::new(packets_sent + 1).to_raw());
+                }
+                if attach_access_report {
+                    // `access_report_state` is `Some` (hence `attach_access_report`
+                    // could be true) only when `conf.access_report` is `Some`.
+                    let access_id = conf
+                        .access_report
+                        .expect("attach_access_report implies conf.access_report is Some");
+                    tlvs.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
+                }
+                if scale_reflected_control {
+                    // §3.4-3: "...adjust the Reflected Test Packet Control
+                    // parameters in any future STAMP packet... based on the
+                    // observation of CE values" — scale the requested interval
+                    // by the same AIMD ratio driving the main send delay.
+                    let scale = congestion
+                        .as_ref()
+                        .map(|c| c.controller.scale_factor())
+                        .unwrap_or(1.0);
+                    let scaled_ns = ((conf.reflected_control_interval_ns as f64) * scale)
+                        .round()
+                        .clamp(0.0, u32::MAX as f64) as u32;
+                    if let Some(control) = build_reflected_control_tlv(
+                        conf.reflected_control_length,
+                        conf.reflected_control_count,
+                        scaled_ns,
+                        conf.reflected_control_no_ext_hdr,
+                    ) {
+                        tlvs.push(control.to_raw());
+                    }
+                }
+                per_packet_tlvs = tlvs;
+                &per_packet_tlvs
+            } else {
+                &extra_tlvs
+            };
 
         let mut buf: Vec<u8> = match &send_mode {
             SendMode::AuthTlv { key } => build_auth_packet_with_tlvs(
@@ -587,8 +1090,16 @@ pub async fn run_sender(
             expiry_queue.push_back((send_time + timeout, seq_num));
         }
 
-        // Event-driven receive: process responses until send_delay expires
-        let send_delay = Duration::from_millis(conf.send_delay as u64);
+        // Event-driven receive: process responses until send_delay expires.
+        // When the AIMD congestion-response controller is active
+        // (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) it — not the static
+        // `--send-delay` — dictates this iteration's wait, having grown
+        // (CE backoff) or shrunk-toward-base (clean recovery) from replies
+        // processed on prior iterations.
+        let send_delay = congestion
+            .as_ref()
+            .map(|c| c.controller.current_interval())
+            .unwrap_or_else(|| Duration::from_millis(conf.send_delay as u64));
         let deadline = tokio::time::Instant::now() + send_delay;
 
         loop {
@@ -596,9 +1107,9 @@ pub async fn run_sender(
             // responses and the send timer. Biased select would starve the timer
             // under heavy receive load, reducing packet send rates.
             tokio::select! {
-                result = recv_packet(&socket, &mut recv_buf, kernel_rx_enabled, conf.clock_source) => {
+                result = recv_packet(&socket, &mut recv_buf, kernel_rx_enabled, ecn_response_active, conf.clock_source) => {
                     match result {
-                        Ok((len, kernel_t4)) => {
+                        Ok((len, kernel_t4, reply_ecn)) => {
                             // Apply pending kernel TX corrections first so the
                             // corrected T1 is in place before OWD computation.
                             #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
@@ -618,6 +1129,10 @@ pub async fn run_sender(
                                 print_stats: conf.print_stats,
                                 hmac_key: hmac_key.as_ref(),
                                 expected_sender_msid: conf.micro_session_id,
+                                expected_reflector_msid: conf.reflector_member_link_id,
+                                latched_reflector_msid: &mut latched_reflector_msid,
+                                access_report_state: access_report_state.as_mut(),
+                                congestion: congestion.as_mut(),
                                 #[cfg(feature = "metrics")]
                                 metrics_enabled,
                                 #[cfg(all(unix, feature = "snmp"))]
@@ -629,6 +1144,7 @@ pub async fn run_sender(
                                 use_tlvs,
                                 conf.clock_source,
                                 kernel_t4,
+                                reply_ecn,
                                 &mut ctx,
                             );
                         }
@@ -666,7 +1182,9 @@ pub async fn run_sender(
                 } => {
                     let interim = rtt_collector
                         .snapshot(packets_sent, packets_lost)
-                        .with_owd(&owd_collector);
+                        .with_owd(&owd_collector)
+                        .with_access_report(access_report_state.as_ref().map(|state| state.summary()))
+                        .with_congestion(congestion.as_ref().map(|state| state.summary()));
                     interim.print_interim(output_format);
                 }
             }
@@ -704,11 +1222,17 @@ pub async fn run_sender(
         let remaining = timeout.saturating_sub(wait_start.elapsed());
         match tokio::time::timeout(
             remaining,
-            recv_packet(&socket, &mut recv_buf, kernel_rx_enabled, conf.clock_source),
+            recv_packet(
+                &socket,
+                &mut recv_buf,
+                kernel_rx_enabled,
+                ecn_response_active,
+                conf.clock_source,
+            ),
         )
         .await
         {
-            Ok(Ok((len, kernel_t4))) => {
+            Ok(Ok((len, kernel_t4, reply_ecn))) => {
                 #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
                 if sender_kernel_ts.tx_kernel {
                     use std::os::fd::AsRawFd;
@@ -724,6 +1248,10 @@ pub async fn run_sender(
                     print_stats: conf.print_stats,
                     hmac_key: hmac_key.as_ref(),
                     expected_sender_msid: conf.micro_session_id,
+                    expected_reflector_msid: conf.reflector_member_link_id,
+                    latched_reflector_msid: &mut latched_reflector_msid,
+                    access_report_state: access_report_state.as_mut(),
+                    congestion: congestion.as_mut(),
                     #[cfg(feature = "metrics")]
                     metrics_enabled,
                     #[cfg(all(unix, feature = "snmp"))]
@@ -735,6 +1263,7 @@ pub async fn run_sender(
                     use_tlvs,
                     conf.clock_source,
                     kernel_t4,
+                    reply_ecn,
                     &mut ctx,
                 );
             }
@@ -747,6 +1276,204 @@ pub async fn run_sender(
                 break;
             }
             Err(_) => break, // Timeout expired
+        }
+    }
+
+    // RFC 8972 §4.6: the retransmission timer must keep firing even once
+    // the main send loop and the plain per-packet wait above have both
+    // finished — otherwise a run shorter than the full retry budget
+    // (`access_report_timeout * (1 + retries)`, up to 15s at the RFC
+    // defaults) reports `Pending` without ever retransmitting (the common
+    // `--count 1` case). Extend the wait here: `tick()` on schedule,
+    // retransmit a real STAMP test packet — carrying the same Access
+    // Report TLV bytes every attempt (see the wire-equality regression
+    // test) — when the timer fires, and keep servicing `process_response`
+    // so an ack arriving mid-wait still disarms the timer via the existing
+    // "AccessReport:ack" scan (no new consumption path). `tick()`'s own
+    // retry-budget bookkeeping bounds this loop to at most
+    // `access_report_timeout * (1 + max_retries)` from when the report was
+    // first armed, so a dead reflector cannot hang the sender past that.
+    // A no-op entirely when `--access-report` was not set
+    // (`access_report_state` is `None`), so the wait phase above is
+    // byte-identical to before in that case.
+    while access_report_state
+        .as_ref()
+        .is_some_and(|state| !state.is_terminal())
+    {
+        let now = Instant::now();
+        let attach = access_report_state
+            .as_mut()
+            .map(|state| state.tick(now))
+            .unwrap_or(false);
+
+        if attach {
+            // An ordinary test packet: the same extra-TLV set the main loop
+            // uses, optionally Direct Measurement, and (always, since
+            // `attach` is true) the Access Report TLV — built fresh from
+            // the same `access_id`/`access_return_code` every time, so its
+            // wire bytes are identical across every attempt.
+            let seq_num = sess.generate_sequence_number();
+            let send_time = Instant::now();
+            let send_timestamp = generate_timestamp(conf.clock_source);
+
+            let mut tlvs = extra_tlvs.clone();
+            if conf.direct_measurement {
+                tlvs.push(DirectMeasurementTlv::new(packets_sent + 1).to_raw());
+            }
+            let access_id = conf.access_report.expect(
+                "attach implies access_report_state is Some, which implies conf.access_report is Some",
+            );
+            tlvs.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
+
+            let mut buf: Vec<u8> = match &send_mode {
+                SendMode::AuthTlv { key } => build_auth_packet_with_tlvs(
+                    seq_num,
+                    send_timestamp,
+                    error_estimate_wire,
+                    key,
+                    conf.ssid,
+                    &tlvs,
+                    Some(*key),
+                ),
+                SendMode::AuthBase { key } => {
+                    let mut packet = assemble_auth_packet(error_estimate_wire);
+                    packet.sequence_number = seq_num;
+                    packet.timestamp = send_timestamp;
+                    packet.ssid = conf.ssid.unwrap_or(0);
+                    finalize_auth_packet(&mut packet, key);
+                    packet.to_bytes().to_vec()
+                }
+                SendMode::OpenTlv { tlv_key } => build_unauth_packet_with_tlvs(
+                    seq_num,
+                    send_timestamp,
+                    error_estimate_wire,
+                    conf.ssid,
+                    &tlvs,
+                    *tlv_key,
+                ),
+                SendMode::OpenBase => {
+                    let mut packet = assemble_unauth_packet(error_estimate_wire);
+                    packet.sequence_number = seq_num;
+                    packet.timestamp = send_timestamp;
+                    packet.ssid = conf.ssid.unwrap_or(0);
+                    packet.to_bytes().to_vec()
+                }
+            };
+
+            if let Some(mode) = conf.malformed {
+                buf.extend_from_slice(&malformed_tlv_bytes(mode));
+            }
+
+            match socket.send(&buf).await {
+                Ok(_) => {
+                    packets_sent += 1;
+                    #[cfg(all(unix, feature = "snmp"))]
+                    if let Some(ref stats) = snmp_stats {
+                        stats.inc_sent();
+                    }
+                    #[cfg(feature = "metrics")]
+                    if metrics_enabled {
+                        crate::metrics::sender_metrics::record_packet_sent();
+                    }
+                    pending.insert(
+                        seq_num,
+                        PendingPacket {
+                            send_time,
+                            send_timestamp,
+                        },
+                    );
+                    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                    if sender_kernel_ts.tx_kernel {
+                        tx_id_to_seq.insert(sender_tx_counter, seq_num);
+                        sender_tx_counter = sender_tx_counter.wrapping_add(1);
+                        if tx_id_to_seq.len() > 4096 {
+                            tx_id_to_seq.clear();
+                        }
+                    }
+                    if timeout > Duration::ZERO {
+                        expiry_queue.push_back((send_time + timeout, seq_num));
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to send Access Report retransmission {}: {}",
+                        seq_num, e
+                    );
+                }
+            }
+
+            continue;
+        }
+
+        // Not due yet, and the loop guard above already excluded the
+        // terminal phases, so `access_report_state` is `Some` and `Armed`
+        // with a deadline to wait for.
+        let Some(deadline) = access_report_state
+            .as_ref()
+            .and_then(|state| state.armed_deadline())
+        else {
+            break;
+        };
+        let deadline = tokio::time::Instant::from_std(deadline);
+
+        tokio::select! {
+            result = recv_packet(&socket, &mut recv_buf, kernel_rx_enabled, ecn_response_active, conf.clock_source) => {
+                match result {
+                    Ok((len, kernel_t4, reply_ecn)) => {
+                        #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                        if sender_kernel_ts.tx_kernel {
+                            use std::os::fd::AsRawFd;
+                            let reports = crate::hwtstamp::drain_tx_timestamps(
+                                socket.as_raw_fd(),
+                                conf.clock_source,
+                            );
+                            apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
+                        }
+                        let mut ctx = SenderRecvContext {
+                            pending: &mut pending,
+                            rtt_collector: &mut rtt_collector,
+                            owd_collector: &mut owd_collector,
+                            packets_received: &mut packets_received,
+                            print_stats: conf.print_stats,
+                            hmac_key: hmac_key.as_ref(),
+                            expected_sender_msid: conf.micro_session_id,
+                            expected_reflector_msid: conf.reflector_member_link_id,
+                            latched_reflector_msid: &mut latched_reflector_msid,
+                            access_report_state: access_report_state.as_mut(),
+                            congestion: congestion.as_mut(),
+                            #[cfg(feature = "metrics")]
+                            metrics_enabled,
+                            #[cfg(all(unix, feature = "snmp"))]
+                            snmp_stats: snmp_stats.as_deref(),
+                        };
+                        process_response(
+                            &recv_buf[..len],
+                            use_auth,
+                            use_tlvs,
+                            conf.clock_source,
+                            kernel_t4,
+                            reply_ecn,
+                            &mut ctx,
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                        if sender_kernel_ts.tx_kernel {
+                            use std::os::fd::AsRawFd;
+                            let reports = crate::hwtstamp::drain_tx_timestamps(
+                                socket.as_raw_fd(),
+                                conf.clock_source,
+                            );
+                            apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Receive error while awaiting Access Report ack: {}", e);
+                        break;
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {}
         }
     }
 
@@ -765,6 +1492,8 @@ pub async fn run_sender(
     rtt_collector
         .snapshot(packets_sent, packets_lost)
         .with_owd(&owd_collector)
+        .with_access_report(access_report_state.as_ref().map(|state| state.summary()))
+        .with_congestion(congestion.as_ref().map(|state| state.summary()))
 }
 
 /// Receives one datagram. With kernel RX timestamping enabled (feature
@@ -772,14 +1501,30 @@ pub async fn run_sender(
 /// (T4) in STAMP wire format alongside the length; otherwise a plain
 /// `recv`. May return `WouldBlock` on spurious readiness wakeups (e.g.
 /// pending error-queue events) — callers drain the error queue and retry.
+/// Receives one datagram, returning `(len, kernel_t4, reply_ecn)`.
+///
+/// - `kernel_t4`: with kernel RX timestamping enabled (feature "hwtstamp")
+///   the kernel receive timestamp (T4) in STAMP wire format; `None`
+///   otherwise.
+/// - `reply_ecn`: with `want_reply_ecn` set, the reply packet's own on-wire
+///   ECN codepoint (low 2 bits of the IP TOS / Traffic Class octet) —
+///   reverse-path congestion detection for draft-ietf-ippm-stamp-cos-ecn-01
+///   §3.4; `None` when not requested or unavailable.
+///
+/// Both extractions share a single `recvmsg` call (Linux/macOS only, via
+/// `nix` — a mandatory dependency on those platforms regardless of the
+/// "hwtstamp" build feature) when either is needed; a plain `recv` is used
+/// otherwise. May return `WouldBlock` on spurious readiness wakeups (e.g.
+/// pending error-queue events) — callers drain the error queue and retry.
 async fn recv_packet(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
     kernel_rx: bool,
+    want_reply_ecn: bool,
     cs: ClockFormat,
-) -> std::io::Result<(usize, Option<u64>)> {
-    #[cfg(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos")))]
-    if kernel_rx {
+) -> std::io::Result<(usize, Option<u64>, Option<u8>)> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if kernel_rx || want_reply_ecn {
         use std::os::fd::AsRawFd;
         socket.readable().await?;
         let mut cmsg_buf = vec![0u8; 256];
@@ -792,12 +1537,23 @@ async fn recv_packet(
         ) {
             Ok(msg) => {
                 let len = msg.bytes;
-                let ts = msg
-                    .cmsgs()
-                    .ok()
-                    .and_then(crate::hwtstamp::extract_kernel_rx_timestamp)
-                    .map(|k| crate::time::timestamp_from_parts(k.secs, k.nanos, cs));
-                Ok((len, ts))
+                #[cfg(feature = "hwtstamp")]
+                let ts = if kernel_rx {
+                    msg.cmsgs()
+                        .ok()
+                        .and_then(crate::hwtstamp::extract_kernel_rx_timestamp)
+                        .map(|k| crate::time::timestamp_from_parts(k.secs, k.nanos, cs))
+                } else {
+                    None
+                };
+                #[cfg(not(feature = "hwtstamp"))]
+                let ts: Option<u64> = None;
+                let ecn = if want_reply_ecn {
+                    extract_reply_ecn_from_cmsgs(&msg)
+                } else {
+                    None
+                };
+                Ok((len, ts, ecn))
             }
             Err(nix::errno::Errno::EAGAIN) => {
                 Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
@@ -805,11 +1561,11 @@ async fn recv_packet(
             Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
         };
     }
-    #[cfg(not(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos"))))]
     let _ = cs;
     let _ = kernel_rx;
+    let _ = want_reply_ecn;
     let len = socket.recv(buf).await?;
-    Ok((len, None))
+    Ok((len, None, None))
 }
 
 /// Applies kernel TX timestamps from the error queue to the pending-packet
@@ -840,6 +1596,10 @@ fn process_response(
     use_tlvs: bool,
     clock_source: ClockFormat,
     kernel_t4: Option<u64>,
+    // Reply packet's on-wire ECN codepoint (reverse-path detection,
+    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4), from `recv_packet`'s
+    // `extract_reply_ecn_from_cmsgs`. `None` when not requested/available.
+    reply_ecn: Option<u8>,
     ctx: &mut SenderRecvContext,
 ) {
     let recv_time = Instant::now();
@@ -849,7 +1609,7 @@ fn process_response(
     let sender_recv_ts = kernel_t4.unwrap_or_else(|| generate_timestamp(clock_source));
 
     // Parse response and validate TLVs if extension mode is enabled
-    // Use lenient parsing per RFC 8762 §4.6 to handle short packets
+    // Use lenient parsing per RFC 8762 §4.6 to handle short packets.
     let (seq_num, reflector_recv_ts, reflector_send_ts, sender_ttl, tlv_info) = if use_auth {
         if use_tlvs {
             // Parse as extended packet with TLVs (lenient, returns canonical buffer)
@@ -890,6 +1650,10 @@ fn process_response(
                     AUTH_BASE_SIZE,
                     ctx.hmac_key,
                     ctx.expected_sender_msid,
+                    ctx.expected_reflector_msid,
+                    ctx.latched_reflector_msid,
+                    ctx.access_report_state.is_some(),
+                    ctx.congestion.is_some(),
                     #[cfg(feature = "metrics")]
                     ctx.metrics_enabled,
                 ) {
@@ -951,6 +1715,10 @@ fn process_response(
                 UNAUTH_BASE_SIZE,
                 ctx.hmac_key,
                 ctx.expected_sender_msid,
+                ctx.expected_reflector_msid,
+                ctx.latched_reflector_msid,
+                ctx.access_report_state.is_some(),
+                ctx.congestion.is_some(),
                 #[cfg(feature = "metrics")]
                 ctx.metrics_enabled,
             ) {
@@ -989,6 +1757,55 @@ fn process_response(
             None,
         )
     };
+
+    // RFC 8972 §4.6: "This timer MUST be disarmed upon reception of the
+    // reflected STAMP test packet that includes the Access Report TLV."
+    // `tlv_info`'s "AccessReport:ack" marker (set by `validate_reflected_tlvs`
+    // only when the TLV survived the same U/M/I/HMAC gating as every other
+    // reflected value) is the acknowledgment signal. This applies regardless
+    // of whether `seq_num` still has a `pending` entry — the ack is about the
+    // TLV's own delivery, not this specific packet's RTT accounting.
+    if let Some(state) = ctx.access_report_state.as_mut() {
+        if tlv_info
+            .as_deref()
+            .is_some_and(|s| s.contains("AccessReport:ack"))
+        {
+            state.acknowledge();
+        }
+    }
+
+    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: observe CE from either the
+    // reflected EC2 field (forward-path, sender→reflector, §3.4-1) or the
+    // reply packet's own on-wire ECN (reverse-path, reflector→sender,
+    // §3.4-2/-3), and drive the AIMD congestion-response controller.
+    // Independent of whether this reply matched a `pending` entry — like
+    // the Access Report ack above, this is about the congestion signal
+    // carried by the reply, not this particular RTT sample. The forward-path
+    // signal comes from `tlv_info`'s "CoS:CE" marker (set by
+    // `validate_reflected_tlvs` only under the same integrity gate as every
+    // other reflected TLV value — RFC 8972 §4.8-17 — so a reply that failed
+    // TLV-HMAC verification or carries an I-flagged CoS TLV cannot be used
+    // to force a spurious backoff); the reverse-path signal is the reply's
+    // own on-wire ECN, which carries no TLV-level integrity to gate on (DSCP/
+    // ECN are mutable-in-transit IP header fields by design, same as the
+    // reflector's own treatment of the *incoming* test packet's ECN).
+    if let Some(state) = ctx.congestion.as_mut() {
+        let forward_ce = tlv_info.as_deref().is_some_and(|s| s.contains("CoS:CE"));
+        let reverse_ce = reply_ecn == Some(0b11);
+        if forward_ce || reverse_ce {
+            state.controller.on_ce_observed();
+            log::info!(
+                "ECN congestion response: CE observed on seq={} (forward={} reverse={}); \
+                 send interval backed off to {:?} (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)",
+                seq_num,
+                forward_ce,
+                reverse_ce,
+                state.controller.current_interval()
+            );
+        } else {
+            state.controller.on_clean_reply();
+        }
+    }
 
     if let Some(pending_packet) = ctx.pending.remove(&seq_num) {
         let rtt_ns = recv_time
@@ -1071,6 +1888,16 @@ enum TlvRejection {
     /// mismatch means the response belongs to a different session, a stale
     /// packet, or a spoofed reply.
     MsidMismatch { got: u16, expected: u16 },
+    /// Reflected Reflector Micro-session ID did not match the expected value
+    /// (RFC 9534 §3.2-11/-12, an unconditional requirement). `expected` is
+    /// either the pre-known reflector member-link identifier
+    /// (`--reflector-member-link-id`) or, when that is not configured, the
+    /// value latched from the first validly-received reply of the session
+    /// (zero-config self-consistency check). Validating the reflector's
+    /// behaviour: a changed value flags an anomaly (e.g. a mid-session LAG
+    /// rehash moving the flow to a different member link), and the reply
+    /// MUST be discarded.
+    ReflectorMsidMismatch { got: u16, expected: u16 },
     /// Reflected Micro-session ID TLV could not be parsed. Since the TLV
     /// carries the session binding, we cannot attribute the response to this
     /// sender and must drop it.
@@ -1085,6 +1912,11 @@ impl std::fmt::Display for TlvRejection {
                 "Micro-session ID mismatch (got sender_id={}, expected={})",
                 got, expected
             ),
+            Self::ReflectorMsidMismatch { got, expected } => write!(
+                f,
+                "Reflector Micro-session ID mismatch (got reflector_id={}, expected={})",
+                got, expected
+            ),
             Self::MsidMalformed => {
                 write!(f, "malformed Micro-session ID TLV in reflected packet")
             }
@@ -1092,46 +1924,53 @@ impl std::fmt::Display for TlvRejection {
     }
 }
 
+/// Builds the outgoing Micro-session ID TLV (RFC 9534 §3.1/§3.2).
+///
+/// The Sender Micro-session ID always carries the sender's own member-link
+/// identifier. Per RFC 9534 §3.2-3, "If the Session-Sender knows the Reflector
+/// member link identifier, the Reflector Micro-session ID field MUST be set" —
+/// so when `reflector_id` is `Some`, it is written into the Reflector
+/// Micro-session ID field; otherwise (§3.2-4) that field is left zero.
+fn micro_session_request_tlv(sender_id: u16, reflector_id: Option<u16>) -> RawTlv {
+    MicroSessionIdTlv::new(sender_id, reflector_id.unwrap_or(0)).to_raw()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_reflected_tlvs(
     tlvs: &TlvList,
     data: &[u8],
     base_size: usize,
     hmac_key: Option<&HmacKey>,
     expected_sender_msid: Option<u16>,
+    expected_reflector_msid: Option<u16>,
+    latched_reflector_msid: &mut Option<u16>,
+    // RFC 8972 §4.6: when the sender is tracking an in-flight Access Report
+    // TLV, scan for its (gated) presence in the reply and surface it via the
+    // "AccessReport:ack" marker in the returned status string. `false` when
+    // `--access-report` was not set — the scan is skipped entirely, matching
+    // prior behaviour for every caller that doesn't use it.
+    track_access_report: bool,
+    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: when the AIMD congestion
+    // controller is active, scan for a CE-marked (0b11) EC2 field in the
+    // reflected CoS TLV and surface it via the "CoS:CE" marker — gated by
+    // the same `integrity_ok` check as MSID/AccessReport below (RFC 8972
+    // §4.8-17: "HMAC MUST be verified before using any data in the
+    // included STAMP TLVs"), so a tampered or unverifiable reply cannot be
+    // used to force a spurious rate reduction. `false` when the controller
+    // is inactive.
+    track_congestion: bool,
     #[cfg(feature = "metrics")] metrics_enabled: bool,
 ) -> Result<Option<String>, TlvRejection> {
     let mut status_parts = Vec::new();
     let tlv_count = tlvs.len();
 
-    // RFC 9534 §3.2: verify the reflector echoed our sender_micro_session_id
-    // unchanged. Mismatch or malformed parse invalidates the session binding —
-    // the caller must discard the response (bail with Err) rather than record
-    // RTT against a packet that may belong to a different session.
-    if let Some(expected) = expected_sender_msid {
-        for raw in tlvs.non_hmac_tlvs() {
-            if raw.tlv_type == crate::tlv::TlvType::MicroSessionId {
-                let parsed =
-                    MicroSessionIdTlv::from_raw(raw).map_err(|_| TlvRejection::MsidMalformed)?;
-                if parsed.sender_micro_session_id != expected {
-                    return Err(TlvRejection::MsidMismatch {
-                        got: parsed.sender_micro_session_id,
-                        expected,
-                    });
-                }
-                status_parts.push(format!(
-                    "MSID:ok(reflector={})",
-                    parsed.reflector_micro_session_id
-                ));
-                break;
-            }
-        }
-    }
-
-    // Check for flagged TLVs
+    // Step 1 — tally per-TLV flags (U/M/I) up front. Integrity decisions are
+    // made BEFORE any reflected TLV value is consumed (RFC 8972 §4, §4.8-12:
+    // "HMAC MUST be verified before using any data in the included STAMP
+    // TLVs").
     let mut unrecognized_count = 0;
     let mut malformed_count = 0;
     let mut integrity_failed_count = 0;
-
     for tlv in tlvs.non_hmac_tlvs() {
         if tlv.is_unrecognized() {
             unrecognized_count += 1;
@@ -1143,8 +1982,6 @@ fn validate_reflected_tlvs(
             integrity_failed_count += 1;
         }
     }
-
-    // Check HMAC TLV flags too
     if let Some(hmac_tlv) = tlvs.hmac_tlv() {
         if hmac_tlv.is_integrity_failed() {
             integrity_failed_count += 1;
@@ -1154,7 +1991,127 @@ fn validate_reflected_tlvs(
         }
     }
 
-    // Report flagged TLVs and record metrics
+    // Step 2 — TLV-HMAC verification result, computed before consuming any
+    // value. `hmac_failed` gates value consumption below (RFC 8972 §4.8-17).
+    let mut hmac_failed = false;
+    if let Some(key) = hmac_key {
+        if let Some(hmac_tlv) = tlvs.hmac_tlv() {
+            if hmac_tlv.is_integrity_failed() {
+                // Reflector echoed our HMAC with I-flag — it couldn't verify.
+                status_parts.push("HMAC:unverified".to_string());
+                hmac_failed = true;
+            } else if base_size >= 4 && data.len() > base_size {
+                // Use the fixed base_size to locate TLV bytes correctly
+                // (avoids fragility with trailing padding or non-TLV bytes).
+                let seq_bytes = &data[..4];
+                let tlv_bytes = &data[base_size..];
+                if tlvs.verify_hmac(key, seq_bytes, tlv_bytes).is_ok() {
+                    status_parts.push("HMAC:ok".to_string());
+                } else {
+                    status_parts.push("HMAC:fail".to_string());
+                    hmac_failed = true;
+                }
+            }
+        } else {
+            // No HMAC TLV in response (reflector may not support it).
+            status_parts.push("no-hmac".to_string());
+        }
+    }
+
+    // Step 3 — consume reflected TLV values for decisions ONLY when the
+    // extension TLVs' integrity is intact:
+    //   RFC 8972 §4-19 / §4.8-16 — an I-flagged TLV ⇒ discard all TLVs, stop.
+    //   RFC 8972 §4.8-17        — TLV-HMAC failure ⇒ stop processing TLVs.
+    // Within the loop, per-TLV flags gate individual TLVs:
+    //   RFC 8972 §4-18 (M) — stop processing the remainder of the packet;
+    //   RFC 8972 §4-17 (U) — skip processing of that TLV.
+    // (Micro-session ID and the Access Report ack marker are the only
+    // reflected values the sender consumes today; logging raw bytes is
+    // fine, but they MUST NOT influence session binding.)
+    let integrity_ok = !hmac_failed && integrity_failed_count == 0;
+    let want_msid = expected_sender_msid.is_some() || expected_reflector_msid.is_some();
+    if integrity_ok && (want_msid || track_access_report || track_congestion) {
+        for raw in tlvs.non_hmac_tlvs() {
+            if raw.is_malformed() {
+                break; // §4-18: M flag halts remainder.
+            }
+            if raw.is_unrecognized() {
+                continue; // §4-17: U flag skips this TLV.
+            }
+            if track_access_report && raw.tlv_type == crate::tlv::TlvType::AccessReport {
+                // RFC 8972 §4.6: "This timer MUST be disarmed upon reception
+                // of the reflected STAMP test packet that includes the
+                // Access Report TLV" — presence of a recognized,
+                // non-malformed, integrity-intact echo (U/M already excluded
+                // above; I-flagged/TLV-HMAC-failed replies are excluded by
+                // the surrounding `integrity_ok` gate) is the acknowledgment
+                // signal `process_response` looks for.
+                status_parts.push("AccessReport:ack".to_string());
+            }
+            if track_congestion && raw.tlv_type == TlvType::ClassOfService {
+                // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: EC2 = 0b11 signals
+                // forward-path (sender→reflector) congestion. Same
+                // U/M-flag-gated, integrity-checked path as every other
+                // reflected value consumed above.
+                if let Ok(cos) = ClassOfServiceTlv::from_raw(raw) {
+                    if cos.ecn2 == 0b11 {
+                        status_parts.push("CoS:CE".to_string());
+                    }
+                }
+            }
+            if want_msid && raw.tlv_type == crate::tlv::TlvType::MicroSessionId {
+                let parsed =
+                    MicroSessionIdTlv::from_raw(raw).map_err(|_| TlvRejection::MsidMalformed)?;
+                // RFC 9534 §3.2 / §3.2-9: our sender_micro_session_id must be
+                // echoed unchanged — a mismatch means the reply belongs to a
+                // different session (or is spoofed); discard.
+                if let Some(expected) = expected_sender_msid {
+                    if parsed.sender_micro_session_id != expected {
+                        return Err(TlvRejection::MsidMismatch {
+                            got: parsed.sender_micro_session_id,
+                            expected,
+                        });
+                    }
+                }
+                // RFC 9534 §3.2-11: "The micro Session-Sender MUST use the
+                // Reflector Micro-session ID to validate the Reflector's
+                // behavior" — unconditional, not gated on pre-known
+                // configuration. When the reflector's member-link ID is
+                // pre-known (`--reflector-member-link-id`), it takes
+                // precedence and the reflected value must equal it —
+                // discard on mismatch. Otherwise (zero-config path), the
+                // first validly-received reply's Reflector Micro-session ID
+                // is latched and becomes the expected value for the rest of
+                // the session; a later reply with a different reflector ID
+                // is rejected through the same path as the pre-known
+                // mismatch. Pre-known configuration always wins: it is never
+                // overridden by a first-seen value.
+                if let Some(expected_refl) = expected_reflector_msid {
+                    if parsed.reflector_micro_session_id != expected_refl {
+                        return Err(TlvRejection::ReflectorMsidMismatch {
+                            got: parsed.reflector_micro_session_id,
+                            expected: expected_refl,
+                        });
+                    }
+                } else if let Some(expected_refl) = *latched_reflector_msid {
+                    if parsed.reflector_micro_session_id != expected_refl {
+                        return Err(TlvRejection::ReflectorMsidMismatch {
+                            got: parsed.reflector_micro_session_id,
+                            expected: expected_refl,
+                        });
+                    }
+                } else {
+                    *latched_reflector_msid = Some(parsed.reflector_micro_session_id);
+                }
+                status_parts.push(format!(
+                    "MSID:ok(reflector={})",
+                    parsed.reflector_micro_session_id
+                ));
+            }
+        }
+    }
+
+    // Step 4 — report flagged TLVs and record metrics.
     if unrecognized_count > 0 {
         status_parts.push(format!("{}U", unrecognized_count));
         #[cfg(feature = "metrics")]
@@ -1183,33 +2140,6 @@ fn validate_reflected_tlvs(
         }
     }
 
-    // Verify TLV HMAC if key is available
-    if let Some(key) = hmac_key {
-        if let Some(hmac_tlv) = tlvs.hmac_tlv() {
-            // Check if reflector set I-flag (couldn't verify HMAC)
-            if hmac_tlv.is_integrity_failed() {
-                // Reflector echoed our HMAC with I-flag - it couldn't verify
-                status_parts.push("HMAC:unverified".to_string());
-            } else {
-                // Use the fixed base_size to locate TLV bytes correctly
-                // (avoids fragility with trailing padding or non-TLV bytes)
-                if base_size >= 4 && data.len() > base_size {
-                    let seq_bytes = &data[..4];
-                    let tlv_bytes = &data[base_size..];
-
-                    if tlvs.verify_hmac(key, seq_bytes, tlv_bytes).is_ok() {
-                        status_parts.push("HMAC:ok".to_string());
-                    } else {
-                        status_parts.push("HMAC:fail".to_string());
-                    }
-                }
-            }
-        } else {
-            // No HMAC TLV in response (reflector may not support it)
-            status_parts.push("no-hmac".to_string());
-        }
-    }
-
     Ok(if status_parts.is_empty() {
         Some(format!("{} TLVs", tlv_count))
     } else {
@@ -1221,9 +2151,9 @@ fn validate_reflected_tlvs(
 /// Empty input is rejected because an empty BER pattern is meaningless.
 /// Builds the Reflected Test Packet Control TLV
 /// (draft-ietf-ippm-asymmetrical-pkts-14 §3) when the configuration requests
-/// asymmetric replies (count > 1) and/or one-way extension-header mode
-/// (draft-ietf-ippm-stamp-ext-hdr-08 §5.3). Returns `None` for plain
-/// symmetric measurements so trivial sessions are not amplified.
+/// asymmetric replies (count > 1) and/or attaches an IPv6 Extension Header
+/// Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-11 §5.3). Returns `None` for
+/// plain symmetric measurements so trivial sessions are not amplified.
 fn build_reflected_control_tlv(
     length: u16,
     count: u16,
@@ -1261,10 +2191,10 @@ fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Builds the Reflected Fixed / IPv6 Extension Header request TLVs
-/// (draft-ietf-ippm-stamp-ext-hdr §§3–4) for the outgoing packet, honoring the
-/// optional §3.1/§3.2 selectors. Assumes `conf` has passed `validate()` (so
-/// any selector decodes and fits); a stray decode error degrades to the
-/// zero-filled request rather than panicking.
+/// (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 3.2) for the outgoing packet,
+/// honoring the optional §5.1/§5.2 Requested-field selectors. Assumes `conf`
+/// has passed `validate()` (so any selector decodes and fits); a stray decode
+/// error degrades to the zero-filled request rather than panicking.
 fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
     let mut out = Vec::new();
 
@@ -1528,6 +2458,169 @@ pub fn create_extended_auth_packet(
 mod tests {
     use super::*;
 
+    // --- AccessReportRetransmitState (RFC 8972 §4.6) -----------------------
+
+    #[test]
+    fn test_access_report_defaults_match_rfc_8972_4_6() {
+        // "The default value of the retransmission timer for the Access
+        // Report TLV SHOULD be three seconds."
+        assert_eq!(DEFAULT_ACCESS_REPORT_TIMEOUT, Duration::from_secs(3));
+        // "This retransmission SHOULD be repeated up to four times before
+        // the procedure is aborted."
+        assert_eq!(DEFAULT_ACCESS_REPORT_RETRIES, 4);
+    }
+
+    #[test]
+    fn test_access_report_state_fresh_is_pending() {
+        let state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        assert_eq!(state.outcome(), AccessReportOutcome::Pending);
+        assert_eq!(state.retransmissions(), 0);
+    }
+
+    #[test]
+    fn test_access_report_first_tick_attaches_and_arms() {
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        let now = Instant::now();
+        assert!(state.tick(now), "first tick must attach the TLV");
+        assert_eq!(state.outcome(), AccessReportOutcome::Pending);
+        assert_eq!(state.retransmissions(), 0);
+    }
+
+    #[test]
+    fn test_access_report_tick_before_deadline_does_not_reattach() {
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        let now = Instant::now();
+        assert!(state.tick(now));
+        // Still well before the 3s deadline.
+        assert!(!state.tick(now + Duration::from_millis(500)));
+        assert_eq!(state.retransmissions(), 0);
+    }
+
+    #[test]
+    fn test_access_report_tick_after_deadline_retransmits() {
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        let now = Instant::now();
+        assert!(state.tick(now));
+        let after_expiry = now + Duration::from_secs(3) + Duration::from_millis(1);
+        assert!(
+            state.tick(after_expiry),
+            "expired timer must trigger a retransmission"
+        );
+        assert_eq!(state.retransmissions(), 1);
+        assert_eq!(state.outcome(), AccessReportOutcome::Pending);
+    }
+
+    #[test]
+    fn test_access_report_retries_exhausted_then_aborted() {
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 2);
+        let mut now = Instant::now();
+        assert!(state.tick(now)); // original send (attempt 0)
+        now += Duration::from_secs(1) + Duration::from_millis(1);
+        assert!(state.tick(now)); // retransmission 1
+        now += Duration::from_secs(1) + Duration::from_millis(1);
+        assert!(state.tick(now)); // retransmission 2 (== max_retries)
+        assert_eq!(state.retransmissions(), 2);
+        assert_eq!(state.outcome(), AccessReportOutcome::Pending);
+
+        // Third expiry past the retry budget aborts the procedure.
+        now += Duration::from_secs(1) + Duration::from_millis(1);
+        assert!(!state.tick(now), "aborting must not request another attach");
+        assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
+        assert_eq!(
+            state.retransmissions(),
+            2,
+            "aborting itself is not counted as a retransmission"
+        );
+
+        // Aborted is terminal: further ticks never attach again.
+        now += Duration::from_secs(10);
+        assert!(!state.tick(now));
+        assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
+    }
+
+    #[test]
+    fn test_access_report_zero_retries_aborts_on_first_expiry() {
+        // RFC 8972 §4.6 MUST: operators must be able to control the retry
+        // count, including down to 0 (abort immediately, no retransmits).
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 0);
+        let now = Instant::now();
+        assert!(state.tick(now));
+        let after_expiry = now + Duration::from_secs(1) + Duration::from_millis(1);
+        assert!(!state.tick(after_expiry));
+        assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
+        assert_eq!(state.retransmissions(), 0);
+    }
+
+    #[test]
+    fn test_access_report_acknowledge_before_deadline_disarms() {
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        let now = Instant::now();
+        assert!(state.tick(now));
+        state.acknowledge();
+        assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
+
+        // Acknowledged is terminal: no further attach, ever, even long past
+        // where the original deadline would have expired.
+        assert!(!state.tick(now + Duration::from_secs(30)));
+        assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
+    }
+
+    #[test]
+    fn test_access_report_acknowledge_after_retransmit_disarms_and_stops() {
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 4);
+        let now = Instant::now();
+        assert!(state.tick(now));
+        let after_expiry = now + Duration::from_secs(1) + Duration::from_millis(1);
+        assert!(state.tick(after_expiry)); // retransmission 1
+        assert_eq!(state.retransmissions(), 1);
+
+        state.acknowledge();
+        assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
+        assert_eq!(
+            state.retransmissions(),
+            1,
+            "retransmission count survives acknowledgment for reporting"
+        );
+        assert!(!state.tick(after_expiry + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn test_access_report_acknowledge_before_any_send_is_noop() {
+        // An ack cannot arrive before the TLV was ever sent — guards
+        // against a caller wiring this up backwards.
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        state.acknowledge();
+        assert_eq!(state.outcome(), AccessReportOutcome::Pending);
+    }
+
+    #[test]
+    fn test_access_report_acknowledge_after_aborted_is_noop() {
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 0);
+        let now = Instant::now();
+        assert!(state.tick(now));
+        assert!(!state.tick(now + Duration::from_secs(2)));
+        assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
+
+        state.acknowledge();
+        assert_eq!(
+            state.outcome(),
+            AccessReportOutcome::Aborted,
+            "a stray ack must not resurrect an aborted procedure"
+        );
+    }
+
+    #[test]
+    fn test_access_report_summary_reflects_state() {
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 4);
+        let now = Instant::now();
+        assert!(state.tick(now));
+        assert!(state.tick(now + Duration::from_secs(1) + Duration::from_millis(1)));
+        state.acknowledge();
+        let summary = state.summary();
+        assert_eq!(summary.outcome, AccessReportOutcome::Acknowledged);
+        assert_eq!(summary.retransmissions, 1);
+    }
+
     #[test]
     fn reflected_header_tlvs_apply_selectors() {
         use crate::tlv::TlvType;
@@ -1642,9 +2735,9 @@ mod tests {
         assert!(tlv.sub_tlvs.is_empty());
         assert_eq!(tlv.number_of_reflected_packets, 4);
 
-        // One-way mode requested → TLV emitted even at count 1, carrying the
+        // Ext-hdr control requested → TLV emitted even at count 1, carrying the
         // presence-only IPv6 Extension Header Control sub-TLV
-        // (draft-ietf-ippm-stamp-ext-hdr-08 §5.3; experimental type 240).
+        // (draft-ietf-ippm-stamp-ext-hdr-11 §5.3; experimental type 240).
         let tlv = build_reflected_control_tlv(0, 1, 1_000_000, true).expect("TLV for one-way mode");
         assert_eq!(tlv.sub_tlvs, vec![0x00, 240, 0x00, 0x00]);
     }
@@ -1946,9 +3039,14 @@ mod tests {
     fn test_validate_reflected_tlvs_msid_match_accepts() {
         // RFC 9534 §3.2: reflected MSID TLV must carry the sender's sender_id
         // unchanged; the reflector fills reflector_micro_session_id.
+        // Model a properly-reflected TLV: a conforming reflector clears the
+        // U/M/I flags on a recognized, well-formed TLV (the typed constructor
+        // sets the sender-side U flag, which does not appear on the wire in a
+        // reflected packet).
+        let mut raw = MicroSessionIdTlv::new(7777, 42).to_raw();
+        raw.clear_reflector_flags();
         let mut tlvs = TlvList::new();
-        tlvs.push(MicroSessionIdTlv::new(7777, 42).to_raw())
-            .unwrap();
+        tlvs.push(raw).unwrap();
 
         let status = validate_reflected_tlvs(
             &tlvs,
@@ -1956,6 +3054,10 @@ mod tests {
             44,
             None,
             Some(7777),
+            None,
+            &mut None,
+            false, // track_access_report
+            false, // track_congestion
             #[cfg(feature = "metrics")]
             false,
         )
@@ -1970,9 +3072,10 @@ mod tests {
         // RFC 9534 §3.2: a mismatched sender_micro_session_id means the
         // response cannot be attributed to this session. The validator must
         // return Err so the caller drops the packet without recording RTT.
+        let mut raw = MicroSessionIdTlv::new(0xBAD, 42).to_raw();
+        raw.clear_reflector_flags(); // properly-reflected TLV: no U/M/I flags
         let mut tlvs = TlvList::new();
-        tlvs.push(MicroSessionIdTlv::new(0xBAD, 42).to_raw())
-            .unwrap();
+        tlvs.push(raw).unwrap();
 
         let err = validate_reflected_tlvs(
             &tlvs,
@@ -1980,6 +3083,10 @@ mod tests {
             44,
             None,
             Some(7777),
+            None,
+            &mut None,
+            false, // track_access_report
+            false, // track_congestion
             #[cfg(feature = "metrics")]
             false,
         )
@@ -2000,12 +3107,13 @@ mod tests {
         // verified; we must drop the response rather than guess.
         let mut tlvs = TlvList::new();
         // MSID TLV value must be exactly 4 bytes (RFC 9534 §3.1). 3 bytes
-        // makes it malformed but keeps the TLV present for the scanner.
-        tlvs.push(crate::tlv::RawTlv::new(
-            crate::tlv::TlvType::MicroSessionId,
-            vec![0, 0, 0],
-        ))
-        .unwrap();
+        // makes it unparseable but keeps the TLV present for the scanner.
+        // Flags cleared: this models a non-conforming reflector that echoed a
+        // wrong-length MSID WITHOUT setting the M flag — so the value is still
+        // reached (an M-flagged TLV would instead halt processing per §4-18).
+        let mut raw = crate::tlv::RawTlv::new(crate::tlv::TlvType::MicroSessionId, vec![0, 0, 0]);
+        raw.clear_reflector_flags();
+        tlvs.push(raw).unwrap();
 
         let err = validate_reflected_tlvs(
             &tlvs,
@@ -2013,6 +3121,10 @@ mod tests {
             44,
             None,
             Some(1234),
+            None,
+            &mut None,
+            false, // track_access_report
+            false, // track_congestion
             #[cfg(feature = "metrics")]
             false,
         )
@@ -2034,6 +3146,10 @@ mod tests {
             44,
             None,
             None,
+            None,
+            &mut None,
+            false, // track_access_report
+            false, // track_congestion
             #[cfg(feature = "metrics")]
             false,
         )
@@ -2041,6 +3157,1690 @@ mod tests {
         .expect("status produced");
 
         assert!(!status.contains("MSID"));
+    }
+
+    #[test]
+    fn test_micro_session_request_tlv_populates_reflector_id() {
+        // RFC 9534 §3.2-3: "If the Session-Sender knows the Reflector member
+        // link identifier, the Reflector Micro-session ID field MUST be set."
+        let tlv = micro_session_request_tlv(0x1234, Some(0xABCD));
+        let parsed = MicroSessionIdTlv::from_raw(&tlv).unwrap();
+        assert_eq!(parsed.sender_micro_session_id, 0x1234);
+        assert_eq!(parsed.reflector_micro_session_id, 0xABCD);
+    }
+
+    #[test]
+    fn test_micro_session_request_tlv_reflector_id_absent_is_zero() {
+        // RFC 9534 §3.2-4: otherwise the field is left zero.
+        let tlv = micro_session_request_tlv(0x1234, None);
+        let parsed = MicroSessionIdTlv::from_raw(&tlv).unwrap();
+        assert_eq!(parsed.sender_micro_session_id, 0x1234);
+        assert_eq!(parsed.reflector_micro_session_id, 0);
+    }
+
+    #[test]
+    fn test_reflected_reflector_msid_mismatch_rejects() {
+        // RFC 9534 §3.2-11/-12: when the reflector member-link ID is pre-known,
+        // a reflected Reflector Micro-session ID that differs from it must be
+        // discarded (validating the reflector's behaviour).
+        let mut raw = MicroSessionIdTlv::new(7777, 0x11).to_raw();
+        raw.clear_reflector_flags();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let mut latched = None;
+        let err = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            Some(0x22), // pre-known reflector id, but reflected 0x11 ≠ 0x22
+            &mut latched,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect_err("reflector MSID mismatch must reject");
+
+        assert_eq!(
+            err,
+            TlvRejection::ReflectorMsidMismatch {
+                got: 0x11,
+                expected: 0x22
+            }
+        );
+        // Pre-known configuration takes precedence and must never be
+        // superseded by a first-seen value: the zero-config latch stays
+        // untouched (RFC 9534 §3.2-11/-12).
+        assert_eq!(
+            latched, None,
+            "pre-known reflector ID must not populate the zero-config latch"
+        );
+    }
+
+    #[test]
+    fn test_reflected_reflector_msid_match_accepts() {
+        let mut raw = MicroSessionIdTlv::new(7777, 0x22).to_raw();
+        raw.clear_reflector_flags();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let mut latched = None;
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            Some(0x22),
+            &mut latched,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("reflector MSID match must accept")
+        .expect("status produced");
+        assert!(status.contains("MSID:ok(reflector=34)"), "got: {}", status);
+        // Pre-known configuration takes precedence and must never be
+        // superseded by a first-seen value: the zero-config latch stays
+        // untouched (RFC 9534 §3.2-11/-12).
+        assert_eq!(
+            latched, None,
+            "pre-known reflector ID must not populate the zero-config latch"
+        );
+    }
+
+    #[test]
+    fn test_reflected_reflector_msid_zero_config_latches_first_seen() {
+        // RFC 9534 §3.2-11 (unconditional validation, zero-config path):
+        // with no pre-known reflector member-link ID, the first
+        // validly-received reply's Reflector Micro-session ID becomes the
+        // expected value for the rest of the session. A second reply
+        // echoing the same reflector ID must still be accepted.
+        let mut latched: Option<u16> = None;
+
+        let mut raw1 = MicroSessionIdTlv::new(7777, 0x22).to_raw();
+        raw1.clear_reflector_flags();
+        let mut tlvs1 = TlvList::new();
+        tlvs1.push(raw1).unwrap();
+        let status1 = validate_reflected_tlvs(
+            &tlvs1,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            None, // no pre-known reflector ID
+            &mut latched,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("first reply must be accepted")
+        .expect("status produced");
+        assert!(status1.contains("MSID:ok"), "got: {}", status1);
+        assert_eq!(
+            latched,
+            Some(0x22),
+            "first-seen reflector ID must be latched"
+        );
+
+        let mut raw2 = MicroSessionIdTlv::new(7777, 0x22).to_raw();
+        raw2.clear_reflector_flags();
+        let mut tlvs2 = TlvList::new();
+        tlvs2.push(raw2).unwrap();
+        let status2 = validate_reflected_tlvs(
+            &tlvs2,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            None,
+            &mut latched,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("second reply with the same reflector ID must also be accepted")
+        .expect("status produced");
+        assert!(status2.contains("MSID:ok"), "got: {}", status2);
+        assert_eq!(latched, Some(0x22), "latch must remain unchanged");
+    }
+
+    #[test]
+    fn test_reflected_reflector_msid_zero_config_rejects_change_after_latch() {
+        // RFC 9534 §3.2-11 (zero-config path): once the first reply has
+        // latched a Reflector Micro-session ID, a later reply echoing a
+        // different reflector ID must be discarded exactly like the
+        // pre-known mismatch path (reuses `ReflectorMsidMismatch`).
+        let mut latched: Option<u16> = None;
+
+        let mut raw1 = MicroSessionIdTlv::new(7777, 0x22).to_raw();
+        raw1.clear_reflector_flags();
+        let mut tlvs1 = TlvList::new();
+        tlvs1.push(raw1).unwrap();
+        validate_reflected_tlvs(
+            &tlvs1,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            None,
+            &mut latched,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("first reply must be accepted and latch the reflector ID");
+        assert_eq!(latched, Some(0x22));
+
+        let mut raw2 = MicroSessionIdTlv::new(7777, 0x33).to_raw();
+        raw2.clear_reflector_flags();
+        let mut tlvs2 = TlvList::new();
+        tlvs2.push(raw2).unwrap();
+        let err = validate_reflected_tlvs(
+            &tlvs2,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            None,
+            &mut latched,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect_err("a changed reflector ID after latching must be rejected");
+
+        assert_eq!(
+            err,
+            TlvRejection::ReflectorMsidMismatch {
+                got: 0x33,
+                expected: 0x22
+            }
+        );
+    }
+
+    #[test]
+    fn test_forged_msid_with_i_flag_not_consumed() {
+        // RFC 8972 §4-19 / §4.8-16: "If the I flag is set, the STAMP system
+        // MUST discard all TLVs and MUST stop processing." A reflector (or an
+        // on-path attacker) that returns an I-flagged MSID TLV with a forged
+        // sender_micro_session_id MUST NOT have that value trusted for session
+        // binding — validation must not reject on the forged mismatch.
+        let mut raw = MicroSessionIdTlv::new(0xBAD, 42).to_raw();
+        raw.set_integrity_failed();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            None,
+            &mut None,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("I-flagged forged MSID must not be consumed → accept");
+
+        let status = status.expect("status produced");
+        assert!(
+            !status.contains("MSID:ok"),
+            "forged MSID value must not be consumed: {}",
+            status
+        );
+        assert!(status.contains("1I"), "I-flag must be reported: {}", status);
+    }
+
+    #[test]
+    fn test_forged_msid_with_m_flag_not_consumed() {
+        // RFC 8972 §4-18: "If the M flag is set, the STAMP system MUST stop
+        // processing the remainder of the extended STAMP packet." An M-flagged
+        // MSID TLV's value MUST NOT be consumed for session binding.
+        let mut raw = MicroSessionIdTlv::new(0xBAD, 42).to_raw();
+        raw.set_malformed();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            None,
+            &mut None,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("M-flagged forged MSID must not be consumed → accept");
+
+        let status = status.expect("status produced");
+        assert!(
+            !status.contains("MSID:ok"),
+            "forged MSID value must not be consumed: {}",
+            status
+        );
+        assert!(status.contains("1M"), "M-flag must be reported: {}", status);
+    }
+
+    #[test]
+    fn test_forged_msid_ignored_when_tlv_hmac_fails() {
+        // RFC 8972 §4.8-17: "If HMAC verification by the Session-Sender fails,
+        // then the Session-Sender MUST stop processing TLVs." The forged MSID
+        // value MUST NOT reach the session-binding check when the TLV-HMAC
+        // cannot be verified.
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let mut tlvs = TlvList::new();
+        tlvs.push(MicroSessionIdTlv::new(0xBAD, 42).to_raw())
+            .unwrap();
+        // A bogus HMAC TLV value that will never verify against the data.
+        tlvs.push(crate::tlv::RawTlv::new(
+            crate::tlv::TlvType::Hmac,
+            vec![0u8; 16],
+        ))
+        .unwrap();
+
+        // Data long enough for the HMAC coverage slice (seq + TLV area).
+        let data = [0u8; 128];
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &data,
+            44,
+            Some(&key),
+            Some(7777),
+            None,
+            &mut None,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("TLV-HMAC failure must stop TLV processing → accept, not reject");
+
+        let status = status.expect("status produced");
+        assert!(status.contains("HMAC:fail"), "got: {}", status);
+        assert!(
+            !status.contains("MSID:ok"),
+            "forged MSID must be ignored on HMAC failure: {}",
+            status
+        );
+    }
+
+    // --- validate_reflected_tlvs: Access Report ack detection (§4.6) ------
+
+    #[test]
+    fn test_validate_reflected_tlvs_detects_access_report_ack() {
+        let mut raw = AccessReportTlv::new(1, 1).to_raw();
+        raw.clear_reflector_flags(); // properly-reflected TLV: no U/M/I flags
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            true,  // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("clean Access Report TLV must return Ok")
+        .expect("status produced");
+
+        assert!(status.contains("AccessReport:ack"), "got: {}", status);
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_ignores_access_report_when_not_tracking() {
+        // Backward compatibility: when the sender never requested tracking
+        // (e.g. `--access-report` was not set), the presence of an Access
+        // Report TLV must not spuriously affect the status string.
+        let mut raw = AccessReportTlv::new(1, 1).to_raw();
+        raw.clear_reflector_flags();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok regardless of tracking")
+        .expect("status produced");
+
+        assert!(!status.contains("AccessReport"), "got: {}", status);
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_access_report_u_flagged_not_acked() {
+        // RFC 8972 §4-17: a U-flagged TLV must be skipped — an unrecognized
+        // echo cannot be trusted as the RFC 8972 §4.6 acknowledgment.
+        let mut raw = AccessReportTlv::new(1, 1).to_raw();
+        raw.set_unrecognized();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            true,
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok even though unrecognized")
+        .expect("status produced");
+
+        assert!(
+            !status.contains("AccessReport:ack"),
+            "U-flagged TLV must not count as an ack: {}",
+            status
+        );
+        assert!(status.contains("1U"), "got: {}", status);
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_access_report_i_flagged_not_acked() {
+        // RFC 8972 §4-19: an I-flagged TLV means integrity failed —
+        // §4.6's ack semantics require an intact echo, so no ack.
+        let mut raw = AccessReportTlv::new(1, 1).to_raw();
+        raw.set_integrity_failed();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            true,
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok even though integrity-failed")
+        .expect("status produced");
+
+        assert!(
+            !status.contains("AccessReport:ack"),
+            "I-flagged TLV must not count as an ack: {}",
+            status
+        );
+        assert!(status.contains("1I"), "got: {}", status);
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_access_report_m_flagged_halts_scan() {
+        // RFC 8972 §4-18: an M-flagged TLV halts processing of the
+        // *remainder* of the packet — an Access Report TLV that comes after
+        // it in wire order must not be reached, hence not acked.
+        let mut bad = crate::tlv::RawTlv::new(crate::tlv::TlvType::MicroSessionId, vec![0, 0, 0]);
+        bad.set_malformed();
+        let mut good = AccessReportTlv::new(1, 1).to_raw();
+        good.clear_reflector_flags();
+
+        let mut tlvs = TlvList::new();
+        tlvs.push(bad).unwrap();
+        tlvs.push(good).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            true,
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok — M just halts the scan, doesn't reject")
+        .expect("status produced");
+
+        assert!(
+            !status.contains("AccessReport:ack"),
+            "M-flag must halt the scan before the later Access Report TLV: {}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_access_report_ack_survives_alongside_msid() {
+        // Both features active at once: MSID success must not short-circuit
+        // (via an early `break`) before the Access Report TLV later in the
+        // list gets scanned.
+        let mut msid = MicroSessionIdTlv::new(7777, 42).to_raw();
+        msid.clear_reflector_flags();
+        let mut ar = AccessReportTlv::new(1, 1).to_raw();
+        ar.clear_reflector_flags();
+
+        let mut tlvs = TlvList::new();
+        tlvs.push(msid).unwrap();
+        tlvs.push(ar).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            None,
+            &mut None,
+            true,
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok")
+        .expect("status produced");
+
+        assert!(status.contains("MSID:ok"), "got: {}", status);
+        assert!(status.contains("AccessReport:ack"), "got: {}", status);
+    }
+
+    // --- validate_reflected_tlvs: CoS EC2 CE detection
+    // (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) ------------------------------
+
+    #[test]
+    fn test_validate_reflected_tlvs_detects_cos_ce() {
+        let mut raw = ClassOfServiceTlv {
+            dscp1: 0,
+            ecn1: 1,
+            dscp2: 0,
+            ecn2: 0b11, // CE
+            rpd: 0,
+            rpe: 0b11,
+        }
+        .to_raw();
+        raw.clear_reflector_flags(); // properly-reflected TLV: no U/M/I flags
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            false, // track_access_report
+            true,  // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("clean CE-marked CoS TLV must return Ok")
+        .expect("status produced");
+
+        assert!(status.contains("CoS:CE"), "got: {}", status);
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_ignores_cos_ce_when_not_tracking() {
+        // Backward compatibility: when the congestion controller is
+        // inactive (e.g. `--cos`/`--ecn` were not requesting ECT0/ECT1),
+        // a CE-marked EC2 field must not spuriously affect the status
+        // string.
+        let mut raw = ClassOfServiceTlv {
+            dscp1: 0,
+            ecn1: 1,
+            dscp2: 0,
+            ecn2: 0b11,
+            rpd: 0,
+            rpe: 0b11,
+        }
+        .to_raw();
+        raw.clear_reflector_flags();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok regardless of tracking")
+        .expect("status produced");
+
+        assert!(!status.contains("CoS:CE"), "got: {}", status);
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_cos_non_ce_ecn2_not_flagged() {
+        // ECT0 (0b10) is not congestion — must not be reported as CE.
+        let mut raw = ClassOfServiceTlv {
+            dscp1: 0,
+            ecn1: 1,
+            dscp2: 0,
+            ecn2: 0b10,
+            rpd: 0,
+            rpe: 0b11,
+        }
+        .to_raw();
+        raw.clear_reflector_flags();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            false, // track_access_report
+            true,  // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok")
+        .expect("status produced");
+
+        assert!(!status.contains("CoS:CE"), "got: {}", status);
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_cos_ce_u_flagged_not_reported() {
+        // RFC 8972 §4-17: a U-flagged TLV must be skipped — an unrecognized
+        // echo cannot be trusted as a congestion signal.
+        let mut raw = ClassOfServiceTlv {
+            dscp1: 0,
+            ecn1: 1,
+            dscp2: 0,
+            ecn2: 0b11,
+            rpd: 0,
+            rpe: 0b11,
+        }
+        .to_raw();
+        raw.set_unrecognized();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            false, // track_access_report
+            true,  // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok even though unrecognized")
+        .expect("status produced");
+
+        assert!(
+            !status.contains("CoS:CE"),
+            "U-flagged TLV must not count as a CE signal: {}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_cos_ce_i_flagged_not_reported() {
+        // RFC 8972 §4-19: an I-flagged TLV means integrity failed — the
+        // controller must not be able to be forced into a spurious backoff
+        // by an unverifiable echo.
+        let mut raw = ClassOfServiceTlv {
+            dscp1: 0,
+            ecn1: 1,
+            dscp2: 0,
+            ecn2: 0b11,
+            rpd: 0,
+            rpe: 0b11,
+        }
+        .to_raw();
+        raw.set_integrity_failed();
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            false, // track_access_report
+            true,  // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok even though integrity-failed")
+        .expect("status produced");
+
+        assert!(
+            !status.contains("CoS:CE"),
+            "I-flagged TLV must not count as a CE signal: {}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_cos_ce_m_flagged_before_it_halts_scan() {
+        // RFC 8972 §4-18: an M-flagged TLV halts processing of the
+        // *remainder* of the packet — a CE-marked CoS TLV that comes after
+        // it in wire order must not be reached.
+        let mut bad = crate::tlv::RawTlv::new(crate::tlv::TlvType::MicroSessionId, vec![0, 0, 0]);
+        bad.set_malformed();
+        let mut good = ClassOfServiceTlv {
+            dscp1: 0,
+            ecn1: 1,
+            dscp2: 0,
+            ecn2: 0b11,
+            rpd: 0,
+            rpe: 0b11,
+        }
+        .to_raw();
+        good.clear_reflector_flags();
+
+        let mut tlvs = TlvList::new();
+        tlvs.push(bad).unwrap();
+        tlvs.push(good).unwrap();
+
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            false, // track_access_report
+            true,  // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("Ok — M just halts the scan, doesn't reject")
+        .expect("status produced");
+
+        assert!(
+            !status.contains("CoS:CE"),
+            "M-flag must halt the scan before the later CoS TLV: {}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_validate_reflected_tlvs_cos_ce_suppressed_by_tlv_hmac_failure() {
+        // RFC 8972 §4.8-17: "If HMAC verification by the Session-Sender
+        // fails, then the Session-Sender MUST stop processing TLVs." A
+        // forged/tampered CE signal MUST NOT reach the congestion
+        // controller when the TLV-HMAC cannot be verified — otherwise an
+        // on-path attacker who cannot forge the HMAC could still force the
+        // sender into a permanent backoff via a bare CoS TLV injection.
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let mut tlvs = TlvList::new();
+        let mut cos = ClassOfServiceTlv {
+            dscp1: 0,
+            ecn1: 1,
+            dscp2: 0,
+            ecn2: 0b11,
+            rpd: 0,
+            rpe: 0b11,
+        }
+        .to_raw();
+        cos.clear_reflector_flags();
+        tlvs.push(cos).unwrap();
+        // A bogus HMAC TLV value that will never verify against the data.
+        tlvs.push(crate::tlv::RawTlv::new(
+            crate::tlv::TlvType::Hmac,
+            vec![0u8; 16],
+        ))
+        .unwrap();
+
+        let data = [0u8; 128];
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &data,
+            44,
+            Some(&key),
+            None,
+            None,
+            &mut None,
+            false, // track_access_report
+            true,  // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("TLV-HMAC failure must stop TLV processing → accept, not reject")
+        .expect("status produced");
+
+        assert!(status.contains("HMAC:fail"), "got: {}", status);
+        assert!(
+            !status.contains("CoS:CE"),
+            "forged CE signal must be ignored on HMAC failure: {}",
+            status
+        );
+    }
+
+    // --- process_response: Access Report acknowledgment wiring (§4.6) -----
+
+    #[test]
+    fn test_process_response_acknowledges_access_report_state() {
+        use crate::packets::{
+            ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated,
+        };
+
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 1,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let mut tlvs = TlvList::new();
+        let mut ar = AccessReportTlv::new(1, 1).to_raw();
+        ar.clear_reflector_flags();
+        tlvs.push(ar).unwrap();
+        let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
+        let buf = ext.to_bytes();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            1,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        access_report_state.tick(Instant::now()); // simulate the original send having armed it
+        let mut ctx = SenderRecvContext {
+            pending: &mut pending,
+            rtt_collector: &mut rtt_collector,
+            owd_collector: &mut owd_collector,
+            packets_received: &mut packets_received,
+            print_stats: false,
+            hmac_key: None,
+            expected_sender_msid: None,
+            expected_reflector_msid: None,
+            latched_reflector_msid: &mut latched_reflector_msid,
+            access_report_state: Some(&mut access_report_state),
+            congestion: None,
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
+            #[cfg(all(unix, feature = "snmp"))]
+            snmp_stats: None,
+        };
+
+        process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
+
+        assert_eq!(
+            access_report_state.outcome(),
+            AccessReportOutcome::Acknowledged
+        );
+    }
+
+    #[test]
+    fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
+        use crate::packets::{
+            ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated,
+        };
+
+        // A reply with no TLVs at all must leave the timer armed.
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 1,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, TlvList::new());
+        let buf = ext.to_bytes();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            1,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        access_report_state.tick(Instant::now());
+        let mut ctx = SenderRecvContext {
+            pending: &mut pending,
+            rtt_collector: &mut rtt_collector,
+            owd_collector: &mut owd_collector,
+            packets_received: &mut packets_received,
+            print_stats: false,
+            hmac_key: None,
+            expected_sender_msid: None,
+            expected_reflector_msid: None,
+            latched_reflector_msid: &mut latched_reflector_msid,
+            access_report_state: Some(&mut access_report_state),
+            congestion: None,
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
+            #[cfg(all(unix, feature = "snmp"))]
+            snmp_stats: None,
+        };
+
+        process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
+
+        assert_eq!(access_report_state.outcome(), AccessReportOutcome::Pending);
+    }
+
+    // --- process_response: AIMD congestion-response wiring
+    // (draft-ietf-ippm-stamp-cos-ecn-01 §3.4, chunk F2) ---------------------
+
+    fn congestion_test_params() -> AimdParams {
+        AimdParams {
+            base_interval: Duration::from_millis(100),
+            backoff_factor: 2.0,
+            max_interval: Duration::from_millis(1600),
+            recovery_step: Duration::from_millis(10),
+        }
+    }
+
+    fn congestion_process_response_ctx<'a>(
+        pending: &'a mut HashMap<u32, PendingPacket>,
+        rtt_collector: &'a mut RttCollector,
+        owd_collector: &'a mut OwdCollector,
+        packets_received: &'a mut u32,
+        latched_reflector_msid: &'a mut Option<u16>,
+        congestion: Option<&'a mut CongestionState>,
+    ) -> SenderRecvContext<'a> {
+        SenderRecvContext {
+            pending,
+            rtt_collector,
+            owd_collector,
+            packets_received,
+            print_stats: false,
+            hmac_key: None,
+            expected_sender_msid: None,
+            expected_reflector_msid: None,
+            latched_reflector_msid,
+            access_report_state: None,
+            congestion,
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
+            #[cfg(all(unix, feature = "snmp"))]
+            snmp_stats: None,
+        }
+    }
+
+    #[test]
+    fn test_process_response_forward_path_ce_backs_off_congestion_controller() {
+        use crate::packets::{
+            ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated,
+        };
+
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 1,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let mut tlvs = TlvList::new();
+        let mut cos = ClassOfServiceTlv {
+            dscp1: 0,
+            ecn1: 1,
+            dscp2: 0,
+            ecn2: 0b11, // CE observed at the reflector's ingress (forward path)
+            rpd: 0,
+            rpe: 0b11,
+        }
+        .to_raw();
+        cos.clear_reflector_flags();
+        tlvs.push(cos).unwrap();
+        let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
+        let buf = ext.to_bytes();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            1,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        let mut congestion = CongestionState::new(congestion_test_params());
+        let mut ctx = congestion_process_response_ctx(
+            &mut pending,
+            &mut rtt_collector,
+            &mut owd_collector,
+            &mut packets_received,
+            &mut latched_reflector_msid,
+            Some(&mut congestion),
+        );
+
+        // No reply-ECN plumbing in this test (reverse path absent).
+        process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
+
+        assert_eq!(
+            congestion.controller.current_interval(),
+            Duration::from_millis(200),
+            "forward-path CE (reflected EC2) must double the interval"
+        );
+        assert_eq!(congestion.controller.stats().ce_observations, 1);
+    }
+
+    #[test]
+    fn test_process_response_reverse_path_ce_backs_off_congestion_controller() {
+        use crate::packets::{
+            ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated,
+        };
+
+        // No CoS TLV at all — the only CE signal is the reply's own on-wire
+        // ECN, passed as `reply_ecn`.
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 2,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 2,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, TlvList::new());
+        let buf = ext.to_bytes();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            2,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        let mut congestion = CongestionState::new(congestion_test_params());
+        let mut ctx = congestion_process_response_ctx(
+            &mut pending,
+            &mut rtt_collector,
+            &mut owd_collector,
+            &mut packets_received,
+            &mut latched_reflector_msid,
+            Some(&mut congestion),
+        );
+
+        process_response(
+            &buf,
+            false,
+            true,
+            ClockFormat::NTP,
+            None,
+            Some(0b11),
+            &mut ctx,
+        );
+
+        assert_eq!(
+            congestion.controller.current_interval(),
+            Duration::from_millis(200),
+            "reverse-path CE (reply's on-wire ECN) must double the interval"
+        );
+        assert_eq!(congestion.controller.stats().ce_observations, 1);
+    }
+
+    #[test]
+    fn test_process_response_clean_reply_recovers_congestion_controller() {
+        use crate::packets::{
+            ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated,
+        };
+
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 3,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 3,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, TlvList::new());
+        let buf = ext.to_bytes();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            3,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        let mut congestion = CongestionState::new(congestion_test_params());
+        congestion.controller.on_ce_observed(); // pre-back off to 200ms
+        assert_eq!(
+            congestion.controller.current_interval(),
+            Duration::from_millis(200)
+        );
+        let mut ctx = congestion_process_response_ctx(
+            &mut pending,
+            &mut rtt_collector,
+            &mut owd_collector,
+            &mut packets_received,
+            &mut latched_reflector_msid,
+            Some(&mut congestion),
+        );
+
+        // Neither direction CE-marked: a clean reply recovers by the
+        // configured step (10ms in `congestion_test_params`).
+        process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
+
+        assert_eq!(
+            congestion.controller.current_interval(),
+            Duration::from_millis(190)
+        );
+        assert_eq!(congestion.controller.stats().ce_observations, 1);
+    }
+
+    #[test]
+    fn test_process_response_no_panic_when_congestion_inactive() {
+        use crate::packets::{
+            ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated,
+        };
+
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 4,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 4,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, TlvList::new());
+        let buf = ext.to_bytes();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            4,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        // `--cos`/`--ecn` not requesting ECT0/ECT1: controller absent.
+        let mut ctx = congestion_process_response_ctx(
+            &mut pending,
+            &mut rtt_collector,
+            &mut owd_collector,
+            &mut packets_received,
+            &mut latched_reflector_msid,
+            None,
+        );
+
+        // Must not panic even with a reverse-path CE reading present.
+        process_response(
+            &buf,
+            false,
+            true,
+            ClockFormat::NTP,
+            None,
+            Some(0b11),
+            &mut ctx,
+        );
+
+        assert_eq!(*ctx.packets_received, 1);
+    }
+
+    // --- Full loopback: sender packet → reflector assembly → sender ack ---
+    //
+    // Exercises the real, socket-free assembly/parse code paths on both
+    // ends (no network): builds a sender packet carrying the Access Report
+    // TLV exactly as the send loop would, feeds it through the reflector's
+    // pure `assemble_unauth_answer_with_tlvs`, and confirms the resulting
+    // reply's bytes acknowledge the state machine via `process_response`.
+
+    #[test]
+    fn test_access_report_loopback_acked_on_first_reply() {
+        use crate::configuration::TlvHandlingMode;
+        use crate::packets::PacketUnauthenticated;
+        use crate::receiver::{assemble_unauth_answer_with_tlvs, ProcessingContext};
+
+        let access_id = 1u8;
+        let return_code = 1u8;
+        let extra_tlvs = [AccessReportTlv::new(access_id, return_code).to_raw()];
+
+        let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        let send_time = Instant::now();
+        assert!(access_report_state.tick(send_time));
+
+        let seq_num = 1u32;
+        let send_timestamp = generate_timestamp(ClockFormat::NTP);
+        let request_bytes =
+            build_unauth_packet_with_tlvs(seq_num, send_timestamp, 0, None, &extra_tlvs, None);
+
+        // --- Reflector side: pure, socket-free assembly ---
+        let packet = PacketUnauthenticated::from_bytes(&request_bytes).unwrap();
+        let ctx = ProcessingContext {
+            clock_source: ClockFormat::NTP,
+            error_estimate_wire: 0,
+            hmac_key: None,
+            hmac_key_set: None,
+            require_hmac: false,
+            session_manager: None,
+            stateful_reflector: false,
+            tlv_mode: TlvHandlingMode::Echo,
+            verify_tlv_hmac: false,
+            strict_packets: false,
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
+            received_dscp: 0,
+            received_ecn: 0,
+            reflector_rx_count: None,
+            reflector_tx_count: None,
+            packet_addr_info: None,
+            last_reflection: None,
+            local_addresses: &[],
+            local_macs: &[],
+            sender_port: 0,
+            return_path_allow_alternate: false,
+            reflector_member_link_id: None,
+            captured_headers: None,
+            reflected_control_max_count: crate::receiver::REFLECTED_CONTROL_MAX_COUNT,
+            reflected_control_max_size: crate::receiver::REFLECTED_CONTROL_MAX_SIZE,
+            reflected_control_min_interval_ns: crate::receiver::REFLECTED_CONTROL_MIN_INTERVAL_NS,
+            rx_timestamp: None,
+            rx_method: crate::tlv::TimestampMethod::SwLocal,
+            tx_method: crate::tlv::TimestampMethod::SwLocal,
+        };
+        let response = assemble_unauth_answer_with_tlvs(
+            &packet,
+            &request_bytes,
+            ClockFormat::NTP,
+            generate_timestamp(ClockFormat::NTP),
+            64,
+            0,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        // --- Sender side: process the reflected reply exactly as the send
+        // loop's receive path would ---
+        let mut pending = HashMap::new();
+        pending.insert(
+            seq_num,
+            PendingPacket {
+                send_time,
+                send_timestamp,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        let mut recv_ctx = SenderRecvContext {
+            pending: &mut pending,
+            rtt_collector: &mut rtt_collector,
+            owd_collector: &mut owd_collector,
+            packets_received: &mut packets_received,
+            print_stats: false,
+            hmac_key: None,
+            expected_sender_msid: None,
+            expected_reflector_msid: None,
+            latched_reflector_msid: &mut latched_reflector_msid,
+            access_report_state: Some(&mut access_report_state),
+            congestion: None,
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
+            #[cfg(all(unix, feature = "snmp"))]
+            snmp_stats: None,
+        };
+        process_response(
+            &response.data,
+            false,
+            true,
+            ClockFormat::NTP,
+            None,
+            None,
+            &mut recv_ctx,
+        );
+
+        assert_eq!(
+            access_report_state.outcome(),
+            AccessReportOutcome::Acknowledged,
+            "a conforming reflector's echo must acknowledge on the first reply"
+        );
+        assert_eq!(access_report_state.retransmissions(), 0);
+        assert_eq!(packets_received, 1, "RTT accounting must proceed as normal");
+    }
+
+    #[test]
+    fn test_access_report_no_reflector_echo_leads_to_retransmit_then_abort() {
+        // Simulates total silence from the reflector (packet lost / dropped)
+        // by simply never calling `acknowledge()` — only driving `tick`
+        // forward in time, exactly as the send loop does every iteration.
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        let mut now = Instant::now();
+
+        assert!(state.tick(now), "iteration 0: original send");
+        for expected_retransmissions in 1..=4u32 {
+            now += Duration::from_secs(3) + Duration::from_millis(1);
+            assert!(
+                state.tick(now),
+                "iteration {expected_retransmissions}: must retransmit"
+            );
+            assert_eq!(state.retransmissions(), expected_retransmissions);
+            assert_eq!(state.outcome(), AccessReportOutcome::Pending);
+        }
+
+        // One more expiry past the 4th retransmission aborts the procedure
+        // (RFC 8972 §4.6: "repeated up to four times before the procedure
+        // is aborted").
+        now += Duration::from_secs(3) + Duration::from_millis(1);
+        assert!(!state.tick(now), "must not attach after aborting");
+        assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
+        assert_eq!(state.retransmissions(), 4);
+    }
+
+    // --- Wait-phase extension (post-loop) — RFC 8972 §4.6 -------------------
+    //
+    // The tests above drive `AccessReportRetransmitState` directly and show
+    // the state machine itself is correct. The defect this section covers
+    // is in the *plumbing*: `run_sender`'s post-loop wait never called
+    // `tick` at all, so a run shorter than the retry budget
+    // (`access_report_timeout * (1 + retries)`) reported `Pending` forever
+    // without ever retransmitting — the common `--count 1` case. These
+    // drive the real `run_sender` end-to-end over loopback UDP so the
+    // plumbing itself is exercised, not just the state machine.
+    // `--access-report-timeout` is seconds-granular (CLI range 1..=3600),
+    // so these sleep for real, bounded, low single-digit seconds.
+
+    /// Builds a `Configuration` for the wait-phase tests: minimal flags,
+    /// talking to `remote_port` on loopback, Access Report enabled with a
+    /// short timeout/retry budget so the tests run quickly. `--timeout 1`
+    /// keeps the pre-existing plain wait phase (before the extension even
+    /// starts) short too.
+    fn access_report_test_config(
+        remote_port: u16,
+        access_report_timeout_secs: u32,
+        access_report_retries: u32,
+    ) -> Configuration {
+        use clap::Parser;
+        let args: Vec<String> = vec![
+            "test".to_string(),
+            "--remote-addr".to_string(),
+            "127.0.0.1".to_string(),
+            "--remote-port".to_string(),
+            remote_port.to_string(),
+            "--local-addr".to_string(),
+            "127.0.0.1".to_string(),
+            "--local-port".to_string(),
+            "0".to_string(),
+            "--count".to_string(),
+            "1".to_string(),
+            "--send-delay".to_string(),
+            "10".to_string(),
+            "--timeout".to_string(),
+            "1".to_string(),
+            "--access-report".to_string(),
+            "1".to_string(),
+            "--access-report-timeout".to_string(),
+            access_report_timeout_secs.to_string(),
+            "--access-report-retries".to_string(),
+            access_report_retries.to_string(),
+        ];
+        Configuration::parse_from(args)
+    }
+
+    /// A "dead" reflector: accepts packets on `socket` but never replies.
+    /// Collects raw datagrams until either `want` have arrived or `budget`
+    /// elapses, whichever comes first — bounding the test's runtime even if
+    /// the defect under test resurfaces (no retransmits ⇒ `want` is never
+    /// reached, so this just idles out after `budget`).
+    async fn collect_silently(socket: UdpSocket, want: usize, budget: Duration) -> Vec<Vec<u8>> {
+        let mut packets = Vec::new();
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut buf = [0u8; 1024];
+        while packets.len() < want {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                Ok(Ok((len, _src))) => packets.push(buf[..len].to_vec()),
+                _ => break,
+            }
+        }
+        packets
+    }
+
+    /// A reflector that ignores every packet until the `ack_after`-th
+    /// (1-indexed), which it acknowledges with a real, TLV-echoing reply
+    /// built via the reflector's own `assemble_unauth_answer_with_tlvs` —
+    /// then keeps listening (silently) for `extra_wait` to prove nothing
+    /// further arrives. Returns the total number of packets received.
+    ///
+    /// Bounded overall by `max_wait` for reaching the `ack_after`-th packet
+    /// so that if the sender never retransmits (e.g. the defect this test
+    /// guards against), the test fails cleanly instead of hanging forever
+    /// waiting for a packet that will never come.
+    async fn ack_nth_then_watch_for_more(
+        socket: UdpSocket,
+        ack_after: usize,
+        extra_wait: Duration,
+        max_wait: Duration,
+    ) -> usize {
+        use crate::configuration::TlvHandlingMode;
+        use crate::packets::PacketUnauthenticated;
+        use crate::receiver::{assemble_unauth_answer_with_tlvs, ProcessingContext};
+
+        let deadline = tokio::time::Instant::now() + max_wait;
+        let mut buf = [0u8; 1024];
+        let mut received = 0usize;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (len, src) = match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await
+            {
+                Ok(Ok(v)) => v,
+                _ => break,
+            };
+            received += 1;
+            if received == ack_after {
+                let packet = PacketUnauthenticated::from_bytes(&buf[..len]).unwrap();
+                let ctx = ProcessingContext {
+                    clock_source: ClockFormat::NTP,
+                    error_estimate_wire: 0,
+                    hmac_key: None,
+                    hmac_key_set: None,
+                    require_hmac: false,
+                    session_manager: None,
+                    stateful_reflector: false,
+                    tlv_mode: TlvHandlingMode::Echo,
+                    verify_tlv_hmac: false,
+                    strict_packets: false,
+                    #[cfg(feature = "metrics")]
+                    metrics_enabled: false,
+                    received_dscp: 0,
+                    received_ecn: 0,
+                    reflector_rx_count: None,
+                    reflector_tx_count: None,
+                    packet_addr_info: None,
+                    last_reflection: None,
+                    local_addresses: &[],
+                    local_macs: &[],
+                    sender_port: 0,
+                    return_path_allow_alternate: false,
+                    reflector_member_link_id: None,
+                    captured_headers: None,
+                    reflected_control_max_count: crate::receiver::REFLECTED_CONTROL_MAX_COUNT,
+                    reflected_control_max_size: crate::receiver::REFLECTED_CONTROL_MAX_SIZE,
+                    reflected_control_min_interval_ns:
+                        crate::receiver::REFLECTED_CONTROL_MIN_INTERVAL_NS,
+                    rx_timestamp: None,
+                    rx_method: crate::tlv::TimestampMethod::SwLocal,
+                    tx_method: crate::tlv::TimestampMethod::SwLocal,
+                };
+                let response = assemble_unauth_answer_with_tlvs(
+                    &packet,
+                    &buf[..len],
+                    ClockFormat::NTP,
+                    generate_timestamp(ClockFormat::NTP),
+                    64,
+                    0,
+                    None,
+                    TlvHandlingMode::Echo,
+                    None,
+                    false,
+                    &ctx,
+                );
+                let _ = socket.send_to(&response.data, src).await;
+
+                // Keep watching to prove the sender does not retransmit
+                // again after being acknowledged.
+                let watch_deadline = tokio::time::Instant::now() + extra_wait;
+                loop {
+                    let remaining =
+                        watch_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                        Ok(Ok(_)) => received += 1,
+                        _ => break,
+                    }
+                }
+                break;
+            }
+        }
+        received
+    }
+
+    #[tokio::test]
+    async fn test_wait_phase_retransmits_when_reflector_silent_then_aborts() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+
+        // timeout=1s, retries=2 ⇒ retry budget = 1*(1+2) = 3s worst case,
+        // on top of the pre-existing plain 1s wait before the extension
+        // even starts.
+        let conf = access_report_test_config(port, 1, 2);
+
+        let reflector = tokio::spawn(collect_silently(socket, 4, Duration::from_secs(8)));
+        let snapshot = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf, None))
+            .await
+            .expect("run_sender must not hang past the retry budget");
+        let packets = reflector.await.unwrap();
+
+        // Original send + exactly `retries` (2) retransmissions — no more:
+        // the retry budget caps it, since the reflector never acks.
+        assert_eq!(
+            packets.len(),
+            3,
+            "expected 1 original send + 2 retransmissions, got {}",
+            packets.len()
+        );
+
+        let summary = snapshot
+            .access_report
+            .expect("Access Report summary must be present when --access-report is set");
+        assert_eq!(summary.outcome, AccessReportOutcome::Aborted);
+        assert_eq!(summary.retransmissions, 2);
+        assert_eq!(
+            snapshot.packets_sent, 3,
+            "sent count must reflect the retransmissions"
+        );
+
+        // Reviewer-suggested cheap regression test: the Access Report TLV's
+        // wire bytes (flags/type/length/value) must be byte-identical
+        // across every attempt — nothing about the retry mechanism should
+        // perturb the TLV's content. In this minimal configuration the TLV
+        // is the only thing following the fixed unauthenticated base
+        // header (no HMAC TLV, since no key was configured).
+        let expected_tlv = AccessReportTlv::new(1, 1).to_raw().to_bytes();
+        for (i, packet) in packets.iter().enumerate() {
+            assert_eq!(
+                &packet[UNAUTH_BASE_SIZE..],
+                expected_tlv.as_slice(),
+                "attempt {i}'s Access Report TLV bytes must match every other attempt"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_phase_ack_mid_wait_stops_retransmitting() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+
+        // timeout=1s, retries=3 (budget 4s if never acked). Ignoring the
+        // original send and acking only the *second* packet received (the
+        // first retransmission, sent by the wait-phase extension after the
+        // main loop and its own plain wait have both already finished)
+        // specifically exercises the extension loop's own recv path, not
+        // the main loop's.
+        let conf = access_report_test_config(port, 1, 3);
+
+        let reflector = tokio::spawn(ack_nth_then_watch_for_more(
+            socket,
+            2,
+            Duration::from_secs(1),
+            Duration::from_secs(6),
+        ));
+        let snapshot = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf, None))
+            .await
+            .expect("run_sender must finish promptly once acknowledged");
+        let received = reflector.await.unwrap();
+
+        assert_eq!(
+            received, 2,
+            "must stop sending after the ack — original + exactly 1 retransmission"
+        );
+
+        let summary = snapshot
+            .access_report
+            .expect("Access Report summary must be present when --access-report is set");
+        assert_eq!(summary.outcome, AccessReportOutcome::Acknowledged);
+        assert_eq!(summary.retransmissions, 1);
+    }
+
+    #[tokio::test]
+    async fn test_wait_phase_unaffected_when_access_report_disabled() {
+        use clap::Parser;
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+
+        let args: Vec<String> = vec![
+            "test".to_string(),
+            "--remote-addr".to_string(),
+            "127.0.0.1".to_string(),
+            "--remote-port".to_string(),
+            port.to_string(),
+            "--local-addr".to_string(),
+            "127.0.0.1".to_string(),
+            "--local-port".to_string(),
+            "0".to_string(),
+            "--count".to_string(),
+            "1".to_string(),
+            "--send-delay".to_string(),
+            "10".to_string(),
+            "--timeout".to_string(),
+            "1".to_string(),
+        ];
+        let conf = Configuration::parse_from(args);
+
+        let reflector = tokio::spawn(collect_silently(socket, 10, Duration::from_millis(1300)));
+        let start = Instant::now();
+        let snapshot = tokio::time::timeout(Duration::from_secs(5), run_sender(&conf, None))
+            .await
+            .expect("run_sender must finish promptly with no Access Report extension");
+        let elapsed = start.elapsed();
+        let packets = reflector.await.unwrap();
+
+        // Bounded by the plain `--timeout` (1s) alone — there is no Access
+        // Report retry budget to extend it, proving the new wait-phase loop
+        // is a true no-op (byte-identical prior behaviour) when
+        // `--access-report` was not set.
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "wait phase must not be extended when --access-report is unset (took {elapsed:?})"
+        );
+        assert_eq!(packets.len(), 1, "no retransmission logic applies at all");
+        assert!(snapshot.access_report.is_none());
+        assert_eq!(snapshot.packets_sent, 1);
+        assert_eq!(snapshot.packets_lost, 1);
     }
 
     #[test]
@@ -2104,6 +4904,7 @@ mod tests {
         let mut rtt_collector = RttCollector::new();
         let mut owd_collector = OwdCollector::new();
         let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
@@ -2112,13 +4913,17 @@ mod tests {
             print_stats: false,
             hmac_key: None,
             expected_sender_msid: None,
+            expected_reflector_msid: None,
+            latched_reflector_msid: &mut latched_reflector_msid,
+            access_report_state: None,
+            congestion: None,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]
             snmp_stats: None,
         };
 
-        process_response(&buf, false, false, ClockFormat::PTP, None, &mut ctx);
+        process_response(&buf, false, false, ClockFormat::PTP, None, None, &mut ctx);
 
         let owd = owd_collector.summary().expect("one OWD sample recorded");
         assert_eq!(owd.samples, 1);
@@ -2153,8 +4958,13 @@ mod tests {
             mbz3: [0; 3],
         };
         let mut tlvs = TlvList::new();
-        tlvs.push(MicroSessionIdTlv::new(0xBAD, 99).to_raw())
-            .unwrap();
+        // Model a properly-reflected TLV: a conforming reflector clears the
+        // U/M/I flags on a recognized, well-formed TLV (the typed constructor
+        // sets the sender-side U flag, which would otherwise make the sender
+        // skip processing per RFC 8972 §4-17).
+        let mut raw = MicroSessionIdTlv::new(0xBAD, 99).to_raw();
+        raw.clear_reflector_flags();
+        tlvs.push(raw).unwrap();
         let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
         let buf = ext.to_bytes();
 
@@ -2169,6 +4979,7 @@ mod tests {
         let mut rtt_collector = RttCollector::new();
         let mut owd_collector = OwdCollector::new();
         let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
@@ -2179,13 +4990,17 @@ mod tests {
             // Sender transmitted with sender_msid=7777; reflector's response
             // carries 0xBAD → session binding fails.
             expected_sender_msid: Some(7777),
+            expected_reflector_msid: None,
+            latched_reflector_msid: &mut latched_reflector_msid,
+            access_report_state: None,
+            congestion: None,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]
             snmp_stats: None,
         };
 
-        process_response(&buf, false, true, ClockFormat::NTP, None, &mut ctx);
+        process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
 
         assert!(
             pending.contains_key(&42),
@@ -2240,6 +5055,7 @@ mod tests {
         let mut rtt_collector = RttCollector::new();
         let mut owd_collector = OwdCollector::new();
         let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
@@ -2248,13 +5064,17 @@ mod tests {
             print_stats: false,
             hmac_key: None,
             expected_sender_msid: Some(7777),
+            expected_reflector_msid: None,
+            latched_reflector_msid: &mut latched_reflector_msid,
+            access_report_state: None,
+            congestion: None,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]
             snmp_stats: None,
         };
 
-        process_response(&buf, false, true, ClockFormat::NTP, None, &mut ctx);
+        process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
 
         assert!(!pending.contains_key(&42));
         assert_eq!(packets_received, 1);

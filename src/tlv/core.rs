@@ -11,8 +11,9 @@ pub const HMAC_TLV_VALUE_SIZE: usize = 16;
 /// Class of Service TLV value size (4 bytes).
 pub const COS_TLV_VALUE_SIZE: usize = 4;
 
-/// Access Report TLV value size (2 bytes).
-pub const ACCESS_REPORT_TLV_VALUE_SIZE: usize = 2;
+/// Access Report TLV value size (4 bytes: ID+Resv, Return Code, and a
+/// 2-byte Reserved tail per RFC 8972 §4.6).
+pub const ACCESS_REPORT_TLV_VALUE_SIZE: usize = 4;
 
 /// Timestamp Information TLV value size (4 bytes).
 pub const TIMESTAMP_INFO_TLV_VALUE_SIZE: usize = 4;
@@ -55,9 +56,11 @@ pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 12;
 pub const REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE: usize = 8;
 
 /// Sub-TLV type for "IPv6 Extension Header Control" under the Reflected
-/// Test Packet Control TLV (draft-ietf-ippm-stamp-ext-hdr-08 §5.3).
-/// Presence-only: requests one-way mode (the reflector must not attach the
-/// received IPv6 extension headers to the reply's IPv6 header).
+/// Test Packet Control TLV (draft-ietf-ippm-stamp-ext-hdr-11 §5.3).
+/// Presence-only (Sub-TLV Length 0). Under -11 it asks the reflector to add
+/// matching IPv6 extension headers to its own reply packet; a reflector that
+/// cannot do so sets the C flag in the sub-TLV's Sub-TLV Flags (rule 4), and
+/// more than one such sub-TLV is a cardinality violation (C on every copy).
 ///
 /// The IANA codepoint is still TBA3 in the draft; this is a stand-in from
 /// the shared "STAMP Sub-TLV Types" Experimental range (240-251). Renumber
@@ -297,12 +300,13 @@ pub enum TlvType {
     /// Type number is TBD in the draft; 242 used from RFC 8972 experimental range.
     BerBurst = 242,
     /// Reflected IPv6 Extension Header Data TLV (246) -
-    /// draft-ietf-ippm-stamp-ext-hdr §3. Reflects received Hop-by-Hop and
-    /// Destination Options extension headers; requires raw-capture backend.
+    /// draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 5.1. Reflects received
+    /// Hop-by-Hop and Destination Options extension headers; requires
+    /// raw-capture backend.
     ReflectedIpv6ExtHdr = 246,
     /// Reflected Fixed Header Data TLV (247) -
-    /// draft-ietf-ippm-stamp-ext-hdr §4. Reflects the raw IPv4/IPv6 fixed
-    /// header (20/40 bytes); requires raw-capture backend.
+    /// draft-ietf-ippm-stamp-ext-hdr-11 §§3.2, 5.2. Reflects the raw IPv4/IPv6
+    /// fixed header (20/40 bytes); requires raw-capture backend.
     ReflectedFixedHdr = 247,
     /// Unknown type.
     Unknown(u8),

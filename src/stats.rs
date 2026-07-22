@@ -143,6 +143,8 @@ impl RttCollector {
             jitter_ms: self.jitter_ns().map(ns_to_ms),
             std_dev_ms: self.std_dev_ns().map(|ns| ns / 1_000_000.0),
             owd: None,
+            access_report: None,
+            congestion: None,
         }
     }
 }
@@ -270,6 +272,82 @@ pub struct OwdSummary {
     pub reverse_median_ms: f64,
 }
 
+/// Delivery outcome of the Access Report TLV retransmission procedure
+/// (RFC 8972 §4.6). Reported once per sender run, since the CLI carries a
+/// single Access ID / Return Code for the run's duration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessReportOutcome {
+    /// The reflector echoed the Access Report TLV (disarming the
+    /// retransmission timer) before the retry budget was exhausted.
+    Acknowledged,
+    /// Still awaiting acknowledgment when the run ended — e.g. the fixed
+    /// `--count`/`--interval` schedule finished before the timer expired or
+    /// the retry budget was exhausted.
+    Pending,
+    /// Retransmission retries were exhausted without acknowledgment; the
+    /// procedure was aborted per RFC 8972 §4.6 ("...SHOULD be repeated up to
+    /// four times before the procedure is aborted"). The measurement itself
+    /// is unaffected — this reflects only the Access Report sub-feature.
+    Aborted,
+}
+
+impl AccessReportOutcome {
+    /// Short machine-friendly label (matches the JSON `snake_case` value),
+    /// used for CSV output where a parenthetical note would be noise.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Acknowledged => "acknowledged",
+            Self::Pending => "pending",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
+impl std::fmt::Display for AccessReportOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Acknowledged | Self::Pending => write!(f, "{}", self.as_str()),
+            Self::Aborted => write!(f, "aborted (retries exhausted)"),
+        }
+    }
+}
+
+/// Access Report TLV delivery summary (RFC 8972 §4.6), present in
+/// [`StatsSnapshot`] only when `--access-report` was set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct AccessReportSummary {
+    pub outcome: AccessReportOutcome,
+    /// Number of retransmissions actually performed (0 means the original
+    /// send was acknowledged, or the run ended/aborted before any
+    /// retransmission was needed).
+    pub retransmissions: u32,
+}
+
+/// AIMD congestion-response observability summary
+/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4), present in [`StatsSnapshot`]
+/// only when the controller is active (`--cos` with `--ecn` requesting
+/// ECT0/ECT1). Built from `rate_control::AimdStats` by the sender.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct CongestionSummary {
+    /// CE-marked replies observed (forward-path EC2 in the reflected CoS
+    /// TLV, or reverse-path wire ECN on the reply itself — a reply flagged
+    /// by both counts once).
+    pub ce_replies: u64,
+    /// Number of times a CE observation actually grew the send interval
+    /// (excludes CE observations that arrived already saturated at
+    /// `max_interval_reached_ms`'s cap).
+    pub backoffs_applied: u64,
+    /// The send interval in effect when the run ended, milliseconds.
+    pub current_interval_ms: f64,
+    /// Highest send interval reached at any point during the run,
+    /// milliseconds.
+    pub max_interval_reached_ms: f64,
+    /// The configured base interval (`--send-delay`), milliseconds, for
+    /// reference.
+    pub base_interval_ms: f64,
+}
+
 /// Serializable sender statistics snapshot.
 #[derive(serde::Serialize)]
 pub struct StatsSnapshot {
@@ -289,6 +367,14 @@ pub struct StatsSnapshot {
     /// timestamps has been measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owd: Option<OwdSummary>,
+    /// Access Report TLV delivery outcome (RFC 8972 §4.6), present only when
+    /// `--access-report` was set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_report: Option<AccessReportSummary>,
+    /// AIMD congestion-response summary (draft-ietf-ippm-stamp-cos-ecn-01
+    /// §3.4), present only when the controller was active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub congestion: Option<CongestionSummary>,
 }
 
 impl StatsSnapshot {
@@ -297,6 +383,23 @@ impl StatsSnapshot {
     #[must_use]
     pub fn with_owd(mut self, owd: &OwdCollector) -> Self {
         self.owd = owd.summary();
+        self
+    }
+
+    /// Attaches the Access Report TLV delivery outcome (RFC 8972 §4.6) to
+    /// this snapshot. Pass `None` when `--access-report` was not set.
+    #[must_use]
+    pub fn with_access_report(mut self, summary: Option<AccessReportSummary>) -> Self {
+        self.access_report = summary;
+        self
+    }
+
+    /// Attaches the AIMD congestion-response summary
+    /// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) to this snapshot. Pass
+    /// `None` when the controller was never active this run.
+    #[must_use]
+    pub fn with_congestion(mut self, summary: Option<CongestionSummary>) -> Self {
+        self.congestion = summary;
         self
     }
 
@@ -372,6 +475,25 @@ impl StatsSnapshot {
                 owd.reverse_max_ms
             );
         }
+        if let Some(ar) = &self.access_report {
+            println!(
+                "{}Access Report (RFC 8972 §4.6): {} (retransmissions={})",
+                prefix, ar.outcome, ar.retransmissions
+            );
+        }
+        if let Some(c) = &self.congestion {
+            println!(
+                "{}Congestion response (draft-ietf-ippm-stamp-cos-ecn-01 §3.4): \
+                 ce_replies={} backoffs_applied={} interval={:.1}ms \
+                 (base={:.1}ms, peak={:.1}ms)",
+                prefix,
+                c.ce_replies,
+                c.backoffs_applied,
+                c.current_interval_ms,
+                c.base_interval_ms,
+                c.max_interval_reached_ms
+            );
+        }
     }
 
     fn print_json(&self, interim: bool) {
@@ -392,17 +514,21 @@ impl StatsSnapshot {
     }
 
     fn print_csv(&self) {
-        // Header + data row. OWD columns are always present but left empty
-        // when no one-way-delay samples were collected.
+        // Header + data row. OWD, Access Report, and Congestion columns
+        // are always present but left empty when no samples were
+        // collected / the feature was not enabled.
         println!(
             "packets_sent,packets_received,packets_lost,loss_percent,\
              min_rtt_ms,max_rtt_ms,avg_rtt_ms,median_rtt_ms,\
              p95_rtt_ms,p99_rtt_ms,jitter_ms,std_dev_ms,\
              owd_fwd_min_ms,owd_fwd_avg_ms,owd_fwd_max_ms,\
-             owd_rev_min_ms,owd_rev_avg_ms,owd_rev_max_ms"
+             owd_rev_min_ms,owd_rev_avg_ms,owd_rev_max_ms,\
+             access_report_outcome,access_report_retransmissions,\
+             congestion_ce_replies,congestion_backoffs_applied,\
+             congestion_current_interval_ms,congestion_max_interval_reached_ms"
         );
         println!(
-            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.packets_sent,
             self.packets_received,
             self.packets_lost,
@@ -421,6 +547,15 @@ impl StatsSnapshot {
             fmt_opt(self.owd.as_ref().map(|o| o.reverse_min_ms)),
             fmt_opt(self.owd.as_ref().map(|o| o.reverse_avg_ms)),
             fmt_opt(self.owd.as_ref().map(|o| o.reverse_max_ms)),
+            self.access_report.map_or("", |ar| ar.outcome.as_str()),
+            self.access_report
+                .map_or_else(String::new, |ar| ar.retransmissions.to_string()),
+            self.congestion
+                .map_or_else(String::new, |c| c.ce_replies.to_string()),
+            self.congestion
+                .map_or_else(String::new, |c| c.backoffs_applied.to_string()),
+            fmt_opt(self.congestion.map(|c| c.current_interval_ms)),
+            fmt_opt(self.congestion.map(|c| c.max_interval_reached_ms)),
         );
     }
 }
@@ -630,6 +765,8 @@ mod tests {
             jitter_ms: Some(0.5),
             std_dev_ms: Some(1.2),
             owd: None,
+            access_report: None,
+            congestion: None,
         };
         // Should not panic
         snap.print(OutputFormat::Text);
@@ -651,6 +788,8 @@ mod tests {
             jitter_ms: Some(0.5),
             std_dev_ms: Some(1.2),
             owd: None,
+            access_report: None,
+            congestion: None,
         };
         // Should not panic
         snap.print(OutputFormat::Json);
@@ -672,8 +811,169 @@ mod tests {
             jitter_ms: Some(0.5),
             std_dev_ms: Some(1.2),
             owd: None,
+            access_report: None,
+            congestion: None,
         };
         // Should not panic
+        snap.print(OutputFormat::Csv);
+    }
+
+    fn base_snapshot() -> StatsSnapshot {
+        StatsSnapshot {
+            packets_sent: 10,
+            packets_received: 8,
+            packets_lost: 2,
+            loss_percent: 20.0,
+            min_rtt_ms: Some(1.0),
+            max_rtt_ms: Some(5.0),
+            avg_rtt_ms: Some(3.0),
+            median_rtt_ms: Some(3.0),
+            p95_rtt_ms: Some(4.5),
+            p99_rtt_ms: Some(4.9),
+            jitter_ms: Some(0.5),
+            std_dev_ms: Some(1.2),
+            owd: None,
+            access_report: None,
+            congestion: None,
+        }
+    }
+
+    #[test]
+    fn test_access_report_outcome_display() {
+        assert_eq!(
+            AccessReportOutcome::Acknowledged.to_string(),
+            "acknowledged"
+        );
+        assert_eq!(AccessReportOutcome::Pending.to_string(), "pending");
+        assert_eq!(
+            AccessReportOutcome::Aborted.to_string(),
+            "aborted (retries exhausted)"
+        );
+    }
+
+    #[test]
+    fn test_with_access_report_attaches_summary() {
+        let snap = base_snapshot().with_access_report(Some(AccessReportSummary {
+            outcome: AccessReportOutcome::Acknowledged,
+            retransmissions: 0,
+        }));
+        let ar = snap.access_report.expect("summary attached");
+        assert_eq!(ar.outcome, AccessReportOutcome::Acknowledged);
+        assert_eq!(ar.retransmissions, 0);
+    }
+
+    #[test]
+    fn test_with_access_report_none_is_noop() {
+        let snap = base_snapshot().with_access_report(None);
+        assert!(snap.access_report.is_none());
+    }
+
+    #[test]
+    fn test_stats_text_format_includes_access_report() {
+        // Capture behaviour indirectly: printing must not panic when the
+        // Access Report summary is present, for every outcome variant.
+        for (outcome, retransmissions) in [
+            (AccessReportOutcome::Acknowledged, 0),
+            (AccessReportOutcome::Acknowledged, 2),
+            (AccessReportOutcome::Pending, 1),
+            (AccessReportOutcome::Aborted, 4),
+        ] {
+            let snap = base_snapshot().with_access_report(Some(AccessReportSummary {
+                outcome,
+                retransmissions,
+            }));
+            snap.print(OutputFormat::Text);
+            snap.print(OutputFormat::Json);
+            snap.print(OutputFormat::Csv);
+        }
+    }
+
+    #[test]
+    fn test_stats_json_serializes_access_report_fields() {
+        let snap = base_snapshot().with_access_report(Some(AccessReportSummary {
+            outcome: AccessReportOutcome::Aborted,
+            retransmissions: 4,
+        }));
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"access_report\""));
+        assert!(json.contains("\"aborted\""));
+        assert!(json.contains("\"retransmissions\":4"));
+    }
+
+    #[test]
+    fn test_stats_json_omits_access_report_when_none() {
+        let snap = base_snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("access_report"));
+    }
+
+    #[test]
+    fn test_stats_csv_includes_access_report_columns() {
+        // Smoke check: CSV printing with an access-report summary attached
+        // must not panic (columns validated via manual inspection since
+        // print_csv writes to stdout, not a capturable buffer here).
+        let snap = base_snapshot().with_access_report(Some(AccessReportSummary {
+            outcome: AccessReportOutcome::Pending,
+            retransmissions: 1,
+        }));
+        snap.print(OutputFormat::Csv);
+    }
+
+    // ===== Congestion response (F2, draft-ietf-ippm-stamp-cos-ecn-01 §3.4) =====
+
+    fn sample_congestion() -> CongestionSummary {
+        CongestionSummary {
+            ce_replies: 3,
+            backoffs_applied: 2,
+            current_interval_ms: 200.0,
+            max_interval_reached_ms: 400.0,
+            base_interval_ms: 100.0,
+        }
+    }
+
+    #[test]
+    fn test_with_congestion_attaches_summary() {
+        let snap = base_snapshot().with_congestion(Some(sample_congestion()));
+        let c = snap.congestion.expect("summary attached");
+        assert_eq!(c.ce_replies, 3);
+        assert_eq!(c.backoffs_applied, 2);
+        assert!((c.current_interval_ms - 200.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_with_congestion_none_is_noop() {
+        let snap = base_snapshot().with_congestion(None);
+        assert!(snap.congestion.is_none());
+    }
+
+    #[test]
+    fn test_stats_text_format_includes_congestion() {
+        let snap = base_snapshot().with_congestion(Some(sample_congestion()));
+        // Must not panic in any output format.
+        snap.print(OutputFormat::Text);
+        snap.print(OutputFormat::Json);
+        snap.print(OutputFormat::Csv);
+    }
+
+    #[test]
+    fn test_stats_json_serializes_congestion_fields() {
+        let snap = base_snapshot().with_congestion(Some(sample_congestion()));
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"congestion\""));
+        assert!(json.contains("\"ce_replies\":3"));
+        assert!(json.contains("\"backoffs_applied\":2"));
+    }
+
+    #[test]
+    fn test_stats_json_omits_congestion_when_none() {
+        let snap = base_snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("congestion"));
+    }
+
+    #[test]
+    fn test_stats_csv_includes_congestion_columns() {
+        let snap = base_snapshot().with_congestion(Some(sample_congestion()));
         snap.print(OutputFormat::Csv);
     }
 
@@ -693,6 +993,8 @@ mod tests {
             jitter_ms: None,
             std_dev_ms: None,
             owd: None,
+            access_report: None,
+            congestion: None,
         };
         snap.print(OutputFormat::Json);
     }

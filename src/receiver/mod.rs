@@ -125,6 +125,70 @@ fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
         .collect()
 }
 
+/// Returns the list of local MAC addresses used for the Reflected Test
+/// Packet Control TLV's L2 Address Group sub-TLV matching
+/// (draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1).
+///
+/// Unlike [`build_local_addresses`], MAC addresses aren't scoped to a bind
+/// address — every interface's hardware address is a candidate regardless
+/// of which IP the reflector is bound to — so this always enumerates every
+/// interface. Enumeration failures (missing permissions, an unsupported
+/// platform, no interfaces with a hardware address) degrade to an empty
+/// list rather than panicking; per §3.1.1 an empty list simply means any
+/// incoming L2 Address Group sub-TLV will fail to match (packet dropped),
+/// which is spec-correct, not a bug.
+pub fn build_local_macs() -> Vec<[u8; 6]> {
+    let macs = enumerate_interface_macs();
+    if macs.is_empty() {
+        log::warn!(
+            "Could not enumerate local MAC addresses; L2 Address Group sub-TLV \
+             requests will never match (packets requesting one will be dropped)"
+        );
+    }
+    macs
+}
+
+#[cfg(unix)]
+fn enumerate_interface_macs() -> Vec<[u8; 6]> {
+    // `SockaddrStorage::as_link_addr()` transparently covers AF_PACKET on
+    // Linux (`sockaddr_ll`) and AF_LINK on macOS/BSD (`sockaddr_dl`) — both
+    // are exposed through the same `nix::sys::socket::LinkAddr::addr()`
+    // accessor, so no per-OS branching is needed here (mirrors how
+    // `enumerate_interface_addresses` uses `as_sockaddr_in`/`_in6` above).
+    let mut macs = Vec::new();
+    if let Ok(ifaddrs) = ::nix::ifaddrs::getifaddrs() {
+        for ifaddr in ifaddrs {
+            if let Some(addr) = ifaddr.address {
+                if let Some(link) = addr.as_link_addr() {
+                    if let Some(mac) = link.addr() {
+                        if mac != [0u8; 6] && !macs.contains(&mac) {
+                            macs.push(mac);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    macs
+}
+
+#[cfg(not(unix))]
+fn enumerate_interface_macs() -> Vec<[u8; 6]> {
+    // Use absolute `::pnet` so we resolve the external crate, not the
+    // sibling `crate::receiver::pnet` submodule (see
+    // `enumerate_interface_addresses` above for the same convention).
+    let mut macs = Vec::new();
+    for iface in ::pnet::datalink::interfaces() {
+        if let Some(::pnet::util::MacAddr(a, b, c, d, e, f)) = iface.mac {
+            let mac = [a, b, c, d, e, f];
+            if mac != [0u8; 6] && !macs.contains(&mac) {
+                macs.push(mac);
+            }
+        }
+    }
+    macs
+}
+
 /// Loads the HMAC key from configuration (hex string or file).
 ///
 /// Single-key path retained for backward compatibility. Operators using
@@ -537,11 +601,14 @@ pub const REFLECTED_AUTH_PACKET_HMAC_OFFSET: usize = 96;
 
 /// Marks the CoS TLV in a serialized response as "requested CoS not applied":
 /// RPD=0b01 (DSCP1 not used, RFC 8972 §4.4) and RPE=0b10 (unable to set the
-/// reply's ECN to EC1, draft-ietf-ippm-stamp-cos-ecn-00 §3.2).
+/// reply's ECN to EC1, draft-ietf-ippm-stamp-cos-ecn-01 §3.2).
 ///
 /// Called by the backends when setsockopt fails to apply the requested
 /// DSCP/ECN to the reply packet. The caller must recompute the TLV HMAC
-/// afterwards (see `recompute_response_tlv_hmac`).
+/// afterwards (see `recompute_response_tlv_hmac`), and — per the -01 MUST
+/// rule — must also attempt to re-apply the reply's on-wire TOS/TCLASS with
+/// the ECN bits forced to 0b00 (see [`cos_unable_fallback_tos`]); this
+/// function only maintains the TLV bits, not the IP header.
 ///
 /// # Arguments
 /// * `response` - The response buffer containing TLVs after the base packet
@@ -576,9 +643,9 @@ pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> 
             // CoS TLV found. The backend failed to apply the requested TOS
             // (DSCP1 + EC1) to the reply, so report both halves:
             // - RPD (value byte 1, bits 1:0) = 0b01 — DSCP1 not used
-            //   (RFC 8972 §4.4 / draft-ietf-ippm-stamp-cos-ecn-00 §3.2);
+            //   (RFC 8972 §4.4 / draft-ietf-ippm-stamp-cos-ecn-01 §3.2);
             // - RPE (value byte 2, bits 5:4) = 0b10 — unable to set the
-            //   reply's ECN to EC1 (cos-ecn-00 §3.2), overwriting the
+            //   reply's ECN to EC1 (cos-ecn-01 §3.2), overwriting the
             //   optimistic 0b11 written during TLV processing.
             tlv_area[value_start + 1] = (tlv_area[value_start + 1] & 0xFC) | 0b01;
             tlv_area[value_start + 2] = (tlv_area[value_start + 2] & 0xCF) | (0b10 << 4);
@@ -589,6 +656,30 @@ pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> 
     }
 
     false
+}
+
+/// Computes the fallback reply TOS (IPv4) / Traffic Class (IPv6) byte the
+/// backends must try to apply to the reply packet's IP header after the
+/// primary `IP_TOS`/`IPV6_TCLASS` setsockopt call for the requested
+/// DSCP1/EC1 fails and [`set_cos_policy_rejected`] marks the CoS TLV
+/// RPD=0b01/RPE=0b10.
+///
+/// Per draft-ietf-ippm-stamp-cos-ecn-01 §3.2, when the reflector is unable
+/// to set the reply's ECN to EC1 it MUST additionally zero the reply's
+/// on-wire ECN bits (0b00, Not-ECT) instead of leaving whatever value the
+/// packet previously carried, as -00 permitted. The DSCP half falls back to
+/// the received DSCP (DSCP2), consistent with the RPD=0b01 already
+/// reported. This is a best-effort retry: if the underlying transport
+/// truly cannot set any TOS/TCLASS value on the socket, the second attempt
+/// will also fail and the on-wire ECN bits may remain non-conformant — see
+/// callers for the graceful-fallback handling of that case.
+///
+/// Mirrors [`crate::tlv::ClassOfServiceTlv::reply_wire_tos`] for the
+/// "unable" state (`policy_rejected = true`, `ecn_applied = false`); see
+/// that method's tests for the underlying bit arithmetic.
+#[must_use]
+pub fn cos_unable_fallback_tos(received_dscp: u8) -> u8 {
+    (received_dscp & 0x3F) << 2
 }
 
 /// Sets the U-flag on the Return Path TLV in a serialized STAMP response.
@@ -729,12 +820,15 @@ pub struct ReflectedControlBehavior {
     pub extra_copies: u16,
     /// Nanoseconds between consecutive sends.
     pub interval_ns: u32,
-    /// One-way measurement mode requested via the IPv6 Extension Header
-    /// Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-08 §5.3): the
-    /// reflector must not attach received IPv6 extension headers to the
-    /// reply's IPv6 header. Neither backend attaches them today, so the
-    /// request is honoured trivially; the bit is recorded for the send
-    /// path once a reply-attachment capability exists.
+    /// Set when exactly one IPv6 Extension Header Control sub-TLV
+    /// (draft-ietf-ippm-stamp-ext-hdr-11 §5.3) was present. Under -11 the
+    /// sub-TLV asks the reflector to add matching IPv6 extension headers to
+    /// its OWN reply packet. Neither backend can do that, so rule 4 sets the C
+    /// flag in the reflected sub-TLV's Sub-TLV Flags (see
+    /// `set_ipv6_ext_hdr_control_c_flag`); this bit only records that a single
+    /// such sub-TLV was seen, for the send path once a reply-attachment
+    /// capability exists. Left `false` on a cardinality violation
+    /// (more than one sub-TLV), which is not actionable.
     pub suppress_reply_ext_headers: bool,
 }
 
@@ -771,17 +865,19 @@ const REFLECTED_CONTROL_SUBTLV_L3_GROUP: u8 = 11;
 /// Parsed Reflected Control sub-TLV per draft-ietf-ippm-asymmetrical-pkts §3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReflectedControlSubTlv {
-    /// Layer 2 Address Group (sub-TLV type 10) — filter by MAC mask/group.
-    /// Body is opaque to the UDP-socket backends, carried for completeness.
-    L2Group {
-        #[allow(dead_code)]
-        body: Vec<u8>,
-    },
+    /// Layer 2 Address Group (sub-TLV type 10, draft-ietf-ippm-
+    /// asymmetrical-pkts-14 §3.1.1) — bitwise mask/group filter matched
+    /// against the reflector's own local MAC addresses. `mask` and `group`
+    /// are always equal length (half of the validated Sub-TLV Length: 2, 6,
+    /// or 8 octets).
+    L2Group { mask: Vec<u8>, group: Vec<u8> },
     /// Layer 3 Address Group (sub-TLV type 11) — IP prefix match.
     L3Group { prefix_len: u8, prefix: Vec<u8> },
-    /// IPv6 Extension Header Control (draft-ietf-ippm-stamp-ext-hdr-08
-    /// §5.3) — presence-only request for one-way mode: do not attach
-    /// received IPv6 extension headers to the reply's IPv6 header.
+    /// IPv6 Extension Header Control (draft-ietf-ippm-stamp-ext-hdr-11
+    /// §5.3) — presence-only (Sub-TLV Length 0) request to add matching IPv6
+    /// extension headers to the reply. This reflector cannot add reply
+    /// extension headers, so its presence yields the C flag on the reflected
+    /// sub-TLV (rule 4); more than one is a cardinality violation.
     Ipv6ExtHdrControl,
     /// Anything else (including the 4-byte zero placeholder that pads the
     /// TLV to the draft-14 §3 12-octet minimum). Ignored by the reflector.
@@ -811,12 +907,25 @@ fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedControlSubTlv> 
         let value = &body[value_start..value_end];
         match type_byte {
             REFLECTED_CONTROL_SUBTLV_L2_GROUP => {
-                out.push(ReflectedControlSubTlv::L2Group {
-                    body: value.to_vec(),
-                });
+                // draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1: Mask and Group
+                // fields MUST be equal length, so valid Sub-TLV Length values
+                // are exactly 4, 12, or 16 octets (2/6/8-byte halves). "Any
+                // other value MUST be considered by the Session-Reflector as
+                // a malformed sub-TLV" — mirroring the L3 Address Group
+                // handling just below, we skip it rather than guess: no
+                // `L2Group` entry is pushed, so a malformed sub-TLV simply
+                // does not participate in matching (same treatment as an
+                // out-of-range L3 prefix length).
+                let len = value.len();
+                if len == 4 || len == 12 || len == 16 {
+                    let half = len / 2;
+                    let mask = value[..half].to_vec();
+                    let group = value[half..].to_vec();
+                    out.push(ReflectedControlSubTlv::L2Group { mask, group });
+                }
             }
             REFLECTED_CONTROL_SUBTLV_L3_GROUP => {
-                // Draft §3: prefix_len(1) + reserved(3) + prefix(4 or 16).
+                // Draft §3.1.2: prefix_len(1) + reserved(3) + prefix(4 or 16).
                 // Exactly 8 octets (IPv4) or 20 octets (IPv6); anything
                 // else is malformed and we skip it rather than guess
                 // (an earlier `>= 4 + 4 || >= 4 + 16` check was a
@@ -882,6 +991,34 @@ fn l3_group_matches_any_local(prefix_len: u8, prefix: &[u8], locals: &[std::net:
     false
 }
 
+/// Returns true if the L2 Address Group mask/group matches any of the
+/// reflector's local MAC addresses. Per draft-ietf-ippm-asymmetrical-pkts-14
+/// §3.1.1: "If the Session-Reflector applies the value of the [Mask] field
+/// (using a bitwise AND) to any of its MAC addresses with the same length
+/// and the result is equal to the value of the [Group] field... continue
+/// processing... If no matches are found, the Session-Reflector MUST stop
+/// processing the received packet" (drop).
+///
+/// `mask` and `group` are always equal length (validated at parse time: 2,
+/// 6, or 8 octets). Every MAC enumerated by [`build_local_macs`] is a
+/// 6-octet EUI-48, so only the 12-octet Sub-TLV Length (6+6) can ever
+/// match — the 4- and 16-octet forms compare against nothing and always
+/// fail to match (this reflector does not enumerate EUI-64 addresses).
+/// Empty `locals` is treated as "no match" (drop), consistent with the L3
+/// path above.
+fn l2_group_matches_any_local(mask: &[u8], group: &[u8], locals: &[[u8; 6]]) -> bool {
+    if mask.len() != 6 {
+        return false;
+    }
+    for local in locals {
+        let matched = (0..6).all(|i| (local[i] & mask[i]) == group[i]);
+        if matched {
+            return true;
+        }
+    }
+    false
+}
+
 /// Response from STAMP packet processing, including optional CoS request.
 #[derive(Debug)]
 pub struct StampResponse {
@@ -918,6 +1055,11 @@ pub struct ProcessingContext<'a> {
     pub require_hmac: bool,
     /// Session manager for stateful mode.
     pub session_manager: Option<&'a Arc<SessionManager>>,
+    /// Whether the reflector runs in stateful mode (`--stateful-reflector`).
+    /// Gates Follow-Up Telemetry reporting: in stateless mode (RFC 8762 §4.2)
+    /// the Sequence Number and Follow-Up Timestamp fields MUST be zeroed
+    /// (RFC 8972 §4.7-7) rather than carry the previous reflection.
+    pub stateful_reflector: bool,
     /// TLV handling mode.
     pub tlv_mode: TlvHandlingMode,
     /// Whether to verify incoming TLV HMAC.
@@ -941,6 +1083,12 @@ pub struct ProcessingContext<'a> {
     pub last_reflection: Option<(u32, u64)>,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     pub local_addresses: &'a [std::net::IpAddr],
+    /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
+    /// Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
+    /// §3.1.1). Populated by [`build_local_macs`]; an empty slice means no
+    /// L2 Address Group sub-TLV can ever match (the packet is dropped per
+    /// spec, not treated as "unsupported").
+    pub local_macs: &'a [[u8; 6]],
     /// Sender's UDP port for Return Path alternate address replies (RFC 9503 §5).
     pub sender_port: u16,
     /// Whether to honour a Return Path "Return Address" sub-TLV by replying to
@@ -981,18 +1129,18 @@ pub struct ProcessingContext<'a> {
 }
 
 /// Raw IP-layer bytes captured at receive time for reflecting back to the
-/// sender via TLV Types 246 and 247 (draft-ietf-ippm-stamp-ext-hdr).
+/// sender via TLV Types 246 and 247 (draft-ietf-ippm-stamp-ext-hdr-11).
 ///
 /// Populated only by backends that capture at the datalink layer (pnet).
 /// UDP-socket backends (nix) cannot observe these bytes and leave the
-/// struct unset; the reflector sets the U-flag on any 246/247 request.
+/// struct unset; the reflector sets the C flag on any 246/247 request.
 #[derive(Debug, Clone, Default)]
 pub struct CapturedHeaders {
     /// Raw IP fixed header (20 bytes for IPv4, 40 bytes for IPv6).
     pub fixed_header: Vec<u8>,
-    /// Concatenated IPv6 Hop-by-Hop (NextHeader 0) and Destination Options
-    /// (NextHeader 60) extension headers, each prefixed with its NextHeader
-    /// byte and HdrLen byte, exactly as received on the wire.
+    /// IPv6 Hop-by-Hop and Destination Options extension headers concatenated
+    /// verbatim as on the wire: each record starts with its own Next Header
+    /// octet (naming what follows it), then HdrExtLen, then the option body.
     pub ipv6_ext_headers: Vec<u8>,
 }
 
@@ -1494,10 +1642,13 @@ fn apply_semantic_tlv_processing(
     let cos_request = tlvs.get_cos_request();
 
     // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §4.4 +
-    // draft-ietf-ippm-stamp-cos-ecn-00 §3.2). No DSCP policy is configured
+    // draft-ietf-ippm-stamp-cos-ecn-01 §3.2). No DSCP policy is configured
     // (DSCP1 is always honoured → RPD=0b00), and both backends apply the
     // requested DSCP1/EC1 to the reply's TOS via `cos_request`, so
-    // RPE=0b11 ("reply ECN set to EC1").
+    // RPE=0b11 ("reply ECN set to EC1") is the optimistic default; if the
+    // backend's setsockopt call later fails, `set_cos_policy_rejected` /
+    // `cos_unable_fallback_tos` override this to RPD=0b01/RPE=0b10 and
+    // force the reply's on-wire ECN bits to 0b00 per the -01 MUST rule.
     tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false, true);
 
     // Update Timestamp Information TLVs (RFC 8972 §4.3). The TLV carries a
@@ -1527,12 +1678,24 @@ fn apply_semantic_tlv_processing(
         tlvs.update_location_tlvs(addr_info);
     }
 
-    // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7). The mode byte
-    // reports how the recorded TX timestamp of the previous reflection
-    // was produced.
-    if let Some((last_seq, last_ts)) = ctx.last_reflection {
-        tlvs.update_follow_up_telemetry_tlvs(last_seq, last_ts, ctx.tx_method);
-    }
+    // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7). In stateful mode the
+    // TLV reports the previous reflection's seq/timestamp (the mode byte
+    // reports how that recorded TX timestamp was produced); in stateless mode
+    // (RFC 8762 §4.2, `--stateful-reflector` off) §4.7-7 requires the Sequence
+    // Number and Follow-Up Timestamp fields be zeroed instead. Passing `None`
+    // selects the stateless zeroing path; invalid-length TLVs are zeroed
+    // regardless (§4.7-6). The call is unconditional so an invalid-length TLV
+    // is always zeroed even when there is no reflection to report.
+    let reflection = if ctx.stateful_reflector {
+        ctx.last_reflection
+    } else {
+        None
+    };
+    tlvs.update_follow_up_telemetry_tlvs(reflection, ctx.tx_method);
+
+    // Discard Access Report TLVs with an invalid Access ID (RFC 8972 §4.6:
+    // values other than 1/2 MUST be discarded — marked U, size preserved).
+    tlvs.discard_invalid_access_report_tlvs();
 
     // Process Destination Node Address TLV (RFC 9503 §4)
     tlvs.process_destination_node_address(ctx.local_addresses);
@@ -1556,11 +1719,11 @@ fn apply_semantic_tlv_processing(
     tlvs.process_ber();
 
     // Process Reflected Fixed / IPv6 Extension Header TLVs
-    // (draft-ietf-ippm-stamp-ext-hdr §§3–4). If the backend captured raw IP
-    // bytes, copy them into the TLV Value; otherwise set the U-flag per
-    // RFC 8972 §4.2 and echo an empty TLV. A nix UDP-socket backend hands us
-    // `captured_headers = None`, so this correctly advertises "unsupported"
-    // to senders that requested header reflection.
+    // (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 3.2). If the backend captured
+    // raw IP bytes, copy the matched header's [4..] into the TLV's Reflected
+    // field; otherwise set the C flag (Conformance) per -11 §5.1/§5.2. A nix
+    // UDP-socket backend hands us `captured_headers = None`, so this correctly
+    // signals "could not reflect" to senders that requested header reflection.
     let (captured_fixed, captured_ext): (Option<&[u8]>, Option<&[u8]>) = match ctx.captured_headers
     {
         Some(h) => (
@@ -1574,21 +1737,30 @@ fn apply_semantic_tlv_processing(
     // Process Reflected Test Packet Control TLV
     // (draft-ietf-ippm-asymmetrical-pkts-14 §3).
     //
-    // Per §3.1, when an L3 Address Group sub-TLV is present and no local
-    // address matches, the reflector MUST stop processing the packet. L2
-    // Address Group sub-TLVs require MAC-address visibility (link-layer
-    // access), which the UDP-socket backends don't have; we set the U-flag
-    // on the echoed Type 12 and continue.
+    // Per §3.1.1 (L2) / §3.1.2 (L3), each Address Group sub-TLV gates the
+    // packet independently: the reflector bitwise-ANDs the requested mask
+    // against its own local addresses (MAC for L2, IP for L3) and, on no
+    // match, "MUST stop processing the received packet" (drop, no reply).
+    // Both sub-TLVs may be present on the same TLV — each is evaluated on
+    // its own terms, and either one failing to match drops the packet, so a
+    // sender combining both is effectively asking for an AND of the two
+    // filters. Neither sub-TLV's flags participate in this decision (the C/U
+    // flags are reserved for the unrelated MTU/rate-limit signalling
+    // elsewhere in this match arm).
     let reflected_control = match tlvs.get_reflected_control_request() {
         Some(req) => {
-            // Pre-check sub-TLVs: L3 mismatch → drop the packet entirely.
+            // Pre-check sub-TLVs: an L2 or L3 mismatch drops the packet
+            // entirely, before any reply-shaping (count/length/interval) is
+            // considered.
             let sub_chain = parse_reflected_control_sub_tlvs(&req.sub_tlvs);
-            let mut l2_present = false;
+            let mut l2_matches: Option<bool> = None;
             let mut l3_matches: Option<bool> = None;
-            let mut one_way_ext_headers = false;
+            let mut ipv6_ext_hdr_control_count = 0usize;
             for sub in &sub_chain {
                 match sub {
-                    ReflectedControlSubTlv::L2Group { .. } => l2_present = true,
+                    ReflectedControlSubTlv::L2Group { mask, group } => {
+                        l2_matches = Some(l2_group_matches_any_local(mask, group, ctx.local_macs));
+                    }
                     ReflectedControlSubTlv::L3Group { prefix_len, prefix } => {
                         l3_matches = Some(l3_group_matches_any_local(
                             *prefix_len,
@@ -1596,9 +1768,18 @@ fn apply_semantic_tlv_processing(
                             ctx.local_addresses,
                         ));
                     }
-                    ReflectedControlSubTlv::Ipv6ExtHdrControl => one_way_ext_headers = true,
+                    ReflectedControlSubTlv::Ipv6ExtHdrControl => ipv6_ext_hdr_control_count += 1,
                     ReflectedControlSubTlv::Unknown { .. } => {}
                 }
+            }
+            if l2_matches == Some(false) {
+                // §3.1.1: "If no matches are found, the Session-Reflector
+                // MUST stop processing the received packet."
+                log::debug!(
+                    "Reflected Control L2 Address Group did not match any local \
+                     MAC address; dropping packet per draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1"
+                );
+                return None;
             }
             if l3_matches == Some(false) {
                 // §3.1.2: "If no matches are found, the Session-Reflector
@@ -1609,11 +1790,19 @@ fn apply_semantic_tlv_processing(
                 );
                 return None;
             }
-            if l2_present {
-                // We can't evaluate L2 match without link-layer visibility.
-                // Set U on the echoed Type 12 TLV to signal "unable to
-                // honour this sub-TLV" without claiming we passed the filter.
-                tlvs.set_reflected_control_u_flag();
+
+            // draft-ietf-ippm-stamp-ext-hdr-11 §5.3: the 'IPv6 Extension Header
+            // Control' Sub-TLV asks the reflector to add matching IPv6 extension
+            // headers to its OWN reply packet. Neither backend can add reply
+            // extension headers, so rule 4 requires the C flag in that sub-TLV's
+            // Sub-TLV Flags. More than one such sub-TLV is a cardinality
+            // violation and gets the C flag on EVERY offending copy (and is not
+            // treated as actionable). Both cases mark C on all matching sub-TLVs
+            // in the reflected Type 12 value; 246 reflection is unaffected
+            // (handled independently, rule 3).
+            let one_way_ext_headers = ipv6_ext_hdr_control_count == 1;
+            if ipv6_ext_hdr_control_count >= 1 {
+                tlvs.set_ipv6_ext_hdr_control_c_flag();
             }
 
             if return_path_action == ReturnPathAction::SuppressReply
@@ -1722,6 +1911,11 @@ fn apply_semantic_tlv_processing(
     // Compute fresh HMAC for response (must be last, after all TLV mutations).
     // Use the reflector variant so the regenerated HMAC TLV carries U=0 per
     // RFC 8972 §4.4.1 — the reflector recognizes the HMAC type by construction.
+    //
+    // Deliberately unconditional on whether the *request* carried an HMAC
+    // TLV — see the RFC 8972 §4.8 adjudication on
+    // `TlvList::set_hmac_response` for why this is spec-compliant rather
+    // than an unsolicited addition.
     if let Some(key) = tlv_hmac_key {
         let response_seq_bytes = &base_bytes[..4];
         tlvs.set_hmac_response(key, response_seq_bytes);
@@ -1850,6 +2044,26 @@ pub fn assemble_unauth_answer_with_tlvs(
                 }
 
                 tlvs.write_to(&mut response);
+
+                // RFC 8762 §4.3/§4.6: the reflected packet MUST be symmetric
+                // in size to the received packet ("copy the content beyond the
+                // size of the base STAMP packet"). The lenient TLV parser
+                // stops at a trailing all-zero run (classic legacy/TWAMP-Light
+                // padding with no TLVs) or a sub-4-byte tail without capturing
+                // those octets, so re-pad the reply up to the received length.
+                // The padding is appended after all echoed TLVs, so the TLV
+                // HMAC coverage (sequence number + TLVs) is unchanged. Never
+                // truncate a legitimately longer reply.
+                //
+                // Skip this default symmetric-size padding when a Reflected
+                // Test Packet Control TLV (Type 12) governs the reply size
+                // (draft-ietf-ippm-asymmetrical-pkts §3): that mechanism
+                // deliberately controls the reply length (e.g. stripping Extra
+                // Padding to produce a shorter reply) and overrides the legacy
+                // symmetric-size default.
+                if reflected_control.is_none() && response.len() < original_data.len() {
+                    response.resize(original_data.len(), 0);
+                }
             }
         }
     }
@@ -1971,6 +2185,18 @@ pub fn assemble_auth_answer_with_tlvs(
                 }
 
                 tlvs.write_to(&mut response);
+
+                // RFC 8762 §4.3/§4.6: preserve symmetric size. In the
+                // authenticated layout the padding is appended AFTER the base
+                // packet (including its own HMAC field) and after all echoed
+                // TLVs and the TLV HMAC, so neither the base packet HMAC nor
+                // the TLV HMAC coverage is affected. Never truncate a
+                // legitimately longer reply. Skipped when a Reflected Test
+                // Packet Control TLV (Type 12) governs the reply size. See the
+                // unauthenticated path for the full rationale.
+                if reflected_control.is_none() && response.len() < original_data.len() {
+                    response.resize(original_data.len(), 0);
+                }
             }
         }
     }
@@ -1997,6 +2223,7 @@ mod tests {
             hmac_key_set: None,
             require_hmac: false,
             session_manager: None,
+            stateful_reflector: true,
             tlv_mode: TlvHandlingMode::Echo,
             verify_tlv_hmac: false,
             strict_packets: false,
@@ -2009,6 +2236,7 @@ mod tests {
             packet_addr_info: None,
             last_reflection: None,
             local_addresses: &[],
+            local_macs: &[],
             sender_port: 0,
             return_path_allow_alternate: false,
             reflector_member_link_id: None,
@@ -2855,7 +3083,218 @@ mod tests {
             .is_ok());
     }
 
+    // RFC 8762 §4.3/§4.6: the reflected packet MUST be symmetric in size to
+    // the received packet (copy the content beyond the base packet). A
+    // trailing all-zero run (classic legacy/TWAMP-Light padding, no TLVs) or a
+    // non-4-byte-aligned garbage trailer must not shrink the reply.
+
     #[test]
+    fn test_zero_trailer_reply_preserves_symmetric_size_unauth() {
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            ssid: 0,
+            mbz: [0; 28],
+        };
+
+        // 44-octet base + 50-octet all-zero trailer (no TLVs at all).
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&[0u8; 50]);
+        assert_eq!(original_data.len(), UNAUTH_BASE_SIZE + 50);
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &test_ctx(0, 0),
+        );
+
+        assert_eq!(
+            response.data.len(),
+            original_data.len(),
+            "reply must be symmetric in size to the received packet"
+        );
+        // The trailing padding must remain zero.
+        assert!(response.data[UNAUTH_BASE_SIZE..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_zero_trailer_reply_preserves_symmetric_size_auth() {
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 100,
+            error_estimate: 10,
+            ssid: 0,
+            mbz1a: [0; 30],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        // 112-octet base + 50-octet all-zero trailer (no TLVs at all).
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&[0u8; 50]);
+        assert_eq!(original_data.len(), AUTH_BASE_SIZE + 50);
+
+        let key = HmacKey::new(vec![0xCD; 32]).unwrap();
+        let response = assemble_auth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            Some(&key),
+            None,
+            TlvHandlingMode::Echo,
+            // No TLV-HMAC key: no HMAC TLV is appended, so the whole trailing
+            // area is pure zero padding — the cleanest symmetric-size probe.
+            None,
+            false,
+            &test_ctx(0, 0),
+        );
+
+        assert_eq!(
+            response.data.len(),
+            original_data.len(),
+            "auth reply must be symmetric in size to the received packet"
+        );
+        // Padding is appended AFTER the base packet's HMAC; the trailing area
+        // must be all zero.
+        assert!(response.data[AUTH_BASE_SIZE..].iter().all(|&b| b == 0));
+
+        // Packet-HMAC coverage must not change: the base packet HMAC (field at
+        // [96..112]) still verifies against the reply's own first 112 octets.
+        // The appended zero padding lies outside the HMAC's coverage, so it
+        // cannot invalidate it.
+        let hmac_field: [u8; 16] = response.data[REFLECTED_AUTH_PACKET_HMAC_OFFSET..AUTH_BASE_SIZE]
+            .try_into()
+            .unwrap();
+        assert!(crate::crypto::verify_packet_hmac(
+            &key,
+            &response.data[..AUTH_BASE_SIZE],
+            REFLECTED_AUTH_PACKET_HMAC_OFFSET,
+            &hmac_field,
+        ));
+    }
+
+    #[test]
+    fn test_nonaligned_garbage_trailer_preserves_size_unauth() {
+        use crate::tlv::{RawTlv, TlvType};
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            ssid: 0,
+            mbz: [0; 28],
+        };
+
+        // A real TLV followed by 3 stray non-zero bytes (not 4-byte aligned).
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        let tlv = RawTlv::new(TlvType::ExtraPadding, vec![0xAA; 4]);
+        original_data.extend_from_slice(&tlv.to_bytes());
+        original_data.extend_from_slice(&[0xBB, 0xCC, 0xDD]);
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &test_ctx(0, 0),
+        );
+
+        assert_eq!(
+            response.data.len(),
+            original_data.len(),
+            "reply must not drop the non-aligned trailer bytes"
+        );
+        // The echoed TLV is still intact at the head of the TLV area.
+        assert_eq!(response.data[UNAUTH_BASE_SIZE + 1], 1); // ExtraPadding type
+    }
+
+    #[test]
+    fn test_stateless_vs_stateful_follow_up_telemetry_reply() {
+        use crate::tlv::{FollowUpTelemetryTlv, TlvList, TypedTlv};
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            ssid: 0,
+            mbz: [0; 28],
+        };
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&FollowUpTelemetryTlv::new().to_raw().to_bytes());
+
+        let assemble = |ctx: &ProcessingContext| {
+            assemble_unauth_answer_with_tlvs(
+                &sender_packet,
+                &original_data,
+                ClockFormat::NTP,
+                200,
+                64,
+                300,
+                None,
+                TlvHandlingMode::Echo,
+                None,
+                false,
+                ctx,
+            )
+        };
+
+        // Stateless mode (RFC 8972 §4.7-7): the previous reflection is present
+        // but MUST NOT be reported — seq/timestamp zeroed.
+        let mut ctx = test_ctx(0, 0);
+        ctx.stateful_reflector = false;
+        ctx.last_reflection = Some((42, 0xDEAD_BEEF));
+        let resp = assemble(&ctx);
+        let tlvs = TlvList::parse(&resp.data[UNAUTH_BASE_SIZE..]).unwrap();
+        let fut = FollowUpTelemetryTlv::from_raw(&tlvs.non_hmac_tlvs()[0]).unwrap();
+        assert_eq!(fut.sequence_number, 0, "stateless: seq must be zero");
+        assert_eq!(
+            fut.follow_up_timestamp, 0,
+            "stateless: timestamp must be zero"
+        );
+
+        // Stateful mode (§4.7-10): the same reflection IS reported.
+        ctx.stateful_reflector = true;
+        let resp = assemble(&ctx);
+        let tlvs = TlvList::parse(&resp.data[UNAUTH_BASE_SIZE..]).unwrap();
+        let fut = FollowUpTelemetryTlv::from_raw(&tlvs.non_hmac_tlvs()[0]).unwrap();
+        assert_eq!(fut.sequence_number, 42);
+        assert_eq!(fut.follow_up_timestamp, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    // RFC 8972 §4.8 adjudication (see also the module docs on
+    // `TlvList::set_hmac_response`): "All authenticated STAMP base
+    // packets ... MUST additionally authenticate the optional TLVs by
+    // including the keyed HMAC TLV" and "The HMAC TLV MAY be used to
+    // protect the integrity of STAMP extensions in the STAMP
+    // unauthenticated mode. An implementation ... MUST provide controls
+    // to enable [it]." Neither clause conditions the reflector's own
+    // HMAC TLV on the *sender's* packet having carried one -- each party
+    // protects the TLVs in the packet it is transmitting. Configuring a
+    // TLV HMAC key on the reflector *is* the "control to enable" the
+    // unauthenticated-mode case, so appending Type 8 to the reply here
+    // even though the request had none is deliberate, RFC-compliant
+    // behavior, not a mirror/echo of the request -- this test pins it.
     fn test_assemble_unauth_with_tlvs_adds_hmac() {
         use crate::tlv::{RawTlv, TlvType, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
 
@@ -2897,6 +3336,68 @@ mod tests {
         // HMAC TLV should be last (type 8 in byte 1 per RFC 8972)
         let hmac_tlv_start = 44 + TLV_HEADER_SIZE + 4;
         assert_eq!(response.data[hmac_tlv_start + 1], 8);
+    }
+
+    #[test]
+    /// Same adjudication as `test_assemble_unauth_with_tlvs_adds_hmac`,
+    /// covering the authenticated-base-packet path: RFC 8972 §4.8's MUST
+    /// applies "per Sections 4.2.2 and 4.3.2 of [RFC8762]" -- i.e. to both
+    /// the Session-Sender's and the Session-Reflector's own authenticated
+    /// packets independently. A Session-Sender that omitted the TLV HMAC
+    /// (non-conformant, or simply not using TLV-level integrity itself)
+    /// does not exempt this reflector from protecting its *own* reply's
+    /// TLVs when it has a TLV HMAC key configured.
+    fn test_assemble_auth_with_tlvs_adds_hmac_even_when_request_has_none() {
+        use crate::tlv::{
+            ClassOfServiceTlv, RawTlv, TlvType, TypedTlv, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE,
+        };
+
+        let sender_packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 100,
+            error_estimate: 10,
+            ssid: 0,
+            mbz1a: [0; 30],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+
+        // Request carries a non-HMAC extension TLV but no Type 8.
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        let cos = ClassOfServiceTlv::new(10, 1).to_raw();
+        original_data.extend_from_slice(&cos.to_bytes());
+        assert!(
+            RawTlv::parse(&original_data[112..])
+                .map(|(t, _)| t.tlv_type != TlvType::Hmac)
+                .unwrap_or(true),
+            "request must not itself carry an HMAC TLV"
+        );
+
+        let tlv_key = HmacKey::new(vec![0xCD; 32]).unwrap();
+        let response = assemble_auth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            None,
+            TlvHandlingMode::Echo,
+            Some(&tlv_key),
+            false,
+            &test_ctx(0, 0),
+        );
+
+        // 112 base + (4 header + 4 CoS value) + (4 header + 16 HMAC value)
+        assert_eq!(
+            response.data.len(),
+            112 + TLV_HEADER_SIZE + 4 + TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE
+        );
+        let hmac_tlv_start = 112 + TLV_HEADER_SIZE + 4;
+        assert_eq!(response.data[hmac_tlv_start + 1], 8); // Type 8 = HMAC
     }
 
     #[test]
@@ -3283,7 +3784,7 @@ mod tests {
         ); // Type
 
         // Parse the value via the typed decoder (single source of truth for
-        // the RFC 8972 + cos-ecn-00 bit layout).
+        // the RFC 8972 + cos-ecn-01 bit layout, unchanged from -00).
         let value_start = tlv_start + TLV_HEADER_SIZE;
         let raw = crate::tlv::RawTlv::new(
             TlvType::ClassOfService,
@@ -3365,6 +3866,28 @@ mod tests {
         assert_eq!(parsed.dscp2, received_dscp);
         assert_eq!(parsed.ecn2, received_ecn);
         assert_eq!(parsed.rpe, 0b11);
+    }
+
+    #[test]
+    fn test_cos_unable_fallback_tos_zeroes_ecn_and_matches_reply_wire_tos() {
+        use crate::tlv::ClassOfServiceTlv;
+
+        // draft-ietf-ippm-stamp-cos-ecn-01 §3.2 MUST rule: the fallback TOS
+        // the backends apply after a failed setsockopt must have its ECN
+        // bits forced to 0b00, and must agree with the "unable" state of
+        // `ClassOfServiceTlv::reply_wire_tos` (RPD=0b01, RPE=0b10) so the
+        // wire value and the TLV's own fields never disagree.
+        for received_dscp in [0u8, 10, 46, 63] {
+            let fallback = cos_unable_fallback_tos(received_dscp);
+            assert_eq!(fallback & 0x03, 0, "ECN bits must be zero (-01 §3.2)");
+
+            let expected = ClassOfServiceTlv::for_response(46, 2, received_dscp, 1, true, false)
+                .reply_wire_tos();
+            assert_eq!(
+                fallback, expected,
+                "cos_unable_fallback_tos must match ClassOfServiceTlv::reply_wire_tos"
+            );
+        }
     }
 
     #[test]
@@ -3707,6 +4230,115 @@ mod tests {
 
         // Check TLV is echoed WITH U-flag set (flags byte bit 7)
         assert_eq!(response.data[UNAUTH_BASE_SIZE] & 0x80, 0x80);
+    }
+
+    // ===== L2 Address Group sub-TLV unit tests =====
+    // draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1: bitwise AND the Mask
+    // field against each local MAC and compare to the Group field; any
+    // match means "continue processing", no match means "drop".
+
+    #[test]
+    fn l2_group_matches_any_local_exact_match() {
+        let mask = [0xFFu8; 6];
+        let group = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let locals = [[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]];
+        assert!(l2_group_matches_any_local(&mask, &group, &locals));
+    }
+
+    #[test]
+    fn l2_group_matches_any_local_masked_match() {
+        // Only the first 3 octets (the OUI) are compared; the low 3 octets
+        // of the local MAC differ from the group's low 3 octets but are
+        // masked out, so this must still match.
+        let mask = [0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00];
+        let group = [0x00, 0x11, 0x22, 0x00, 0x00, 0x00];
+        let locals = [[0x00, 0x11, 0x22, 0x99, 0x88, 0x77]];
+        assert!(l2_group_matches_any_local(&mask, &group, &locals));
+    }
+
+    #[test]
+    fn l2_group_matches_any_local_no_match() {
+        let mask = [0xFFu8; 6];
+        let group = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let locals = [[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]];
+        assert!(!l2_group_matches_any_local(&mask, &group, &locals));
+    }
+
+    #[test]
+    fn l2_group_matches_any_local_length_mismatch_never_matches() {
+        // A 2-byte or 8-byte mask/group (Sub-TLV Length 4 or 16) can never
+        // match a 6-byte EUI-48 local MAC — "with the same length" in the
+        // draft text excludes them by construction.
+        let locals = [[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]];
+        assert!(!l2_group_matches_any_local(&[0xFF; 2], &[0x00; 2], &locals));
+        assert!(!l2_group_matches_any_local(&[0xFF; 8], &[0x00; 8], &locals));
+    }
+
+    #[test]
+    fn l2_group_matches_any_local_empty_locals_never_matches() {
+        // Empty `locals` (enumeration failed / no interfaces) ⇒ no match ⇒
+        // drop, consistent with the L3 path's treatment of empty locals.
+        let mask = [0xFFu8; 6];
+        let group = [0x00u8; 6];
+        assert!(!l2_group_matches_any_local(&mask, &group, &[]));
+    }
+
+    #[test]
+    fn l2_group_matches_any_local_any_of_multiple_locals() {
+        let mask = [0xFFu8; 6];
+        let group = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let locals = [
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ];
+        assert!(l2_group_matches_any_local(&mask, &group, &locals));
+    }
+
+    /// draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1: "valid values for the
+    /// Sub-TLV Length are 4, 12, and 16. Any other value MUST be considered
+    /// ... as a malformed sub-TLV." This codebase's established handling
+    /// for a malformed sub-TLV inside the Reflected Test Packet Control TLV
+    /// (see the L3 Address Group length check just above in the source) is
+    /// to silently skip it — no `L2Group` entry is produced, so it simply
+    /// does not participate in matching, as if it were absent.
+    #[test]
+    fn parse_reflected_control_sub_tlvs_l2_valid_lengths_produce_entries() {
+        for len in [4usize, 12, 16] {
+            let mut body = Vec::new();
+            body.extend_from_slice(&[0u8, REFLECTED_CONTROL_SUBTLV_L2_GROUP]);
+            body.extend_from_slice(&(len as u16).to_be_bytes());
+            body.extend(std::iter::repeat_n(0xAAu8, len));
+
+            let parsed = parse_reflected_control_sub_tlvs(&body);
+            assert_eq!(
+                parsed.len(),
+                1,
+                "valid Sub-TLV Length {len} must parse to one L2Group entry"
+            );
+            match &parsed[0] {
+                ReflectedControlSubTlv::L2Group { mask, group } => {
+                    assert_eq!(mask.len(), len / 2);
+                    assert_eq!(group.len(), len / 2);
+                }
+                other => panic!("expected L2Group, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_reflected_control_sub_tlvs_l2_malformed_length_is_skipped() {
+        for len in [0usize, 2, 6, 8, 10, 20] {
+            let mut body = Vec::new();
+            body.extend_from_slice(&[0u8, REFLECTED_CONTROL_SUBTLV_L2_GROUP]);
+            body.extend_from_slice(&(len as u16).to_be_bytes());
+            body.extend(std::iter::repeat_n(0xAAu8, len));
+
+            let parsed = parse_reflected_control_sub_tlvs(&body);
+            assert!(
+                parsed.is_empty(),
+                "malformed Sub-TLV Length {len} must be skipped, not produce an entry"
+            );
+        }
     }
 
     #[test]
