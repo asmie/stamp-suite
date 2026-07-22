@@ -38,8 +38,6 @@ jobs:
             name: default
           - features: ttl-nix
             name: ttl-nix
-          - features: ttl-pnet
-            name: ttl-pnet
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -57,6 +55,27 @@ jobs:
           fi
         shell: bash
 
+  clippy-pnet:
+    name: Clippy (pnet backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-pnet
+      # The pnet receiver backend (src/receiver/pnet.rs) is cfg-gated on
+      # `feature = "ttl-pnet" AND NOT feature = "ttl-nix"`, so it's
+      # compiled out under --all-features on any platform (ttl-nix wins
+      # there) and is otherwise not covered by the `clippy` job (which
+      # only runs default/ttl-nix legs). This dedicated job is the sole
+      # pnet-backend lint gate and a stable, individually addressable
+      # required check.
+      - name: Clippy (ttl-pnet, no default features)
+        run: cargo clippy --no-default-features --features ttl-pnet --tests -- -D warnings
+
   test:
     name: Test (${{ matrix.os }}, ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
@@ -73,14 +92,24 @@ jobs:
           - os: macos-latest
             rust: stable
             features: ""
-          # No Windows test job: the lib test binary statically links
-          # pnet's Packet.dll / wpcap.dll, which neither windows-latest
-          # nor windows-2022 ship any more (windows-2025 rollover
-          # dropped it; the Npcap installer hangs on /S silent mode in
-          # CI). Build coverage for Windows is preserved by the
-          # `build-release` matrix below. The long-term fix is gating
-          # pnet behind a Cargo feature on Windows so the default
-          # binary doesn't link it at all — tracked for 0.8.1.
+          # Still no Windows leg in this *gating* matrix: `pnet` is an
+          # unconditional Windows target dependency (see Cargo.toml's
+          # `[target.'cfg(target_os = "windows")'.dependencies]`), and its
+          # Windows backend `#[link(name = "Packet")]`s against
+          # Packet.dll/wpcap.dll -- so any test binary built for this
+          # target needs that DLL loadable at process start, even tests
+          # that never touch pnet. The free Npcap installer has no
+          # silent/unattended mode (that's an OEM-only feature; see
+          # nmap/npcap#720 and #545), which is what made this untenable
+          # here previously. Build coverage for Windows is preserved by
+          # the `build-release` matrix below (linking only needs the
+          # Npcap SDK's import libs, not the runtime driver). A
+          # *non-gating*, best-effort `test-windows` job now covers
+          # actually running the test suite by extracting just the
+          # runtime DLLs from the installer instead of running it — see
+          # that job for the full rationale. Promoting it into this
+          # gating matrix depends on that approach proving reliable
+          # across Npcap releases, which hasn't been observed yet.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -91,6 +120,80 @@ jobs:
           key: test-${{ matrix.os }}-${{ matrix.rust }}
       - name: Run tests
         run: cargo test --verbose ${{ matrix.features }}
+
+  # Best-effort, informational Windows test coverage. NOT part of the
+  # gating `test` matrix above -- see the comment on that job for why.
+  #
+  # `continue-on-error: true` means a red run here never fails the
+  # workflow or blocks a PR; the "(best-effort, non-gating)" suffix on
+  # the name makes that legible from the checks list without having to
+  # open the job.
+  #
+  # The free Npcap installer cannot be run unattended in CI (no silent
+  # mode without an OEM license: nmap/npcap#720, #545), and a prior
+  # attempt in this workflow to run it with `/S` anyway simply hung. So
+  # instead of running the installer, this job unpacks it as the plain
+  # NSIS self-extracting archive it is (via 7-Zip -- installed through
+  # Chocolatey, which unlike 7-Zip itself is reliably preinstalled on
+  # GitHub-hosted Windows images) and lifts out just the two
+  # redistributable DLLs (`Packet.dll`, `wpcap.dll`) that `pnet`'s
+  # Windows backend needs loadable at process start. It never
+  # registers or starts the actual capture driver/service, which is
+  # fine here: the only tests that would need a live driver
+  # (`tests/pnet_loopback_test.rs`) are already `#[ignore]`d by default
+  # and require CAP_NET_RAW-equivalent privileges this runner doesn't
+  # have anyway, so plain `cargo test` never reaches them.
+  #
+  # If the extraction step ever fails to locate the DLLs (e.g. a future
+  # Npcap release changes its installer's internal layout), the test
+  # step below will simply fail to launch -- annoying but harmless,
+  # since the job is non-gating either way.
+  test-windows:
+    name: "test-windows (best-effort, non-gating)"
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-windows
+      - name: Install Npcap SDK (link-time import libs)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile "$env:TEMP/npcap-sdk.zip"
+          Expand-Archive -Path "$env:TEMP/npcap-sdk.zip" -DestinationPath "C:/npcap-sdk"
+          echo "LIB=C:/npcap-sdk/Lib/x64" >> $env:GITHUB_ENV
+      - name: Extract Npcap runtime DLLs (installer unpacked, never run)
+        shell: pwsh
+        run: |
+          # 7-Zip is not reliably preinstalled on GitHub-hosted Windows
+          # images any more (actions/runner-images#9361); Chocolatey is,
+          # so use it to guarantee 7z.exe is present rather than assuming
+          # a path. `choco` needs no credentials for a public package.
+          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip -and (Test-Path "C:\Program Files\7-Zip\7z.exe")) {
+            $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          }
+          if (-not $sevenZip) {
+            choco install 7zip -y --no-progress | Out-Null
+            $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          }
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-1.88.exe" -OutFile "$env:TEMP/npcap.exe"
+          & $sevenZip x "$env:TEMP/npcap.exe" -o"$env:TEMP/npcap-extract" -y | Out-Null
+          $dlls = Get-ChildItem -Path "$env:TEMP/npcap-extract" -Recurse -Include "Packet.dll","wpcap.dll" -ErrorAction SilentlyContinue
+          if (-not $dlls) {
+            Write-Warning "Could not find Packet.dll/wpcap.dll inside the extracted Npcap installer; the test step will likely fail to launch. Continuing anyway (best-effort job)."
+          } else {
+            $destDir = "C:/npcap-runtime"
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            $dlls | ForEach-Object { Copy-Item $_.FullName -Destination $destDir -Force }
+            echo "$destDir" >> $env:GITHUB_PATH
+          }
+      - name: Run tests (ttl-pnet backend)
+        run: cargo test --no-default-features --features ttl-pnet
+        shell: bash
 
   test-features:
     name: Test Features
@@ -250,6 +353,16 @@ jobs:
     # rustsec/audit-check action can post its findings as a check-run
     # (it needs checks:write) and open issues for new advisories
     # (issues:write — optional but harmless).
+    #
+    # Overlap with `cargo-deny` below: both scan the RustSec advisory
+    # database for known vulnerabilities in this crate's dependency tree,
+    # so the [advisories] half of that job duplicates this one. Kept side
+    # by side deliberately -- this job's value is the PR-annotated
+    # check-run and issue-filing on new advisories, which
+    # `cargo-deny-action` doesn't do; `cargo deny check` is kept as the
+    # single command contributors run locally (see deny.toml) and also
+    # covers licenses/bans/sources in the same pass. Small redundancy on
+    # the advisories check, not wasted effort.
     permissions:
       contents: read
       checks: write
@@ -259,6 +372,16 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo-deny:
+    name: cargo-deny (advisories, bans, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
 
   mib-lint:
     name: MIB Lint
