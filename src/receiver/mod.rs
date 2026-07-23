@@ -1136,11 +1136,16 @@ pub struct ProcessingContext<'a> {
 /// struct unset; the reflector sets the C flag on any 246/247 request.
 #[derive(Debug, Clone, Default)]
 pub struct CapturedHeaders {
-    /// Raw IP fixed header (20 bytes for IPv4, 40 bytes for IPv6).
-    pub fixed_header: Vec<u8>,
-    /// IPv6 Hop-by-Hop and Destination Options extension headers concatenated
-    /// verbatim as on the wire: each record starts with its own Next Header
-    /// octet (naming what follows it), then HdrExtLen, then the option body.
+    /// Raw IP fixed headers (20 bytes for IPv4, 40 bytes for IPv6), ordered
+    /// outer→inner. In the common (non-tunneled) case this holds exactly one
+    /// header; an IP-in-IP tunnel (IP protocol 4 / next-header 41) contributes
+    /// one record per stacked IP header for draft-ietf-ippm-stamp-ext-hdr-11
+    /// §3.2 rule 2 positional pairing of multiple Type-247 TLVs.
+    pub fixed_headers: Vec<Vec<u8>>,
+    /// IPv6 Hop-by-Hop, Destination Options, Routing (incl. SRH) and Fragment
+    /// extension headers concatenated verbatim as on the wire: each record
+    /// starts with its own Next Header octet (naming what follows it), then
+    /// HdrExtLen, then the header body.
     pub ipv6_ext_headers: Vec<u8>,
 }
 
@@ -1724,15 +1729,45 @@ fn apply_semantic_tlv_processing(
     // field; otherwise set the C flag (Conformance) per -11 §5.1/§5.2. A nix
     // UDP-socket backend hands us `captured_headers = None`, so this correctly
     // signals "could not reflect" to senders that requested header reflection.
-    let (captured_fixed, captured_ext): (Option<&[u8]>, Option<&[u8]>) = match ctx.captured_headers
+    let (captured_fixed, captured_ext): (Option<&[Vec<u8>]>, Option<&[u8]>) =
+        match ctx.captured_headers {
+            Some(h) => (
+                Some(h.fixed_headers.as_slice()),
+                Some(h.ipv6_ext_headers.as_slice()),
+            ),
+            None => (None, None),
+        };
+    tlvs.process_reflected_headers_multi(captured_fixed, captured_ext);
+
+    // draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2 MTU rule (reflector half): the
+    // reflected test packet MUST NOT exceed the IP/IPv6 MTU after the Reflected
+    // Fixed/IPv6 Ext Header TLVs; if necessary, one or more of those TLVs MUST
+    // be removed. The reflector fills the sender-sized TLVs in place and never
+    // grows them, so this is a defensive cap keyed to the operator's
+    // `--reflected-control-max-size` (the same egress-MTU stand-in used for
+    // Type-12 padding); it fires only when a request already sits at/over that
+    // size. The base + a reserve for the response HMAC TLV (if keyed) is the
+    // fixed part; TLVs are trimmed to fit the remainder.
     {
-        Some(h) => (
-            Some(h.fixed_header.as_slice()),
-            Some(h.ipv6_ext_headers.as_slice()),
-        ),
-        None => (None, None),
-    };
-    tlvs.process_reflected_headers(captured_fixed, captured_ext);
+        // HMAC TLV wire size = 4-byte header + 16-byte value.
+        let hmac_reserve = if tlv_hmac_key.is_some() {
+            TLV_HEADER_SIZE + 16
+        } else {
+            0
+        };
+        let removed = tlvs.trim_reflected_headers_to_size(
+            base_bytes.len() + hmac_reserve,
+            ctx.reflected_control_max_size as usize,
+        );
+        if removed > 0 {
+            log::warn!(
+                "Removed {removed} Reflected Fixed/IPv6 Ext Header TLV(s) (Type 246/247) from \
+                 the reply to stay within the {}-byte reply-size limit \
+                 (draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2)",
+                ctx.reflected_control_max_size
+            );
+        }
+    }
 
     // Process Reflected Test Packet Control TLV
     // (draft-ietf-ippm-asymmetrical-pkts-14 §3).
