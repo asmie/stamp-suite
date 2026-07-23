@@ -25,7 +25,7 @@
 
             # Regenerate after any Cargo.lock change: set to pkgs.lib.fakeHash,
             # run `nix build .#default`, and copy the `got:` hash from the error.
-            cargoHash = "sha256-9kJyRAJT2KI61gPm6y5LErgysYVrSHFEn76Qf/JoayQ=";
+            cargoHash = "sha256-S18r1hEme2m3fW91CevGsu0B56qg9dPFY9et07AxKDk=";
 
             buildFeatures = allFeatures;
             # Honour --all-features for the cargo test phase too so the
@@ -54,7 +54,7 @@
             src = self;
             # Regenerate after any Cargo.lock change: set to pkgs.lib.fakeHash,
             # run `nix build .#default`, and copy the `got:` hash from the error.
-            cargoHash = "sha256-9kJyRAJT2KI61gPm6y5LErgysYVrSHFEn76Qf/JoayQ=";
+            cargoHash = "sha256-S18r1hEme2m3fW91CevGsu0B56qg9dPFY9et07AxKDk=";
             buildFeatures = allFeatures;
             nativeBuildInputs = [ pkgs.clippy ];
             buildPhase = ''
