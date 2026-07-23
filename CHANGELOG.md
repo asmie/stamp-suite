@@ -218,6 +218,209 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   little-endian), and incoming request PDUs that declare a different byte order
   are rejected rather than silently misinterpreted.
 
+### Security
+
+- **Session-Sender reflected-TLV validation order hardened (RFC 8972
+  §4-17/18/19, §4.8-16/17).** `validate_reflected_tlvs` (`src/sender.rs`) is
+  restructured so a reflected packet's U/M/I flags and its TLV-HMAC
+  verification result are all evaluated *before* any TLV value — the
+  Micro-session ID used for session binding, the Access Report acknowledgment
+  marker, the CoS CE congestion marker — is read for effect: a U-flagged TLV
+  is now skipped rather than trusted, an M-flagged TLV halts the scan of the
+  remaining TLVs, and any I-flagged TLV or a failed TLV-HMAC closes the
+  integrity gate for the whole reflected TLV set. Previously a reflected
+  packet could have a forged Micro-session ID (or other TLV value) consumed
+  before its own flags/HMAC failure was accounted for. Tests:
+  `test_forged_msid_with_{u,m,i}_flag_not_consumed`,
+  `test_forged_msid_ignored_when_tlv_hmac_fails` (`src/sender.rs`).
+
+### Added
+
+- **draft-ietf-ippm-stamp-ext-hdr-11: the remaining MUST cluster.**
+  `--reflected-ipv6-ext-hdr` and `--reflected-fixed-hdr` are now repeatable
+  (`[LEN[:SELECTORHEX]]` per occurrence), emitting one Type-246/Type-247 TLV
+  each, in order; the single-flag form and the standalone
+  `--reflected-ipv6-ext-hdr-selector`/`--reflected-fixed-hdr-selector` flags
+  stay backward compatible. New `--attach-ext-hdr hbh|dest[:HEX]` makes the
+  sender attach a real IPv6 Hop-by-Hop or Destination Options header to its
+  own egress packets (sticky `IPV6_HOPOPTS`/`IPV6_DSTOPTS`, Linux/macOS) and
+  emit the matching request TLV. The reflector's capture walk now traverses
+  the full IPv6 extension header chain (Routing, including the Segment
+  Routing Header, and the fixed-size Fragment header), terminating cleanly
+  with a C-flag at AH/ESP (neither can be reflected), and descends IP-in-IP
+  tunnels (protocols 4/41, depth-capped at 4) to capture stacked outer/inner
+  fixed headers for multi-TLV Type-247 requests. Both roles are now MTU-aware:
+  the sender queries the live route MTU (`IP_MTU`/`IPV6_MTU`, 1280/1500
+  fallback) and trims header TLVs tail-first (Type-246 before Type-247,
+  BER padding never removed) when the assembled packet would exceed it; the
+  reflector trims reflected-header data against `--reflected-control-max-size`
+  as its egress-MTU stand-in. The reflector also now enforces §3.3's
+  ordering rule: if a Type-246 TLV appears before its Type-247 sibling in the
+  packet, every header TLV is returned with the C flag and no data is copied.
+- **draft-ietf-ippm-stamp-cos-ecn-01: AIMD congestion response.** New
+  `src/rate_control.rs` implements the multiplicative-backoff /
+  linear-recovery controller described in §3.4: on a CE-marked reply — either
+  the reflected CoS TLV's EC2 field (forward path, integrity-gated the same
+  as any other reflected TLV value) or the reply packet's own on-wire ECN
+  observed via new `recvmsg`/`IP_RECVTOS`/`IPV6_RECVTCLASS` plumbing on the
+  sender socket (reverse path, Linux/macOS) — the sender's inter-packet send
+  interval grows by `--ecn-backoff-factor`, capped at `--ecn-max-delay`, and
+  decays on clean replies. Active automatically whenever `--cos`+`--ecn`
+  request ECT0/ECT1, with no escape hatch, matching the unconditional MUST.
+  Non-Linux/macOS platforms log a one-time warning and fall back to
+  forward-path-only detection.
+- **Layer-2 Address Group sub-TLV filter (draft-ietf-ippm-asymmetrical-pkts-14
+  §3.1.1).** The Reflected Test Packet Control TLV's L2 (MAC-based) Address
+  Group sub-TLV is now evaluated against the reflector's own local MAC
+  addresses, mirroring the existing L3 (IP-prefix) handling: a match replies
+  normally, a mismatch drops the packet with no reply. Netns evidence:
+  `tests/netns_conformance.rs::scenario_5_address_group_filters`.
+- **Access Report retransmission (RFC 8972 §4.6).** The sender now arms a
+  retransmission timer whenever it sends a packet carrying the Access Report
+  TLV, retransmitting the same TLV up to `--access-report-retries` times
+  (default 4) at `--access-report-timeout`-second intervals (default 3s, per
+  §4.6-13) until a reflected packet with a recognized, integrity-intact
+  Access Report TLV disarms it or the retry budget is exhausted (`Aborted`).
+  The timer runs to completion independently of `--count`/`--interval` via a
+  post-loop wait-phase extension, so a run shorter than the full retry budget
+  still retransmits and aborts correctly rather than reporting `Pending`
+  forever. `--access-report` also now rejects an Access ID outside the RFC's
+  1-2 registry values (`0` is explicitly invalid per §4.6; 3-15 warn as
+  forward-compatible but are accepted on the sender side).
+- **RFC 9534 Reflector Micro-session ID validation on the sender.** The
+  sender now validates the reflected Reflector Micro-session ID field on
+  every reply, not only when `--reflector-member-link-id` is pre-configured:
+  absent a pre-known value, the first validly-received reply's Reflector
+  Micro-session ID is latched and becomes the expected value for the rest of
+  the session (zero-config path); a pre-known value always takes precedence
+  and is never overridden. A mismatch on either path discards the packet
+  (`TlvRejection::ReflectorMsidMismatch`).
+- **`-v`/`--verbose` CLI flag.** Repeatable (`-v`, `-vv`, `-vvv`, ...),
+  raising the effective log level from `info` to `debug` to `trace`
+  (`resolve_log_filter`); an explicit `RUST_LOG` environment variable always
+  takes precedence over the flag at any count.
+- **Privileged network-namespace conformance tier.** New
+  `tests/netns_conformance.rs` (9 scenarios) exercises on-wire behaviour that
+  unit and loopback tests cannot reach — real IP TOS/ECN/TTL marking, IPv6
+  extension headers, SRv6 SRH return-path routing (the first live exercise of
+  `send_with_srh()`), Address Group filtering, and Type-12 multi-reply
+  pacing/count/length — over a pair of Linux network namespaces joined by a
+  `veth` link. Every scenario is `#[ignore]`d and additionally gated on
+  `STAMP_NETNS_TESTS=1` plus root/`CAP_NET_ADMIN`, so an ordinary `cargo test`
+  run never touches the network. Full instructions, prerequisites, and a
+  rootless (`unshare -Urn`) path: `doc/testing-netns.md`.
+- **Clause-level conformance matrices and a rolled-up compliance statement.**
+  `doc/conformance/` now carries an independently re-verified,
+  clause-by-clause matrix (quote, RFC-2119 level, role, status, code/test
+  evidence) for RFC 8762, RFC 8972 (incl. errata 8199/8339), RFC 9503, RFC
+  9534, RFC 8545, and drafts asymmetrical-pkts-14, stamp-cos-ecn-01, and
+  stamp-ext-hdr-11 — 368 clauses total. `doc/conformance/README.md` rolls
+  these up into a single compliance statement: per-document counts, a
+  maintainer-adjudicated list of documented exclusions (SR-MPLS return-path
+  forwarding, SNMP SET, STAMP YANG, Windows/macOS platform-tier limits,
+  NIC-hardware timestamp verification, SSID-based session admission) versus
+  genuinely open Partials/Gaps, the experimental-codepoint disclosure, and a
+  summary of this project's verification tiers.
+- **Release pipeline hardening: preflight, gated publish, artifacts.** A new
+  `release-preflight` CI job runs before packaging or publishing: it checks
+  that the git tag, `Cargo.toml`, `CHANGELOG.md`, the Debian changelog, and
+  the OpenWrt Makefile all agree on the same version, and dry-run packages
+  for crates.io (`cargo publish --dry-run --locked`) to catch manifest/
+  packaging errors before any build or test time is spent. Packaging jobs
+  now additionally assemble a plain tarball per target (Linux DEB/RPM
+  targets and two new macOS targets, `aarch64`/`x86_64-apple-darwin`) and
+  crates.io publishing itself is gated behind the preflight and test jobs
+  passing.
+- **`cargo-deny` CI gate.** New `deny.toml` runs `cargo deny check` in CI
+  (advisories, licenses allow-list, duplicate-version/wildcard-dependency
+  bans, and a crates.io-only source restriction) across the full
+  `--all-features` dependency graph, alongside the existing RustSec
+  `audit-check` job (kept side by side deliberately — `audit-check` posts
+  inline PR annotations and can open issues for new advisories,
+  `cargo-deny` additionally covers licenses/bans/sources and is the one
+  command contributors run locally).
+- **Best-effort Windows CI test job.** `rust.yml` now also runs the test
+  suite on `windows-2022`; the job is explicitly non-gating (a Windows test
+  failure is reported but does not block the pipeline), consistent with
+  Windows being the `pnet`/libpcap-Npcap fallback tier rather than the
+  primary `nix` backend.
+
+### Changed
+
+- **Internal library modules are now `#[doc(hidden)]` (binary-first API).**
+  `clock_format`, `configuration`, `crypto`, `error_estimate`, `hwtstamp`,
+  `packets`, `rate_control`, `receiver`, `sender`, `session`, `srv6`,
+  `stats`, `time`, `tlv`, and the optional `control`/`metrics`/`snmp`
+  modules remain `pub` (needed by this crate's own integration tests,
+  benches, and fuzz targets) but no longer appear in generated rustdoc; a new
+  Stability doc comment on the crate root states plainly that the stable 1.x
+  surface is the CLI flags, the config-file schema, and on-the-wire
+  behaviour — not these Rust APIs, which are exempt from semver and may
+  change in any 1.x release.
+- **Experimental/pending-IANA TLV codepoints centralized.** The six
+  codepoint stand-ins this implementation uses ahead of IANA allocation —
+  the BER Pattern/Count/Max-Burst TLV types (240/241/242,
+  draft-gandhi-ippm-stamp-ber), the Reflected IPv6 Extension Header Data and
+  Reflected Fixed Header Data TLV types (246/247, TBA1/TBA2 in
+  draft-ietf-ippm-stamp-ext-hdr), and the IPv6 Extension Header Control
+  sub-TLV type (240 of Type 12, TBA3 in the same draft) — now live as
+  individually documented named constants in a new `src/tlv/experimental.rs`
+  module, each doc comment stating which draft defines the TLV, the IANA
+  action that will trigger renumbering, and that the constant is the single
+  edit point. Pure refactor: `TlvType`'s enum discriminants and
+  `from_byte`/`to_byte` now reference these constants instead of bare
+  literals; on-the-wire behaviour and all existing import paths are
+  unchanged. Deliberately no runtime/config override mechanism (YAGNI).
+
+### Fixed
+
+- **`IP_PKTINFO` destination address was byte-reversed on the `nix` backend
+  (little-endian hosts).** `ipv4_addr_from_pktinfo` called
+  `ipi_addr.s_addr.to_be_bytes()` on a value the kernel already fills in
+  network byte order as a raw `u32` — on any little-endian host (effectively
+  all x86_64/aarch64 deployments) this silently reversed the octets, so the
+  Location TLV's captured destination address (and any other consumer of
+  `extract_dst_addr_from_cmsgs`) could report the wrong IP. Changed to
+  `to_ne_bytes()`, which copies the underlying byte layout as-is regardless
+  of host endianness. Test: `ipv4_pktinfo_extraction_preserves_octet_order`.
+- **Reflector replies were silently truncated when a request's trailing
+  padding was an all-zero run with no TLVs (RFC 8762 §4.3/§4.6).**
+  `TlvList::parse_lenient` correctly drops a trailing all-zero run at a
+  4-byte-aligned offset, but the Echo-mode assembly path never re-padded to
+  compensate, so e.g. a classic TWAMP-Light packet with 50 zero-octet padding
+  and no TLVs came back truncated to base-packet size. Fixed by re-padding
+  the reply up to the received length after writing TLVs, skipped only when
+  a Reflected Test Packet Control TLV (Type 12) deliberately governs reply
+  size. Tests: `test_zero_trailer_reply_preserves_symmetric_size_{unauth,auth}`,
+  `test_nonaligned_garbage_trailer_preserves_size_unauth`.
+- **Location TLV sub-TLVs used a non-registry wire format, and the reflector
+  did not preserve the TLV's own length on echo (RFC 8972 §4.2.1/§4.2.2).**
+  Sub-TLVs now use the same 4-octet Flags/Type/Length header as top-level
+  TLVs, matching Figure 5 of the RFC instead of a bespoke layout; the
+  reflector's update now edits sub-TLV value bytes strictly in place so the
+  Location TLV's own wire Length is never resized.
+- **Timestamp Information TLV request leaked the sender's own clock into
+  reserved fields (RFC 8972 §4.3).** The Session-Sender's request TLV is now
+  built via `TimestampInfoTlv::request()`, which zeroes all four value
+  octets as the RFC requires ("MUST NOT fill any information fields...
+  All other fields MUST be filled with zeroes"); the prior constructor wrote
+  the sender's own sync source and timestamp into fields the reflector alone
+  is meant to fill.
+- **Follow-Up Telemetry TLV was not zeroed in stateless mode, and an
+  invalid-length value was not zeroed (RFC 8972 §4.7, erratum 8339).** The
+  reflector now zeroes the Sequence Number and Follow-Up Timestamp fields
+  when `--stateful-reflector` is off (§4.7-7) and also zeroes them (in
+  addition to setting the M flag) when the received TLV's own Length is
+  invalid (§4.7-6), instead of leaving stale or attacker-echoed bytes in
+  place.
+- **Access Report TLV's value size was 2 octets instead of the RFC-mandated
+  4, and an invalid Access ID was not discarded (RFC 8972 §4.6-3/§4.6-4).**
+  `ACCESS_REPORT_TLV_VALUE_SIZE` is now 4 (ID+Resv, Return Code, and the
+  2-octet Reserved tail §4.6 actually specifies); a well-formed Access Report
+  TLV whose Access ID is not 1 or 2 is now marked unrecognized (U flag) by
+  the reflector via `discard_invalid_access_report_tlvs`, instead of being
+  silently accepted.
+
 ## [0.8.0] - 2026-05-18
 
 ### Added

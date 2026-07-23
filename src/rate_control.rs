@@ -8,15 +8,15 @@
 //! congestion, reflector to sender). This module implements the *response*
 //! half of that requirement: a pure, deterministic AIMD (Additive Increase
 //! / Multiplicative Decrease, expressed here in delay-space rather than
-//! window-space — see [`AimdController`]) state machine that turns a stream
+//! window-space — see `AimdController`) state machine that turns a stream
 //! of "CE observed" / "clean reply" events into an inter-packet send
 //! interval.
 //!
 //! Deliberately free of sockets, timers, and wall-clock sleeps: the
 //! Session-Sender's existing send loop (`sender::run_sender`) drives it by
-//! calling [`AimdController::on_ce_observed`] or
-//! [`AimdController::on_clean_reply`] once per processed reply, and reads
-//! back [`AimdController::current_interval`] to decide how long to wait
+//! calling `AimdController::on_ce_observed` or
+//! `AimdController::on_clean_reply` once per processed reply, and reads
+//! back `AimdController::current_interval` to decide how long to wait
 //! before the next send. This is what makes the controller's AIMD sequence
 //! properties unit-testable without any real waiting.
 
@@ -29,7 +29,7 @@ use std::time::Duration;
 /// CE always has a real, growing effect once it is observed.
 const MIN_BACKOFF_FLOOR: Duration = Duration::from_millis(1);
 
-/// Configuration for an [`AimdController`], derived 1:1 from the
+/// Configuration for an `AimdController`, derived 1:1 from the
 /// `--send-delay`, `--ecn-backoff-factor`, `--ecn-max-delay`, and
 /// `--ecn-recovery-step` CLI flags.
 ///
@@ -41,7 +41,7 @@ const MIN_BACKOFF_FLOOR: Duration = Duration::from_millis(1);
 pub struct AimdParams {
     /// The operator-configured steady-state send interval (`--send-delay`).
     /// The controller never recovers past this — it is the floor for
-    /// [`AimdController::on_clean_reply`] and the starting point on
+    /// `AimdController::on_clean_reply` and the starting point on
     /// construction.
     pub base_interval: Duration,
     /// Multiplicative factor applied to the current interval on each CE
@@ -56,11 +56,11 @@ pub struct AimdParams {
     pub recovery_step: Duration,
 }
 
-/// Point-in-time observability snapshot of an [`AimdController`], surfaced
+/// Point-in-time observability snapshot of an `AimdController`, surfaced
 /// in the sender's stats output (`stats::CongestionSummary`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AimdStats {
-    /// Number of times [`AimdController::on_ce_observed`] was called
+    /// Number of times `AimdController::on_ce_observed` was called
     /// (i.e. CE-marked replies seen, counting both forward- and
     /// reverse-path detections — a reply flagged in both directions at
     /// once still counts once, since only one backoff step is applied per

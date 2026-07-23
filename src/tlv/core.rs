@@ -2,6 +2,16 @@
 
 use thiserror::Error;
 
+// Experimental/pending-IANA codepoint stand-ins live in `super::experimental`
+// (single edit point — see that module's doc comment for the renumbering
+// policy). Re-exported here so existing `crate::tlv::core::…` import paths
+// keep working unchanged.
+pub use super::experimental::{
+    BER_COUNT_TLV_TYPE, BER_MAX_BURST_TLV_TYPE, BER_PATTERN_TLV_TYPE,
+    REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, REFLECTED_FIXED_HDR_TLV_TYPE,
+    REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
+};
+
 /// TLV header size in bytes (1 byte flags+type, 2 bytes length).
 pub const TLV_HEADER_SIZE: usize = 4;
 
@@ -54,18 +64,6 @@ pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 12;
 /// Number of fixed bytes at the head of the Reflected Test Packet Control
 /// TLV value field (length(2) + count(2) + interval(4)). Sub-TLVs follow.
 pub const REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE: usize = 8;
-
-/// Sub-TLV type for "IPv6 Extension Header Control" under the Reflected
-/// Test Packet Control TLV (draft-ietf-ippm-stamp-ext-hdr-11 §5.3).
-/// Presence-only (Sub-TLV Length 0). Under -11 it asks the reflector to add
-/// matching IPv6 extension headers to its own reply packet; a reflector that
-/// cannot do so sets the C flag in the sub-TLV's Sub-TLV Flags (rule 4), and
-/// more than one such sub-TLV is a cardinality violation (C on every copy).
-///
-/// The IANA codepoint is still TBA3 in the draft; this is a stand-in from
-/// the shared "STAMP Sub-TLV Types" Experimental range (240-251). Renumber
-/// when the RFC publishes.
-pub const REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL: u8 = 240;
 
 /// BER Bit Error Count TLV value size
 /// (draft-gandhi-ippm-stamp-ber §3.3: single u32).
@@ -291,23 +289,32 @@ pub enum TlvType {
     /// Reflected Test Packet Control TLV (12) - draft-ietf-ippm-asymmetrical-pkts §3.
     ReflectedControl = 12,
     /// BER Bit Pattern in Padding TLV (240) - draft-gandhi-ippm-stamp-ber §3.2.
-    /// Type number is TBD in the draft; 240 used from RFC 8972 experimental range.
-    BerPattern = 240,
+    /// Experimental-range codepoint stand-in; see `experimental::BER_PATTERN_TLV_TYPE`
+    /// — single edit point for renumbering.
+    BerPattern = BER_PATTERN_TLV_TYPE,
     /// BER Bit Error Count in Padding TLV (241) - draft-gandhi-ippm-stamp-ber §3.3.
-    /// Type number is TBD in the draft; 241 used from RFC 8972 experimental range.
-    BerCount = 241,
+    /// Experimental-range codepoint stand-in; see `experimental::BER_COUNT_TLV_TYPE`
+    /// — single edit point for renumbering.
+    BerCount = BER_COUNT_TLV_TYPE,
     /// BER Max Bit Error Burst Size TLV (242) - draft-gandhi-ippm-stamp-ber §3.4.
-    /// Type number is TBD in the draft; 242 used from RFC 8972 experimental range.
-    BerBurst = 242,
+    /// Experimental-range codepoint stand-in (and a known collision with an
+    /// unrelated TLV in another implementation — see the const's doc); see
+    /// `experimental::BER_MAX_BURST_TLV_TYPE` — single edit point for renumbering.
+    BerBurst = BER_MAX_BURST_TLV_TYPE,
     /// Reflected IPv6 Extension Header Data TLV (246) -
     /// draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 5.1. Reflects received
     /// Hop-by-Hop and Destination Options extension headers; requires
-    /// raw-capture backend.
-    ReflectedIpv6ExtHdr = 246,
+    /// raw-capture backend. Experimental-range codepoint stand-in (IANA
+    /// TBA1); see `experimental::REFLECTED_IPV6_EXT_HDR_TLV_TYPE` — single
+    /// edit point for renumbering.
+    ReflectedIpv6ExtHdr = REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
     /// Reflected Fixed Header Data TLV (247) -
     /// draft-ietf-ippm-stamp-ext-hdr-11 §§3.2, 5.2. Reflects the raw IPv4/IPv6
     /// fixed header (20/40 bytes); requires raw-capture backend.
-    ReflectedFixedHdr = 247,
+    /// Experimental-range codepoint stand-in (IANA TBA2); see
+    /// `experimental::REFLECTED_FIXED_HDR_TLV_TYPE` — single edit point for
+    /// renumbering.
+    ReflectedFixedHdr = REFLECTED_FIXED_HDR_TLV_TYPE,
     /// Unknown type.
     Unknown(u8),
 }
@@ -330,11 +337,11 @@ impl TlvType {
             10 => Self::ReturnPath,
             11 => Self::MicroSessionId,
             12 => Self::ReflectedControl,
-            240 => Self::BerPattern,
-            241 => Self::BerCount,
-            242 => Self::BerBurst,
-            246 => Self::ReflectedIpv6ExtHdr,
-            247 => Self::ReflectedFixedHdr,
+            BER_PATTERN_TLV_TYPE => Self::BerPattern,
+            BER_COUNT_TLV_TYPE => Self::BerCount,
+            BER_MAX_BURST_TLV_TYPE => Self::BerBurst,
+            REFLECTED_IPV6_EXT_HDR_TLV_TYPE => Self::ReflectedIpv6ExtHdr,
+            REFLECTED_FIXED_HDR_TLV_TYPE => Self::ReflectedFixedHdr,
             n => Self::Unknown(n),
         }
     }
@@ -356,11 +363,11 @@ impl TlvType {
             Self::ReturnPath => 10,
             Self::MicroSessionId => 11,
             Self::ReflectedControl => 12,
-            Self::BerPattern => 240,
-            Self::BerCount => 241,
-            Self::BerBurst => 242,
-            Self::ReflectedIpv6ExtHdr => 246,
-            Self::ReflectedFixedHdr => 247,
+            Self::BerPattern => BER_PATTERN_TLV_TYPE,
+            Self::BerCount => BER_COUNT_TLV_TYPE,
+            Self::BerBurst => BER_MAX_BURST_TLV_TYPE,
+            Self::ReflectedIpv6ExtHdr => REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
+            Self::ReflectedFixedHdr => REFLECTED_FIXED_HDR_TLV_TYPE,
             Self::Unknown(n) => n,
         }
     }
