@@ -429,24 +429,38 @@ fn run_capture_loop(
     }
 }
 
+/// IP protocol numbers for the two IP-in-IP tunnel encapsulations.
+const PROTO_IPV4_IN_IP: u8 = 4;
+const PROTO_IPV6_IN_IP: u8 = 41;
+/// Cap on IP-in-IP nesting we descend, to bound work on adversarial packets.
+const MAX_IP_TUNNEL_DEPTH: usize = 4;
+
 fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &PnetSendContext) {
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => {
             if let Some(header) = Ipv4Packet::new(ethernet.payload()) {
-                if header.get_next_level_protocol() == IpNextHeaderProtocols::Udp {
-                    if let Some(udp) = UdpPacket::new(header.payload()) {
+                // Capture the raw 20-byte IPv4 fixed header for Reflected Fixed
+                // Header Data TLV (Type 247). IHL * 4 gives the total IPv4 header
+                // length (including options); the draft reflects only the fixed
+                // 20-byte header, so clamp to that.
+                let ipv4_bytes = header.packet();
+                let fixed_len = std::cmp::min(ipv4_bytes.len(), crate::tlv::IPV4_FIXED_HEADER_SIZE);
+                let mut fixed_headers = vec![ipv4_bytes[..fixed_len].to_vec()];
+                let mut ext_headers: Vec<u8> = Vec::new();
+                // Descend any IP-in-IP tunnel (§3.2 rule 2: multiple stacked IP
+                // headers) to reach the innermost UDP datagram.
+                let (final_proto, upper) = descend_ip_tunnel(
+                    header.get_next_level_protocol().0,
+                    header.payload(),
+                    &mut fixed_headers,
+                    &mut ext_headers,
+                );
+                if final_proto == IpNextHeaderProtocols::Udp.0 {
+                    if let Some(udp) = UdpPacket::new(upper) {
                         if udp.get_destination() == config.local_port {
-                            // Capture the raw 20-byte IPv4 fixed header for
-                            // Reflected Fixed Header Data TLV (Type 247).
-                            // IHL * 4 gives the total IPv4 header length
-                            // (including options); the draft reflects only
-                            // the fixed 20-byte header, so clamp to that.
-                            let ipv4_bytes = header.packet();
-                            let fixed_len =
-                                std::cmp::min(ipv4_bytes.len(), crate::tlv::IPV4_FIXED_HEADER_SIZE);
                             let captured = super::CapturedHeaders {
-                                fixed_header: ipv4_bytes[..fixed_len].to_vec(),
-                                ipv6_ext_headers: Vec::new(),
+                                fixed_headers,
+                                ipv6_ext_headers: ext_headers,
                             };
                             let pkt = PacketMeta {
                                 src: SocketAddr::new(
@@ -467,21 +481,28 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
         }
         EtherTypes::Ipv6 => {
             if let Some(header) = Ipv6Packet::new(ethernet.payload()) {
-                // Capture the 40-byte IPv6 fixed header and any Hop-by-Hop
-                // (NextHeader=0) or Destination Options (NextHeader=60)
-                // extension headers for TLV Types 247/246.
+                // Capture the 40-byte IPv6 fixed header and any Hop-by-Hop /
+                // Destination Options / Routing (incl. SRH) / Fragment extension
+                // headers for TLV Types 247/246.
                 let ipv6_bytes = header.packet();
                 let fixed_len = std::cmp::min(ipv6_bytes.len(), crate::tlv::IPV6_FIXED_HEADER_SIZE);
-                let fixed_header = ipv6_bytes[..fixed_len].to_vec();
-                let (ext_headers, final_next, payload_offset) = extract_ipv6_ext_headers(&header);
+                let mut fixed_headers = vec![ipv6_bytes[..fixed_len].to_vec()];
+                let (mut ext_headers, final_next, payload_offset) =
+                    extract_ipv6_ext_headers(&header);
+                // Descend any IP-in-IP tunnel after the outer ext-header chain.
+                let (final_proto, upper) = descend_ip_tunnel(
+                    final_next.0,
+                    &ipv6_bytes[payload_offset.min(ipv6_bytes.len())..],
+                    &mut fixed_headers,
+                    &mut ext_headers,
+                );
 
-                if final_next == IpNextHeaderProtocols::Udp {
-                    let payload = &ipv6_bytes[payload_offset..];
-                    if let Some(udp) = UdpPacket::new(payload) {
+                if final_proto == IpNextHeaderProtocols::Udp.0 {
+                    if let Some(udp) = UdpPacket::new(upper) {
                         if udp.get_destination() == config.local_port {
                             let traffic_class = header.get_traffic_class();
                             let captured = super::CapturedHeaders {
-                                fixed_header,
+                                fixed_headers,
                                 ipv6_ext_headers: ext_headers,
                             };
                             let pkt = PacketMeta {
@@ -505,64 +526,152 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
     }
 }
 
-/// Walks IPv6 extension headers (Hop-by-Hop = 0, Destination Options = 60)
-/// after the 40-byte fixed header, returning:
+/// Descends an IP-in-IP tunnel chain (draft-ietf-ippm-stamp-ext-hdr-11 §3.2
+/// rule 2): while `proto` names an encapsulated IPv4 (protocol 4) or IPv6
+/// (protocol 41) header inside `bytes`, capture that inner header's fixed part
+/// into `fixed_headers` (outer→inner) and, for IPv6, append its extension
+/// headers to `ext_headers`, then advance to the encapsulated payload. Returns
+/// the first non-tunnel protocol number and the remaining upper-layer bytes
+/// (e.g. the UDP datagram). Bounded by [`MAX_IP_TUNNEL_DEPTH`].
+fn descend_ip_tunnel<'a>(
+    mut proto: u8,
+    mut bytes: &'a [u8],
+    fixed_headers: &mut Vec<Vec<u8>>,
+    ext_headers: &mut Vec<u8>,
+) -> (u8, &'a [u8]) {
+    for _ in 0..MAX_IP_TUNNEL_DEPTH {
+        match proto {
+            PROTO_IPV4_IN_IP => {
+                let Some(inner) = Ipv4Packet::new(bytes) else {
+                    break;
+                };
+                let inner_bytes = inner.packet();
+                let flen = std::cmp::min(inner_bytes.len(), crate::tlv::IPV4_FIXED_HEADER_SIZE);
+                if flen < crate::tlv::IPV4_FIXED_HEADER_SIZE {
+                    break;
+                }
+                fixed_headers.push(inner_bytes[..flen].to_vec());
+                proto = inner.get_next_level_protocol().0;
+                // Advance past the full inner IPv4 header (IHL words).
+                let ihl = (inner.get_header_length() as usize) * 4;
+                let advance = ihl.max(crate::tlv::IPV4_FIXED_HEADER_SIZE).min(bytes.len());
+                bytes = &bytes[advance..];
+            }
+            PROTO_IPV6_IN_IP => {
+                let Some(inner) = Ipv6Packet::new(bytes) else {
+                    break;
+                };
+                let inner_bytes = inner.packet();
+                let flen = std::cmp::min(inner_bytes.len(), crate::tlv::IPV6_FIXED_HEADER_SIZE);
+                if flen < crate::tlv::IPV6_FIXED_HEADER_SIZE {
+                    break;
+                }
+                fixed_headers.push(inner_bytes[..flen].to_vec());
+                let (inner_ext, inner_next, inner_off) = extract_ipv6_ext_headers(&inner);
+                ext_headers.extend_from_slice(&inner_ext);
+                proto = inner_next.0;
+                bytes = &bytes[inner_off.min(bytes.len())..];
+            }
+            _ => break,
+        }
+    }
+    (proto, bytes)
+}
+
+/// Walks the IPv6 extension-header chain after the 40-byte fixed header,
+/// returning:
 /// - the extension-header bytes concatenated **verbatim as on the wire**: each
 ///   record starts with its own Next Header octet (naming what follows), then
-///   HdrExtLen, then the option body — per draft-ietf-ippm-stamp-ext-hdr-11
+///   HdrExtLen, then the header body — per draft-ietf-ippm-stamp-ext-hdr-11
 ///   §3.1/§5.1 (the reflector's first-4-byte Requested selector matches these
 ///   on-wire octets);
 /// - the final NextHeader protocol number (UDP if the chain leads to UDP);
 /// - the byte offset into the full IPv6 packet where the upper-layer payload
 ///   (e.g. UDP) begins.
 ///
-/// Stops on the first non-option header (e.g. Routing, Fragment, ESP, AH) —
-/// those are out of scope for draft-ietf-ippm-stamp-ext-hdr.
+/// Recognised (and captured) headers, per RFC 8200 and §3.1's own examples
+/// ("Routing Header for IPv6 including Segment Routing Header"): Hop-by-Hop (0),
+/// Routing (43, incl. SRH type 4), Fragment (44), and Destination Options (60).
+/// Routing/HBH/DestOpts carry the generic `[Next Header][Hdr Ext Len]` container
+/// (length `(HdrExtLen + 1) * 8`); Fragment is a fixed 8-octet header whose
+/// second octet is Reserved, not a length. The walk **terminates** at the
+/// Authentication Header (51) and Encapsulating Security Payload (50): AH's
+/// length is expressed in a different unit and ESP's contents are encrypted, so
+/// neither can be reflected meaningfully — the reflector then finds no
+/// length-matching candidate and correctly signals the C flag (§5.1-E). It also
+/// terminates at any upper-layer protocol (e.g. UDP).
 fn extract_ipv6_ext_headers(
     header: &Ipv6Packet,
 ) -> (Vec<u8>, pnet::packet::ip::IpNextHeaderProtocol, usize) {
     use pnet::packet::ip::IpNextHeaderProtocol;
 
-    const HOP_BY_HOP: u8 = 0;
-    const DESTINATION_OPTS: u8 = 60;
+    let (out, final_next, walked) =
+        walk_ipv6_ext_header_chain(header.payload(), header.get_next_header().0);
+    (
+        out,
+        IpNextHeaderProtocol(final_next),
+        // 40-byte fixed header + walked extension-header bytes.
+        40 + walked,
+    )
+}
 
-    let payload = header.payload();
-    // Type of the header currently at `offset_in_payload` (named by the
-    // preceding Next Header field: the fixed header's, then each ext header's).
-    let mut this_header_type = header.get_next_header().0;
-    let mut offset_in_payload = 0usize;
+const HOP_BY_HOP: u8 = 0;
+const ESP: u8 = 50;
+const AUTH_HEADER: u8 = 51;
+const ROUTING: u8 = 43;
+const FRAGMENT: u8 = 44;
+const DESTINATION_OPTS: u8 = 60;
+
+/// Returns the on-wire length in octets of the extension header of type
+/// `hdr_type` whose bytes begin at `rec`, or `None` if `hdr_type` is not a
+/// captured extension header (upper-layer protocol, AH, ESP, …) or `rec` is too
+/// short to determine the length.
+fn ext_header_len(hdr_type: u8, rec: &[u8]) -> Option<usize> {
+    match hdr_type {
+        // Generic option/routing container: length = (Hdr Ext Len + 1) * 8.
+        HOP_BY_HOP | DESTINATION_OPTS | ROUTING => {
+            let hdr_ext_len = *rec.get(1)? as usize;
+            Some((hdr_ext_len + 1) * 8)
+        }
+        // Fragment header is always exactly 8 octets (RFC 8200 §4.5); its
+        // second octet is Reserved, not a length field.
+        FRAGMENT => Some(8),
+        // AH's length is in a different unit and ESP's payload is encrypted, so
+        // neither can be reflected — the walk terminates here (§5.1-E C-flag).
+        AUTH_HEADER | ESP => None,
+        // Upper-layer protocol (e.g. UDP) or anything else: not an ext header.
+        _ => None,
+    }
+}
+
+/// Pure core of [`extract_ipv6_ext_headers`], operating on the IPv6 payload
+/// bytes and the fixed header's Next Header value. Returns the captured
+/// extension-header bytes (verbatim), the final Next Header value, and the
+/// number of payload bytes consumed by the walked headers.
+fn walk_ipv6_ext_header_chain(payload: &[u8], first_next: u8) -> (Vec<u8>, u8, usize) {
+    let mut this_header_type = first_next;
+    let mut offset = 0usize;
     let mut out = Vec::new();
 
     loop {
-        if this_header_type != HOP_BY_HOP && this_header_type != DESTINATION_OPTS {
+        let rec = &payload[offset.min(payload.len())..];
+        let Some(len) = ext_header_len(this_header_type, rec) else {
+            break; // Upper-layer protocol, AH, ESP, or unrecognised → stop.
+        };
+        // Need at least 2 bytes for the Next Header + Hdr Ext Len fields and
+        // the full declared length to be present.
+        if rec.len() < 2 || rec.len() < len || len == 0 {
             break;
         }
-        // Need at least 2 bytes for NextHeader + HdrExtLen fields.
-        if payload.len().saturating_sub(offset_in_payload) < 2 {
-            break;
-        }
-        // This header's own Next Header field names the FOLLOWING header.
-        let this_next = payload[offset_in_payload];
-        let hdr_ext_len = payload[offset_in_payload + 1];
-        // RFC 8200: option header length in 8-octet units, excluding first 8.
-        let ext_len_bytes = (hdr_ext_len as usize + 1) * 8;
-        if payload.len().saturating_sub(offset_in_payload) < ext_len_bytes {
-            break;
-        }
-        // Emit the extension header verbatim (byte 0 = this header's own Next
-        // Header field, byte 1 = HdrExtLen, then the option body).
-        out.extend_from_slice(&payload[offset_in_payload..offset_in_payload + ext_len_bytes]);
-
+        // This header's own Next Header field (byte 0) names the FOLLOWING
+        // header. Emit the header verbatim.
+        let this_next = rec[0];
+        out.extend_from_slice(&rec[..len]);
         this_header_type = this_next;
-        offset_in_payload += ext_len_bytes;
+        offset += len;
     }
 
-    (
-        out,
-        IpNextHeaderProtocol(this_header_type),
-        // 40-byte fixed header + walked extension-header bytes.
-        40 + offset_in_payload,
-    )
+    (out, this_header_type, offset)
 }
 
 /// Sets the IP TOS (Type of Service) / IPv6 Traffic Class on a socket.
@@ -1015,6 +1124,63 @@ mod tests {
         );
         assert_eq!(final_next.0, 17, "chain terminates at UDP");
         assert_eq!(payload_offset, 48, "40-byte fixed + 8-byte HBH");
+    }
+
+    /// draft-ietf-ippm-stamp-ext-hdr-11 §3.1 rule 2 / §3.1's example list:
+    /// the walk must traverse and capture a Routing Header (type 43, incl. the
+    /// Segment Routing Header / routing type 4) in the chain, in order, and
+    /// continue to the upper layer.
+    #[test]
+    fn walk_captures_routing_header_including_srh() {
+        // Chain: fixed(next=HBH) → HBH(8, next=Routing) → SRH(16, next=UDP).
+        // SRH is a Routing Header with Routing Type 4.
+        let mut payload = Vec::new();
+        // HBH: next=Routing(43), HdrExtLen=0 ⇒ 8 octets.
+        payload.extend_from_slice(&[43, 0, 0x01, 0x04, 0, 0, 0, 0]);
+        // SRH (Routing): next=UDP(17), HdrExtLen=1 ⇒ 16 octets; routing type 4.
+        payload.extend_from_slice(&[17, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let (out, final_next, walked) = walk_ipv6_ext_header_chain(&payload, HOP_BY_HOP);
+        assert_eq!(walked, 24, "8-byte HBH + 16-byte SRH walked");
+        assert_eq!(final_next, 17, "chain terminates at UDP");
+        // Two records captured verbatim, in order.
+        assert_eq!(&out[..8], &payload[..8], "HBH captured first");
+        assert_eq!(
+            &out[8..24],
+            &payload[8..24],
+            "SRH captured second, in order"
+        );
+        assert_eq!(out[8], 17, "SRH record byte 0 is its own Next Header (UDP)");
+        assert_eq!(out[10], 4, "SRH routing type 4 preserved verbatim");
+    }
+
+    /// A Fragment header (type 44) is a fixed 8 octets; its second byte is
+    /// Reserved, not a Hdr Ext Len, so the walk must not treat it as a length.
+    #[test]
+    fn walk_captures_fragment_header_as_fixed_eight_octets() {
+        // Fragment header: next=UDP(17), Reserved byte = 0xAB (must be ignored
+        // for length purposes), then 6 more octets = 8 total.
+        let payload = [17u8, 0xAB, 0x00, 0x08, 0x11, 0x22, 0x33, 0x44];
+        let (out, final_next, walked) = walk_ipv6_ext_header_chain(&payload, FRAGMENT);
+        assert_eq!(walked, 8, "Fragment header is always 8 octets");
+        assert_eq!(final_next, 17, "terminates at UDP");
+        assert_eq!(out, payload.to_vec(), "captured verbatim");
+    }
+
+    /// The walk terminates at AH (51) and ESP (50): those cannot be reflected,
+    /// so they are neither captured nor walked past.
+    #[test]
+    fn walk_terminates_at_ah_and_esp() {
+        // fixed(next=AH) → nothing captured, final_next = AH.
+        let ah_payload = [0u8; 16];
+        let (out, final_next, walked) = walk_ipv6_ext_header_chain(&ah_payload, AUTH_HEADER);
+        assert!(out.is_empty(), "AH is not captured");
+        assert_eq!(final_next, AUTH_HEADER);
+        assert_eq!(walked, 0);
+
+        let (out, final_next, walked) = walk_ipv6_ext_header_chain(&ah_payload, ESP);
+        assert!(out.is_empty(), "ESP is not captured");
+        assert_eq!(final_next, ESP);
+        assert_eq!(walked, 0);
     }
 
     /// `run_receiver` must return cleanly (not panic) when the configured

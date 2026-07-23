@@ -776,14 +776,43 @@ impl TlvList {
     /// received (§5.1/§5.2, per I-D.ietf-ippm-asymmetrical-pkts). The pre-11
     /// U-flag failure signalling is gone.
     ///
-    /// `captured_fixed` supplies the IP fixed header (IPv4 20 bytes, IPv6
-    /// 40 bytes). `captured_ext_headers` supplies IPv6 Hop-by-Hop/Destination
-    /// Options headers concatenated verbatim as on the wire: each starts with
-    /// its own Next Header octet (naming what follows), then HdrExtLen, then
-    /// the option body.
+    /// `captured_fixed` supplies the single IP fixed header (IPv4 20 bytes,
+    /// IPv6 40 bytes). This is the backward-compatible single-header entry
+    /// point: an empty slice means "the backend observed the IP layer but there
+    /// is no fixed-header candidate" (→ the C flag), and a non-empty slice is
+    /// exactly one fixed-header record. For IP-in-IP tunnels (multiple stacked
+    /// IP headers) use [`Self::process_reflected_headers_multi`].
+    /// `captured_ext_headers` supplies IPv6 Hop-by-Hop/Destination Options/
+    /// Routing/Fragment headers concatenated verbatim as on the wire: each
+    /// starts with its own Next Header octet (naming what follows), then
+    /// HdrExtLen, then the header body.
     pub fn process_reflected_headers(
         &mut self,
         captured_fixed: Option<&[u8]>,
+        captured_ext_headers: Option<&[u8]>,
+    ) {
+        let fixed_list: Option<Vec<Vec<u8>>> = captured_fixed.map(|b| {
+            if b.is_empty() {
+                Vec::new()
+            } else {
+                vec![b.to_vec()]
+            }
+        });
+        self.process_reflected_headers_multi(fixed_list.as_deref(), captured_ext_headers);
+    }
+
+    /// Multi-header entry point (draft-ietf-ippm-stamp-ext-hdr-11 §3.2 rule 2):
+    /// `captured_fixed` is the ordered list of IP fixed headers (outer→inner)
+    /// captured from an IP-in-IP tunnel, one record per stacked IP header.
+    /// `None` means the backend cannot observe the IP layer. Multiple Type-247
+    /// TLVs pair with these records using the same first-fit-with-consumption
+    /// discipline as Type-246: each captured header is reflected by at most one
+    /// TLV, so successive same-length Type-247 TLVs pair 1st↔outer, 2nd↔inner
+    /// (§3.2 rule 2 ordering) while a non-zero Requested field still selects a
+    /// specific header (§5.2).
+    pub fn process_reflected_headers_multi(
+        &mut self,
+        captured_fixed: Option<&[Vec<u8>]>,
         captured_ext_headers: Option<&[u8]>,
     ) {
         Self::apply_reflected_headers(&mut self.tlvs, captured_fixed, captured_ext_headers);
@@ -792,9 +821,51 @@ impl TlvList {
         }
     }
 
+    /// Removes Reflected Fixed/IPv6 Extension Header TLVs (Types 247/246) from
+    /// the reply until `base_len + self.wire_size() <= max_reply_bytes`, per
+    /// draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2 ("one or more ... TLVs MUST be
+    /// removed to avoid violating the ... MTU limit"). Type-246 TLVs are removed
+    /// before Type-247 (they sit last in §3.3 wire order, so trimming from the
+    /// tail keeps survivors ordered); only these two types are removed. Applied
+    /// to both `self.tlvs` and `wire_order_tlvs`. Returns the number removed.
+    ///
+    /// Because the reflector fills the sender-sized TLVs in place (never growing
+    /// them), this is defensive: in normal operation the reply is no larger than
+    /// the request, which already fit the forward-path MTU. `max_reply_bytes` of
+    /// 0 disables the check.
+    pub fn trim_reflected_headers_to_size(
+        &mut self,
+        base_len: usize,
+        max_reply_bytes: usize,
+    ) -> usize {
+        if max_reply_bytes == 0 {
+            return 0;
+        }
+        let is_header = |t: &RawTlv| {
+            matches!(
+                t.tlv_type,
+                TlvType::ReflectedFixedHdr | TlvType::ReflectedIpv6ExtHdr
+            )
+        };
+        let mut removed = 0usize;
+        while base_len + self.wire_size() > max_reply_bytes {
+            let Some(idx) = self.tlvs.iter().rposition(is_header) else {
+                break; // No header TLV left to drop; remaining oversize is out of scope.
+            };
+            self.tlvs.remove(idx);
+            if let Some(ref mut wire_order) = self.wire_order_tlvs {
+                if let Some(widx) = wire_order.iter().rposition(is_header) {
+                    wire_order.remove(widx);
+                }
+            }
+            removed += 1;
+        }
+        removed
+    }
+
     fn apply_reflected_headers(
         tlvs: &mut [RawTlv],
-        captured_fixed: Option<&[u8]>,
+        captured_fixed: Option<&[Vec<u8>]>,
         captured_ext_headers: Option<&[u8]>,
     ) {
         // draft-ietf-ippm-stamp-ext-hdr-11 §3.3: the Reflected Fixed Header
@@ -830,18 +901,24 @@ impl TlvList {
         // Split the captured ext-header blob into individual records (wire
         // order) once. `None` means the backend cannot observe the IP layer.
         let ext_records: Option<Vec<&[u8]>> = captured_ext_headers.map(parse_ext_header_records);
+        // Borrow the captured fixed-header list (outer→inner) as slices.
+        let fixed_records: Option<Vec<&[u8]>> =
+            captured_fixed.map(|list| list.iter().map(Vec::as_slice).collect());
 
-        // Per-packet consumed set for Type 246 first-fit-with-consumption
-        // pairing (§5.1 first-fit-by-length reconciled with §3.1 rule 2
-        // ordering). Each captured ext header is reflected by at most one TLV.
-        // A fresh set per call means the `self.tlvs` and `wire_order_tlvs` views
-        // are paired independently, exactly as the old `ext_pos` counter was.
-        let mut consumed: Vec<bool> = Vec::new();
+        // Per-packet consumed sets for Type 246 (ext) and Type 247 (fixed)
+        // first-fit-with-consumption pairing (§5.1/§5.2 first-fit-by-length
+        // reconciled with §3.1/§3.2 rule 2 ordering). Each captured header is
+        // reflected by at most one TLV. Fresh sets per call mean the `self.tlvs`
+        // and `wire_order_tlvs` views are paired independently.
+        let mut consumed_ext: Vec<bool> = Vec::new();
+        let mut consumed_fixed: Vec<bool> = Vec::new();
         for tlv in tlvs {
             match tlv.tlv_type {
-                TlvType::ReflectedFixedHdr => Self::apply_reflected_fixed(tlv, captured_fixed),
+                TlvType::ReflectedFixedHdr => {
+                    Self::apply_reflected_fixed(tlv, fixed_records.as_deref(), &mut consumed_fixed);
+                }
                 TlvType::ReflectedIpv6ExtHdr => {
-                    Self::apply_reflected_ext(tlv, ext_records.as_deref(), &mut consumed);
+                    Self::apply_reflected_ext(tlv, ext_records.as_deref(), &mut consumed_ext);
                 }
                 _ => {}
             }
@@ -849,38 +926,64 @@ impl TlvList {
     }
 
     /// Reflects a single Reflected Fixed Header Data TLV (Type 247) per -11
-    /// §3.2/§5.2. There is a single captured IP fixed-header candidate.
-    fn apply_reflected_fixed(tlv: &mut RawTlv, captured_fixed: Option<&[u8]>) {
+    /// §3.2/§5.2, using **first-fit-with-consumption** across the captured
+    /// IP fixed-header list (outer→inner) — mirroring [`Self::apply_reflected_ext`]
+    /// so multiple Type-247 TLVs from an IP-in-IP tunnel pair positionally
+    /// (§3.2 rule 2) while a non-zero Requested field still selects a specific
+    /// header (§5.2). A TLV that fails to match consumes nothing.
+    fn apply_reflected_fixed(
+        tlv: &mut RawTlv,
+        fixed_records: Option<&[&[u8]]>,
+        consumed: &mut Vec<bool>,
+    ) {
         let value_len = tlv.value.len();
-        let matched = match captured_fixed {
-            Some(bytes) if !bytes.is_empty() => {
-                if bytes.len() != value_len {
-                    // (a) length mismatch with the captured header.
-                    log_reflected_hdr_length_mismatch_once();
-                    None
-                } else if let Some(requested) = Self::reflected_hdr_selector(&tlv.value) {
-                    // (c) a non-zero Requested field must match the header's
-                    // first 4 on-wire octets.
-                    if bytes.get(..4) == Some(&requested[..]) {
-                        Some(bytes)
-                    } else {
-                        log_reflected_hdr_selector_no_match_once();
-                        None
-                    }
-                } else {
-                    // All-zeros Requested: the single fixed header matches.
-                    Some(bytes)
-                }
-            }
+        let selected: Option<usize> = match fixed_records {
             // (b) backend cannot observe the IP layer (nix UDP-socket backend).
-            _ => {
+            None => {
                 log_reflected_hdr_unsupported_once();
                 None
             }
+            Some(records) => {
+                if consumed.len() < records.len() {
+                    consumed.resize(records.len(), false);
+                }
+                if let Some(requested) = Self::reflected_hdr_selector(&tlv.value) {
+                    // (c) non-zero Requested: first not-yet-consumed length-
+                    // matching header whose first 4 on-wire octets equal the
+                    // selector (§5.2).
+                    let m = records.iter().enumerate().position(|(i, r)| {
+                        !consumed[i] && r.len() == value_len && r.get(..4) == Some(&requested[..])
+                    });
+                    if m.is_none() {
+                        if records.iter().any(|r| r.len() == value_len) {
+                            log_reflected_hdr_selector_no_match_once();
+                        } else {
+                            log_reflected_hdr_length_mismatch_once();
+                        }
+                    }
+                    m
+                } else {
+                    // All-zeros Requested: first not-yet-consumed length-matching
+                    // header (§5.2 first-fit-by-length; §3.2 rule 2 ordering
+                    // falls out of consumption for multiple such TLVs).
+                    let m = records
+                        .iter()
+                        .enumerate()
+                        .position(|(i, r)| !consumed[i] && r.len() == value_len);
+                    if m.is_none() {
+                        // (a) length mismatch (no same-length candidate remains).
+                        log_reflected_hdr_length_mismatch_once();
+                    }
+                    m
+                }
+            }
         };
-        match matched {
-            Some(header) => Self::copy_reflected(&mut tlv.value, header),
-            None => tlv.set_conformant_reflected(),
+        match (selected, fixed_records) {
+            (Some(idx), Some(records)) => {
+                consumed[idx] = true;
+                Self::copy_reflected(&mut tlv.value, records[idx]);
+            }
+            _ => tlv.set_conformant_reflected(),
         }
     }
 
@@ -2113,6 +2216,136 @@ mod tests {
     }
 
     // --- Reflected Fixed/IPv6 Ext Header Data (draft-ietf-ippm-stamp-ext-hdr-11) tests ---
+
+    /// draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2 reflector MTU rule: reflected
+    /// header TLVs are removed (246 before 247) until the reply fits the size
+    /// limit; only Types 246/247 are removed, other TLVs stay.
+    #[test]
+    fn test_trim_reflected_headers_to_size_removes_246_before_247() {
+        use crate::tlv::{ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv};
+        let mut list = TlvList::new();
+        // §3.3 order: 247 first, then 246.
+        list.push(ReflectedFixedHdrTlv::request_with_capacity(40).to_raw())
+            .unwrap();
+        list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(40).to_raw())
+            .unwrap();
+        list.push(ExtraPaddingTlv::new_zeros(4).to_raw()).unwrap();
+        list.clear_reflector_flags();
+
+        // Each header TLV is 44 bytes on the wire; padding is 8. base=44.
+        // Cap at 100 forces removal until 44 + wire_size <= 100.
+        let removed = list.trim_reflected_headers_to_size(44, 100);
+        assert!(removed >= 1, "at least one header TLV removed");
+        // The Type-246 (ext) TLV is removed before the Type-247 (fixed) one.
+        assert!(
+            !list
+                .non_hmac_tlvs()
+                .iter()
+                .any(|t| t.tlv_type == TlvType::ReflectedIpv6ExtHdr),
+            "246 removed first"
+        );
+        assert!(
+            list.non_hmac_tlvs()
+                .iter()
+                .any(|t| t.tlv_type == TlvType::ExtraPadding),
+            "non-header TLVs are preserved"
+        );
+        assert!(44 + list.wire_size() <= 100, "reply now fits the limit");
+    }
+
+    #[test]
+    fn test_trim_reflected_headers_to_size_zero_disables() {
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(40).to_raw());
+        assert_eq!(list.trim_reflected_headers_to_size(44, 0), 0, "0 disables");
+        assert_eq!(list.non_hmac_tlvs().len(), 1);
+    }
+
+    /// draft-ietf-ippm-stamp-ext-hdr-11 §3.2 rule 2: with an IP-in-IP tunnel's
+    /// two captured fixed headers (outer→inner), two same-length Type-247 TLVs
+    /// pair positionally — 1st↔outer, 2nd↔inner — via first-fit-with-consumption.
+    #[test]
+    fn test_multi_fixed_hdr_positional_pairing() {
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut list = TlvList::new();
+        list.push(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw())
+            .unwrap();
+        list.push(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw())
+            .unwrap();
+        list.clear_reflector_flags();
+
+        let outer: Vec<u8> = (10u8..30).collect();
+        let inner: Vec<u8> = (40u8..60).collect();
+        let captured = vec![outer.clone(), inner.clone()];
+        list.process_reflected_headers_multi(Some(&captured), Some(&[]));
+
+        let tlvs = list.non_hmac_tlvs();
+        assert_eq!(&tlvs[0].value[4..], &outer[4..], "1st TLV ↔ outer header");
+        assert_eq!(&tlvs[1].value[4..], &inner[4..], "2nd TLV ↔ inner header");
+        assert!(!tlvs[0].flags.conformant_reflected);
+        assert!(!tlvs[1].flags.conformant_reflected);
+    }
+
+    /// A non-zero Requested selector picks a specific captured fixed header even
+    /// among same-length candidates (§5.2), independent of positional order.
+    #[test]
+    fn test_multi_fixed_hdr_selector_picks_specific() {
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut outer = vec![0x45u8; 20];
+        outer[..4].copy_from_slice(&[0x45, 0x00, 0xAA, 0xAA]);
+        let mut inner = vec![0x45u8; 20];
+        inner[..4].copy_from_slice(&[0x45, 0x00, 0xBB, 0xBB]);
+
+        // Single Type-247 TLV whose selector matches the INNER header's first 4.
+        let mut list = list_with_cleared(
+            ReflectedFixedHdrTlv::request_with_selector(&[0x45, 0x00, 0xBB, 0xBB], 20).to_raw(),
+        );
+        let captured = vec![outer, inner.clone()];
+        list.process_reflected_headers_multi(Some(&captured), Some(&[]));
+
+        let tlv = &list.non_hmac_tlvs()[0];
+        assert!(
+            !tlv.flags.conformant_reflected,
+            "selector matched inner header"
+        );
+        assert_eq!(
+            &tlv.value[4..],
+            &inner[4..],
+            "reflected the selected header"
+        );
+    }
+
+    /// Mixed-family tunnel (IPv6 outer, IPv4 inner): a Length-40 TLV pairs with
+    /// the 40-byte outer, a Length-20 TLV with the 20-byte inner, by length.
+    #[test]
+    fn test_multi_fixed_hdr_mixed_family_lengths() {
+        use crate::tlv::ReflectedFixedHdrTlv;
+        let mut list = TlvList::new();
+        list.push(ReflectedFixedHdrTlv::request_with_capacity(40).to_raw())
+            .unwrap();
+        list.push(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw())
+            .unwrap();
+        list.clear_reflector_flags();
+
+        let outer_v6: Vec<u8> = (0u8..40).collect();
+        let inner_v4: Vec<u8> = (100u8..120).collect();
+        let captured = vec![outer_v6.clone(), inner_v4.clone()];
+        list.process_reflected_headers_multi(Some(&captured), Some(&[]));
+
+        let tlvs = list.non_hmac_tlvs();
+        assert_eq!(tlvs[0].value.len(), 40);
+        assert_eq!(
+            &tlvs[0].value[4..],
+            &outer_v6[4..],
+            "40-byte TLV ↔ IPv6 outer"
+        );
+        assert_eq!(tlvs[1].value.len(), 20);
+        assert_eq!(
+            &tlvs[1].value[4..],
+            &inner_v4[4..],
+            "20-byte TLV ↔ IPv4 inner"
+        );
+    }
 
     #[test]
     fn test_reflected_fixed_hdr_populated_when_captured() {

@@ -213,10 +213,11 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --reflected-control-count <N>     Asymmetrical reply count (draft-ietf-ippm-asymmetrical-pkts) [default: 1]
       --reflected-control-length <LEN>  Requested reply packet length, 0 = don't pad [default: 0]
       --reflected-control-interval-ns <NS>  Inter-packet gap [default: 1_000_000]
-      --reflected-fixed-hdr        Request reflected IPv4/IPv6 fixed header (TLV 247, draft-ietf-ippm-stamp-ext-hdr §4)
-      --reflected-fixed-hdr-selector <HEX>  §3.2 selector: first bytes must match the received IP header, else U-flag (requires --reflected-fixed-hdr)
-      --reflected-ipv6-ext-hdr     Request reflected IPv6 extension headers (TLV 246, draft-ietf-ippm-stamp-ext-hdr §3)
-      --reflected-ipv6-ext-hdr-selector <HEX>  §3.1 selector: return only the matching extension header; byte 0 is the header type (00=Hop-by-Hop, 3c=Dest-Opts) (requires --reflected-ipv6-ext-hdr)
+      --reflected-fixed-hdr [SELECTORHEX]   Request a reflected IPv4/IPv6 fixed header (TLV 247, draft-ietf-ippm-stamp-ext-hdr §3.2). REPEATABLE: one occurrence per requested IP header (e.g. outer+inner for an IP-in-IP tunnel), each pairing positionally with the reflector's outer→inner capture. Optional inline §5.2 selector hex.
+      --reflected-fixed-hdr-selector <HEX>  §5.2 selector (single-header form only): first bytes must match the received IP header, else the reflector sets the C flag (requires exactly one --reflected-fixed-hdr with no inline selector)
+      --reflected-ipv6-ext-hdr [LEN[:SELECTORHEX]]  Request a reflected IPv6 extension header (TLV 246, draft-ietf-ippm-stamp-ext-hdr §3.1). REPEATABLE: one occurrence per requested header, in order, with matching lengths. LEN = the header's on-wire size (default 8); optional inline §5.1 selector hex.
+      --reflected-ipv6-ext-hdr-selector <HEX>  §5.1 selector (single-header form only): return only the matching extension header; the 4 bytes are the header's on-wire first 4 octets — byte 0 is its Next Header field, NOT its type (requires exactly one --reflected-ipv6-ext-hdr with no inline selector)
+      --attach-ext-hdr <KIND[:HEX]>  Attach a REAL IPv6 extension header to the sender's egress packets and request its reflection (draft-ietf-ippm-stamp-ext-hdr §3.1). REPEATABLE. KIND = hbh (Hop-by-Hop, IPV6_HOPOPTS) or dest (Destination Options, IPV6_DSTOPTS); optional HEX is the full header buffer (multiple of 8 octets, byte 0 kernel-assigned; default = 8-octet PadN). Each attached header also emits a matching Type-246 request TLV. Linux/macOS + IPv6 destination only; elsewhere a warning is logged (on non-IPv4 the request TLV is still sent).
       --ber                        Enable BER TLVs (draft-gandhi-ippm-stamp-ber, Types 240/241/242)
       --ber-pattern <HEX>          Padding bit pattern (default: ff00)
       --ber-padding-size <BYTES>   Extra Padding length used with --ber [default: 64]

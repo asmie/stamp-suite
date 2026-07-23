@@ -1491,7 +1491,7 @@ fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
     blob.extend_from_slice(&rec_a);
     blob.extend_from_slice(&rec_b);
     let captured = CapturedHeaders {
-        fixed_header: Vec::new(),
+        fixed_headers: Vec::new(),
         ipv6_ext_headers: blob,
     };
 
@@ -1528,7 +1528,7 @@ fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
 #[test]
 fn reflected_ipv6_ext_hdr_selector_no_match_sets_c_flag_end_to_end() {
     let captured = CapturedHeaders {
-        fixed_header: Vec::new(),
+        fixed_headers: Vec::new(),
         ipv6_ext_headers: vec![0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6],
     };
 
