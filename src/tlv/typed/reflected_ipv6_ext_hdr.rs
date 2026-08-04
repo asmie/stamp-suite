@@ -38,8 +38,15 @@
 //! header's **on-wire first 4 octets** — byte 0 is the header's own Next Header
 //! field (naming what *follows* it), byte 1 is HdrExtLen, then the first 2
 //! option octets. An all-zeros Requested field matches the first
-//! length-matching header (for multiple Type 246 TLVs, the
-//! positionally-corresponding header in wire order, §3.1 rule 2).
+//! length-matching header.
+//!
+//! With several Type 246 TLVs present, selection is
+//! **first-fit-with-consumption**: each matched captured header is consumed so
+//! no later TLV re-uses it. That reconciles §5.1's first-fit-by-length MUST
+//! with §3.1 rule 2's positional pairing (successive same-length TLVs end up
+//! pairing 1st↔1st, 2nd↔2nd) — see
+//! [`TlvList::process_reflected_headers`](crate::tlv::TlvList::process_reflected_headers)
+//! for the reconciliation this implements.
 
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;

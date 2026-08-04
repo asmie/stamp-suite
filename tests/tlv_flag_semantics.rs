@@ -98,7 +98,7 @@ fn reflect_unauth(packet: &[u8], ctx: &ProcessingContext) -> TlvList {
 }
 
 /// Build a single TLV chain (header + value), with optional sender-side flag
-/// byte. RFC 8972 §4.4.1 says senders set U=1, M=0, I=0; that's what the
+/// byte. RFC 8972 §4 says senders set U=1, M=0, I=0; that's what the
 /// `RawTlv::new`-constructed bytes already do.
 fn tlv_to_chain(tlv: &RawTlv) -> Vec<u8> {
     tlv.to_bytes()
@@ -296,7 +296,7 @@ fn valid_cos_does_not_set_m_flag() {
 
 #[test]
 fn cos_tlv_reflector_fills_ec2_rpd_rpe_at_draft_positions() {
-    // Byte-exact pin of draft-ietf-ippm-stamp-cos-ecn-00 §3.2 reflector
+    // Byte-exact pin of draft-ietf-ippm-stamp-cos-ecn-01 §3.2 reflector
     // behaviour on the RFC 8972 §4.4 wire layout: DSCP2/EC2 copied from the
     // received IP header, RPD=0b00 (no policy rejection), RPE=0b11 (reply
     // ECN set to EC1). Sender requests DSCP1=46, EC1=2; the reflector
@@ -317,7 +317,7 @@ fn cos_tlv_reflector_fills_ec2_rpd_rpe_at_draft_positions() {
     assert_eq!(
         value,
         &[0xB8, 0xA4, 0xB0, 0x00],
-        "echoed CoS value must follow the RFC 8972 + cos-ecn-00 bit layout"
+        "echoed CoS value must follow the RFC 8972 + cos-ecn-01 bit layout"
     );
 }
 
@@ -1471,6 +1471,52 @@ fn a1_reflected_control_l2_fails_l3_matches_still_suppresses() {
     assert!(
         matches!(response.return_path_action, ReturnPathAction::SuppressReply),
         "an L2 mismatch must suppress the reply even when the L3 sub-TLV matches"
+    );
+}
+
+/// The mirror of the case above: L2 matches, L3 does not. Independent gating
+/// (draft §3.1.1/§3.1.2) means the L3 mismatch still drops the packet — an L2
+/// match must not override it.
+#[test]
+fn a1_reflected_control_l2_matches_l3_fails_still_suppresses() {
+    use stamp_suite::tlv::ReturnPathAction;
+
+    let local_mac: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+    // The reflector's only address is outside the requested L3 prefix.
+    let local_ip: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+
+    let l2 = l2_group_sub_tlv([0xFF; 6], local_mac);
+    let l3 = [
+        0u8, 11, 0x00, 0x08, 24, 0x00, 0x00, 0x00, 192, 0, 2, 0, // 192.0.2.0/24
+    ];
+    let mut sub_tlvs = Vec::new();
+    sub_tlvs.extend_from_slice(&l2);
+    sub_tlvs.extend_from_slice(&l3);
+    let value = reflected_control_value_with_sub_tlv(&sub_tlvs);
+
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let local_macs = [local_mac];
+    let local_addrs = [local_ip];
+    let mut ctx = make_ctx(None);
+    ctx.local_macs = &local_macs;
+    ctx.local_addresses = &local_addrs;
+
+    let response = stamp_suite::receiver::process_stamp_packet(
+        &packet,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        ),
+        64,
+        false,
+        &ctx,
+    )
+    .expect("packet still parsed, only reply is suppressed");
+
+    assert!(
+        matches!(response.return_path_action, ReturnPathAction::SuppressReply),
+        "an L3 mismatch must suppress the reply even when the L2 sub-TLV matches"
     );
 }
 

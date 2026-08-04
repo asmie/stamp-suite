@@ -39,7 +39,8 @@ use crate::tlv::ReturnPathAction;
 use super::{
     cos_unable_fallback_tos, load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
     recompute_response_tlv_hmac, set_cos_policy_rejected, set_return_path_u_flag_in_response,
-    ProcessingContext, ReceiverSharedState, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    should_apply_fallback_tos, ProcessingContext, ReceiverSharedState, ReflectorCounters,
+    AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Context for sending STAMP responses in pnet mode.
@@ -946,7 +947,7 @@ fn handle_stamp_packet(
                             // leaving the previous, possibly non-zero, ECN
                             // value on the wire.
                             let fallback_tos = cos_unable_fallback_tos(pkt.dscp);
-                            if fallback_tos != last_tos_cache.get() {
+                            if should_apply_fallback_tos(tos, fallback_tos, last_tos_cache.get()) {
                                 match set_socket_tos(socket, fallback_tos, is_ipv6) {
                                     Ok(()) => last_tos_cache.set(fallback_tos),
                                     Err(e2) => log::debug!(

@@ -144,7 +144,7 @@ impl LocationSubTlv {
 
     /// Builds a Session-Sender *generic request* sub-TLV: the correct
     /// RFC-mandated Length, a fully zeroed (MBZ) value, and U=1 flags per
-    /// RFC 8972 §4.4.1 / §4.2.1. Only the three generic request types
+    /// RFC 8972 §4 / §4.2.1. Only the three generic request types
     /// (Source MAC, Destination IP, Source IP) have a well-defined request
     /// form; for any other type the value is zeroed to a length of 0.
     #[must_use]

@@ -245,7 +245,7 @@ impl TlvFlags {
         }
     }
 
-    /// Creates flags for sender-originated TLVs per RFC 8972 §4.4.1.
+    /// Creates flags for sender-originated TLVs per RFC 8972 §4.
     ///
     /// The Session-Sender MUST set U=1, M=0, I=0 before transmitting; the
     /// Session-Reflector overwrites all three based on its own processing.
@@ -408,7 +408,7 @@ pub struct RawTlv {
     /// Used to echo malformed TLVs byte-exactly per RFC 8972 §4.8.
     wire_length: Option<u16>,
     /// Parser-detected structural error preserved across the reflector
-    /// flag-clear pass (RFC 8972 §4.4.1). See `mark_malformed_by_parser`.
+    /// flag-clear pass (RFC 8972 §4). See `mark_malformed_by_parser`.
     parser_marked_malformed: bool,
 }
 
@@ -424,7 +424,7 @@ impl PartialEq for RawTlv {
 impl RawTlv {
     /// Creates a new RawTlv with the given type and value.
     ///
-    /// Flags are initialized for sender use per RFC 8972 §4.4.1: U=1, M=0, I=0.
+    /// Flags are initialized for sender use per RFC 8972 §4: U=1, M=0, I=0.
     #[must_use]
     pub fn new(tlv_type: TlvType, value: Vec<u8>) -> Self {
         Self {
@@ -628,7 +628,7 @@ impl RawTlv {
     }
 
     /// Clears the U, M, and I flags so the reflector can re-derive them
-    /// per RFC 8972 §4.4.1, and drops the C flag — the Session-Reflector
+    /// per RFC 8972 §4, and drops the C flag — the Session-Reflector
     /// MUST ignore the received C value and derive its own
     /// (draft-ietf-ippm-asymmetrical-pkts-14 §3). Reserved bits and the
     /// `parser_marked_malformed` marker (used to re-set M for parser-detected
