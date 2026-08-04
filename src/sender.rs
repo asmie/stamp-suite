@@ -370,11 +370,13 @@ fn apply_egress_ip_options(
 ///
 /// Best-effort: a per-header failure is logged and skipped (the matching
 /// Type-246 request TLV is still sent, and the reflector then reports the C
-/// flag for the header it never sees). Linux/macOS only. Note that the kernel
-/// keeps a single sticky buffer per option, so at most one Hop-by-Hop and one
-/// Destination Options header can be attached this way; supplying several of
-/// the same kind leaves only the last in effect.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// flag for the header it never sees). Linux only — the `libc` crate exports
+/// `IPV6_HOPOPTS` / `IPV6_DSTOPTS` for `linux_like` targets only, and the
+/// sticky-option technique is the one proved on the wire by the netns tier.
+/// Note that the kernel keeps a single sticky buffer per option, so at most one
+/// Hop-by-Hop and one Destination Options header can be attached this way;
+/// supplying several of the same kind leaves only the last in effect.
+#[cfg(target_os = "linux")]
 fn apply_attach_ext_hdrs(fd: std::os::fd::RawFd, specs: &[crate::configuration::AttachExtHdrSpec]) {
     use nix::libc;
 
@@ -705,9 +707,16 @@ pub async fn run_sender(
                 ),
             }
         }
+    }
 
-        // draft-ietf-ippm-stamp-ext-hdr-11 §3.1: attach the real IPv6 extension
-        // headers requested via --attach-ext-hdr. IPv6 destinations only.
+    // draft-ietf-ippm-stamp-ext-hdr-11 §3.1: attach the real IPv6 extension
+    // headers requested via --attach-ext-hdr. IPv6 destinations only, and
+    // Linux only (see `apply_attach_ext_hdrs` — the sticky IPV6_HOPOPTS /
+    // IPV6_DSTOPTS options are not exposed by `libc` on Darwin).
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+
         let attach_specs = conf.attach_ext_hdrs();
         if !attach_specs.is_empty() {
             if conf.remote_addr.is_ipv6() {
@@ -720,6 +729,16 @@ pub async fn run_sender(
                     attach_specs.len()
                 );
             }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if !conf.attach_ext_hdr.is_empty() {
+            log::warn!(
+                "--attach-ext-hdr (real IPv6 extension header attachment) requires Linux; \
+                 the header(s) are not attached on this platform, but the matching Type-246 \
+                 request TLV(s) are still sent (draft-ietf-ippm-stamp-ext-hdr-11 §3.1)"
+            );
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -735,13 +754,6 @@ pub async fn run_sender(
                 "Reverse-path ECN congestion detection (wire ECN of replies) requires \
                  Linux/macOS; only forward-path detection via the reflected CoS TLV's EC2 \
                  field is active on this platform (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)"
-            );
-        }
-        if !conf.attach_ext_hdr.is_empty() {
-            log::warn!(
-                "--attach-ext-hdr (real IPv6 extension header attachment) requires Linux/macOS; \
-                 the header(s) are not attached on this platform, but the matching Type-246 \
-                 request TLV(s) are still sent (draft-ietf-ippm-stamp-ext-hdr-11 §3.1)"
             );
         }
     }
