@@ -670,9 +670,10 @@ pub struct Configuration {
     /// Each attached header also gets a matching Type-246 request TLV (Length =
     /// header size, all-zeros Requested field: byte 0 is kernel-assigned so no
     /// selector can be predicted; positional pairing handles ordering).
-    /// Linux/macOS + IPv6 destinations only; on other platforms or an IPv4
-    /// destination the header is not attached (a one-time warning is logged),
-    /// though on non-IPv4 the request TLV is still emitted.
+    /// Linux + IPv6 destinations only (the sticky `IPV6_HOPOPTS`/`IPV6_DSTOPTS`
+    /// options are not exposed by `libc` on Darwin); on other platforms or an
+    /// IPv4 destination the header is not attached (a one-time warning is
+    /// logged), though on non-IPv4 the request TLV is still emitted.
     #[clap(long, value_name = "KIND[:HEX]", action = clap::ArgAction::Append)]
     pub attach_ext_hdr: Vec<String>,
 
