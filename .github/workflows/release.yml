@@ -76,6 +76,10 @@ jobs:
     name: Package ${{ matrix.target }}
     needs: [release-preflight]
     runs-on: ${{ matrix.runner }}
+    # Only uploads build artifacts; does not touch the release. Narrow the
+    # workflow-level `contents: write` down, matching `package-macos`.
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:

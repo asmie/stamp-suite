@@ -198,7 +198,10 @@ pub struct Configuration {
     #[clap(long)]
     pub clock_synchronized: bool,
 
-    /// HMAC key as hex string (32+ hex chars recommended).
+    /// HMAC key as hex string; at least 32 hex chars (16 bytes) are required.
+    ///
+    /// A shorter key is rejected outright, not warned about. 64 hex chars
+    /// (32 bytes, matching the HMAC-SHA-256 output length) is a good default.
     ///
     /// Note: a key passed on the command line is visible in `ps` /
     /// `/proc/<pid>/cmdline` to other local users, and an env-var key is

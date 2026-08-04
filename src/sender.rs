@@ -3768,6 +3768,68 @@ mod tests {
     }
 
     #[test]
+    fn test_forged_first_reply_does_not_latch_reflector_msid() {
+        // RFC 9534 §3.2-11 zero-config path, adversarial first reply: the
+        // latch must only ever record a value from a reply that passed the
+        // integrity gate. An I-flagged (or otherwise untrusted) FIRST reply
+        // must leave the latch empty, so a forged reflector ID cannot become
+        // the session's expected value and lock out the real reflector.
+        let mut latched: Option<u16> = None;
+
+        let mut forged = MicroSessionIdTlv::new(7777, 0xDEAD).to_raw();
+        forged.set_integrity_failed();
+        let mut tlvs = TlvList::new();
+        tlvs.push(forged).unwrap();
+
+        validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            None, // no pre-known reflector ID → zero-config latch path
+            &mut latched,
+            false, // track_access_report
+            false, // track_congestion
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("I-flagged reply must not be consumed → accept, not reject");
+
+        assert_eq!(
+            latched, None,
+            "an untrusted first reply must not latch a Reflector Micro-session ID"
+        );
+
+        // The next legitimate reply is then free to latch its own value.
+        let mut clean = MicroSessionIdTlv::new(7777, 0x22).to_raw();
+        clean.clear_reflector_flags();
+        let mut tlvs2 = TlvList::new();
+        tlvs2.push(clean).unwrap();
+
+        validate_reflected_tlvs(
+            &tlvs2,
+            &[0u8; 44],
+            44,
+            None,
+            Some(7777),
+            None,
+            &mut latched,
+            false,
+            false,
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .expect("a valid reply after a forged one must be accepted");
+
+        assert_eq!(
+            latched,
+            Some(0x22),
+            "the first *trusted* reply must be the one that latches"
+        );
+    }
+
+    #[test]
     fn test_forged_msid_with_i_flag_not_consumed() {
         // RFC 8972 §4-19 / §4.8-16: "If the I flag is set, the STAMP system
         // MUST discard all TLVs and MUST stop processing." A reflector (or an

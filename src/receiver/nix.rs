@@ -26,7 +26,8 @@ use crate::tlv::ReturnPathAction;
 use super::{
     cos_unable_fallback_tos, load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
     recompute_response_tlv_hmac, set_cos_policy_rejected, set_return_path_u_flag_in_response,
-    ProcessingContext, ReceiverSharedState, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    should_apply_fallback_tos, ProcessingContext, ReceiverSharedState, AUTH_BASE_SIZE,
+    UNAUTH_BASE_SIZE,
 };
 
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
@@ -620,7 +621,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                                     // leaving the previous, possibly non-zero, ECN
                                     // value on the wire.
                                     let fallback_tos = cos_unable_fallback_tos(received_dscp);
-                                    if fallback_tos != last_tos {
+                                    if should_apply_fallback_tos(tos, fallback_tos, last_tos) {
                                         match apply_socket_tos(fd, is_ipv6, fallback_tos) {
                                             Ok(()) => last_tos = fallback_tos,
                                             Err(e2) => log::debug!(

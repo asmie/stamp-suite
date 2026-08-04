@@ -682,6 +682,26 @@ pub fn cos_unable_fallback_tos(received_dscp: u8) -> u8 {
     (received_dscp & 0x3F) << 2
 }
 
+/// Decides whether the cos-ecn-01 §3.2 zero-ECN fallback is worth a
+/// `setsockopt` call.
+///
+/// The fallback exists to force the reply's ECN bits to Not-ECT after the
+/// requested DSCP1/EC1 byte was refused. Two cases make the retry pointless:
+///
+/// - `fallback == attempted`: the byte the fallback would set is the very byte
+///   the kernel just rejected (happens when EC1 is already 0b00 and DSCP1
+///   equals the received DSCP, so zeroing the ECN half changes nothing).
+///   Re-issuing it can only fail again.
+/// - `fallback == last`: that byte is already applied to the socket, so the
+///   on-wire ECN bits are already conformant.
+///
+/// Keeping this out of the backend loops means both `nix` and `pnet` share one
+/// tested rule.
+#[must_use]
+pub fn should_apply_fallback_tos(attempted: u8, fallback: u8, last: u8) -> bool {
+    fallback != attempted && fallback != last
+}
+
 /// Sets the U-flag on the Return Path TLV in a serialized STAMP response.
 ///
 /// Walks the TLV area to find a Return Path TLV (type 10) and sets its
@@ -1000,14 +1020,15 @@ fn l3_group_matches_any_local(prefix_len: u8, prefix: &[u8], locals: &[std::net:
 /// processing the received packet" (drop).
 ///
 /// `mask` and `group` are always equal length (validated at parse time: 2,
-/// 6, or 8 octets). Every MAC enumerated by [`build_local_macs`] is a
+/// 6, or 8 octets); both lengths are re-checked here so a short slice can
+/// never index out of bounds. Every MAC enumerated by [`build_local_macs`] is a
 /// 6-octet EUI-48, so only the 12-octet Sub-TLV Length (6+6) can ever
 /// match — the 4- and 16-octet forms compare against nothing and always
 /// fail to match (this reflector does not enumerate EUI-64 addresses).
 /// Empty `locals` is treated as "no match" (drop), consistent with the L3
 /// path above.
 fn l2_group_matches_any_local(mask: &[u8], group: &[u8], locals: &[[u8; 6]]) -> bool {
-    if mask.len() != 6 {
+    if mask.len() != 6 || group.len() != 6 {
         return false;
     }
     for local in locals {
@@ -1945,7 +1966,7 @@ fn apply_semantic_tlv_processing(
 
     // Compute fresh HMAC for response (must be last, after all TLV mutations).
     // Use the reflector variant so the regenerated HMAC TLV carries U=0 per
-    // RFC 8972 §4.4.1 — the reflector recognizes the HMAC type by construction.
+    // RFC 8972 §4 — the reflector recognizes the HMAC type by construction.
     //
     // Deliberately unconditional on whether the *request* carried an HMAC
     // TLV — see the RFC 8972 §4.8 adjudication on
@@ -3926,6 +3947,39 @@ mod tests {
     }
 
     #[test]
+    fn test_should_apply_fallback_tos_skips_the_byte_that_just_failed() {
+        // EC1 = 0b00 and DSCP1 == received DSCP ⇒ the zero-ECN fallback byte
+        // is identical to the byte the kernel just refused. Retrying it can
+        // only fail again, so no second syscall should be issued.
+        let attempted = cos_unable_fallback_tos(46); // DSCP 46, ECN 0
+        let fallback = cos_unable_fallback_tos(46);
+        assert!(!should_apply_fallback_tos(attempted, fallback, 0));
+    }
+
+    #[test]
+    fn test_should_apply_fallback_tos_skips_when_already_on_the_socket() {
+        // The fallback byte is already the socket's current TOS ⇒ the on-wire
+        // ECN bits are already Not-ECT; nothing to re-apply.
+        let fallback = cos_unable_fallback_tos(10);
+        assert!(!should_apply_fallback_tos(
+            46 << 2 | 0b10,
+            fallback,
+            fallback
+        ));
+    }
+
+    #[test]
+    fn test_should_apply_fallback_tos_applies_when_it_changes_the_wire() {
+        // Requested DSCP 46 with EC1 = 0b10; the fallback keeps the received
+        // DSCP (10) and zeroes the ECN half — a genuinely different byte that
+        // is not yet on the socket, so it must be applied.
+        let attempted = (46 << 2) | 0b10;
+        let fallback = cos_unable_fallback_tos(10);
+        assert_ne!(attempted, fallback);
+        assert!(should_apply_fallback_tos(attempted, fallback, attempted));
+    }
+
+    #[test]
     fn test_set_cos_policy_rejected_unauth() {
         use crate::tlv::{ClassOfServiceTlv, TypedTlv};
 
@@ -4310,6 +4364,19 @@ mod tests {
     }
 
     #[test]
+    fn l2_group_matches_any_local_short_group_never_matches() {
+        // Defensive: a 6-byte mask paired with a group shorter than 6 bytes
+        // must be rejected, not indexed. The sub-TLV parser only ever hands
+        // this helper equal-length mask/group pairs, so this is unreachable
+        // from the wire today — but the helper is called with two
+        // independently-sliced buffers and an out-of-bounds index here would
+        // be a panic inside packet processing.
+        let locals = [[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]];
+        assert!(!l2_group_matches_any_local(&[0xFF; 6], &[0x00; 3], &locals));
+        assert!(!l2_group_matches_any_local(&[0xFF; 6], &[], &locals));
+    }
+
+    #[test]
     fn l2_group_matches_any_local_empty_locals_never_matches() {
         // Empty `locals` (enumeration failed / no interfaces) ⇒ no match ⇒
         // drop, consistent with the L3 path's treatment of empty locals.
@@ -4552,7 +4619,7 @@ mod tests {
 
         let mut raw = rp_tlv.to_raw();
         // Simulate post-clear state (apply_reflector_flags has already run);
-        // sender default is U=1 per RFC 8972 §4.4.1, but the U-flag toggle
+        // sender default is U=1 per RFC 8972 §4, but the U-flag toggle
         // tested here is the send-path "set after clear" path.
         raw.clear_reflector_flags();
         let mut data = sender_packet.to_bytes().to_vec();

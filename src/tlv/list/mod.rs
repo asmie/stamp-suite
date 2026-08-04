@@ -427,7 +427,7 @@ impl TlvList {
     /// Computes and sets the HMAC TLV per RFC 8972 §4.8 for the **sender** path.
     ///
     /// The resulting HMAC TLV carries sender-default flags (U=1, M=0, I=0)
-    /// per RFC 8972 §4.4.1. Reflectors regenerating an HMAC for a response
+    /// per RFC 8972 §4. Reflectors regenerating an HMAC for a response
     /// should call [`Self::set_hmac_response`] instead.
     pub fn set_hmac(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) {
         // wire_order_tlvs holds a separate clone of the HMAC TLV for the
@@ -453,7 +453,7 @@ impl TlvList {
     /// Computes and sets the HMAC TLV for the **reflector** response path.
     ///
     /// The reflector recognizes the HMAC type by construction, so per
-    /// RFC 8972 §4.4.1 the U flag must be 0.
+    /// RFC 8972 §4 the U flag must be 0.
     ///
     /// # Unsolicited HMAC TLV (adjudicated against RFC 8972 §4.8)
     ///
@@ -529,7 +529,7 @@ impl TlvList {
         tlv_bytes: &[u8],
         require_hmac_tlv: bool,
     ) -> bool {
-        // RFC 8972 §4.4.1: the reflector overwrites U/M/I. The "Otherwise"
+        // RFC 8972 §4: the reflector overwrites U/M/I. The "Otherwise"
         // clauses require setting each to 0 when the named condition does not
         // hold, so clear them first and let the setters below raise as needed.
         self.clear_reflector_flags();
@@ -554,9 +554,14 @@ impl TlvList {
         }
     }
 
-    /// Clears U, M, and I on every TLV (preserving the C/Conformant bit and
-    /// any reserved bits) so the setters in `apply_reflector_flags_strict`
-    /// can re-derive each flag per RFC 8972 §4.4.1.
+    /// Clears U, M, I *and* the C/Conformant bit on every TLV (reserved bits
+    /// and the parser's own malformed marker are preserved) so the setters in
+    /// `apply_reflector_flags_strict` can re-derive each flag per RFC 8972 §4.
+    ///
+    /// C is cleared rather than preserved because the Session-Reflector MUST
+    /// ignore the received C value and derive its own
+    /// (draft-ietf-ippm-asymmetrical-pkts-14 §3) — see
+    /// [`RawTlv::clear_reflector_flags`], which this delegates to.
     pub fn clear_reflector_flags(&mut self) {
         for tlv in &mut self.tlvs {
             tlv.clear_reflector_flags();
@@ -571,7 +576,7 @@ impl TlvList {
         }
     }
 
-    /// Re-derives the M-flag on every TLV held by this list, per RFC 8972 §4.4.1.
+    /// Re-derives the M-flag on every TLV held by this list, per RFC 8972 §4.
     ///
     /// For each TLV, sets M=1 when **either**:
     /// - the parser previously detected a structural / positional error and
@@ -741,7 +746,7 @@ mod tests {
     #[test]
     fn test_tlv_list_mark_unrecognized() {
         // Cleared flags isolate the U-flag behavior under test;
-        // sender-default U=1 (RFC 8972 §4.4.1) would otherwise mask it.
+        // sender-default U=1 (RFC 8972 §4) would otherwise mask it.
         let mut list = TlvList::new();
         list.push(RawTlv::with_flags(
             TlvFlags::default(),
@@ -814,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_apply_reflector_flags_overwrites_uim() {
-        // RFC 8972 §4.4.1: the reflector MUST set U=0 when the type is
+        // RFC 8972 §4: the reflector MUST set U=0 when the type is
         // recognized (and M=0 / I=0 absent the named conditions). Sender
         // sends U=1 by mandate, so an "echo" must not preserve it.
         let mut list = TlvList::new();
@@ -880,7 +885,7 @@ mod tests {
         // parse_lenient marks the truncated TLV as malformed via the parser
         // marker. The clear-then-rederive pass in apply_reflector_flags must
         // re-set M so the echoed response advertises malformed-ness to peers
-        // and metrics, per RFC 8972 §4.4.1 + §4.8.
+        // and metrics, per RFC 8972 §4 + §4.8.
         let mut buf = Vec::new();
         // ExtraPadding TLV with declared length 100 but only 4 bytes available.
         buf.push(0x00);
@@ -962,7 +967,7 @@ mod tests {
 
     #[test]
     fn test_set_hmac_sender_variant_uses_u1() {
-        // Sender path: per RFC 8972 §4.4.1 the sender MUST set U=1.
+        // Sender path: per RFC 8972 §4 the sender MUST set U=1.
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
         let mut list = TlvList::new();
         list.set_hmac(&key, &[0u8; 4]);
@@ -1005,7 +1010,7 @@ mod tests {
 
     #[test]
     fn test_set_hmac_response_variant_uses_u0() {
-        // Reflector path: HMAC type is recognized, so U=0 per RFC 8972 §4.4.1.
+        // Reflector path: HMAC type is recognized, so U=0 per RFC 8972 §4.
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
         let mut list = TlvList::new();
         list.set_hmac_response(&key, &[0u8; 4]);
