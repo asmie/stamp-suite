@@ -21,7 +21,7 @@ IMPORTS
         FROM SNMPv2-SMI;
 
 stampSuiteMIB MODULE-IDENTITY
-    LAST-UPDATED "202501010000Z"
+    LAST-UPDATED "202608050000Z"
     ORGANIZATION "stamp-suite project"
     CONTACT-INFO
         "https://github.com/asmie/stamp-suite"
@@ -32,6 +32,9 @@ stampSuiteMIB MODULE-IDENTITY
 
          This MIB exposes reflector and sender configuration,
          operational counters, and per-session state."
+    REVISION     "202608050000Z"
+    DESCRIPTION  "Version 1.0.0. Object definitions unchanged from the
+                  initial version; re-stamped for the 1.0.0 release."
     REVISION     "202501010000Z"
     DESCRIPTION  "Initial version."
     ::= { enterprises 65134 }

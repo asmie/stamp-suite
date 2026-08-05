@@ -1,3 +1,9 @@
+stamp-suite (1.0.0-1) unstable; urgency=medium
+
+  * First stable release. See CHANGELOG.md for the full 1.0.0 notes.
+
+ -- Piotr Olszewski <asmie@asmie.pl>  Wed, 05 Aug 2026 00:00:00 +0000
+
 stamp-suite (0.5.0-1) unstable; urgency=medium
 
   * Initial Debian packaging.
