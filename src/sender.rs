@@ -1187,24 +1187,20 @@ pub async fn run_sender(
                     tlvs.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
                 }
                 if scale_reflected_control {
-                    // §3.4-3: "...adjust the Reflected Test Packet Control
-                    // parameters in any future STAMP packet... based on the
-                    // observation of CE values" — scale the requested interval
-                    // by the same AIMD ratio driving the main send delay.
+                    // §3.4-3: scale the requested interval by the same AIMD
+                    // ratio driving the main send delay.
                     let scale = congestion
                         .as_ref()
                         .map(|c| c.controller.scale_factor())
                         .unwrap_or(1.0);
-                    let scaled_ns = ((conf.reflected_control_interval_ns as f64) * scale)
-                        .round()
-                        .clamp(0.0, u32::MAX as f64) as u32;
-                    if let Some(control) = build_reflected_control_tlv(
+                    if let Some(control) = scaled_reflected_control_tlv(
                         conf.reflected_control_length,
                         conf.reflected_control_count,
-                        scaled_ns,
+                        conf.reflected_control_interval_ns,
                         conf.reflected_control_no_ext_hdr,
+                        scale,
                     ) {
-                        tlvs.push(control.to_raw());
+                        tlvs.push(control);
                     }
                 }
                 per_packet_tlvs = tlvs;
@@ -1527,6 +1523,26 @@ pub async fn run_sender(
                 "attach implies access_report_state is Some, which implies conf.access_report is Some",
             );
             tlvs.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
+            if scale_reflected_control {
+                // A retransmission is one of §3.4-3's "future STAMP packets",
+                // and `extra_tlvs` omits the control TLV in this mode (the
+                // main loop rebuilds it per send). Rebuild it here too, with
+                // whatever AIMD factor the controller holds now, so the TLV
+                // does not vanish from every retry.
+                let scale = congestion
+                    .as_ref()
+                    .map(|c| c.controller.scale_factor())
+                    .unwrap_or(1.0);
+                if let Some(control) = scaled_reflected_control_tlv(
+                    conf.reflected_control_length,
+                    conf.reflected_control_count,
+                    conf.reflected_control_interval_ns,
+                    conf.reflected_control_no_ext_hdr,
+                    scale,
+                ) {
+                    tlvs.push(control);
+                }
+            }
 
             let mut buf: Vec<u8> = match &send_mode {
                 SendMode::AuthTlv { key } => build_auth_packet_with_tlvs(
@@ -2383,6 +2399,31 @@ fn build_reflected_control_tlv(
     } else {
         Some(ReflectedControlTlv::new(length, count, interval_ns))
     }
+}
+
+/// Builds the per-send Reflected Test Packet Control TLV with its requested
+/// interval scaled by the current AIMD factor
+/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3: "adjust the Reflected Test Packet
+/// Control parameters in any future STAMP packet ... based on the observation
+/// of CE values").
+///
+/// Used by every path that emits a test packet while `scale_reflected_control`
+/// is active — the main send loop and the Access Report wait-phase
+/// retransmission. Those paths build their TLV set from a clone of
+/// `extra_tlvs`, which deliberately omits the static control TLV in that mode,
+/// so each of them must add the scaled one back or the TLV disappears from the
+/// packets they send.
+fn scaled_reflected_control_tlv(
+    length: u16,
+    count: u16,
+    interval_ns: u32,
+    no_ext_hdr: bool,
+    scale: f64,
+) -> Option<RawTlv> {
+    let scaled_ns = ((interval_ns as f64) * scale)
+        .round()
+        .clamp(0.0, u32::MAX as f64) as u32;
+    build_reflected_control_tlv(length, count, scaled_ns, no_ext_hdr).map(|c| c.to_raw())
 }
 
 fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
@@ -5042,6 +5083,88 @@ mod tests {
             access_report_retries.to_string(),
         ];
         Configuration::parse_from(args)
+    }
+
+    /// Like [`access_report_test_config`], but additionally turns on the
+    /// AIMD congestion-response path (`--cos --ecn 1`) and requests a
+    /// reflected burst, so `scale_reflected_control` is active and the
+    /// Reflected Control TLV is rebuilt per send instead of living in the
+    /// static `extra_tlvs` set.
+    fn access_report_with_scaled_control_config(
+        remote_port: u16,
+        access_report_timeout_secs: u32,
+        access_report_retries: u32,
+    ) -> Configuration {
+        use clap::Parser;
+        let args: Vec<String> = vec![
+            "test".to_string(),
+            "--remote-addr".to_string(),
+            "127.0.0.1".to_string(),
+            "--remote-port".to_string(),
+            remote_port.to_string(),
+            "--local-addr".to_string(),
+            "127.0.0.1".to_string(),
+            "--local-port".to_string(),
+            "0".to_string(),
+            "--count".to_string(),
+            "1".to_string(),
+            "--send-delay".to_string(),
+            "10".to_string(),
+            "--timeout".to_string(),
+            "1".to_string(),
+            "--access-report".to_string(),
+            "1".to_string(),
+            "--access-report-timeout".to_string(),
+            access_report_timeout_secs.to_string(),
+            "--access-report-retries".to_string(),
+            access_report_retries.to_string(),
+            // AIMD congestion response: needs --cos with an ECT codepoint.
+            "--cos".to_string(),
+            "--ecn".to_string(),
+            "1".to_string(),
+            // A burst request (> 1) makes scale_reflected_control true.
+            "--reflected-control-count".to_string(),
+            "2".to_string(),
+        ];
+        Configuration::parse_from(args)
+    }
+
+    /// draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3 requires the Reflected Test
+    /// Packet Control parameters to be carried on "any future STAMP packet".
+    /// A wait-phase retransmission is such a packet, but it is built from the
+    /// static `extra_tlvs` set — which deliberately excludes the control TLV
+    /// when `scale_reflected_control` is on, because the main loop rebuilds it
+    /// per packet with the AIMD-scaled interval. The retransmit path must do
+    /// the same rebuild, or the TLV silently vanishes from every retry.
+    #[tokio::test]
+    async fn test_wait_phase_retransmit_still_carries_scaled_control_tlv() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let conf = access_report_with_scaled_control_config(port, 1, 2);
+
+        let reflector = tokio::spawn(collect_silently(socket, 3, Duration::from_secs(8)));
+        let _ = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf, None))
+            .await
+            .expect("run_sender must not hang past the retry budget");
+        let packets = reflector.await.unwrap();
+
+        assert!(
+            packets.len() >= 2,
+            "need the original send plus at least one retransmission, got {}",
+            packets.len()
+        );
+
+        for (i, packet) in packets.iter().enumerate() {
+            let tlvs = TlvList::parse(&packet[UNAUTH_BASE_SIZE..])
+                .unwrap_or_else(|e| panic!("attempt {i} TLV area must parse: {e:?}"));
+            assert!(
+                tlvs.iter()
+                    .any(|t| matches!(t.tlv_type, TlvType::ReflectedControl)),
+                "attempt {i} must carry the Reflected Control TLV (§3.4-3); \
+                 TLV types present: {:?}",
+                tlvs.iter().map(|t| t.tlv_type).collect::<Vec<_>>()
+            );
+        }
     }
 
     /// A "dead" reflector: accepts packets on `socket` but never replies.
