@@ -48,6 +48,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>, strict: bool) -> ProcessingContex
         reflector_tx_count: None,
         packet_addr_info: None,
         last_reflection: None,
+        location_disclosure: Default::default(),
         local_addresses: &[],
         local_macs: &[],
         sender_port: 12345,
@@ -171,8 +172,9 @@ fn group_b_truncated_tlv_header_no_panic() {
 // ===========================================================================
 // Group C: HMAC TLV ordering (RFC 8972 §4.8)
 
-/// HMAC TLV must be LAST per RFC 8972 §4.8. A TLV after the HMAC TLV
-/// is positionally malformed; the parser must mark it without panicking.
+/// Per RFC 8972 §4.8 the HMAC TLV must be followed by nothing except an Extra
+/// Padding TLV. Anything else leaves the HMAC misplaced, which is positionally
+/// malformed; the parser must mark it without panicking.
 #[test]
 fn group_c_tlv_after_hmac_marked_malformed() {
     let mut chain = Vec::new();
@@ -184,7 +186,44 @@ fn group_c_tlv_after_hmac_marked_malformed() {
     chain.extend_from_slice(&16u16.to_be_bytes());
     chain.extend_from_slice(&[0u8; 16]);
 
-    // A trailing Extra Padding after the HMAC — positionally illegal.
+    // A Direct Measurement TLV after the HMAC — positionally illegal (unlike
+    // Extra Padding, which §4.8 explicitly exempts).
+    chain.push(0);
+    chain.push(TlvType::DirectMeasurement.to_byte());
+    chain.extend_from_slice(&16u16.to_be_bytes());
+    chain.extend_from_slice(&[0xAAu8; 16]);
+
+    let packet = build_unauth_packet(&chain);
+    let ctx = make_ctx(None, false);
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("reflector must echo even with mis-ordered HMAC");
+    let (parsed, any_malformed) = TlvList::parse_lenient(&response.data[UNAUTH_BASE_SIZE..]);
+    let (_u, m, i) = parsed.count_error_flags();
+    assert!(
+        m >= 1 || any_malformed,
+        "post-HMAC TLV must be marked malformed"
+    );
+    // RFC8972-4.8-3: a misplaced HMAC "MUST be processed as HMAC verification
+    // failure", whose procedure is the I flag on every TLV.
+    assert!(
+        i >= 1,
+        "a misplaced HMAC must run the §4.8 verification-failure procedure"
+    );
+}
+
+/// RFC 8972 §4.8's explicit exemption: "The HMAC TLV MUST follow all TLVs
+/// included in a STAMP test packet except for the Extra Padding TLV". Trailing
+/// Extra Padding is therefore a legal layout and must NOT be reported as
+/// malformed.
+#[test]
+fn group_c_extra_padding_after_hmac_is_not_malformed() {
+    let mut chain = Vec::new();
+
+    chain.push(0);
+    chain.push(TlvType::Hmac.to_byte());
+    chain.extend_from_slice(&16u16.to_be_bytes());
+    chain.extend_from_slice(&[0u8; 16]);
+
     chain.push(0);
     chain.push(TlvType::ExtraPadding.to_byte());
     chain.extend_from_slice(&4u16.to_be_bytes());
@@ -193,12 +232,12 @@ fn group_c_tlv_after_hmac_marked_malformed() {
     let packet = build_unauth_packet(&chain);
     let ctx = make_ctx(None, false);
     let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
-        .expect("reflector must echo even with mis-ordered HMAC");
-    let (parsed, any_malformed) = TlvList::parse_lenient(&response.data[UNAUTH_BASE_SIZE..]);
+        .expect("reflector must reflect a legally-padded packet");
+    let (parsed, _any_malformed) = TlvList::parse_lenient(&response.data[UNAUTH_BASE_SIZE..]);
     let (_u, m, _i) = parsed.count_error_flags();
-    assert!(
-        m >= 1 || any_malformed,
-        "post-HMAC TLV must be marked malformed"
+    assert_eq!(
+        m, 0,
+        "Extra Padding after the HMAC TLV is legal and must not be M-flagged"
     );
 }
 

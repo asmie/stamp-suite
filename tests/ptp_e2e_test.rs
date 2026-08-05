@@ -14,9 +14,11 @@
 //! 2. With a PTP-configured reflector (ctx.clock_source = PTP), the
 //!    response Type 3 TLV reports `sync_src_out = Ptp` and
 //!    `timestamp_out = SwLocal`.
-//! 3. Mixed mode: a sender that signals `sync_src_in = Ntp` reaching a
-//!    PTP-configured reflector keeps `sync_src_in = Ntp` on the wire
-//!    (echoed unchanged) and gets `sync_src_out = Ptp` from the reflector.
+//! 3. Mixed mode: all four value octets describe the *reflector* (RFC 8972
+//!    §4.3, and RFC8972-4.3-2 makes the sender zero every one of them), so a
+//!    PTP-configured reflector reports `Ptp` in both `sync_src_in` and
+//!    `sync_src_out` even when a non-conformant sender wrote `Ntp` into the
+//!    In field, and vice versa.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -56,6 +58,7 @@ fn make_ctx<'a>(clock_source: ClockFormat) -> ProcessingContext<'a> {
         reflector_tx_count: None,
         packet_addr_info: None,
         last_reflection: None,
+        location_disclosure: Default::default(),
         local_addresses: &[],
         local_macs: &[],
         sender_port: 12345,
@@ -194,7 +197,7 @@ fn ntp_reflector_fills_sync_src_out_ntp() {
 // sender's declared input source.
 
 #[test]
-fn mixed_mode_sender_ntp_reflector_ptp_preserves_sender_fields() {
+fn mixed_mode_reflector_reports_own_clock_in_both_field_pairs() {
     // Sender encoded NTP timestamp, declares Ntp in the TLV.
     let ts = generate_timestamp(ClockFormat::NTP);
     let sender_tlv = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::SwLocal);
@@ -213,10 +216,15 @@ fn mixed_mode_sender_ntp_reflector_ptp_preserves_sender_fields() {
         .expect("Type 3 TLV must be echoed");
     let tinfo = TimestampInfoTlv::from_raw(raw).expect("decode Type 3");
 
+    // RFC 8972 §4.3: Sync Src In characterizes "the source of clock
+    // synchronization at the ingress of a Session-Reflector" — the
+    // reflector's own clock, not the sender's. The sender is required to
+    // zero it (RFC8972-4.3-2), so a value it left there is stale input and
+    // must be overwritten, not echoed.
     assert_eq!(
         tinfo.sync_src_in,
-        SyncSource::Ntp,
-        "sender's declared NTP source must NOT be overwritten by a PTP reflector"
+        SyncSource::Ptp,
+        "PTP reflector must report its own source in sync_src_in (its ingress clock)"
     );
     assert_eq!(
         tinfo.sync_src_out,
@@ -226,7 +234,7 @@ fn mixed_mode_sender_ntp_reflector_ptp_preserves_sender_fields() {
 }
 
 #[test]
-fn mixed_mode_sender_ptp_reflector_ntp_preserves_sender_fields() {
+fn mixed_mode_ntp_reflector_overwrites_ptp_sender_in_field() {
     let ts = generate_timestamp(ClockFormat::PTP);
     let sender_tlv = TimestampInfoTlv::new(SyncSource::Ptp, TimestampMethod::SwLocal);
     let packet = build_packet_with_timestamp_info(ts, sender_tlv);
@@ -245,8 +253,9 @@ fn mixed_mode_sender_ptp_reflector_ntp_preserves_sender_fields() {
 
     assert_eq!(
         tinfo.sync_src_in,
-        SyncSource::Ptp,
-        "sender's declared PTP source must be preserved"
+        SyncSource::Ntp,
+        "NTP reflector must report its own source in sync_src_in, overwriting \
+         the sender's stale Ptp value"
     );
     assert_eq!(
         tinfo.sync_src_out,

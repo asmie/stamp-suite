@@ -11,6 +11,140 @@ const LOCATION_IP_SUBTLV_LEN: usize = 16;
 /// RFC-mandated Length field value for Source MAC / EUI-48 / EUI-64.
 const LOCATION_MAC_SUBTLV_LEN: usize = 8;
 
+/// Which Location TLV fields the Session-Reflector is permitted to report.
+///
+/// RFC 8972 §4.2.2 pairs a permission with an obligation: "Based on the local
+/// policy, the Session-Reflector MAY leave some fields unreported by filling
+/// them with zeroes. An implementation of the stateful Session-Reflector MUST
+/// provide control for managing such policies." This type is that control; a
+/// suppressed field is answered as zeroes, exactly as the MAY describes, rather
+/// than being dropped or flagged (dropping it would change the reply's size and
+/// flagging it would misreport a well-formed request as unrecognized).
+///
+/// The default discloses everything, which is what a measurement tool is for —
+/// the policy exists so an operator on an untrusted path can narrow it.
+///
+/// The Source MAC answer is not represented here: both backends already answer
+/// it with a zeroed EUI-64 (they have no L2 visibility), so there is nothing to
+/// suppress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocationDisclosure {
+    /// Report the observed source port (value octets 2-3).
+    pub src_port: bool,
+    /// Report the observed destination port (value octets 0-1).
+    pub dst_port: bool,
+    /// Answer a Source IP Address generic request (sub-TLV Type 7).
+    pub src_ip: bool,
+    /// Answer a Destination IP Address generic request (sub-TLV Type 4).
+    pub dst_ip: bool,
+}
+
+impl Default for LocationDisclosure {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl LocationDisclosure {
+    /// Every field reported — the default.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            src_port: true,
+            dst_port: true,
+            src_ip: true,
+            dst_ip: true,
+        }
+    }
+
+    /// No field reported; every answer is zeroes.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            src_port: false,
+            dst_port: false,
+            src_ip: false,
+            dst_ip: false,
+        }
+    }
+
+    /// True when no field may be reported.
+    #[must_use]
+    pub const fn discloses_nothing(&self) -> bool {
+        !self.src_port && !self.dst_port && !self.src_ip && !self.dst_ip
+    }
+
+    /// Parses a comma-separated field list: `all`, `none`, or any combination
+    /// of `src-port`, `dst-port`, `ports`, `src-ip`, `dst-ip`, `ips`.
+    ///
+    /// # Errors
+    /// Returns the offending token when it is not a recognized field name, and
+    /// rejects mixing `all`/`none` with individual field names — a list like
+    /// `none,src-ip` has no unambiguous reading.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let mut policy = Self::none();
+        let mut saw_wildcard = false;
+        let mut saw_field = false;
+
+        for token in spec.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            match token.to_ascii_lowercase().as_str() {
+                "all" => {
+                    policy = Self::all();
+                    saw_wildcard = true;
+                }
+                "none" => {
+                    policy = Self::none();
+                    saw_wildcard = true;
+                }
+                "src-port" => {
+                    policy.src_port = true;
+                    saw_field = true;
+                }
+                "dst-port" => {
+                    policy.dst_port = true;
+                    saw_field = true;
+                }
+                "ports" => {
+                    policy.src_port = true;
+                    policy.dst_port = true;
+                    saw_field = true;
+                }
+                "src-ip" => {
+                    policy.src_ip = true;
+                    saw_field = true;
+                }
+                "dst-ip" => {
+                    policy.dst_ip = true;
+                    saw_field = true;
+                }
+                "ips" => {
+                    policy.src_ip = true;
+                    policy.dst_ip = true;
+                    saw_field = true;
+                }
+                other => {
+                    return Err(format!(
+                        "unknown Location field '{other}' (expected all, none, \
+                         src-port, dst-port, ports, src-ip, dst-ip, or ips)"
+                    ))
+                }
+            }
+        }
+
+        if saw_wildcard && saw_field {
+            return Err("'all'/'none' cannot be combined with individual field names".to_string());
+        }
+        if !saw_wildcard && !saw_field {
+            return Err("empty Location disclosure list".to_string());
+        }
+        Ok(policy)
+    }
+}
+
 /// Location sub-TLV types per RFC 8972 §4.2.1 (Table 5).
 ///
 /// Types 1, 4, and 7 are the *generic request* types a Session-Sender emits;
@@ -322,6 +456,57 @@ pub struct PacketAddressInfo {
 
 #[cfg(test)]
 mod tests {
+    use super::LocationDisclosure;
+
+    #[test]
+    fn test_location_disclosure_default_is_permissive() {
+        // A measurement tool answers by default; the policy exists to narrow.
+        assert_eq!(LocationDisclosure::default(), LocationDisclosure::all());
+        assert!(!LocationDisclosure::all().discloses_nothing());
+        assert!(LocationDisclosure::none().discloses_nothing());
+    }
+
+    #[test]
+    fn test_location_disclosure_parse_wildcards() {
+        assert_eq!(
+            LocationDisclosure::parse("all").unwrap(),
+            LocationDisclosure::all()
+        );
+        assert_eq!(
+            LocationDisclosure::parse("none").unwrap(),
+            LocationDisclosure::none()
+        );
+        // Case and surrounding space are tolerated.
+        assert_eq!(
+            LocationDisclosure::parse("  ALL ").unwrap(),
+            LocationDisclosure::all()
+        );
+    }
+
+    #[test]
+    fn test_location_disclosure_parse_individual_and_groups() {
+        let p = LocationDisclosure::parse("ports").unwrap();
+        assert!(p.src_port && p.dst_port && !p.src_ip && !p.dst_ip);
+
+        let p = LocationDisclosure::parse("src-ip,dst-port").unwrap();
+        assert!(p.src_ip && p.dst_port && !p.dst_ip && !p.src_port);
+
+        let p = LocationDisclosure::parse("ips").unwrap();
+        assert!(p.src_ip && p.dst_ip && !p.src_port && !p.dst_port);
+    }
+
+    #[test]
+    fn test_location_disclosure_parse_rejects_bad_input() {
+        // Unknown field name.
+        assert!(LocationDisclosure::parse("src-mac").is_err());
+        // Mixing a wildcard with named fields has no unambiguous reading.
+        assert!(LocationDisclosure::parse("none,src-ip").is_err());
+        assert!(LocationDisclosure::parse("all,ports").is_err());
+        // An empty list is a typo, not "disclose nothing" — `none` says that.
+        assert!(LocationDisclosure::parse("").is_err());
+        assert!(LocationDisclosure::parse(" , ").is_err());
+    }
+
     use super::*;
     use crate::tlv::core::RawTlv;
 

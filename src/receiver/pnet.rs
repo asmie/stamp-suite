@@ -80,6 +80,8 @@ struct CaptureConfig {
     /// Aggregate packet counters for reporting.
     counters: Arc<ReflectorCounters>,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
+    /// RFC 8972 §4.2.2 Location field-disclosure policy.
+    location_disclosure: crate::tlv::LocationDisclosure,
     local_addresses: Vec<IpAddr>,
     /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
     /// Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
@@ -295,6 +297,9 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         shutdown: Arc::clone(&shutdown),
         counters: Arc::clone(&counters),
         local_addresses,
+        // RFC 8972 §4.2.2 Location field-disclosure policy; `validate()`
+        // already rejected a bad list at startup.
+        location_disclosure: conf.location_disclosure().unwrap_or_default(),
         local_macs,
         reflector_member_link_id: conf.reflector_member_link_id,
         return_path_allow_alternate: conf.return_path_allow_alternate,
@@ -835,6 +840,7 @@ fn handle_stamp_packet(
             reflector_tx_count,
             packet_addr_info,
             last_reflection,
+            location_disclosure: config.location_disclosure,
             local_addresses: &config.local_addresses,
             local_macs: &config.local_macs,
             sender_port: pkt.src.port(),

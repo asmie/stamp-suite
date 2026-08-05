@@ -63,8 +63,9 @@ use crate::{
     stats::{self, OutputFormat},
     time::generate_timestamp,
     tlv::{
-        PacketAddressInfo, ReturnPathAction, SyncSource, TimestampMethod, TlvList, TlvType,
-        HMAC_TLV_VALUE_SIZE, REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, TLV_HEADER_SIZE,
+        LocationDisclosure, PacketAddressInfo, ReturnPathAction, SyncSource, TimestampMethod,
+        TlvList, TlvType, HMAC_TLV_VALUE_SIZE, REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL,
+        TLV_HEADER_SIZE,
     },
 };
 
@@ -1102,6 +1103,9 @@ pub struct ProcessingContext<'a> {
     pub packet_addr_info: Option<PacketAddressInfo>,
     /// Last reflection data: (seq, timestamp) for Follow-Up Telemetry TLV.
     pub last_reflection: Option<(u32, u64)>,
+    /// Which Location TLV fields this reflector may report (RFC 8972 §4.2.2
+    /// field-disclosure policy, `--location-disclose`).
+    pub location_disclosure: LocationDisclosure,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     pub local_addresses: &'a [std::net::IpAddr],
     /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
@@ -1677,31 +1681,27 @@ fn apply_semantic_tlv_processing(
     // force the reply's on-wire ECN bits to 0b00 per the -01 MUST rule.
     tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false, true);
 
-    // Update Timestamp Information TLVs (RFC 8972 §4.3). The TLV carries a
-    // single method byte for the reflector, so report HwAssist only when
-    // BOTH the receive and transmit timestamps come from the NIC —
-    // anything mixed is conservatively SwLocal.
+    // Update Timestamp Information TLVs (RFC 8972 §4.3). All four value
+    // octets describe this reflector: the In pair characterizes the ingress
+    // that obtained T2, the Out pair the egress that obtained T3. Report each
+    // direction's real acquisition method — a mixed configuration (kernel
+    // software receive, NIC hardware transmit) is exactly what the separate
+    // In/Out fields exist to express.
     let sync_src = match ctx.clock_source {
         ClockFormat::NTP => SyncSource::Ntp,
         ClockFormat::PTP => SyncSource::Ptp,
     };
-    let reflector_method = if ctx.rx_method == TimestampMethod::HwAssist
-        && ctx.tx_method == TimestampMethod::HwAssist
-    {
-        TimestampMethod::HwAssist
-    } else {
-        TimestampMethod::SwLocal
-    };
-    tlvs.update_timestamp_info_tlvs(sync_src, reflector_method);
+    tlvs.update_timestamp_info_tlvs(sync_src, ctx.rx_method, ctx.tx_method);
 
     // Update Direct Measurement TLVs (RFC 8972 §4.5)
     if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
         tlvs.update_direct_measurement_tlvs(rx, tx);
     }
 
-    // Update Location TLVs (RFC 8972 §4.2)
+    // Update Location TLVs (RFC 8972 §4.2), honouring the §4.2.2
+    // field-disclosure policy.
     if let Some(ref addr_info) = ctx.packet_addr_info {
-        tlvs.update_location_tlvs(addr_info);
+        tlvs.update_location_tlvs(addr_info, ctx.location_disclosure);
     }
 
     // Update Follow-Up Telemetry TLVs (RFC 8972 §4.7). In stateful mode the
@@ -2305,6 +2305,7 @@ mod tests {
             reflector_tx_count: None,
             packet_addr_info: None,
             last_reflection: None,
+            location_disclosure: Default::default(),
             local_addresses: &[],
             local_macs: &[],
             sender_port: 0,

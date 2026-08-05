@@ -148,10 +148,24 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --srv6-return-forwarding     Best-effort SRv6 Return Path SRH forwarding
                                    (RFC 9503 §5; Linux+IPv6; off by default,
                                    graceful U-flag fallback when unsupported)
+      --location-disclose <FIELDS>  Which Location TLV fields the reflector may
+                                   report (RFC 8972 §4.2.2 policy control):
+                                   all (default) | none | any of src-port,
+                                   dst-port, ports, src-ip, dst-ip, ips.
+                                   Withheld fields are answered as zeroes, so
+                                   the reply's size and TLV layout do not change
       --strict-packets             Reject short packets instead of zero-filling (RFC 8762 §4.6)
       --require-hmac               Error out at startup if no HMAC key is configured
       --verify-tlv-hmac            Verify HMAC TLV (RFC 8972) on incoming packets
 ```
+
+RFC 8972 §4.2.2 lets a reflector "leave some fields unreported by filling them
+with zeroes" under local policy and requires an implementation to provide
+control over that policy; `--location-disclose` is that control. It only
+affects what the reflector *answers* — a request for a withheld field is still
+echoed as Answered (not flagged unrecognized), and a withheld IP request keeps
+its generic sub-TLV type rather than being rewritten to the IPv4/IPv6 variant,
+since the variant would itself disclose the observed address family.
 
 ### Authentication
 

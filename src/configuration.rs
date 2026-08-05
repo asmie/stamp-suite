@@ -3,6 +3,8 @@ use std::{fmt, net::SocketAddr, path::PathBuf};
 use clap::{Parser, ValueEnum};
 use thiserror::Error;
 
+use crate::tlv::LocationDisclosure;
+
 pub use crate::clock_format::ClockFormat;
 pub use crate::hwtstamp::HwTsMode;
 pub use crate::stats::OutputFormat;
@@ -244,6 +246,19 @@ pub struct Configuration {
     /// this duration may be cleaned up. Default: 300 (5 minutes). Set to 0 to disable.
     #[clap(long, default_value_t = 300)]
     pub session_timeout: u64,
+
+    /// Which Location TLV fields the reflector may report (RFC 8972 §4.2.2).
+    ///
+    /// §4.2.2 lets a reflector "leave some fields unreported by filling them
+    /// with zeroes" under local policy, and requires an implementation to
+    /// provide control over that policy. Comma-separated: `all` (default),
+    /// `none`, or any of `src-port`, `dst-port`, `ports`, `src-ip`, `dst-ip`,
+    /// `ips`. A withheld field is answered as zeroes, so the reply's size and
+    /// TLV structure are unchanged.
+    ///
+    /// Reflector-side only; ignored by the sender.
+    #[clap(long, default_value = "all", value_name = "FIELDS")]
+    pub location_disclose: String,
 
     /// TLV handling mode for the reflector (RFC 8972). Default: echo.
     /// - ignore: Strip TLVs from reflected packets (zero-pad to preserve length)
@@ -707,7 +722,22 @@ impl Configuration {
     /// Validates the configuration parameters.
     ///
     /// Returns an error if any configuration value is invalid.
+    /// Parses `--location-disclose` into the reflector's RFC 8972 §4.2.2
+    /// field-disclosure policy.
+    ///
+    /// # Errors
+    /// Returns the parse error for an unknown or contradictory field list.
+    pub fn location_disclosure(&self) -> Result<LocationDisclosure, ConfigurationError> {
+        LocationDisclosure::parse(&self.location_disclose).map_err(|e| {
+            ConfigurationError::InvalidConfiguration(format!("invalid --location-disclose: {e}"))
+        })
+    }
+
     pub fn validate(&self) -> Result<(), ConfigurationError> {
+        // Surface a bad Location disclosure list at startup rather than
+        // silently falling back to a default policy per packet.
+        self.location_disclosure()?;
+
         if self.error_scale > 63 {
             return Err(ConfigurationError::InvalidConfiguration(format!(
                 "Error scale {} exceeds maximum of 63",
@@ -1177,6 +1207,7 @@ impl Configuration {
         merge!(strict_packets);
         merge!(stateful_reflector);
         merge!(session_timeout);
+        merge!(location_disclose);
         merge!(tlv_mode);
         merge!(verify_tlv_hmac);
         merge_opt!(ssid);
@@ -1279,6 +1310,7 @@ pub struct FileConfiguration {
     pub strict_packets: Option<bool>,
     pub stateful_reflector: Option<bool>,
     pub session_timeout: Option<u64>,
+    pub location_disclose: Option<String>,
     pub tlv_mode: Option<TlvHandlingMode>,
     pub verify_tlv_hmac: Option<bool>,
     pub ssid: Option<u16>,
@@ -3350,6 +3382,52 @@ mod tests {
         let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
             .expect_err("conflicting return-path options must fail");
         assert!(err.to_string().contains("return_srv6_sids"));
+    }
+
+    #[test]
+    fn test_location_disclose_defaults_to_all_and_parses() {
+        let conf = load_from_args(&["test"]).expect("defaults must be valid");
+        assert_eq!(conf.location_disclose, "all");
+        assert_eq!(
+            conf.location_disclosure().unwrap(),
+            LocationDisclosure::all(),
+            "the default policy must keep answering every field"
+        );
+
+        let conf = load_from_args(&["test", "--location-disclose", "ports,src-ip"])
+            .expect("a valid field list must load");
+        let policy = conf.location_disclosure().unwrap();
+        assert!(policy.src_port && policy.dst_port && policy.src_ip);
+        assert!(!policy.dst_ip);
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_location_disclose() {
+        // A typo must fail at startup, not silently degrade to a default
+        // policy on every packet.
+        let err = load_from_args(&["test", "--location-disclose", "src-mac"])
+            .expect_err("an unknown Location field must be rejected");
+        assert!(
+            err.to_string().contains("location-disclose"),
+            "error must name the offending flag: {err}"
+        );
+
+        let err = load_from_args(&["test", "--location-disclose", "none,src-ip"])
+            .expect_err("mixing a wildcard with named fields must be rejected");
+        assert!(err.to_string().contains("location-disclose"), "{err}");
+    }
+
+    #[test]
+    fn test_location_disclose_merges_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "location_disclose = \"none\"\n").unwrap();
+        let conf = load_from_args(&["test", "--config", path.to_str().unwrap()])
+            .expect("file-configured policy must load");
+        assert!(
+            conf.location_disclosure().unwrap().discloses_nothing(),
+            "the file value must reach the parsed policy"
+        );
     }
 
     #[test]

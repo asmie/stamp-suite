@@ -47,6 +47,7 @@ fuzz_target!(|data: &[u8]| {
             dst_port: 862,
         }),
         last_reflection: Some((0, 0)),
+        location_disclosure: Default::default(),
         local_addresses: &local,
         local_macs: &local_macs,
         sender_port: src.port(),

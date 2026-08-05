@@ -22,7 +22,9 @@ mod timestamp_info;
 pub use extra_padding::ExtraPaddingTlv;
 
 // Type 2 — Location
-pub use location::{LocationSubTlv, LocationSubType, LocationTlv, PacketAddressInfo};
+pub use location::{
+    LocationDisclosure, LocationSubTlv, LocationSubType, LocationTlv, PacketAddressInfo,
+};
 
 // Type 3 — Timestamp Information
 pub use timestamp_info::{SyncSource, TimestampInfoTlv, TimestampMethod};
