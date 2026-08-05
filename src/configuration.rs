@@ -662,13 +662,21 @@ pub struct Configuration {
     #[clap(long, default_value_t = 0)]
     pub reflected_control_max_count: u16,
 
-    /// Reflector-side amplification cap, and the operator's stand-in for
-    /// the egress-interface MTU of draft-ietf-ippm-asymmetrical-pkts-14 §3:
-    /// maximum reply packet size (in bytes) the reflector will pad up to
-    /// when honouring a Reflected Test Packet Control TLV `length` request.
-    /// When the requested length exceeds this, a single reflected packet
-    /// padded to this cap is sent with the C flag set on the echoed TLV.
-    /// Default 1500 (typical Ethernet MTU); set to your real egress MTU.
+    /// Reflector-side amplification cap for
+    /// draft-ietf-ippm-asymmetrical-pkts-14 §3: maximum reply packet size (in
+    /// bytes) the reflector will pad up to when honouring a Reflected Test
+    /// Packet Control TLV `length` request. When the requested length exceeds
+    /// the effective cap, a single reflected packet padded to it is sent with
+    /// the C flag set on the echoed TLV.
+    ///
+    /// On Linux with a non-wildcard `--local-addr`, the reflector also reads
+    /// the egress interface's MTU (`SIOCGIFMTU`) and enforces whichever cap is
+    /// smaller. So on a 1500-byte link the effective cap is 1472 — the MTU
+    /// minus the IP and UDP headers — even at this flag's 1500 default, which
+    /// is what keeps a maximum-length reply from becoming a 1528-byte
+    /// datagram. Raise this flag for a jumbo link; lower it to cap replies
+    /// below what the path would allow. Best-effort: a wildcard bind, a failed
+    /// query, or a non-Linux platform leaves this value as the only cap.
     #[clap(long, default_value_t = 1500)]
     pub reflected_control_max_size: u16,
 

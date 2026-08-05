@@ -168,6 +168,21 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --verify-tlv-hmac            Verify HMAC TLV (RFC 8972) on incoming packets
 ```
 
+**Reply-size cap and the live egress MTU (draft-ietf-ippm-asymmetrical-pkts
+§3).** `--reflected-control-max-size` bounds the STAMP reply the reflector will
+pad up to for a Type-12 `length` request. On Linux, when `--local-addr` names a
+single interface, the reflector also reads that interface's MTU via `SIOCGIFMTU`
+at startup and enforces whichever cap is smaller, logging the reduction. The
+practical effect at the defaults: on a 1500-byte link the effective cap is 1472
+(MTU less the IPv4 and UDP headers, or 1452 for IPv6), so a maximum-length
+request gets the draft's C-flag/single-reply treatment instead of producing a
+1528-byte datagram that the path would have to fragment. Raise the flag for a
+jumbo link, or lower it to cap replies below the path MTU. The query is
+best-effort — a wildcard bind has no single egress interface, and a failed query
+or a non-Linux platform simply leaves the flag as the only cap. The sender does
+the equivalent check with `getsockopt(IP_MTU)`, which only answers on a
+connected socket and so cannot be used by a reflector.
+
 **Replay detection (draft-ietf-ippm-asymmetrical-pkts §5).** The reflector
 tracks the Sequence Number of every received packet against a 31-entry
 per-session window and classifies it as new, reordered, replayed, or older than
