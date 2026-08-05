@@ -64,7 +64,7 @@ use crate::{
     time::generate_timestamp,
     tlv::{
         PacketAddressInfo, ReturnPathAction, SyncSource, TimestampMethod, TlvList, TlvType,
-        REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, TLV_HEADER_SIZE,
+        HMAC_TLV_VALUE_SIZE, REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, TLV_HEADER_SIZE,
     },
 };
 
@@ -1921,7 +1921,21 @@ fn apply_semantic_tlv_processing(
                 // egress-interface MTU; exceeding the cap is the C=1 "MTU"
                 // case and the reply is padded to the cap instead.
                 tlvs.remove_extra_padding_tlvs();
-                let current = base_bytes.len() + tlvs.wire_size();
+                // A keyed reflector appends its own HMAC TLV *after* this
+                // padding decision, whether or not the request carried one
+                // (see the §4.8 per-role adjudication at `set_hmac_response`
+                // below). That TLV is part of the reflected packet, so its
+                // 20 octets have to be reserved here; without the reserve a
+                // request from a peer that sends no HMAC TLV of its own gets
+                // a reply exactly 20 octets past the length it asked for.
+                // When the request did carry an HMAC TLV, `wire_size()`
+                // already counts it (`TlvList::iter` chains `hmac_tlv`).
+                let hmac_reserve = if tlv_hmac_key.is_some() && tlvs.hmac_tlv().is_none() {
+                    TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE
+                } else {
+                    0
+                };
+                let current = base_bytes.len() + tlvs.wire_size() + hmac_reserve;
                 let aligned_req = (req.length_of_reflected_packet as usize).div_ceil(4) * 4;
                 let cap = ctx.reflected_control_max_size as usize;
                 if aligned_req > cap {

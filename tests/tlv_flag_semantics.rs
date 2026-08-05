@@ -1165,6 +1165,56 @@ fn a1_reflected_control_length_padding_within_cap() {
     );
 }
 
+/// draft-ietf-ippm-asymmetrical-pkts-14 §3 length rule, keyed reflector: the
+/// reflector appends its own HMAC TLV to every reply when a TLV key is
+/// configured, whether or not the request carried one (the §4.8 per-role
+/// adjudication). That 20-octet TLV is part of the reflected packet, so the
+/// Extra Padding TLV must be sized to leave room for it — otherwise the reply
+/// overshoots the requested length by exactly 20 bytes.
+#[test]
+fn a1_reflected_control_length_target_accounts_for_reflector_added_hmac() {
+    let key = HmacKey::new(vec![0x5A; 32]).expect("key");
+    let target_length = 200u16;
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&target_length.to_be_bytes());
+    value.extend_from_slice(&1u16.to_be_bytes()); // count: 1
+    value.extend_from_slice(&0u32.to_be_bytes()); // interval
+    value.extend_from_slice(&[0u8; 4]); // sub-TLV placeholder
+
+    // The request carries NO HMAC TLV of its own — the reflector adds one.
+    let raw = RawTlv::new(TlvType::ReflectedControl, value);
+    let packet = build_unauth_packet(&raw.to_bytes());
+    let ctx = make_ctx(Some(&key));
+
+    let response = stamp_suite::receiver::process_stamp_packet(
+        &packet,
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            12345,
+        ),
+        64,
+        false,
+        &ctx,
+    )
+    .expect("must reflect");
+
+    let parsed =
+        TlvList::parse(&response.data[stamp_suite::receiver::UNAUTH_BASE_SIZE..]).expect("parse");
+    assert!(
+        parsed.hmac_tlv().is_some(),
+        "keyed reflector must append its own HMAC TLV (§4.8 per-role reading)"
+    );
+    assert_eq!(
+        response.data.len(),
+        target_length as usize,
+        "reply must be exactly the requested {} octets including the reflector's \
+         own HMAC TLV, not {} (overshoot of {})",
+        target_length,
+        response.data.len(),
+        response.data.len() as isize - target_length as isize
+    );
+}
+
 /// Requested reply length exceeds the cap → C flag is set; we still pad up
 /// to the cap (best-effort).
 #[test]
