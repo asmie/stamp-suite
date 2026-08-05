@@ -1,47 +1,53 @@
 # stamp-suite conformance — compliance statement
 
-Status date: **2026-07-23**. Branch: **1.0-line**.
+Status date: **2026-08-05**. Branch: **1.0-line**.
 
 This document rolls up the eight clause-level conformance matrices in this
 directory into a single compliance statement for the stamp-suite 1.0 line.
-It does not re-score any clause — every count below is read verbatim from
-each matrix's own `Summary:` line, and none of the eight matrix files were
-edited to produce this rollup. Where this document goes further than the
-matrices is in stating, as a maintainer decision, which of the residual
-non-Compliant rows are accepted design trade-offs (**Documented exclusions**)
-versus genuinely open work (**Remaining Partials**), and in disclosing the
+Every count below is read verbatim from each matrix's own `Summary:` line.
+Where this document goes further than the matrices is in stating, as a
+maintainer decision, which of the residual non-Compliant rows are accepted
+design trade-offs (**Documented exclusions**), and in disclosing the
 experimental/pending-IANA codepoints this implementation stands in for.
 
-**Bottom line:** every Gap the audit found was either fixed in this 1.0 line
-or moved into one of the two sections below, with a named rationale and a
-maintainer sign-off date. Nothing was silently dropped.
+**Bottom line:** as of the status date there are **no Partial rows and no open
+Gap rows left**. The fifteen rows that were Partial or open Gap on 2026-07-23
+were closed by the post-review pass (see "Closed since the 1.0 audit" below);
+the only non-Compliant rows remaining are the three SSID-admission Gaps kept
+deliberately under "Documented exclusions" and three Excluded rows, each with a
+named rationale. Nothing was silently dropped or silently re-scored: every
+closed row keeps its original finding in the matrix, with the closure appended
+beneath it.
 
 ## Per-document summary
 
 | Document | Revision frozen | Clauses | Compliant | Partial | Gap | N/A | Excluded |
 |---|---|---:|---:|---:|---:|---:|---:|
-| [RFC 8762](rfc8762.md) — STAMP base protocol | RFC 8762, March 2020 | 62 | 51 | 1 | 0 | 9 | 1 |
-| [RFC 8972](rfc8972.md) — STAMP Optional Extensions | RFC 8972, January 2021 | 151 | 130 | 5 | 6 | 10 | 0 |
-| [RFC 9503](rfc9503.md) — Destination Node Address / Return Path | RFC 9503, October 2023 | 26 | 21 | 1 | 0 | 3 | 1 |
+| [RFC 8762](rfc8762.md) — STAMP base protocol | RFC 8762, March 2020 | 62 | 52 | 0 | 0 | 9 | 1 |
+| [RFC 8972](rfc8972.md) — STAMP Optional Extensions | RFC 8972, January 2021 | 151 | 138 | 0 | 3 | 10 | 0 |
+| [RFC 9503](rfc9503.md) — Destination Node Address / Return Path | RFC 9503, October 2023 | 26 | 22 | 0 | 0 | 3 | 1 |
 | [RFC 9534](rfc9534.md) — Micro-session ID (LAG) | RFC 9534, January 2024 | 18 | 15 | 0 | 0 | 3 | 0 |
 | [RFC 8545](rfc8545.md) — TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
-| [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 (RFC Editor queue) | 47 | 35 | 1 | 2 | 8 | 1 |
-| [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md) — CoS/ECN congestion signaling | -01, 20 July 2026 | 16 | 14 | 2 | 0 | 0 | 0 |
+| [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 (RFC Editor queue) | 47 | 38 | 0 | 0 | 8 | 1 |
+| [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md) — CoS/ECN congestion signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -11, 4 July 2026 | 40 | 38 | 0 | 0 | 2 | 0 |
-| **Total** | | **368** | **305** | **10** | **8** | **42** | **3** |
+| **Total** | | **368** | **320** | **0** | **3** | **42** | **3** |
 
 Each matrix was independently re-verified against a freshly fetched copy of
 its source text on 2026-07-22 (see each file's own "Revision frozen" line and
-adversarial re-verification log). Only the `Summary:` line of each file was
-read to build the table above; the matrices themselves are the source of
-truth and are not reproduced or altered here.
+adversarial re-verification log). No clause was re-read against its source text
+in the 2026-08-05 pass: that pass changed *implementation*, and each row it
+touched was re-scored against the same frozen clause text, with the code and
+test evidence for the closure appended to the row. The matrices remain the
+source of truth; the table above is read from their `Summary:` lines.
 
 ## Documented exclusions
 
 These are non-Compliant rows (or feature-scope boundaries the matrices don't
 score at all) that this project has deliberately decided **not** to close,
-with a stated rationale. Unlike the Partials below, these are not "still
-open" — they are closed as accepted design.
+with a stated rationale. These are not "still open" — they are closed as
+accepted design, and as of the status date they are the *only* non-Compliant
+rows left in any matrix.
 
 | Exclusion | Rationale | Pointer |
 |---|---|---|
@@ -53,29 +59,61 @@ open" — they are closed as accepted design.
 | **NIC-hardware timestamp paths** | The `SIOCSHWTSTAMP` hardware-timestamp tier (Linux, `--hwtstamp on`, needs `CAP_NET_ADMIN` and a NIC that actually supports it) is code-cited and unit-tested for its request/fallback logic, but the live hardware path itself cannot be exercised in ordinary CI (no privileged, hardware-timestamp-capable NIC available there). Verification for this tier is the code citation plus a manual procedure an operator with the right hardware can run; `startup_action()`'s graceful fallback means the binary never *requires* the hardware to start. | `src/hwtstamp.rs`; `doc/architecture.md` ("NIC hardware tier") |
 | **SSID-based session admission** | RFC 8972 §3 MUSTs require a Session-Reflector to be pre-provisioned with session identity (SSID + 4-tuple) and to discard non-matching traffic (`RFC8972-3-6`/`-3-7`/`-3-8`, scored Gap in the matrix). stamp-suite's reflector deliberately accepts any syntactically valid STAMP packet on the bound port — a general-purpose measurement tool, not a provisioned network element — and the RFC's own §3 text places "the means of provisioning" explicitly out of its own scope. The actual admission controls this project ships instead are: the per-source/per-SSID rate limiter, HMAC integrity in authenticated mode, and per-client stateful sequencing when `--stateful-reflector` is set. **Maintainer decision, 2026-07-22:** keep the accept-any design; these three rows remain Gap in `rfc8972.md` for traceability but are treated as closed here, not as outstanding work. | `RFC8972-3-6`, `RFC8972-3-7`, `RFC8972-3-8` in `rfc8972.md`; `src/session.rs` `SessionManager`; `src/receiver/mod.rs` rate limiter wiring |
 
-## Remaining Partials
+## Closed since the 1.0 audit
 
-These rows are genuinely open — real, disclosed limitations, not accepted
-design. Each is tagged with its actual matrix status (some rows below are
-scored **Partial**, others **Gap** in their matrices; they are listed
-together because together with the three Gap rows retired under
-"Documented exclusions" above, this table accounts for **every**
-non-Compliant, non-N/A row across all eight matrices — the complete honest
-residual of the audit).
+The 2026-07-23 statement listed eleven open items covering fifteen matrix rows —
+ten scored Partial and five scored Gap. **All fifteen were closed in the
+post-review pass of 2026-08-04/05.** They are recorded here rather than deleted,
+so the statement remains readable against its predecessor: each matrix row keeps
+its original finding with the closure appended beneath it, naming the code and
+the tests.
 
-| Item | Status | Rationale | Pointer |
+| Item (as listed on 2026-07-23) | Was | Rows | Closed by |
 |---|---|---|---|
-| **Control-plane transport security trade-off** | Partial | The runtime control-plane REST API binds loopback-only by default, warns loudly on a non-loopback bind, and supports an opt-in constant-time-compared bearer token — but there is no TLS in v1 and the token is not enforced. Remote management is expected to go over an SSH tunnel or reverse proxy. | `RFC8762-7-1`; `doc/control-plane.md` |
-| **Reply source-address pinning (SHOULD)** | Partial | RFC 9503 §3 says a matched Destination Node Address SHOULD become the reply's IP source address; neither backend pins it — source selection is left to OS routing on both `nix` and `pnet`. Correct on a single-address bind by coincidence; not forced on a multi-homed/wildcard bind, which is exactly the tunnel-decap case the RFC motivates. | `9503-3-1` |
-| **DSCP/ECN admission-policy layer** | Partial | RFC 8972 §4.4/§6 and draft-stamp-cos-ecn §3.2 call for a local policy that can independently confirm a DSCP/ECN value is *permitted* before applying it. This implementation conflates "permitted" with "capable": it always attempts the `IP_TOS`/`IPV6_TCLASS` setsockopt and only refuses on syscall failure. No `--allowed-dscp`-style destination-scoped policy exists. | `RFC8972-4.4-8`, `RFC8972-6-3`, `cos-ecn-3.2-3`, `cos-ecn-3.2-6` |
-| **Extra-Padding-after-HMAC leniency** | Partial | RFC 8972 §4.8's coherent reading permits an Extra Padding TLV after the HMAC TLV (pure filler, not HMAC-covered content); the receive-side parser has no such exemption and marks any post-HMAC TLV malformed regardless of type. The sender is unaffected (it never emits this ordering). Receive-side leniency gap toward an otherwise-conformant peer. | `RFC8972-4.8-2` |
-| **Live egress-MTU query (reflector side)** | Partial | draft-ietf-ippm-asymmetrical-pkts §3's MTU-exceeded C-flag/single-reply behavior is implemented, but `--reflected-control-max-size` is an operator-configured constant standing in for the real egress-interface MTU, not a live `SIOCGIFMTU`/`IP_MTU` query. Correct only insofar as the operator keeps the flag in sync with the real path MTU. (The sender side of the same MUST, by contrast, does query the live route MTU — see `ext-hdr-3.1-9`/`-3.2-8` in `draft-stamp-ext-hdr.md`, which are Compliant.) | `asym-3-08` |
-| **Replay detection (SHOULD)** | Gap | The draft's Security Considerations recommend tracking the Sequence Number of received test packets to detect replay/reordering; no such tracking exists (the reflector's own `curr_seq` is an outgoing generator, not a record of received sequence numbers). Blast radius is bounded by the rate limiter and by Type-12 amplification being off by default, but the SHOULD itself is unmet. | `asym-5-07` |
-| **Send-delay / reflected-burst cross-check** | Gap | The sender's own `--send-delay` pacing is not validated against the expected completion time of a requested Type-12 reflected burst (`count`/`interval`), so an operator can configure a `--send-delay` shorter than the burst the reflector will still be transmitting. Self-inflicted, advisory-level (SHOULD NOT), and opt-in only (Type-12 defaults to count 1 / disabled). | `asym-5-09` |
-| **Zeroed-SSID reply control (sender)** | Gap | RFC 8972 §3 expects the Session-Sender to support a control governing how to proceed when a reflector returns a zeroed SSID (continue vs. stop the session); the sender logs the reflected SSID but exposes no such knob and never changes behavior on a zeroed SSID. Advisory impact for a CLI probe — measurement continues either way and no reflected value is trusted because of it. | `RFC8972-3-11` |
-| **Location field-disclosure policy (stateful reflector)** | Gap | §4.2.2 calls for reflector-side policy control over which Location TLV fields are disclosed; no such knob exists. Exposure is bounded in practice: this implementation only ever fills source/destination IP and port answers (MAC/EUI sub-TLVs are answered zeroed on UDP-socket backends by platform necessity), so the data a policy layer would suppress is already minimal. | `RFC8972-4.2.2-2` |
-| **Misplaced-HMAC severity** | Gap | §4.8 treats a TLV placed after the HMAC TLV as an integrity condition; the parser marks such packets malformed (M-flag) and stops processing rather than additionally running the full HMAC-verification-failure procedure (I-flag on all TLVs). Only reachable from a malformed or adversarial peer, and the affected packet's TLVs are never trusted either way — the deviation is in which flag signals the problem, not in any value being consumed. | `RFC8972-4.8-3` |
-| **Reflector ingress clock telemetry (Timestamp Info "In" fields)** | Partial | §4.3's Sync Src In / Timestamp In field definitions describe the reflector's ingress (T2) clock characteristics; the reflector fills its egress-side fields but reports no distinct ingress-side source/method. The field definitions are descriptive rather than an explicit reflector-fill MUST (which is why these rows are Partial, not Gap). | `RFC8972-4.3-5`, `RFC8972-4.3-6` |
+| Control-plane transport security trade-off | Partial | `RFC8762-7-1` | TLS for the control plane: `--control-tls-cert`/`--control-tls-key` (rustls, explicit `ring` provider), both flags required together, and TLS additionally requires a bearer token. Verified with a real handshake asserting 200 with the token and 401 without. |
+| Reply source-address pinning (SHOULD) | Partial | `9503-3-1` | The matched Destination Node Address now reaches the send path (`StampResponse::reply_source`) and both backends pin it via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message. Verified by asserting the *receiver* observes the pinned source. |
+| DSCP/ECN admission-policy layer | Partial | `RFC8972-4.4-8`, `RFC8972-6-3`, `cos-ecn-3.2-3`, `cos-ecn-3.2-6` | `src/cos_policy.rs` separates *permitted* from *capable*: `--allowed-dscp`, `--allowed-ecn`, and destination-scoped `--allowed-dscp-for`. A refused DSCP1 reports RPD=0b01; a refused EC1 forces Not-ECT and reports RPE=0b10. |
+| Extra-Padding-after-HMAC leniency | Partial | `RFC8972-4.8-2` | Both parsers now accept trailing Extra Padding. Required fixing HMAC coverage first: the covered prefix had been derived from the sum of non-HMAC TLV sizes, which is only the true prefix while the HMAC TLV is last. |
+| Live egress-MTU query (reflector side) | Partial | `asym-3-08` | `ioctl(SIOCGIFMTU)` on the egress interface, enforced alongside `--reflected-control-max-size`. The stand-in had been wrong at the default, permitting a 1528-byte datagram on a 1500-byte link. |
+| Reflector ingress clock telemetry | Partial | `RFC8972-4.3-5`, `RFC8972-4.3-6` | All four Timestamp Info octets are now filled from the reflector's own clocks, with the ingress (T2) and egress (T3) methods reported separately. |
+| Replay detection (SHOULD) | Gap | `asym-5-07` | `Session::check_replay` with a 31-entry per-session window in a single `AtomicU64`; counters on `/v1/status`; opt-in `--drop-replayed` for the action. |
+| Send-delay / reflected-burst cross-check | Gap | `asym-5-09` | `reflected_burst_pacing_warning()` warns at startup when `--send-delay` is shorter than the requested burst, naming the minimum. |
+| Zeroed-SSID reply control (sender) | Gap | `RFC8972-3-11` | `--on-zero-ssid continue\|stop`, checking both reflected SSID fields and inert without a configured `--ssid`. |
+| Location field-disclosure policy | Gap | `RFC8972-4.2.2-2` | `--location-disclose`; a withheld field is answered as zeroes, and a withheld IP request keeps its generic sub-TLV type so the address family is not disclosed either. |
+| Misplaced-HMAC severity | Gap | `RFC8972-4.8-3` | A misplaced HMAC now runs the §4.8 verification-failure procedure (I flag on every TLV), not only the parser's M flag. |
+
+Two further defects were fixed in the same pass that no matrix row had scored,
+because both sat inside behaviour the matrices recorded as Compliant:
+
+- A Type-12 `length` request from a peer that sends no HMAC TLV produced a reply
+  exactly 20 octets over the requested length, because the keyed reflector
+  appends its own HMAC TLV after the length-padding decision. The pre-existing
+  test asserted the reply was *at least* the requested length, so the overshoot
+  passed; it now asserts equality.
+- With the AIMD congestion response active, an Access Report wait-phase
+  retransmission carried no Reflected Test Packet Control TLV at all, because
+  that path rebuilt its TLV set from the static list the main loop deliberately
+  omits it from.
+
+## Citation verification
+
+The `file:line` citations in the matrices are the link between a clause and its
+evidence, and they drift whenever the code moves. `scripts/check_conformance_citations.py`
+checks them and exits non-zero on drift, so this can gate CI rather than being
+rediscovered by the next audit.
+
+As of the status date: **540 line-bearing citations, 0 drifted.** Of those, 108
+are positively machine-verified — the cited range intersects the extent of an
+identifier the row names beside it — and 432 cannot be machine-checked, because
+the citation follows prose that names no identifier, or names one defined in a
+different file (a call site rather than a definition). Every citation resolves to
+an existing file and an in-range line.
+
+Fourteen citations that the tool could not pin to a single construct had their
+line numbers **deliberately removed** during the 2026-08-05 refresh, keeping the
+file path and the identifier the prose already names. A coarse citation that is
+correct is worth more than a precise one that is confidently wrong, and those
+rows are now out of the drift surface for good.
 
 ## Experimental-codepoint disclosure
 
@@ -120,7 +158,7 @@ see the module doc comment in `src/tlv/experimental.rs`).
 
 ## Verification tiers
 
-- **Unit tests** — 848 tests under `cargo test --lib` (`cargo test
+- **Unit tests** — 933 tests under `cargo test --lib` (`cargo test
   --all-features`), covering packet/TLV parsing and serialization, flag
   derivation, session state, HMAC, congestion control, SNMP encoding, and
   every semantic TLV-processing path exercised without a socket.
@@ -160,10 +198,14 @@ see the module doc comment in `src/tlv/experimental.rs`).
 
 ## Sign-off
 
-Every Gap identified during this audit was either fixed in the 1.0 line's
-commits, moved into "Documented exclusions" above with a maintainer
-rationale and date, or listed under "Remaining Partials" as open,
-disclosed work. Nothing found was left unaddressed and undocumented.
-This statement reflects the matrices as they stand on the date above, on
-branch `1.0-line`; it is not re-issued automatically and should be revisited
-whenever a matrix's own `Summary:` line changes.
+Every Gap identified during the audit was either fixed in the 1.0 line's
+commits, closed in the post-review pass recorded above, or moved into
+"Documented exclusions" with a maintainer rationale and date. Nothing found was
+left unaddressed and undocumented, and no row was re-scored without its
+supporting code and tests named in the matrix.
+
+As of the status date the residual is: **three Gap rows** (the SSID-admission
+trio, kept deliberately) and **three Excluded rows**, all six under "Documented
+exclusions"; **no Partial rows**. This statement reflects the matrices as they
+stand on the date above, on branch `1.0-line`; it is not re-issued automatically
+and should be revisited whenever a matrix's own `Summary:` line changes.
