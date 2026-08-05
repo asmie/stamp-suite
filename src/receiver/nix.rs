@@ -725,7 +725,32 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                         }
                     }
 
-                    let sent_ok = if srv6_sent {
+                    // RFC 9503 §3: a matched Destination Node Address SHOULD be
+                    // the reply's IP source. Best-effort — on any failure fall
+                    // through to the ordinary send, which is still a correct
+                    // reply, just from the kernel's choice of source.
+                    let pinned_ok = match response.reply_source {
+                        Some(source) if !srv6_sent && crate::reply_source::supported() => {
+                            match crate::reply_source::send_from(
+                                tokio_socket.as_raw_fd(),
+                                &response.data,
+                                send_target,
+                                source,
+                            ) {
+                                Ok(_) => true,
+                                Err(e) => {
+                                    log::debug!(
+                                        "could not pin reply source to {source} \
+                                         (RFC 9503 §3): {e}; using the OS's choice"
+                                    );
+                                    false
+                                }
+                            }
+                        }
+                        _ => false,
+                    };
+
+                    let sent_ok = if srv6_sent || pinned_ok {
                         true
                     } else {
                         match tokio_socket.send_to(&response.data, send_target).await {

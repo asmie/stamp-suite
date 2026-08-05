@@ -176,6 +176,57 @@ fn ipv6_dest_node_addr_match_clears_u_flag() {
     );
 }
 
+/// RFC 9503 §3: "it SHOULD be used as the Source Address in the IP header of
+/// the reply test packet". A matched address must reach the send path, not just
+/// clear the U-flag on the echo — the send path is where the SHOULD is honoured.
+#[test]
+fn ipv6_dest_node_addr_match_pins_the_reply_source() {
+    let dest = DestinationNodeAddressTlv::new(ipv6_local()).to_raw();
+    let packet = build_unauth_packet(&dest.to_bytes());
+
+    let locals = [ipv6_local()];
+    let ctx = make_ctx(None, &locals, None);
+    let response =
+        process_stamp_packet(&packet, ipv6_src(), 64, false, &ctx).expect("reflector responds");
+    assert_eq!(
+        response.reply_source,
+        Some(ipv6_local()),
+        "the matched Destination Node Address must be handed to the send path"
+    );
+}
+
+/// A mismatched address must not be pinned: sending from an address that is not
+/// ours would be worse than letting the OS choose.
+#[test]
+fn ipv6_dest_node_addr_mismatch_pins_nothing() {
+    let dest =
+        DestinationNodeAddressTlv::new(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)))
+            .to_raw();
+    let packet = build_unauth_packet(&dest.to_bytes());
+
+    let locals = [ipv6_local()];
+    let ctx = make_ctx(None, &locals, None);
+    let response =
+        process_stamp_packet(&packet, ipv6_src(), 64, false, &ctx).expect("reflector responds");
+    assert_eq!(
+        response.reply_source, None,
+        "an address that is not ours must never be pinned as the reply source"
+    );
+}
+
+/// With no Destination Node Address TLV at all there is nothing to pin, and the
+/// OS keeps choosing the source exactly as before.
+#[test]
+fn ipv6_no_dest_node_addr_pins_nothing() {
+    let cos = ClassOfServiceTlv::new(46, 2).to_raw();
+    let packet = build_unauth_packet(&cos.to_bytes());
+    let locals = [ipv6_local()];
+    let ctx = make_ctx(None, &locals, None);
+    let response =
+        process_stamp_packet(&packet, ipv6_src(), 64, false, &ctx).expect("reflector responds");
+    assert_eq!(response.reply_source, None);
+}
+
 /// RFC 9503: when the Dest Node Addr does not match any local address,
 /// reflector sets U flag on the echoed TLV.
 #[test]

@@ -993,18 +993,46 @@ fn handle_stamp_packet(
             }
         }
 
-        // Helper: send to the given target using the correct address-family socket.
+        // Helper: send to the given target using the correct address-family
+        // socket, pinning the reply's IP source address when a Destination Node
+        // Address TLV matched one of ours (RFC 9503 §3). Pinning is best-effort
+        // and Linux-only; any failure falls through to an ordinary send, which
+        // is still a correct reply from the kernel's choice of source. Both
+        // backends do this identically so the §3 SHOULD does not depend on
+        // which one is in use.
+        let reply_source = response.reply_source;
         let try_send = |data: &[u8], target: SocketAddr| -> Result<usize, std::io::Error> {
-            match target {
-                SocketAddr::V4(_) => send_ctx.send_socket_v4.send_to(data, target),
-                SocketAddr::V6(_) => match &send_ctx.send_socket_v6 {
-                    Some(socket) => socket.send_to(data, target),
-                    None => Err(std::io::Error::new(
-                        std::io::ErrorKind::AddrNotAvailable,
-                        "IPv6 socket unavailable",
-                    )),
-                },
+            let socket = match target {
+                SocketAddr::V4(_) => Some(&send_ctx.send_socket_v4),
+                SocketAddr::V6(_) => send_ctx.send_socket_v6.as_ref(),
+            };
+            let Some(socket) = socket else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    "IPv6 socket unavailable",
+                ));
+            };
+            if let Some(source) = reply_source {
+                if crate::reply_source::supported() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::fd::AsRawFd;
+                        match crate::reply_source::send_from(
+                            socket.as_raw_fd(),
+                            data,
+                            target,
+                            source,
+                        ) {
+                            Ok(sent) => return Ok(sent),
+                            Err(e) => log::debug!(
+                                "could not pin reply source to {source} \
+                                 (RFC 9503 §3): {e}; using the OS's choice"
+                            ),
+                        }
+                    }
+                }
             }
+            socket.send_to(data, target)
         };
 
         let sent_ok = match try_send(&response.data, send_target) {

@@ -19,6 +19,38 @@ use crate::tlv::{
 
 use super::TlvList;
 
+/// Result of matching a Destination Node Address TLV (RFC 9503 §3/§4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationNodeAddressOutcome {
+    /// No Destination Node Address TLV was present.
+    Absent,
+    /// The TLV named one of the reflector's own addresses. RFC 9503 §3: "it
+    /// SHOULD be used as the Source Address in the IP header of the reply test
+    /// packet".
+    Matched(std::net::IpAddr),
+    /// The TLV named an address that is not ours; the echoed TLV carries the
+    /// U-flag and there is nothing to pin.
+    Unmatched,
+}
+
+impl DestinationNodeAddressOutcome {
+    /// The address to pin as the reply's source, if any.
+    #[must_use]
+    pub fn pinned_source(self) -> Option<std::net::IpAddr> {
+        match self {
+            Self::Matched(addr) => Some(addr),
+            Self::Absent | Self::Unmatched => None,
+        }
+    }
+
+    /// True unless a TLV was present and named an address that is not ours —
+    /// the sense the pre-existing callers used.
+    #[must_use]
+    pub fn matched_or_absent(self) -> bool {
+        !matches!(self, Self::Unmatched)
+    }
+}
+
 impl TlvList {
     /// Calls `f` on every TLV (in both `self.tlvs` and `self.wire_order_tlvs`)
     /// for which `pred` returns true.
@@ -444,17 +476,26 @@ impl TlvList {
     /// Finds the first Destination Node Address TLV and checks if the address
     /// matches one of the reflector's local addresses. If not, sets the U-flag.
     ///
-    /// Returns `true` if the address matched (or no such TLV was present).
-    pub fn process_destination_node_address(&mut self, local_addrs: &[std::net::IpAddr]) -> bool {
+    /// Returns the outcome, which carries the matched address: RFC 9503 §3 says
+    /// it SHOULD become the reply's IP source address, so the send path needs it
+    /// and not merely a yes/no.
+    pub fn process_destination_node_address(
+        &mut self,
+        local_addrs: &[std::net::IpAddr],
+    ) -> DestinationNodeAddressOutcome {
+        let mut outcome = DestinationNodeAddressOutcome::Absent;
         let mut matched = true;
 
         // Check in separated tlvs
         for tlv in &mut self.tlvs {
             if tlv.tlv_type == TlvType::DestinationNodeAddress {
                 if let Ok(dna) = DestinationNodeAddressTlv::from_raw(tlv) {
-                    if !local_addrs.contains(&dna.address) {
+                    if local_addrs.contains(&dna.address) {
+                        outcome = DestinationNodeAddressOutcome::Matched(dna.address);
+                    } else {
                         tlv.set_unrecognized();
                         matched = false;
+                        outcome = DestinationNodeAddressOutcome::Unmatched;
                     }
                 }
                 break;
@@ -473,7 +514,7 @@ impl TlvList {
             }
         }
 
-        matched
+        outcome
     }
 
     /// Processes Return Path TLVs per RFC 9503 §5.
@@ -1944,8 +1985,13 @@ mod tests {
         let mut list = list_with_cleared(DestinationNodeAddressTlv::new(addr).to_raw());
 
         let local_addrs = vec![addr];
-        let matched = list.process_destination_node_address(&local_addrs);
-        assert!(matched);
+        let outcome = list.process_destination_node_address(&local_addrs);
+        assert!(outcome.matched_or_absent());
+        assert_eq!(
+            outcome.pinned_source(),
+            Some(addr),
+            "a matched address must be handed to the send path for RFC 9503 §3 pinning"
+        );
         assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
     }
 
@@ -1957,8 +2003,13 @@ mod tests {
         list.push(tlv.to_raw()).unwrap();
 
         let local_addrs = vec!["10.0.0.1".parse().unwrap()];
-        let matched = list.process_destination_node_address(&local_addrs);
-        assert!(!matched);
+        let outcome = list.process_destination_node_address(&local_addrs);
+        assert!(!outcome.matched_or_absent());
+        assert_eq!(
+            outcome.pinned_source(),
+            None,
+            "an unmatched address must not be pinned as the reply source"
+        );
         assert!(list.non_hmac_tlvs()[0].is_unrecognized());
     }
 
