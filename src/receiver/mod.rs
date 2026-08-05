@@ -298,6 +298,17 @@ pub struct ReflectorCounters {
     /// token bucket was empty. Distinguishing this from generic drops lets
     /// operators tell rate-limit pressure from parse / HMAC failures.
     pub packets_rate_limited: AtomicU64,
+    /// Received packets whose Sequence Number had already been seen on that
+    /// session — duplicates or replays
+    /// (draft-ietf-ippm-asymmetrical-pkts-14 §5). Counted whether or not
+    /// `--drop-replayed` acts on them; when it does, they are also included in
+    /// `packets_dropped`.
+    pub packets_replayed: AtomicU64,
+    /// Received packets behind the session's high-water mark but not seen
+    /// before: late or reordered delivery. Ordinary on a real path, tracked
+    /// alongside the replay count so an operator can tell benign reordering
+    /// from an actual duplicate.
+    pub packets_reordered: AtomicU64,
 }
 
 impl ReflectorCounters {
@@ -307,6 +318,8 @@ impl ReflectorCounters {
             packets_reflected: AtomicU64::new(0),
             packets_dropped: AtomicU64::new(0),
             packets_rate_limited: AtomicU64::new(0),
+            packets_replayed: AtomicU64::new(0),
+            packets_reordered: AtomicU64::new(0),
         }
     }
 }
@@ -701,6 +714,61 @@ pub fn cos_unable_fallback_tos(received_dscp: u8) -> u8 {
 #[must_use]
 pub fn should_apply_fallback_tos(attempted: u8, fallback: u8, last: u8) -> bool {
     fallback != attempted && fallback != last
+}
+
+/// Classifies a received packet against its session's replay window and counts
+/// the result (draft-ietf-ippm-asymmetrical-pkts-14 §5).
+///
+/// The Sequence Number is the first four octets of the base packet in both the
+/// authenticated and unauthenticated layouts (RFC 8762 §4.2/§4.3), so no full
+/// parse is needed — this runs before processing, on the bytes as received.
+///
+/// Shared by both backends so detection cannot drift between them. Returns the
+/// verdict; acting on it (`--drop-replayed`) is the caller's decision, because
+/// a duplicate is not proof of an attack: a sender restarted mid-run produces
+/// the same pattern, and dropping its traffic would break an honest
+/// measurement.
+///
+/// Logging stays at debug level deliberately. A replay is attacker-controlled
+/// input, so warning per event would hand a remote peer a log-amplification
+/// lever; the counters (visible over the control plane) are the operator's
+/// signal, and they cannot be flooded.
+pub fn evaluate_replay(
+    session: &crate::session::Session,
+    data: &[u8],
+    counters: &ReflectorCounters,
+) -> crate::session::ReplayVerdict {
+    use crate::session::ReplayVerdict;
+
+    if data.len() < 4 {
+        // Too short to carry a Sequence Number; the base-packet length rules
+        // (RFC 8762 §4.6, `--strict-packets`) deal with it downstream.
+        return ReplayVerdict::New;
+    }
+    let seq = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    let verdict = session.check_replay(seq);
+    match verdict {
+        ReplayVerdict::Replay => {
+            counters
+                .packets_replayed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            log::debug!(
+                "replayed sequence number {seq} on session {}",
+                session.get_id()
+            );
+        }
+        ReplayVerdict::Reordered | ReplayVerdict::OutOfWindow => {
+            counters
+                .packets_reordered
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            log::debug!(
+                "out-of-order sequence number {seq} ({verdict:?}) on session {}",
+                session.get_id()
+            );
+        }
+        ReplayVerdict::New => {}
+    }
+    verdict
 }
 
 /// Sets the U-flag on the Return Path TLV in a serialized STAMP response.
@@ -3959,6 +4027,127 @@ mod tests {
                 "cos_unable_fallback_tos must match ClassOfServiceTlv::reply_wire_tos"
             );
         }
+    }
+
+    #[test]
+    fn test_evaluate_replay_counts_duplicates_and_reorders() {
+        use crate::session::{ReplayVerdict, Session};
+
+        let session = Session::new(1);
+        let counters = ReflectorCounters::new();
+        let packet = |seq: u32| {
+            let mut buf = vec![0u8; 44];
+            buf[0..4].copy_from_slice(&seq.to_be_bytes());
+            buf
+        };
+
+        // In-order traffic is silent.
+        assert_eq!(
+            evaluate_replay(&session, &packet(1), &counters),
+            ReplayVerdict::New
+        );
+        assert_eq!(
+            evaluate_replay(&session, &packet(2), &counters),
+            ReplayVerdict::New
+        );
+        assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.packets_reordered.load(Ordering::Relaxed), 0);
+
+        // A duplicate is counted as a replay.
+        assert_eq!(
+            evaluate_replay(&session, &packet(2), &counters),
+            ReplayVerdict::Replay
+        );
+        assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 1);
+
+        // A late-but-unseen packet is counted separately: reordering is
+        // ordinary and must not be reported as an attack.
+        assert_eq!(
+            evaluate_replay(&session, &packet(1) /* already seen */, &counters),
+            ReplayVerdict::Replay
+        );
+        assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            counters.packets_reordered.load(Ordering::Relaxed),
+            0,
+            "a seen sequence number is a replay, not a reorder"
+        );
+
+        // Jump ahead, then deliver a gap-filler late: unseen and behind the
+        // high-water mark, so it lands on the reorder counter, not the replay
+        // one.
+        assert_eq!(
+            evaluate_replay(&session, &packet(10), &counters),
+            ReplayVerdict::New
+        );
+        assert_eq!(
+            evaluate_replay(&session, &packet(8), &counters),
+            ReplayVerdict::Reordered
+        );
+        assert_eq!(counters.packets_reordered.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counters.packets_replayed.load(Ordering::Relaxed),
+            2,
+            "reordering must not inflate the replay count"
+        );
+
+        // A packet older than the window is counted with the reorders — the
+        // window cannot claim it was seen. Advance far enough first that the
+        // "older than the window" sequence number is still positive.
+        assert_eq!(
+            evaluate_replay(&session, &packet(1000), &counters),
+            ReplayVerdict::New
+        );
+        assert_eq!(
+            evaluate_replay(
+                &session,
+                &packet(1000 - crate::session::REPLAY_WINDOW - 1),
+                &counters
+            ),
+            ReplayVerdict::OutOfWindow
+        );
+        assert_eq!(counters.packets_reordered.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_evaluate_replay_reads_sequence_from_both_layouts() {
+        use crate::session::{ReplayVerdict, Session};
+
+        // The Sequence Number is the first four octets in both the
+        // authenticated (112-byte) and unauthenticated (44-byte) base layouts,
+        // so one extraction serves both.
+        for base_len in [UNAUTH_BASE_SIZE, AUTH_BASE_SIZE] {
+            let session = Session::new(1);
+            let counters = ReflectorCounters::new();
+            let mut buf = vec![0u8; base_len];
+            buf[0..4].copy_from_slice(&99u32.to_be_bytes());
+            assert_eq!(
+                evaluate_replay(&session, &buf, &counters),
+                ReplayVerdict::New
+            );
+            assert_eq!(
+                evaluate_replay(&session, &buf, &counters),
+                ReplayVerdict::Replay,
+                "sequence number must be read identically at base length {base_len}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_evaluate_replay_tolerates_a_runt_packet() {
+        use crate::session::{ReplayVerdict, Session};
+
+        // Shorter than a Sequence Number: nothing to classify, and the
+        // base-length rules handle it downstream. Must not panic.
+        let session = Session::new(1);
+        let counters = ReflectorCounters::new();
+        for len in 0..4usize {
+            assert_eq!(
+                evaluate_replay(&session, &vec![0u8; len], &counters),
+                ReplayVerdict::New
+            );
+        }
+        assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 0);
     }
 
     #[test]

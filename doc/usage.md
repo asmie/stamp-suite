@@ -154,10 +154,31 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
                                    dst-port, ports, src-ip, dst-ip, ips.
                                    Withheld fields are answered as zeroes, so
                                    the reply's size and TLV layout do not change
+      --drop-replayed              Suppress the reply to a packet whose Sequence
+                                   Number was already seen on its session
+                                   (draft-ietf-ippm-asymmetrical-pkts §5).
+                                   Detection and counting are always on; this
+                                   only decides whether a duplicate is answered.
+                                   Off by default — a Session-Sender restarted
+                                   mid-run replays its own numbering, and
+                                   dropping its traffic would break an honest
+                                   measurement
       --strict-packets             Reject short packets instead of zero-filling (RFC 8762 §4.6)
       --require-hmac               Error out at startup if no HMAC key is configured
       --verify-tlv-hmac            Verify HMAC TLV (RFC 8972) on incoming packets
 ```
+
+**Replay detection (draft-ietf-ippm-asymmetrical-pkts §5).** The reflector
+tracks the Sequence Number of every received packet against a 31-entry
+per-session window and classifies it as new, reordered, replayed, or older than
+the window. This runs unconditionally — the draft notes the HMAC TLV is no
+defence here, since a replayed packet carries a valid HMAC. Two counters,
+`packets_replayed` and `packets_reordered`, appear in the control-plane
+`/v1/status` response (reordering is separated out because it is ordinary on a
+real path). Detection never changes what is sent unless `--drop-replayed` is
+set. Per-event logging stays at debug level on purpose: the sequence numbers are
+attacker-controlled, so warning per event would hand a remote peer a
+log-amplification lever.
 
 RFC 8972 §4.2.2 lets a reflector "leave some fields unreported by filling them
 with zeroes" under local policy and requires an implementation to provide

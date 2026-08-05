@@ -8,6 +8,42 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How an incoming Sequence Number compares with the ones already seen on a
+/// session (draft-ietf-ippm-asymmetrical-pkts-14 §5).
+///
+/// The draft's Security Considerations tell a reflector to "use the value of
+/// the Sequence Number field of the received STAMP test packet" to notice
+/// replayed or non-monotonic traffic, noting that the HMAC TLV alone does not
+/// help: a replayed packet carries a perfectly valid HMAC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayVerdict {
+    /// Ahead of every sequence number seen so far (the normal case), or the
+    /// first packet of the session.
+    New,
+    /// Behind the high-water mark but not seen before — a late or reordered
+    /// packet, which is ordinary on a real network and not an attack signal.
+    Reordered,
+    /// Already seen: a duplicate or a replay.
+    Replay,
+    /// So far behind the high-water mark that the window no longer remembers
+    /// whether it was seen. Reported separately rather than guessed at.
+    OutOfWindow,
+}
+
+/// Number of sequence numbers below the high-water mark the replay window
+/// remembers. 31 rather than 32 so the window bitmap and an "initialized"
+/// marker share one `u64` with the high-water mark, keeping the whole check a
+/// single compare-and-swap.
+pub const REPLAY_WINDOW: u32 = 31;
+
+/// Bit 31 of the packed low half: set once the session has seen any packet.
+/// Without it, the all-zero state would be ambiguous between "nothing seen
+/// yet" and "sequence number 0 seen".
+const REPLAY_INITIALIZED: u32 = 1 << 31;
+
+/// Mask of the window bitmap proper (bits 0..=30 → offsets 1..=31).
+const REPLAY_BITMAP_MASK: u32 = REPLAY_INITIALIZED - 1;
+
 /// Represents a STAMP measurement session.
 ///
 /// A session tracks the session identifier, maintains an atomic counter
@@ -26,6 +62,15 @@ pub struct Session {
     last_reflected_seq: AtomicU32,
     /// Timestamp of the last reflected packet (for Follow-Up Telemetry TLV).
     last_reflected_timestamp: AtomicU64,
+    /// Replay-detection window for *received* sequence numbers
+    /// (draft-ietf-ippm-asymmetrical-pkts-14 §5). Distinct from `curr_seq`,
+    /// which is this reflector's own outgoing generator.
+    ///
+    /// Packed so the whole update is one compare-and-swap:
+    /// bits 63..32 hold the highest sequence number seen, bit 31 marks the
+    /// session as initialized, and bits 30..0 are a bitmap where bit `n` means
+    /// "sequence number `high - (n + 1)` has been seen".
+    replay_state: AtomicU64,
 }
 
 impl Session {
@@ -40,6 +85,91 @@ impl Session {
             packets_transmitted: AtomicU32::new(0),
             last_reflected_seq: AtomicU32::new(0),
             last_reflected_timestamp: AtomicU64::new(0),
+            replay_state: AtomicU64::new(0),
+        }
+    }
+
+    /// Classifies an incoming Sequence Number against the ones this session has
+    /// already seen, and records it (draft-ietf-ippm-asymmetrical-pkts-14 §5).
+    ///
+    /// Detection only — the caller decides what to do with the verdict. That
+    /// split is deliberate: reordering is normal on a real path, and even a
+    /// genuine duplicate is not proof of an attack (a sender restarted mid-run
+    /// looks identical), so silently dropping traffic here would break honest
+    /// measurements. See `--drop-replayed` for the opt-in mitigation.
+    ///
+    /// Sequence numbers are compared with wrapping arithmetic: a difference
+    /// below 2^31 counts as ahead, at or above as behind, so a session that
+    /// runs past `u32::MAX` keeps working.
+    ///
+    /// Concurrency: the compare-and-swap retries on contention, so no update is
+    /// lost. Two packets racing on a session's *first* packet may both be
+    /// reported `New` with either one becoming the high-water mark — harmless,
+    /// since neither is a replay of the other.
+    pub fn check_replay(&self, seq: u32) -> ReplayVerdict {
+        loop {
+            let packed = self.replay_state.load(Ordering::Relaxed);
+            let low = packed as u32;
+
+            let (verdict, next) = if low & REPLAY_INITIALIZED == 0 {
+                // First packet on this session.
+                (
+                    ReplayVerdict::New,
+                    ((seq as u64) << 32) | u64::from(REPLAY_INITIALIZED),
+                )
+            } else {
+                let high = (packed >> 32) as u32;
+                let bitmap = low & REPLAY_BITMAP_MASK;
+
+                if seq == high {
+                    // The high-water mark itself, seen a second time.
+                    return ReplayVerdict::Replay;
+                }
+
+                let ahead = seq.wrapping_sub(high);
+                if ahead < 1 << 31 {
+                    // Advancing: every remembered offset moves further back by
+                    // `ahead`, and the old high-water mark becomes offset
+                    // `ahead` (bit `ahead - 1`) if the window still reaches it.
+                    let shifted = if ahead >= 32 {
+                        0
+                    } else {
+                        (bitmap << ahead) & REPLAY_BITMAP_MASK
+                    };
+                    let old_high_bit = if ahead <= REPLAY_WINDOW {
+                        1u32 << (ahead - 1)
+                    } else {
+                        0
+                    };
+                    let next_low = REPLAY_INITIALIZED | shifted | old_high_bit;
+                    (
+                        ReplayVerdict::New,
+                        ((seq as u64) << 32) | u64::from(next_low),
+                    )
+                } else {
+                    let behind = high.wrapping_sub(seq);
+                    if behind > REPLAY_WINDOW {
+                        return ReplayVerdict::OutOfWindow;
+                    }
+                    let bit = 1u32 << (behind - 1);
+                    if bitmap & bit != 0 {
+                        return ReplayVerdict::Replay;
+                    }
+                    let next_low = REPLAY_INITIALIZED | bitmap | bit;
+                    (
+                        ReplayVerdict::Reordered,
+                        ((high as u64) << 32) | u64::from(next_low),
+                    )
+                }
+            };
+
+            if self
+                .replay_state
+                .compare_exchange_weak(packed, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return verdict;
+            }
         }
     }
 
@@ -417,6 +547,154 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::thread;
+
+    // -----------------------------------------------------------------------
+    // Replay detection (draft-ietf-ippm-asymmetrical-pkts-14 §5)
+
+    #[test]
+    fn test_replay_first_packet_is_new() {
+        let s = Session::new(1);
+        assert_eq!(s.check_replay(0), ReplayVerdict::New);
+
+        // Sequence number 0 must be *remembered*, which is why the packed
+        // state carries an explicit initialized marker: an all-zero state
+        // would otherwise look like "nothing seen yet".
+        assert_eq!(s.check_replay(0), ReplayVerdict::Replay);
+    }
+
+    #[test]
+    fn test_replay_monotonic_run_is_all_new() {
+        let s = Session::new(1);
+        for seq in 0..1000u32 {
+            assert_eq!(
+                s.check_replay(seq),
+                ReplayVerdict::New,
+                "in-order seq {seq} must be New"
+            );
+        }
+    }
+
+    #[test]
+    fn test_replay_immediate_duplicate_detected() {
+        let s = Session::new(1);
+        assert_eq!(s.check_replay(10), ReplayVerdict::New);
+        assert_eq!(s.check_replay(10), ReplayVerdict::Replay);
+        // And still detected after the window has moved on a little.
+        assert_eq!(s.check_replay(11), ReplayVerdict::New);
+        assert_eq!(s.check_replay(10), ReplayVerdict::Replay);
+    }
+
+    #[test]
+    fn test_replay_reordered_then_duplicate() {
+        let s = Session::new(1);
+        assert_eq!(s.check_replay(100), ReplayVerdict::New);
+        // 98 is behind the high-water mark and unseen: late, not a replay.
+        assert_eq!(s.check_replay(98), ReplayVerdict::Reordered);
+        // The same late packet again *is* a replay.
+        assert_eq!(s.check_replay(98), ReplayVerdict::Replay);
+        // A different late one is still just reordered.
+        assert_eq!(s.check_replay(99), ReplayVerdict::Reordered);
+    }
+
+    #[test]
+    fn test_replay_window_edge_and_beyond() {
+        let s = Session::new(1);
+        assert_eq!(s.check_replay(1000), ReplayVerdict::New);
+
+        // The furthest offset the window remembers.
+        let edge = 1000 - REPLAY_WINDOW;
+        assert_eq!(s.check_replay(edge), ReplayVerdict::Reordered);
+        assert_eq!(s.check_replay(edge), ReplayVerdict::Replay);
+
+        // One past the window: honestly reported as unknown rather than
+        // guessed at in either direction.
+        assert_eq!(s.check_replay(edge - 1), ReplayVerdict::OutOfWindow);
+        assert_eq!(s.check_replay(edge - 1), ReplayVerdict::OutOfWindow);
+    }
+
+    #[test]
+    fn test_replay_large_forward_jump_clears_the_window() {
+        let s = Session::new(1);
+        assert_eq!(s.check_replay(5), ReplayVerdict::New);
+        assert_eq!(s.check_replay(4), ReplayVerdict::Reordered);
+        // Jumping far ahead pushes every remembered offset out of range.
+        assert_eq!(s.check_replay(10_000), ReplayVerdict::New);
+        // 4 and 5 are now ancient history, not replays.
+        assert_eq!(s.check_replay(4), ReplayVerdict::OutOfWindow);
+        assert_eq!(s.check_replay(9_999), ReplayVerdict::Reordered);
+    }
+
+    #[test]
+    fn test_replay_advance_preserves_remembered_offsets() {
+        let s = Session::new(1);
+        assert_eq!(s.check_replay(50), ReplayVerdict::New);
+        assert_eq!(s.check_replay(48), ReplayVerdict::Reordered);
+        // Advance by 3: offset of 48 becomes 5, still inside the window.
+        assert_eq!(s.check_replay(53), ReplayVerdict::New);
+        assert_eq!(
+            s.check_replay(48),
+            ReplayVerdict::Replay,
+            "a remembered offset must survive the window shifting"
+        );
+        assert_eq!(
+            s.check_replay(50),
+            ReplayVerdict::Replay,
+            "the previous high-water mark must be remembered after advancing"
+        );
+    }
+
+    #[test]
+    fn test_replay_survives_sequence_wraparound() {
+        let s = Session::new(1);
+        let near_max = u32::MAX - 2;
+        assert_eq!(s.check_replay(near_max), ReplayVerdict::New);
+        assert_eq!(s.check_replay(u32::MAX - 1), ReplayVerdict::New);
+        assert_eq!(s.check_replay(u32::MAX), ReplayVerdict::New);
+        // Wrapping past the end keeps advancing, not looking like a 4-billion
+        // step backwards.
+        assert_eq!(s.check_replay(0), ReplayVerdict::New);
+        assert_eq!(s.check_replay(1), ReplayVerdict::New);
+        // And the pre-wrap values are still remembered as seen.
+        assert_eq!(s.check_replay(u32::MAX), ReplayVerdict::Replay);
+        assert_eq!(s.check_replay(near_max), ReplayVerdict::Replay);
+    }
+
+    #[test]
+    fn test_replay_is_per_session_not_global() {
+        let a = Session::new(1);
+        let b = Session::new(2);
+        assert_eq!(a.check_replay(7), ReplayVerdict::New);
+        assert_eq!(
+            b.check_replay(7),
+            ReplayVerdict::New,
+            "each session tracks its own sender's numbering"
+        );
+    }
+
+    #[test]
+    fn test_replay_concurrent_updates_lose_nothing() {
+        // Every distinct sequence number is offered exactly once from several
+        // threads: none may be reported as a replay, because none is one.
+        let s = Arc::new(Session::new(1));
+        let mut handles = Vec::new();
+        for t in 0..4u32 {
+            let s = Arc::clone(&s);
+            handles.push(thread::spawn(move || {
+                let mut replays = 0;
+                for i in 0..250u32 {
+                    if s.check_replay(t * 250 + i) == ReplayVerdict::Replay {
+                        replays += 1;
+                    }
+                }
+                replays
+            }));
+        }
+        let total: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        assert_eq!(
+            total, 0,
+            "no distinct sequence number may be called a replay"
+        );
+    }
 
     #[test]
     fn test_expire_session() {

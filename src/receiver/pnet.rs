@@ -82,6 +82,9 @@ struct CaptureConfig {
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     /// RFC 8972 §4.2.2 Location field-disclosure policy.
     location_disclosure: crate::tlv::LocationDisclosure,
+    /// Suppress the reply to a replayed Sequence Number
+    /// (draft-ietf-ippm-asymmetrical-pkts-14 §5, `--drop-replayed`).
+    drop_replayed: bool,
     local_addresses: Vec<IpAddr>,
     /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
     /// Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
@@ -300,6 +303,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         // RFC 8972 §4.2.2 Location field-disclosure policy; `validate()`
         // already rejected a bad list at startup.
         location_disclosure: conf.location_disclosure().unwrap_or_default(),
+        drop_replayed: conf.drop_replayed,
         local_macs,
         reflector_member_link_id: conf.reflector_member_link_id,
         return_path_allow_alternate: conf.return_path_allow_alternate,
@@ -797,6 +801,19 @@ fn handle_stamp_packet(
     // Always tracked per-client, independent of --stateful-reflector.
     let counter_session = config.session_manager.get_or_create_session(pkt.src);
     counter_session.record_received();
+
+    // draft-ietf-ippm-asymmetrical-pkts-14 §5: classify the received Sequence
+    // Number against this session's replay window. Detection is unconditional
+    // and counted; `--drop-replayed` decides whether a duplicate is answered.
+    let replay_verdict = super::evaluate_replay(&counter_session, data, &config.counters);
+    if config.drop_replayed && replay_verdict == crate::session::ReplayVerdict::Replay {
+        config
+            .counters
+            .packets_dropped
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        return;
+    }
+
     let reflector_rx_count = Some(counter_session.get_received_count());
     let reflector_tx_count = Some(counter_session.get_transmitted_count());
     let last_reflection = Some(counter_session.get_last_reflection());

@@ -278,6 +278,19 @@ pub struct Configuration {
     #[clap(long, default_value_t = 300)]
     pub session_timeout: u64,
 
+    /// Suppress the reply to a packet whose Sequence Number was already seen
+    /// on its session (draft-ietf-ippm-asymmetrical-pkts-14 §5).
+    ///
+    /// Detection is always on and counted; this flag makes the reflector act on
+    /// it. Off by default because a duplicate is not proof of an attack — a
+    /// Session-Sender restarted mid-run replays its own numbering, and dropping
+    /// its traffic would break an honest measurement. Turn it on where replayed
+    /// Type-12 requests are a real amplification concern.
+    ///
+    /// Reflector-side only.
+    #[clap(long)]
+    pub drop_replayed: bool,
+
     /// Which Location TLV fields the reflector may report (RFC 8972 §4.2.2).
     ///
     /// §4.2.2 lets a reflector "leave some fields unreported by filling them
@@ -1290,6 +1303,7 @@ impl Configuration {
         merge!(stateful_reflector);
         merge!(session_timeout);
         merge!(location_disclose);
+        merge!(drop_replayed);
         merge!(tlv_mode);
         merge!(verify_tlv_hmac);
         merge_opt!(ssid);
@@ -1394,6 +1408,7 @@ pub struct FileConfiguration {
     pub stateful_reflector: Option<bool>,
     pub session_timeout: Option<u64>,
     pub location_disclose: Option<String>,
+    pub drop_replayed: Option<bool>,
     pub tlv_mode: Option<TlvHandlingMode>,
     pub verify_tlv_hmac: Option<bool>,
     pub ssid: Option<u16>,
@@ -3466,6 +3481,25 @@ mod tests {
         let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
             .expect_err("conflicting return-path options must fail");
         assert!(err.to_string().contains("return_srv6_sids"));
+    }
+
+    #[test]
+    fn test_drop_replayed_defaults_off_and_merges_from_file() {
+        let conf = load_from_args(&["test"]).unwrap();
+        assert!(
+            !conf.drop_replayed,
+            "acting on a duplicate must be opt-in: a restarted sender replays \
+             its own numbering and dropping it would break honest measurement"
+        );
+
+        let conf = load_from_args(&["test", "--drop-replayed"]).unwrap();
+        assert!(conf.drop_replayed);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "drop_replayed = true\n").unwrap();
+        let conf = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap();
+        assert!(conf.drop_replayed);
     }
 
     #[test]
