@@ -17,6 +17,9 @@
 //! reply sent from the kernel's choice of source is still a correct STAMP
 //! reply; the SHOULD is about which of several correct answers is preferred.
 
+// Only the `send_from` signatures need these, and that function exists on Unix
+// only — see its Windows note below.
+#[cfg(unix)]
 use std::net::{IpAddr, SocketAddr};
 
 /// Whether this build can pin a reply's source address.
@@ -145,9 +148,14 @@ pub fn send_from(
 }
 
 /// Source pinning is Linux-only; callers gate on [`supported`] and fall back to
-/// an ordinary send. This stub exists so the Unix `nix` backend and the `pnet`
-/// backend both compile everywhere.
-#[cfg(not(target_os = "linux"))]
+/// an ordinary send. This stub exists so the other Unix platforms still compile.
+///
+/// Gated to Unix, not merely to "not Linux": `std::os::fd::RawFd` does not exist
+/// on Windows, so a `not(target_os = "linux")` stub fails to compile there. On
+/// Windows this function is absent entirely and callers reach it only from
+/// inside their own `cfg(unix)` blocks — the same arrangement
+/// [`crate::srv6::send_with_srh`] uses.
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn send_from(
     _fd: std::os::fd::RawFd,
     _payload: &[u8],
