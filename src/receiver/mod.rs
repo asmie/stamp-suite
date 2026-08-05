@@ -507,8 +507,10 @@ impl RuntimeCaps {
             reflected_control_max_count: std::sync::atomic::AtomicU16::new(
                 conf.reflected_control_max_count,
             ),
+            // Live egress MTU, when it can be read, bounds this alongside the
+            // configured value (draft-ietf-ippm-asymmetrical-pkts-14 §3).
             reflected_control_max_size: std::sync::atomic::AtomicU16::new(
-                conf.reflected_control_max_size,
+                effective_reflected_control_max_size(conf),
             ),
             reflected_control_min_interval_ns: AtomicU32::new(
                 conf.reflected_control_min_interval_ns,
@@ -714,6 +716,128 @@ pub fn cos_unable_fallback_tos(received_dscp: u8) -> u8 {
 #[must_use]
 pub fn should_apply_fallback_tos(attempted: u8, fallback: u8, last: u8) -> bool {
     fallback != attempted && fallback != last
+}
+
+/// Reads an interface's MTU with `ioctl(SIOCGIFMTU)`.
+///
+/// The reflector cannot use the sender's `getsockopt(IP_MTU)` route lookup:
+/// that only answers on a *connected* socket, and a reflector's socket is bound
+/// to a local address and replies to arbitrary peers. Querying the egress
+/// interface by name is the equivalent that works for a bound socket.
+///
+/// A throwaway UDP socket supplies the descriptor — `SIOCGIFMTU` only needs
+/// *some* socket of the right family, not the reflector's own.
+///
+/// Returns `None` on any failure (unknown interface, permission, non-Linux), so
+/// callers fall back to their configured value rather than losing the cap.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn interface_mtu(iface: &str) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+
+    // `::nix` — inside this module, a bare `nix` would resolve to the sibling
+    // `receiver::nix` backend module.
+    use ::nix::libc;
+
+    if iface.is_empty() || iface.len() >= libc::IFNAMSIZ {
+        return None;
+    }
+    let probe = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+
+    // SAFETY: `ifreq` is a plain C struct with no invalid bit patterns; an
+    // all-zero value is a valid "empty request" before the name is filled in.
+    let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (dst, byte) in req.ifr_name.iter_mut().zip(iface.as_bytes()) {
+        *dst = *byte as libc::c_char;
+    }
+
+    // SAFETY: `fd` is an open socket owned for the call's duration and `req` is
+    // a valid, correctly-sized `ifreq` the kernel writes the MTU into.
+    let rc = unsafe { libc::ioctl(probe.as_raw_fd(), libc::SIOCGIFMTU, &mut req) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: SIOCGIFMTU populates the `ifru_mtu` arm of the union.
+    let mtu = unsafe { req.ifr_ifru.ifru_mtu };
+    (mtu > 0).then_some(mtu as u32)
+}
+
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn interface_mtu(_iface: &str) -> Option<u32> {
+    None
+}
+
+/// Largest STAMP payload (UDP payload) that fits in `mtu` without fragmenting.
+///
+/// `--reflected-control-max-size` bounds the *STAMP packet*, while an MTU bounds
+/// the whole IP datagram, so the IP and UDP headers have to come off before the
+/// two are comparable.
+///
+/// Floored at [`AUTH_BASE_SIZE`]: a cap below a reply's own mandatory base would
+/// be unsatisfiable, and reporting the floor keeps the reply-shaping arithmetic
+/// meaningful instead of collapsing to zero on an unusably small MTU.
+#[must_use]
+pub fn mtu_payload_cap(mtu: u32, is_ipv6: bool) -> u16 {
+    use crate::tlv::{IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE};
+    const UDP_HEADER: u32 = 8;
+
+    let ip_hdr = if is_ipv6 {
+        IPV6_FIXED_HEADER_SIZE as u32
+    } else {
+        IPV4_FIXED_HEADER_SIZE as u32
+    };
+    let payload = mtu.saturating_sub(ip_hdr).saturating_sub(UDP_HEADER);
+    let clamped = payload.min(u16::MAX as u32) as u16;
+    clamped.max(AUTH_BASE_SIZE as u16)
+}
+
+/// Resolves the reply-size cap the reflector should actually enforce
+/// (draft-ietf-ippm-asymmetrical-pkts-14 §3).
+///
+/// `--reflected-control-max-size` stands in for the egress MTU, and the draft's
+/// MTU-exceeded behaviour is only correct insofar as it matches reality. This
+/// takes the **smaller** of the configured value and the live interface MTU's
+/// payload capacity, so:
+///
+/// - an operator who left the default (1500) on a 1500-byte link no longer
+///   invites a 1528-byte datagram — the STAMP payload cap becomes 1472 and the
+///   draft's C-flag/MTU path fires where it genuinely should;
+/// - an operator who deliberately configured something smaller keeps it;
+/// - a jumbo link is not silently capped at a stale 1500 if the operator raised
+///   the flag to match.
+///
+/// Best-effort by design (per this project's convention for anything that
+/// depends on the platform): a wildcard bind has no single egress interface, and
+/// a failed or unavailable query leaves the configured value untouched.
+#[must_use]
+pub fn effective_reflected_control_max_size(conf: &Configuration) -> u16 {
+    let configured = conf.reflected_control_max_size;
+    let Some(iface) = crate::hwtstamp::interface_for_addr(conf.local_addr) else {
+        log::debug!(
+            "egress MTU not queried (no single interface for {}); using              --reflected-control-max-size {configured}",
+            conf.local_addr
+        );
+        return configured;
+    };
+    let Some(mtu) = interface_mtu(&iface) else {
+        log::debug!(
+            "egress MTU unavailable on {iface}; using              --reflected-control-max-size {configured}"
+        );
+        return configured;
+    };
+    let live = mtu_payload_cap(mtu, conf.local_addr.is_ipv6());
+    let effective = configured.min(live);
+    if effective != configured {
+        log::info!(
+            "reply-size cap reduced from {configured} to {effective} bytes: {iface}              MTU is {mtu}, leaving {live} bytes of STAMP payload              (draft-ietf-ippm-asymmetrical-pkts-14 §3)"
+        );
+    } else {
+        log::debug!(
+            "egress MTU on {iface} is {mtu} ({live} bytes of payload);              --reflected-control-max-size {configured} is the binding cap"
+        );
+    }
+    effective
 }
 
 /// Classifies a received packet against its session's replay window and counts
@@ -4025,6 +4149,81 @@ mod tests {
             assert_eq!(
                 fallback, expected,
                 "cos_unable_fallback_tos must match ClassOfServiceTlv::reply_wire_tos"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mtu_payload_cap_subtracts_ip_and_udp_headers() {
+        // 1500-byte Ethernet MTU: 20 (IPv4) + 8 (UDP) of headers leaves 1472.
+        // This is the case that matters — the old default cap of 1500 would
+        // have built a 1528-byte datagram on exactly this link.
+        assert_eq!(mtu_payload_cap(1500, false), 1472);
+        // IPv6's fixed header is 40 bytes.
+        assert_eq!(mtu_payload_cap(1500, true), 1452);
+        // The IPv6 minimum link MTU.
+        assert_eq!(mtu_payload_cap(1280, true), 1232);
+    }
+
+    #[test]
+    fn test_mtu_payload_cap_floors_at_the_auth_base_size() {
+        // An unusably small MTU must not produce a cap below a reply's own
+        // mandatory base, which would make the reply-shaping arithmetic
+        // meaningless rather than merely tight.
+        assert_eq!(mtu_payload_cap(0, false), AUTH_BASE_SIZE as u16);
+        assert_eq!(mtu_payload_cap(68, false), AUTH_BASE_SIZE as u16);
+        assert_eq!(mtu_payload_cap(1, true), AUTH_BASE_SIZE as u16);
+    }
+
+    #[test]
+    fn test_mtu_payload_cap_clamps_a_jumbo_mtu_to_u16() {
+        // Loopback's 65536 MTU exceeds what the u16 cap field can hold.
+        let cap = mtu_payload_cap(65_536, false);
+        assert!(cap > 60_000, "a jumbo MTU must not wrap: got {cap}");
+    }
+
+    #[test]
+    fn test_interface_mtu_rejects_bad_interface_names() {
+        // Never panics, and an unknown or unusable name yields None so the
+        // caller keeps its configured cap.
+        assert_eq!(interface_mtu(""), None);
+        assert_eq!(interface_mtu("definitely-not-an-interface"), None);
+        assert_eq!(interface_mtu(&"x".repeat(64)), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_interface_mtu_reads_loopback() {
+        // Loopback always exists on Linux. Tolerant of a sandbox that refuses
+        // the socket or the ioctl — the point is that a success is sane, not
+        // that the environment cooperates.
+        if let Some(mtu) = interface_mtu("lo") {
+            assert!(mtu >= 1500, "loopback MTU looks wrong: {mtu}");
+        }
+    }
+
+    #[test]
+    fn test_effective_max_size_keeps_configured_value_on_wildcard_bind() {
+        // A wildcard bind has no single egress interface, so there is nothing
+        // to query and the configured cap must survive untouched.
+        let mut conf = <Configuration as clap::Parser>::parse_from(["test"]);
+        conf.local_addr = "0.0.0.0".parse().unwrap();
+        conf.reflected_control_max_size = 1500;
+        assert_eq!(effective_reflected_control_max_size(&conf), 1500);
+    }
+
+    #[test]
+    fn test_effective_max_size_never_exceeds_the_configured_cap() {
+        // Whatever the live MTU turns out to be in this environment, the
+        // operator's value is an upper bound: the query may only tighten it.
+        let mut conf = <Configuration as clap::Parser>::parse_from(["test"]);
+        conf.local_addr = "127.0.0.1".parse().unwrap();
+        for configured in [128u16, 576, 1500, 9000] {
+            conf.reflected_control_max_size = configured;
+            let effective = effective_reflected_control_max_size(&conf);
+            assert!(
+                effective <= configured,
+                "live MTU must only tighten the cap: {effective} > {configured}"
             );
         }
     }
