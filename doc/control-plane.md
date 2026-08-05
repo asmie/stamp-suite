@@ -96,7 +96,7 @@ segments; a JSON body parses as a plain `SocketAddr`.
 
 ```json
 {
-  "version": "0.9.0",
+  "version": "1.0.0",
   "uptime_seconds": 12345,
   "draining": false,
   "sessions": 17,

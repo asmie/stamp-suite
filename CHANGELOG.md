@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-05
+
+First stable release. Everything below shipped as 1.0.0, including the
+post-review closeout pass of 2026-08-04/05, which closed the last fifteen
+non-Compliant conformance rows. The compliance statement in
+`doc/conformance/README.md` records 368 audited clauses at 320 Compliant /
+0 Partial / 3 Gap, where all three remaining Gaps and three Excluded rows are
+documented, deliberate exclusions.
+
+### Added
+
+- **`--location-disclose <FIELDS>`** — reflector control over which Location TLV
+  fields are reported (RFC 8972 §4.2.2). A withheld field is answered as zeroes,
+  so the reply's size and TLV structure do not change; a withheld IP request
+  keeps its generic sub-TLV type so the address family is not disclosed either.
+- **`--allowed-dscp`, `--allowed-ecn`, `--allowed-dscp-for PREFIX/LEN=SPEC`** —
+  the CoS admission policy RFC 8972 §4.4/§6 and cos-ecn-01 §3.2 ask for,
+  separating *permitted* (operator policy) from *capable* (what the socket will
+  do). A refused DSCP1 reports RPD=0b01 and keeps the received DSCP; a refused
+  EC1 forces Not-ECT and reports RPE=0b10.
+- **`--on-zero-ssid continue|stop`** — the sender control RFC 8972 §3 requires
+  for a reflector that returns a zeroed SSID. Inert unless a non-zero `--ssid`
+  was configured.
+- **Replay detection** (asymmetrical-pkts §5) — per-session tracking of received
+  Sequence Numbers, with `packets_replayed` and `packets_reordered` on the
+  control plane's `/v1/status`. Detection is unconditional; acting on it is the
+  opt-in `--drop-replayed`.
+- **Control-plane TLS** — `--control-tls-cert` / `--control-tls-key` serve the
+  API over HTTPS. TLS additionally requires `--control-token-file`.
+- **Live egress-MTU query (reflector)** — the reply-size cap is now the smaller
+  of `--reflected-control-max-size` and the egress interface's MTU.
+- **Reply source-address pinning** — a matched Destination Node Address is used
+  as the reply's IP source address (RFC 9503 §3), on both backends.
+- **`--extra-padding <BYTES>`** — an Extra Padding TLV independent of `--ber`.
+- **`--ber-omit-burst`** — omit the Type-242 TLV, whose Experimental-range
+  codepoint collides with another implementation's incompatible Heartbeat TLV.
+- **`--tlv-hmac auto|on|off`** — control HMAC TLV origination separately from
+  holding a key.
+- **`scripts/check_conformance_citations.py`** — checks the conformance
+  matrices' `file:line` citations and exits non-zero on drift.
+
+### Changed
+
+- **Reply-size cap is smaller by default.** With `--reflected-control-max-size`
+  at its 1500 default on a 1500-byte link, the effective STAMP payload cap is
+  now 1472 (1452 for IPv6) rather than 1500. The flag bounds the STAMP payload
+  while an MTU bounds the whole datagram, so the previous default permitted a
+  1528-byte datagram; the draft's MTU-exceeded C-flag path now fires where it
+  belongs. Raise the flag for a jumbo link.
+- **Timestamp Information TLV**: all four value octets are filled from the
+  reflector's own clocks, with the ingress (T2) and egress (T3) acquisition
+  methods reported separately instead of merged into one conservative value.
+- **An Extra Padding TLV following the HMAC TLV is accepted** as RFC 8972 §4.8
+  explicitly permits, instead of being marked malformed.
+- **A misplaced HMAC TLV** now runs §4.8's verification-failure procedure (the
+  I flag on every TLV), not only the parser's M flag on the offending TLV.
+- `TlvList`'s `PartialEq`/`Eq` are hand-written so parse provenance does not
+  affect equality.
+
+### Fixed
+
+- **Panic in packet processing.** `l2_group_matches_any_local` validated only
+  the mask length before indexing both mask and group, so an Address Group
+  sub-TLV whose group was shorter than six octets panicked. Unreachable from the
+  current parser, but a panic there is a reflector-wide denial of service.
+- **Type-12 length overshoot.** A keyed reflector appends its own HMAC TLV after
+  the length-padding decision, so a request from a peer that sends no HMAC TLV
+  received a reply exactly 20 octets over the length it asked for. The existing
+  test asserted the reply was *at least* the requested length, which the
+  overshoot satisfied; it now asserts equality.
+- **Missing control TLV on retransmission.** With the AIMD congestion response
+  active, an Access Report wait-phase retransmission carried no Reflected Test
+  Packet Control TLV at all, because that path rebuilt its TLV set from the list
+  the main loop deliberately omits it from.
+- **HMAC coverage arithmetic.** The covered prefix was derived from the sum of
+  non-HMAC TLV sizes, which is the true wire prefix only while the HMAC TLV is
+  last — the blocker that had to be fixed before trailing Extra Padding could be
+  accepted.
+- **Redundant syscall.** The cos-ecn-01 zero-ECN fallback re-issued the exact
+  TOS byte the kernel had just refused when EC1 was already 0 and DSCP1 matched
+  the received DSCP.
+- **18 incorrect RFC citations.** U/M/I flag semantics were attributed to
+  RFC 8972 §4.4.1, which does not exist; they are defined in §4.
+- Documentation corrections: `TlvList::clear_reflector_flags` claimed to
+  preserve the C bit while the method it delegates to clears it deliberately;
+  `--hmac-key` called 32+ hex chars "recommended" when shorter keys are rejected
+  outright; the reflected-header module doc described an earlier draft round's
+  positional matching.
+- The release workflow's `package` job no longer inherits `contents: write`.
+
+### Security
+
+- Replay/duplicate detection for received Sequence Numbers, which the draft
+  notes the HMAC TLV does not defend against, since a replayed packet carries a
+  valid HMAC. Per-event logging stays at debug level deliberately: the sequence
+  numbers are attacker-controlled, so warning per event would be a
+  log-amplification lever.
+- A misplaced HMAC TLV is treated as the integrity condition §4.8 defines.
+- Control-plane TLS, with a bearer token mandatory whenever TLS is enabled — an
+  unauthenticated key-management and shutdown endpoint should not be reachable
+  encrypted or not.
+- The CoS admission policy stops treating a successful `setsockopt` as evidence
+  that a codepoint is permitted in the operator's domain.
+- The Address Group panic above was reachable only from a malformed sub-TLV, but
+  is fixed as a denial-of-service class defect.
+
 ### Security
 
 - **Reflection/amplification hardening (open mode).** The reflector no longer

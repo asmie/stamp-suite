@@ -19,13 +19,13 @@
         packages = {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "stamp-suite";
-            version = "0.9.0";
+            version = "1.0.0";
 
             src = self;
 
             # Regenerate after any Cargo.lock change: set to pkgs.lib.fakeHash,
             # run `nix build .#default`, and copy the `got:` hash from the error.
-            cargoHash = "sha256-S18r1hEme2m3fW91CevGsu0B56qg9dPFY9et07AxKDk=";
+            cargoHash = "sha256-lC9VmTgT+JV2RnTvdWD0BVAS4HIAu1XXXHIjIiayD94=";
 
             buildFeatures = allFeatures;
             # Honour --all-features for the cargo test phase too so the
@@ -50,11 +50,11 @@
 
           clippy = pkgs.rustPlatform.buildRustPackage {
             pname = "stamp-suite-clippy";
-            version = "0.9.0";
+            version = "1.0.0";
             src = self;
             # Regenerate after any Cargo.lock change: set to pkgs.lib.fakeHash,
             # run `nix build .#default`, and copy the `got:` hash from the error.
-            cargoHash = "sha256-S18r1hEme2m3fW91CevGsu0B56qg9dPFY9et07AxKDk=";
+            cargoHash = "sha256-lC9VmTgT+JV2RnTvdWD0BVAS4HIAu1XXXHIjIiayD94=";
             buildFeatures = allFeatures;
             nativeBuildInputs = [ pkgs.clippy ];
             buildPhase = ''
