@@ -61,6 +61,9 @@ pub mod rate_control;
 /// Session Reflector implementations.
 #[doc(hidden)]
 pub mod receiver;
+
+#[doc(hidden)]
+pub mod reply_source;
 /// Session Sender implementation.
 #[doc(hidden)]
 pub mod sender;

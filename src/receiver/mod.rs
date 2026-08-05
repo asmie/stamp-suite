@@ -1248,6 +1248,11 @@ pub struct StampResponse {
     /// (draft-ietf-ippm-asymmetrical-pkts §3). `None` when the incoming
     /// packet had no such TLV.
     pub reflected_control: Option<ReflectedControlBehavior>,
+    /// IP source address the reply SHOULD be sent from, when a Destination
+    /// Node Address TLV matched one of ours (RFC 9503 §3). `None` leaves source
+    /// selection to the OS, which is also the fallback when pinning is
+    /// unsupported or fails.
+    pub reply_source: Option<std::net::IpAddr>,
 }
 
 /// Context for processing STAMP packets, shared between backends.
@@ -1639,6 +1644,9 @@ fn process_auth_packet(
             cos_request: None,
             return_path_action: ReturnPathAction::Normal,
             reflected_control: None,
+            // The symmetric no-TLV path never parses a Destination Node
+            // Address TLV, so there is nothing to pin.
+            reply_source: None,
         })
     }
 }
@@ -1695,6 +1703,7 @@ fn process_unauth_packet(
                         reflector_seq,
                     ),
                     cos_request: None,
+                    reply_source: None,
                     return_path_action: ReturnPathAction::Normal,
                     reflected_control: None,
                 })
@@ -1852,6 +1861,9 @@ struct SemanticResult {
     cos_request: Option<(u8, u8)>,
     return_path_action: ReturnPathAction,
     reflected_control: Option<ReflectedControlBehavior>,
+    /// RFC 9503 §3: the matched Destination Node Address, to be pinned as the
+    /// reply's IP source address.
+    reply_source: Option<std::net::IpAddr>,
 }
 
 /// Applies semantic TLV processing on the reflector side (RFC 8972 §4.8).
@@ -1976,7 +1988,9 @@ fn apply_semantic_tlv_processing(
     tlvs.discard_invalid_access_report_tlvs();
 
     // Process Destination Node Address TLV (RFC 9503 §4)
-    tlvs.process_destination_node_address(ctx.local_addresses);
+    let reply_source = tlvs
+        .process_destination_node_address(ctx.local_addresses)
+        .pinned_source();
 
     // Process Micro-session ID TLV (RFC 9534 §3.2)
     if let Some(refl_id) = ctx.reflector_member_link_id {
@@ -2247,6 +2261,7 @@ fn apply_semantic_tlv_processing(
         cos_request,
         return_path_action,
         reflected_control,
+        reply_source,
     })
 }
 
@@ -2295,6 +2310,7 @@ pub fn assemble_unauth_answer_with_tlvs(
     let mut cos_request: Option<(u8, u8)> = None;
     let mut return_path_action = ReturnPathAction::Normal;
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
+    let mut reply_source: Option<std::net::IpAddr> = None;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -2353,6 +2369,7 @@ pub fn assemble_unauth_answer_with_tlvs(
                             cos_request = result.cos_request;
                             return_path_action = result.return_path_action;
                             reflected_control = result.reflected_control;
+                            reply_source = result.reply_source;
                         }
                         None => {
                             return StampResponse {
@@ -2360,6 +2377,7 @@ pub fn assemble_unauth_answer_with_tlvs(
                                 cos_request: None,
                                 return_path_action: ReturnPathAction::SuppressReply,
                                 reflected_control: None,
+                                reply_source: None,
                             };
                         }
                     }
@@ -2395,6 +2413,7 @@ pub fn assemble_unauth_answer_with_tlvs(
         cos_request,
         return_path_action,
         reflected_control,
+        reply_source,
     }
 }
 
@@ -2431,6 +2450,7 @@ pub fn assemble_auth_answer_with_tlvs(
     let mut cos_request: Option<(u8, u8)> = None;
     let mut return_path_action = ReturnPathAction::Normal;
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
+    let mut reply_source: Option<std::net::IpAddr> = None;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -2494,6 +2514,7 @@ pub fn assemble_auth_answer_with_tlvs(
                             cos_request = result.cos_request;
                             return_path_action = result.return_path_action;
                             reflected_control = result.reflected_control;
+                            reply_source = result.reply_source;
                         }
                         None => {
                             return StampResponse {
@@ -2501,6 +2522,7 @@ pub fn assemble_auth_answer_with_tlvs(
                                 cos_request: None,
                                 return_path_action: ReturnPathAction::SuppressReply,
                                 reflected_control: None,
+                                reply_source: None,
                             };
                         }
                     }
@@ -2528,6 +2550,7 @@ pub fn assemble_auth_answer_with_tlvs(
         cos_request,
         return_path_action,
         reflected_control,
+        reply_source,
     }
 }
 
