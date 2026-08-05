@@ -1000,6 +1000,8 @@ fn handle_stamp_packet(
         // is still a correct reply from the kernel's choice of source. Both
         // backends do this identically so the §3 SHOULD does not depend on
         // which one is in use.
+        // Only the Unix pinning path below reads this.
+        #[cfg(unix)]
         let reply_source = response.reply_source;
         let try_send = |data: &[u8], target: SocketAddr| -> Result<usize, std::io::Error> {
             let socket = match target {
@@ -1012,23 +1014,19 @@ fn handle_stamp_packet(
                     "IPv6 socket unavailable",
                 ));
             };
+            // The whole attempt is inside one `cfg(unix)` block: on Windows
+            // `reply_source::send_from` does not exist (no `std::os::fd`), so
+            // there is nothing here to bind `source` for either.
+            #[cfg(unix)]
             if let Some(source) = reply_source {
                 if crate::reply_source::supported() {
-                    #[cfg(unix)]
-                    {
-                        use std::os::fd::AsRawFd;
-                        match crate::reply_source::send_from(
-                            socket.as_raw_fd(),
-                            data,
-                            target,
-                            source,
-                        ) {
-                            Ok(sent) => return Ok(sent),
-                            Err(e) => log::debug!(
-                                "could not pin reply source to {source} \
-                                 (RFC 9503 §3): {e}; using the OS's choice"
-                            ),
-                        }
+                    use std::os::fd::AsRawFd;
+                    match crate::reply_source::send_from(socket.as_raw_fd(), data, target, source) {
+                        Ok(sent) => return Ok(sent),
+                        Err(e) => log::debug!(
+                            "could not pin reply source to {source} \
+                             (RFC 9503 §3): {e}; using the OS's choice"
+                        ),
                     }
                 }
             }
