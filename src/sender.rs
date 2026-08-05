@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 
 use crate::{
     clock_format::ClockFormat,
-    configuration::{decode_selector, is_auth, Configuration, MalformedMode},
+    configuration::{decode_selector, is_auth, Configuration, MalformedMode, ZeroSsidAction},
     crypto::{compute_packet_hmac, verify_packet_hmac, HmacKey},
     error_estimate::ErrorEstimate,
     packets::{
@@ -83,6 +83,19 @@ struct SenderRecvContext<'a> {
     /// `process_response` drives it with `on_ce_observed`/`on_clean_reply`
     /// based on the reply's forward-path EC2 and/or reverse-path wire ECN.
     congestion: Option<&'a mut CongestionState>,
+    /// The non-zero SSID this sender put on the wire, when it set one. RFC 8972
+    /// §3's zeroed-SSID scenario is only meaningful against a sender that
+    /// actually asked for SSID demultiplexing; `None` disables the check.
+    expected_ssid: Option<u16>,
+    /// What to do about a reflected packet whose SSID field came back zeroed
+    /// (RFC 8972 §3: "An implementation of a Session-Sender MUST support
+    /// control of its behavior in such a scenario").
+    on_zero_ssid: ZeroSsidAction,
+    /// Set by `process_response` when a zeroed-SSID reply arrives under
+    /// [`ZeroSsidAction::Stop`]; the send loop and the Access Report wait phase
+    /// both stop once it is set. Also latches "already warned" for the
+    /// `Continue` policy so a long run logs the condition once, not per packet.
+    zero_ssid_seen: &'a mut bool,
     #[cfg(feature = "metrics")]
     metrics_enabled: bool,
     #[cfg(all(unix, feature = "snmp"))]
@@ -869,6 +882,20 @@ pub async fn run_sender(
         conf.reflected_control_count > 1 || conf.reflected_control_no_ext_hdr;
     let scale_reflected_control = ecn_response_active && reflected_control_requested;
 
+    // draft-ietf-ippm-asymmetrical-pkts-14 §5: warn when the sender's own
+    // pacing would start the next Type-12 request before the reflector is
+    // expected to finish the previous burst. Advisory (SHOULD NOT), and
+    // eprintln! rather than log::warn! so it is visible regardless of the
+    // logging configuration — this fires once, at startup.
+    if let Some(warning) = conf.reflected_burst_pacing_warning() {
+        eprintln!("Warning: {warning}");
+    }
+
+    // RFC 8972 §3 zeroed-SSID control. Only a non-zero SSID makes the scenario
+    // meaningful: with no SSID requested, a zeroed reply field says nothing.
+    let zero_ssid_expected = conf.ssid.filter(|s| *s != 0);
+    let mut zero_ssid_seen = false;
+
     let mut congestion = ecn_response_active.then(|| {
         let params = AimdParams {
             base_interval: Duration::from_millis(conf.send_delay as u64),
@@ -1332,6 +1359,9 @@ pub async fn run_sender(
                                 latched_reflector_msid: &mut latched_reflector_msid,
                                 access_report_state: access_report_state.as_mut(),
                                 congestion: congestion.as_mut(),
+                                expected_ssid: zero_ssid_expected,
+                                on_zero_ssid: conf.on_zero_ssid,
+                                zero_ssid_seen: &mut zero_ssid_seen,
                                 #[cfg(feature = "metrics")]
                                 metrics_enabled,
                                 #[cfg(all(unix, feature = "snmp"))]
@@ -1413,11 +1443,20 @@ pub async fn run_sender(
                 }
             }
         }
+
+        // RFC 8972 §3: `--on-zero-ssid=stop` ends the session at the first
+        // reply that came back with a zeroed SSID.
+        if zero_ssid_seen && conf.on_zero_ssid == ZeroSsidAction::Stop {
+            break;
+        }
     }
 
-    // Final wait phase for remaining responses
+    // Final wait phase for remaining responses. Skipped entirely when the
+    // zeroed-SSID policy stopped the session — there is nothing left to
+    // measure and the pending entries belong to the abandoned run.
     let wait_start = Instant::now();
-    while !pending.is_empty() && wait_start.elapsed() < timeout {
+    let stopped_on_zero_ssid = zero_ssid_seen && conf.on_zero_ssid == ZeroSsidAction::Stop;
+    while !stopped_on_zero_ssid && !pending.is_empty() && wait_start.elapsed() < timeout {
         let remaining = timeout.saturating_sub(wait_start.elapsed());
         match tokio::time::timeout(
             remaining,
@@ -1451,6 +1490,9 @@ pub async fn run_sender(
                     latched_reflector_msid: &mut latched_reflector_msid,
                     access_report_state: access_report_state.as_mut(),
                     congestion: congestion.as_mut(),
+                    expected_ssid: zero_ssid_expected,
+                    on_zero_ssid: conf.on_zero_ssid,
+                    zero_ssid_seen: &mut zero_ssid_seen,
                     #[cfg(feature = "metrics")]
                     metrics_enabled,
                     #[cfg(all(unix, feature = "snmp"))]
@@ -1495,9 +1537,10 @@ pub async fn run_sender(
     // A no-op entirely when `--access-report` was not set
     // (`access_report_state` is `None`), so the wait phase above is
     // byte-identical to before in that case.
-    while access_report_state
-        .as_ref()
-        .is_some_and(|state| !state.is_terminal())
+    while !stopped_on_zero_ssid
+        && access_report_state
+            .as_ref()
+            .is_some_and(|state| !state.is_terminal())
     {
         let now = Instant::now();
         let attach = access_report_state
@@ -1660,6 +1703,9 @@ pub async fn run_sender(
                             latched_reflector_msid: &mut latched_reflector_msid,
                             access_report_state: access_report_state.as_mut(),
                             congestion: congestion.as_mut(),
+                            expected_ssid: zero_ssid_expected,
+                            on_zero_ssid: conf.on_zero_ssid,
+                            zero_ssid_seen: &mut zero_ssid_seen,
                             #[cfg(feature = "metrics")]
                             metrics_enabled,
                             #[cfg(all(unix, feature = "snmp"))]
@@ -1829,44 +1875,125 @@ fn process_response(
 
     // Parse response and validate TLVs if extension mode is enabled
     // Use lenient parsing per RFC 8762 §4.6 to handle short packets.
-    let (seq_num, reflector_recv_ts, reflector_send_ts, sender_ttl, tlv_info) = if use_auth {
-        if use_tlvs {
-            // Parse as extended packet with TLVs (lenient, returns canonical buffer)
-            let (ext_packet, canonical_buf) =
-                ExtendedReflectedPacketAuthenticated::from_bytes_lenient(data);
-            let base = &ext_packet.base;
-            let seq_num = base.sess_sender_seq_number;
-            let recv_ts = base.receive_timestamp;
-            let send_ts = base.timestamp;
-            let ttl = base.sess_sender_ttl;
-            let hmac = base.hmac;
+    let (seq_num, reflector_recv_ts, reflector_send_ts, sender_ttl, tlv_info, reflected_ssids) =
+        if use_auth {
+            if use_tlvs {
+                // Parse as extended packet with TLVs (lenient, returns canonical buffer)
+                let (ext_packet, canonical_buf) =
+                    ExtendedReflectedPacketAuthenticated::from_bytes_lenient(data);
+                let base = &ext_packet.base;
+                let seq_num = base.sess_sender_seq_number;
+                let recv_ts = base.receive_timestamp;
+                let send_ts = base.timestamp;
+                let ttl = base.sess_sender_ttl;
+                let hmac = base.hmac;
 
-            // Verify base packet HMAC against canonical buffer (RFC 8762 §4.4, §4.6)
-            if let Some(key) = ctx.hmac_key {
-                if !verify_packet_hmac(
-                    key,
-                    &canonical_buf,
-                    REFLECTED_AUTH_PACKET_HMAC_OFFSET,
-                    &hmac,
-                ) {
-                    eprintln!(
-                        "HMAC verification failed for reflected packet seq={}",
-                        seq_num
-                    );
-                    #[cfg(feature = "metrics")]
-                    if ctx.metrics_enabled {
-                        crate::metrics::sender_metrics::record_hmac_failure();
+                // Verify base packet HMAC against canonical buffer (RFC 8762 §4.4, §4.6)
+                if let Some(key) = ctx.hmac_key {
+                    if !verify_packet_hmac(
+                        key,
+                        &canonical_buf,
+                        REFLECTED_AUTH_PACKET_HMAC_OFFSET,
+                        &hmac,
+                    ) {
+                        eprintln!(
+                            "HMAC verification failed for reflected packet seq={}",
+                            seq_num
+                        );
+                        #[cfg(feature = "metrics")]
+                        if ctx.metrics_enabled {
+                            crate::metrics::sender_metrics::record_hmac_failure();
+                        }
+                        return;
                     }
-                    return;
                 }
+
+                // Validate TLVs if present
+                let tlv_info = if ext_packet.has_tlvs() {
+                    match validate_reflected_tlvs(
+                        &ext_packet.tlvs,
+                        data,
+                        AUTH_BASE_SIZE,
+                        ctx.hmac_key,
+                        ctx.expected_sender_msid,
+                        ctx.expected_reflector_msid,
+                        ctx.latched_reflector_msid,
+                        ctx.access_report_state.is_some(),
+                        ctx.congestion.is_some(),
+                        #[cfg(feature = "metrics")]
+                        ctx.metrics_enabled,
+                    ) {
+                        Ok(info) => info,
+                        Err(reason) => {
+                            eprintln!("Discarding reflected packet seq={}: {}", seq_num, reason);
+                            #[cfg(feature = "metrics")]
+                            if ctx.metrics_enabled {
+                                crate::metrics::sender_metrics::record_tlv_error("M");
+                            }
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                (
+                    seq_num,
+                    recv_ts,
+                    send_ts,
+                    ttl,
+                    tlv_info,
+                    (base.ssid, base.sess_sender_ssid),
+                )
+            } else {
+                // Parse base packet only (lenient, returns canonical buffer)
+                let (packet, canonical_buf) =
+                    ReflectedPacketAuthenticated::from_bytes_lenient(data);
+                let seq_num = packet.sess_sender_seq_number;
+                let recv_ts = packet.receive_timestamp;
+                let send_ts = packet.timestamp;
+                let ttl = packet.sess_sender_ttl;
+                let hmac = packet.hmac;
+
+                // Verify HMAC against canonical buffer when key is present (RFC 8762 §4.4, §4.6)
+                if let Some(key) = ctx.hmac_key {
+                    if !verify_packet_hmac(
+                        key,
+                        &canonical_buf,
+                        REFLECTED_AUTH_PACKET_HMAC_OFFSET,
+                        &hmac,
+                    ) {
+                        eprintln!(
+                            "HMAC verification failed for reflected packet seq={}",
+                            seq_num
+                        );
+                        #[cfg(feature = "metrics")]
+                        if ctx.metrics_enabled {
+                            crate::metrics::sender_metrics::record_hmac_failure();
+                        }
+                        return;
+                    }
+                }
+                (
+                    seq_num,
+                    recv_ts,
+                    send_ts,
+                    ttl,
+                    None,
+                    (packet.ssid, packet.sess_sender_ssid),
+                )
             }
+        } else if use_tlvs {
+            // Parse as extended packet with TLVs (unauthenticated, lenient)
+            let ext_packet = ExtendedReflectedPacketUnauthenticated::from_bytes_lenient(data);
+            let base = &ext_packet.base;
 
             // Validate TLVs if present
             let tlv_info = if ext_packet.has_tlvs() {
                 match validate_reflected_tlvs(
                     &ext_packet.tlvs,
                     data,
-                    AUTH_BASE_SIZE,
+                    UNAUTH_BASE_SIZE,
                     ctx.hmac_key,
                     ctx.expected_sender_msid,
                     ctx.expected_reflector_msid,
@@ -1878,7 +2005,10 @@ fn process_response(
                 ) {
                     Ok(info) => info,
                     Err(reason) => {
-                        eprintln!("Discarding reflected packet seq={}: {}", seq_num, reason);
+                        eprintln!(
+                            "Discarding reflected packet seq={}: {}",
+                            base.sess_sender_seq_number, reason
+                        );
                         #[cfg(feature = "metrics")]
                         if ctx.metrics_enabled {
                             crate::metrics::sender_metrics::record_tlv_error("M");
@@ -1890,92 +2020,60 @@ fn process_response(
                 None
             };
 
-            (seq_num, recv_ts, send_ts, ttl, tlv_info)
+            (
+                base.sess_sender_seq_number,
+                base.receive_timestamp,
+                base.timestamp,
+                base.sess_sender_ttl,
+                tlv_info,
+                (base.ssid, base.sess_sender_ssid),
+            )
         } else {
-            // Parse base packet only (lenient, returns canonical buffer)
-            let (packet, canonical_buf) = ReflectedPacketAuthenticated::from_bytes_lenient(data);
-            let seq_num = packet.sess_sender_seq_number;
-            let recv_ts = packet.receive_timestamp;
-            let send_ts = packet.timestamp;
-            let ttl = packet.sess_sender_ttl;
-            let hmac = packet.hmac;
-
-            // Verify HMAC against canonical buffer when key is present (RFC 8762 §4.4, §4.6)
-            if let Some(key) = ctx.hmac_key {
-                if !verify_packet_hmac(
-                    key,
-                    &canonical_buf,
-                    REFLECTED_AUTH_PACKET_HMAC_OFFSET,
-                    &hmac,
-                ) {
-                    eprintln!(
-                        "HMAC verification failed for reflected packet seq={}",
-                        seq_num
-                    );
-                    #[cfg(feature = "metrics")]
-                    if ctx.metrics_enabled {
-                        crate::metrics::sender_metrics::record_hmac_failure();
-                    }
-                    return;
-                }
-            }
-            (seq_num, recv_ts, send_ts, ttl, None)
-        }
-    } else if use_tlvs {
-        // Parse as extended packet with TLVs (unauthenticated, lenient)
-        let ext_packet = ExtendedReflectedPacketUnauthenticated::from_bytes_lenient(data);
-        let base = &ext_packet.base;
-
-        // Validate TLVs if present
-        let tlv_info = if ext_packet.has_tlvs() {
-            match validate_reflected_tlvs(
-                &ext_packet.tlvs,
-                data,
-                UNAUTH_BASE_SIZE,
-                ctx.hmac_key,
-                ctx.expected_sender_msid,
-                ctx.expected_reflector_msid,
-                ctx.latched_reflector_msid,
-                ctx.access_report_state.is_some(),
-                ctx.congestion.is_some(),
-                #[cfg(feature = "metrics")]
-                ctx.metrics_enabled,
-            ) {
-                Ok(info) => info,
-                Err(reason) => {
-                    eprintln!(
-                        "Discarding reflected packet seq={}: {}",
-                        base.sess_sender_seq_number, reason
-                    );
-                    #[cfg(feature = "metrics")]
-                    if ctx.metrics_enabled {
-                        crate::metrics::sender_metrics::record_tlv_error("M");
-                    }
-                    return;
-                }
-            }
-        } else {
-            None
+            // Parse base packet only (lenient)
+            let packet = ReflectedPacketUnauthenticated::from_bytes_lenient(data);
+            (
+                packet.sess_sender_seq_number,
+                packet.receive_timestamp,
+                packet.timestamp,
+                packet.sess_sender_ttl,
+                None,
+                (packet.ssid, packet.sess_sender_ssid),
+            )
         };
 
-        (
-            base.sess_sender_seq_number,
-            base.receive_timestamp,
-            base.timestamp,
-            base.sess_sender_ttl,
-            tlv_info,
-        )
-    } else {
-        // Parse base packet only (lenient)
-        let packet = ReflectedPacketUnauthenticated::from_bytes_lenient(data);
-        (
-            packet.sess_sender_seq_number,
-            packet.receive_timestamp,
-            packet.timestamp,
-            packet.sess_sender_ttl,
-            None,
-        )
-    };
+    // RFC 8972 §3 zeroed-SSID scenario. The reflector echoes the sender's SSID
+    // in both the reflected `SSID` field and the `Session-Sender SSID` field; a
+    // peer that does not implement the field leaves both zero (they are MBZ in
+    // the RFC 8762 layout). Either one coming back zeroed against a non-zero
+    // request means the reflector is not demultiplexing on SSID, so it is the
+    // condition `--on-zero-ssid` governs.
+    if let Some(expected) = ctx.expected_ssid {
+        let (reflected_ssid, echoed_sender_ssid) = reflected_ssids;
+        if reflected_ssid == 0 || echoed_sender_ssid == 0 {
+            let first_time = !*ctx.zero_ssid_seen;
+            *ctx.zero_ssid_seen = true;
+            if first_time {
+                match ctx.on_zero_ssid {
+                    ZeroSsidAction::Continue => eprintln!(
+                        "Warning: reflector returned a zeroed SSID (sent {expected}, \
+                         got ssid={reflected_ssid} sender_ssid={echoed_sender_ssid}) \
+                         — it is not demultiplexing sessions on SSID. Continuing \
+                         per --on-zero-ssid=continue (RFC 8972 §3)."
+                    ),
+                    ZeroSsidAction::Stop => eprintln!(
+                        "Reflector returned a zeroed SSID (sent {expected}, got \
+                         ssid={reflected_ssid} sender_ssid={echoed_sender_ssid}); \
+                         stopping the session per --on-zero-ssid=stop (RFC 8972 §3)."
+                    ),
+                }
+            }
+            if ctx.on_zero_ssid == ZeroSsidAction::Stop {
+                // Do not account this reply: the session is over, and the
+                // measurement it belongs to is the one being abandoned.
+                return;
+            }
+        }
+    }
 
     // RFC 8972 §4.6: "This timer MUST be disarmed upon reception of the
     // reflected STAMP test packet that includes the Access Report TLV."
@@ -4520,6 +4618,9 @@ mod tests {
             latched_reflector_msid: &mut latched_reflector_msid,
             access_report_state: Some(&mut access_report_state),
             congestion: None,
+            expected_ssid: None,
+            on_zero_ssid: ZeroSsidAction::Continue,
+            zero_ssid_seen: &mut false,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]
@@ -4583,6 +4684,9 @@ mod tests {
             latched_reflector_msid: &mut latched_reflector_msid,
             access_report_state: Some(&mut access_report_state),
             congestion: None,
+            expected_ssid: None,
+            on_zero_ssid: ZeroSsidAction::Continue,
+            zero_ssid_seen: &mut false,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]
@@ -4613,6 +4717,7 @@ mod tests {
         packets_received: &'a mut u32,
         latched_reflector_msid: &'a mut Option<u16>,
         congestion: Option<&'a mut CongestionState>,
+        zero_ssid_seen: &'a mut bool,
     ) -> SenderRecvContext<'a> {
         SenderRecvContext {
             pending,
@@ -4626,6 +4731,9 @@ mod tests {
             latched_reflector_msid,
             access_report_state: None,
             congestion,
+            expected_ssid: None,
+            on_zero_ssid: ZeroSsidAction::Continue,
+            zero_ssid_seen,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]
@@ -4680,6 +4788,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut congestion = CongestionState::new(congestion_test_params());
+        let mut zero_ssid_seen = false;
         let mut ctx = congestion_process_response_ctx(
             &mut pending,
             &mut rtt_collector,
@@ -4687,6 +4796,7 @@ mod tests {
             &mut packets_received,
             &mut latched_reflector_msid,
             Some(&mut congestion),
+            &mut zero_ssid_seen,
         );
 
         // No reply-ECN plumbing in this test (reverse path absent).
@@ -4737,6 +4847,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut congestion = CongestionState::new(congestion_test_params());
+        let mut zero_ssid_seen = false;
         let mut ctx = congestion_process_response_ctx(
             &mut pending,
             &mut rtt_collector,
@@ -4744,6 +4855,7 @@ mod tests {
             &mut packets_received,
             &mut latched_reflector_msid,
             Some(&mut congestion),
+            &mut zero_ssid_seen,
         );
 
         process_response(
@@ -4804,6 +4916,7 @@ mod tests {
             congestion.controller.current_interval(),
             Duration::from_millis(200)
         );
+        let mut zero_ssid_seen = false;
         let mut ctx = congestion_process_response_ctx(
             &mut pending,
             &mut rtt_collector,
@@ -4811,6 +4924,7 @@ mod tests {
             &mut packets_received,
             &mut latched_reflector_msid,
             Some(&mut congestion),
+            &mut zero_ssid_seen,
         );
 
         // Neither direction CE-marked: a clean reply recovers by the
@@ -4859,6 +4973,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         // `--cos`/`--ecn` not requesting ECT0/ECT1: controller absent.
+        let mut zero_ssid_seen = false;
         let mut ctx = congestion_process_response_ctx(
             &mut pending,
             &mut rtt_collector,
@@ -4866,6 +4981,7 @@ mod tests {
             &mut packets_received,
             &mut latched_reflector_msid,
             None,
+            &mut zero_ssid_seen,
         );
 
         // Must not panic even with a reverse-path CE reading present.
@@ -4984,6 +5100,9 @@ mod tests {
             latched_reflector_msid: &mut latched_reflector_msid,
             access_report_state: Some(&mut access_report_state),
             congestion: None,
+            expected_ssid: None,
+            on_zero_ssid: ZeroSsidAction::Continue,
+            zero_ssid_seen: &mut false,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]
@@ -5504,6 +5623,9 @@ mod tests {
             latched_reflector_msid: &mut latched_reflector_msid,
             access_report_state: None,
             congestion: None,
+            expected_ssid: None,
+            on_zero_ssid: ZeroSsidAction::Continue,
+            zero_ssid_seen: &mut false,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]
@@ -5519,6 +5641,215 @@ mod tests {
             "forward OWD must be T2 − T1 = 3 ms, got {}",
             owd.forward_avg_ms
         );
+    }
+
+    /// RFC8972-3-11: "An implementation of a Session-Sender MUST support
+    /// control of its behavior in such a scenario [a zeroed SSID]." The two
+    /// actions must actually differ: `stop` refuses to account the reply and
+    /// latches the condition, `continue` accounts it normally.
+    #[test]
+    fn test_zero_ssid_policy_stop_discards_reply_and_latches() {
+        use crate::packets::ReflectedPacketUnauthenticated;
+
+        // A reflector that does not implement SSID leaves both fields zero.
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 7,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 7,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let buf = reflected.to_bytes().to_vec();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            7,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        let mut zero_ssid_seen = false;
+        {
+            let mut ctx = SenderRecvContext {
+                pending: &mut pending,
+                rtt_collector: &mut rtt_collector,
+                owd_collector: &mut owd_collector,
+                packets_received: &mut packets_received,
+                print_stats: false,
+                hmac_key: None,
+                expected_sender_msid: None,
+                expected_reflector_msid: None,
+                latched_reflector_msid: &mut latched_reflector_msid,
+                access_report_state: None,
+                congestion: None,
+                // The sender asked for SSID 4242; the reply carries zero.
+                expected_ssid: Some(4242),
+                on_zero_ssid: ZeroSsidAction::Stop,
+                zero_ssid_seen: &mut zero_ssid_seen,
+                #[cfg(feature = "metrics")]
+                metrics_enabled: false,
+                #[cfg(all(unix, feature = "snmp"))]
+                snmp_stats: None,
+            };
+            process_response(&buf, false, false, ClockFormat::NTP, None, None, &mut ctx);
+        }
+
+        assert!(
+            zero_ssid_seen,
+            "the zeroed-SSID condition must be latched for the send loop to stop on"
+        );
+        assert_eq!(
+            packets_received, 0,
+            "under `stop` the reply belongs to an abandoned session and must not be counted"
+        );
+        assert!(
+            pending.contains_key(&7),
+            "the pending entry must be left alone under `stop`"
+        );
+    }
+
+    #[test]
+    fn test_zero_ssid_policy_continue_still_accounts_the_reply() {
+        use crate::packets::ReflectedPacketUnauthenticated;
+
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 7,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 7,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let buf = reflected.to_bytes().to_vec();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            7,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        let mut zero_ssid_seen = false;
+        {
+            let mut ctx = SenderRecvContext {
+                pending: &mut pending,
+                rtt_collector: &mut rtt_collector,
+                owd_collector: &mut owd_collector,
+                packets_received: &mut packets_received,
+                print_stats: false,
+                hmac_key: None,
+                expected_sender_msid: None,
+                expected_reflector_msid: None,
+                latched_reflector_msid: &mut latched_reflector_msid,
+                access_report_state: None,
+                congestion: None,
+                expected_ssid: Some(4242),
+                on_zero_ssid: ZeroSsidAction::Continue,
+                zero_ssid_seen: &mut zero_ssid_seen,
+                #[cfg(feature = "metrics")]
+                metrics_enabled: false,
+                #[cfg(all(unix, feature = "snmp"))]
+                snmp_stats: None,
+            };
+            process_response(&buf, false, false, ClockFormat::NTP, None, None, &mut ctx);
+        }
+
+        assert!(
+            zero_ssid_seen,
+            "the condition is still recorded so it is only reported once"
+        );
+        assert_eq!(
+            packets_received, 1,
+            "continuing is RFC-permitted: the measurement proceeds normally"
+        );
+        assert!(
+            !pending.contains_key(&7),
+            "the reply was accounted, so its pending entry is consumed"
+        );
+    }
+
+    /// A sender that never set an SSID must not react to a zeroed reply field:
+    /// there is nothing for the reflector to have echoed.
+    #[test]
+    fn test_zero_ssid_policy_inert_without_a_configured_ssid() {
+        use crate::packets::ReflectedPacketUnauthenticated;
+
+        let reflected = ReflectedPacketUnauthenticated {
+            sequence_number: 7,
+            timestamp: 0,
+            error_estimate: 0,
+            ssid: 0,
+            receive_timestamp: 0,
+            sess_sender_seq_number: 7,
+            sess_sender_timestamp: 0,
+            sess_sender_err_estimate: 0,
+            sess_sender_ssid: 0,
+            sess_sender_ttl: 0,
+            mbz3: [0; 3],
+        };
+        let buf = reflected.to_bytes().to_vec();
+
+        let mut pending = HashMap::new();
+        pending.insert(
+            7,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        );
+        let mut rtt_collector = RttCollector::new();
+        let mut owd_collector = OwdCollector::new();
+        let mut packets_received = 0u32;
+        let mut latched_reflector_msid = None;
+        let mut zero_ssid_seen = false;
+        {
+            let mut ctx = SenderRecvContext {
+                pending: &mut pending,
+                rtt_collector: &mut rtt_collector,
+                owd_collector: &mut owd_collector,
+                packets_received: &mut packets_received,
+                print_stats: false,
+                hmac_key: None,
+                expected_sender_msid: None,
+                expected_reflector_msid: None,
+                latched_reflector_msid: &mut latched_reflector_msid,
+                access_report_state: None,
+                congestion: None,
+                // No SSID requested — even `stop` must not fire.
+                expected_ssid: None,
+                on_zero_ssid: ZeroSsidAction::Stop,
+                zero_ssid_seen: &mut zero_ssid_seen,
+                #[cfg(feature = "metrics")]
+                metrics_enabled: false,
+                #[cfg(all(unix, feature = "snmp"))]
+                snmp_stats: None,
+            };
+            process_response(&buf, false, false, ClockFormat::NTP, None, None, &mut ctx);
+        }
+
+        assert!(!zero_ssid_seen, "no SSID was requested; nothing to detect");
+        assert_eq!(packets_received, 1, "the reply must be accounted normally");
     }
 
     #[test]
@@ -5581,6 +5912,9 @@ mod tests {
             latched_reflector_msid: &mut latched_reflector_msid,
             access_report_state: None,
             congestion: None,
+            expected_ssid: None,
+            on_zero_ssid: ZeroSsidAction::Continue,
+            zero_ssid_seen: &mut false,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]
@@ -5655,6 +5989,9 @@ mod tests {
             latched_reflector_msid: &mut latched_reflector_msid,
             access_report_state: None,
             congestion: None,
+            expected_ssid: None,
+            on_zero_ssid: ZeroSsidAction::Continue,
+            zero_ssid_seen: &mut false,
             #[cfg(feature = "metrics")]
             metrics_enabled: false,
             #[cfg(all(unix, feature = "snmp"))]

@@ -118,6 +118,37 @@ impl fmt::Display for TlvHandlingMode {
     }
 }
 
+/// What the Session-Sender does when a reflected packet comes back with a
+/// zeroed SSID field.
+///
+/// RFC 8972 §3 describes a reflector that returns a zeroed SSID (it does not
+/// support the field, or declines to echo it) and requires that "an
+/// implementation of a Session-Sender MUST support control of its behavior in
+/// such a scenario". This enum is that control. Only meaningful when the sender
+/// actually set a non-zero `--ssid`: without one, a zeroed reply field carries
+/// no information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ZeroSsidAction {
+    /// Keep measuring, logging the condition once. The RFC permits continuing,
+    /// and it is the useful default for a probe pointed at an unknown peer.
+    #[default]
+    Continue,
+    /// Stop the session on the first zeroed-SSID reply. For an operator who
+    /// requires SSID-demultiplexed sessions, a reflector that drops the field
+    /// makes the measurement meaningless.
+    Stop,
+}
+
+impl fmt::Display for ZeroSsidAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Continue => write!(f, "continue"),
+            Self::Stop => write!(f, "stop"),
+        }
+    }
+}
+
 /// Selects the kind of deliberately malformed TLV the sender injects (for
 /// conformance-testing a reflector's RFC 8972 §4.2 malformed/flag handling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
@@ -275,6 +306,15 @@ pub struct Configuration {
     /// Error Estimate (bytes 14-15 unauth / 26-27 auth).
     #[clap(long)]
     pub ssid: Option<u16>,
+
+    /// What to do when a reflected packet returns a zeroed SSID field
+    /// (RFC 8972 §3): `continue` (default) keeps measuring and logs the
+    /// condition once, `stop` ends the session on the first such reply.
+    ///
+    /// Sender-side only, and only meaningful together with a non-zero
+    /// `--ssid` — without one there is nothing for the reflector to echo.
+    #[clap(long, default_value_t = ZeroSsidAction::Continue, value_name = "ACTION")]
+    pub on_zero_ssid: ZeroSsidAction,
 
     /// Enable Prometheus metrics endpoint (requires "metrics" feature).
     #[clap(long)]
@@ -722,6 +762,48 @@ impl Configuration {
     /// Validates the configuration parameters.
     ///
     /// Returns an error if any configuration value is invalid.
+    /// Checks the sender's own pacing against the reflected burst it requests
+    /// (draft-ietf-ippm-asymmetrical-pkts-14 §5): "A Session-Sender SHOULD NOT
+    /// send the next STAMP test packet with the Reflected Test Packet Control
+    /// TLV before the Session-Reflector is expected to complete transmitting
+    /// all reflected packets in response to the ... TLV in the previous test
+    /// packet."
+    ///
+    /// Returns the operator-facing warning when `--send-delay` is shorter than
+    /// the requested burst's expected duration, `None` when the pacing is fine
+    /// or no burst was requested. This is advisory (a SHOULD NOT governing the
+    /// sender's own self-inflicted overlap, not a wire violation), so it warns
+    /// rather than refusing to start — an operator deliberately measuring
+    /// under overlap keeps that option.
+    ///
+    /// The reflector sends `count` packets separated by `interval_ns`, so the
+    /// last one leaves at `(count - 1) * interval_ns`.
+    #[must_use]
+    pub fn reflected_burst_pacing_warning(&self) -> Option<String> {
+        if self.reflected_control_count <= 1 {
+            return None;
+        }
+        let burst_ns = u64::from(self.reflected_control_count - 1)
+            * u64::from(self.reflected_control_interval_ns);
+        let send_delay_ns = u64::from(self.send_delay) * 1_000_000;
+        if send_delay_ns >= burst_ns {
+            return None;
+        }
+        Some(format!(
+            "--send-delay {} ms is shorter than the {:.3} ms the reflected burst \
+             is expected to take (--reflected-control-count {} x \
+             --reflected-control-interval-ns {}); the next test packet will be \
+             sent while the reflector is still replying to the previous one \
+             (draft-ietf-ippm-asymmetrical-pkts-14 §5 SHOULD NOT). Raise \
+             --send-delay to at least {} ms, or lower the count/interval.",
+            self.send_delay,
+            burst_ns as f64 / 1_000_000.0,
+            self.reflected_control_count,
+            self.reflected_control_interval_ns,
+            burst_ns.div_ceil(1_000_000),
+        ))
+    }
+
     /// Parses `--location-disclose` into the reflector's RFC 8972 §4.2.2
     /// field-disclosure policy.
     ///
@@ -1211,6 +1293,7 @@ impl Configuration {
         merge!(tlv_mode);
         merge!(verify_tlv_hmac);
         merge_opt!(ssid);
+        merge!(on_zero_ssid);
         merge!(metrics);
         merge!(metrics_addr);
         merge!(cos);
@@ -1314,6 +1397,7 @@ pub struct FileConfiguration {
     pub tlv_mode: Option<TlvHandlingMode>,
     pub verify_tlv_hmac: Option<bool>,
     pub ssid: Option<u16>,
+    pub on_zero_ssid: Option<ZeroSsidAction>,
     pub metrics: Option<bool>,
     pub metrics_addr: Option<SocketAddr>,
     pub cos: Option<bool>,
@@ -3382,6 +3466,92 @@ mod tests {
         let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
             .expect_err("conflicting return-path options must fail");
         assert!(err.to_string().contains("return_srv6_sids"));
+    }
+
+    #[test]
+    fn test_reflected_burst_pacing_warning_absent_without_a_burst() {
+        // count defaults to 1: no Type-12 burst is requested, so the §5
+        // SHOULD NOT cannot be violated.
+        let conf = load_from_args(&["test"]).unwrap();
+        assert_eq!(conf.reflected_control_count, 1);
+        assert!(conf.reflected_burst_pacing_warning().is_none());
+    }
+
+    #[test]
+    fn test_reflected_burst_pacing_warning_fires_when_send_delay_too_short() {
+        // 20 packets, 10 ms apart => the burst runs 190 ms; a 50 ms
+        // --send-delay starts the next request mid-burst.
+        let conf = load_from_args(&[
+            "test",
+            "--send-delay",
+            "50",
+            "--reflected-control-count",
+            "20",
+            "--reflected-control-interval-ns",
+            "10000000",
+        ])
+        .unwrap();
+        let w = conf
+            .reflected_burst_pacing_warning()
+            .expect("overlapping pacing must warn");
+        assert!(w.contains("190.000 ms"), "expected burst duration in: {w}");
+        assert!(w.contains("at least 190 ms"), "expected remedy in: {w}");
+    }
+
+    #[test]
+    fn test_reflected_burst_pacing_warning_silent_when_delay_is_sufficient() {
+        // Same burst (190 ms) with a 200 ms gap: no overlap, no warning.
+        let conf = load_from_args(&[
+            "test",
+            "--send-delay",
+            "200",
+            "--reflected-control-count",
+            "20",
+            "--reflected-control-interval-ns",
+            "10000000",
+        ])
+        .unwrap();
+        assert!(conf.reflected_burst_pacing_warning().is_none());
+    }
+
+    #[test]
+    fn test_reflected_burst_pacing_boundary_is_not_a_violation() {
+        // Exactly equal is compliant: the SHOULD NOT is about sending
+        // *before* the reflector is expected to be done.
+        let conf = load_from_args(&[
+            "test",
+            "--send-delay",
+            "10",
+            "--reflected-control-count",
+            "11",
+            "--reflected-control-interval-ns",
+            "1000000",
+        ])
+        .unwrap();
+        assert!(conf.reflected_burst_pacing_warning().is_none());
+    }
+
+    #[test]
+    fn test_on_zero_ssid_defaults_to_continue_and_parses() {
+        let conf = load_from_args(&["test"]).unwrap();
+        assert_eq!(
+            conf.on_zero_ssid,
+            ZeroSsidAction::Continue,
+            "continuing is RFC-permitted and the useful default for a probe"
+        );
+
+        let conf = load_from_args(&["test", "--on-zero-ssid", "stop"]).unwrap();
+        assert_eq!(conf.on_zero_ssid, ZeroSsidAction::Stop);
+    }
+
+    #[test]
+    fn test_on_zero_ssid_merges_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "on_zero_ssid = \"stop\"\n").unwrap();
+        let conf = load_from_args(&["test", "--config", path.to_str().unwrap()])
+            .expect("file-configured action must load");
+        assert_eq!(conf.on_zero_ssid, ZeroSsidAction::Stop);
     }
 
     #[test]

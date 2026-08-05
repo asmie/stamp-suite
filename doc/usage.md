@@ -186,6 +186,12 @@ since the variant would itself disclose the observed address family.
 
 ```
       --ssid <ID>                  Session-Sender Identifier (RFC 8972 §3)
+      --on-zero-ssid <ACTION>      What to do when a reply comes back with a
+                                   zeroed SSID field, i.e. the reflector is not
+                                   demultiplexing on SSID (RFC 8972 §3):
+                                   continue (default, logs once) | stop (ends
+                                   the session on the first such reply).
+                                   Inert unless a non-zero --ssid was set
       --cos                        Class of Service TLV (RFC 8972 §4.4).
                                    Also marks the egress IP header (TOS /
                                    IPv6 Traffic Class) to match DSCP/ECN
@@ -227,6 +233,14 @@ since the variant would itself disclose the observed address family.
       --reflected-control-count <N>     Asymmetrical reply count (draft-ietf-ippm-asymmetrical-pkts) [default: 1]
       --reflected-control-length <LEN>  Requested reply packet length, 0 = don't pad [default: 0]
       --reflected-control-interval-ns <NS>  Inter-packet gap [default: 1_000_000]
+                                            NOTE: if --send-delay is shorter
+                                            than (count - 1) x interval, the
+                                            next request would start while the
+                                            reflector is still replying to the
+                                            previous one; the sender warns at
+                                            startup and names the minimum
+                                            (draft-ietf-ippm-asymmetrical-pkts
+                                            §5 SHOULD NOT)
       --reflected-fixed-hdr [SELECTORHEX]   Request a reflected IPv4/IPv6 fixed header (TLV 247, draft-ietf-ippm-stamp-ext-hdr §3.2). REPEATABLE: one occurrence per requested IP header (e.g. outer+inner for an IP-in-IP tunnel), each pairing positionally with the reflector's outer→inner capture. Optional inline §5.2 selector hex.
       --reflected-fixed-hdr-selector <HEX>  §5.2 selector (single-header form only): first bytes must match the received IP header, else the reflector sets the C flag (requires exactly one --reflected-fixed-hdr with no inline selector)
       --reflected-ipv6-ext-hdr [LEN[:SELECTORHEX]]  Request a reflected IPv6 extension header (TLV 246, draft-ietf-ippm-stamp-ext-hdr §3.1). REPEATABLE: one occurrence per requested header, in order, with matching lengths. LEN = the header's on-wire size (default 8); optional inline §5.1 selector hex.
