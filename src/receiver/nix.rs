@@ -260,6 +260,10 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     // Start with the configured bind address; if wildcard, enumerate interface addresses.
     let local_addresses = super::build_local_addresses(conf.local_addr);
+    // RFC 8972 §4.2.2 Location field-disclosure policy. `validate()` already
+    // rejected a bad list at startup; fall back to the permissive default
+    // rather than dropping traffic if that somehow did not run.
+    let location_disclosure = conf.location_disclosure().unwrap_or_default();
 
     // Build local MAC addresses for the Reflected Test Packet Control TLV's
     // L2 Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
@@ -524,6 +528,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                         reflector_tx_count,
                         packet_addr_info,
                         last_reflection,
+                        location_disclosure,
                         local_addresses: &local_addresses,
                         local_macs: &local_macs,
                         sender_port: src_addr.port(),

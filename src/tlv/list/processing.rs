@@ -12,9 +12,9 @@ use crate::tlv::core::{
     TIMESTAMP_INFO_TLV_VALUE_SIZE, TLV_HEADER_SIZE,
 };
 use crate::tlv::{
-    ClassOfServiceTlv, DestinationNodeAddressTlv, LocationSubType, MicroSessionIdTlv,
-    PacketAddressInfo, ReflectedControlTlv, ReturnPathAction, ReturnPathTlv, SyncSource,
-    TimestampMethod, TypedTlv, BER_DEFAULT_PATTERN,
+    ClassOfServiceTlv, DestinationNodeAddressTlv, LocationDisclosure, LocationSubType,
+    MicroSessionIdTlv, PacketAddressInfo, ReflectedControlTlv, ReturnPathAction, ReturnPathTlv,
+    SyncSource, TimestampMethod, TypedTlv, BER_DEFAULT_PATTERN,
 };
 
 use super::TlvList;
@@ -128,21 +128,38 @@ impl TlvList {
         value[2] = (value[2] & 0xCF) | (rpe << 4);
     }
 
-    /// Updates Timestamp Information TLVs with the reflector's sync source and method.
+    /// Updates Timestamp Information TLVs with the reflector's clock information.
     ///
-    /// Per RFC 8972 §4.3, the Session-Reflector fills `sync_src_out` and `timestamp_out`
-    /// (bytes 2-3 of the value) with its own clock information.
-    pub fn update_timestamp_info_tlvs(&mut self, sync_src: SyncSource, ts_method: TimestampMethod) {
+    /// All four value octets of this TLV describe the **reflector's** clocks
+    /// (RFC 8972 §4.3): bytes 0-1 are Sync Src In / Timestamp In, characterizing
+    /// the ingress that obtained T2, and bytes 2-3 are Sync Src Out /
+    /// Timestamp Out, characterizing the egress that obtained T3. The
+    /// Session-Sender zeroes all four (§4.3, RFC8972-4.3-2), so each is filled
+    /// here rather than preserved from the request.
+    ///
+    /// `ingress_method` and `egress_method` are reported separately instead of
+    /// being merged into one conservative value: the two directions genuinely
+    /// can differ (kernel-software receive with hardware transmit, say), and
+    /// §4.3 defines a distinct field for each.
+    pub fn update_timestamp_info_tlvs(
+        &mut self,
+        sync_src: SyncSource,
+        ingress_method: TimestampMethod,
+        egress_method: TimestampMethod,
+    ) {
         let src_byte = sync_src.to_byte();
-        let method_byte = ts_method.to_byte();
+        let ingress_byte = ingress_method.to_byte();
+        let egress_byte = egress_method.to_byte();
         self.for_each_matching_tlv(
             |tlv| {
                 tlv.tlv_type == TlvType::TimestampInfo
                     && tlv.value.len() == TIMESTAMP_INFO_TLV_VALUE_SIZE
             },
             |tlv| {
+                tlv.value[0] = src_byte;
+                tlv.value[1] = ingress_byte;
                 tlv.value[2] = src_byte;
-                tlv.value[3] = method_byte;
+                tlv.value[3] = egress_byte;
             },
         );
     }
@@ -169,13 +186,15 @@ impl TlvList {
     /// Updates Location TLVs with the observed packet address information.
     ///
     /// Per RFC 8972 §4.2, the Session-Reflector fills in the ports and adds
-    /// sub-TLVs for the source and destination IP addresses it observed.
-    pub fn update_location_tlvs(&mut self, info: &PacketAddressInfo) {
+    /// sub-TLVs for the source and destination IP addresses it observed,
+    /// subject to `policy` — §4.2.2's operator-managed field-disclosure
+    /// control (see [`LocationDisclosure`]).
+    pub fn update_location_tlvs(&mut self, info: &PacketAddressInfo, policy: LocationDisclosure) {
         self.for_each_matching_tlv(
             |tlv| {
                 tlv.tlv_type == TlvType::Location && tlv.value.len() >= LOCATION_TLV_MIN_VALUE_SIZE
             },
-            |tlv| Self::update_location_value_in_place(&mut tlv.value, info),
+            |tlv| Self::update_location_value_in_place(&mut tlv.value, info, policy),
         );
     }
 
@@ -202,11 +221,25 @@ impl TlvList {
     /// sub-TLV are left in place (they remain within the preserved Length),
     /// honouring "the Session-Reflector MAY leave some fields unreported by
     /// filling them with zeroes."
-    fn update_location_value_in_place(value: &mut [u8], info: &PacketAddressInfo) {
+    fn update_location_value_in_place(
+        value: &mut [u8],
+        info: &PacketAddressInfo,
+        policy: LocationDisclosure,
+    ) {
         // Ports always fit: callers only invoke this for values that are
-        // already >= LOCATION_TLV_MIN_VALUE_SIZE (4 octets).
-        value[0..2].copy_from_slice(&info.dst_port.to_be_bytes());
-        value[2..4].copy_from_slice(&info.src_port.to_be_bytes());
+        // already >= LOCATION_TLV_MIN_VALUE_SIZE (4 octets). A port the
+        // disclosure policy withholds is left as zeroes per §4.2.2's "MAY
+        // leave some fields unreported by filling them with zeroes".
+        if policy.dst_port {
+            value[0..2].copy_from_slice(&info.dst_port.to_be_bytes());
+        } else {
+            value[0..2].fill(0);
+        }
+        if policy.src_port {
+            value[2..4].copy_from_slice(&info.src_port.to_be_bytes());
+        } else {
+            value[2..4].fill(0);
+        }
 
         let mut offset = LOCATION_TLV_MIN_VALUE_SIZE;
         while offset + TLV_HEADER_SIZE <= value.len() {
@@ -223,7 +256,7 @@ impl TlvList {
                     break;
                 }
             };
-            if Self::answer_location_sub_tlv(&mut value[offset..end], info)
+            if Self::answer_location_sub_tlv(&mut value[offset..end], info, policy)
                 == LocationSubOutcome::Malformed
             {
                 // §4: processing of extension TLVs MUST stop; the remainder is
@@ -237,7 +270,11 @@ impl TlvList {
     /// Answers a single Location sub-TLV in place (its slice spans the 4-octet
     /// header and value). Returns the outcome so the caller can stop on a
     /// malformed sub-TLV per RFC 8972 §4.
-    fn answer_location_sub_tlv(sub: &mut [u8], info: &PacketAddressInfo) -> LocationSubOutcome {
+    fn answer_location_sub_tlv(
+        sub: &mut [u8],
+        info: &PacketAddressInfo,
+        policy: LocationDisclosure,
+    ) -> LocationSubOutcome {
         let sub_type = LocationSubType::from_byte(sub[1]);
         let vlen = sub.len() - TLV_HEADER_SIZE;
 
@@ -263,11 +300,19 @@ impl TlvList {
                 LocationSubOutcome::Answered
             }
             LocationSubType::DestinationIp => {
-                Self::write_ip_sub_tlv_answer(sub, info.dst_addr, true);
+                if policy.dst_ip {
+                    Self::write_ip_sub_tlv_answer(sub, info.dst_addr, true);
+                } else {
+                    Self::suppress_sub_tlv_answer(sub);
+                }
                 LocationSubOutcome::Answered
             }
             LocationSubType::SourceIp => {
-                Self::write_ip_sub_tlv_answer(sub, info.src_addr, false);
+                if policy.src_ip {
+                    Self::write_ip_sub_tlv_answer(sub, info.src_addr, false);
+                } else {
+                    Self::suppress_sub_tlv_answer(sub);
+                }
                 LocationSubOutcome::Answered
             }
             // Any other type (including the specific answer types, which a
@@ -279,6 +324,17 @@ impl TlvList {
                 LocationSubOutcome::Unrecognized
             }
         }
+    }
+
+    /// Answers a request the disclosure policy withholds: the sub-TLV keeps the
+    /// generic request type it arrived with and its value is zeroed, which is
+    /// precisely RFC 8972 §4.2.2's "MAY leave some fields unreported by filling
+    /// them with zeroes". The type is deliberately *not* rewritten to the
+    /// specific IPv4/IPv6 variant — that choice would itself leak the observed
+    /// address family, which is part of what a policy may be withholding.
+    fn suppress_sub_tlv_answer(sub: &mut [u8]) {
+        sub[TLV_HEADER_SIZE..].fill(0);
+        set_sub_tlv_flag(sub, LocationSubFlag::Answered);
     }
 
     /// Writes a generic Destination/Source IP request answer in place, choosing
@@ -1340,16 +1396,51 @@ mod tests {
         let sender_tlv = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::SwLocal);
         list.push(sender_tlv.to_raw()).unwrap();
 
-        list.update_timestamp_info_tlvs(SyncSource::Ptp, TimestampMethod::HwAssist);
+        list.update_timestamp_info_tlvs(
+            SyncSource::Ptp,
+            TimestampMethod::SwLocal,
+            TimestampMethod::HwAssist,
+        );
 
         let raw = &list.non_hmac_tlvs()[0];
         let parsed = TimestampInfoTlv::from_raw(raw).unwrap();
-        // In-fields should be preserved
-        assert_eq!(parsed.sync_src_in, SyncSource::Ntp);
+        // RFC 8972 §4.3: all four octets describe the *reflector*, and the
+        // sender zeroes them (RFC8972-4.3-2), so the reflector fills every
+        // one — including the In pair, which characterizes its own ingress
+        // (T2) rather than anything the sender put there.
+        assert_eq!(parsed.sync_src_in, SyncSource::Ptp);
         assert_eq!(parsed.timestamp_in, TimestampMethod::SwLocal);
-        // Out-fields should be updated
         assert_eq!(parsed.sync_src_out, SyncSource::Ptp);
         assert_eq!(parsed.timestamp_out, TimestampMethod::HwAssist);
+    }
+
+    /// RFC8972-4.3-5/-6: the ingress ("In") pair must report the reflector's
+    /// own T2 clock, so a stale value a non-conformant sender left there is
+    /// overwritten rather than echoed back.
+    #[test]
+    fn test_update_timestamp_info_overwrites_sender_supplied_in_fields() {
+        let mut list = TlvList::new();
+        // A non-conformant sender that filled the In fields itself.
+        let stale = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::HwAssist);
+        list.push(stale.to_raw()).unwrap();
+
+        list.update_timestamp_info_tlvs(
+            SyncSource::Ptp,
+            TimestampMethod::SwLocal,
+            TimestampMethod::SwLocal,
+        );
+
+        let parsed = TimestampInfoTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+        assert_eq!(
+            parsed.sync_src_in,
+            SyncSource::Ptp,
+            "Sync Src In must be the reflector's clock, not the sender's"
+        );
+        assert_eq!(
+            parsed.timestamp_in,
+            TimestampMethod::SwLocal,
+            "Timestamp In must be the reflector's real T2 method"
+        );
     }
 
     #[test]
@@ -1359,7 +1450,11 @@ mod tests {
         list.push(RawTlv::new(TlvType::TimestampInfo, vec![1, 2, 3]))
             .unwrap();
 
-        list.update_timestamp_info_tlvs(SyncSource::Ptp, TimestampMethod::HwAssist);
+        list.update_timestamp_info_tlvs(
+            SyncSource::Ptp,
+            TimestampMethod::SwLocal,
+            TimestampMethod::HwAssist,
+        );
 
         // Value should be unchanged since size didn't match
         assert_eq!(list.non_hmac_tlvs()[0].value, vec![1, 2, 3]);
@@ -1413,7 +1508,7 @@ mod tests {
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
         };
-        list.update_location_tlvs(&info);
+        list.update_location_tlvs(&info, LocationDisclosure::all());
         let v = &list.non_hmac_tlvs()[0].value;
         assert_eq!(v.len(), req.len(), "Location TLV Length preserved (§4.2.2)");
         assert_eq!(&v[0..2], &862u16.to_be_bytes(), "dest port");
@@ -1424,6 +1519,75 @@ mod tests {
         assert_eq!(&v[6..8], &16u16.to_be_bytes(), "sub-TLV Length 16");
         assert_eq!(&v[8..12], &[10, 0, 0, 1], "source IPv4 copied");
         assert_eq!(&v[12..24], &[0u8; 12], "MBZ tail");
+    }
+
+    /// RFC8972-4.2.2-2: "Based on the local policy, the Session-Reflector MAY
+    /// leave some fields unreported by filling them with zeroes. An
+    /// implementation of the stateful Session-Reflector MUST provide control
+    /// for managing such policies." A withheld field is answered as zeroes,
+    /// keeping the reply's length and structure identical.
+    #[test]
+    fn test_location_disclosure_policy_withholds_fields_as_zeroes() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut req = vec![0u8; 4];
+        req.extend_from_slice(&[0x80, 7, 0x00, 0x10]); // generic Source IP
+        req.extend_from_slice(&[0u8; 16]);
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::Location, req.clone()))
+            .unwrap();
+        let info = PacketAddressInfo {
+            src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            src_port: 50000,
+            dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            dst_port: 862,
+        };
+
+        list.update_location_tlvs(&info, LocationDisclosure::none());
+        let v = &list.non_hmac_tlvs()[0].value;
+
+        assert_eq!(v.len(), req.len(), "Length is preserved when withholding");
+        assert_eq!(&v[0..2], &[0, 0], "withheld destination port reads as zero");
+        assert_eq!(&v[2..4], &[0, 0], "withheld source port reads as zero");
+        assert_eq!(
+            v[4], 0x00,
+            "the sub-TLV is still Answered, not flagged unrecognized"
+        );
+        assert_eq!(
+            v[5], 7,
+            "type stays the generic request: rewriting it to IPv4/IPv6 would \
+             itself disclose the observed address family"
+        );
+        assert_eq!(&v[8..24], &[0u8; 16], "withheld address reads as zero");
+    }
+
+    /// A partial policy discloses only what it names.
+    #[test]
+    fn test_location_disclosure_policy_partial_discloses_only_named_fields() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut req = vec![0u8; 4];
+        req.extend_from_slice(&[0x80, 7, 0x00, 0x10]); // generic Source IP
+        req.extend_from_slice(&[0u8; 16]);
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::Location, req)).unwrap();
+        let info = PacketAddressInfo {
+            src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            src_port: 50000,
+            dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            dst_port: 862,
+        };
+
+        // Ports allowed, addresses withheld.
+        let policy = LocationDisclosure {
+            src_port: true,
+            dst_port: true,
+            src_ip: false,
+            dst_ip: false,
+        };
+        list.update_location_tlvs(&info, policy);
+        let v = &list.non_hmac_tlvs()[0].value;
+        assert_eq!(&v[0..2], &862u16.to_be_bytes(), "dst port disclosed");
+        assert_eq!(&v[2..4], &50000u16.to_be_bytes(), "src port disclosed");
+        assert_eq!(&v[8..24], &[0u8; 16], "source address still withheld");
     }
 
     #[test]
@@ -1443,7 +1607,7 @@ mod tests {
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
         };
-        list.update_location_tlvs(&info);
+        list.update_location_tlvs(&info, LocationDisclosure::all());
 
         let raw = &list.non_hmac_tlvs()[0];
         assert_eq!(
@@ -1488,7 +1652,7 @@ mod tests {
             dst_addr: IpAddr::V6(dst),
             dst_port: 862,
         };
-        list.update_location_tlvs(&info);
+        list.update_location_tlvs(&info, LocationDisclosure::all());
 
         let raw = &list.non_hmac_tlvs()[0];
         assert_eq!(
@@ -1530,7 +1694,7 @@ mod tests {
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
         };
-        list.update_location_tlvs(&info);
+        list.update_location_tlvs(&info, LocationDisclosure::all());
         let parsed = LocationTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
         assert_eq!(parsed.sub_tlvs.len(), 1);
         assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceEui64);
@@ -1557,7 +1721,7 @@ mod tests {
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
         };
-        list.update_location_tlvs(&info);
+        list.update_location_tlvs(&info, LocationDisclosure::all());
         let raw = &list.non_hmac_tlvs()[0];
         assert_eq!(raw.value.len(), req.len(), "Length preserved");
         let parsed = LocationTlv::from_raw(raw).unwrap();
@@ -1593,7 +1757,7 @@ mod tests {
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
         };
-        list.update_location_tlvs(&info);
+        list.update_location_tlvs(&info, LocationDisclosure::all());
         let raw = &list.non_hmac_tlvs()[0];
         assert_eq!(raw.value.len(), req.len(), "Length preserved");
         // First sub-TLV (offset 4): M flag set.
@@ -1625,7 +1789,7 @@ mod tests {
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
         };
-        list.update_location_tlvs(&info);
+        list.update_location_tlvs(&info, LocationDisclosure::all());
 
         let raw = &list.non_hmac_tlvs()[0];
         assert_eq!(raw.value.len(), 4, "Location TLV Length must be preserved");
@@ -1664,7 +1828,7 @@ mod tests {
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
         };
-        list.update_location_tlvs(&info);
+        list.update_location_tlvs(&info, LocationDisclosure::all());
 
         let raw = &list.non_hmac_tlvs()[0];
         assert_eq!(

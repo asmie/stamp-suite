@@ -47,6 +47,7 @@ fn make_ctx<'a>(
         reflector_tx_count: None,
         packet_addr_info: None,
         last_reflection: None,
+        location_disclosure: Default::default(),
         local_addresses: &[],
         local_macs: &[],
         sender_port: 12345,

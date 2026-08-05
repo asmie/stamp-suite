@@ -9,7 +9,7 @@ use crate::tlv::core::{RawTlv, TlvError, TlvFlags, TlvType, HMAC_TLV_VALUE_SIZE,
 ///
 /// Per RFC 8972, the HMAC TLV must always be the last TLV in the list.
 /// For failure echo paths, wire order is preserved to comply with RFC 8972 §4.8.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct TlvList {
     /// The TLVs in the list (excluding HMAC).
     tlvs: Vec<RawTlv>,
@@ -18,7 +18,40 @@ pub struct TlvList {
     /// All TLVs in original wire order (used for failure echo per RFC 8972 §4.8).
     /// When set, `to_bytes()` will use this order instead of the separated fields.
     wire_order_tlvs: Option<Vec<RawTlv>>,
+    /// Byte offset of the HMAC TLV within the parsed TLV area, when this list
+    /// came from the wire.
+    ///
+    /// RFC 8972 §4.8's HMAC covers the Sequence Number plus every TLV
+    /// *preceding* the HMAC TLV. That prefix equals "the total size of all
+    /// non-HMAC TLVs" only while the HMAC TLV is last — which stops holding
+    /// once an Extra Padding TLV legitimately trails it (§4.8: "The HMAC TLV
+    /// MUST follow all TLVs ... except for the Extra Padding TLV"). Recording
+    /// the real offset keeps verification correct in that case; `None` (a
+    /// locally-built list) falls back to the size-sum.
+    hmac_wire_offset: Option<usize>,
+    /// A TLV that is neither the HMAC nor an Extra Padding TLV followed the
+    /// HMAC TLV on the wire, so the HMAC is not in its required position.
+    ///
+    /// RFC 8972 §4.8: "If the HMAC TLV appears in any other position in a
+    /// STAMP extended test packet, then the situation MUST be processed as
+    /// HMAC verification failure" — see `apply_reflector_flags_strict`.
+    hmac_misplaced: bool,
 }
+
+/// Equality compares TLV *content and arrangement* only.
+///
+/// `hmac_wire_offset` and `hmac_misplaced` are provenance recorded by the
+/// parsers so HMAC coverage can be computed correctly; they are deliberately
+/// excluded so a locally-built list still equals its own parsed round trip.
+impl PartialEq for TlvList {
+    fn eq(&self, other: &Self) -> bool {
+        self.tlvs == other.tlvs
+            && self.hmac_tlv == other.hmac_tlv
+            && self.wire_order_tlvs == other.wire_order_tlvs
+    }
+}
+
+impl Eq for TlvList {}
 
 impl TlvList {
     /// Creates a new empty TlvList.
@@ -127,12 +160,17 @@ impl TlvList {
 
             let (tlv, consumed) = RawTlv::parse(&buf[offset..])?;
 
-            if found_hmac {
+            // RFC 8972 §4.8: "The HMAC TLV MUST follow all TLVs included in a
+            // STAMP test packet except for the Extra Padding TLV" — trailing
+            // Extra Padding is pure filler outside the HMAC's coverage, so it
+            // is a legal position, not a misplaced HMAC.
+            if found_hmac && tlv.tlv_type != TlvType::ExtraPadding {
                 return Err(TlvError::HmacNotLast);
             }
 
             if tlv.tlv_type.is_hmac() {
                 found_hmac = true;
+                list.hmac_wire_offset = Some(offset);
                 if tlv.value.len() != HMAC_TLV_VALUE_SIZE {
                     return Err(TlvError::InvalidHmacLength(tlv.value.len()));
                 }
@@ -161,6 +199,8 @@ impl TlvList {
         let mut found_hmac = false;
         let mut any_malformed = false;
         let mut has_multiple_hmac = false;
+        let mut hmac_wire_offset: Option<usize> = None;
+        let mut hmac_misplaced = false;
 
         while offset < buf.len() {
             if buf.len() - offset < TLV_HEADER_SIZE {
@@ -178,18 +218,25 @@ impl TlvList {
                         any_malformed = true;
                     }
 
-                    if found_hmac {
-                        // RFC 8972: HMAC TLV must be last. TLVs appearing
-                        // after it are positionally malformed; mark via the
-                        // parser variant so the marker survives the
-                        // reflector's clear-and-rederive pass.
+                    if found_hmac && tlv.tlv_type != TlvType::ExtraPadding {
+                        // RFC 8972 §4.8: the HMAC TLV must precede only Extra
+                        // Padding TLVs. Anything else after it leaves the HMAC
+                        // misplaced, which §4.8 says "MUST be processed as
+                        // HMAC verification failure" — recorded here and acted
+                        // on in `apply_reflector_flags_strict`. The M flag is
+                        // set via the parser variant as well, so the
+                        // structural signal survives the reflector's
+                        // clear-and-rederive pass.
                         tlv.mark_malformed_by_parser();
                         any_malformed = true;
+                        hmac_misplaced = true;
                     }
 
                     if tlv.tlv_type.is_hmac() {
                         if found_hmac {
                             has_multiple_hmac = true;
+                        } else {
+                            hmac_wire_offset = Some(offset);
                         }
                         found_hmac = true;
                         if tlv.value.len() != HMAC_TLV_VALUE_SIZE {
@@ -234,7 +281,17 @@ impl TlvList {
             }
         }
 
+        list.hmac_wire_offset = hmac_wire_offset;
+        list.hmac_misplaced = hmac_misplaced;
+
         (list, any_malformed)
+    }
+
+    /// True when a TLV other than Extra Padding followed the HMAC TLV on the
+    /// wire, leaving the HMAC out of its RFC 8972 §4.8 position.
+    #[must_use]
+    pub fn hmac_misplaced(&self) -> bool {
+        self.hmac_misplaced
     }
 
     /// Serializes the TLV list to bytes.
@@ -280,7 +337,13 @@ impl TlvList {
 
     /// Builds the HMAC input data per RFC 8972 §4.8.
     fn build_hmac_input(&self, sequence_number_bytes: &[u8], tlv_bytes: &[u8]) -> Vec<u8> {
-        let non_hmac_size: usize = self.tlvs.iter().map(|t| t.wire_size()).sum();
+        // The HMAC covers the Sequence Number plus every TLV that precedes the
+        // HMAC TLV. When this list came off the wire we know that prefix
+        // exactly; the size-sum fallback is only correct when the HMAC TLV is
+        // last, which a legal trailing Extra Padding TLV (§4.8) breaks.
+        let non_hmac_size: usize = self
+            .hmac_wire_offset
+            .unwrap_or_else(|| self.tlvs.iter().map(|t| t.wire_size()).sum());
 
         let mut data = Vec::with_capacity(4 + non_hmac_size);
 
@@ -536,6 +599,18 @@ impl TlvList {
         self.mark_unrecognized_types();
         self.validate_known_tlv_lengths();
 
+        // RFC 8972 §4.8: "If the HMAC TLV appears in any other position in a
+        // STAMP extended test packet, then the situation MUST be processed as
+        // HMAC verification failure, as defined below in this section" — that
+        // procedure is the I flag on every TLV, not merely the M flag on the
+        // offending one. Checked before the key branches because the rule is
+        // positional: it holds whether or not this reflector has a key with
+        // which it could have verified anything.
+        if self.hmac_misplaced {
+            self.mark_all_integrity_failed();
+            return false;
+        }
+
         if let Some(key) = hmac_key {
             if require_hmac_tlv && self.hmac_tlv.is_none() {
                 if !self.contains_only_extra_padding() {
@@ -718,7 +793,10 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&[0x00, 0x08, 0x00, 0x10]);
         bytes.extend_from_slice(&[0xFF; 16]);
-        bytes.extend_from_slice(&[0x00, 0x01, 0x00, 0x02, 0xAA, 0xBB]);
+        // A Class of Service TLV after the HMAC. (Extra Padding here would be
+        // legal per RFC 8972 §4.8's explicit exemption — see
+        // `test_strict_parse_allows_only_extra_padding_after_hmac`.)
+        bytes.extend_from_slice(&[0x00, 0x04, 0x00, 0x02, 0xAA, 0xBB]);
 
         let result = TlvList::parse(&bytes);
         assert!(matches!(result, Err(TlvError::HmacNotLast)));
@@ -909,17 +987,18 @@ mod tests {
 
     #[test]
     fn test_apply_reflector_flags_preserves_parser_m_on_after_hmac_tlv() {
-        // RFC 8972 §4.5: HMAC TLV must be last. A TLV after HMAC is
-        // positionally malformed — that signal must reach the echoed response.
+        // RFC 8972 §4.8: the HMAC TLV must be followed by nothing except an
+        // Extra Padding TLV. A *Class of Service* TLV after it leaves the HMAC
+        // misplaced — the positional signal must reach the echoed response.
         let mut buf = Vec::new();
         // Valid HMAC TLV (16-byte value).
         buf.push(0x00);
         buf.push(0x08); // HMAC type
         buf.extend_from_slice(&16u16.to_be_bytes());
         buf.extend_from_slice(&[0xAA; 16]);
-        // ExtraPadding TLV after the HMAC — illegal position.
+        // Class of Service TLV after the HMAC — illegal position.
         buf.push(0x00);
-        buf.push(0x01); // ExtraPadding
+        buf.push(0x04); // ClassOfService
         buf.extend_from_slice(&4u16.to_be_bytes());
         buf.extend_from_slice(&[0xBB; 4]);
 
@@ -936,12 +1015,124 @@ mod tests {
             .expect("malformed packet preserves wire order");
         let post_hmac = wire_order
             .iter()
-            .find(|t| t.tlv_type == TlvType::ExtraPadding)
+            .find(|t| t.tlv_type == TlvType::ClassOfService)
             .expect("post-HMAC TLV preserved");
         assert!(
             post_hmac.is_malformed(),
             "TLV after HMAC must keep M-flag through the clear pass"
         );
+    }
+
+    /// RFC8972-4.8-3: "If the HMAC TLV appears in any other position ... the
+    /// situation MUST be processed as HMAC verification failure" — the §4.8
+    /// failure procedure sets the I flag on *every* TLV, so an M flag on the
+    /// offending TLV alone is not enough.
+    #[test]
+    fn test_misplaced_hmac_runs_verification_failure_procedure() {
+        let key = HmacKey::new(vec![0x33; 32]).unwrap();
+        let mut buf = Vec::new();
+        // A recognized TLV, then the HMAC, then another recognized TLV.
+        buf.push(0x00);
+        buf.push(0x04); // ClassOfService
+        buf.extend_from_slice(&4u16.to_be_bytes());
+        buf.extend_from_slice(&[0x11; 4]);
+        buf.push(0x00);
+        buf.push(0x08); // HMAC
+        buf.extend_from_slice(&16u16.to_be_bytes());
+        buf.extend_from_slice(&[0xAA; 16]);
+        buf.push(0x00);
+        buf.push(0x05); // DirectMeasurement — not Extra Padding
+        buf.extend_from_slice(&16u16.to_be_bytes());
+        buf.extend_from_slice(&[0x22; 16]);
+
+        let (mut list, any_malformed) = TlvList::parse_lenient(&buf);
+        assert!(
+            any_malformed,
+            "a misplaced HMAC is still structurally flagged"
+        );
+        assert!(list.hmac_misplaced(), "the misplaced HMAC must be recorded");
+
+        let raw = list.to_bytes();
+        let ok = list.apply_reflector_flags(Some(&key), &[0u8; 4], &raw);
+        assert!(
+            !ok,
+            "a misplaced HMAC must be reported as a verification failure"
+        );
+
+        let wire_order = list.wire_order_tlvs().expect("wire order preserved");
+        for tlv in wire_order {
+            assert!(
+                tlv.is_integrity_failed(),
+                "§4.8 failure procedure sets I on every TLV; {:?} lacks it",
+                tlv.tlv_type
+            );
+        }
+    }
+
+    /// RFC8972-4.8-2: "The HMAC TLV MUST follow all TLVs included in a STAMP
+    /// test packet **except for the Extra Padding TLV**" — so Extra Padding
+    /// after the HMAC TLV is a legal layout from a conformant peer. It must
+    /// not be marked malformed, and the HMAC must still verify: that trailing
+    /// padding lies outside the HMAC's coverage.
+    #[test]
+    fn test_extra_padding_after_hmac_is_legal_and_verifies() {
+        let key = HmacKey::new(vec![0x44; 32]).unwrap();
+        let seq = [0u8, 0, 0, 7];
+
+        // Covered prefix: one Class of Service TLV.
+        let covered = RawTlv::new(TlvType::ClassOfService, vec![0x11; 4]);
+        let mut covered_bytes = Vec::new();
+        covered.write_to(&mut covered_bytes);
+
+        // The peer's HMAC is over seq + the covered prefix only.
+        let mut hmac_input = Vec::new();
+        hmac_input.extend_from_slice(&seq);
+        hmac_input.extend_from_slice(&covered_bytes);
+        let mac = key.compute(&hmac_input);
+
+        let mut buf = covered_bytes.clone();
+        RawTlv::new(TlvType::Hmac, mac.to_vec()).write_to(&mut buf);
+        // Trailing filler, outside the HMAC's coverage.
+        RawTlv::new(TlvType::ExtraPadding, vec![0xBB; 8]).write_to(&mut buf);
+
+        let (mut list, any_malformed) = TlvList::parse_lenient(&buf);
+        assert!(
+            !any_malformed,
+            "Extra Padding after the HMAC TLV is a legal position, not malformed"
+        );
+        assert!(!list.hmac_misplaced(), "the HMAC is correctly positioned");
+
+        let ok = list.apply_reflector_flags(Some(&key), &seq, &buf);
+        assert!(
+            ok,
+            "the HMAC must verify — trailing Extra Padding is not covered by it"
+        );
+        for tlv in list.iter() {
+            assert!(
+                !tlv.is_integrity_failed(),
+                "no TLV may carry I on a successful verification; {:?} does",
+                tlv.tlv_type
+            );
+        }
+    }
+
+    /// The strict parser gets the same §4.8 exemption: trailing Extra Padding
+    /// is accepted, anything else after the HMAC TLV is still `HmacNotLast`.
+    #[test]
+    fn test_strict_parse_allows_only_extra_padding_after_hmac() {
+        let mut ok_buf = Vec::new();
+        RawTlv::new(TlvType::Hmac, vec![0xAA; 16]).write_to(&mut ok_buf);
+        RawTlv::new(TlvType::ExtraPadding, vec![0xBB; 4]).write_to(&mut ok_buf);
+        let list = TlvList::parse(&ok_buf).expect("trailing Extra Padding is legal");
+        assert_eq!(list.len(), 2);
+
+        let mut bad_buf = Vec::new();
+        RawTlv::new(TlvType::Hmac, vec![0xAA; 16]).write_to(&mut bad_buf);
+        RawTlv::new(TlvType::ClassOfService, vec![0xBB; 4]).write_to(&mut bad_buf);
+        assert!(matches!(
+            TlvList::parse(&bad_buf),
+            Err(TlvError::HmacNotLast)
+        ));
     }
 
     #[test]

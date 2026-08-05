@@ -45,7 +45,9 @@ pub use list::TlvList;
 pub use typed::ExtraPaddingTlv;
 
 // Type 2 — Location
-pub use typed::{LocationSubTlv, LocationSubType, LocationTlv, PacketAddressInfo};
+pub use typed::{
+    LocationDisclosure, LocationSubTlv, LocationSubType, LocationTlv, PacketAddressInfo,
+};
 
 // Type 3 — Timestamp Information
 pub use typed::{SyncSource, TimestampInfoTlv, TimestampMethod};
