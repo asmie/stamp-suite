@@ -484,6 +484,19 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                 // Always tracked per-client, independent of --stateful-reflector.
                 let counter_session = session_manager.get_or_create_session(src_addr);
                 counter_session.record_received();
+
+                // draft-ietf-ippm-asymmetrical-pkts-14 §5: classify the
+                // received Sequence Number against this session's replay
+                // window. Detection is unconditional and counted;
+                // `--drop-replayed` decides whether a duplicate is answered.
+                let replay_verdict = super::evaluate_replay(&counter_session, data, &counters);
+                if conf.drop_replayed && replay_verdict == crate::session::ReplayVerdict::Replay {
+                    counters
+                        .packets_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+
                 let reflector_rx_count = Some(counter_session.get_received_count());
                 let reflector_tx_count = Some(counter_session.get_transmitted_count());
                 let last_reflection = Some(counter_session.get_last_reflection());

@@ -98,6 +98,9 @@ async fn get_status(State(s): State<ControlState>) -> Json<serde_json::Value> {
             "packets_reflected": s.counters.packets_reflected.load(Ordering::Relaxed),
             "packets_dropped": s.counters.packets_dropped.load(Ordering::Relaxed),
             "packets_rate_limited": s.counters.packets_rate_limited.load(Ordering::Relaxed),
+            // draft-ietf-ippm-asymmetrical-pkts-14 §5 replay detection.
+            "packets_replayed": s.counters.packets_replayed.load(Ordering::Relaxed),
+            "packets_reordered": s.counters.packets_reordered.load(Ordering::Relaxed),
         },
     }))
 }
@@ -407,6 +410,10 @@ mod tests {
         assert!(v["uptime_seconds"].is_number());
         assert_eq!(v["counters"]["packets_received"], 0);
         assert_eq!(v["counters"]["packets_rate_limited"], 0);
+        // Replay-detection counters are part of the status surface so the
+        // §5 detection is observable without a log-level change.
+        assert_eq!(v["counters"]["packets_replayed"], 0);
+        assert_eq!(v["counters"]["packets_reordered"], 0);
     }
 
     #[tokio::test]
