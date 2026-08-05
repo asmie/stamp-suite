@@ -27,7 +27,15 @@ ttl-pnet = ["dep:pnet"]
 metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", "dep:tokio-util"]
 # Runtime control-plane REST API (reflector only): localhost session/key
 # management, cap tuning, drain/shutdown. Design: doc/control-plane.md.
-control = ["dep:axum", "dep:tokio-util"]
+# TLS is part of `control` rather than a sub-feature: the control plane
+# manages keys and shutdown, so transport security is not an optional
+# extra for it, and one fewer cfg dimension keeps the matrix honest.
+control = [
+    "dep:axum",
+    "dep:tokio-util",
+    "dep:axum-server",
+    "dep:rustls",
+]
 snmp = []
 # Kernel/hardware timestamping. Gates the SO_TIMESTAMPING read paths:
 # Linux gets kernel RX timestamps (SCM_TIMESTAMPING cmsgs) and TX timestamps
@@ -63,6 +71,8 @@ axum = { version = "0.8", optional = true }
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.18", optional = true }
 tokio-util = { version = "0.7", optional = true, features = ["rt"] }
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"], optional = true }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
 
 [dependencies.tokio]
 version = "1.52"

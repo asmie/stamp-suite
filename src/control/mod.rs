@@ -336,33 +336,171 @@ impl ControlServer {
     }
 }
 
+/// A loaded server certificate chain and private key for the control plane.
+///
+/// Held as parsed DER rather than paths so a bad file fails at startup, next to
+/// the operator who wrote the flag, instead of on the first request.
+pub struct ControlTls {
+    chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+}
+
+impl std::fmt::Debug for ControlTls {
+    /// Deliberately says nothing about the key material.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlTls")
+            .field("certificates", &self.chain.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ControlTls {
+    /// Loads a PEM certificate chain and private key from disk.
+    ///
+    /// # Errors
+    /// Returns an `io::Error` describing which file failed and why: unreadable,
+    /// containing no certificate, or containing no supported private key. The
+    /// messages name the flag so the operator knows which path to fix.
+    pub fn load(
+        cert_path: &std::path::Path,
+        key_path: &std::path::Path,
+    ) -> Result<Self, std::io::Error> {
+        let cert_pem = std::fs::read(cert_path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("--control-tls-cert {}: {e}", cert_path.display()),
+            )
+        })?;
+        use rustls::pki_types::pem::PemObject;
+        let chain = rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("--control-tls-cert {}: {e}", cert_path.display()),
+                )
+            })?;
+        if chain.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "--control-tls-cert {}: no CERTIFICATE block found",
+                    cert_path.display()
+                ),
+            ));
+        }
+
+        let key_pem = std::fs::read(key_path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("--control-tls-key {}: {e}", key_path.display()),
+            )
+        })?;
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "--control-tls-key {}: no usable PRIVATE KEY block found ({e})",
+                    key_path.display()
+                ),
+            )
+        })?;
+
+        Ok(Self { chain, key })
+    }
+
+    /// Builds the rustls server configuration.
+    ///
+    /// The crypto provider is passed explicitly rather than taken from rustls's
+    /// process-wide default. With the `metrics` feature also enabled this binary
+    /// links a second provider (aws-lc-rs, via hyper-rustls), and asking for
+    /// "the default" would then depend on which crate installed one first.
+    fn server_config(self) -> Result<rustls::ServerConfig, std::io::Error> {
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let mut config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?
+            .with_no_client_auth()
+            .with_single_cert(self.chain, self.key)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("control-plane TLS certificate/key rejected: {e}"),
+                )
+            })?;
+        // The control plane speaks HTTP/1.1; advertising it avoids a client
+        // negotiating h2 that the router is not being served over.
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(config)
+    }
+}
+
 /// Binds and spawns the control server. Fail-fast on bind errors
 /// (`main.rs` exits when the operator asked for a control plane it
 /// cannot provide, matching the metrics server contract).
+///
+/// With `tls` set the listener speaks HTTPS; the scheme in the startup log
+/// reflects what is actually being served, so an operator can tell at a glance.
 pub async fn init(
     addr: std::net::SocketAddr,
     state: ControlState,
+    tls: Option<ControlTls>,
 ) -> Result<ControlServer, std::io::Error> {
-    if !addr.ip().is_loopback() {
+    if !addr.ip().is_loopback() && tls.is_none() {
         log::warn!(
-            "control-plane API bound to non-loopback {addr} — it manages keys \
-             and shutdown; ensure network-level access control or set \
-             --control-token-file"
+            "control-plane API bound to non-loopback {addr} without TLS — it \
+             manages keys and shutdown, and a bearer token crosses the network \
+             in clear; set --control-tls-cert/--control-tls-key, or keep it on \
+             loopback behind an SSH tunnel or reverse proxy"
         );
     }
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
     let app = router(state);
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move { cancel_clone.cancelled().await })
-            .await
-            .ok();
-    });
-    log::info!("control-plane API listening on http://{local_addr}/v1/");
-    Ok(ControlServer { cancel, local_addr })
+
+    match tls {
+        Some(tls) => {
+            let config = tls.server_config()?;
+            // Bind eagerly so a busy port fails here, like the plaintext path,
+            // rather than inside the spawned task where nothing would notice.
+            let std_listener = std::net::TcpListener::bind(addr)?;
+            std_listener.set_nonblocking(true)?;
+            let local_addr = std_listener.local_addr()?;
+            let acceptor =
+                axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(config));
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            tokio::spawn(async move {
+                cancel_clone.cancelled().await;
+                shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+            });
+            tokio::spawn(async move {
+                let Ok(server) = axum_server::from_tcp_rustls(std_listener, acceptor) else {
+                    log::error!("control-plane TLS listener could not be adopted");
+                    return;
+                };
+                server
+                    .handle(handle)
+                    .serve(app.into_make_service())
+                    .await
+                    .ok();
+            });
+            log::info!("control-plane API listening on https://{local_addr}/v1/");
+            Ok(ControlServer { cancel, local_addr })
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let local_addr = listener.local_addr()?;
+            tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async move { cancel_clone.cancelled().await })
+                    .await
+                    .ok();
+            });
+            log::info!("control-plane API listening on http://{local_addr}/v1/");
+            Ok(ControlServer { cancel, local_addr })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -399,6 +537,237 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // TLS. These use a real socket and a real handshake, unlike the
+    // tower-oneshot tests above — the point is that the transport works, which
+    // an in-process router call cannot show.
+
+    /// Generates a throwaway CA and a leaf certificate signed by it, using
+    /// `openssl`. Returns `(ca_cert, leaf_cert, leaf_key)`.
+    ///
+    /// A CA plus leaf rather than one self-signed certificate, because rustls
+    /// correctly refuses a certificate with `CA:TRUE` as a server's end-entity
+    /// cert (`CaUsedAsEndEntity`) — a self-signed cert cannot be both the trust
+    /// anchor and the leaf. Generated per run rather than committed: a private
+    /// key in the repository trips secret scanners and would eventually expire.
+    /// Returns `None` when `openssl` is unavailable, so the test skips instead
+    /// of failing on a machine that lacks the tool.
+    fn generate_test_chain(
+        dir: &std::path::Path,
+    ) -> Option<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
+        let run = |args: Vec<std::ffi::OsString>| -> bool {
+            std::process::Command::new("openssl")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        let osv = |s: &str| std::ffi::OsString::from(s);
+        let osp = |p: &std::path::Path| p.as_os_str().to_os_string();
+
+        let ca_key = dir.join("ca.key");
+        let ca_cert = dir.join("ca.pem");
+        let leaf_key = dir.join("leaf.key");
+        let leaf_csr = dir.join("leaf.csr");
+        let leaf_cert = dir.join("leaf.pem");
+        let ext_file = dir.join("leaf.ext");
+
+        std::fs::write(
+            &ext_file,
+            b"basicConstraints=critical,CA:FALSE\n              keyUsage=critical,digitalSignature,keyEncipherment\n              extendedKeyUsage=serverAuth\n              subjectAltName=DNS:localhost,IP:127.0.0.1\n",
+        )
+        .ok()?;
+
+        // Self-signed CA.
+        if !run(vec![
+            osv("req"),
+            osv("-x509"),
+            osv("-newkey"),
+            osv("rsa:2048"),
+            osv("-nodes"),
+            osv("-keyout"),
+            osp(&ca_key),
+            osv("-out"),
+            osp(&ca_cert),
+            osv("-days"),
+            osv("3650"),
+            osv("-subj"),
+            osv("/CN=stamp-suite-test-ca"),
+            osv("-addext"),
+            osv("basicConstraints=critical,CA:TRUE"),
+        ]) {
+            return None;
+        }
+        // Leaf key + CSR.
+        if !run(vec![
+            osv("req"),
+            osv("-newkey"),
+            osv("rsa:2048"),
+            osv("-nodes"),
+            osv("-keyout"),
+            osp(&leaf_key),
+            osv("-out"),
+            osp(&leaf_csr),
+            osv("-subj"),
+            osv("/CN=localhost"),
+        ]) {
+            return None;
+        }
+        // Sign the leaf with the CA, adding the SAN the client will check.
+        if !run(vec![
+            osv("x509"),
+            osv("-req"),
+            osv("-in"),
+            osp(&leaf_csr),
+            osv("-CA"),
+            osp(&ca_cert),
+            osv("-CAkey"),
+            osp(&ca_key),
+            osv("-out"),
+            osp(&leaf_cert),
+            osv("-days"),
+            osv("3650"),
+            osv("-extfile"),
+            osp(&ext_file),
+        ]) {
+            return None;
+        }
+        (leaf_cert.exists() && leaf_key.exists() && ca_cert.exists())
+            .then_some((ca_cert, leaf_cert, leaf_key))
+    }
+
+    #[test]
+    fn tls_load_reports_which_file_is_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.pem");
+        let err = ControlTls::load(&missing, &missing).expect_err("missing cert must fail");
+        assert!(
+            err.to_string().contains("--control-tls-cert"),
+            "the error must name the flag: {err}"
+        );
+
+        // A readable file that holds no certificate.
+        let junk = dir.path().join("junk.pem");
+        std::fs::write(&junk, b"not a pem file\n").unwrap();
+        let err = ControlTls::load(&junk, &junk).expect_err("a non-PEM cert must fail");
+        assert!(
+            err.to_string().contains("no CERTIFICATE block"),
+            "the error must say what was missing: {err}"
+        );
+    }
+
+    #[test]
+    fn tls_load_rejects_a_cert_without_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some((_ca, cert, _key)) = generate_test_chain(dir.path()) else {
+            eprintln!("skipping: openssl unavailable");
+            return;
+        };
+        // Point the key argument at the certificate: valid PEM, wrong block.
+        let err = ControlTls::load(&cert, &cert).expect_err("a cert is not a key");
+        assert!(
+            err.to_string().contains("--control-tls-key"),
+            "the error must name the key flag: {err}"
+        );
+    }
+
+    #[test]
+    fn tls_debug_does_not_leak_key_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some((_ca, cert, key)) = generate_test_chain(dir.path()) else {
+            eprintln!("skipping: openssl unavailable");
+            return;
+        };
+        let tls = ControlTls::load(&cert, &key).expect("generated material must load");
+        let rendered = format!("{tls:?}");
+        assert!(rendered.contains("certificates"), "got: {rendered}");
+        assert!(
+            !rendered.to_ascii_lowercase().contains("key"),
+            "Debug must not mention key material: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tls_serves_https_and_enforces_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some((ca_path, cert_path, key_path)) = generate_test_chain(dir.path()) else {
+            eprintln!("skipping: openssl unavailable");
+            return;
+        };
+        let tls = ControlTls::load(&cert_path, &key_path).expect("material must load");
+
+        let mut state = test_state();
+        state.token = Some("s3cret".to_string());
+        let server = init("127.0.0.1:0".parse().unwrap(), state, Some(tls))
+            .await
+            .expect("TLS control plane must bind");
+        let addr = server.local_addr();
+
+        // Trust the CA that signed the leaf the server presents.
+        let cert_pem = std::fs::read(&ca_path).unwrap();
+        use rustls::pki_types::pem::PemObject;
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem) {
+            roots.add(cert.unwrap()).unwrap();
+        }
+
+        // A blocking rustls client on a worker thread: this exercises the real
+        // handshake rather than the router in isolation.
+        let request = |token: Option<&'static str>| {
+            let roots = roots.clone();
+            tokio::task::spawn_blocking(move || {
+                let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+                let config = rustls::ClientConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+                let mut conn =
+                    rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
+                        .unwrap();
+                let mut sock = std::net::TcpStream::connect(addr).unwrap();
+                let mut tls_stream = rustls::Stream::new(&mut conn, &mut sock);
+
+                use std::io::{Read, Write};
+                let auth = token
+                    .map(|t| format!("Authorization: Bearer {t}\r\n"))
+                    .unwrap_or_default();
+                let req = format!(
+                    "GET /v1/status HTTP/1.1\r\nHost: localhost\r\n{auth}Connection: close\r\n\r\n"
+                );
+                tls_stream.write_all(req.as_bytes()).unwrap();
+                let mut response = Vec::new();
+                // A clean close arrives as CloseNotify or an abrupt EOF
+                // depending on timing; either is fine once we have the status.
+                let _ = tls_stream.read_to_end(&mut response);
+                String::from_utf8_lossy(&response).to_string()
+            })
+        };
+
+        let authorized = request(Some("s3cret")).await.unwrap();
+        assert!(
+            authorized.starts_with("HTTP/1.1 200"),
+            "an authorized HTTPS request must succeed, got: {}",
+            authorized.lines().next().unwrap_or_default()
+        );
+        assert!(
+            authorized.contains("\"uptime_seconds\""),
+            "the response body must be the status JSON"
+        );
+
+        let unauthorized = request(None).await.unwrap();
+        assert!(
+            unauthorized.starts_with("HTTP/1.1 401"),
+            "TLS must not weaken the bearer-token check, got: {}",
+            unauthorized.lines().next().unwrap_or_default()
+        );
+
+        server.shutdown();
     }
 
     #[tokio::test]

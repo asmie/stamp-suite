@@ -163,7 +163,21 @@ async fn main() {
                 shutdown_requested: std::sync::Arc::clone(&shared.shutdown_requested),
                 token,
             };
-            match stamp_suite::control::init(conf.control_addr, state).await {
+            // Load the certificate/key before binding: a bad path must fail
+            // next to the operator who typed it, not on the first request.
+            let tls = match (&conf.control_tls_cert, &conf.control_tls_key) {
+                (Some(cert), Some(key)) => {
+                    match stamp_suite::control::ControlTls::load(cert, key) {
+                        Ok(tls) => Some(tls),
+                        Err(e) => {
+                            eprintln!("Failed to load control-plane TLS material: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                _ => None,
+            };
+            match stamp_suite::control::init(conf.control_addr, state, tls).await {
                 Ok(server) => Some(server),
                 Err(e) => {
                     eprintln!(

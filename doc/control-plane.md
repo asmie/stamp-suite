@@ -14,13 +14,14 @@ This document is the authoritative API contract.
 - Close the operational gap with teaparty's meta API while staying honest
   to stamp-suite's model (keys are SSID-scoped, sessions are lazily
   created per client `IP:port`).
-- Zero new runtime dependencies; localhost-safe by default.
+- Localhost-safe by default, with optional TLS for the cases where loopback
+  is not enough.
 
 **Non-goals (v1)**
 
 - Sender-mode control (the control plane is reflector-only).
-- TLS / mTLS termination — remote access goes through an SSH tunnel or a
-  reverse proxy; the API itself stays plain HTTP on loopback.
+- mTLS / client-certificate authentication. Server-side TLS is supported
+  (see §5); client identity is a bearer token, not a certificate.
 - Session *pre-provisioning* (teaparty's 4-tuple create-with-key). In
   stamp-suite, "provision a key for a measurement" is `PUT /v1/keys/{ssid}`;
   the session table entry appears when the client's first packet does.
@@ -182,8 +183,30 @@ Lock-poisoning follows the codebase convention:
 - **Why a token matters even on loopback:** `PUT /v1/keys` grants
   measurement access and `POST /v1/shutdown` is a kill switch; multi-user
   hosts should set the token.
-- **No TLS in v1:** remote management = SSH tunnel / reverse proxy. The
-  API never carries key material *out*, only *in*.
+- **Transport security:** `--control-tls-cert` and `--control-tls-key` (PEM)
+  switch the listener from HTTP to HTTPS. Both flags are required together —
+  clap enforces that on the command line and `validate()` enforces it for a
+  config file, which can otherwise set one alone.
+- **TLS implies a token.** Enabling TLS without `--control-token-file` is a
+  startup error. TLS is what makes exposing this API beyond loopback
+  plausible, and an unauthenticated key-management and shutdown endpoint
+  should not be reachable whether or not the transport is encrypted. The
+  reverse is still allowed: a token without TLS is the loopback case, where
+  the token guards against other local users.
+- **Certificate and key are loaded before the socket binds,** so a wrong path
+  or a non-PEM file fails at startup next to the operator who typed it,
+  naming the offending flag — not on the first request. `ControlTls`'s `Debug`
+  is written by hand so key material cannot reach a log.
+- **Crypto provider is passed explicitly** (`ring`) rather than taken from
+  rustls's process-wide default. With the `metrics` feature also enabled the
+  binary links a second provider (aws-lc-rs, via hyper-rustls), and asking
+  for "the default" would depend on which crate installed one first.
+- **The API still never carries key material *out*, only *in*** — TLS
+  protects the token and the inbound key, and `GET /v1/keys` remains a
+  metadata-only inventory.
+- **A non-loopback bind without TLS** logs a loud warning naming both the
+  TLS flags and the tunnel alternative; a non-loopback bind *with* TLS does
+  not warn.
 - **Abuse surface:** all mutating endpoints are constant-time-cheap and
   rate-limited implicitly by being a localhost HTTP server; no endpoint
   allocates unbounded memory (session list is bounded by `max_sessions`,
@@ -217,7 +240,7 @@ lines are the audit trail; v1 has no separate audit log.
 - Drain-then-shutdown convenience (`POST /v1/shutdown {"drain_seconds": N}`).
 - Session pre-provisioning, if a concrete teaparty-interop need appears.
 - OpenAPI document generation; Prometheus counters for control actions.
-- Windows/`SIO_TIMESTAMPING`, TLS, SNMP SET parity — tracked elsewhere.
+- Windows/`SIO_TIMESTAMPING`, mTLS client certificates, SNMP SET parity — tracked elsewhere.
 
 ## 9. Known collision
 
