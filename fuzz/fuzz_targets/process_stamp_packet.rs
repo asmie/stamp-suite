@@ -48,6 +48,7 @@ fuzz_target!(|data: &[u8]| {
         }),
         last_reflection: Some((0, 0)),
         location_disclosure: Default::default(),
+        cos_policy: stamp_suite::cos_policy::permissive(),
         local_addresses: &local,
         local_macs: &local_macs,
         sender_port: src.port(),

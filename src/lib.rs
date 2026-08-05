@@ -35,6 +35,9 @@ pub mod clock_format;
 pub mod configuration;
 /// HMAC cryptographic operations for packet authentication.
 #[doc(hidden)]
+pub mod cos_policy;
+
+#[doc(hidden)]
 pub mod crypto;
 /// Error estimate encoding/decoding for timestamps.
 #[doc(hidden)]

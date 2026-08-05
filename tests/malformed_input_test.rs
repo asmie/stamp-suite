@@ -49,6 +49,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>, strict: bool) -> ProcessingContex
         packet_addr_info: None,
         last_reflection: None,
         location_disclosure: Default::default(),
+        cos_policy: stamp_suite::cos_policy::permissive(),
         local_addresses: &[],
         local_macs: &[],
         sender_port: 12345,

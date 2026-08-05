@@ -575,6 +575,7 @@ fn test_location_tlv_ipv4_round_trip() {
         packet_addr_info: Some(addr_info),
         last_reflection: None,
         location_disclosure: Default::default(),
+        cos_policy: stamp_suite::cos_policy::permissive(),
         local_addresses: &[],
         local_macs: &[],
         sender_port: 12345,

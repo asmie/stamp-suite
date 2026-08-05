@@ -54,6 +54,7 @@ use std::time::{Duration, Instant};
 
 use crate::{
     configuration::{ClockFormat, Configuration, TlvHandlingMode},
+    cos_policy::CosAdmissionPolicy,
     crypto::{compute_packet_hmac, verify_packet_hmac, HmacKey},
     packets::{
         PacketAuthenticated, PacketUnauthenticated, ReflectedPacketAuthenticated,
@@ -1298,6 +1299,9 @@ pub struct ProcessingContext<'a> {
     /// Which Location TLV fields this reflector may report (RFC 8972 §4.2.2
     /// field-disclosure policy, `--location-disclose`).
     pub location_disclosure: LocationDisclosure,
+    /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, cos-ecn-01 §3.2): answers
+    /// *permitted*, where the backends' setsockopt answers *capable*.
+    pub cos_policy: &'a CosAdmissionPolicy,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     pub local_addresses: &'a [std::net::IpAddr],
     /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
@@ -1861,17 +1865,73 @@ fn apply_semantic_tlv_processing(
     base_bytes: &[u8],
 ) -> Option<SemanticResult> {
     // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS
-    let cos_request = tlvs.get_cos_request();
+    let requested_cos = tlvs.get_cos_request();
+
+    // RFC 8972 §4.4: "The Session-Reflector MUST use the local policy to verify
+    // whether the CoS corresponding to the value of the DSCP1 field is
+    // permitted in the domain"; §6 adds the same as a SHOULD; cos-ecn-01 §3.2
+    // extends it to EC1 ("if it is permitted and capable to do so").
+    //
+    // *Permitted* is decided here, against the operator's admission policy.
+    // *Capable* stays with the backends' setsockopt attempt. A request must
+    // clear both, and the two answers are genuinely different: the kernel will
+    // happily apply a codepoint the domain is not supposed to carry, so
+    // treating syscall success as permission answers only the second question.
+    //
+    // The policy is scoped to where the reply is going, which is the address
+    // the request came from.
+    let reply_destination = ctx.packet_addr_info.as_ref().map(|info| info.src_addr);
+    let (dscp_permitted, ecn_permitted) = match requested_cos {
+        Some((dscp1, ec1)) => (
+            ctx.cos_policy.permits_dscp(reply_destination, dscp1),
+            ctx.cos_policy.permits_ecn(ec1),
+        ),
+        // Nothing requested: nothing to admit or refuse.
+        None => (true, true),
+    };
+
+    // What the backend should actually put on the wire. A refused DSCP1 falls
+    // back to the received DSCP (DSCP2), matching the RPD=0b01 the TLV now
+    // reports; a refused EC1 forces the reply's ECN bits to 0b00 (Not-ECT)
+    // rather than leaving a value the policy rejected, which is the same
+    // treatment cos-ecn-01 §3.2 mandates for the "unable" case.
+    let cos_request = requested_cos.map(|(dscp1, ec1)| {
+        (
+            if dscp_permitted {
+                dscp1
+            } else {
+                ctx.received_dscp
+            },
+            if ecn_permitted { ec1 } else { 0 },
+        )
+    });
+
+    if let Some((dscp1, ec1)) = requested_cos {
+        if !dscp_permitted {
+            log::debug!(
+                "CoS admission policy refused DSCP1 {dscp1} for a reply to {:?};                  using the received DSCP {} with RPD=0b01",
+                reply_destination,
+                ctx.received_dscp
+            );
+        }
+        if !ecn_permitted {
+            log::debug!("CoS admission policy refused EC1 {ec1}; reply ECN forced to Not-ECT");
+        }
+    }
 
     // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §4.4 +
-    // draft-ietf-ippm-stamp-cos-ecn-01 §3.2). No DSCP policy is configured
-    // (DSCP1 is always honoured → RPD=0b00), and both backends apply the
-    // requested DSCP1/EC1 to the reply's TOS via `cos_request`, so
-    // RPE=0b11 ("reply ECN set to EC1") is the optimistic default; if the
-    // backend's setsockopt call later fails, `set_cos_policy_rejected` /
-    // `cos_unable_fallback_tos` override this to RPD=0b01/RPE=0b10 and
-    // force the reply's on-wire ECN bits to 0b00 per the -01 MUST rule.
-    tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, false, true);
+    // draft-ietf-ippm-stamp-cos-ecn-01 §3.2). RPD reports whether DSCP1 was
+    // honoured and RPE whether the reply's ECN was set to EC1 — both now
+    // reflect the admission decision above. If the backend's setsockopt call
+    // later fails, `set_cos_policy_rejected` / `cos_unable_fallback_tos`
+    // override these to RPD=0b01/RPE=0b10, so a request that was permitted but
+    // turned out not to be applicable still reports honestly.
+    tlvs.update_cos_tlvs(
+        ctx.received_dscp,
+        ctx.received_ecn,
+        !dscp_permitted,
+        ecn_permitted,
+    );
 
     // Update Timestamp Information TLVs (RFC 8972 §4.3). All four value
     // octets describe this reflector: the In pair characterizes the ingress
@@ -2498,6 +2558,7 @@ mod tests {
             packet_addr_info: None,
             last_reflection: None,
             location_disclosure: Default::default(),
+            cos_policy: crate::cos_policy::permissive(),
             local_addresses: &[],
             local_macs: &[],
             sender_port: 0,

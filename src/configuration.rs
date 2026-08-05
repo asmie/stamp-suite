@@ -3,7 +3,10 @@ use std::{fmt, net::SocketAddr, path::PathBuf};
 use clap::{Parser, ValueEnum};
 use thiserror::Error;
 
-use crate::tlv::LocationDisclosure;
+use crate::{
+    cos_policy::{parse_destination_rule, CosAdmissionPolicy, DscpSet, EcnSet},
+    tlv::LocationDisclosure,
+};
 
 pub use crate::clock_format::ClockFormat;
 pub use crate::hwtstamp::HwTsMode;
@@ -277,6 +280,45 @@ pub struct Configuration {
     /// this duration may be cleaned up. Default: 300 (5 minutes). Set to 0 to disable.
     #[clap(long, default_value_t = 300)]
     pub session_timeout: u64,
+
+    /// DSCP codepoints the reflector may apply to a reply when a Class of
+    /// Service TLV requests them (RFC 8972 §4.4/§6, cos-ecn-01 §3.2).
+    ///
+    /// `all` (default), `none`, or a comma-separated list of values and
+    /// inclusive ranges: `0,8,10-14,46`. A refused DSCP1 is not applied; the
+    /// reply keeps the received DSCP and the echoed TLV reports RPD=0b01.
+    ///
+    /// This is the *permitted* check the RFC asks for. Whether the value can
+    /// actually be set — *capable* — remains a separate question answered by
+    /// the socket, and a request must clear both.
+    ///
+    /// Reflector-side only.
+    #[clap(long, default_value = "all", value_name = "SPEC")]
+    pub allowed_dscp: String,
+
+    /// ECN codepoints the reflector may apply to a reply's IP header when a
+    /// Class of Service TLV requests them (cos-ecn-01 §3.2).
+    ///
+    /// `all` (default), `none`, or a comma-separated list of 0-3. A refused EC1
+    /// forces the reply's ECN bits to Not-ECT and the echoed TLV reports
+    /// RPE=0b10.
+    ///
+    /// Reflector-side only.
+    #[clap(long, default_value = "all", value_name = "SPEC")]
+    pub allowed_ecn: String,
+
+    /// Destination-scoped DSCP policy, overriding `--allowed-dscp` for replies
+    /// addressed inside a prefix: `PREFIX/LEN=SPEC`, e.g.
+    /// `--allowed-dscp-for 192.0.2.0/24=0,46`.
+    ///
+    /// Repeatable. The most specific matching prefix wins regardless of the
+    /// order given, and a matching rule *replaces* the global set rather than
+    /// adding to it. cos-ecn-01 §3.2 names exactly this shape: "a policy ...
+    /// configured for specific destination addresses or networks".
+    ///
+    /// Reflector-side only.
+    #[clap(long, value_name = "PREFIX/LEN=SPEC")]
+    pub allowed_dscp_for: Vec<String>,
 
     /// Suppress the reply to a packet whose Sequence Number was already seen
     /// on its session (draft-ietf-ippm-asymmetrical-pkts-14 §5).
@@ -825,6 +867,28 @@ impl Configuration {
         ))
     }
 
+    /// Builds the reflector's CoS admission policy from `--allowed-dscp`,
+    /// `--allowed-ecn` and any `--allowed-dscp-for` rules.
+    ///
+    /// # Errors
+    /// Returns the parse error, naming the flag, for a bad value list, a
+    /// malformed prefix rule, or an out-of-range codepoint.
+    pub fn cos_admission_policy(&self) -> Result<CosAdmissionPolicy, ConfigurationError> {
+        let cfg_err = ConfigurationError::InvalidConfiguration;
+        let dscp = DscpSet::parse(&self.allowed_dscp)
+            .map_err(|e| cfg_err(format!("invalid --allowed-dscp: {e}")))?;
+        let ecn = EcnSet::parse(&self.allowed_ecn)
+            .map_err(|e| cfg_err(format!("invalid --allowed-ecn: {e}")))?;
+        let mut destinations = Vec::with_capacity(self.allowed_dscp_for.len());
+        for rule in &self.allowed_dscp_for {
+            destinations.push(
+                parse_destination_rule(rule)
+                    .map_err(|e| cfg_err(format!("invalid --allowed-dscp-for `{rule}`: {e}")))?,
+            );
+        }
+        Ok(CosAdmissionPolicy::new(dscp, ecn, destinations))
+    }
+
     /// Parses `--location-disclose` into the reflector's RFC 8972 §4.2.2
     /// field-disclosure policy.
     ///
@@ -840,6 +904,10 @@ impl Configuration {
         // Surface a bad Location disclosure list at startup rather than
         // silently falling back to a default policy per packet.
         self.location_disclosure()?;
+
+        // Same for the CoS admission policy: a typo must not degrade silently
+        // into "permit everything" on every packet.
+        self.cos_admission_policy()?;
 
         if self.error_scale > 63 {
             return Err(ConfigurationError::InvalidConfiguration(format!(
@@ -1312,6 +1380,9 @@ impl Configuration {
         merge!(session_timeout);
         merge!(location_disclose);
         merge!(drop_replayed);
+        merge!(allowed_dscp);
+        merge!(allowed_ecn);
+        merge!(allowed_dscp_for);
         merge!(tlv_mode);
         merge!(verify_tlv_hmac);
         merge_opt!(ssid);
@@ -1417,6 +1488,9 @@ pub struct FileConfiguration {
     pub session_timeout: Option<u64>,
     pub location_disclose: Option<String>,
     pub drop_replayed: Option<bool>,
+    pub allowed_dscp: Option<String>,
+    pub allowed_ecn: Option<String>,
+    pub allowed_dscp_for: Option<Vec<String>>,
     pub tlv_mode: Option<TlvHandlingMode>,
     pub verify_tlv_hmac: Option<bool>,
     pub ssid: Option<u16>,
@@ -3489,6 +3563,91 @@ mod tests {
         let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
             .expect_err("conflicting return-path options must fail");
         assert!(err.to_string().contains("return_srv6_sids"));
+    }
+
+    #[test]
+    fn test_cos_policy_defaults_to_permit_all() {
+        let conf = load_from_args(&["test"]).unwrap();
+        assert_eq!(conf.allowed_dscp, "all");
+        assert_eq!(conf.allowed_ecn, "all");
+        assert!(
+            conf.cos_admission_policy().unwrap().is_permissive(),
+            "a measurement tool must answer every CoS request by default"
+        );
+    }
+
+    #[test]
+    fn test_cos_policy_parses_flags_and_destination_rules() {
+        let conf = load_from_args(&[
+            "test",
+            "--allowed-dscp",
+            "0,46",
+            "--allowed-ecn",
+            "0,2",
+            "--allowed-dscp-for",
+            "192.0.2.0/24=34",
+            "--allowed-dscp-for",
+            "10.0.0.0/8=none",
+        ])
+        .expect("a valid policy must load");
+        let policy = conf.cos_admission_policy().unwrap();
+        assert!(!policy.is_permissive());
+        assert!(policy.permits_dscp(None, 46));
+        assert!(!policy.permits_dscp(None, 34));
+        assert!(policy.permits_ecn(2));
+        assert!(!policy.permits_ecn(1));
+        // Destination rules replace the global set inside their prefix.
+        let inside: std::net::IpAddr = "192.0.2.9".parse().unwrap();
+        assert!(policy.permits_dscp(Some(inside), 34));
+        assert!(!policy.permits_dscp(Some(inside), 46));
+        let denied: std::net::IpAddr = "10.1.1.1".parse().unwrap();
+        assert!(!policy.permits_dscp(Some(denied), 46));
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_cos_policy() {
+        // Each flag must fail at startup rather than degrading to permit-all
+        // on every packet.
+        let err =
+            load_from_args(&["test", "--allowed-dscp", "64"]).expect_err("DSCP 64 is out of range");
+        assert!(err.to_string().contains("allowed-dscp"), "{err}");
+
+        let err =
+            load_from_args(&["test", "--allowed-ecn", "9"]).expect_err("ECN 9 is out of range");
+        assert!(err.to_string().contains("allowed-ecn"), "{err}");
+
+        let err = load_from_args(&["test", "--allowed-dscp-for", "192.0.2.0/24"])
+            .expect_err("a rule without '=' is malformed");
+        assert!(err.to_string().contains("allowed-dscp-for"), "{err}");
+
+        let err = load_from_args(&["test", "--allowed-dscp-for", "192.0.2.0/33=46"])
+            .expect_err("prefix length out of range");
+        assert!(err.to_string().contains("allowed-dscp-for"), "{err}");
+    }
+
+    #[test]
+    fn test_cos_policy_merges_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(
+            &path,
+            "allowed_dscp = \"46\"\nallowed_ecn = \"none\"\nallowed_dscp_for = [\"192.0.2.0/24=0\"]\n",
+        )
+        .unwrap();
+        let conf = load_from_args(&["test", "--config", path.to_str().unwrap()])
+            .expect("file-configured policy must load");
+        let policy = conf.cos_admission_policy().unwrap();
+        assert!(policy.permits_dscp(None, 46));
+        assert!(!policy.permits_dscp(None, 0));
+        assert!(
+            !policy.permits_ecn(0),
+            "allowed_ecn = none refuses every value"
+        );
+        let inside: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        assert!(
+            policy.permits_dscp(Some(inside), 0),
+            "file rule must reach the policy"
+        );
     }
 
     #[test]
