@@ -513,6 +513,20 @@ pub struct Configuration {
     #[clap(long, value_name = "PATH")]
     pub control_token_file: Option<PathBuf>,
 
+    /// PEM certificate chain for the control-plane API. Serves HTTPS instead of
+    /// HTTP; requires `--control-tls-key`.
+    ///
+    /// A bearer token is mandatory alongside TLS: TLS is what makes exposing
+    /// this API beyond loopback plausible, and an unauthenticated
+    /// key-management and shutdown endpoint is not something to expose,
+    /// encrypted or not.
+    #[clap(long, value_name = "PATH", requires = "control_tls_key")]
+    pub control_tls_cert: Option<PathBuf>,
+
+    /// PEM private key matching `--control-tls-cert`.
+    #[clap(long, value_name = "PATH", requires = "control_tls_cert")]
+    pub control_tls_key: Option<PathBuf>,
+
     /// Output format for statistics (text, json, csv).
     #[clap(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
@@ -908,6 +922,33 @@ impl Configuration {
         // Same for the CoS admission policy: a typo must not degrade silently
         // into "permit everything" on every packet.
         self.cos_admission_policy()?;
+
+        // Control-plane TLS: both halves or neither (clap's `requires` covers
+        // the CLI, but a config file can set one alone), and never without a
+        // bearer token — TLS is what makes non-loopback exposure plausible, and
+        // an unauthenticated key-management endpoint should not be reachable
+        // whether or not the transport is encrypted.
+        match (&self.control_tls_cert, &self.control_tls_key) {
+            (Some(_), None) => {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "control_tls_cert requires control_tls_key".to_string(),
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "control_tls_key requires control_tls_cert".to_string(),
+                ))
+            }
+            (Some(_), Some(_)) if self.control_token_file.is_none() => {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "control-plane TLS requires --control-token-file: an \
+                     unauthenticated key-management and shutdown API should not \
+                     be exposed, encrypted or not"
+                        .to_string(),
+                ))
+            }
+            _ => {}
+        }
 
         if self.error_scale > 63 {
             return Err(ConfigurationError::InvalidConfiguration(format!(
@@ -1410,6 +1451,8 @@ impl Configuration {
         merge!(control);
         merge!(control_addr);
         merge_opt!(control_token_file);
+        merge_opt!(control_tls_cert);
+        merge_opt!(control_tls_key);
         merge!(output_format);
         merge!(log_format);
         merge!(hwtstamp);
@@ -1518,6 +1561,8 @@ pub struct FileConfiguration {
     pub control: Option<bool>,
     pub control_addr: Option<SocketAddr>,
     pub control_token_file: Option<PathBuf>,
+    pub control_tls_cert: Option<PathBuf>,
+    pub control_tls_key: Option<PathBuf>,
     pub output_format: Option<OutputFormat>,
     pub log_format: Option<LogFormat>,
     pub hwtstamp: Option<HwTsMode>,
@@ -1614,6 +1659,8 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "control": { "type": "boolean" },
     "control_addr": { "type": "string" },
     "control_token_file": { "type": "string" },
+    "control_tls_cert": { "type": "string" },
+    "control_tls_key": { "type": "string" },
     "output_format": { "enum": ["text", "json", "csv"] },
     "log_format": { "enum": ["text", "json"] },
     "hwtstamp":   { "enum": ["auto", "on", "off"] },
@@ -3563,6 +3610,64 @@ mod tests {
         let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
             .expect_err("conflicting return-path options must fail");
         assert!(err.to_string().contains("return_srv6_sids"));
+    }
+
+    #[test]
+    fn test_control_tls_requires_both_halves_and_a_token() {
+        // Both halves together, with a token: accepted.
+        let conf = load_from_args(&[
+            "test",
+            "--control-tls-cert",
+            "/tmp/c.pem",
+            "--control-tls-key",
+            "/tmp/k.pem",
+            "--control-token-file",
+            "/tmp/t",
+        ])
+        .expect("cert + key + token is the supported combination");
+        assert!(conf.control_tls_cert.is_some() && conf.control_tls_key.is_some());
+
+        // TLS without a token is refused: an unauthenticated key-management and
+        // shutdown API should not be exposed, encrypted or not.
+        let err = load_from_args(&[
+            "test",
+            "--control-tls-cert",
+            "/tmp/c.pem",
+            "--control-tls-key",
+            "/tmp/k.pem",
+        ])
+        .expect_err("TLS without a bearer token must be refused");
+        assert!(
+            err.to_string().contains("control-token-file"),
+            "the error must point at the missing token: {err}"
+        );
+    }
+
+    #[test]
+    fn test_control_tls_half_configured_from_file_is_rejected() {
+        // clap's `requires` covers the CLI, but a config file can set one
+        // alone — validate() has to catch that too.
+        for (key, other) in [
+            ("control_tls_cert", "control_tls_key"),
+            ("control_tls_key", "control_tls_cert"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("stamp.toml");
+            std::fs::write(&path, format!("{key} = \"/tmp/x.pem\"\n")).unwrap();
+            let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
+                .expect_err("half-configured TLS must be refused");
+            assert!(
+                err.to_string().contains(other),
+                "the error must name the missing half ({other}): {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_control_tls_absent_by_default() {
+        let conf = load_from_args(&["test"]).unwrap();
+        assert!(conf.control_tls_cert.is_none());
+        assert!(conf.control_tls_key.is_none());
     }
 
     #[test]

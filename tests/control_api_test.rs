@@ -43,7 +43,8 @@ async fn control_api_end_to_end() {
     let state = test_state();
     let shutdown_flag = Arc::clone(&state.shutdown_requested);
 
-    let server = init("127.0.0.1:0".parse().unwrap(), state)
+    // No TLS in this test: it drives the plaintext loopback path.
+    let server = init("127.0.0.1:0".parse().unwrap(), state, None)
         .await
         .expect("bind on ephemeral port");
     let addr = server.local_addr();
