@@ -264,6 +264,22 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     // rejected a bad list at startup; fall back to the permissive default
     // rather than dropping traffic if that somehow did not run.
     let location_disclosure = conf.location_disclosure().unwrap_or_default();
+    // RFC 8972 §4.4/§6 + cos-ecn-01 §3.2 admission policy, resolved once.
+    // `validate()` already rejected a bad spec at startup; the permissive
+    // default is the safe fallback if that somehow did not run.
+    let cos_policy = conf
+        .cos_admission_policy()
+        .unwrap_or_else(|_| crate::cos_policy::CosAdmissionPolicy::permit_all());
+    if !cos_policy.is_permissive() {
+        log::info!(
+            "CoS admission policy active (--allowed-dscp {}, --allowed-ecn {}, {} \
+             destination rule(s)): a refused DSCP1/EC1 is reported via RPD/RPE \
+             instead of being applied",
+            conf.allowed_dscp,
+            conf.allowed_ecn,
+            conf.allowed_dscp_for.len()
+        );
+    }
 
     // Build local MAC addresses for the Reflected Test Packet Control TLV's
     // L2 Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
@@ -542,6 +558,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                         packet_addr_info,
                         last_reflection,
                         location_disclosure,
+                        cos_policy: &cos_policy,
                         local_addresses: &local_addresses,
                         local_macs: &local_macs,
                         sender_port: src_addr.port(),

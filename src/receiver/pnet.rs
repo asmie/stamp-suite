@@ -85,6 +85,8 @@ struct CaptureConfig {
     /// Suppress the reply to a replayed Sequence Number
     /// (draft-ietf-ippm-asymmetrical-pkts-14 §5, `--drop-replayed`).
     drop_replayed: bool,
+    /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, cos-ecn-01 §3.2).
+    cos_policy: crate::cos_policy::CosAdmissionPolicy,
     local_addresses: Vec<IpAddr>,
     /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
     /// Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
@@ -304,6 +306,9 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         // already rejected a bad list at startup.
         location_disclosure: conf.location_disclosure().unwrap_or_default(),
         drop_replayed: conf.drop_replayed,
+        cos_policy: conf
+            .cos_admission_policy()
+            .unwrap_or_else(|_| crate::cos_policy::CosAdmissionPolicy::permit_all()),
         local_macs,
         reflector_member_link_id: conf.reflector_member_link_id,
         return_path_allow_alternate: conf.return_path_allow_alternate,
@@ -858,6 +863,7 @@ fn handle_stamp_packet(
             packet_addr_info,
             last_reflection,
             location_disclosure: config.location_disclosure,
+            cos_policy: &config.cos_policy,
             local_addresses: &config.local_addresses,
             local_macs: &config.local_macs,
             sender_port: pkt.src.port(),

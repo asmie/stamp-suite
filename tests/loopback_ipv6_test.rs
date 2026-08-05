@@ -56,6 +56,7 @@ fn make_ctx<'a>(
         packet_addr_info: addr_info,
         last_reflection: None,
         location_disclosure: Default::default(),
+        cos_policy: stamp_suite::cos_policy::permissive(),
         local_addresses,
         local_macs: &[],
         sender_port: 12345,

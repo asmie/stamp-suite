@@ -60,6 +60,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         packet_addr_info: None,
         last_reflection: None,
         location_disclosure: Default::default(),
+        cos_policy: stamp_suite::cos_policy::permissive(),
         local_addresses: &[],
         local_macs: &[],
         sender_port: 12345,
@@ -319,6 +320,132 @@ fn cos_tlv_reflector_fills_ec2_rpd_rpe_at_draft_positions() {
         value,
         &[0xB8, 0xA4, 0xB0, 0x00],
         "echoed CoS value must follow the RFC 8972 + cos-ecn-01 bit layout"
+    );
+}
+
+/// RFC8972-4.4-8 / RFC8972-6-3 / cos-ecn-3.2-3: a DSCP1 the admission policy
+/// refuses must be reported as a policy rejection (RPD=0b01) rather than
+/// applied. Same wire layout as the permitted case above, so the byte-exact
+/// comparison isolates the RPD field.
+#[test]
+fn cos_tlv_refused_dscp_reports_policy_rejection() {
+    use stamp_suite::cos_policy::{CosAdmissionPolicy, DscpSet, EcnSet};
+
+    // Policy permits 0 and 34, but the sender asks for 46.
+    let policy =
+        CosAdmissionPolicy::new(DscpSet::parse("0,34").unwrap(), EcnSet::all(), Vec::new());
+    let cos = ClassOfServiceTlv::new(46, 2);
+    let packet = build_unauth_packet(&cos.to_raw().to_bytes());
+    let mut ctx = make_ctx(None);
+    ctx.received_dscp = 10;
+    ctx.received_ecn = 1;
+    ctx.cos_policy = &policy;
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("a refused CoS request is still reflected");
+    let value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE;
+    let value = &response.data[value_start..value_start + 4];
+
+    // byte0/byte1 are unchanged from the permitted case (DSCP1 is echoed as
+    // received, DSCP2/EC2 report the ingress); only RPD moves 0b00 → 0b01.
+    //   byte1 = (10 & 0xF)<<4 | 1<<2 | 0b01 = 0xA5
+    assert_eq!(
+        value,
+        &[0xB8, 0xA5, 0xB0, 0x00],
+        "a refused DSCP1 must set RPD=0b01 and change nothing else"
+    );
+
+    // And the reflector must not ask the backend to apply the refused value:
+    // the reply falls back to the received DSCP with ECN preserved.
+    assert_eq!(
+        response.cos_request,
+        Some((10, 2)),
+        "the refused DSCP1 must be replaced by the received DSCP for the wire"
+    );
+}
+
+/// cos-ecn-3.2-6: a refused EC1 must force the reply's ECN to Not-ECT and
+/// report RPE=0b10 ("unable to set the reply's ECN to EC1").
+#[test]
+fn cos_tlv_refused_ecn_forces_not_ect() {
+    use stamp_suite::cos_policy::{CosAdmissionPolicy, DscpSet, EcnSet};
+
+    // ECT(0)=2 is refused; DSCP is unrestricted.
+    let policy = CosAdmissionPolicy::new(DscpSet::all(), EcnSet::parse("0,1").unwrap(), Vec::new());
+    let cos = ClassOfServiceTlv::new(46, 2);
+    let packet = build_unauth_packet(&cos.to_raw().to_bytes());
+    let mut ctx = make_ctx(None);
+    ctx.received_dscp = 10;
+    ctx.received_ecn = 1;
+    ctx.cos_policy = &policy;
+
+    let response = process_stamp_packet(&packet, src(), 64, false, &ctx)
+        .expect("a refused CoS request is still reflected");
+    let value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE;
+    let value = &response.data[value_start..value_start + 4];
+
+    //   byte2 = 2<<6 | 0b10<<4 = 0xA0  (RPE 0b11 → 0b10)
+    assert_eq!(
+        value,
+        &[0xB8, 0xA4, 0xA0, 0x00],
+        "a refused EC1 must set RPE=0b10 and leave RPD alone"
+    );
+    assert_eq!(
+        response.cos_request,
+        Some((46, 0)),
+        "the refused EC1 must be replaced by Not-ECT for the wire"
+    );
+}
+
+/// The destination-scoped form: the same request is permitted or refused
+/// depending on where the reply is going (cos-ecn-01 §3.2's "policy ...
+/// configured for specific destination addresses or networks").
+#[test]
+fn cos_tlv_destination_scoped_policy_decides_per_peer() {
+    use stamp_suite::cos_policy::{parse_destination_rule, CosAdmissionPolicy, DscpSet, EcnSet};
+
+    // Globally nothing is permitted; 127.0.0.0/8 may use 46.
+    let rule = parse_destination_rule("127.0.0.0/8=46").unwrap();
+    let policy = CosAdmissionPolicy::new(DscpSet::none(), EcnSet::all(), vec![rule]);
+
+    let cos = ClassOfServiceTlv::new(46, 2);
+    let packet = build_unauth_packet(&cos.to_raw().to_bytes());
+    let value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE;
+
+    // The Location-TLV address info is what carries the reply destination, so
+    // build a context whose observed source is the peer being tested.
+    let permitted_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 5)), 12345);
+    let mut ctx = make_ctx(None);
+    ctx.received_dscp = 10;
+    ctx.received_ecn = 1;
+    ctx.cos_policy = &policy;
+    ctx.packet_addr_info = Some(stamp_suite::tlv::PacketAddressInfo {
+        src_addr: permitted_peer.ip(),
+        src_port: permitted_peer.port(),
+        dst_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        dst_port: 862,
+    });
+    let response =
+        process_stamp_packet(&packet, permitted_peer, 64, false, &ctx).expect("reflected");
+    assert_eq!(
+        response.data[value_start + 1] & 0b11,
+        0b00,
+        "inside the permitted prefix, RPD must stay 0b00"
+    );
+
+    // A peer outside the rule falls back to the (empty) global set.
+    let refused_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 5)), 12345);
+    ctx.packet_addr_info = Some(stamp_suite::tlv::PacketAddressInfo {
+        src_addr: refused_peer.ip(),
+        src_port: refused_peer.port(),
+        dst_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        dst_port: 862,
+    });
+    let response = process_stamp_packet(&packet, refused_peer, 64, false, &ctx).expect("reflected");
+    assert_eq!(
+        response.data[value_start + 1] & 0b11,
+        0b01,
+        "outside it, the same request must be refused with RPD=0b01"
     );
 }
 

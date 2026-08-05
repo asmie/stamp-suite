@@ -148,6 +148,23 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --srv6-return-forwarding     Best-effort SRv6 Return Path SRH forwarding
                                    (RFC 9503 §5; Linux+IPv6; off by default,
                                    graceful U-flag fallback when unsupported)
+      --allowed-dscp <SPEC>        DSCP codepoints the reflector may apply to a
+                                   reply (RFC 8972 §4.4/§6, cos-ecn-01 §3.2):
+                                   all (default) | none | list of values and
+                                   ranges, e.g. 0,8,10-14,46. A refused DSCP1
+                                   is not applied; the reply keeps the received
+                                   DSCP and the echoed TLV reports RPD=0b01
+      --allowed-ecn <SPEC>         ECN codepoints the reflector may apply:
+                                   all (default) | none | list of 0-3. A refused
+                                   EC1 forces the reply's ECN to Not-ECT and the
+                                   echoed TLV reports RPE=0b10
+      --allowed-dscp-for <RULE>    Destination-scoped DSCP policy overriding
+                                   --allowed-dscp for replies inside a prefix:
+                                   PREFIX/LEN=SPEC, e.g. 192.0.2.0/24=0,46.
+                                   REPEATABLE; the most specific matching prefix
+                                   wins regardless of order, and a matching rule
+                                   replaces the global set rather than adding
+                                   to it
       --location-disclose <FIELDS>  Which Location TLV fields the reflector may
                                    report (RFC 8972 §4.2.2 policy control):
                                    all (default) | none | any of src-port,
@@ -167,6 +184,20 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --require-hmac               Error out at startup if no HMAC key is configured
       --verify-tlv-hmac            Verify HMAC TLV (RFC 8972) on incoming packets
 ```
+
+**CoS admission policy — permitted vs capable (RFC 8972 §4.4/§6,
+draft-ietf-ippm-stamp-cos-ecn-01 §3.2).** The RFC requires the reflector to "use
+the local policy to verify whether the CoS corresponding to the value of the
+DSCP1 field is permitted in the domain". Attempting the setsockopt and treating
+failure as refusal only answers a different question — whether the host is
+*capable* — because the kernel knows nothing about the operator's domain policy
+and will happily apply a codepoint the network is not meant to carry.
+`--allowed-dscp`, `--allowed-ecn` and `--allowed-dscp-for` supply the *permitted*
+answer; the socket still supplies the *capable* one, and a request must clear
+both. A refused DSCP1 is reported with RPD=0b01 and the reply keeps the received
+DSCP; a refused EC1 is reported with RPE=0b10 and the reply's ECN is forced to
+Not-ECT. Nothing is dropped and no TLV is flagged malformed — refusal is a
+reported outcome, not an error. Defaults permit everything.
 
 **Reply-size cap and the live egress MTU (draft-ietf-ippm-asymmetrical-pkts
 §3).** `--reflected-control-max-size` bounds the STAMP reply the reflector will
