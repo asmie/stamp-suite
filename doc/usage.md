@@ -316,6 +316,25 @@ since the variant would itself disclose the observed address family.
       --ber                        Enable BER TLVs (draft-gandhi-ippm-stamp-ber, Types 240/241/242)
       --ber-pattern <HEX>          Padding bit pattern (default: ff00)
       --ber-padding-size <BYTES>   Extra Padding length used with --ber [default: 64]
+      --ber-omit-burst             Omit the Max Bit Error Burst Size TLV
+                                   (Type 242) from --ber packets. Type 242 is in
+                                   the Experimental Use range (RFC 8972 §5.1) and
+                                   is used independently, with an incompatible
+                                   wire format, by another implementation's
+                                   "Heartbeat" TLV; this keeps the rest of the
+                                   BER exchange usable against such a peer
+      --extra-padding <BYTES>      Append an Extra Padding TLV of this many value
+                                   octets to every packet (RFC 8972 §4.1),
+                                   independent of --ber. Pseudorandom fill per
+                                   §4.2. Conflicts with --ber, which fills the
+                                   padding TLV with its own known pattern
+      --tlv-hmac <auto|on|off>     Whether the sender originates an HMAC TLV
+                                   (RFC 8972 §4.8) [default: auto].
+                                   auto = originate when a key is configured,
+                                   on = always (requires a key),
+                                   off = never, even with a key — the key is
+                                   then used only for base-packet auth and for
+                                   verifying reflected TLV HMACs
       --malformed <bad-flags|bad-length>
                                    Diagnostic: append a deliberately malformed
                                    TLV to test a reflector's RFC 8972 §4.2

@@ -8,7 +8,9 @@ use tokio::net::UdpSocket;
 
 use crate::{
     clock_format::ClockFormat,
-    configuration::{decode_selector, is_auth, Configuration, MalformedMode, ZeroSsidAction},
+    configuration::{
+        decode_selector, is_auth, Configuration, MalformedMode, TlvHmacMode, ZeroSsidAction,
+    },
     crypto::{compute_packet_hmac, verify_packet_hmac, HmacKey},
     error_estimate::ErrorEstimate,
     packets::{
@@ -1044,6 +1046,14 @@ pub async fn run_sender(
         }
     }
 
+    // Standalone Extra Padding TLV (RFC 8972 §4.1), independent of BER.
+    // Pseudorandom fill per §4.2's recommendation. `validate()` has already
+    // rejected combining this with --ber, which needs a known pattern.
+    if let Some(bytes) = conf.extra_padding {
+        extra_tlvs.push(ExtraPaddingTlv::new(bytes).to_raw());
+        log::info!("Extra Padding TLV enabled ({bytes} value octets)");
+    }
+
     // Build BER TLVs (draft-gandhi-ippm-stamp-ber §3). All three are emitted
     // together, paired with an Extra Padding TLV filled with the repeated pattern.
     if conf.ber {
@@ -1073,7 +1083,18 @@ pub async fn run_sender(
         extra_tlvs.push(padding_tlv.to_raw());
         extra_tlvs.push(BerPatternTlv::new(pattern_bytes).to_raw());
         extra_tlvs.push(BerCountTlv::default().to_raw());
-        extra_tlvs.push(BerBurstTlv::default().to_raw());
+        // Type 242 collides with another implementation's incompatible
+        // experimental "Heartbeat" TLV (RFC 8972 §5.1 Experimental Use range);
+        // --ber-omit-burst drops it so the rest of the BER exchange still works
+        // against such a peer.
+        if conf.ber_omit_burst {
+            log::info!(
+                "BER: omitting the Max Bit Error Burst Size TLV (Type 242) per \
+                 --ber-omit-burst"
+            );
+        } else {
+            extra_tlvs.push(BerBurstTlv::default().to_raw());
+        }
         log::info!(
             "BER TLVs enabled (padding_size={}, pattern={})",
             conf.ber_padding_size,
@@ -1158,8 +1179,21 @@ pub async fn run_sender(
             SendMode::AuthBase { key }
         }
     } else if use_tlvs {
+        // RFC 8972 §4.8 origination is separate from holding a key: --tlv-hmac
+        // off keeps the key for verifying replies without putting an HMAC TLV
+        // on the wire. `validate()` has already ensured `on` has a key.
+        let originate = match conf.tlv_hmac {
+            TlvHmacMode::Auto | TlvHmacMode::On => true,
+            TlvHmacMode::Off => false,
+        };
+        if !originate && hmac_key.is_some() {
+            log::info!(
+                "not originating an HMAC TLV per --tlv-hmac off; the configured \
+                 key is still used to verify reflected TLV HMACs"
+            );
+        }
         SendMode::OpenTlv {
-            tlv_key: hmac_key.as_ref(),
+            tlv_key: originate.then_some(hmac_key.as_ref()).flatten(),
         }
     } else {
         SendMode::OpenBase
@@ -5204,6 +5238,129 @@ mod tests {
             access_report_retries.to_string(),
         ];
         Configuration::parse_from(args)
+    }
+
+    /// Minimal one-packet sender config aimed at `port`, plus `extra` flags.
+    /// Used by the wire-level flag tests below: they assert what actually
+    /// reaches the socket, not merely what the config parsed to.
+    fn wire_test_config(port: u16, extra: &[&str]) -> Configuration {
+        use clap::Parser;
+        let mut args: Vec<String> = vec![
+            "test",
+            "--remote-addr",
+            "127.0.0.1",
+            "--remote-port",
+            &port.to_string(),
+            "--local-addr",
+            "127.0.0.1",
+            "--local-port",
+            "0",
+            "--count",
+            "1",
+            "--send-delay",
+            "10",
+            "--timeout",
+            "1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        args.extend(extra.iter().map(|s| String::from(*s)));
+        Configuration::parse_from(args)
+    }
+
+    /// Collects the TLV types of the first packet a `run_sender` call emits.
+    async fn first_packet_tlv_types(conf: Configuration) -> Vec<TlvType> {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let conf = Configuration {
+            remote_port: port,
+            ..conf
+        };
+        let reflector = tokio::spawn(collect_silently(socket, 1, Duration::from_secs(5)));
+        let _ = tokio::time::timeout(Duration::from_secs(8), run_sender(&conf, None)).await;
+        let packets = reflector.await.unwrap();
+        assert!(!packets.is_empty(), "the sender must emit a packet");
+        let tlvs = TlvList::parse(&packets[0][UNAUTH_BASE_SIZE..]).expect("TLV area must parse");
+        tlvs.iter().map(|t| t.tlv_type).collect()
+    }
+
+    #[tokio::test]
+    async fn test_extra_padding_flag_emits_a_padding_tlv() {
+        // Without the flag there is no Extra Padding TLV at all.
+        let types = first_packet_tlv_types(wire_test_config(0, &[])).await;
+        assert!(
+            !types.contains(&TlvType::ExtraPadding),
+            "no padding by default; got {types:?}"
+        );
+
+        // With it, exactly one, independent of --ber.
+        let types = first_packet_tlv_types(wire_test_config(0, &["--extra-padding", "64"])).await;
+        assert_eq!(
+            types
+                .iter()
+                .filter(|t| **t == TlvType::ExtraPadding)
+                .count(),
+            1,
+            "expected one Extra Padding TLV; got {types:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ber_omit_burst_drops_only_type_242() {
+        // Baseline: --ber emits pattern, count and burst, plus its padding.
+        let types = first_packet_tlv_types(wire_test_config(0, &["--ber"])).await;
+        assert!(types.contains(&TlvType::BerBurst), "got {types:?}");
+        assert!(types.contains(&TlvType::BerPattern), "got {types:?}");
+        assert!(types.contains(&TlvType::BerCount), "got {types:?}");
+
+        // With the flag, Type 242 is gone and the rest of the exchange stands.
+        let types =
+            first_packet_tlv_types(wire_test_config(0, &["--ber", "--ber-omit-burst"])).await;
+        assert!(
+            !types.contains(&TlvType::BerBurst),
+            "Type 242 must be omitted; got {types:?}"
+        );
+        assert!(
+            types.contains(&TlvType::BerPattern) && types.contains(&TlvType::BerCount),
+            "the rest of the BER TLVs must remain; got {types:?}"
+        );
+        assert!(
+            types.contains(&TlvType::ExtraPadding),
+            "BER's pattern-filled padding must remain; got {types:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tlv_hmac_mode_controls_origination() {
+        const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+        // auto (the default) with a key: the HMAC TLV is originated.
+        let types = first_packet_tlv_types(wire_test_config(
+            0,
+            &["--hmac-key", KEY, "--timestamp-info"],
+        ))
+        .await;
+        assert!(
+            types.contains(&TlvType::Hmac),
+            "auto must originate with a key configured; got {types:?}"
+        );
+
+        // off: no HMAC TLV on the wire even though the key is still configured
+        // (and still used to verify replies).
+        let types = first_packet_tlv_types(wire_test_config(
+            0,
+            &["--hmac-key", KEY, "--timestamp-info", "--tlv-hmac", "off"],
+        ))
+        .await;
+        assert!(
+            !types.contains(&TlvType::Hmac),
+            "off must not originate an HMAC TLV; got {types:?}"
+        );
+        assert!(
+            types.contains(&TlvType::TimestampInfo),
+            "the other TLVs must be unaffected; got {types:?}"
+        );
     }
 
     /// Like [`access_report_test_config`], but additionally turns on the

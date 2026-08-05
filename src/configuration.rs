@@ -121,6 +121,37 @@ impl fmt::Display for TlvHandlingMode {
     }
 }
 
+/// Whether the Session-Sender originates an HMAC TLV (RFC 8972 §4.8).
+///
+/// Origination is separate from *having* a key: a key may be configured purely
+/// to verify a reflector's replies, or for base-packet authentication in
+/// authenticated mode. Found during interop testing, where a peer's handling of
+/// an unsolicited HMAC TLV differed from ours and there was no way to turn
+/// origination off without also giving up the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TlvHmacMode {
+    /// Originate an HMAC TLV whenever a key is configured and TLVs are in use.
+    /// The long-standing behaviour, and the default.
+    #[default]
+    Auto,
+    /// Always originate; startup fails if no key is configured.
+    On,
+    /// Never originate, even with a key configured. The key is then used only
+    /// for base-packet authentication and for verifying reflected TLV HMACs.
+    Off,
+}
+
+impl fmt::Display for TlvHmacMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::On => write!(f, "on"),
+            Self::Off => write!(f, "off"),
+        }
+    }
+}
+
 /// What the Session-Sender does when a reflected packet comes back with a
 /// zeroed SSID field.
 ///
@@ -660,6 +691,32 @@ pub struct Configuration {
     #[clap(long)]
     pub ber: bool,
 
+    /// Append an Extra Padding TLV of this many value octets to every test
+    /// packet (RFC 8972 §4.1), independent of `--ber`.
+    ///
+    /// Filled with pseudorandom bytes as §4.2 recommends. Use this to grow test
+    /// packets for MTU or fragmentation work without turning on BER
+    /// measurement, which needs a known pattern instead and owns the padding
+    /// TLV when it is enabled.
+    #[clap(long, value_name = "BYTES", conflicts_with = "ber")]
+    pub extra_padding: Option<usize>,
+
+    /// Omit the Max Bit Error Burst Size TLV (Type 242) from `--ber` packets.
+    ///
+    /// Type 242 sits in the Experimental Use range (RFC 8972 §5.1) and is used
+    /// independently, with an incompatible wire format, by another STAMP
+    /// implementation's "Heartbeat" TLV. Against such a peer that TLV is
+    /// misparsed, so this omits it while keeping the rest of the BER exchange
+    /// intact. Ignored unless `--ber` is set.
+    #[clap(long)]
+    pub ber_omit_burst: bool,
+
+    /// Whether the sender originates an HMAC TLV (RFC 8972 §4.8):
+    /// `auto` (default, originate when a key is configured), `on` (always;
+    /// requires a key), `off` (never, even with a key).
+    #[clap(long, default_value_t = TlvHmacMode::Auto, value_name = "MODE")]
+    pub tlv_hmac: TlvHmacMode,
+
     /// Bit pattern used to fill the Extra Padding TLV when `--ber` is set.
     /// Hex string (e.g. "ff00" or "aa55"). Defaults to the draft's recommended
     /// pattern (0xFF00). Ignored unless `--ber` is set.
@@ -922,6 +979,33 @@ impl Configuration {
         // Same for the CoS admission policy: a typo must not degrade silently
         // into "permit everything" on every packet.
         self.cos_admission_policy()?;
+
+        // `--tlv-hmac on` promises an HMAC TLV on every packet, which is
+        // impossible without a key. Fail at startup rather than silently
+        // sending unauthenticated packets.
+        if self.tlv_hmac == TlvHmacMode::On
+            && self.hmac_key.is_none()
+            && self.hmac_key_file.is_none()
+            && self.hmac_key_dir.is_none()
+        {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "tlv_hmac = on requires an HMAC key (--hmac-key, --hmac-key-file \
+                 or --hmac-key-dir)"
+                    .to_string(),
+            ));
+        }
+
+        // clap's `conflicts_with` covers the CLI; a config file can set both.
+        // BER owns the padding TLV when enabled — its pattern is what the
+        // reflector XOR-compares, so a second, pseudorandom padding TLV would
+        // corrupt the measurement.
+        if self.ber && self.extra_padding.is_some() {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "extra_padding conflicts with ber: BER fills the Extra Padding \
+                 TLV with its own known pattern (use ber_padding_size)"
+                    .to_string(),
+            ));
+        }
 
         // Control-plane TLS: both halves or neither (clap's `requires` covers
         // the CLI, but a config file can set one alone), and never without a
@@ -1472,6 +1556,9 @@ impl Configuration {
         merge!(ber);
         merge_opt!(ber_pattern);
         merge!(ber_padding_size);
+        merge_opt!(extra_padding);
+        merge!(ber_omit_burst);
+        merge!(tlv_hmac);
         merge!(reflected_control_count);
         merge!(reflected_control_length);
         merge!(reflected_control_interval_ns);
@@ -1582,6 +1669,9 @@ pub struct FileConfiguration {
     pub ber: Option<bool>,
     pub ber_pattern: Option<String>,
     pub ber_padding_size: Option<usize>,
+    pub extra_padding: Option<usize>,
+    pub ber_omit_burst: Option<bool>,
+    pub tlv_hmac: Option<TlvHmacMode>,
     pub reflected_control_count: Option<u16>,
     pub reflected_control_length: Option<u16>,
     pub reflected_control_interval_ns: Option<u32>,
@@ -1680,6 +1770,9 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "ber": { "type": "boolean" },
     "ber_pattern": { "type": "string", "pattern": "^[0-9a-fA-F]+$" },
     "ber_padding_size": { "type": "integer", "minimum": 0 },
+    "extra_padding": { "type": "integer", "minimum": 0 },
+    "ber_omit_burst": { "type": "boolean" },
+    "tlv_hmac": { "type": "string", "enum": ["auto", "on", "off"] },
     "reflected_control_count": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "reflected_control_length": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "reflected_control_interval_ns": { "type": "integer", "minimum": 0 },
@@ -3661,6 +3754,78 @@ mod tests {
                 "the error must name the missing half ({other}): {err}"
             );
         }
+    }
+
+    #[test]
+    fn test_interop_flag_defaults_are_unchanged_behaviour() {
+        let conf = load_from_args(&["test"]).unwrap();
+        assert_eq!(conf.extra_padding, None);
+        assert!(!conf.ber_omit_burst);
+        assert_eq!(
+            conf.tlv_hmac,
+            TlvHmacMode::Auto,
+            "auto preserves the long-standing origination behaviour"
+        );
+    }
+
+    #[test]
+    fn test_extra_padding_conflicts_with_ber() {
+        // On the CLI clap refuses it. `try_get_matches_from` rather than the
+        // `load_from_args` helper: clap's own error path exits the process, so
+        // the helper cannot observe it.
+        let err = Configuration::command()
+            .try_get_matches_from(["test", "--ber", "--extra-padding", "64"])
+            .expect_err("BER owns the padding TLV; a second one would corrupt it");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        // ...and from a config file, where clap cannot see the conflict.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "ber = true\nextra_padding = 64\n").unwrap();
+        let err = load_from_args(&["test", "--config", path.to_str().unwrap()])
+            .expect_err("the file form must be refused too");
+        assert!(
+            err.to_string().contains("extra_padding"),
+            "the error must name the conflict: {err}"
+        );
+    }
+
+    #[test]
+    fn test_tlv_hmac_on_requires_a_key() {
+        let err = load_from_args(&["test", "--tlv-hmac", "on"])
+            .expect_err("promising an HMAC TLV without a key is impossible");
+        assert!(err.to_string().contains("tlv_hmac"), "{err}");
+
+        // With a key it loads.
+        let conf = load_from_args(&[
+            "test",
+            "--tlv-hmac",
+            "on",
+            "--hmac-key",
+            "00112233445566778899aabbccddeeff",
+        ])
+        .expect("on + key is valid");
+        assert_eq!(conf.tlv_hmac, TlvHmacMode::On);
+
+        // `off` needs no key: it is the "hold a key but do not originate" case.
+        let conf = load_from_args(&["test", "--tlv-hmac", "off"]).expect("off needs no key");
+        assert_eq!(conf.tlv_hmac, TlvHmacMode::Off);
+    }
+
+    #[test]
+    fn test_interop_flags_merge_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(
+            &path,
+            "extra_padding = 128\nber_omit_burst = true\ntlv_hmac = \"off\"\n",
+        )
+        .unwrap();
+        let conf = load_from_args(&["test", "--config", path.to_str().unwrap()])
+            .expect("file-configured interop flags must load");
+        assert_eq!(conf.extra_padding, Some(128));
+        assert!(conf.ber_omit_burst);
+        assert_eq!(conf.tlv_hmac, TlvHmacMode::Off);
     }
 
     #[test]
