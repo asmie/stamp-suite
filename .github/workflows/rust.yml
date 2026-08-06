@@ -182,13 +182,39 @@ jobs:
           }
           Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-1.88.exe" -OutFile "$env:TEMP/npcap.exe"
           & $sevenZip x "$env:TEMP/npcap.exe" -o"$env:TEMP/npcap-extract" -y | Out-Null
-          $dlls = Get-ChildItem -Path "$env:TEMP/npcap-extract" -Recurse -Include "Packet.dll","wpcap.dll" -ErrorAction SilentlyContinue
+          # The installer ships BOTH architectures: 32-bit Packet.dll/wpcap.dll
+          # at the root and 64-bit ones under a subdirectory. Copying every
+          # match into one flat directory with -Force makes the survivor depend
+          # on enumeration order, and a 32-bit DLL loaded by the x64 test binary
+          # aborts it at load time with STATUS_INVALID_IMAGE_FORMAT
+          # (0xc000007b) before a single test runs. Select the 64-bit copies
+          # explicitly instead.
+          $all = Get-ChildItem -Path "$env:TEMP/npcap-extract" -Recurse -Include "Packet.dll","wpcap.dll" -ErrorAction SilentlyContinue
+          Write-Host "Candidate DLLs found in the extracted installer:"
+          $all | ForEach-Object { Write-Host "  $($_.FullName)" }
+          $dlls = $all | Where-Object { $_.FullName -match '\\x64\\' }
+          if (-not $dlls) {
+            # Fall back to any match rather than failing outright, and say so:
+            # a future installer layout may not use an x64/ subdirectory.
+            Write-Warning "No DLLs under an x64/ directory; falling back to every match, which may be the 32-bit set."
+            $dlls = $all
+          }
           if (-not $dlls) {
             Write-Warning "Could not find Packet.dll/wpcap.dll inside the extracted Npcap installer; the test step will likely fail to launch. Continuing anyway (best-effort job)."
           } else {
             $destDir = "C:/npcap-runtime"
             New-Item -ItemType Directory -Force -Path $destDir | Out-Null
             $dlls | ForEach-Object { Copy-Item $_.FullName -Destination $destDir -Force }
+            # Report the machine type of what was actually staged, so a repeat
+            # failure names its own cause instead of needing another round trip:
+            # 0x8664 = x64, 0x14c = x86 (PE header, e_lfanew then +4).
+            Get-ChildItem $destDir -Filter *.dll | ForEach-Object {
+              $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+              $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+              $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+              $arch = if ($machine -eq 0x8664) { "x64" } elseif ($machine -eq 0x14c) { "x86" } else { "0x{0:x}" -f $machine }
+              Write-Host "staged $($_.Name): $arch"
+            }
             echo "$destDir" >> $env:GITHUB_PATH
           }
       - name: Run tests (ttl-pnet backend)
