@@ -144,7 +144,10 @@ async fn main() {
         #[cfg(feature = "control")]
         let _control_server = if conf.control {
             let token = match conf.control_token_file.as_deref() {
-                Some(path) => match std::fs::read_to_string(path) {
+                // Same descriptor-based permission check as HMAC key files:
+                // a group/world-readable token hands any local user the
+                // key-management and shutdown endpoints.
+                Some(path) => match stamp_suite::crypto::read_token_file(path) {
                     Ok(t) => Some(t.trim().to_string()),
                     Err(e) => {
                         eprintln!("Failed to read --control-token-file: {e}");

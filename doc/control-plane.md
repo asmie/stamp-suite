@@ -90,6 +90,12 @@ status code. Request bodies are validated strictly
 is deliberate: IPv6 literals like `[::1]:5000` are hostile to path
 segments; a JSON body parses as a plain `SocketAddr`.
 
+Deleting a key **revokes access**: once a keyset exists, an authenticated
+packet whose SSID resolves to no key (unknown SSID with no default, or the
+last key deleted) is dropped. Removing keys can only make the reflector
+stricter — it never falls back to answering authenticated-layout packets
+without verification, regardless of `--require-hmac`.
+
 ### Response shapes
 
 `GET /v1/status`:
@@ -154,7 +160,11 @@ fields; `0` consistently means "unlimited/disabled", mirroring the CLI):
   before the process exits.
 - **Caps PATCH** is per-field atomic but not transactional across fields;
   each `Some` field is stored independently (Relaxed atomics — these are
-  tuning knobs, not synchronization points).
+  tuning knobs, not synchronization points). `reflected_control_max_size`
+  is additionally clamped to the payload ceiling discovered from the
+  egress MTU at startup — a runtime raise cannot reintroduce Type 12
+  replies that fragment on the live link; the response body reports the
+  clamped effective value.
 
 ## 4. Concurrency and state model
 

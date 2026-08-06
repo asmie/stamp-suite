@@ -30,13 +30,13 @@
 //! when the PHC is synchronized (ptp4l/phc2sys).
 
 use clap::ValueEnum;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::tlv::TimestampMethod;
 
 /// Operator preference for hardware-assisted timestamping. Selected via
 /// the `--hwtstamp` CLI flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HwTsMode {
     /// Use kernel *software* timestamps when the build supports them

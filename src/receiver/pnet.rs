@@ -889,6 +889,10 @@ fn handle_stamp_packet(
         process_stamp_packet_isolated(data, pkt.src, pkt.ttl, config.use_auth, &ctx)
     };
     if let Some(mut response) = response_opt {
+        // The packet survived parse + HMAC verification — only now may it
+        // advance the session's anti-replay window.
+        super::commit_replay(&counter_session, data);
+
         // Handle Return Path action (RFC 9503 §5)
         let send_target = match &response.return_path_action {
             ReturnPathAction::SuppressReply => {

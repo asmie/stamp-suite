@@ -292,7 +292,11 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
         local_addr
     );
 
-    let mut buf = [0u8; 1024];
+    // Full-size UDP payloads, not "typical" STAMP packets: --extra-padding
+    // grows requests to MTU-probing sizes, and a request truncated here would
+    // be answered wrong (or rejected) instead of echoed. One heap allocation
+    // for the life of the loop.
+    let mut buf = vec![0u8; crate::packets::MAX_UDP_PAYLOAD];
     // 512 bytes: TTL + TOS + PKTINFO plus the 64-byte SCM_TIMESTAMPING
     // cmsg (feature "hwtstamp") with headroom.
     let mut cmsg_buf = vec![0u8; 512];
@@ -597,6 +601,10 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                     process_stamp_packet_isolated(data, src_addr, ttl, use_auth, &ctx)
                 };
                 if let Some(mut response) = response_opt {
+                    // The packet survived parse + HMAC verification — only now
+                    // may it advance the session's anti-replay window.
+                    super::commit_replay(&counter_session, data);
+
                     // Handle Return Path action (RFC 9503 §5)
                     let send_target = match &response.return_path_action {
                         ReturnPathAction::SuppressReply => {
@@ -737,7 +745,22 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                                 send_target,
                                 source,
                             ) {
-                                Ok(_) => true,
+                                Ok(_) => {
+                                    // SOF_TIMESTAMPING_OPT_ID advances for
+                                    // every successful send on this socket, so
+                                    // the userspace counter must advance in
+                                    // lock-step here too — otherwise every
+                                    // later TX timestamp is attributed to the
+                                    // wrong reflection.
+                                    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                                    if kernel_ts.tx_kernel {
+                                        sent_opt_id = Some(
+                                            tx_counter
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                        );
+                                    }
+                                    true
+                                }
                                 Err(e) => {
                                     log::debug!(
                                         "could not pin reply source to {source} \

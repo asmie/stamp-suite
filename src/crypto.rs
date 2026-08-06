@@ -50,6 +50,54 @@ pub enum HmacError {
     },
 }
 
+/// Opens a secret file, rejecting group/other-accessible permissions.
+///
+/// The mode is checked on the *opened file descriptor* (`fstat`), not via a
+/// second path lookup: this closes the TOCTOU window between check and read,
+/// and — because it inspects the exact inode the bytes come from — also
+/// rejects a symlink whose target is group- or other-accessible, while still
+/// allowing symlinked secret-injection setups (Kubernetes mounts, systemd
+/// credentials) whose targets are owner-only.
+fn open_owner_only_file(path: &Path, detail: &'static str) -> Result<fs::File, HmacError> {
+    let file = fs::File::open(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = file
+            .metadata()
+            .map_err(|e| HmacError::FileReadError(e.to_string()))?;
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(HmacError::InsecurePermissions {
+                path: path.display().to_string(),
+                mode: mode & 0o777,
+                detail,
+            });
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = detail;
+
+    Ok(file)
+}
+
+/// Reads the control-plane bearer-token file, applying the same
+/// descriptor-based permission validation as [`HmacKey::from_file`]: a token
+/// readable by group or other grants any local user key-management and
+/// shutdown access, so it is refused just like an exposed HMAC key
+/// (`doc/control-plane.md` §5 documents this mode check).
+pub fn read_token_file(path: &Path) -> Result<String, HmacError> {
+    use std::io::Read;
+
+    let mut file = open_owner_only_file(path, "token file is accessible by group or other")?;
+    let mut token = String::new();
+    file.read_to_string(&mut token)
+        .map_err(|e| HmacError::FileReadError(e.to_string()))?;
+    Ok(token)
+}
+
 /// HMAC key for STAMP authentication.
 ///
 /// Wraps a key and provides methods for computing and verifying
@@ -126,23 +174,7 @@ impl HmacKey {
     pub fn from_file(path: &Path) -> Result<Self, HmacError> {
         use std::io::Read;
 
-        let mut file = fs::File::open(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let metadata = file
-                .metadata()
-                .map_err(|e| HmacError::FileReadError(e.to_string()))?;
-            let mode = metadata.permissions().mode();
-            if mode & 0o077 != 0 {
-                return Err(HmacError::InsecurePermissions {
-                    path: path.display().to_string(),
-                    mode: mode & 0o777,
-                    detail: "key file is accessible by group or other",
-                });
-            }
-        }
+        let mut file = open_owner_only_file(path, "key file is accessible by group or other")?;
 
         let mut raw_bytes = Vec::new();
         file.read_to_end(&mut raw_bytes)
@@ -694,6 +726,38 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o604)).unwrap();
         assert!(matches!(
             HmacKey::from_file(&path),
+            Err(HmacError::InsecurePermissions { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_token_file_accepts_owner_only_token() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_key_file(dir.path(), "token", "s3cret-bearer-token\n");
+        let token = read_token_file(&path).expect("0600 token must load");
+        assert_eq!(token, "s3cret-bearer-token\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_token_file_rejects_group_or_other_accessible_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = write_key_file(dir.path(), "token", "s3cret-bearer-token");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            matches!(
+                read_token_file(&path),
+                Err(HmacError::InsecurePermissions { .. })
+            ),
+            "group-readable token file must be rejected"
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o604)).unwrap();
+        assert!(matches!(
+            read_token_file(&path),
             Err(HmacError::InsecurePermissions { .. })
         ));
     }
