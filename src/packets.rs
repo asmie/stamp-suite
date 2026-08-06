@@ -10,6 +10,16 @@ use thiserror::Error;
 
 use crate::tlv::{TlvError, TlvList};
 
+/// Largest UDP payload a STAMP endpoint may need to receive in one datagram
+/// (the 16-bit UDP length ceiling; IPv4's practical limit is 65507).
+///
+/// Receive buffers are sized to this rather than a "typical" STAMP packet:
+/// `--extra-padding` legitimately grows test packets to MTU-probing sizes and
+/// reflectors echo them back, and a datagram truncated by a small `recv`
+/// buffer is then rejected as malformed — defeating exactly the measurement
+/// that flag exists for.
+pub const MAX_UDP_PAYLOAD: usize = 65535;
+
 /// Errors that can occur during packet parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum PacketError {

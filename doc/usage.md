@@ -212,13 +212,19 @@ jumbo link, or lower it to cap replies below the path MTU. The query is
 best-effort — a wildcard bind has no single egress interface, and a failed query
 or a non-Linux platform simply leaves the flag as the only cap. The sender does
 the equivalent check with `getsockopt(IP_MTU)`, which only answers on a
-connected socket and so cannot be used by a reflector.
+connected socket and so cannot be used by a reflector. The discovered ceiling
+also bounds runtime updates: a control-plane `PATCH /v1/caps` cannot raise
+`reflected_control_max_size` past it.
 
 **Replay detection (draft-ietf-ippm-asymmetrical-pkts §5).** The reflector
-tracks the Sequence Number of every received packet against a 31-entry
-per-session window and classifies it as new, reordered, replayed, or older than
-the window. This runs unconditionally — the draft notes the HMAC TLV is no
-defence here, since a replayed packet carries a valid HMAC. Two counters,
+classifies the Sequence Number of every received packet against a 31-entry
+per-session window — new, reordered, replayed, or older than the window. This
+runs unconditionally — the draft notes the HMAC TLV is no defence here, since a
+replayed packet carries a valid HMAC. The window itself only advances for
+packets that survive parsing and (when a key is configured) HMAC verification:
+an unverified packet can be *refused* on its verdict but can never *plant* a
+sequence number, so a spoofed packet cannot get a later genuine one dropped
+under `--drop-replayed`. Two counters,
 `packets_replayed` and `packets_reordered`, appear in the control-plane
 `/v1/status` response (reordering is separated out because it is ordinary on a
 real path). Detection never changes what is sent unless `--drop-replayed` is

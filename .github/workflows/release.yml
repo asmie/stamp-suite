@@ -265,6 +265,14 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
+          # The packages-* artifacts preserve the debian/ and generate-rpm/
+          # directories they were uploaded under (two upload paths share the
+          # target/<triple>/ root). Flatten before hashing so the globs match
+          # and SHA256SUMS entries carry the same basenames the release
+          # attaches its assets under.
+          find . -mindepth 2 -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' \) \
+            -exec mv -t . {} +
           sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:

@@ -17,7 +17,7 @@ use crate::{
         ExtendedPacketAuthenticated, ExtendedPacketUnauthenticated,
         ExtendedReflectedPacketAuthenticated, ExtendedReflectedPacketUnauthenticated,
         PacketAuthenticated, PacketUnauthenticated, ReflectedPacketAuthenticated,
-        ReflectedPacketUnauthenticated,
+        ReflectedPacketUnauthenticated, MAX_UDP_PAYLOAD,
     },
     rate_control::{AimdController, AimdParams, AimdStats},
     receiver::{
@@ -242,6 +242,15 @@ impl AccessReportRetransmitState {
     /// Number of retransmissions actually performed so far.
     fn retransmissions(&self) -> u32 {
         self.retransmissions
+    }
+
+    /// `true` once the original send has happened (the machine left
+    /// `NotStarted`). The sender's post-loop retransmission wait only
+    /// applies to a procedure the main loop actually started — with
+    /// `--count 0` nothing was ever sent, and the wait must not originate
+    /// packets on its own.
+    fn has_started(&self) -> bool {
+        !matches!(self.phase, AccessReportPhase::NotStarted)
     }
 
     /// `true` once the procedure has reached a terminal state
@@ -872,7 +881,12 @@ pub async fn run_sender(
     // `--reflector-member-link-id` was not given; persists for the whole
     // session so later replies are checked for self-consistency.
     let mut latched_reflector_msid: Option<u16> = None;
-    let mut recv_buf = [0u8; 1024];
+    // Sized for the largest possible UDP payload, not a "typical" STAMP
+    // packet: --extra-padding legitimately grows test packets to MTU-probing
+    // sizes (and reflectors echo them back), and a reply truncated by a
+    // too-small buffer would be rejected as malformed, defeating exactly the
+    // measurements that flag exists for. Heap-allocated once per run.
+    let mut recv_buf = vec![0u8; MAX_UDP_PAYLOAD];
     let timeout = Duration::from_secs(conf.timeout as u64);
 
     // draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3: when the Reflected Test
@@ -1110,6 +1124,16 @@ pub async fn run_sender(
     // or echoes with the C flag.
     extra_tlvs.extend(reflected_header_request_tlvs(conf));
 
+    // RFC 8972 §4.8 origination is separate from holding a key: --tlv-hmac
+    // off keeps the key for verifying replies without putting an HMAC TLV on
+    // the wire. Decided here, before the MTU budget below, so the 20-byte
+    // reserve matches what will actually be sent. `validate()` has already
+    // ensured `on` has a key and rejected `off` in authenticated mode.
+    let originate_tlv_hmac = match conf.tlv_hmac {
+        TlvHmacMode::Auto | TlvHmacMode::On => true,
+        TlvHmacMode::Off => false,
+    };
+
     // draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2 MTU rule (sender half): the
     // resulting test packets MUST NOT exceed the IP/IPv6 MTU after adding the
     // Reflected Fixed/IPv6 Extension Header TLVs; if necessary, one or more of
@@ -1142,8 +1166,15 @@ pub async fn run_sender(
             crate::receiver::UNAUTH_BASE_SIZE
         };
         // Worst-case per-packet extras: HMAC TLV (20), Direct Measurement (16),
-        // Access Report (8) — included when they can appear.
-        let hmac_tlv = if hmac_key.is_some() { 20 } else { 0 };
+        // Access Report (8) — included when they can appear. The HMAC TLV
+        // reserve follows the origination decision, not mere key possession:
+        // with --tlv-hmac off no HMAC TLV is sent, and reserving for one
+        // would trim Type 246/247 requests that actually fit on the wire.
+        let hmac_tlv = if hmac_key.is_some() && (use_auth || originate_tlv_hmac) {
+            20
+        } else {
+            0
+        };
         let dm = if conf.direct_measurement { 16 } else { 0 };
         let access = if access_report_state.is_some() { 8 } else { 0 };
         const UDP_HEADER: usize = 8;
@@ -1179,21 +1210,14 @@ pub async fn run_sender(
             SendMode::AuthBase { key }
         }
     } else if use_tlvs {
-        // RFC 8972 §4.8 origination is separate from holding a key: --tlv-hmac
-        // off keeps the key for verifying replies without putting an HMAC TLV
-        // on the wire. `validate()` has already ensured `on` has a key.
-        let originate = match conf.tlv_hmac {
-            TlvHmacMode::Auto | TlvHmacMode::On => true,
-            TlvHmacMode::Off => false,
-        };
-        if !originate && hmac_key.is_some() {
+        if !originate_tlv_hmac && hmac_key.is_some() {
             log::info!(
                 "not originating an HMAC TLV per --tlv-hmac off; the configured \
                  key is still used to verify reflected TLV HMACs"
             );
         }
         SendMode::OpenTlv {
-            tlv_key: originate.then_some(hmac_key.as_ref()).flatten(),
+            tlv_key: originate_tlv_hmac.then_some(hmac_key.as_ref()).flatten(),
         }
     } else {
         SendMode::OpenBase
@@ -1485,12 +1509,20 @@ pub async fn run_sender(
         }
     }
 
-    // Final wait phase for remaining responses. Skipped entirely when the
-    // zeroed-SSID policy stopped the session — there is nothing left to
-    // measure and the pending entries belong to the abandoned run.
+    // Final wait phase for remaining responses. Ends as soon as the
+    // zeroed-SSID policy stops the session — there is nothing left to
+    // measure and the pending entries belong to the abandoned run. The
+    // check is a closure over the LIVE flag rather than a snapshot taken
+    // here: the first zeroed-SSID reply may arrive during these waits
+    // (`process_response` sets it via `SenderRecvContext`), and a stale
+    // boolean would keep waiting until timeout and keep retransmitting
+    // Access Reports despite `--on-zero-ssid=stop`.
+    let stopped_on_zero_ssid = |seen: bool| seen && conf.on_zero_ssid == ZeroSsidAction::Stop;
     let wait_start = Instant::now();
-    let stopped_on_zero_ssid = zero_ssid_seen && conf.on_zero_ssid == ZeroSsidAction::Stop;
-    while !stopped_on_zero_ssid && !pending.is_empty() && wait_start.elapsed() < timeout {
+    while !stopped_on_zero_ssid(zero_ssid_seen)
+        && !pending.is_empty()
+        && wait_start.elapsed() < timeout
+    {
         let remaining = timeout.saturating_sub(wait_start.elapsed());
         match tokio::time::timeout(
             remaining,
@@ -1571,10 +1603,14 @@ pub async fn run_sender(
     // A no-op entirely when `--access-report` was not set
     // (`access_report_state` is `None`), so the wait phase above is
     // byte-identical to before in that case.
-    while !stopped_on_zero_ssid
+    // Guarded on `has_started()`: with `--count 0` the main loop never sent
+    // anything and the state machine is still `NotStarted` — this wait must
+    // not originate an Access Report exchange the operator asked to have
+    // zero packets for.
+    while !stopped_on_zero_ssid(zero_ssid_seen)
         && access_report_state
             .as_ref()
-            .is_some_and(|state| !state.is_terminal())
+            .is_some_and(|state| state.has_started() && !state.is_terminal())
     {
         let now = Instant::now();
         let attach = access_report_state
@@ -3057,6 +3093,23 @@ mod tests {
         assert!(state.tick(now), "first tick must attach the TLV");
         assert_eq!(state.outcome(), AccessReportOutcome::Pending);
         assert_eq!(state.retransmissions(), 0);
+    }
+
+    /// A fresh state machine has not started: the sender's post-loop wait is
+    /// gated on `has_started() && !is_terminal()`, so a `--count 0` run
+    /// (main loop never ticks) must not enter it and originate packets.
+    #[test]
+    fn test_access_report_fresh_state_has_not_started() {
+        let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        assert!(!state.has_started(), "fresh state must not have started");
+        assert!(
+            !(state.has_started() && !state.is_terminal()),
+            "the post-loop wait guard must be false for a fresh state"
+        );
+        // The first tick (the main loop's original send) starts it.
+        assert!(state.tick(Instant::now()));
+        assert!(state.has_started());
+        assert!(state.has_started() && !state.is_terminal());
     }
 
     #[test]

@@ -109,60 +109,10 @@ impl Session {
     pub fn check_replay(&self, seq: u32) -> ReplayVerdict {
         loop {
             let packed = self.replay_state.load(Ordering::Relaxed);
-            let low = packed as u32;
-
-            let (verdict, next) = if low & REPLAY_INITIALIZED == 0 {
-                // First packet on this session.
-                (
-                    ReplayVerdict::New,
-                    ((seq as u64) << 32) | u64::from(REPLAY_INITIALIZED),
-                )
-            } else {
-                let high = (packed >> 32) as u32;
-                let bitmap = low & REPLAY_BITMAP_MASK;
-
-                if seq == high {
-                    // The high-water mark itself, seen a second time.
-                    return ReplayVerdict::Replay;
-                }
-
-                let ahead = seq.wrapping_sub(high);
-                if ahead < 1 << 31 {
-                    // Advancing: every remembered offset moves further back by
-                    // `ahead`, and the old high-water mark becomes offset
-                    // `ahead` (bit `ahead - 1`) if the window still reaches it.
-                    let shifted = if ahead >= 32 {
-                        0
-                    } else {
-                        (bitmap << ahead) & REPLAY_BITMAP_MASK
-                    };
-                    let old_high_bit = if ahead <= REPLAY_WINDOW {
-                        1u32 << (ahead - 1)
-                    } else {
-                        0
-                    };
-                    let next_low = REPLAY_INITIALIZED | shifted | old_high_bit;
-                    (
-                        ReplayVerdict::New,
-                        ((seq as u64) << 32) | u64::from(next_low),
-                    )
-                } else {
-                    let behind = high.wrapping_sub(seq);
-                    if behind > REPLAY_WINDOW {
-                        return ReplayVerdict::OutOfWindow;
-                    }
-                    let bit = 1u32 << (behind - 1);
-                    if bitmap & bit != 0 {
-                        return ReplayVerdict::Replay;
-                    }
-                    let next_low = REPLAY_INITIALIZED | bitmap | bit;
-                    (
-                        ReplayVerdict::Reordered,
-                        ((high as u64) << 32) | u64::from(next_low),
-                    )
-                }
+            let (verdict, next) = Self::replay_step(packed, seq);
+            let Some(next) = next else {
+                return verdict;
             };
-
             if self
                 .replay_state
                 .compare_exchange_weak(packed, next, Ordering::Relaxed, Ordering::Relaxed)
@@ -170,6 +120,95 @@ impl Session {
             {
                 return verdict;
             }
+        }
+    }
+
+    /// Read-only half of [`Self::check_replay`]: classifies `seq` against the
+    /// current window without recording it. Backends use this *before* packet
+    /// verification (parse + HMAC), so a spoofed or corrupt packet can be
+    /// refused on the verdict but can never advance the window — otherwise an
+    /// unauthenticated packet carrying a predicted sequence number would
+    /// poison the anti-replay state and get the later genuine packet dropped.
+    pub fn classify_replay(&self, seq: u32) -> ReplayVerdict {
+        Self::replay_step(self.replay_state.load(Ordering::Relaxed), seq).0
+    }
+
+    /// Mutating half of [`Self::check_replay`]: records `seq` in the window.
+    /// Backends call this only after the packet passed verification and was
+    /// answered, so the window holds nothing an attacker could plant.
+    pub fn commit_replay(&self, seq: u32) {
+        loop {
+            let packed = self.replay_state.load(Ordering::Relaxed);
+            let (_, next) = Self::replay_step(packed, seq);
+            let Some(next) = next else {
+                return; // Already recorded (replay / out of window) — no update.
+            };
+            if self
+                .replay_state
+                .compare_exchange_weak(packed, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    /// One classification step against a packed window state: the verdict for
+    /// `seq`, and the successor state when recording it would change anything
+    /// (`None` for replays and out-of-window packets, which never update).
+    fn replay_step(packed: u64, seq: u32) -> (ReplayVerdict, Option<u64>) {
+        let low = packed as u32;
+
+        if low & REPLAY_INITIALIZED == 0 {
+            // First packet on this session.
+            return (
+                ReplayVerdict::New,
+                Some(((seq as u64) << 32) | u64::from(REPLAY_INITIALIZED)),
+            );
+        }
+
+        let high = (packed >> 32) as u32;
+        let bitmap = low & REPLAY_BITMAP_MASK;
+
+        if seq == high {
+            // The high-water mark itself, seen a second time.
+            return (ReplayVerdict::Replay, None);
+        }
+
+        let ahead = seq.wrapping_sub(high);
+        if ahead < 1 << 31 {
+            // Advancing: every remembered offset moves further back by
+            // `ahead`, and the old high-water mark becomes offset
+            // `ahead` (bit `ahead - 1`) if the window still reaches it.
+            let shifted = if ahead >= 32 {
+                0
+            } else {
+                (bitmap << ahead) & REPLAY_BITMAP_MASK
+            };
+            let old_high_bit = if ahead <= REPLAY_WINDOW {
+                1u32 << (ahead - 1)
+            } else {
+                0
+            };
+            let next_low = REPLAY_INITIALIZED | shifted | old_high_bit;
+            (
+                ReplayVerdict::New,
+                Some(((seq as u64) << 32) | u64::from(next_low)),
+            )
+        } else {
+            let behind = high.wrapping_sub(seq);
+            if behind > REPLAY_WINDOW {
+                return (ReplayVerdict::OutOfWindow, None);
+            }
+            let bit = 1u32 << (behind - 1);
+            if bitmap & bit != 0 {
+                return (ReplayVerdict::Replay, None);
+            }
+            let next_low = REPLAY_INITIALIZED | bitmap | bit;
+            (
+                ReplayVerdict::Reordered,
+                Some(((high as u64) << 32) | u64::from(next_low)),
+            )
         }
     }
 
@@ -622,6 +661,31 @@ mod tests {
         // 4 and 5 are now ancient history, not replays.
         assert_eq!(s.check_replay(4), ReplayVerdict::OutOfWindow);
         assert_eq!(s.check_replay(9_999), ReplayVerdict::Reordered);
+    }
+
+    #[test]
+    fn test_classify_replay_is_read_only_commit_advances() {
+        let s = Session::new(1);
+        // Classification never advances the window — repeated classification
+        // of the same unseen sequence number stays New.
+        assert_eq!(s.classify_replay(5), ReplayVerdict::New);
+        assert_eq!(s.classify_replay(5), ReplayVerdict::New);
+
+        s.commit_replay(5);
+        assert_eq!(s.classify_replay(5), ReplayVerdict::Replay);
+        // Committing an already-recorded sequence number is a no-op.
+        s.commit_replay(5);
+        assert_eq!(s.classify_replay(5), ReplayVerdict::Replay);
+
+        // A late unseen packet classifies as Reordered until committed.
+        assert_eq!(s.classify_replay(4), ReplayVerdict::Reordered);
+        assert_eq!(s.classify_replay(4), ReplayVerdict::Reordered);
+        s.commit_replay(4);
+        assert_eq!(s.classify_replay(4), ReplayVerdict::Replay);
+
+        // classify+commit agrees with the atomic check_replay.
+        assert_eq!(s.check_replay(6), ReplayVerdict::New);
+        assert_eq!(s.classify_replay(6), ReplayVerdict::Replay);
     }
 
     #[test]

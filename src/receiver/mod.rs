@@ -496,6 +496,11 @@ pub struct RuntimeCaps {
     pub reflected_control_max_count: std::sync::atomic::AtomicU16,
     /// Type 12 reply-size cap in octets (egress-MTU stand-in).
     pub reflected_control_max_size: std::sync::atomic::AtomicU16,
+    /// Startup-immutable payload ceiling discovered from the live egress MTU
+    /// (`u16::MAX` when undiscoverable). Control-plane updates to
+    /// `reflected_control_max_size` are clamped to this, so a runtime PATCH
+    /// cannot reintroduce replies that fragment on the link.
+    pub reflected_control_size_ceiling: u16,
     /// Type 12 rate limit: minimum inter-packet interval in nanoseconds.
     pub reflected_control_min_interval_ns: AtomicU32,
 }
@@ -513,6 +518,7 @@ impl RuntimeCaps {
             reflected_control_max_size: std::sync::atomic::AtomicU16::new(
                 effective_reflected_control_max_size(conf),
             ),
+            reflected_control_size_ceiling: reflected_control_size_ceiling(conf),
             reflected_control_min_interval_ns: AtomicU32::new(
                 conf.reflected_control_min_interval_ns,
             ),
@@ -528,6 +534,7 @@ impl RuntimeCaps {
             reflected_control_max_size: std::sync::atomic::AtomicU16::new(
                 REFLECTED_CONTROL_MAX_SIZE,
             ),
+            reflected_control_size_ceiling: u16::MAX,
             reflected_control_min_interval_ns: AtomicU32::new(REFLECTED_CONTROL_MIN_INTERVAL_NS),
         }
     }
@@ -814,31 +821,40 @@ pub fn mtu_payload_cap(mtu: u32, is_ipv6: bool) -> u16 {
 #[must_use]
 pub fn effective_reflected_control_max_size(conf: &Configuration) -> u16 {
     let configured = conf.reflected_control_max_size;
-    let Some(iface) = crate::hwtstamp::interface_for_addr(conf.local_addr) else {
-        log::debug!(
-            "egress MTU not queried (no single interface for {}); using              --reflected-control-max-size {configured}",
-            conf.local_addr
-        );
-        return configured;
-    };
-    let Some(mtu) = interface_mtu(&iface) else {
-        log::debug!(
-            "egress MTU unavailable on {iface}; using              --reflected-control-max-size {configured}"
-        );
-        return configured;
-    };
-    let live = mtu_payload_cap(mtu, conf.local_addr.is_ipv6());
+    let live = reflected_control_size_ceiling(conf);
     let effective = configured.min(live);
     if effective != configured {
         log::info!(
-            "reply-size cap reduced from {configured} to {effective} bytes: {iface}              MTU is {mtu}, leaving {live} bytes of STAMP payload              (draft-ietf-ippm-asymmetrical-pkts-14 §3)"
-        );
-    } else {
-        log::debug!(
-            "egress MTU on {iface} is {mtu} ({live} bytes of payload);              --reflected-control-max-size {configured} is the binding cap"
+            "reply-size cap reduced from {configured} to {effective} bytes: the egress              MTU leaves {live} bytes of STAMP payload              (draft-ietf-ippm-asymmetrical-pkts-14 §3)"
         );
     }
     effective
+}
+
+/// The payload ceiling discovered from the live egress MTU, independent of
+/// the configured `--reflected-control-max-size`: what the link can carry,
+/// as opposed to what the operator asked for. `u16::MAX` when no single
+/// interface / MTU can be determined (wildcard bind, failed query).
+///
+/// Stored in [`RuntimeCaps`] at startup so control-plane cap updates stay
+/// bounded by it — a runtime PATCH must not reintroduce Type 12 replies
+/// that fragment or fail on the live link.
+#[must_use]
+pub fn reflected_control_size_ceiling(conf: &Configuration) -> u16 {
+    let Some(iface) = crate::hwtstamp::interface_for_addr(conf.local_addr) else {
+        log::debug!(
+            "egress MTU not queried (no single interface for {}); reply-size cap              unbounded by MTU",
+            conf.local_addr
+        );
+        return u16::MAX;
+    };
+    let Some(mtu) = interface_mtu(&iface) else {
+        log::debug!("egress MTU unavailable on {iface}; reply-size cap unbounded by MTU");
+        return u16::MAX;
+    };
+    let live = mtu_payload_cap(mtu, conf.local_addr.is_ipv6());
+    log::debug!("egress MTU on {iface} is {mtu}: {live} bytes of STAMP payload");
+    live
 }
 
 /// Classifies a received packet against its session's replay window and counts
@@ -853,6 +869,13 @@ pub fn effective_reflected_control_max_size(conf: &Configuration) -> u16 {
 /// a duplicate is not proof of an attack: a sender restarted mid-run produces
 /// the same pattern, and dropping its traffic would break an honest
 /// measurement.
+///
+/// Classification only — the window is NOT advanced here. This runs before
+/// parse/HMAC verification, and an unverified packet must never be able to
+/// plant a sequence number in the anti-replay state (a spoofed packet with a
+/// predicted sequence number would otherwise get the genuine one dropped
+/// under `--drop-replayed`). Backends call [`commit_replay`] after the packet
+/// has been verified and answered.
 ///
 /// Logging stays at debug level deliberately. A replay is attacker-controlled
 /// input, so warning per event would hand a remote peer a log-amplification
@@ -871,7 +894,7 @@ pub fn evaluate_replay(
         return ReplayVerdict::New;
     }
     let seq = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    let verdict = session.check_replay(seq);
+    let verdict = session.classify_replay(seq);
     match verdict {
         ReplayVerdict::Replay => {
             counters
@@ -894,6 +917,19 @@ pub fn evaluate_replay(
         ReplayVerdict::New => {}
     }
     verdict
+}
+
+/// Records a *verified* packet's Sequence Number in its session's replay
+/// window — the mutating counterpart of [`evaluate_replay`]. Both backends
+/// call this once processing has produced a response, i.e. after the packet
+/// survived parsing and (when a key is configured) HMAC verification, so only
+/// authenticated traffic can advance the anti-replay state.
+pub fn commit_replay(session: &crate::session::Session, data: &[u8]) {
+    if data.len() < 4 {
+        return;
+    }
+    let seq = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    session.commit_replay(seq);
 }
 
 /// Sets the U-flag on the Return Path TLV in a serialized STAMP response.
@@ -1592,6 +1628,22 @@ fn process_auth_packet(
             }
             return None;
         }
+    } else if ctx.hmac_key_set.is_some() {
+        // A keyset exists (key dir / control plane) but resolved no key for
+        // this packet's SSID — an unknown SSID with no default, or the last
+        // key was deleted at runtime. Refuse the packet: removing a key must
+        // revoke access, never downgrade the reflector to answering
+        // authenticated-layout packets without verification.
+        log::warn!(
+            "no HMAC key for SSID {} (keyset configured); dropping packet from {}",
+            packet.ssid,
+            src
+        );
+        #[cfg(feature = "metrics")]
+        if ctx.metrics_enabled {
+            crate::metrics::reflector_metrics::record_packet_dropped("no_key_for_ssid");
+        }
+        return None;
     } else if ctx.require_hmac {
         log::warn!(
             "HMAC key required but not configured; dropping packet from {}",
@@ -1876,75 +1928,6 @@ fn apply_semantic_tlv_processing(
     tlv_hmac_key: Option<&HmacKey>,
     base_bytes: &[u8],
 ) -> Option<SemanticResult> {
-    // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS
-    let requested_cos = tlvs.get_cos_request();
-
-    // RFC 8972 §4.4: "The Session-Reflector MUST use the local policy to verify
-    // whether the CoS corresponding to the value of the DSCP1 field is
-    // permitted in the domain"; §6 adds the same as a SHOULD; cos-ecn-01 §3.2
-    // extends it to EC1 ("if it is permitted and capable to do so").
-    //
-    // *Permitted* is decided here, against the operator's admission policy.
-    // *Capable* stays with the backends' setsockopt attempt. A request must
-    // clear both, and the two answers are genuinely different: the kernel will
-    // happily apply a codepoint the domain is not supposed to carry, so
-    // treating syscall success as permission answers only the second question.
-    //
-    // The policy is scoped to where the reply is going, which is the address
-    // the request came from.
-    let reply_destination = ctx.packet_addr_info.as_ref().map(|info| info.src_addr);
-    let (dscp_permitted, ecn_permitted) = match requested_cos {
-        Some((dscp1, ec1)) => (
-            ctx.cos_policy.permits_dscp(reply_destination, dscp1),
-            ctx.cos_policy.permits_ecn(ec1),
-        ),
-        // Nothing requested: nothing to admit or refuse.
-        None => (true, true),
-    };
-
-    // What the backend should actually put on the wire. A refused DSCP1 falls
-    // back to the received DSCP (DSCP2), matching the RPD=0b01 the TLV now
-    // reports; a refused EC1 forces the reply's ECN bits to 0b00 (Not-ECT)
-    // rather than leaving a value the policy rejected, which is the same
-    // treatment cos-ecn-01 §3.2 mandates for the "unable" case.
-    let cos_request = requested_cos.map(|(dscp1, ec1)| {
-        (
-            if dscp_permitted {
-                dscp1
-            } else {
-                ctx.received_dscp
-            },
-            if ecn_permitted { ec1 } else { 0 },
-        )
-    });
-
-    if let Some((dscp1, ec1)) = requested_cos {
-        if !dscp_permitted {
-            log::debug!(
-                "CoS admission policy refused DSCP1 {dscp1} for a reply to {:?};                  using the received DSCP {} with RPD=0b01",
-                reply_destination,
-                ctx.received_dscp
-            );
-        }
-        if !ecn_permitted {
-            log::debug!("CoS admission policy refused EC1 {ec1}; reply ECN forced to Not-ECT");
-        }
-    }
-
-    // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §4.4 +
-    // draft-ietf-ippm-stamp-cos-ecn-01 §3.2). RPD reports whether DSCP1 was
-    // honoured and RPE whether the reply's ECN was set to EC1 — both now
-    // reflect the admission decision above. If the backend's setsockopt call
-    // later fails, `set_cos_policy_rejected` / `cos_unable_fallback_tos`
-    // override these to RPD=0b01/RPE=0b10, so a request that was permitted but
-    // turned out not to be applicable still reports honestly.
-    tlvs.update_cos_tlvs(
-        ctx.received_dscp,
-        ctx.received_ecn,
-        !dscp_permitted,
-        ecn_permitted,
-    );
-
     // Update Timestamp Information TLVs (RFC 8972 §4.3). All four value
     // octets describe this reflector: the In pair characterizes the ingress
     // that obtained T2, the Out pair the egress that obtained T3. Report each
@@ -2005,6 +1988,81 @@ fn apply_semantic_tlv_processing(
     // override a no-reply request.
     let mut return_path_action =
         tlvs.process_return_path(ctx.sender_port, ctx.return_path_allow_alternate);
+
+    // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS.
+    let requested_cos = tlvs.get_cos_request();
+
+    // RFC 8972 §4.4: "The Session-Reflector MUST use the local policy to verify
+    // whether the CoS corresponding to the value of the DSCP1 field is
+    // permitted in the domain"; §6 adds the same as a SHOULD; cos-ecn-01 §3.2
+    // extends it to EC1 ("if it is permitted and capable to do so").
+    //
+    // *Permitted* is decided here, against the operator's admission policy.
+    // *Capable* stays with the backends' setsockopt attempt. A request must
+    // clear both, and the two answers are genuinely different: the kernel will
+    // happily apply a codepoint the domain is not supposed to carry, so
+    // treating syscall success as permission answers only the second question.
+    //
+    // The policy is scoped to where the reply is actually going — which is why
+    // this runs after the Return Path TLV: an honoured Return Address
+    // (RFC 9503 §5, `--return-path-allow-alternate`) redirects the reply, and
+    // a destination-scoped rule for that address must win over the original
+    // source's.
+    let reply_destination = match &return_path_action {
+        ReturnPathAction::AlternateAddress(addr) => Some(addr.ip()),
+        _ => ctx.packet_addr_info.as_ref().map(|info| info.src_addr),
+    };
+    let (dscp_permitted, ecn_permitted) = match requested_cos {
+        Some((dscp1, ec1)) => (
+            ctx.cos_policy.permits_dscp(reply_destination, dscp1),
+            ctx.cos_policy.permits_ecn(ec1),
+        ),
+        // Nothing requested: nothing to admit or refuse.
+        None => (true, true),
+    };
+
+    // What the backend should actually put on the wire. A refused DSCP1 falls
+    // back to the received DSCP (DSCP2), matching the RPD=0b01 the TLV now
+    // reports; a refused EC1 forces the reply's ECN bits to 0b00 (Not-ECT)
+    // rather than leaving a value the policy rejected, which is the same
+    // treatment cos-ecn-01 §3.2 mandates for the "unable" case.
+    let cos_request = requested_cos.map(|(dscp1, ec1)| {
+        (
+            if dscp_permitted {
+                dscp1
+            } else {
+                ctx.received_dscp
+            },
+            if ecn_permitted { ec1 } else { 0 },
+        )
+    });
+
+    if let Some((dscp1, ec1)) = requested_cos {
+        if !dscp_permitted {
+            log::debug!(
+                "CoS admission policy refused DSCP1 {dscp1} for a reply to {:?};                  using the received DSCP {} with RPD=0b01",
+                reply_destination,
+                ctx.received_dscp
+            );
+        }
+        if !ecn_permitted {
+            log::debug!("CoS admission policy refused EC1 {ec1}; reply ECN forced to Not-ECT");
+        }
+    }
+
+    // Update CoS TLVs with received DSCP/ECN values (RFC 8972 §4.4 +
+    // draft-ietf-ippm-stamp-cos-ecn-01 §3.2). RPD reports whether DSCP1 was
+    // honoured and RPE whether the reply's ECN was set to EC1 — both now
+    // reflect the admission decision above. If the backend's setsockopt call
+    // later fails, `set_cos_policy_rejected` / `cos_unable_fallback_tos`
+    // override these to RPD=0b01/RPE=0b10, so a request that was permitted but
+    // turned out not to be applicable still reports honestly.
+    tlvs.update_cos_tlvs(
+        ctx.received_dscp,
+        ctx.received_ecn,
+        !dscp_permitted,
+        ecn_permitted,
+    );
 
     // Process BER TLVs (draft-gandhi-ippm-stamp-ber §3):
     // compute Bit Error Count and Max Burst against the companion Extra Padding.
@@ -4323,30 +4381,28 @@ mod tests {
             buf[0..4].copy_from_slice(&seq.to_be_bytes());
             buf
         };
+        // Classify-then-commit, the way a backend treats a packet that
+        // passed verification and was answered.
+        let eval_commit = |data: &[u8]| {
+            let verdict = evaluate_replay(&session, data, &counters);
+            commit_replay(&session, data);
+            verdict
+        };
 
         // In-order traffic is silent.
-        assert_eq!(
-            evaluate_replay(&session, &packet(1), &counters),
-            ReplayVerdict::New
-        );
-        assert_eq!(
-            evaluate_replay(&session, &packet(2), &counters),
-            ReplayVerdict::New
-        );
+        assert_eq!(eval_commit(&packet(1)), ReplayVerdict::New);
+        assert_eq!(eval_commit(&packet(2)), ReplayVerdict::New);
         assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 0);
         assert_eq!(counters.packets_reordered.load(Ordering::Relaxed), 0);
 
         // A duplicate is counted as a replay.
-        assert_eq!(
-            evaluate_replay(&session, &packet(2), &counters),
-            ReplayVerdict::Replay
-        );
+        assert_eq!(eval_commit(&packet(2)), ReplayVerdict::Replay);
         assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 1);
 
         // A late-but-unseen packet is counted separately: reordering is
         // ordinary and must not be reported as an attack.
         assert_eq!(
-            evaluate_replay(&session, &packet(1) /* already seen */, &counters),
+            eval_commit(&packet(1) /* already seen */),
             ReplayVerdict::Replay
         );
         assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 2);
@@ -4359,14 +4415,8 @@ mod tests {
         // Jump ahead, then deliver a gap-filler late: unseen and behind the
         // high-water mark, so it lands on the reorder counter, not the replay
         // one.
-        assert_eq!(
-            evaluate_replay(&session, &packet(10), &counters),
-            ReplayVerdict::New
-        );
-        assert_eq!(
-            evaluate_replay(&session, &packet(8), &counters),
-            ReplayVerdict::Reordered
-        );
+        assert_eq!(eval_commit(&packet(10)), ReplayVerdict::New);
+        assert_eq!(eval_commit(&packet(8)), ReplayVerdict::Reordered);
         assert_eq!(counters.packets_reordered.load(Ordering::Relaxed), 1);
         assert_eq!(
             counters.packets_replayed.load(Ordering::Relaxed),
@@ -4377,16 +4427,9 @@ mod tests {
         // A packet older than the window is counted with the reorders — the
         // window cannot claim it was seen. Advance far enough first that the
         // "older than the window" sequence number is still positive.
+        assert_eq!(eval_commit(&packet(1000)), ReplayVerdict::New);
         assert_eq!(
-            evaluate_replay(&session, &packet(1000), &counters),
-            ReplayVerdict::New
-        );
-        assert_eq!(
-            evaluate_replay(
-                &session,
-                &packet(1000 - crate::session::REPLAY_WINDOW - 1),
-                &counters
-            ),
+            eval_commit(&packet(1000 - crate::session::REPLAY_WINDOW - 1)),
             ReplayVerdict::OutOfWindow
         );
         assert_eq!(counters.packets_reordered.load(Ordering::Relaxed), 2);
@@ -4408,12 +4451,48 @@ mod tests {
                 evaluate_replay(&session, &buf, &counters),
                 ReplayVerdict::New
             );
+            commit_replay(&session, &buf);
             assert_eq!(
                 evaluate_replay(&session, &buf, &counters),
                 ReplayVerdict::Replay,
                 "sequence number must be read identically at base length {base_len}"
             );
         }
+    }
+
+    /// An unverified packet (classified but never committed — e.g. bad HMAC)
+    /// must not poison the anti-replay window: the genuine packet carrying
+    /// the same sequence number is still `New`.
+    #[test]
+    fn test_replay_window_only_advances_on_commit() {
+        use crate::session::{ReplayVerdict, Session};
+
+        let session = Session::new(1);
+        let counters = ReflectorCounters::new();
+        let packet = |seq: u32| {
+            let mut buf = vec![0u8; 44];
+            buf[0..4].copy_from_slice(&seq.to_be_bytes());
+            buf
+        };
+
+        // Attacker spoofs a predicted future sequence number; the packet
+        // fails verification, so the backend never commits it.
+        assert_eq!(
+            evaluate_replay(&session, &packet(7), &counters),
+            ReplayVerdict::New
+        );
+        // The genuine packet with that sequence number must still be New —
+        // under --drop-replayed it would otherwise be dropped.
+        assert_eq!(
+            evaluate_replay(&session, &packet(7), &counters),
+            ReplayVerdict::New
+        );
+        commit_replay(&session, &packet(7));
+        // Only a committed (verified, answered) packet makes it a replay.
+        assert_eq!(
+            evaluate_replay(&session, &packet(7), &counters),
+            ReplayVerdict::Replay
+        );
     }
 
     #[test]
@@ -5052,6 +5131,93 @@ mod tests {
         assert_eq!(response.return_path_action, ReturnPathAction::Normal);
     }
 
+    /// The CoS admission policy is scoped to where the reply actually goes:
+    /// when an honoured Return Address redirects the reply, a
+    /// destination-scoped rule for the alternate address must win over the
+    /// (more permissive) treatment the original source would get.
+    #[test]
+    fn test_cos_policy_evaluated_against_alternate_return_address() {
+        use crate::{
+            cos_policy::{CosAdmissionPolicy, DscpSet, EcnSet},
+            tlv::{ClassOfServiceTlv, ReturnPathTlv, TypedTlv},
+        };
+
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 10,
+            ssid: 0,
+            mbz: [0; 28],
+        };
+
+        let alt_addr: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(
+            &ReturnPathTlv::with_return_address(alt_addr)
+                .to_raw()
+                .to_bytes(),
+        );
+        original_data.extend_from_slice(&ClassOfServiceTlv::new(46, 0).to_raw().to_bytes());
+
+        // Globally DSCP 46 is fine, but nothing may carry it toward 10/8.
+        let policy: &'static CosAdmissionPolicy = Box::leak(Box::new(CosAdmissionPolicy::new(
+            DscpSet::all(),
+            EcnSet::all(),
+            vec![("10.0.0.0".parse().unwrap(), 8, DscpSet::none())],
+        )));
+
+        let mut ctx = test_ctx(0, 0);
+        ctx.sender_port = 12345;
+        ctx.return_path_allow_alternate = true;
+        ctx.cos_policy = policy;
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+
+        assert_eq!(
+            response.return_path_action,
+            ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(alt_addr, 12345))
+        );
+        assert_eq!(
+            response.cos_request,
+            Some((0, 0)),
+            "DSCP 46 is forbidden toward 10/8, so the reply must fall back to \
+             the received DSCP even though the original source would permit it"
+        );
+
+        // Control case: the same packet without the alternate honoured is
+        // evaluated against the original source and keeps DSCP 46.
+        let mut ctx = test_ctx(0, 0);
+        ctx.sender_port = 12345;
+        ctx.cos_policy = policy; // allow_alternate stays false
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+        assert_eq!(response.return_path_action, ReturnPathAction::Normal);
+        assert_eq!(response.cos_request, Some((46, 0)));
+    }
+
     #[test]
     fn test_unauth_return_path_sr_unsupported() {
         use crate::tlv::ReturnPathTlv;
@@ -5500,6 +5666,54 @@ mod tests {
                 "strict={strict} + require_hmac without key must drop"
             );
         }
+    }
+
+    /// A present-but-empty keyset (e.g. the control plane deleted the last
+    /// key at runtime) must CLOSE the reflector to authenticated packets,
+    /// not downgrade it to answering them without verification — even with
+    /// the default `require_hmac = false`.
+    #[test]
+    fn auth_packet_rejected_when_keyset_present_but_resolves_no_key() {
+        let packet = PacketAuthenticated {
+            sequence_number: 1,
+            mbz0: [0; 12],
+            timestamp: 200,
+            error_estimate: 0,
+            ssid: 0,
+            mbz1a: [0; 30],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0; 16],
+        };
+        let data = packet.to_bytes();
+
+        // Empty keyset — the "last key deleted" state.
+        let empty_set = crate::crypto::HmacKeySet::new();
+        let mut ctx = test_ctx(0, 0);
+        ctx.hmac_key_set = Some(&empty_set);
+        assert!(
+            process_stamp_packet(&data, loopback_src(), 64, true, &ctx).is_none(),
+            "empty keyset must reject auth packets, not answer them unverified"
+        );
+
+        // Keyset with a key for a *different* SSID and no default: an auth
+        // packet with an unknown SSID must be rejected too.
+        let mut other_ssid_set = crate::crypto::HmacKeySet::new();
+        other_ssid_set.insert(42, crate::crypto::HmacKey::new(vec![0xAB; 16]).unwrap());
+        let mut ctx = test_ctx(0, 0);
+        ctx.hmac_key_set = Some(&other_ssid_set);
+        assert!(
+            process_stamp_packet(&data, loopback_src(), 64, true, &ctx).is_none(),
+            "unknown SSID with no default key must be rejected"
+        );
+
+        // Sanity: with NO keyset at all (never configured), the legacy
+        // keyless-open behavior is unchanged.
+        let ctx = test_ctx(0, 0);
+        assert!(
+            process_stamp_packet(&data, loopback_src(), 64, true, &ctx).is_some(),
+            "keyless reflector without any keyset keeps accepting"
+        );
     }
 
     /// Non-zero MBZ bytes — RFC 8762 §4.1.1 requires receivers to *ignore*

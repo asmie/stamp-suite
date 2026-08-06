@@ -69,7 +69,9 @@ pub enum LogFormat {
 /// STAMP authentication mode per RFC 8762.
 ///
 /// A STAMP session is either authenticated or unauthenticated (open), not both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 pub enum AuthMode {
     /// Authenticated mode - packets include HMAC for integrity verification.
     #[value(name = "A")]
@@ -102,7 +104,9 @@ impl fmt::Display for AuthMode {
 /// TLV handling mode for the reflector.
 ///
 /// Controls how the reflector handles TLV extensions in incoming packets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TlvHandlingMode {
     /// Ignore TLVs - strip them from reflected packets (zero-pad to preserve length).
@@ -128,7 +132,9 @@ impl fmt::Display for TlvHandlingMode {
 /// authenticated mode. Found during interop testing, where a peer's handling of
 /// an unsolicited HMAC TLV differed from ours and there was no way to turn
 /// origination off without also giving up the key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TlvHmacMode {
     /// Originate an HMAC TLV whenever a key is configured and TLVs are in use.
@@ -161,7 +167,9 @@ impl fmt::Display for TlvHmacMode {
 /// such a scenario". This enum is that control. Only meaningful when the sender
 /// actually set a non-zero `--ssid`: without one, a zeroed reply field carries
 /// no information.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ZeroSsidAction {
     /// Keep measuring, logging the condition once. The RFC permits continuing,
@@ -185,7 +193,7 @@ impl fmt::Display for ZeroSsidAction {
 
 /// Selects the kind of deliberately malformed TLV the sender injects (for
 /// conformance-testing a reflector's RFC 8972 §4.2 malformed/flag handling).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MalformedMode {
     /// A structurally valid TLV whose flags octet has reserved bits set
@@ -1007,6 +1015,44 @@ impl Configuration {
             ));
         }
 
+        // Padding sizes need a finite, wire-safe bound: the value is
+        // allocated before any protocol check (an absurd value is a
+        // capacity-overflow panic or an OOM), and anything past the TLV's
+        // 16-bit Length field would serialize with a truncated length.
+        if let Some(bytes) = self.extra_padding {
+            if bytes > MAX_PADDING_BYTES {
+                return Err(ConfigurationError::InvalidConfiguration(format!(
+                    "extra_padding value {bytes} exceeds the maximum of \
+                     {MAX_PADDING_BYTES} bytes (the largest padding TLV that fits \
+                     a maximum-size UDP payload alongside the base packet and \
+                     per-packet TLVs)"
+                )));
+            }
+        }
+        if self.ber_padding_size > MAX_PADDING_BYTES {
+            return Err(ConfigurationError::InvalidConfiguration(format!(
+                "ber_padding_size value {} exceeds the maximum of \
+                 {MAX_PADDING_BYTES} bytes",
+                self.ber_padding_size
+            )));
+        }
+
+        // RFC 8972 §4.8: in authenticated mode the sender's TLV-bearing
+        // packets always carry an HMAC TLV — the auth send path cannot honor
+        // `--tlv-hmac off`, and silently originating one anyway would ignore
+        // an explicit interop control. Reject the combination instead.
+        if !self.is_reflector
+            && self.auth_mode.is_authenticated()
+            && self.tlv_hmac == TlvHmacMode::Off
+        {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "tlv_hmac = off is not supported in authenticated mode (-A A): \
+                 authenticated TLV-bearing packets always originate an HMAC TLV \
+                 (RFC 8972 §4.8); use open mode to suppress it"
+                    .to_string(),
+            ));
+        }
+
         // Control-plane TLS: both halves or neither (clap's `requires` covers
         // the CLI, but a config file can set one alone), and never without a
         // bearer token — TLS is what makes non-loopback exposure plausible, and
@@ -1593,7 +1639,7 @@ pub enum ConfigurationError {
 /// plaintext secrets from being stored in config files (use `hmac_key_file`
 /// or the `STAMP_HMAC_KEY` environment variable instead), the latter because
 /// it would be recursive.
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfiguration {
     pub remote_addr: Option<std::net::IpAddr>,
@@ -1723,9 +1769,15 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "strict_packets": { "type": "boolean" },
     "stateful_reflector": { "type": "boolean" },
     "session_timeout": { "type": "integer", "minimum": 0 },
+    "location_disclose": { "type": "string" },
+    "drop_replayed": { "type": "boolean" },
+    "allowed_dscp": { "type": "string" },
+    "allowed_ecn": { "type": "string" },
+    "allowed_dscp_for": { "type": "array", "items": { "type": "string" } },
     "tlv_mode": { "enum": ["echo", "ignore"] },
     "verify_tlv_hmac": { "type": "boolean" },
     "ssid": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "on_zero_ssid": { "enum": ["continue", "stop"] },
     "metrics": { "type": "boolean" },
     "metrics_addr": { "type": "string" },
     "cos": { "type": "boolean" },
@@ -1769,8 +1821,8 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "max_sessions": { "type": "integer", "minimum": 0 },
     "ber": { "type": "boolean" },
     "ber_pattern": { "type": "string", "pattern": "^[0-9a-fA-F]+$" },
-    "ber_padding_size": { "type": "integer", "minimum": 0 },
-    "extra_padding": { "type": "integer", "minimum": 0 },
+    "ber_padding_size": { "type": "integer", "minimum": 0, "maximum": 65347 },
+    "extra_padding": { "type": "integer", "minimum": 0, "maximum": 65347 },
     "ber_omit_burst": { "type": "boolean" },
     "tlv_hmac": { "type": "string", "enum": ["auto", "on", "off"] },
     "reflected_control_count": { "type": "integer", "minimum": 0, "maximum": 65535 },
@@ -1824,6 +1876,17 @@ pub fn resolve_log_filter(verbose: u8, env: Option<&str>) -> String {
     }
     .to_string()
 }
+
+/// Upper bound for `--extra-padding` / `--ber-padding-size` value octets.
+///
+/// Derivation: the largest IPv4 UDP payload is 65507 bytes; subtract the
+/// authenticated base packet (112), the padding TLV's own header (4), and
+/// the worst-case per-packet TLVs the sender may add alongside it (HMAC 20,
+/// Direct Measurement 16, Access Report 8). Anything larger either cannot be
+/// represented by the TLV's 16-bit Length field or cannot leave the host in
+/// one datagram — and the unchecked value is allocated up front, so an
+/// absurd one must fail validation, not panic or OOM at send time.
+pub const MAX_PADDING_BYTES: usize = 65_507 - 112 - 4 - 20 - 16 - 8;
 
 /// Maximum length of a Type 246 selector: one full IPv6 extension header,
 /// `(255 + 1) * 8` bytes (draft-ietf-ippm-stamp-ext-hdr-11 §5.1).
@@ -2230,6 +2293,72 @@ mod tests {
         assert_eq!(attaches[0].bytes.len(), 8);
         assert_eq!(attaches[1].kind, AttachExtHdrKind::DestOpts);
         assert_eq!(attaches[1].bytes.len(), 8);
+    }
+
+    #[test]
+    fn extra_padding_above_wire_safe_bound_is_rejected() {
+        let mut args = base_valid_args();
+        args.extend([
+            "--extra-padding".to_string(),
+            (MAX_PADDING_BYTES + 1).to_string(),
+        ]);
+        let conf = Configuration::try_parse_from(args).unwrap();
+        assert!(conf.validate().is_err(), "over-bound padding must fail");
+
+        let mut args = base_valid_args();
+        args.extend(["--extra-padding".to_string(), MAX_PADDING_BYTES.to_string()]);
+        let conf = Configuration::try_parse_from(args).unwrap();
+        assert!(conf.validate().is_ok(), "the bound itself is allowed");
+    }
+
+    #[test]
+    fn ber_padding_size_above_wire_safe_bound_is_rejected() {
+        let mut args = base_valid_args();
+        args.extend([
+            "--ber".to_string(),
+            "--ber-padding-size".to_string(),
+            (MAX_PADDING_BYTES + 1).to_string(),
+        ]);
+        let conf = Configuration::try_parse_from(args).unwrap();
+        assert!(conf.validate().is_err());
+    }
+
+    /// `-A A` + `--tlv-hmac off` on the sender is rejected: the auth send
+    /// path always originates an HMAC TLV on TLV-bearing packets, so the
+    /// explicit interop control cannot be honored and must not be silently
+    /// ignored. A reflector config is unaffected (the flag is sender-side).
+    #[test]
+    fn auth_mode_with_tlv_hmac_off_is_rejected_for_sender() {
+        let sender_args = |auth_mode: &str, tlv_hmac: &str| {
+            vec![
+                "test".to_string(),
+                "--remote-addr".to_string(),
+                "127.0.0.1".to_string(),
+                "--auth-mode".to_string(),
+                auth_mode.to_string(),
+                "--hmac-key".to_string(),
+                "0123456789abcdef0123456789abcdef".to_string(),
+                "--tlv-hmac".to_string(),
+                tlv_hmac.to_string(),
+            ]
+        };
+
+        let conf = Configuration::try_parse_from(sender_args("A", "off")).unwrap();
+        assert!(
+            conf.validate().is_err(),
+            "sender -A A + --tlv-hmac off must be rejected"
+        );
+
+        // Same combination in open mode remains valid (verify-only key).
+        let conf = Configuration::try_parse_from(sender_args("O", "off")).unwrap();
+        assert!(conf.validate().is_ok());
+
+        // A reflector keeps accepting tlv_hmac = off with -A A: the flag
+        // controls sender origination only.
+        let mut args = base_valid_args();
+        args.extend(["--tlv-hmac".to_string(), "off".to_string()]);
+        let conf = Configuration::try_parse_from(args).unwrap();
+        assert!(conf.validate().is_ok());
     }
 
     #[test]
@@ -2688,100 +2817,36 @@ mod tests {
         );
     }
 
-    /// Every field in FileConfiguration appears in the schema's
-    /// properties block — guards against forgetting to update the
-    /// schema when adding a new field.
+    /// The schema's properties block and FileConfiguration's fields match
+    /// 1:1 — both directions. The field list is derived from the struct
+    /// itself (every field is an `Option`, so a default serializes each one
+    /// as an explicit null), not hand-maintained: a hand-kept copy of the
+    /// list went stale once and let six accepted keys ship un-schematized.
     #[test]
-    fn test_config_schema_covers_every_file_config_field() {
+    fn test_config_schema_matches_file_config_fields_exactly() {
         let v: serde_json::Value = serde_json::from_str(CONFIG_JSON_SCHEMA).unwrap();
         let props = v
             .get("properties")
             .and_then(|p| p.as_object())
             .expect("schema must have a properties object");
 
-        // Hand-maintained list of every FileConfiguration field. Update
-        // this list when adding a new field to FileConfiguration and
-        // CONFIG_JSON_SCHEMA — the test guarantees both stay in sync.
-        let expected = [
-            "remote_addr",
-            "local_addr",
-            "remote_port",
-            "local_port",
-            "clock_source",
-            "send_delay",
-            "count",
-            "timeout",
-            "auth_mode",
-            "print_stats",
-            "is_reflector",
-            "error_scale",
-            "error_multiplier",
-            "clock_synchronized",
-            "hmac_key_file",
-            "hmac_key_dir",
-            "require_hmac",
-            "strict_packets",
-            "stateful_reflector",
-            "session_timeout",
-            "tlv_mode",
-            "verify_tlv_hmac",
-            "ssid",
-            "metrics",
-            "metrics_addr",
-            "cos",
-            "dscp",
-            "ecn",
-            "ecn_backoff_factor",
-            "ecn_max_delay",
-            "ecn_recovery_step",
-            "ttl",
-            "malformed",
-            "access_report",
-            "access_return_code",
-            "access_report_timeout",
-            "access_report_retries",
-            "timestamp_info",
-            "direct_measurement",
-            "location",
-            "follow_up_telemetry",
-            "snmp",
-            "snmp_socket",
-            "control",
-            "control_addr",
-            "control_token_file",
-            "output_format",
-            "log_format",
-            "hwtstamp",
-            "report_interval",
-            "dest_node_addr",
-            "return_path_cc",
-            "return_address",
-            "return_sr_mpls_labels",
-            "return_srv6_sids",
-            "srv6_return_forwarding",
-            "return_path_allow_alternate",
-            "micro_session_id",
-            "reflector_member_link_id",
-            "max_pps",
-            "reflector_rate_burst",
-            "max_sessions",
-            "ber",
-            "ber_pattern",
-            "ber_padding_size",
-            "reflected_control_count",
-            "reflected_control_length",
-            "reflected_control_interval_ns",
-            "reflected_control_max_count",
-            "reflected_control_max_size",
-            "reflected_control_min_interval_ns",
-            "reflected_fixed_hdr",
-            "reflected_ipv6_ext_hdr",
-            "attach_ext_hdr",
-        ];
-        for name in expected {
+        let fields = serde_json::to_value(FileConfiguration::default()).unwrap();
+        let fields = fields
+            .as_object()
+            .expect("FileConfiguration must serialize as an object");
+
+        for name in fields.keys() {
             assert!(
                 props.contains_key(name),
-                "schema is missing property '{name}'; update CONFIG_JSON_SCHEMA"
+                "schema is missing property '{name}'; update CONFIG_JSON_SCHEMA \
+                 (additionalProperties is false, so a valid config would be rejected)"
+            );
+        }
+        for name in props.keys() {
+            assert!(
+                fields.contains_key(name),
+                "schema property '{name}' has no FileConfiguration field; \
+                 the schema would accept a key the parser rejects"
             );
         }
     }

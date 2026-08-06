@@ -122,7 +122,11 @@ impl AimdController {
     ///
     /// When `base_interval` is zero (`--send-delay 0`), the ratio is taken
     /// against [`MIN_BACKOFF_FLOOR`] instead, so the scale factor stays a
-    /// finite, meaningful multiplier rather than dividing by zero.
+    /// finite, meaningful multiplier rather than dividing by zero. In that
+    /// configuration the current interval also rests at zero, so the ratio
+    /// is floored at 1.0 — the documented at-rest value — rather than
+    /// reporting 0 and zeroing every scaled parameter (e.g. the Type 12
+    /// inter-packet interval, which reflectors check against their minimum).
     #[must_use]
     pub fn scale_factor(&self) -> f64 {
         let base = self.params.base_interval;
@@ -131,7 +135,7 @@ impl AimdController {
         } else {
             base.as_secs_f64()
         };
-        self.current.as_secs_f64() / base_secs
+        (self.current.as_secs_f64() / base_secs).max(1.0)
     }
 
     /// Records a CE-marked reply: multiplicatively grows the interval
@@ -148,9 +152,17 @@ impl AimdController {
         } else {
             self.current
         };
-        let next = floor
-            .mul_f64(self.params.backoff_factor)
-            .min(self.params.max_interval);
+        // Multiply in f64 and saturate at max_interval BEFORE constructing a
+        // Duration: `Duration::mul_f64` panics on overflow, so an extreme
+        // (but validated-finite) --ecn-backoff-factor must cap here rather
+        // than let the first CE-marked reply terminate the sender.
+        let max = self.params.max_interval;
+        let scaled = floor.as_secs_f64() * self.params.backoff_factor;
+        let next = if scaled.is_finite() && scaled < max.as_secs_f64() {
+            Duration::from_secs_f64(scaled)
+        } else {
+            max
+        };
         if next > self.current {
             self.current = next;
             self.backoffs_applied += 1;
@@ -352,10 +364,29 @@ mod tests {
             recovery_step: Duration::from_millis(1),
         };
         let mut c = AimdController::new(zero_base);
-        // At rest (current == 0): scale factor is 0 / 1ms == 0.0.
-        assert!((c.scale_factor() - 0.0).abs() < f64::EPSILON);
+        // At rest (current == 0) the documented value is 1.0 — a zero scale
+        // would zero every scaled parameter (e.g. the Type 12 inter-packet
+        // interval, which reflectors reject against their minimum).
+        assert!((c.scale_factor() - 1.0).abs() < f64::EPSILON);
         c.on_ce_observed(); // current -> 1ms floor * 3.0 = 3ms
         assert!((c.scale_factor() - 3.0).abs() < 1e-9);
+    }
+
+    /// An extreme (but finite, hence validation-accepted) backoff factor
+    /// must saturate at max_interval instead of panicking inside
+    /// `Duration::mul_f64` on the first CE observation.
+    #[test]
+    fn extreme_backoff_factor_saturates_at_max_instead_of_panicking() {
+        let extreme = AimdParams {
+            base_interval: Duration::from_millis(100),
+            backoff_factor: 1e308,
+            max_interval: Duration::from_millis(1600),
+            recovery_step: Duration::from_millis(20),
+        };
+        let mut c = AimdController::new(extreme);
+        c.on_ce_observed();
+        assert_eq!(c.current_interval(), Duration::from_millis(1600));
+        assert_eq!(c.stats().backoffs_applied, 1);
     }
 
     #[test]
