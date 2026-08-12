@@ -182,40 +182,67 @@ jobs:
           }
           Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-1.88.exe" -OutFile "$env:TEMP/npcap.exe"
           & $sevenZip x "$env:TEMP/npcap.exe" -o"$env:TEMP/npcap-extract" -y | Out-Null
-          # The installer ships BOTH architectures: 32-bit Packet.dll/wpcap.dll
-          # at the root and 64-bit ones under a subdirectory. Copying every
-          # match into one flat directory with -Force makes the survivor depend
-          # on enumeration order, and a 32-bit DLL loaded by the x64 test binary
-          # aborts it at load time with STATUS_INVALID_IMAGE_FORMAT
-          # (0xc000007b) before a single test runs. Select the 64-bit copies
-          # explicitly instead.
-          $all = Get-ChildItem -Path "$env:TEMP/npcap-extract" -Recurse -Include "Packet.dll","wpcap.dll" -ErrorAction SilentlyContinue
-          Write-Host "Candidate DLLs found in the extracted installer:"
-          $all | ForEach-Object { Write-Host "  $($_.FullName)" }
-          $dlls = $all | Where-Object { $_.FullName -match '\\x64\\' }
-          if (-not $dlls) {
-            # Fall back to any match rather than failing outright, and say so:
-            # a future installer layout may not use an x64/ subdirectory.
-            Write-Warning "No DLLs under an x64/ directory; falling back to every match, which may be the 32-bit set."
-            $dlls = $all
-          }
-          if (-not $dlls) {
-            Write-Warning "Could not find Packet.dll/wpcap.dll inside the extracted Npcap installer; the test step will likely fail to launch. Continuing anyway (best-effort job)."
-          } else {
-            $destDir = "C:/npcap-runtime"
-            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-            $dlls | ForEach-Object { Copy-Item $_.FullName -Destination $destDir -Force }
-            # Report the machine type of what was actually staged, so a repeat
-            # failure names its own cause instead of needing another round trip:
-            # 0x8664 = x64, 0x14c = x86 (PE header, e_lfanew then +4).
-            Get-ChildItem $destDir -Filter *.dll | ForEach-Object {
-              $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+          # The installer is NOT laid out as "32-bit at the root, 64-bit in a
+          # subdirectory". Npcap 1.88 ships three architectures under a naming
+          # scheme that defeats every path- or name-based heuristic:
+          #
+          #   Packet.dll,       wpcap.dll        (root)             -> ARM64
+          #   Packet_arm64.dll, wpcap_arm64.dll  (root)             -> ARM64
+          #   Packet_x64.dll,   wpcap_x64.dll    (root)             -> x64
+          #   Packet.dll,       wpcap.dll        ($SYSDIR/Npcap/)   -> x64
+          #
+          # There is no x64/ directory anywhere, so matching on one selects
+          # nothing; and an exact-name match for "Packet.dll"/"wpcap.dll"
+          # skips the _x64 copies entirely while picking up the ARM64 ones at
+          # the root. Loading a non-x64 DLL into the x64 test binary aborts it
+          # with STATUS_INVALID_IMAGE_FORMAT (0xc000007b) before a single test
+          # runs. So key on the only thing that cannot drift with installer
+          # layout: the PE header's machine type (0x8664 = x64). The two x64
+          # copies above are byte-identical, so either is a correct pick.
+          function Get-PeMachine([string]$Path) {
+            try {
+              $bytes = [System.IO.File]::ReadAllBytes($Path)
               $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
-              $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-              $arch = if ($machine -eq 0x8664) { "x64" } elseif ($machine -eq 0x14c) { "x86" } else { "0x{0:x}" -f $machine }
-              Write-Host "staged $($_.Name): $arch"
+              return [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            } catch {
+              return 0
             }
+          }
+          function Format-Machine([uint16]$Machine) {
+            switch ($Machine) {
+              0x8664  { "x64" }
+              0x14c   { "x86" }
+              0xaa64  { "ARM64" }
+              default { "0x{0:x}" -f $Machine }
+            }
+          }
+          # $PLUGINSDIR holds the installer's own NSIS plugins, never runtime
+          # DLLs; excluding it keeps the candidate list to the real payload.
+          $all = Get-ChildItem -Path "$env:TEMP/npcap-extract" -Recurse -File -Filter "*.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(Packet|wpcap)' -and $_.FullName -notmatch '\$PLUGINSDIR' }
+          Write-Host "Candidate DLLs found in the extracted installer:"
+          $all | ForEach-Object { Write-Host ("  {0,-6} {1}" -f (Format-Machine (Get-PeMachine $_.FullName)), $_.FullName) }
+          $destDir = "C:/npcap-runtime"
+          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+          # Stage under the canonical names the loader looks for, whichever
+          # source file the x64 build happened to come from.
+          $stagedCount = 0
+          foreach ($stem in @("Packet", "wpcap")) {
+            $pick = $all |
+              Where-Object { $_.Name -match "^$stem" -and (Get-PeMachine $_.FullName) -eq 0x8664 } |
+              Select-Object -First 1
+            if ($pick) {
+              Copy-Item $pick.FullName -Destination (Join-Path $destDir "$stem.dll") -Force
+              Write-Host "staged $stem.dll (x64) <- $($pick.FullName)"
+              $stagedCount++
+            } else {
+              Write-Warning "No x64 build of $stem.dll inside the extracted Npcap installer."
+            }
+          }
+          if ($stagedCount -eq 2) {
             echo "$destDir" >> $env:GITHUB_PATH
+          } else {
+            Write-Warning "Incomplete Npcap runtime staged; the test step will fail to launch. Continuing anyway (best-effort job)."
           }
       - name: Run tests (ttl-pnet backend)
         run: cargo test --no-default-features --features ttl-pnet
