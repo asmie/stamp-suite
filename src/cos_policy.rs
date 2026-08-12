@@ -70,7 +70,14 @@ impl DscpSet {
         for token in spec.split(',') {
             let token = token.trim();
             if token.is_empty() {
-                continue;
+                // A wholly empty spec is reported as an empty list below. An
+                // empty element *inside* a list (`0,,8`, `0,46,`) is a typo, and
+                // skipping it silently would let the policy admit something the
+                // operator never wrote.
+                if spec.trim().is_empty() {
+                    continue;
+                }
+                return Err(format!("empty entry in DSCP list '{spec}'"));
             }
             match token.to_ascii_lowercase().as_str() {
                 "all" => {
@@ -156,7 +163,14 @@ impl EcnSet {
         for token in spec.split(',') {
             let token = token.trim();
             if token.is_empty() {
-                continue;
+                // A wholly empty spec is reported as an empty list below. An
+                // empty element *inside* a list (`0,,8`, `0,46,`) is a typo, and
+                // skipping it silently would let the policy admit something the
+                // operator never wrote.
+                if spec.trim().is_empty() {
+                    continue;
+                }
+                return Err(format!("empty entry in ECN list '{spec}'"));
             }
             match token.to_ascii_lowercase().as_str() {
                 "all" => {
@@ -359,6 +373,38 @@ pub fn parse_destination_rule(spec: &str) -> Result<(IpAddr, u8, DscpSet), Strin
 
 #[cfg(test)]
 mod tests {
+
+    /// An empty element inside a list is a typo, not a no-op: skipping it
+    /// silently let `--allowed-dscp 0,,8` and a trailing comma through, so a
+    /// mistyped policy admitted a set the operator never wrote.
+    #[test]
+    fn empty_list_elements_are_rejected() {
+        for spec in ["0,,8", "0,46,", ",0", "0,,", "all,,"] {
+            assert!(
+                DscpSet::parse(spec).is_err(),
+                "DSCP spec '{spec}' must be rejected"
+            );
+        }
+        for spec in ["0,,1", "0,3,", ",1"] {
+            assert!(
+                EcnSet::parse(spec).is_err(),
+                "ECN spec '{spec}' must be rejected"
+            );
+        }
+
+        // Well-formed lists, the wildcards, and surrounding whitespace all
+        // still parse.
+        assert!(DscpSet::parse("0,8,10-14,46").is_ok());
+        assert!(DscpSet::parse(" 0 , 46 ").is_ok());
+        assert!(DscpSet::parse("all").is_ok());
+        assert!(DscpSet::parse("none").is_ok());
+        assert!(EcnSet::parse("0,1,2,3").is_ok());
+        assert!(EcnSet::parse("all").is_ok());
+
+        // A wholly empty spec keeps its own clearer diagnostic.
+        assert!(DscpSet::parse("").is_err());
+        assert!(DscpSet::parse("   ").is_err());
+    }
     use super::*;
 
     #[test]

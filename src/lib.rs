@@ -98,3 +98,29 @@ pub mod metrics;
 #[cfg(all(unix, feature = "snmp"))]
 #[doc(hidden)]
 pub mod snmp;
+
+/// A failure that prevented a role from starting at all: the socket would not
+/// bind, a required socket option was refused, or authenticated mode was asked
+/// for without a usable key.
+///
+/// Kept distinct from a normal shutdown so the process can exit non-zero.
+/// Configuration errors already exit 1; the runtime startup path used to
+/// `return` and exit 0, which a supervisor reads as a clean, intentional exit —
+/// `dist/systemd/stamp-suite.service` is `Type=simple` with
+/// `Restart=on-failure`, so a reflector that could not bind was never
+/// restarted, and `stamp-suite … && echo ok` reported success on total
+/// failure.
+///
+/// The message is the operator-facing diagnostic and is printed once, by the
+/// caller in `main`, rather than at each failure site.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct StartupError(pub String);
+
+impl StartupError {
+    /// Builds a startup error from anything displayable.
+    #[must_use]
+    pub fn new(msg: impl std::fmt::Display) -> Self {
+        Self(msg.to_string())
+    }
+}

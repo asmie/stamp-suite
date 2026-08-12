@@ -1789,7 +1789,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "ttl":  { "type": "integer", "minimum": 1, "maximum": 255 },
     "malformed": { "enum": ["bad-flags", "bad-length"] },
     "access_report": { "type": "integer", "minimum": 1, "maximum": 15 },
-    "access_return_code": { "type": "integer", "minimum": 0, "maximum": 15 },
+    "access_return_code": { "type": "integer", "minimum": 0, "maximum": 255 },
     "access_report_timeout": { "type": "integer", "minimum": 1, "maximum": 3600 },
     "access_report_retries": { "type": "integer", "minimum": 0, "maximum": 255 },
     "timestamp_info": { "type": "boolean" },
@@ -1983,6 +1983,13 @@ pub(crate) fn parse_ext_hdr_request_spec(s: &str) -> Result<ExtHdrRequestSpec, S
             .parse::<usize>()
             .map_err(|e| format!("invalid length `{len_part}`: {e}"))?
     };
+    // A zero-length request names no extension header. Omit the value to get
+    // the default length instead of asking for nothing.
+    if length == 0 {
+        return Err(
+            "length 0 requests no extension header; omit the value to use the default".to_string(),
+        );
+    }
     if length > MAX_IPV6_EXT_HDR_SELECTOR_BYTES {
         return Err(format!(
             "length {length} exceeds the maximum of {MAX_IPV6_EXT_HDR_SELECTOR_BYTES} \
@@ -4088,6 +4095,44 @@ mod tests {
         let conf = load_from_args(&["test", "--config", path.to_str().unwrap()])
             .expect("file-configured action must load");
         assert_eq!(conf.on_zero_ssid, ZeroSsidAction::Stop);
+    }
+
+    /// RFC 8972 §4.6 makes the Access Report Return Code a full octet (Table 11
+    /// defines 0, 1, 2 and 255), and `access_report.rs` puts the whole octet on
+    /// the wire. The published schema capped it at 15, so the validation
+    /// workflow that `--print-config-schema` documents rejected values the
+    /// binary accepts.
+    #[test]
+    fn test_schema_access_return_code_spans_a_full_octet() {
+        let schema: serde_json::Value =
+            serde_json::from_str(CONFIG_JSON_SCHEMA).expect("schema must be valid JSON");
+        let spec = &schema["properties"]["access_return_code"];
+        assert_eq!(spec["minimum"], 0);
+        assert_eq!(spec["maximum"], 255);
+
+        // And the loader really does accept the top of that range. (256 is
+        // rejected by clap's own range check, which exits the process rather
+        // than returning an error, so it cannot be asserted here.)
+        for value in [0u16, 15, 16, 255] {
+            assert!(
+                load_from_args(&["test", "--access-return-code", &value.to_string()]).is_ok(),
+                "access_return_code {value} must load"
+            );
+        }
+    }
+
+    /// `--reflected-ipv6-ext-hdr=0` asks the reflector for a zero-length
+    /// extension header, which names nothing. Omitting the value is how you get
+    /// the default length.
+    #[test]
+    fn test_reflected_ipv6_ext_hdr_rejects_zero_length() {
+        assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr=0"]).is_err());
+        assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr=0:11000102"]).is_err());
+
+        // The bare flag and an explicit non-zero length still work.
+        assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr"]).is_ok());
+        assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr=8"]).is_ok());
+        assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr=8:11000102"]).is_ok());
     }
 
     #[test]

@@ -652,7 +652,7 @@ pub async fn run_sender(
         std::sync::Arc<crate::snmp::state::SenderSnmpStats>,
     >,
     #[cfg(not(all(unix, feature = "snmp")))] _snmp_stats: Option<()>,
-) -> StatsSnapshot {
+) -> Result<StatsSnapshot, crate::StartupError> {
     #[cfg(feature = "metrics")]
     let metrics_enabled = conf.metrics;
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
@@ -668,19 +668,19 @@ pub async fn run_sender(
     // field (§3.4-2/-3's "EC1 field").
     let ecn_response_active = conf.cos && matches!(conf.ecn, 1 | 2);
 
-    let empty_snapshot = || RttCollector::new().snapshot(0, 0);
-
     let socket = match UdpSocket::bind(local_addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Cannot bind to address {}: {}", local_addr, e);
-            return empty_snapshot();
+            return Err(crate::StartupError::new(format!(
+                "Cannot bind to address {local_addr}: {e}"
+            )));
         }
     };
 
     if let Err(e) = socket.connect(remote_addr).await {
-        eprintln!("Cannot connect to address {}: {}", remote_addr, e);
-        return empty_snapshot();
+        return Err(crate::StartupError::new(format!(
+            "Cannot connect to address {remote_addr}: {e}"
+        )));
     }
 
     // Mark the egress IP header so the on-the-wire DSCP/ECN matches the Class
@@ -848,10 +848,20 @@ pub async fn run_sender(
 
     // Validate: authenticated mode requires HMAC key
     if use_auth && hmac_key.is_none() {
-        eprintln!(
-            "Error: Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file)"
-        );
-        return empty_snapshot();
+        return Err(crate::StartupError::new(
+            "Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file)",
+        ));
+    }
+
+    // A key source that failed to load is a configuration error in either mode:
+    // the key also signs the TLV HMAC this sender may originate, so continuing
+    // without it would silently send unauthenticated TLVs.
+    if hmac_key.is_none() && crate::receiver::hmac_key_source_configured(conf) {
+        return Err(crate::StartupError::new(
+            "an HMAC key source was configured (--hmac-key, --hmac-key-file or \
+             --hmac-key-dir) but no usable key could be loaded; see the error above. \
+             Refusing to run without the key that was asked for",
+        ));
     }
 
     if hmac_key.is_some() {
@@ -1075,8 +1085,9 @@ pub async fn run_sender(
             match parse_hex_pattern(hex) {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    eprintln!("Invalid --ber-pattern ({}): {}", hex, e);
-                    return empty_snapshot();
+                    return Err(crate::StartupError::new(format!(
+                        "Invalid --ber-pattern ({hex}): {e}"
+                    )));
                 }
             }
         } else {
@@ -1824,11 +1835,11 @@ pub async fn run_sender(
         stats.inc_lost_by(remaining_lost);
     }
 
-    rtt_collector
+    Ok(rtt_collector
         .snapshot(packets_sent, packets_lost)
         .with_owd(&owd_collector)
         .with_access_report(access_report_state.as_ref().map(|state| state.summary()))
-        .with_congestion(congestion.as_ref().map(|state| state.summary()))
+        .with_congestion(congestion.as_ref().map(|state| state.summary())))
 }
 
 /// Receives one datagram. With kernel RX timestamping enabled (feature
@@ -2007,14 +2018,7 @@ fn process_response(
                     None
                 };
 
-                (
-                    seq_num,
-                    recv_ts,
-                    send_ts,
-                    ttl,
-                    tlv_info,
-                    (base.ssid, base.sess_sender_ssid),
-                )
+                (seq_num, recv_ts, send_ts, ttl, tlv_info, base.ssid)
             } else {
                 // Parse base packet only (lenient, returns canonical buffer)
                 let (packet, canonical_buf) =
@@ -2044,14 +2048,7 @@ fn process_response(
                         return;
                     }
                 }
-                (
-                    seq_num,
-                    recv_ts,
-                    send_ts,
-                    ttl,
-                    None,
-                    (packet.ssid, packet.sess_sender_ssid),
-                )
+                (seq_num, recv_ts, send_ts, ttl, None, packet.ssid)
             }
         } else if use_tlvs {
             // Parse as extended packet with TLVs (unauthenticated, lenient)
@@ -2096,7 +2093,7 @@ fn process_response(
                 base.timestamp,
                 base.sess_sender_ttl,
                 tlv_info,
-                (base.ssid, base.sess_sender_ssid),
+                base.ssid,
             )
         } else {
             // Parse base packet only (lenient)
@@ -2107,32 +2104,31 @@ fn process_response(
                 packet.timestamp,
                 packet.sess_sender_ttl,
                 None,
-                (packet.ssid, packet.sess_sender_ssid),
+                packet.ssid,
             )
         };
 
-    // RFC 8972 §3 zeroed-SSID scenario. The reflector echoes the sender's SSID
-    // in both the reflected `SSID` field and the `Session-Sender SSID` field; a
-    // peer that does not implement the field leaves both zero (they are MBZ in
-    // the RFC 8762 layout). Either one coming back zeroed against a non-zero
-    // request means the reflector is not demultiplexing on SSID, so it is the
-    // condition `--on-zero-ssid` governs.
+    // RFC 8972 §3 zeroed-SSID scenario. Figure 2 gives the reflected packet a
+    // single SSID field, in the two octets after the reflector's own Error
+    // Estimate; everything else in the RFC 8762 layout stays MBZ. A reflector
+    // that does not implement the field leaves that one field zero, which
+    // means it is not demultiplexing on SSID — the condition `--on-zero-ssid`
+    // governs. (Earlier revisions also inspected the MBZ run after the
+    // Session-Sender Error Estimate, which a conformant peer always zeroes.)
     if let Some(expected) = ctx.expected_ssid {
-        let (reflected_ssid, echoed_sender_ssid) = reflected_ssids;
-        if reflected_ssid == 0 || echoed_sender_ssid == 0 {
+        let reflected_ssid = reflected_ssids;
+        if reflected_ssid == 0 {
             let first_time = !*ctx.zero_ssid_seen;
             *ctx.zero_ssid_seen = true;
             if first_time {
                 match ctx.on_zero_ssid {
                     ZeroSsidAction::Continue => eprintln!(
                         "Warning: reflector returned a zeroed SSID (sent {expected}, \
-                         got ssid={reflected_ssid} sender_ssid={echoed_sender_ssid}) \
-                         — it is not demultiplexing sessions on SSID. Continuing \
-                         per --on-zero-ssid=continue (RFC 8972 §3)."
+                         got 0) — it is not demultiplexing sessions on SSID. \
+                         Continuing per --on-zero-ssid=continue (RFC 8972 §3)."
                     ),
                     ZeroSsidAction::Stop => eprintln!(
-                        "Reflector returned a zeroed SSID (sent {expected}, got \
-                         ssid={reflected_ssid} sender_ssid={echoed_sender_ssid}); \
+                        "Reflector returned a zeroed SSID (sent {expected}, got 0); \
                          stopping the session per --on-zero-ssid=stop (RFC 8972 §3)."
                     ),
                 }
@@ -4668,7 +4664,7 @@ mod tests {
             sess_sender_seq_number: 1,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -4738,7 +4734,7 @@ mod tests {
             sess_sender_seq_number: 1,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -4843,7 +4839,7 @@ mod tests {
             sess_sender_seq_number: 1,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -4914,7 +4910,7 @@ mod tests {
             sess_sender_seq_number: 2,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -4978,7 +4974,7 @@ mod tests {
             sess_sender_seq_number: 3,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -5040,7 +5036,7 @@ mod tests {
             sess_sender_seq_number: 4,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -5476,7 +5472,8 @@ mod tests {
         let reflector = tokio::spawn(collect_silently(socket, 3, Duration::from_secs(8)));
         let _ = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf, None))
             .await
-            .expect("run_sender must not hang past the retry budget");
+            .expect("run_sender must not hang past the retry budget")
+            .expect("run_sender must start successfully");
         let packets = reflector.await.unwrap();
 
         assert!(
@@ -5639,7 +5636,8 @@ mod tests {
         let reflector = tokio::spawn(collect_silently(socket, 4, Duration::from_secs(8)));
         let snapshot = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf, None))
             .await
-            .expect("run_sender must not hang past the retry budget");
+            .expect("run_sender must not hang past the retry budget")
+            .expect("run_sender must start successfully");
         let packets = reflector.await.unwrap();
 
         // Original send + exactly `retries` (2) retransmissions — no more:
@@ -5698,7 +5696,8 @@ mod tests {
         ));
         let snapshot = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf, None))
             .await
-            .expect("run_sender must finish promptly once acknowledged");
+            .expect("run_sender must finish promptly once acknowledged")
+            .expect("run_sender must start successfully");
         let received = reflector.await.unwrap();
 
         assert_eq!(
@@ -5743,7 +5742,8 @@ mod tests {
         let start = Instant::now();
         let snapshot = tokio::time::timeout(Duration::from_secs(5), run_sender(&conf, None))
             .await
-            .expect("run_sender must finish promptly with no Access Report extension");
+            .expect("run_sender must finish promptly with no Access Report extension")
+            .expect("run_sender must start successfully");
         let elapsed = start.elapsed();
         let packets = reflector.await.unwrap();
 
@@ -5805,7 +5805,7 @@ mod tests {
             sess_sender_seq_number: 7,
             sess_sender_timestamp: t1,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 64,
             mbz3: [0; 3],
         };
@@ -5873,7 +5873,7 @@ mod tests {
             sess_sender_seq_number: 7,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -5944,7 +5944,7 @@ mod tests {
             sess_sender_seq_number: 7,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -6016,7 +6016,7 @@ mod tests {
             sess_sender_seq_number: 7,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -6083,7 +6083,7 @@ mod tests {
             sess_sender_seq_number: 42,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -6167,7 +6167,7 @@ mod tests {
             sess_sender_seq_number: 42,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -6222,7 +6222,8 @@ mod tests {
         use crate::receiver::assemble_unauth_answer;
 
         // End-to-end wire check: an SSID set by the sender reaches the reflector
-        // in the base header and is echoed into both SSID fields of the reply.
+        // in the base header and is echoed into the reply's single SSID field
+        // (RFC 8972 §3 Figure 2), leaving octets 38-39 MBZ.
         let built = build_unauth_packet_with_tlvs(1, 100, 0, Some(0xABCD), &[], None);
         let parsed = PacketUnauthenticated::from_bytes(&built).unwrap();
         assert_eq!(parsed.ssid, 0xABCD);
@@ -6230,7 +6231,14 @@ mod tests {
         let reply: ReflectedPacketUnauthenticated =
             assemble_unauth_answer(&parsed, ClockFormat::NTP, 0, 64, 0, None);
         assert_eq!(reply.ssid, 0xABCD);
-        assert_eq!(reply.sess_sender_ssid, 0xABCD);
+
+        let bytes = reply.to_bytes();
+        assert_eq!(u16::from_be_bytes([bytes[14], bytes[15]]), 0xABCD);
+        assert_eq!(
+            &bytes[38..40],
+            &[0, 0],
+            "a second SSID copy here makes MBZ-verifying peers drop the reply"
+        );
     }
 
     #[test]
@@ -6240,9 +6248,9 @@ mod tests {
 
         // End-to-end wire check for the authenticated path: the SSID set by
         // the sender must reach the reflector in base header bytes 26-27 and
-        // be echoed into both SSID fields (offsets 26-27 and 74-75) of the
-        // reflected packet. HMAC is recomputed on each side, so getting this
-        // wrong would also desync verification.
+        // be echoed into the reply's single SSID field (offsets 26-27), with
+        // octets 74-79 left MBZ. HMAC is recomputed on each side, so getting
+        // this wrong would also desync verification.
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
         let built = build_auth_packet_with_tlvs(42, 1000, 100, &key, Some(0xBEEF), &[], None);
         assert_eq!(built.len(), 112);
@@ -6254,7 +6262,6 @@ mod tests {
         let reply: ReflectedPacketAuthenticated =
             assemble_auth_answer(&parsed, ClockFormat::NTP, 0, 64, 0, Some(&key), None);
         assert_eq!(reply.ssid, 0xBEEF);
-        assert_eq!(reply.sess_sender_ssid, 0xBEEF);
 
         // Reflector's HMAC must be computed over the echoed SSID too —
         // serialize and verify it round-trips through from_bytes.
@@ -6264,11 +6271,12 @@ mod tests {
             0xBEEF
         );
         assert_eq!(
-            u16::from_be_bytes([reply_bytes[74], reply_bytes[75]]),
-            0xBEEF
+            &reply_bytes[74..80],
+            &[0; 6],
+            "a second SSID copy here makes MBZ-verifying peers drop the reply"
         );
         let reparsed = ReflectedPacketAuthenticated::from_bytes(&reply_bytes).unwrap();
         assert_eq!(reparsed.ssid, 0xBEEF);
-        assert_eq!(reparsed.sess_sender_ssid, 0xBEEF);
+        assert_eq!(reparsed.mbz4, [0; 6]);
     }
 }

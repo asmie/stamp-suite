@@ -262,7 +262,13 @@ async fn main() {
             std::process::exit(1);
         }
 
-        receiver::run_receiver(&conf, &shared).await;
+        // A reflector that never got off the ground must exit non-zero: the
+        // shipped systemd unit is Type=simple with Restart=on-failure, and
+        // exit 0 would be read as a deliberate stop.
+        if let Err(e) = receiver::run_receiver(&conf, &shared).await {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     } else {
         #[cfg(all(unix, feature = "snmp"))]
         let sender_stats = std::sync::Arc::new(stamp_suite::snmp::state::SenderSnmpStats::new());
@@ -329,17 +335,20 @@ async fn main() {
             std::process::exit(1);
         }
 
+        // Same contract as the reflector: a sender that could not bind,
+        // connect, or load its key reports failure rather than printing an
+        // all-zero statistics block and exiting 0.
         #[cfg(all(unix, feature = "snmp"))]
-        {
-            sender::run_sender(&conf, Some(sender_stats))
-                .await
-                .print(conf.output_format);
-        }
+        let outcome = sender::run_sender(&conf, Some(sender_stats)).await;
         #[cfg(not(all(unix, feature = "snmp")))]
-        {
-            sender::run_sender(&conf, None)
-                .await
-                .print(conf.output_format);
+        let outcome = sender::run_sender(&conf, None).await;
+
+        match outcome {
+            Ok(stats) => stats.print(conf.output_format),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
         }
     }
 }

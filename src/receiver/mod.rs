@@ -195,6 +195,17 @@ fn enumerate_interface_macs() -> Vec<[u8; 6]> {
 ///
 /// Single-key path retained for backward compatibility. Operators using
 /// per-SSID keys should call `load_hmac_key_set` instead — see B6.
+/// True when the operator named an HMAC key source.
+///
+/// `load_hmac_key` returns `None` both when no key was asked for and when a key
+/// *was* asked for but could not be loaded (missing file, group-readable mode,
+/// unparsable hex). Callers need to tell those apart: silently running without
+/// a key the operator supplied is a downgrade, not a default.
+#[must_use]
+pub fn hmac_key_source_configured(conf: &Configuration) -> bool {
+    conf.hmac_key.is_some() || conf.hmac_key_file.is_some() || conf.hmac_key_dir.is_some()
+}
+
 pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
     if let Some(ref hex_key) = conf.hmac_key {
         match HmacKey::from_hex(hex_key.as_str()) {
@@ -1031,13 +1042,14 @@ pub fn assemble_unauth_answer(
     reflector_error_estimate: u16,
     reflector_seq: Option<u32>,
 ) -> ReflectedPacketUnauthenticated {
-    // RFC 8972 §4.1.1: both SSID fields carry the Session-Sender Identifier
-    // from the received test packet (the reflector tracks sessions by SSID).
+    // RFC 8972 §3 Figure 2: the reflected packet carries the Session-Sender
+    // Identifier once, in the two octets after the reflector's own Error
+    // Estimate. The run after the Session-Sender Error Estimate stays MBZ.
     ReflectedPacketUnauthenticated {
         sess_sender_timestamp: packet.timestamp,
         sess_sender_err_estimate: packet.error_estimate,
         sess_sender_seq_number: packet.sequence_number,
-        sess_sender_ssid: packet.ssid,
+        mbz2: [0; 2],
         sess_sender_ttl: ttl,
         sequence_number: reflector_seq.unwrap_or(packet.sequence_number),
         error_estimate: reflector_error_estimate,
@@ -1531,6 +1543,46 @@ pub fn process_stamp_packet(
     // - Auto-verify when HMAC key is configured (regardless of auth mode)
     let verify_tlv_hmac = ctx.verify_tlv_hmac || resolved_hmac_key.is_some();
 
+    // An authenticated Session-Sender packet arriving at an unauthenticated
+    // reflector cannot be reflected usefully: parsed with the unauthenticated
+    // layout, octets 4..16 (the authenticated form's mandatory 12-octet MBZ)
+    // become the Timestamp and Error Estimate we are required to echo, so the
+    // reply carries a zero Session-Sender Timestamp and a zero Error Estimate.
+    // A zero Error Estimate means multiplier 0, which RFC 8762 §4.2 forbids, and
+    // the authenticated packet's remaining MBZ run gets echoed back as a run of
+    // synthesised zero-type TLVs. Drop it instead of emitting that.
+    //
+    // Mode is not signalled on the wire, so this is a shape test, and it asks
+    // for positive evidence of the authenticated layout rather than merely an
+    // absence: the datagram must be long enough to be the authenticated form,
+    // its octets 4..16 must be the all-zero MBZ that form mandates, *and* the
+    // Timestamp and Error Estimate that form places at octets 16..24 and 24..26
+    // must both be present. In an unauthenticated packet those offsets fall in
+    // the 28-octet MBZ run, so a zero-timestamp unauthenticated packet — which
+    // is otherwise indistinguishable on the first sixteen octets — is not
+    // caught. Short packets zero-filled for TWAMP-Light interop are below the
+    // length bar and unaffected either way.
+    if !use_auth
+        && data.len() >= AUTH_BASE_SIZE
+        && data[4..16].iter().all(|&octet| octet == 0)
+        && data[16..24].iter().any(|&octet| octet != 0)
+        && data[24..26].iter().any(|&octet| octet != 0)
+    {
+        log::warn!(
+            "dropping {}-octet packet from {}: it has the shape of an \
+             authenticated test packet but this reflector is in open mode \
+             (-A O); reflecting it would emit a zero Error Estimate \
+             (RFC 8762 §4.2 forbids multiplier 0)",
+            data.len(),
+            src
+        );
+        #[cfg(feature = "metrics")]
+        if ctx.metrics_enabled {
+            crate::metrics::reflector_metrics::record_packet_dropped("auth_packet_in_open_mode");
+        }
+        return None;
+    }
+
     let result = if use_auth {
         process_auth_packet(
             data,
@@ -1839,7 +1891,6 @@ pub fn assemble_auth_answer(
         sess_sender_timestamp: packet.timestamp,
         sess_sender_err_estimate: packet.error_estimate,
         sess_sender_seq_number: packet.sequence_number,
-        sess_sender_ssid: packet.ssid,
         sess_sender_ttl: ttl,
         sequence_number: reflector_seq.unwrap_or(packet.sequence_number),
         error_estimate: reflector_error_estimate,
@@ -1850,7 +1901,7 @@ pub fn assemble_auth_answer(
         mbz1: [0u8; 4],
         mbz2: [0u8; 8],
         mbz3: [0u8; 12],
-        mbz4: [0u8; 4],
+        mbz4: [0u8; 6],
         mbz5: [0u8; 15],
         hmac: [0u8; 16],
     };
@@ -5522,6 +5573,69 @@ mod tests {
     }
 
     /// The panic-isolating wrapper must be transparent on the happy path: a
+    /// An authenticated test packet reaching an open-mode reflector must be
+    /// dropped, not reflected: read with the unauthenticated layout its
+    /// mandatory 12-octet MBZ becomes the Timestamp and Error Estimate we echo,
+    /// so the reply would carry a zero Error Estimate — multiplier 0, which
+    /// RFC 8762 §4.2 forbids — plus a run of synthesised zero-type TLVs. A real
+    /// peer rejects such a reply outright.
+    #[test]
+    fn open_mode_reflector_drops_authenticated_shaped_packet() {
+        let auth = PacketAuthenticated {
+            sequence_number: 0x22,
+            mbz0: [0; 12],
+            timestamp: 0xEE26_C5EE_6734_968E,
+            error_estimate: 0x0001,
+            ssid: 0,
+            mbz1a: [0; 30],
+            mbz1b: [0; 32],
+            mbz1c: [0; 6],
+            hmac: [0xAB; 16],
+        };
+        let data = auth.to_bytes();
+        assert_eq!(data.len(), AUTH_BASE_SIZE);
+        let ctx = test_ctx(0, 0);
+
+        // Open mode (use_auth = false): dropped.
+        assert!(
+            process_stamp_packet(&data, loopback_src(), 64, false, &ctx).is_none(),
+            "an authenticated-shaped packet must not be reflected in open mode"
+        );
+
+        // The same bytes in authenticated mode are handled by the auth path and
+        // are not caught by the guard (no key configured here, so the reply is
+        // gated by the auth rules rather than this shape test).
+        let _ = process_stamp_packet(&data, loopback_src(), 64, true, &ctx);
+    }
+
+    /// The guard is a shape test, so it must not touch ordinary traffic: a
+    /// genuine unauthenticated packet long enough to reach the authenticated
+    /// base size (44-octet base plus TLVs) still carries a real timestamp in
+    /// octets 4..12 and is reflected normally.
+    #[test]
+    fn open_mode_guard_ignores_long_unauthenticated_packets() {
+        let packet = PacketUnauthenticated {
+            sequence_number: 7,
+            timestamp: 0xEE26_C5EE_6734_968E,
+            error_estimate: 0x0001,
+            ssid: 0,
+            mbz: [0; 28],
+        };
+        let mut data = packet.to_bytes().to_vec();
+        // Pad past AUTH_BASE_SIZE with an Extra Padding TLV so length alone
+        // cannot be what distinguishes the two cases.
+        data.extend_from_slice(&[0x00, 0x01]);
+        data.extend_from_slice(&80u16.to_be_bytes());
+        data.extend_from_slice(&[0u8; 80]);
+        assert!(data.len() > AUTH_BASE_SIZE);
+
+        let ctx = test_ctx(0, 0);
+        assert!(
+            process_stamp_packet(&data, loopback_src(), 64, false, &ctx).is_some(),
+            "a long unauthenticated packet must still be reflected"
+        );
+    }
+
     /// valid packet yields the same reply bytes as the raw entry point.
     #[test]
     fn process_stamp_packet_isolated_matches_raw_on_valid_packet() {

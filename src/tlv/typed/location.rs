@@ -85,20 +85,28 @@ impl LocationDisclosure {
         let mut policy = Self::none();
         let mut saw_wildcard = false;
         let mut saw_field = false;
+        let mut wildcards = 0usize;
 
         for token in spec.split(',') {
             let token = token.trim();
             if token.is_empty() {
-                continue;
+                // As with the CoS lists: a wholly empty spec is reported as an
+                // empty list below, but an empty element inside one is a typo.
+                if spec.trim().is_empty() {
+                    continue;
+                }
+                return Err(format!("empty entry in Location field list '{spec}'"));
             }
             match token.to_ascii_lowercase().as_str() {
                 "all" => {
                     policy = Self::all();
                     saw_wildcard = true;
+                    wildcards += 1;
                 }
                 "none" => {
                     policy = Self::none();
                     saw_wildcard = true;
+                    wildcards += 1;
                 }
                 "src-port" => {
                     policy.src_port = true;
@@ -137,6 +145,13 @@ impl LocationDisclosure {
 
         if saw_wildcard && saw_field {
             return Err("'all'/'none' cannot be combined with individual field names".to_string());
+        }
+        // `all,none` used to resolve to whichever came last. It states two
+        // incompatible policies, so there is no reading to pick.
+        if wildcards > 1 {
+            return Err(format!(
+                "'{spec}' names more than one wildcard; use exactly one of 'all' or 'none'"
+            ));
         }
         if !saw_wildcard && !saw_field {
             return Err("empty Location disclosure list".to_string());
@@ -456,6 +471,31 @@ pub struct PacketAddressInfo {
 
 #[cfg(test)]
 mod tests {
+
+    /// `all,none` states two incompatible policies. It used to resolve to
+    /// whichever token came last, silently disclosing (or withholding)
+    /// everything depending on the order typed.
+    #[test]
+    fn contradictory_wildcards_are_rejected() {
+        for spec in ["all,none", "none,all", "all,all", "none,none"] {
+            assert!(
+                LocationDisclosure::parse(spec).is_err(),
+                "'{spec}' must be rejected"
+            );
+        }
+        for spec in ["src-port,,dst-ip", "ports,"] {
+            assert!(
+                LocationDisclosure::parse(spec).is_err(),
+                "'{spec}' must be rejected"
+            );
+        }
+
+        // Exactly one wildcard, or a plain field list, still parses.
+        assert!(LocationDisclosure::parse("all").is_ok());
+        assert!(LocationDisclosure::parse("none").is_ok());
+        assert!(LocationDisclosure::parse("src-port,dst-ip").is_ok());
+        assert!(LocationDisclosure::parse("ips").is_ok());
+    }
     use super::LocationDisclosure;
 
     #[test]

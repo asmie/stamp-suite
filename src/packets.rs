@@ -260,8 +260,14 @@ pub struct ReflectedPacketUnauthenticated {
     pub sess_sender_timestamp: u64,
     /// Original sender's error estimate (echoed back).
     pub sess_sender_err_estimate: u16,
-    /// Session-Sender SSID echoed from the received test packet (RFC 8972 §4.1.1).
-    pub sess_sender_ssid: u16,
+    /// Must Be Zero - reserved (2 bytes).
+    ///
+    /// RFC 8972 §3 Figure 2 places the SSID *once* in the reflected packet,
+    /// in the two octets after the reflector's own Error Estimate (`ssid`,
+    /// octets 14-15). The two octets here, following the Session-Sender Error
+    /// Estimate, stay MBZ. Echoing the SSID a second time makes a peer that
+    /// verifies MBZ (RFC 8762 §4.6) discard the whole reply.
+    pub mbz2: [u8; 2],
     /// TTL/Hop Limit of the received test packet.
     pub sess_sender_ttl: u8,
     /// Must Be Zero - reserved (3 bytes).
@@ -280,7 +286,7 @@ impl ReflectedPacketUnauthenticated {
         buf[24..28].copy_from_slice(&self.sess_sender_seq_number.to_be_bytes());
         buf[28..36].copy_from_slice(&self.sess_sender_timestamp.to_be_bytes());
         buf[36..38].copy_from_slice(&self.sess_sender_err_estimate.to_be_bytes());
-        buf[38..40].copy_from_slice(&self.sess_sender_ssid.to_be_bytes());
+        buf[38..40].copy_from_slice(&self.mbz2);
         buf[40] = self.sess_sender_ttl;
         buf[41..44].copy_from_slice(&self.mbz3);
         buf
@@ -301,7 +307,7 @@ impl ReflectedPacketUnauthenticated {
             sess_sender_seq_number: read_u32(buf, 24),
             sess_sender_timestamp: read_u64(buf, 28),
             sess_sender_err_estimate: read_u16(buf, 36),
-            sess_sender_ssid: read_u16(buf, 38),
+            mbz2: read_array(buf, 38),
             sess_sender_ttl: buf[40],
             mbz3: read_array(buf, 41),
         })
@@ -325,7 +331,7 @@ impl ReflectedPacketUnauthenticated {
             sess_sender_seq_number: read_u32(&padded, 24),
             sess_sender_timestamp: read_u64(&padded, 28),
             sess_sender_err_estimate: read_u16(&padded, 36),
-            sess_sender_ssid: read_u16(&padded, 38),
+            mbz2: read_array(&padded, 38),
             sess_sender_ttl: padded[40],
             mbz3: read_array(&padded, 41),
         }
@@ -458,10 +464,12 @@ pub struct ReflectedPacketAuthenticated {
     pub sess_sender_timestamp: u64,
     /// Original sender's error estimate (echoed back).
     pub sess_sender_err_estimate: u16,
-    /// Session-Sender SSID echoed from the received test packet (RFC 8972 §4.1.2).
-    pub sess_sender_ssid: u16,
-    /// Must Be Zero - reserved padding (4 bytes).
-    pub mbz4: [u8; 4],
+    /// Must Be Zero - reserved padding (6 bytes).
+    ///
+    /// Covers octets 74-79. RFC 8972 §3 places the SSID once per reflected
+    /// packet (`ssid`, octets 26-27); the run after the Session-Sender Error
+    /// Estimate is MBZ. See `ReflectedPacketUnauthenticated::mbz2`.
+    pub mbz4: [u8; 6],
     /// TTL/Hop Limit of the received test packet.
     pub sess_sender_ttl: u8,
     /// Must Be Zero - reserved padding (15 bytes).
@@ -486,8 +494,7 @@ impl ReflectedPacketAuthenticated {
         buf[52..64].copy_from_slice(&self.mbz3);
         buf[64..72].copy_from_slice(&self.sess_sender_timestamp.to_be_bytes());
         buf[72..74].copy_from_slice(&self.sess_sender_err_estimate.to_be_bytes());
-        buf[74..76].copy_from_slice(&self.sess_sender_ssid.to_be_bytes());
-        buf[76..80].copy_from_slice(&self.mbz4);
+        buf[74..80].copy_from_slice(&self.mbz4);
         buf[80] = self.sess_sender_ttl;
         buf[81..96].copy_from_slice(&self.mbz5);
         buf[96..112].copy_from_slice(&self.hmac);
@@ -513,8 +520,7 @@ impl ReflectedPacketAuthenticated {
             mbz3: read_array(buf, 52),
             sess_sender_timestamp: read_u64(buf, 64),
             sess_sender_err_estimate: read_u16(buf, 72),
-            sess_sender_ssid: read_u16(buf, 74),
-            mbz4: read_array(buf, 76),
+            mbz4: read_array(buf, 74),
             sess_sender_ttl: buf[80],
             mbz5: read_array(buf, 81),
             hmac: read_array(buf, 96),
@@ -544,8 +550,7 @@ impl ReflectedPacketAuthenticated {
             mbz3: read_array(&padded, 52),
             sess_sender_timestamp: read_u64(&padded, 64),
             sess_sender_err_estimate: read_u16(&padded, 72),
-            sess_sender_ssid: read_u16(&padded, 74),
-            mbz4: read_array(&padded, 76),
+            mbz4: read_array(&padded, 74),
             sess_sender_ttl: padded[80],
             mbz5: read_array(&padded, 81),
             hmac: read_array(&padded, 96),
@@ -919,7 +924,7 @@ mod tests {
             sess_sender_seq_number: 0,
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 0,
             mbz3: [0; 3],
         };
@@ -951,8 +956,7 @@ mod tests {
             mbz3: [0; 12],
             sess_sender_timestamp: 0,
             sess_sender_err_estimate: 0,
-            sess_sender_ssid: 0,
-            mbz4: [0; 4],
+            mbz4: [0; 6],
             sess_sender_ttl: 0,
             mbz5: [0; 15],
             hmac: [0; 16],
@@ -985,7 +989,7 @@ mod tests {
             sess_sender_seq_number: 2,
             sess_sender_timestamp: 123456789,
             sess_sender_err_estimate: 100,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 64,
             mbz3: [0; 3],
         };
@@ -1027,8 +1031,7 @@ mod tests {
             mbz3: [0; 12],
             sess_sender_timestamp: 123456789,
             sess_sender_err_estimate: 100,
-            sess_sender_ssid: 0,
-            mbz4: [0; 4],
+            mbz4: [0; 6],
             sess_sender_ttl: 64,
             mbz5: [0; 15],
             hmac: [0; 16],
@@ -1098,7 +1101,7 @@ mod tests {
             sess_sender_seq_number: 500,
             sess_sender_timestamp: 600,
             sess_sender_err_estimate: 700,
-            sess_sender_ssid: 0x22,
+            mbz2: [0; 2],
             sess_sender_ttl: 64,
             mbz3: [0; 3],
         };
@@ -1110,8 +1113,13 @@ mod tests {
         assert_eq!(deserialized.sess_sender_timestamp, 600);
         assert_eq!(deserialized.sess_sender_err_estimate, 700);
         assert_eq!(deserialized.ssid, 0x11);
-        assert_eq!(deserialized.sess_sender_ssid, 0x22);
         assert_eq!(deserialized.sess_sender_ttl, 64);
+
+        // RFC 8972 §3 Figure 2: the SSID appears once. The two octets after
+        // the Session-Sender Error Estimate are MBZ, and a peer that verifies
+        // MBZ (RFC 8762 §4.6) drops the reply if they are not.
+        assert_eq!(&serialized[38..40], &[0, 0], "octets 38-39 must stay MBZ");
+        assert_eq!(deserialized.mbz2, [0; 2]);
     }
 
     #[test]
@@ -1343,7 +1351,7 @@ mod tests {
                 sess_sender_seq_number: 0,
                 sess_sender_timestamp: 0,
                 sess_sender_err_estimate: 0,
-                sess_sender_ssid: 0,
+                mbz2: [0; 2],
                 sess_sender_ttl: ttl,
                 mbz3: [0; 3],
             };
@@ -1616,7 +1624,7 @@ mod tests {
             sess_sender_seq_number: 1,
             sess_sender_timestamp: 30,
             sess_sender_err_estimate: 5,
-            sess_sender_ssid: 0,
+            mbz2: [0; 2],
             sess_sender_ttl: 64,
             mbz3: [0; 3],
         };
@@ -1648,8 +1656,7 @@ mod tests {
             mbz3: [0; 12],
             sess_sender_timestamp: 30,
             sess_sender_err_estimate: 5,
-            sess_sender_ssid: 0,
-            mbz4: [0; 4],
+            mbz4: [0; 6],
             sess_sender_ttl: 64,
             mbz5: [0; 15],
             hmac: [0; 16],

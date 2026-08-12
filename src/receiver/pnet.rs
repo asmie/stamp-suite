@@ -37,10 +37,10 @@ use crate::{
 use crate::tlv::ReturnPathAction;
 
 use super::{
-    cos_unable_fallback_tos, load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
-    recompute_response_tlv_hmac, set_cos_policy_rejected, set_return_path_u_flag_in_response,
-    should_apply_fallback_tos, ProcessingContext, ReceiverSharedState, ReflectorCounters,
-    AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    cos_unable_fallback_tos, hmac_key_source_configured, load_hmac_key, print_reflector_stats,
+    process_stamp_packet_isolated, recompute_response_tlv_hmac, set_cos_policy_rejected,
+    set_return_path_u_flag_in_response, should_apply_fallback_tos, ProcessingContext,
+    ReceiverSharedState, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Context for sending STAMP responses in pnet mode.
@@ -121,7 +121,10 @@ struct InterfaceProps {
 ///
 /// The blocking packet capture loop runs in a dedicated thread via `spawn_blocking`
 /// to prevent starvation of the async runtime (e.g., metrics server).
-pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
+pub async fn run_receiver(
+    conf: &Configuration,
+    shared: &ReceiverSharedState,
+) -> Result<(), crate::StartupError> {
     let interface_ip_match =
         |iface: &NetworkInterface| iface.ips.iter().any(|ip| ip.ip() == conf.local_addr);
 
@@ -132,12 +135,11 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let interface = match interface {
         Some(iface) => iface,
         None => {
-            log::error!(
-                "No interface found with IP address {}; reflector cannot start",
-                conf.local_addr
-            );
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return;
+            return Err(crate::StartupError::new(format!(
+                "No interface found with IP address {}",
+                conf.local_addr
+            )));
         }
     };
 
@@ -165,21 +167,18 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let (_, rx) = match datalink::channel(&interface, config) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => {
-            log::error!(
-                "Unhandled channel type for interface {}; reflector cannot start",
-                interface.name
-            );
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return;
+            return Err(crate::StartupError::new(format!(
+                "Unhandled channel type for interface {}",
+                interface.name
+            )));
         }
         Err(e) => {
-            log::error!(
-                "Unable to create capture channel on {}: {}; reflector cannot start",
-                interface.name,
-                e
-            );
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return;
+            return Err(crate::StartupError::new(format!(
+                "Unable to create capture channel on {}: {e}",
+                interface.name
+            )));
         }
     };
 
@@ -189,12 +188,10 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let send_socket_v4 = match std::net::UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
         Err(e) => {
-            log::error!(
-                "Cannot bind IPv4 send socket: {}; reflector cannot start",
-                e
-            );
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return;
+            return Err(crate::StartupError::new(format!(
+                "Cannot bind IPv4 send socket: {e}"
+            )));
         }
     };
     let send_socket_v6 = std::net::UdpSocket::bind("[::]:0").ok(); // Optional, may fail if IPv6 unavailable
@@ -217,12 +214,21 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
 
     // Validate: authenticated mode requires some HMAC key (single or set).
     if use_auth && hmac_key.is_none() && !keyset_configured {
-        log::error!(
-            "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir; \
-             reflector cannot start"
-        );
         shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-        return;
+        return Err(crate::StartupError::new(
+            "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir",
+        ));
+    }
+
+    // See the matching check in the nix backend: a key source that failed to
+    // load must not degrade into running without one.
+    if hmac_key.is_none() && !keyset_configured && hmac_key_source_configured(conf) {
+        shared.capture_alive.store(false, AtomicOrdering::Relaxed);
+        return Err(crate::StartupError::new(
+            "an HMAC key source was configured (--hmac-key, --hmac-key-file or \
+             --hmac-key-dir) but no usable key could be loaded; see the error above. \
+             Refusing to run without the key that was asked for",
+        ));
     }
 
     // Build error estimate from configuration with Z flag set based on clock source
@@ -1264,8 +1270,15 @@ mod tests {
 
         assert!(shared.capture_alive.load(AtomicOrdering::Relaxed));
 
-        // run_receiver returns immediately when no interface matches.
-        run_receiver(&conf, &shared).await;
+        // run_receiver fails immediately when no interface matches, and that
+        // failure must be reported (not a clean exit) so main can exit non-zero.
+        let err = run_receiver(&conf, &shared)
+            .await
+            .expect_err("a missing capture interface is a startup failure");
+        assert!(
+            err.to_string().contains("No interface found"),
+            "unexpected startup error: {err}"
+        );
 
         assert!(
             !shared.capture_alive.load(AtomicOrdering::Relaxed),

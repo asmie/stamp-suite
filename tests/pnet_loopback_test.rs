@@ -123,7 +123,7 @@ async fn one_packet_round_trip(
     // Start the receiver in the background. Move conf+shared into the
     // task so they outlive run_receiver's borrow.
     let handle = tokio::spawn(async move {
-        receiver::run_receiver(&conf, &shared).await;
+        let _ = receiver::run_receiver(&conf, &shared).await;
     });
 
     // Give the pnet capture thread time to attach to the interface;

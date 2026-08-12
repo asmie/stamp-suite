@@ -49,6 +49,13 @@ const MAX_PDU_PAYLOAD: u32 = 1_048_576;
 // handful of ranges, so this ceiling is generous while bounding worst-case work.
 const MAX_SEARCH_RANGES_PER_PDU: usize = 256;
 
+/// Octets in an Object Identifier header before the sub-identifiers
+/// (RFC 2741 §5.1): `n_subid`(1) `prefix`(1) `include`(1) `reserved`(1).
+pub const OID_HEADER_SIZE: usize = 4;
+
+/// Largest sub-identifier count the single-octet `n_subid` field can express.
+const MAX_OID_SUBIDS: usize = u8::MAX as usize;
+
 // --- VarBind type constants (RFC 2741 §5.4) ---
 
 const VARBIND_INTEGER: u16 = 2;
@@ -205,8 +212,16 @@ pub fn decode_header(buf: &[u8]) -> Result<PduHeader, AgentXError> {
 
 /// Encodes an OID per RFC 2741 §5.1.
 ///
-/// Format: n_subid(4) + prefix(1) + include(1) + reserved(2) + sub-identifiers(4 each).
-/// If the OID starts with 1.3.6.1 the prefix optimization is used.
+/// Format: n_subid(1) + prefix(1) + include(1) + reserved(1) + sub-identifiers
+/// (4 octets each) — a **4-octet** header, not 8. If the OID starts with
+/// 1.3.6.1 the prefix optimization is used, which drops those four
+/// sub-identifiers and carries the fifth in `prefix`.
+///
+/// The header width matters for interoperability, not just internally: a master
+/// agent reading an 8-octet header sees `n_subid = 0` (the null OID) in the
+/// first four octets and then resumes parsing mid-field, desynchronising the
+/// rest of the PDU. Encoder and decoder agreeing with each other is not enough,
+/// so [`OID_HEADER_SIZE`] is asserted against the wire layout in the tests.
 pub fn encode_oid(oid: &Oid, include: bool) -> Vec<u8> {
     let subs = &oid.0;
 
@@ -223,33 +238,46 @@ pub fn encode_oid(oid: &Oid, include: bool) -> Vec<u8> {
             (0u8, 0)
         };
 
-    let n_subid = (subs.len() - start_idx) as u32;
-    let mut buf = Vec::with_capacity(4 + (n_subid as usize) * 4);
-    buf.extend_from_slice(&n_subid.to_be_bytes());
+    // `n_subid` is a single octet, so an over-long OID cannot be described
+    // truthfully. Emit only as many sub-identifiers as the count can express
+    // rather than writing a length that disagrees with the body; MAX_OID_SUBIDS
+    // is far above the 128 sub-identifiers an OID is allowed anyway.
+    let emitted = &subs[start_idx..];
+    let emitted = &emitted[..emitted.len().min(MAX_OID_SUBIDS)];
+    debug_assert!(
+        subs.len() - start_idx <= MAX_OID_SUBIDS,
+        "OID with {} sub-identifiers cannot be encoded in one octet",
+        subs.len() - start_idx
+    );
+
+    let mut buf = Vec::with_capacity(OID_HEADER_SIZE + emitted.len() * 4);
+    buf.push(emitted.len() as u8);
     buf.push(prefix_byte);
-    buf.push(if include { 1 } else { 0 });
-    buf.push(0); // reserved
+    buf.push(u8::from(include));
     buf.push(0); // reserved
 
-    for &sub in &subs[start_idx..] {
+    for &sub in emitted {
         buf.extend_from_slice(&sub.to_be_bytes());
     }
     buf
 }
 
 /// Decodes an OID from a buffer. Returns the decoded OID and the number of bytes consumed.
+///
+/// Header layout per RFC 2741 §5.1: `n_subid`(1) `prefix`(1) `include`(1)
+/// `reserved`(1), then `n_subid` sub-identifiers of 4 octets each.
 pub fn decode_oid(buf: &[u8]) -> Result<(Oid, bool, usize), AgentXError> {
-    if buf.len() < 8 {
+    if buf.len() < OID_HEADER_SIZE {
         return Err(AgentXError::Protocol("OID header too short".to_string()));
     }
 
-    let n_subid = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-    let prefix = buf[4];
-    let include = buf[5] != 0;
+    let n_subid = buf[0] as usize;
+    let prefix = buf[1];
+    let include = buf[2] != 0;
 
     let expected_len = n_subid
         .checked_mul(4)
-        .and_then(|v| v.checked_add(8))
+        .and_then(|v| v.checked_add(OID_HEADER_SIZE))
         .ok_or_else(|| AgentXError::Protocol("OID length overflow".to_string()))?;
     if buf.len() < expected_len {
         return Err(AgentXError::Protocol(format!(
@@ -265,7 +293,7 @@ pub fn decode_oid(buf: &[u8]) -> Result<(Oid, bool, usize), AgentXError> {
         subs.extend_from_slice(&[1, 3, 6, 1, prefix as u32]);
     }
 
-    let mut offset = 8;
+    let mut offset = OID_HEADER_SIZE;
     for _ in 0..n_subid {
         subs.push(u32::from_be_bytes([
             buf[offset],
@@ -785,11 +813,61 @@ mod tests {
 
     #[test]
     fn test_oid_decode_short_buffer_rejected() {
-        // 4-7 byte buffers must be rejected, not panic
-        for len in 0..8 {
+        // Anything shorter than the 4-octet RFC 2741 §5.1 header must be
+        // rejected rather than panic. Exactly 4 zero octets is the *valid*
+        // null OID (n_subid = 0), so the rejected range stops there.
+        for len in 0..OID_HEADER_SIZE {
             let buf = vec![0u8; len];
-            assert!(decode_oid(&buf).is_err());
+            assert!(decode_oid(&buf).is_err(), "len {len} must be rejected");
         }
+        let (oid, include, consumed) = decode_oid(&[0u8; OID_HEADER_SIZE]).unwrap();
+        assert_eq!(oid, Oid(vec![]));
+        assert!(!include);
+        assert_eq!(consumed, OID_HEADER_SIZE);
+    }
+
+    /// The wire layout itself, not just encode/decode agreement. A round-trip
+    /// test passes just as happily with a wrong-width header, which is how an
+    /// 8-octet `n_subid` survived: every reader was our own decoder.
+    #[test]
+    fn test_oid_wire_layout_matches_rfc2741_section_5_1() {
+        // 1.3.6.1.4.1.65134 with the internet-prefix optimization: 1.3.6.1 is
+        // folded away, prefix = 4, leaving sub-identifiers [1, 65134].
+        let oid = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134]);
+        let enc = encode_oid(&oid, false);
+        assert_eq!(
+            enc,
+            vec![
+                0x02, // n_subid = 2   (ONE octet)
+                0x04, // prefix   = 4
+                0x00, // include  = false
+                0x00, // reserved
+                0x00, 0x00, 0x00, 0x01, // sub-identifier 1
+                0x00, 0x00, 0xfe, 0x6e, // sub-identifier 65134
+            ]
+        );
+        assert_eq!(enc.len(), OID_HEADER_SIZE + 2 * 4);
+
+        // include = true only sets the third octet.
+        let inc = encode_oid(&oid, true);
+        assert_eq!(inc[2], 1);
+        assert_eq!(&inc[..2], &enc[..2]);
+
+        // No prefix optimization: all sub-identifiers are carried inline and
+        // prefix stays 0.
+        let plain = encode_oid(&Oid::from_slice(&[1, 2, 3]), false);
+        assert_eq!(
+            plain,
+            vec![
+                0x03, 0x00, 0x00, 0x00, // n_subid = 3, no prefix, no include
+                0x00, 0x00, 0x00, 0x01, //
+                0x00, 0x00, 0x00, 0x02, //
+                0x00, 0x00, 0x00, 0x03, //
+            ]
+        );
+
+        // The null OID is exactly the bare header.
+        assert_eq!(encode_oid(&Oid(vec![]), false), vec![0, 0, 0, 0]);
     }
 
     #[test]
@@ -966,11 +1044,11 @@ mod tests {
         // OID .1.3.6.1.4 should use prefix byte 4
         let oid = Oid::from_slice(&[1, 3, 6, 1, 4, 1, 65134]);
         let encoded = encode_oid(&oid, false);
-        // n_subid should be 2 (only sub-ids after the prefix: 1, 65134)
-        let n_subid = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
-        assert_eq!(n_subid, 2);
+        // n_subid should be 2 (only sub-ids after the prefix: 1, 65134), and
+        // it is a single octet at offset 0 per RFC 2741 §5.1.
+        assert_eq!(encoded[0], 2);
         // prefix byte
-        assert_eq!(encoded[4], 4);
+        assert_eq!(encoded[1], 4);
     }
 
     // ------------------------------------------------------------------
@@ -1007,22 +1085,21 @@ mod tests {
     #[test]
     fn test_decode_oid_rejects_truncated_subidentifier_list() {
         // n_subid says 3, but only 4 bytes (one sub-id) of data follow.
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&3u32.to_be_bytes()); // n_subid = 3
-        buf.push(0); // prefix
-        buf.push(0); // include
-        buf.push(0); // reserved
-        buf.push(0); // reserved
+        let mut buf = vec![
+            3, // n_subid = 3
+            0, // prefix
+            0, // include
+            0, // reserved
+        ];
         buf.extend_from_slice(&1u32.to_be_bytes()); // only one sub-id
         assert!(decode_oid(&buf).is_err());
     }
 
     #[test]
     fn test_decode_oid_rejects_length_overflow() {
-        // n_subid = u32::MAX would overflow when multiplied by 4 + 8.
-        let mut buf = Vec::with_capacity(8);
-        buf.extend_from_slice(&u32::MAX.to_be_bytes());
-        buf.extend_from_slice(&[0, 0, 0, 0]);
+        // The largest n_subid the octet can hold (255) needs 255*4 octets of
+        // sub-identifiers; a bare header must be rejected, not indexed past.
+        let buf = vec![u8::MAX, 0, 0, 0];
         assert!(decode_oid(&buf).is_err());
     }
 
@@ -1064,7 +1141,8 @@ mod tests {
 
     #[test]
     fn test_parse_search_ranges_under_cap_returns_all() {
-        let payload = vec![0u8; 16 * 3];
+        // A SearchRange is two OIDs; two null OIDs are 2 * OID_HEADER_SIZE.
+        let payload = vec![0u8; 2 * OID_HEADER_SIZE * 3];
         let ranges = parse_search_ranges(&payload, MAX_SEARCH_RANGES_PER_PDU).unwrap();
         assert_eq!(ranges.len(), 3, "ranges below the cap are all returned");
     }

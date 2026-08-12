@@ -24,17 +24,20 @@ use crate::{
 use crate::tlv::ReturnPathAction;
 
 use super::{
-    cos_unable_fallback_tos, load_hmac_key, print_reflector_stats, process_stamp_packet_isolated,
-    recompute_response_tlv_hmac, set_cos_policy_rejected, set_return_path_u_flag_in_response,
-    should_apply_fallback_tos, ProcessingContext, ReceiverSharedState, AUTH_BASE_SIZE,
-    UNAUTH_BASE_SIZE,
+    cos_unable_fallback_tos, hmac_key_source_configured, load_hmac_key, print_reflector_stats,
+    process_stamp_packet_isolated, recompute_response_tlv_hmac, set_cos_policy_rejected,
+    set_return_path_u_flag_in_response, should_apply_fallback_tos, ProcessingContext,
+    ReceiverSharedState, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
 ///
 /// Uses IP_RECVTTL/IPV6_RECVHOPLIMIT socket options to capture the actual
 /// TTL/Hop Limit from incoming packets. Preferred on Linux systems.
-pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
+pub async fn run_receiver(
+    conf: &Configuration,
+    shared: &ReceiverSharedState,
+) -> Result<(), crate::StartupError> {
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let is_ipv6 = conf.local_addr.is_ipv6();
 
@@ -42,8 +45,9 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let std_socket = match std::net::UdpSocket::bind(local_addr) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Cannot bind to address {}: {}", local_addr, e);
-            return;
+            return Err(crate::StartupError::new(format!(
+                "Cannot bind to address {local_addr}: {e}"
+            )));
         }
     };
 
@@ -76,11 +80,10 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     };
 
     if result < 0 {
-        eprintln!(
+        return Err(crate::StartupError::new(format!(
             "Failed to set IP_RECVTTL/IPV6_RECVHOPLIMIT: {}",
             std::io::Error::last_os_error()
-        );
-        return;
+        )));
     }
 
     // Enable TOS/Traffic Class reception (for DSCP/ECN measurement)
@@ -188,8 +191,9 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
 
     // Set non-blocking for tokio
     if let Err(e) = std_socket.set_nonblocking(true) {
-        eprintln!("Error: Failed to set socket non-blocking: {}", e);
-        return;
+        return Err(crate::StartupError::new(format!(
+            "Error: Failed to set socket non-blocking: {e}"
+        )));
     }
 
     // Wrap in tokio for async readiness notifications. Arc so spawned tasks
@@ -198,8 +202,9 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     let tokio_socket = match UdpSocket::from_std(std_socket) {
         Ok(s) => Arc::new(s),
         Err(e) => {
-            eprintln!("Error: Failed to create tokio socket: {}", e);
-            return;
+            return Err(crate::StartupError::new(format!(
+                "Error: Failed to create tokio socket: {e}"
+            )));
         }
     };
 
@@ -223,10 +228,20 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
     // Validate: authenticated mode requires HMAC key (either single-key
     // legacy path or B6 per-SSID key set).
     if use_auth && hmac_key.is_none() && !keyset_configured {
-        log::error!(
-            "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir"
-        );
-        return;
+        return Err(crate::StartupError::new(
+            "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir",
+        ));
+    }
+
+    // A key source that failed to load is a configuration error in either mode:
+    // in open mode the key still signs and verifies TLV HMACs, so continuing
+    // without it would silently drop that protection.
+    if hmac_key.is_none() && !keyset_configured && hmac_key_source_configured(conf) {
+        return Err(crate::StartupError::new(
+            "an HMAC key source was configured (--hmac-key, --hmac-key-file or \
+             --hmac-key-dir) but no usable key could be loaded; see the error above. \
+             Refusing to run without the key that was asked for",
+        ));
     }
 
     // Build error estimate from configuration with Z flag set based on clock source
@@ -384,7 +399,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
 
             _ = tokio::signal::ctrl_c() => {
                 print_reflector_stats(&counters, &session_manager, start_time, output_format);
-                return;
+                return Ok(());
             }
 
             _ = shutdown_tick.tick() => {
@@ -396,7 +411,7 @@ pub async fn run_receiver(conf: &Configuration, shared: &ReceiverSharedState) {
                 {
                     log::info!("shutdown requested via control plane");
                     print_reflector_stats(&counters, &session_manager, start_time, output_format);
-                    return;
+                    return Ok(());
                 }
             }
         }
