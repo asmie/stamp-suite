@@ -856,7 +856,7 @@ pub async fn run_sender(
     // A key source that failed to load is a configuration error in either mode:
     // the key also signs the TLV HMAC this sender may originate, so continuing
     // without it would silently send unauthenticated TLVs.
-    if hmac_key.is_none() && crate::receiver::hmac_key_source_configured(conf) {
+    if hmac_key.is_none() && crate::receiver::single_hmac_key_source_configured(conf) {
         return Err(crate::StartupError::new(
             "an HMAC key source was configured (--hmac-key, --hmac-key-file or \
              --hmac-key-dir) but no usable key could be loaded; see the error above. \

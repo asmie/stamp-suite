@@ -183,18 +183,43 @@ pub async fn run_receiver(
     };
 
     // We need UDP sockets to send responses - one for each address family
-    // since pnet captures at the datalink layer and may see both IPv4 and IPv6 packets
+    // since pnet captures at the datalink layer and may see both IPv4 and IPv6 packets.
+    //
+    // These bind the STAMP port, not an ephemeral one. A Session-Sender
+    // `connect()`s its socket to the reflector's `IP:port`, so the kernel
+    // discards any datagram whose source is not exactly that — a reply from an
+    // ephemeral port is dropped before the sender ever sees it. This backend
+    // captures at the datalink layer and never binds a receive socket, so the
+    // STAMP port is free for it to send from.
+    //
+    // Measured before this bound the port: the reflector reported
+    // packets_received=4, packets_reflected=4 while the sender saw 100% loss,
+    // and the reply on the wire read `10.99.0.2.37745 > 10.99.0.1.50002`
+    // instead of coming from :50001.
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
-    let send_socket_v4 = match std::net::UdpSocket::bind("0.0.0.0:0") {
+    let send_bind_v4: SocketAddr = match conf.local_addr {
+        std::net::IpAddr::V4(v4) => (v4, conf.local_port).into(),
+        // Captured IPv4 traffic still needs an IPv4 reply socket when the
+        // reflector was pointed at an IPv6 (or wildcard) address.
+        std::net::IpAddr::V6(_) => (std::net::Ipv4Addr::UNSPECIFIED, conf.local_port).into(),
+    };
+    let send_socket_v4 = match std::net::UdpSocket::bind(send_bind_v4) {
         Ok(s) => s,
         Err(e) => {
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
             return Err(crate::StartupError::new(format!(
-                "Cannot bind IPv4 send socket: {e}"
+                "Cannot bind IPv4 send socket on {send_bind_v4}: {e}"
             )));
         }
     };
-    let send_socket_v6 = std::net::UdpSocket::bind("[::]:0").ok(); // Optional, may fail if IPv6 unavailable
+    let send_bind_v6: SocketAddr = match conf.local_addr {
+        std::net::IpAddr::V6(v6) => (v6, conf.local_port).into(),
+        std::net::IpAddr::V4(_) => (std::net::Ipv6Addr::UNSPECIFIED, conf.local_port).into(),
+    };
+    // Optional: IPv6 may be unavailable, or the port may already be taken by
+    // the v4 socket above on a dual-stack bind. Losing it only costs IPv6
+    // replies, which the v4 path cannot serve anyway.
+    let send_socket_v6 = std::net::UdpSocket::bind(send_bind_v6).ok();
 
     // Check if authenticated mode is used
     let use_auth = is_auth(conf.auth_mode);
@@ -365,6 +390,9 @@ pub async fn run_receiver(
 
     // Print reflector stats on shutdown
     print_reflector_stats(&counters, &session_manager, start_time, output_format);
+    // Reaching here is a normal shutdown (ctrl-c or the control plane), not a
+    // startup failure — those return Err above and make main exit non-zero.
+    Ok(())
 }
 
 /// The blocking packet capture loop, run on a dedicated thread.

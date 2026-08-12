@@ -1302,6 +1302,19 @@ impl Configuration {
                 ));
             }
         }
+        // `--hmac-key-dir` builds a per-SSID keyset, which only a reflector
+        // demultiplexes; a Session-Sender has one session and one key. Without
+        // this rule a sender silently ignored the flag — including a typo'd
+        // path — and `-A A --hmac-key-dir <valid dir>` passed validation only to
+        // die later with the less helpful "requires HMAC key".
+        if self.hmac_key_dir.is_some() && !self.is_reflector {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "hmac_key_dir is reflector-only (it is a per-SSID keyset); a \
+                 Session-Sender uses a single key — pass hmac_key_file instead"
+                    .to_string(),
+            ));
+        }
+
         // The control plane manages reflector state; sender mode has none.
         if self.control && !self.is_reflector {
             return Err(ConfigurationError::InvalidConfiguration(
@@ -4095,6 +4108,25 @@ mod tests {
         let conf = load_from_args(&["test", "--config", path.to_str().unwrap()])
             .expect("file-configured action must load");
         assert_eq!(conf.on_zero_ssid, ZeroSsidAction::Stop);
+    }
+
+    /// `--hmac-key-dir` is a reflector concept: `load_hmac_key` (the sender's
+    /// path) does not read directories, so a sender given one used to ignore it
+    /// silently — a typo'd path included.
+    #[test]
+    fn test_hmac_key_dir_is_reflector_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let err = load_from_args(&["test", "--hmac-key-dir", path])
+            .expect_err("a sender must not silently ignore --hmac-key-dir");
+        assert!(
+            err.to_string().contains("reflector-only"),
+            "unexpected error: {err}"
+        );
+
+        // The reflector accepts it, and a sender is told to use a key file.
+        assert!(load_from_args(&["test", "--is-reflector", "--hmac-key-dir", path]).is_ok());
     }
 
     /// RFC 8972 §4.6 makes the Access Report Return Code a full octet (Table 11

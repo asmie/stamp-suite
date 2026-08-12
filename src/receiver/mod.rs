@@ -195,15 +195,29 @@ fn enumerate_interface_macs() -> Vec<[u8; 6]> {
 ///
 /// Single-key path retained for backward compatibility. Operators using
 /// per-SSID keys should call `load_hmac_key_set` instead — see B6.
-/// True when the operator named an HMAC key source.
+/// True when the operator named any HMAC key source, including a key
+/// *directory*.
 ///
 /// `load_hmac_key` returns `None` both when no key was asked for and when a key
 /// *was* asked for but could not be loaded (missing file, group-readable mode,
 /// unparsable hex). Callers need to tell those apart: silently running without
 /// a key the operator supplied is a downgrade, not a default.
+///
+/// For the reflector, pair this with the keyset check — a directory that loaded
+/// successfully shows up as a keyset, not as a single key.
 #[must_use]
 pub fn hmac_key_source_configured(conf: &Configuration) -> bool {
     conf.hmac_key.is_some() || conf.hmac_key_file.is_some() || conf.hmac_key_dir.is_some()
+}
+
+/// True when the operator named a source [`load_hmac_key`] can actually load.
+///
+/// `--hmac-key-dir` builds a per-SSID keyset and is a reflector concept, so
+/// `load_hmac_key` ignores it; a sender must not treat its presence as a key it
+/// failed to load.
+#[must_use]
+pub fn single_hmac_key_source_configured(conf: &Configuration) -> bool {
+    conf.hmac_key.is_some() || conf.hmac_key_file.is_some()
 }
 
 pub fn load_hmac_key(conf: &Configuration) -> Option<HmacKey> {
