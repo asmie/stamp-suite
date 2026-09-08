@@ -34,23 +34,17 @@ use crate::{
     session::SessionManager,
 };
 
-use crate::tlv::ReturnPathAction;
+use super::transmit::{ReplyQueue, Transmission};
 
 use super::{
-    cos_unable_fallback_tos, hmac_key_source_configured, load_hmac_key, print_reflector_stats,
-    process_session_packet_isolated, recompute_response_tlv_hmac, set_cos_policy_rejected,
-    set_return_path_u_flag_in_response, should_apply_fallback_tos, ProcessingContext,
-    ReceiverSharedState, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    hmac_key_source_configured, load_hmac_key, print_reflector_stats,
+    process_session_packet_isolated, ProcessingContext, ReceiverSharedState, ReflectorCounters,
 };
 
 /// Context for sending STAMP responses in pnet mode.
 struct PnetSendContext {
     send_socket_v4: std::net::UdpSocket,
     send_socket_v6: Option<std::net::UdpSocket>,
-    /// Cached TOS value for IPv4 socket to avoid redundant setsockopt calls.
-    last_tos_v4: std::cell::Cell<u8>,
-    /// Cached TOS value for IPv6 socket to avoid redundant setsockopt calls.
-    last_tos_v6: std::cell::Cell<u8>,
 }
 
 /// Configuration extracted for the blocking capture loop.
@@ -279,8 +273,6 @@ pub async fn run_receiver(
     let send_ctx = PnetSendContext {
         send_socket_v4,
         send_socket_v6,
-        last_tos_v4: std::cell::Cell::new(0),
-        last_tos_v6: std::cell::Cell::new(0),
     };
 
     if conf.tlv_mode != TlvHandlingMode::Ignore {
@@ -402,6 +394,13 @@ fn run_capture_loop(
     send_ctx: PnetSendContext,
     iface_props: InterfaceProps,
 ) {
+    let (transmitter, receiver) = std::sync::mpsc::channel();
+    let tx_counters = Arc::clone(&config.counters);
+    let tx_limiter = Arc::clone(&config.rate_limiter);
+    let tx_shutdown = Arc::clone(&config.shutdown);
+    let worker = std::thread::spawn(move || {
+        run_transmit_loop(receiver, send_ctx, &tx_counters, &tx_limiter, &tx_shutdown)
+    });
     let mut last_cleanup = Instant::now();
     let mut buf = [0u8; 1600];
 
@@ -449,14 +448,22 @@ fn run_capture_loop(
                             fake_ethernet_frame.set_source(MacAddr(0, 0, 0, 0, 0, 0));
                             fake_ethernet_frame.set_ethertype(EtherTypes::Ipv4);
                             fake_ethernet_frame.set_payload(&packet[payload_offset..]);
-                            handle_packet(&fake_ethernet_frame.to_immutable(), &config, &send_ctx);
+                            handle_packet(
+                                &fake_ethernet_frame.to_immutable(),
+                                &config,
+                                &transmitter,
+                            );
                             continue;
                         } else if version == 6 {
                             fake_ethernet_frame.set_destination(MacAddr(0, 0, 0, 0, 0, 0));
                             fake_ethernet_frame.set_source(MacAddr(0, 0, 0, 0, 0, 0));
                             fake_ethernet_frame.set_ethertype(EtherTypes::Ipv6);
                             fake_ethernet_frame.set_payload(&packet[payload_offset..]);
-                            handle_packet(&fake_ethernet_frame.to_immutable(), &config, &send_ctx);
+                            handle_packet(
+                                &fake_ethernet_frame.to_immutable(),
+                                &config,
+                                &transmitter,
+                            );
                             continue;
                         }
                     }
@@ -464,7 +471,7 @@ fn run_capture_loop(
                 let Some(ethernet) = EthernetPacket::new(packet) else {
                     continue; // Malformed frame, skip
                 };
-                handle_packet(&ethernet, &config, &send_ctx);
+                handle_packet(&ethernet, &config, &transmitter);
             }
             Err(e) => {
                 // Timeout errors are expected when read_timeout is set - just continue to run cleanup
@@ -476,6 +483,10 @@ fn run_capture_loop(
             }
         }
     }
+    drop(transmitter);
+    if worker.join().is_err() {
+        log::error!("reflector transmission worker panicked");
+    }
 }
 
 /// IP protocol numbers for the two IP-in-IP tunnel encapsulations.
@@ -484,7 +495,11 @@ const PROTO_IPV6_IN_IP: u8 = 41;
 /// Cap on IP-in-IP nesting we descend, to bound work on adversarial packets.
 const MAX_IP_TUNNEL_DEPTH: usize = 4;
 
-fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &PnetSendContext) {
+fn handle_packet(
+    ethernet: &EthernetPacket,
+    config: &CaptureConfig,
+    transmitter: &std::sync::mpsc::Sender<Transmission>,
+) {
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => {
             if let Some(header) = Ipv4Packet::new(ethernet.payload()) {
@@ -522,7 +537,7 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                                 ecn: header.get_ecn(),
                                 captured,
                             };
-                            handle_stamp_packet(udp.payload(), &pkt, config, send_ctx);
+                            handle_stamp_packet(udp.payload(), &pkt, config, transmitter);
                         }
                     }
                 }
@@ -565,7 +580,7 @@ fn handle_packet(ethernet: &EthernetPacket, config: &CaptureConfig, send_ctx: &P
                                 ecn: traffic_class & 0x03,
                                 captured,
                             };
-                            handle_stamp_packet(udp.payload(), &pkt, config, send_ctx);
+                            handle_stamp_packet(udp.payload(), &pkt, config, transmitter);
                         }
                     }
                 }
@@ -725,38 +740,6 @@ fn walk_ipv6_ext_header_chain(payload: &[u8], first_next: u8) -> (Vec<u8>, u8, u
 
 /// Sets the IP TOS (Type of Service) / IPv6 Traffic Class on a socket.
 ///
-/// This controls the DSCP/ECN bits in outgoing packets for CoS TLV support (RFC 8972 §5.2).
-#[cfg(unix)]
-fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::io::Result<()> {
-    use nix::libc;
-    use std::os::fd::AsRawFd;
-
-    let fd = socket.as_raw_fd();
-    let tos_val: libc::c_int = tos as libc::c_int;
-    let (level, opt) = if is_ipv6 {
-        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
-    } else {
-        (libc::IPPROTO_IP, libc::IP_TOS)
-    };
-
-    let result = unsafe {
-        libc::setsockopt(
-            fd,
-            level,
-            opt,
-            &tos_val as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if result < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-/// Sets the IP TOS (Type of Service) / IPv6 Traffic Class on a socket.
-///
 /// Windows implementation using Winsock2 `setsockopt`.
 #[cfg(windows)]
 fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::io::Result<()> {
@@ -813,7 +796,7 @@ fn handle_stamp_packet(
     data: &[u8],
     pkt: &PacketMeta,
     config: &CaptureConfig,
-    send_ctx: &PnetSendContext,
+    transmitter: &std::sync::mpsc::Sender<Transmission>,
 ) {
     // Rate limit check: drop packet if source exceeds the per-client
     // token bucket. Distinct counter so operators can tell rate-limit
@@ -904,252 +887,22 @@ fn handle_stamp_packet(
             &config.counters,
             config.drop_replayed,
         )
+        .map(|(response, session)| {
+            Transmission::new(
+                response,
+                session,
+                pkt.src,
+                config.clock_source,
+                config.use_auth,
+                config.stateful_reflector,
+                super::resolve_hmac_key(&ctx, super::peek_ssid(data, config.use_auth)).cloned(),
+                pkt.dscp,
+                false,
+            )
+        })
     };
-    if let Some((mut response, counter_session)) = response_opt {
-        // Handle Return Path action (RFC 9503 §5)
-        let send_target = match &response.return_path_action {
-            ReturnPathAction::SuppressReply => {
-                log::debug!("Return Path: suppressing reply to {}", pkt.src);
-                config
-                    .counters
-                    .packets_dropped
-                    .fetch_add(1, AtomicOrdering::Relaxed);
-                return;
-            }
-            ReturnPathAction::AlternateAddress(addr) => *addr,
-            ReturnPathAction::Normal
-            | ReturnPathAction::UnsupportedSr
-            | ReturnPathAction::Srv6Forward(_) => pkt.src,
-        };
-
-        // The pnet/raw backend cannot insert an SRv6 Segment Routing Header, so
-        // an SRv6 return path is treated as unsupported: set the Return Path
-        // U-flag (RFC 8972 §4.2) and reply over the normal path. (SRv6 SRH
-        // insertion is implemented only on the Linux `nix` UDP-socket backend.)
-        if matches!(
-            response.return_path_action,
-            ReturnPathAction::Srv6Forward(_)
-        ) {
-            let base_size = if config.use_auth {
-                AUTH_BASE_SIZE
-            } else {
-                UNAUTH_BASE_SIZE
-            };
-            if set_return_path_u_flag_in_response(&mut response.data, base_size) {
-                if let Some(ref key) = config.hmac_key {
-                    recompute_response_tlv_hmac(&mut response.data, base_size, key);
-                }
-            }
-        }
-
-        // Determine TOS value: use CoS TLV request if present, otherwise default (0).
-        let (tos, has_cos_request) = match response.cos_request {
-            Some((dscp, ecn)) => (((dscp & 0x3F) << 2) | (ecn & 0x03), true),
-            None => (0u8, false),
-        };
-
-        let is_ipv6 = send_target.is_ipv6();
-
-        let last_tos_cache = if is_ipv6 {
-            &send_ctx.last_tos_v6
-        } else {
-            &send_ctx.last_tos_v4
-        };
-
-        // Only call setsockopt if TOS value changed (reduces syscall overhead under load).
-        // Skip if the target socket is unavailable — try_send will fail and the
-        // alternate-address fallback path handles it (sets U-flag, retries on original src).
-        let tos_socket: Option<&std::net::UdpSocket> = if is_ipv6 {
-            send_ctx.send_socket_v6.as_ref()
-        } else {
-            Some(&send_ctx.send_socket_v4)
-        };
-        if tos != last_tos_cache.get() {
-            if let Some(socket) = tos_socket {
-                match set_socket_tos(socket, tos, is_ipv6) {
-                    Ok(()) => {
-                        last_tos_cache.set(tos);
-                    }
-                    Err(e) => {
-                        if has_cos_request {
-                            log::debug!("Failed to set IP_TOS/IPV6_TCLASS to {}: {}", tos, e);
-                            // Set RP flag in CoS TLV to indicate policy rejection (RFC 8972 §5.2)
-                            let base_size = if config.use_auth {
-                                AUTH_BASE_SIZE
-                            } else {
-                                UNAUTH_BASE_SIZE
-                            };
-                            if set_cos_policy_rejected(&mut response.data, base_size) {
-                                // RP mutation invalidates the TLV HMAC — recompute
-                                if let Some(ref key) = config.hmac_key {
-                                    recompute_response_tlv_hmac(&mut response.data, base_size, key);
-                                }
-                            }
-
-                            // draft-ietf-ippm-stamp-cos-ecn-01 §3.2 MUST: even
-                            // though the requested DSCP1/EC1 TOS could not be
-                            // applied, best-effort re-apply with the reply's
-                            // ECN bits forced to 0b00 (Not-ECT) rather than
-                            // leaving the previous, possibly non-zero, ECN
-                            // value on the wire.
-                            let fallback_tos = cos_unable_fallback_tos(pkt.dscp);
-                            if should_apply_fallback_tos(tos, fallback_tos, last_tos_cache.get()) {
-                                match set_socket_tos(socket, fallback_tos, is_ipv6) {
-                                    Ok(()) => last_tos_cache.set(fallback_tos),
-                                    Err(e2) => log::debug!(
-                                        "cos-ecn-01 zero-ECN fallback TOS {} also failed: {}",
-                                        fallback_tos,
-                                        e2
-                                    ),
-                                }
-                            }
-                        }
-                        // Don't update cache further on failure - retry next time
-                    }
-                }
-            }
-        }
-
-        // Helper: send to the given target using the correct address-family
-        // socket, pinning the reply's IP source address when a Destination Node
-        // Address TLV matched one of ours (RFC 9503 §3). Pinning is best-effort
-        // and Linux-only; any failure falls through to an ordinary send, which
-        // is still a correct reply from the kernel's choice of source. Both
-        // backends do this identically so the §3 SHOULD does not depend on
-        // which one is in use.
-        // Only the Unix pinning path below reads this.
-        #[cfg(unix)]
-        let reply_source = response.reply_source;
-        let try_send = |data: &[u8], target: SocketAddr| -> Result<usize, std::io::Error> {
-            let socket = match target {
-                SocketAddr::V4(_) => Some(&send_ctx.send_socket_v4),
-                SocketAddr::V6(_) => send_ctx.send_socket_v6.as_ref(),
-            };
-            let Some(socket) = socket else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrNotAvailable,
-                    "IPv6 socket unavailable",
-                ));
-            };
-            // The whole attempt is inside one `cfg(unix)` block: on Windows
-            // `reply_source::send_from` does not exist (no `std::os::fd`), so
-            // there is nothing here to bind `source` for either.
-            #[cfg(unix)]
-            if let Some(source) = reply_source {
-                if crate::reply_source::supported() {
-                    use std::os::fd::AsRawFd;
-                    match crate::reply_source::send_from(socket.as_raw_fd(), data, target, source) {
-                        Ok(sent) => return Ok(sent),
-                        Err(e) => log::debug!(
-                            "could not pin reply source to {source} \
-                             (RFC 9503 §3): {e}; using the OS's choice"
-                        ),
-                    }
-                }
-            }
-            socket.send_to(data, target)
-        };
-
-        let sent_ok = match try_send(&response.data, send_target) {
-            Ok(_) => true,
-            Err(e) if send_target != pkt.src => {
-                // Alternate-address send failed — set U-flag on Return Path TLV
-                // and fall back to original source (RFC 9503 §5).
-                log::debug!(
-                    "Return Path: alternate send to {} failed ({}), falling back to {}",
-                    send_target,
-                    e,
-                    pkt.src
-                );
-                let base_size = if config.use_auth {
-                    AUTH_BASE_SIZE
-                } else {
-                    UNAUTH_BASE_SIZE
-                };
-                if set_return_path_u_flag_in_response(&mut response.data, base_size) {
-                    if let Some(ref key) = config.hmac_key {
-                        recompute_response_tlv_hmac(&mut response.data, base_size, key);
-                    }
-                }
-                match try_send(&response.data, pkt.src) {
-                    Ok(_) => true,
-                    Err(e2) => {
-                        log::warn!("Failed to send response to {}: {}", pkt.src, e2);
-                        false
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("Failed to send response to {}: {}", send_target, e);
-                false
-            }
-        };
-
-        if sent_ok {
-            config
-                .counters
-                .packets_reflected
-                .fetch_add(1, AtomicOrdering::Relaxed);
-            // Record transmission for Direct Measurement and Follow-Up Telemetry.
-            // Always tracked per session identity, independent of --stateful-reflector.
-            let session = &counter_session;
-            session.record_transmitted();
-            if response.data.len() >= 4 {
-                let reflected_seq = u32::from_be_bytes([
-                    response.data[0],
-                    response.data[1],
-                    response.data[2],
-                    response.data[3],
-                ]);
-                let send_ts = crate::time::generate_timestamp(config.clock_source);
-                session.record_reflection(reflected_seq, send_ts);
-            }
-
-            // Reflected Test Packet Control multi-send
-            // (draft-ietf-ippm-asymmetrical-pkts §3). Inline blocking sleep —
-            // the pnet backend runs packet capture on a dedicated blocking
-            // thread, so this delays subsequent packets. Cap and clamp were
-            // applied upstream in receiver::mod::apply_semantic_tlv_processing.
-            if let Some(behavior) = response.reflected_control {
-                if behavior.extra_copies > 0 {
-                    let interval = std::time::Duration::from_nanos(behavior.interval_ns as u64);
-                    for _ in 0..behavior.extra_copies {
-                        std::thread::sleep(interval);
-                        // Each extra send consumes one rate-limit token;
-                        // bucket exhaustion breaks the loop early so a
-                        // sender's asymmetric burst cannot exceed its
-                        // per-client budget.
-                        if !config.rate_limiter.allow(pkt.src.ip()) {
-                            config
-                                .counters
-                                .packets_rate_limited
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                            config
-                                .counters
-                                .packets_dropped
-                                .fetch_add(1, AtomicOrdering::Relaxed);
-                            break;
-                        }
-                        match try_send(&response.data, send_target) {
-                            Ok(_) => {
-                                config
-                                    .counters
-                                    .packets_reflected
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                            }
-                            Err(e) => {
-                                log::debug!("Reflected Control extra send failed: {}", e);
-                                config
-                                    .counters
-                                    .packets_dropped
-                                    .fetch_add(1, AtomicOrdering::Relaxed);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
+    if let Some(transmission) = response_opt {
+        if transmitter.send(transmission).is_err() {
             config
                 .counters
                 .packets_dropped
@@ -1163,6 +916,55 @@ fn handle_stamp_packet(
     }
 }
 
+/// Own both sending sockets and interleave burst deadlines with new requests.
+fn run_transmit_loop(
+    receiver: std::sync::mpsc::Receiver<Transmission>,
+    sockets: PnetSendContext,
+    counters: &ReflectorCounters,
+    limiter: &super::RateLimiter,
+    shutdown: &AtomicBool,
+) {
+    let mut replies = ReplyQueue::default();
+    while !shutdown.load(AtomicOrdering::Relaxed) {
+        if let Some(mut transmission) = replies.pop_due() {
+            transmission.send_next(counters, limiter, |data, target, options| {
+                let socket = if target.is_ipv4() {
+                    Some(&sockets.send_socket_v4)
+                } else {
+                    sockets.send_socket_v6.as_ref()
+                };
+                let socket = socket.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::AddrNotAvailable,
+                        "IPv6 socket unavailable",
+                    )
+                })?;
+                #[cfg(unix)]
+                {
+                    use std::os::fd::AsRawFd;
+                    super::transmit::send_datagram(socket.as_raw_fd(), data, target, options)
+                }
+                #[cfg(windows)]
+                {
+                    set_socket_tos(socket, options.tos, target.is_ipv6())?;
+                    socket.send_to(data, target)
+                }
+            });
+            replies.schedule_next(transmission);
+            continue;
+        }
+        let wait = replies.deadline().map_or(Duration::from_millis(250), |at| {
+            at.saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(250))
+        });
+        match receiver.recv_timeout(wait) {
+            Ok(transmission) => replies.push_at(transmission, Instant::now()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
 // `build_local_addresses` now lives in `receiver::mod` and is shared between
 // backends (see [`super::build_local_addresses`]).
 
@@ -1170,6 +972,79 @@ fn handle_stamp_packet(
 mod tests {
     use super::*;
     use crate::receiver::create_shared_state;
+
+    #[test]
+    fn transmit_worker_interleaves_requests_and_burst_deadlines() {
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let sockets = PnetSendContext {
+            send_socket_v4: std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+            send_socket_v6: None,
+        };
+        let counters = Arc::new(ReflectorCounters::new());
+        let session = Arc::new(crate::session::Session::new(0));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker_counters = Arc::clone(&counters);
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker = std::thread::spawn(move || {
+            run_transmit_loop(
+                receiver,
+                sockets,
+                &worker_counters,
+                &super::super::RateLimiter::new(0),
+                &worker_shutdown,
+            )
+        });
+        let make = |seq: u32, extra| {
+            let mut data = vec![0; 44];
+            data[..4].copy_from_slice(&seq.to_be_bytes());
+            data[24..28].copy_from_slice(&seq.to_be_bytes());
+            data[13] = 1;
+            let response = super::super::StampResponse {
+                data,
+                cos_request: None,
+                reply_source: None,
+                return_path_action: crate::tlv::ReturnPathAction::Normal,
+                reflected_control: Some(super::super::ReflectedControlBehavior {
+                    extra_copies: extra,
+                    interval_ns: 120_000_000,
+                    suppress_reply_ext_headers: false,
+                }),
+            };
+            Transmission::new(
+                response,
+                Arc::clone(&session),
+                peer.local_addr().unwrap(),
+                ClockFormat::NTP,
+                false,
+                true,
+                None,
+                0,
+                false,
+            )
+        };
+        sender.send(make(7, 2)).unwrap();
+        let mut data = [0; 256];
+        peer.recv_from(&mut data).unwrap();
+        assert_eq!(u32::from_be_bytes(data[..4].try_into().unwrap()), 0);
+        sender.send(make(8, 0)).unwrap();
+        for (sequence, request) in [(1u32, 8u32), (2, 7), (3, 7)] {
+            let previous = data[4..12].to_vec();
+            peer.recv_from(&mut data).unwrap();
+            assert_eq!(u32::from_be_bytes(data[..4].try_into().unwrap()), sequence);
+            assert_eq!(
+                u32::from_be_bytes(data[24..28].try_into().unwrap()),
+                request
+            );
+            assert!(data[4..12] > previous[..]);
+        }
+        drop(sender);
+        worker.join().unwrap();
+        assert_eq!(session.get_transmitted_count(), 4);
+        assert_eq!(session.get_last_reflection().0, 3);
+        assert_eq!(counters.packets_reflected.load(AtomicOrdering::Relaxed), 4);
+    }
     use clap::Parser;
 
     /// draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§5.1: captured extension headers

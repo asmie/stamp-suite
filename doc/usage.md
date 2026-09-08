@@ -201,6 +201,17 @@ DSCP; a refused EC1 is reported with RPE=0b10 and the reply's ECN is forced to
 Not-ECT. Nothing is dropped and no TLV is flagged malformed — refusal is a
 reported outcome, not an error. Defaults permit everything.
 
+**Burst replies.** When Type-12 reflection is enabled, every copy gets its own
+T3 and, in stateful mode, a sequence number assigned in transmission order.
+T2 and the echoed sender fields identify the original request. DM and Follow-Up
+fields reflect the session at each send; counters advance after successful sends.
+Interleaved requests do not change a burst's CoS, source-address, or return-path
+settings. All copies use the key selected when the request was accepted.
+The nix loop schedules copies by deadline; a dedicated pnet worker keeps burst
+waits off the capture thread. Timing is best-effort and can exceed the requested
+interval under load. Rate limiting or a send failure can stop a burst early.
+Pending bursts are not yet bounded independently, and shutdown discards them.
+
 **Reply-size cap and the live egress MTU (draft-ietf-ippm-asymmetrical-pkts
 §3).** `--reflected-control-max-size` bounds the STAMP reply the reflector will
 pad up to for a Type-12 `length` request. On Linux, when `--local-addr` names a

@@ -21,13 +21,11 @@ use crate::{
     error_estimate::ErrorEstimate,
 };
 
-use crate::tlv::ReturnPathAction;
+use super::transmit::{send_datagram, ReplyQueue, Transmission};
 
 use super::{
-    cos_unable_fallback_tos, hmac_key_source_configured, load_hmac_key, print_reflector_stats,
-    process_session_packet_isolated, recompute_response_tlv_hmac, set_cos_policy_rejected,
-    set_return_path_u_flag_in_response, should_apply_fallback_tos, ProcessingContext,
-    ReceiverSharedState, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
+    hmac_key_source_configured, load_hmac_key, print_reflector_stats,
+    process_session_packet_isolated, ProcessingContext, ReceiverSharedState,
 };
 
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
@@ -320,20 +318,15 @@ pub async fn run_receiver(
     // cmsg (feature "hwtstamp") with headroom.
     let mut cmsg_buf = vec![0u8; 512];
 
-    // Kernel TX-timestamp correlation (feature "hwtstamp"): every
-    // successful send on this socket consumes one SOF_TIMESTAMPING_OPT_ID
-    // counter value in the kernel, so the userspace counter is bumped at
-    // *every* send site (main reply, alternate-address fallback, SRv6,
-    // Reflected Control extra copies). Only the main reply's counter value
-    // is mapped to (client, seq) — the others' timestamps are dropped on
-    // drain. The extra-copy tasks share the socket concurrently, so their
-    // attribution can race the main reply by one slot; corrections are
-    // best-effort and Type 12 multi-send is off by default.
+    // One loop owns every send and its OPT_ID assignment, including burst copies.
+    let mut replies = ReplyQueue::default();
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-    let tx_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let mut tx_counter = 0u32;
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-    let mut tx_id_map: std::collections::HashMap<u32, (crate::session::SessionKey, u32)> =
-        std::collections::HashMap::new();
+    let mut tx_id_map: std::collections::HashMap<
+        u32,
+        (std::sync::Weak<crate::session::Session>, u32),
+    > = std::collections::HashMap::new();
 
     // Session cleanup interval: run at half the timeout period, minimum 1 second
     // When session_timeout is 0, checked_div returns None, disabling cleanup
@@ -342,10 +335,6 @@ pub async fn run_receiver(
         .checked_div(2)
         .map(|t| Duration::from_secs(t.max(1)));
     let mut cleanup_timer = cleanup_interval.map(interval);
-
-    // Cache last applied TOS value to avoid redundant setsockopt calls under load.
-    // Sockets default to TOS=0, so we start with that assumption.
-    let mut last_tos: u8 = 0;
 
     // Poll for control-plane shutdown requests (cheap 250 ms tick; the
     // first immediate tick is harmless — the flag starts false).
@@ -361,8 +350,8 @@ pub async fn run_receiver(
             for report in
                 crate::hwtstamp::drain_tx_timestamps(tokio_socket.as_raw_fd(), conf.clock_source)
             {
-                if let Some((client, seq)) = tx_id_map.remove(&report.opt_id) {
-                    if let Some(session) = session_manager.get_session(client) {
+                if let Some((session, seq)) = tx_id_map.remove(&report.opt_id) {
+                    if let Some(session) = session.upgrade() {
                         session.correct_reflection_timestamp(seq, report.timestamp);
                     }
                 }
@@ -379,6 +368,25 @@ pub async fn run_receiver(
         // Use unbiased select to ensure fair scheduling - biased select
         // would starve the cleanup timer under heavy packet load.
         tokio::select! {
+            _ = async {
+                if let Some(deadline) = replies.deadline() {
+                    tokio::time::sleep_until(deadline.into()).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                if let Some(mut transmission) = replies.pop_due() {
+                    if let Some(_sequence) = transmission.send_next(&counters, &shared.rate_limiter, |bytes, target, options| send_datagram(tokio_socket.as_raw_fd(), bytes, target, options)) {
+                        #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                        if kernel_ts.tx_kernel {
+                            tx_id_map.insert(tx_counter, (Arc::downgrade(&transmission.session), _sequence));
+                            tx_counter = tx_counter.wrapping_add(1);
+                        }
+                    }
+                    replies.schedule_next(transmission);
+                }
+                continue;
+            }
             result = tokio_socket.readable() => {
                 if let Err(e) = result {
                     eprintln!("Failed to wait for readable: {}", e);
@@ -606,350 +614,23 @@ pub async fn run_receiver(
                         &counters,
                         conf.drop_replayed,
                     )
+                    .map(|(response, session)| {
+                        Transmission::new(
+                            response,
+                            session,
+                            src_addr,
+                            conf.clock_source,
+                            use_auth,
+                            conf.stateful_reflector,
+                            super::resolve_hmac_key(&ctx, super::peek_ssid(data, use_auth))
+                                .cloned(),
+                            received_dscp,
+                            conf.srv6_return_forwarding && crate::srv6::srh_supported(),
+                        )
+                    })
                 };
-                if let Some((mut response, counter_session)) = response_opt {
-                    // Handle Return Path action (RFC 9503 §5)
-                    let send_target = match &response.return_path_action {
-                        ReturnPathAction::SuppressReply => {
-                            log::debug!("Return Path: suppressing reply to {}", src_addr);
-                            counters
-                                .packets_dropped
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            continue;
-                        }
-                        ReturnPathAction::AlternateAddress(addr) => *addr,
-                        ReturnPathAction::Normal
-                        | ReturnPathAction::UnsupportedSr
-                        | ReturnPathAction::Srv6Forward(_) => src_addr,
-                    };
-
-                    // Determine TOS value: use CoS TLV request if present, otherwise default (0).
-                    let (tos, has_cos_request) = match response.cos_request {
-                        Some((dscp, ecn)) => (((dscp & 0x3F) << 2) | (ecn & 0x03), true),
-                        None => (0u8, false),
-                    };
-
-                    // Only call setsockopt if TOS value changed (reduces syscall overhead under load)
-                    if tos != last_tos {
-                        let fd = tokio_socket.as_raw_fd();
-                        match apply_socket_tos(fd, is_ipv6, tos) {
-                            Ok(()) => {
-                                last_tos = tos;
-                            }
-                            Err(e) => {
-                                if has_cos_request {
-                                    log::debug!(
-                                        "Failed to set IP_TOS/IPV6_TCLASS to {}: {}",
-                                        tos,
-                                        e
-                                    );
-                                    // Set RP flag in CoS TLV to indicate policy rejection (RFC 8972 §5.2)
-                                    let base_size = if use_auth {
-                                        AUTH_BASE_SIZE
-                                    } else {
-                                        UNAUTH_BASE_SIZE
-                                    };
-                                    if set_cos_policy_rejected(&mut response.data, base_size) {
-                                        // RP mutation invalidates the TLV HMAC — recompute
-                                        if let Some(ref key) = hmac_key {
-                                            recompute_response_tlv_hmac(
-                                                &mut response.data,
-                                                base_size,
-                                                key,
-                                            );
-                                        }
-                                    }
-
-                                    // draft-ietf-ippm-stamp-cos-ecn-01 §3.2 MUST: even
-                                    // though the requested DSCP1/EC1 TOS could not be
-                                    // applied, best-effort re-apply with the reply's
-                                    // ECN bits forced to 0b00 (Not-ECT) rather than
-                                    // leaving the previous, possibly non-zero, ECN
-                                    // value on the wire.
-                                    let fallback_tos = cos_unable_fallback_tos(received_dscp);
-                                    if should_apply_fallback_tos(tos, fallback_tos, last_tos) {
-                                        match apply_socket_tos(fd, is_ipv6, fallback_tos) {
-                                            Ok(()) => last_tos = fallback_tos,
-                                            Err(e2) => log::debug!(
-                                                "cos-ecn-01 zero-ECN fallback TOS {} also failed: {}",
-                                                fallback_tos,
-                                                e2
-                                            ),
-                                        }
-                                    }
-                                }
-                                // Don't update last_tos further on failure - retry next time
-                            }
-                        }
-                    }
-
-                    // SRv6 return-path best-effort forwarding (RFC 9503 §5 +
-                    // RFC 8754). When enabled and the kernel supports it, insert
-                    // a Segment Routing Header on the IPv6 reply; otherwise fall
-                    // back to a normal reply with the Return Path U-flag set.
-                    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-                    let mut sent_opt_id: Option<u32> = None;
-                    let mut srv6_sent = false;
-                    if let ReturnPathAction::Srv6Forward(sids) = &response.return_path_action {
-                        if conf.srv6_return_forwarding && crate::srv6::srh_supported() {
-                            if let SocketAddr::V6(v6) = send_target {
-                                if let Some(srh) = crate::srv6::build_srh(sids) {
-                                    match crate::srv6::send_with_srh(
-                                        tokio_socket.as_raw_fd(),
-                                        &response.data,
-                                        v6,
-                                        &srh,
-                                    ) {
-                                        Ok(_) => {
-                                            srv6_sent = true;
-                                            #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-                                            if kernel_ts.tx_kernel {
-                                                sent_opt_id = Some(tx_counter.fetch_add(
-                                                    1,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                ));
-                                            }
-                                        }
-                                        Err(e) => log::debug!(
-                                            "SRv6 return-path send to {} failed ({}); \
-                                             falling back to U-flag reply",
-                                            v6,
-                                            e
-                                        ),
-                                    }
-                                }
-                            }
-                        }
-                        if !srv6_sent {
-                            // Could not honour the SR return path — signal via
-                            // the U-flag (RFC 8972 §4.2) and reply normally.
-                            let base_size = if use_auth {
-                                AUTH_BASE_SIZE
-                            } else {
-                                UNAUTH_BASE_SIZE
-                            };
-                            if set_return_path_u_flag_in_response(&mut response.data, base_size) {
-                                if let Some(ref key) = hmac_key {
-                                    recompute_response_tlv_hmac(&mut response.data, base_size, key);
-                                }
-                            }
-                        }
-                    }
-
-                    // RFC 9503 §3: a matched Destination Node Address SHOULD be
-                    // the reply's IP source. Best-effort — on any failure fall
-                    // through to the ordinary send, which is still a correct
-                    // reply, just from the kernel's choice of source.
-                    let pinned_ok = match response.reply_source {
-                        Some(source) if !srv6_sent && crate::reply_source::supported() => {
-                            match crate::reply_source::send_from(
-                                tokio_socket.as_raw_fd(),
-                                &response.data,
-                                send_target,
-                                source,
-                            ) {
-                                Ok(_) => {
-                                    // SOF_TIMESTAMPING_OPT_ID advances for
-                                    // every successful send on this socket, so
-                                    // the userspace counter must advance in
-                                    // lock-step here too — otherwise every
-                                    // later TX timestamp is attributed to the
-                                    // wrong reflection.
-                                    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-                                    if kernel_ts.tx_kernel {
-                                        sent_opt_id = Some(
-                                            tx_counter
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                        );
-                                    }
-                                    true
-                                }
-                                Err(e) => {
-                                    log::debug!(
-                                        "could not pin reply source to {source} \
-                                         (RFC 9503 §3): {e}; using the OS's choice"
-                                    );
-                                    false
-                                }
-                            }
-                        }
-                        _ => false,
-                    };
-
-                    let sent_ok = if srv6_sent || pinned_ok {
-                        true
-                    } else {
-                        match tokio_socket.send_to(&response.data, send_target).await {
-                            Ok(_) => {
-                                #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-                                if kernel_ts.tx_kernel {
-                                    sent_opt_id = Some(
-                                        tx_counter
-                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                    );
-                                }
-                                true
-                            }
-                            Err(e) if send_target != src_addr => {
-                                // Alternate-address send failed — set U-flag on Return Path TLV
-                                // and fall back to original source (RFC 9503 §5).
-                                log::debug!(
-                                "Return Path: alternate send to {} failed ({}), falling back to {}",
-                                send_target,
-                                e,
-                                src_addr
-                            );
-                                let base_size = if use_auth {
-                                    AUTH_BASE_SIZE
-                                } else {
-                                    UNAUTH_BASE_SIZE
-                                };
-                                if set_return_path_u_flag_in_response(&mut response.data, base_size)
-                                {
-                                    if let Some(ref key) = hmac_key {
-                                        recompute_response_tlv_hmac(
-                                            &mut response.data,
-                                            base_size,
-                                            key,
-                                        );
-                                    }
-                                }
-                                match tokio_socket.send_to(&response.data, src_addr).await {
-                                    Ok(_) => {
-                                        #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-                                        if kernel_ts.tx_kernel {
-                                            sent_opt_id = Some(tx_counter.fetch_add(
-                                                1,
-                                                std::sync::atomic::Ordering::Relaxed,
-                                            ));
-                                        }
-                                        true
-                                    }
-                                    Err(e2) => {
-                                        eprintln!(
-                                            "Failed to send response to {}: {}",
-                                            src_addr, e2
-                                        );
-                                        false
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to send response: {}", e);
-                                false
-                            }
-                        }
-                    };
-
-                    if sent_ok {
-                        counters
-                            .packets_reflected
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        // Record transmission for Direct Measurement and Follow-Up Telemetry.
-                        // Always tracked per session identity, independent of --stateful-reflector.
-                        let session = &counter_session;
-                        session.record_transmitted();
-                        // Extract the reflected seq from the response packet
-                        // (first 4 bytes of reflected packet = sequence_number)
-                        if response.data.len() >= 4 {
-                            let reflected_seq = u32::from_be_bytes([
-                                response.data[0],
-                                response.data[1],
-                                response.data[2],
-                                response.data[3],
-                            ]);
-                            let send_ts = crate::time::generate_timestamp(conf.clock_source);
-                            session.record_reflection(reflected_seq, send_ts);
-                            // Map this send's OPT_ID to (client, seq) so the
-                            // error-queue drain can replace the userspace
-                            // timestamp above with the kernel TX timestamp.
-                            #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-                            if let Some(id) = sent_opt_id {
-                                if let Some(key) = super::packet_session_key(
-                                    data,
-                                    src_addr,
-                                    SocketAddr::new(dst_addr, local_addr.port()),
-                                    use_auth,
-                                ) {
-                                    tx_id_map.insert(id, (key, reflected_seq));
-                                }
-                            }
-                        }
-
-                        // Reflected Test Packet Control multi-send
-                        // (draft-ietf-ippm-asymmetrical-pkts §3). Emit the
-                        // additional copies asynchronously so the main recv
-                        // loop is not blocked by the inter-packet gap. Each
-                        // extra copy consumes one rate-limit token; the
-                        // loop breaks early when the bucket runs out so a
-                        // sender asking for an asymmetric burst can't
-                        // exceed its per-client budget.
-                        if let Some(behavior) = response.reflected_control {
-                            if behavior.extra_copies > 0 {
-                                let sock = Arc::clone(&tokio_socket);
-                                let data = response.data.clone();
-                                let target = send_target;
-                                let counters_for_task = Arc::clone(&counters);
-                                // Keep the kernel OPT_ID counter in sync: each
-                                // extra copy consumes one counter slot even
-                                // though its timestamp is not correlated.
-                                #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-                                let tx_counter_task =
-                                    kernel_ts.tx_kernel.then(|| Arc::clone(&tx_counter));
-                                let limiter_for_task = Arc::clone(&shared.rate_limiter);
-                                let limiter_key = src_addr.ip();
-                                tokio::spawn(async move {
-                                    let interval =
-                                        Duration::from_nanos(behavior.interval_ns as u64);
-                                    for _ in 0..behavior.extra_copies {
-                                        tokio::time::sleep(interval).await;
-                                        if !limiter_for_task.allow(limiter_key) {
-                                            counters_for_task
-                                                .packets_rate_limited
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            counters_for_task
-                                                .packets_dropped
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            break;
-                                        }
-                                        match sock.send_to(&data, target).await {
-                                            Ok(_) => {
-                                                counters_for_task.packets_reflected.fetch_add(
-                                                    1,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                                #[cfg(all(
-                                                    feature = "hwtstamp",
-                                                    target_os = "linux"
-                                                ))]
-                                                if let Some(ref c) = tx_counter_task {
-                                                    c.fetch_add(
-                                                        1,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => {
-                                                log::debug!(
-                                                    "Reflected Control extra send failed: {}",
-                                                    e
-                                                );
-                                                counters_for_task.packets_dropped.fetch_add(
-                                                    1,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
-                                                break;
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    } else {
-                        counters
-                            .packets_dropped
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
+                if let Some(transmission) = response_opt {
+                    replies.push_at(transmission, std::time::Instant::now());
                 } else {
                     counters
                         .packets_dropped
@@ -965,40 +646,6 @@ pub async fn run_receiver(
                 eprintln!("Receive error: {}", e);
             }
         }
-    }
-}
-
-/// Applies an IP TOS / IPv6 Traffic Class value to the reflector's egress
-/// socket. Shared by the primary CoS TLV (DSCP1/EC1) application attempt
-/// and the draft-ietf-ippm-stamp-cos-ecn-01 §3.2 zero-ECN fallback retry
-/// (see [`super::cos_unable_fallback_tos`]).
-fn apply_socket_tos(fd: std::os::fd::RawFd, is_ipv6: bool, tos: u8) -> std::io::Result<()> {
-    let tos_val: libc::c_int = tos as libc::c_int;
-    let result = if is_ipv6 {
-        unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IPV6,
-                libc::IPV6_TCLASS,
-                &tos_val as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        }
-    } else {
-        unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_TOS,
-                &tos_val as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        }
-    };
-    if result < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
     }
 }
 

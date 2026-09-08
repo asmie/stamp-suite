@@ -140,11 +140,11 @@ key rotation cannot split those operations across different key versions.
 
 1. **Identify and admit** — Extract the complete session key and check the configured admission policy without creating runtime state.
 2. **Parse and authenticate** — Decode the base header; enforce strict length or canonical zero-fill policy, the open-mode shape guard, and configured base HMAC verification. Unknown/revoked keys and invalid base packets stop here. Both backends count rejected processing in aggregate `packets_dropped`; no session is created or refreshed.
-3. **Session lookup / update** — Acquire the session only after validation. Update its receive counter, classify replay, and snapshot Direct Measurement / Follow-Up state. `--drop-replayed` applies to validated duplicates. Stateful sequence numbers come from this same session handle; stateless replies echo the sender sequence.
+3. **Session lookup / update** — Acquire the session only after validation. Update its receive counter, classify replay, and snapshot Direct Measurement / Follow-Up state. `--drop-replayed` applies to validated duplicates. Stateful sequence numbers are assigned from this same session handle at transmission; stateless replies echo the sender sequence.
 4. **TLV pipeline** — Parse/verify extensions and preserve the RFC 8972 flag rules. A valid base packet with an invalid TLV HMAC still receives the required I-flag response; it is not treated as a failed base HMAC.
-5. **RFC 9503 processing** — Destination Node Address matching against `local_addresses`; Return Path action selection (Normal, SuppressReply, AlternateAddress, Srv6Forward, UnsupportedSr). Encoded into a `ReturnPathAction` carried in `StampResponse`; the send path attempts best-effort SRv6 SRH forwarding for `Srv6Forward` (see Return Path TLV below). A *matched* Destination Node Address is also carried as `StampResponse::reply_source`, and both send paths pin it as the reply's IP source address via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message (`src/reply_source.rs`, RFC 9503 §3). That is Linux-only and best-effort: elsewhere, or on any failure, the reply goes out with the OS's choice of source, which is still a correct reply — the SHOULD is about which correct source is preferred. This matters on a wildcard or multi-homed bind, where the kernel picks by route rather than by what the sender asked for; on a single-address bind the two coincide anyway.
+5. **RFC 9503 processing** — Destination Node Address matching against `local_addresses`; Return Path action selection (Normal, SuppressReply, AlternateAddress, Srv6Forward, UnsupportedSr). Encoded into a `ReturnPathAction` carried in `StampResponse`; the send path attempts best-effort SRv6 SRH forwarding for `Srv6Forward` (see Return Path TLV below). A *matched* Destination Node Address is also carried as `StampResponse::reply_source`, and both send paths pin it as the reply's IP source address via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message (`src/receiver/transmit.rs`, RFC 9503 §3). That is Linux-only and best-effort: elsewhere, or on any failure, the reply goes out with the OS's choice of source, which is still a correct reply — the SHOULD is about which correct source is preferred. This matters on a wildcard or multi-homed bind, where the kernel picks by route rather than by what the sender asked for; on a single-address bind the two coincide anyway.
 6. **Assemble reply** — `assemble_unauth_answer_with_tlvs` / `assemble_auth_answer_with_tlvs` build the response, populate reflector-side TLV fields (DM counters, Follow-Up Telemetry, Timestamp Info, Location, Class of Service, etc.), and recompute HMACs (base + TLV) if applicable.
-7. **Send** — Commit the validated replay sequence after response assembly, then reply to the original source, an alternate address (Return Path), or suppress entirely. Successful initial sends update the same session handle's transmit/Follow-Up state without another lookup.
+7. **Send** — Commit the validated replay sequence after response assembly, then reply to the original source, an alternate address (Return Path), or suppress entirely. `Transmission::send_next` (`src/receiver/transmit.rs`) assigns the stateful sequence in send order, refreshes T3 and eligible DM/Follow-Up fields, and signs the final bytes before each attempt. Each successful send, including every burst copy, updates the same session handle's transmit/Follow-Up state without another lookup. T2 and the echoed sender fields retain the original request's values. The queued response owns the key selected under the validation/assembly guard; key rotation affects newly accepted requests. Fallback retries retain their sequence and refresh T3 and signatures after any flag changes.
 
 The `ProcessingContext` struct carries per-packet shared state (counters, optional `SessionManager` reference, local addresses, sender port). `ReceiverSharedState` (counters, session manager, start time) lives at the receiver level and is created once via `create_shared_state()` before `run_receiver()`.
 
@@ -406,7 +406,9 @@ Reflector behaviour (aligned with draft-14 §3 as of this release):
 - Parses **Layer-3 Address Group sub-TLV** (sub-TLV Type 11, draft §3.1.2): the reflector applies the requested prefix mask to each of its local IP addresses; if none matches, the packet is dropped per §3.1.2 ("MUST stop processing the received packet"). The drop surfaces to the backend as `ReturnPathAction::SuppressReply`.
 - L2 and L3 Address Group sub-TLVs may appear together on the same TLV; each gates independently, so a mismatch on either one drops the packet (both must match for the packet to be reflected). A malformed sub-TLV (Sub-TLV Length outside the valid set) is skipped rather than gating anything — it simply does not participate in matching, per how out-of-range L3 prefix lengths were already handled.
 - Enforces the draft-14 §3 minimum value-field size of 12 octets at parse time. The sender path (`ReflectedControlTlv::encode_value`) emits 4-byte zero placeholders to satisfy this when no real sub-TLV is attached.
-- On the `nix` backend extra copies are sent on a spawned tokio task so the recv loop is never blocked; the `pnet` backend sleeps inline on its capture thread.
+- Both backends use a deadline queue with one entry per active burst. The `nix` receive loop owns all sends, including kernel TX timestamp correlation; `pnet` has a dedicated send worker so inter-copy waits do not block capture. After a successful copy, the next deadline is the current time plus the requested interval. OS scheduling and send work can lengthen the observed interval; nanosecond precision is not guaranteed.
+- Every copy uses the same transport policy. On Linux one `sendmsg` carries CoS, matched source address, and supported SRH together. Other supported platforms set CoS immediately before the sole send owner's syscall. SRH/source/alternate-address failures take the shared best-effort fallback path; flag changes are signed with the request's selected key. Socket queue pressure stops the remaining burst and records a drop without downgrading metadata.
+- Active-burst admission and explicit drain policy remain unbounded/unimplemented respectively (optimization O04). Shutdown discards queued copies; the existing pnet capture timeout can still delay exit.
 
 ### Bit Error Rate TLVs (draft-gandhi-ippm-stamp-ber)
 
@@ -574,7 +576,7 @@ feature; no extra dependencies).
   used for forward OWD is corrected retroactively before the response is
   processed. On the reflector, the Follow-Up Telemetry record (RFC 8972
   §4.7) is corrected, so the FUT TLV reports the previous reply's kernel
-  TX time. Note: T3 *inside* a reflected packet is physically
+  TX time. Every nix burst copy participates in the same serialized OPT_ID mapping, which holds a weak reference to the validated session. Note: T3 *inside* a reflected packet is physically
   uncorrectable (the timestamp is serialized before the send) — that is
   exactly the gap FUT exists to close.
 - NIC hardware tier ✅ (Linux, `--hwtstamp on`) — sets NIC filters via
@@ -619,11 +621,9 @@ implementation:
   actually got and why.
 - `off` — software timestamps only; the probe result is informational.
 
-**Future phases.** Kernel software RX timestamps
-(`SOF_TIMESTAMPING_RX_SOFTWARE`, works on any interface including `lo`),
-hardware RX (`RX_HARDWARE` + `SIOCSHWTSTAMP` filters, CAP_NET_ADMIN),
-and TX via `MSG_ERRQUEUE` with `SOF_TIMESTAMPING_OPT_ID` correlation.
-Note the PHC clock-domain hazard: NIC hardware timestamps live on the
+**Clock-domain limitation.** The kernel RX/TX paths above are implemented.
+Live NIC hardware verification still requires suitable hardware and privileges.
+The PHC clock-domain hazard remains: NIC hardware timestamps live on the
 PTP hardware clock, which is only meaningful against CLOCK_REALTIME
 T1/T4 when the PHC is synchronized (ptp4l/phc2sys) — the read path must
 gate on that or surface it via the Error Estimate S-bit.

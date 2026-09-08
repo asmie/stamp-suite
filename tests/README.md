@@ -11,6 +11,7 @@ this file documents the opt-in invocations.
 | --- | --- | --- |
 | `config_file_test.rs` | TOML config parsing and validation. | yes |
 | `loopback_test.rs` | UDP-loopback round-trips on `127.0.0.1` (and one `[::1]`). | yes |
+| `burst_transmission_test.rs` | Live interleaved burst replies: IPv4/IPv6, open/auth, NTP/PTP, stateless/stateful, CoS, DM, Follow-Up, HMAC, and kernel TX correlation. | yes, Linux nix |
 | `idle_cpu_test.rs` | Real reflector process: bounded idle CPU after traffic, then receipt of another packet; IPv4/IPv6 and optional kernel timestamps. Linux nix backend; reads child CPU accounting from `/proc`. | yes, Linux nix |
 | `loopback_ipv6_test.rs` | TLV-by-TLV IPv6 parity via `process_stamp_packet`. | yes |
 | `tlv_flag_semantics.rs` | RFC 8972 U/M/I + draft-asymmetrical C flag conformance. | yes |
@@ -18,6 +19,19 @@ this file documents the opt-in invocations.
 | `ptp_e2e_test.rs` | PTP timestamp encoding + Type 3 sync-source reporting. | yes |
 | `malformed_input_test.rs` | Hand-crafted hostile byte sequences at every parser boundary. | yes |
 | `pnet_loopback_test.rs` | Real pnet capture on the `lo` interface. | **no — see below** |
+
+The shared transmission unit tests cover SRH/source/alternate-address/CoS
+fallback combinations, final signatures, malformed-tail preservation, failed-send
+accounting, and real Linux source pinning. The pnet-only library test
+`transmit_worker_interleaves_requests_and_burst_deadlines` exercises the send
+worker with ordinary UDP sockets and needs no raw capture capability:
+
+```bash
+cargo test --locked --no-default-features --features ttl-pnet --lib
+```
+
+`--all-features` selects the nix backend; use the explicit pnet-only build above
+to compile and exercise the pnet worker.
 
 ## Running the pnet integration tests (C10)
 

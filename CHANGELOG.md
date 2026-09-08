@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Finalize every burst reply with a fresh transmit timestamp, stateful sequence,
+  and HMACs; update counters and Follow-Up state after each successful send.
+  Preserve CoS, source pinning, and return-path fallback for every copy.
+  Serialize kernel TX correlation in the nix loop and move pnet burst waits
+  off the capture thread.
+
 - Validate base packets and configured HMACs before creating or refreshing
   reflector sessions. Rejected packets cannot consume session slots or alter
   counters, sequence numbers, replay windows, or Follow-Up state. Both receive

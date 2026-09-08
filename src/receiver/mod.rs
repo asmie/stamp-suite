@@ -8,6 +8,8 @@
 //! - **`ttl-nix`**: Force nix backend
 //! - **`ttl-pnet`**: Force pnet backend
 
+mod transmit;
+
 // Explicit feature flags take priority
 #[cfg(feature = "ttl-nix")]
 mod nix;
@@ -1756,7 +1758,10 @@ fn process_stamp_packet_inner(
     } else {
         None
     };
-    let reflector_seq = if ctx.stateful_reflector {
+    let reflector_seq = if ctx.stateful_reflector && tracking.is_some() {
+        // Live sends assign the sequence in transmission order, including queued bursts.
+        Some(0)
+    } else if ctx.stateful_reflector {
         counter_session
             .as_ref()
             .map(|session| session.generate_sequence_number())
