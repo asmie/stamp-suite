@@ -134,18 +134,17 @@ above.
 
 ## Packet Processing Pipeline
 
-Both backends first extract identity and check admission. They currently
-allocate/update runtime counters before authentication (review finding 03,
-still pending); independent sequence generation happens after base validation.
-They then use the shared processing stages in `receiver/mod.rs`:
+Both backends use `process_session_packet_isolated` for the following stages.
+A single keyset read guard spans validation and reply assembly, so a concurrent
+key rotation cannot split those operations across different key versions.
 
-1. **Parse** — Decode the STAMP base header into `PacketUnauthenticated` or `PacketAuthenticated`.
-2. **HMAC verify** — In authenticated mode, `crypto::verify_packet_hmac` checks the keyed digest over the base packet. Failures increment `hmac_failures_total` and drop the packet.
-3. **TLV pipeline** — Walk the TLV chain. For each known type, run its typed parser; unknown types are preserved and echoed with the U-flag set (per RFC 8972 §4.2).
-4. **Session lookup / update** — Per-session counters (`reflector_rx_count`, `reflector_tx_count`, `last_reflection`) are always tracked. If `--stateful-reflector` is set, a per-session sequence number is also assigned via `SessionManager`.
+1. **Identify and admit** — Extract the complete session key and check the configured admission policy without creating runtime state.
+2. **Parse and authenticate** — Decode the base header; enforce strict length or canonical zero-fill policy, the open-mode shape guard, and configured base HMAC verification. Unknown/revoked keys and invalid base packets stop here. Both backends count rejected processing in aggregate `packets_dropped`; no session is created or refreshed.
+3. **Session lookup / update** — Acquire the session only after validation. Update its receive counter, classify replay, and snapshot Direct Measurement / Follow-Up state. `--drop-replayed` applies to validated duplicates. Stateful sequence numbers come from this same session handle; stateless replies echo the sender sequence.
+4. **TLV pipeline** — Parse/verify extensions and preserve the RFC 8972 flag rules. A valid base packet with an invalid TLV HMAC still receives the required I-flag response; it is not treated as a failed base HMAC.
 5. **RFC 9503 processing** — Destination Node Address matching against `local_addresses`; Return Path action selection (Normal, SuppressReply, AlternateAddress, Srv6Forward, UnsupportedSr). Encoded into a `ReturnPathAction` carried in `StampResponse`; the send path attempts best-effort SRv6 SRH forwarding for `Srv6Forward` (see Return Path TLV below). A *matched* Destination Node Address is also carried as `StampResponse::reply_source`, and both send paths pin it as the reply's IP source address via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message (`src/reply_source.rs`, RFC 9503 §3). That is Linux-only and best-effort: elsewhere, or on any failure, the reply goes out with the OS's choice of source, which is still a correct reply — the SHOULD is about which correct source is preferred. This matters on a wildcard or multi-homed bind, where the kernel picks by route rather than by what the sender asked for; on a single-address bind the two coincide anyway.
 6. **Assemble reply** — `assemble_unauth_answer_with_tlvs` / `assemble_auth_answer_with_tlvs` build the response, populate reflector-side TLV fields (DM counters, Follow-Up Telemetry, Timestamp Info, Location, Class of Service, etc.), and recompute HMACs (base + TLV) if applicable.
-7. **Send** — Reply to the original source, an alternate address (Return Path), or suppress entirely.
+7. **Send** — Commit the validated replay sequence after response assembly, then reply to the original source, an alternate address (Return Path), or suppress entirely. Successful initial sends update the same session handle's transmit/Follow-Up state without another lookup.
 
 The `ProcessingContext` struct carries per-packet shared state (counters, optional `SessionManager` reference, local addresses, sender port). `ReceiverSharedState` (counters, session manager, start time) lives at the receiver level and is created once via `create_shared_state()` before `run_receiver()`.
 
@@ -186,7 +185,8 @@ The AgentX event loop runs inside `tokio::task::spawn_blocking`. A separate supe
 sender micro-session ID before admission. `--session-admission provisioned`
 requires exact membership in immutable startup rules; permissive mode learns
 runtime sessions from traffic. The core also enforces admission when a manager
-is supplied. `--stateful-reflector` controls only sequence generation; stateless
+is supplied. Live processing validates the base before allocating runtime state
+or refreshing activity; rejected traffic does not enter session counters. `--stateful-reflector` controls only sequence generation; stateless
 replies echo the sender sequence. Counters and Follow-Up/replay state are keyed
 by the same full identity in both modes. Kernel TX timestamp correlation retains
 the full key. Runtime expiry leaves provisioning intact. The legacy source-only

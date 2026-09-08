@@ -38,7 +38,7 @@ use crate::tlv::ReturnPathAction;
 
 use super::{
     cos_unable_fallback_tos, hmac_key_source_configured, load_hmac_key, print_reflector_stats,
-    process_stamp_packet_isolated, recompute_response_tlv_hmac, set_cos_policy_rejected,
+    process_session_packet_isolated, recompute_response_tlv_hmac, set_cos_policy_rejected,
     set_return_path_u_flag_in_response, should_apply_fallback_tos, ProcessingContext,
     ReceiverSharedState, ReflectorCounters, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
@@ -836,47 +836,6 @@ fn handle_stamp_packet(
         .packets_received
         .fetch_add(1, AtomicOrdering::Relaxed);
 
-    let Some(session_key) = super::packet_session_key(
-        data,
-        pkt.src,
-        SocketAddr::new(pkt.dst_addr, config.local_port),
-        config.use_auth,
-    ) else {
-        config
-            .counters
-            .packets_dropped
-            .fetch_add(1, AtomicOrdering::Relaxed);
-        return;
-    };
-    if !config.session_manager.admits(&session_key) {
-        config
-            .counters
-            .packets_dropped
-            .fetch_add(1, AtomicOrdering::Relaxed);
-        return;
-    }
-
-    // Get session counters for Direct Measurement and Follow-Up Telemetry.
-    // Always tracked per session identity, independent of --stateful-reflector.
-    let counter_session = config.session_manager.get_or_create_session(session_key);
-    counter_session.record_received();
-
-    // draft-ietf-ippm-asymmetrical-pkts-14 §5: classify the received Sequence
-    // Number against this session's replay window. Detection is unconditional
-    // and counted; `--drop-replayed` decides whether a duplicate is answered.
-    let replay_verdict = super::evaluate_replay(&counter_session, data, &config.counters);
-    if config.drop_replayed && replay_verdict == crate::session::ReplayVerdict::Replay {
-        config
-            .counters
-            .packets_dropped
-            .fetch_add(1, AtomicOrdering::Relaxed);
-        return;
-    }
-
-    let reflector_rx_count = Some(counter_session.get_received_count());
-    let reflector_tx_count = Some(counter_session.get_transmitted_count());
-    let last_reflection = Some(counter_session.get_last_reflection());
-
     // Build packet address info for Location TLV.
     // dst_addr comes from the parsed IP header, so it's always the real
     // destination even when bound to a wildcard address.
@@ -908,10 +867,10 @@ fn handle_stamp_packet(
             metrics_enabled: config.metrics_enabled,
             received_dscp: pkt.dscp,
             received_ecn: pkt.ecn,
-            reflector_rx_count,
-            reflector_tx_count,
+            reflector_rx_count: None,
+            reflector_tx_count: None,
             packet_addr_info,
-            last_reflection,
+            last_reflection: None,
             location_disclosure: config.location_disclosure,
             cos_policy: &config.cos_policy,
             local_addresses: &config.local_addresses,
@@ -936,13 +895,17 @@ fn handle_stamp_packet(
             rx_method: crate::tlv::TimestampMethod::SwLocal,
             tx_method: crate::tlv::TimestampMethod::SwLocal,
         };
-        process_stamp_packet_isolated(data, pkt.src, pkt.ttl, config.use_auth, &ctx)
+        process_session_packet_isolated(
+            data,
+            pkt.src,
+            pkt.ttl,
+            config.use_auth,
+            &ctx,
+            &config.counters,
+            config.drop_replayed,
+        )
     };
-    if let Some(mut response) = response_opt {
-        // The packet survived parse + HMAC verification — only now may it
-        // advance the session's anti-replay window.
-        super::commit_replay(&counter_session, data);
-
+    if let Some((mut response, counter_session)) = response_opt {
         // Handle Return Path action (RFC 9503 §5)
         let send_target = match &response.return_path_action {
             ReturnPathAction::SuppressReply => {
@@ -1129,7 +1092,7 @@ fn handle_stamp_packet(
                 .fetch_add(1, AtomicOrdering::Relaxed);
             // Record transmission for Direct Measurement and Follow-Up Telemetry.
             // Always tracked per session identity, independent of --stateful-reflector.
-            let session = config.session_manager.get_or_create_session(session_key);
+            let session = &counter_session;
             session.record_transmitted();
             if response.data.len() >= 4 {
                 let reflected_seq = u32::from_be_bytes([
@@ -1192,6 +1155,11 @@ fn handle_stamp_packet(
                 .packets_dropped
                 .fetch_add(1, AtomicOrdering::Relaxed);
         }
+    } else {
+        config
+            .counters
+            .packets_dropped
+            .fetch_add(1, AtomicOrdering::Relaxed);
     }
 }
 

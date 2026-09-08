@@ -96,6 +96,11 @@ not the wire SSID). A client-only request succeeds if exactly one entry matches;
 multiple matches return 409 without removing anything. Expiry does not revoke
 static provisioning, so a subsequent admitted packet can recreate runtime state.
 
+Session receive counts and idle timestamps are updated only after base parsing
+and configured authentication succeed. Invalid base HMACs and unknown/revoked
+keys cannot create entries or keep existing entries alive. Aggregate
+`packets_received` / `packets_dropped` still account for rejected processing.
+
 Deleting a key **revokes access**: once a keyset exists, an authenticated
 packet whose SSID resolves to no key (unknown SSID with no default, or the
 last key deleted) is dropped. Removing keys can only make the reflector

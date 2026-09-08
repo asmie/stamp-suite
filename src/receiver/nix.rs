@@ -25,7 +25,7 @@ use crate::tlv::ReturnPathAction;
 
 use super::{
     cos_unable_fallback_tos, hmac_key_source_configured, load_hmac_key, print_reflector_stats,
-    process_stamp_packet_isolated, recompute_response_tlv_hmac, set_cos_policy_rejected,
+    process_session_packet_isolated, recompute_response_tlv_hmac, set_cos_policy_rejected,
     set_return_path_u_flag_in_response, should_apply_fallback_tos, ProcessingContext,
     ReceiverSharedState, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
@@ -524,45 +524,6 @@ pub async fn run_receiver(
                     .packets_received
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                let Some(session_key) = super::packet_session_key(
-                    data,
-                    src_addr,
-                    SocketAddr::new(dst_addr, local_addr.port()),
-                    use_auth,
-                ) else {
-                    counters
-                        .packets_dropped
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    continue;
-                };
-                if !session_manager.admits(&session_key) {
-                    counters
-                        .packets_dropped
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    continue;
-                }
-
-                // Get session counters for Direct Measurement and Follow-Up Telemetry.
-                // Always tracked per session identity, independent of --stateful-reflector.
-                let counter_session = session_manager.get_or_create_session(session_key);
-                counter_session.record_received();
-
-                // draft-ietf-ippm-asymmetrical-pkts-14 §5: classify the
-                // received Sequence Number against this session's replay
-                // window. Detection is unconditional and counted;
-                // `--drop-replayed` decides whether a duplicate is answered.
-                let replay_verdict = super::evaluate_replay(&counter_session, data, &counters);
-                if conf.drop_replayed && replay_verdict == crate::session::ReplayVerdict::Replay {
-                    counters
-                        .packets_dropped
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    continue;
-                }
-
-                let reflector_rx_count = Some(counter_session.get_received_count());
-                let reflector_tx_count = Some(counter_session.get_transmitted_count());
-                let last_reflection = Some(counter_session.get_last_reflection());
-
                 // Build packet address info for Location TLV
                 let packet_addr_info = Some(crate::tlv::PacketAddressInfo {
                     src_addr: src_addr.ip(),
@@ -595,10 +556,10 @@ pub async fn run_receiver(
                         metrics_enabled: conf.metrics,
                         received_dscp,
                         received_ecn,
-                        reflector_rx_count,
-                        reflector_tx_count,
+                        reflector_rx_count: None,
+                        reflector_tx_count: None,
                         packet_addr_info,
-                        last_reflection,
+                        last_reflection: None,
                         location_disclosure,
                         cos_policy: &cos_policy,
                         local_addresses: &local_addresses,
@@ -636,13 +597,17 @@ pub async fn run_receiver(
                         #[cfg(not(feature = "hwtstamp"))]
                         tx_method: crate::tlv::TimestampMethod::SwLocal,
                     };
-                    process_stamp_packet_isolated(data, src_addr, ttl, use_auth, &ctx)
+                    process_session_packet_isolated(
+                        data,
+                        src_addr,
+                        ttl,
+                        use_auth,
+                        &ctx,
+                        &counters,
+                        conf.drop_replayed,
+                    )
                 };
-                if let Some(mut response) = response_opt {
-                    // The packet survived parse + HMAC verification — only now
-                    // may it advance the session's anti-replay window.
-                    super::commit_replay(&counter_session, data);
-
+                if let Some((mut response, counter_session)) = response_opt {
                     // Handle Return Path action (RFC 9503 §5)
                     let send_target = match &response.return_path_action {
                         ReturnPathAction::SuppressReply => {
@@ -882,7 +847,7 @@ pub async fn run_receiver(
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // Record transmission for Direct Measurement and Follow-Up Telemetry.
                         // Always tracked per session identity, independent of --stateful-reflector.
-                        let session = session_manager.get_or_create_session(session_key);
+                        let session = &counter_session;
                         session.record_transmitted();
                         // Extract the reflected seq from the response packet
                         // (first 4 bytes of reflected packet = sequence_number)
@@ -900,7 +865,14 @@ pub async fn run_receiver(
                             // timestamp above with the kernel TX timestamp.
                             #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
                             if let Some(id) = sent_opt_id {
-                                tx_id_map.insert(id, (session_key, reflected_seq));
+                                if let Some(key) = super::packet_session_key(
+                                    data,
+                                    src_addr,
+                                    SocketAddr::new(dst_addr, local_addr.port()),
+                                    use_auth,
+                                ) {
+                                    tx_id_map.insert(id, (key, reflected_seq));
+                                }
                             }
                         }
 
@@ -978,6 +950,10 @@ pub async fn run_receiver(
                             .packets_dropped
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
+                } else {
+                    counters
+                        .packets_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {

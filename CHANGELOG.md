@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Validate base packets and configured HMACs before creating or refreshing
+  reflector sessions. Rejected packets cannot consume session slots or alter
+  counters, sequence numbers, replay windows, or Follow-Up state. Both receive
+  backends count processing rejections as aggregate drops and reuse the validated
+  session handle through the initial send. Preserve TLV integrity-failure replies.
+
 - Separate reflector sequences, counters, replay windows, and Follow-Up state
   by UDP endpoints, SSID, and sender micro-session ID. Add exact static session
   admission with `--session-admission provisioned` / `--reflector-session`;

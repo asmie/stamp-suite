@@ -973,12 +973,12 @@ pub fn reflected_control_size_ceiling(conf: &Configuration) -> u16 {
 /// the same pattern, and dropping its traffic would break an honest
 /// measurement.
 ///
-/// Classification only — the window is NOT advanced here. This runs before
-/// parse/HMAC verification, and an unverified packet must never be able to
-/// plant a sequence number in the anti-replay state (a spoofed packet with a
-/// predicted sequence number would otherwise get the genuine one dropped
-/// under `--drop-replayed`). Backends call [`commit_replay`] after the packet
-/// has been verified and answered.
+/// Classification only — the window is NOT advanced here. Live processing
+/// calls this after base parsing and configured HMAC verification, so rejected
+/// packets cannot affect replay counters or plant a sequence number in the
+/// anti-replay state. The shared pipeline calls [`commit_replay`] once response
+/// assembly succeeds. This preserves the separate classification and commit
+/// stages while applying both only to validated base packets.
 ///
 /// Logging stays at debug level deliberately. A replay is attacker-controlled
 /// input, so warning per event would hand a remote peer a log-amplification
@@ -992,8 +992,8 @@ pub fn evaluate_replay(
     use crate::session::ReplayVerdict;
 
     if data.len() < 4 {
-        // Too short to carry a Sequence Number; the base-packet length rules
-        // (RFC 8762 §4.6, `--strict-packets`) deal with it downstream.
+        // Too short to carry a complete wire Sequence Number. Strict parsing
+        // rejects this upstream; lenient zero-fill remains supported.
         return ReplayVerdict::New;
     }
     let seq = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -1023,10 +1023,10 @@ pub fn evaluate_replay(
 }
 
 /// Records a *verified* packet's Sequence Number in its session's replay
-/// window — the mutating counterpart of [`evaluate_replay`]. Both backends
-/// call this once processing has produced a response, i.e. after the packet
-/// survived parsing and (when a key is configured) HMAC verification, so only
-/// authenticated traffic can advance the anti-replay state.
+/// window — the mutating counterpart of [`evaluate_replay`]. The shared live
+/// pipeline calls this after response assembly. Base parsing and configured
+/// HMAC verification have already succeeded; rejected authenticated-mode
+/// packets cannot advance the anti-replay state.
 pub fn commit_replay(session: &crate::session::Session, data: &[u8]) {
     if data.len() < 4 {
         return;
@@ -1396,6 +1396,7 @@ pub struct StampResponse {
 }
 
 /// Context for processing STAMP packets, shared between backends.
+#[derive(Clone)]
 pub struct ProcessingContext<'a> {
     /// Clock format for timestamps.
     pub clock_source: ClockFormat,
@@ -1588,12 +1589,63 @@ pub fn process_stamp_packet(
     use_auth: bool,
     ctx: &ProcessingContext,
 ) -> Option<StampResponse> {
-    if let Some(manager) = ctx.session_manager {
+    process_stamp_packet_inner(data, src, ttl, use_auth, ctx, None).map(|(response, _)| response)
+}
+
+/// Live backend entry: authenticate, then acquire/update session state, classify
+/// replay, and assemble with the resulting counters. The caller holds one keyset
+/// read guard through this call, so rotation cannot split verification/assembly.
+#[allow(clippy::too_many_arguments)]
+fn process_session_packet_isolated(
+    data: &[u8],
+    src: SocketAddr,
+    ttl: u8,
+    use_auth: bool,
+    ctx: &ProcessingContext,
+    counters: &ReflectorCounters,
+    drop_replayed: bool,
+) -> Option<(StampResponse, Arc<crate::session::Session>)> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (response, session) = process_stamp_packet_inner(
+            data,
+            src,
+            ttl,
+            use_auth,
+            ctx,
+            Some((counters, drop_replayed)),
+        )?;
+        Some((response, session?))
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            note_processing_panic(src);
+            None
+        }
+    }
+}
+
+enum ValidatedBase {
+    Auth(PacketAuthenticated),
+    Open(PacketUnauthenticated),
+}
+
+fn process_stamp_packet_inner(
+    data: &[u8],
+    src: SocketAddr,
+    ttl: u8,
+    use_auth: bool,
+    ctx: &ProcessingContext,
+    tracking: Option<(&ReflectorCounters, bool)>,
+) -> Option<(StampResponse, Option<Arc<crate::session::Session>>)> {
+    let session_key = if let Some(manager) = ctx.session_manager {
         let key = ctx.packet_session_key(data, src, use_auth)?;
         if !manager.admits(&key) {
             return None;
         }
-    }
+        Some(key)
+    } else {
+        None
+    };
     #[cfg(feature = "metrics")]
     let start_time = if ctx.metrics_enabled {
         Some(std::time::Instant::now())
@@ -1681,29 +1733,121 @@ pub fn process_stamp_packet(
         return None;
     }
 
-    let result = if use_auth {
-        process_auth_packet(
-            data,
-            src,
-            ttl,
-            rcvt,
-            has_tlvs,
-            resolved_hmac_key,
-            tlv_hmac_key,
-            verify_tlv_hmac,
-            ctx,
-        )
+    let packet = if use_auth {
+        ValidatedBase::Auth(process_auth_packet(data, src, resolved_hmac_key, ctx)?)
     } else {
-        process_unauth_packet(
-            data,
-            src,
-            ttl,
-            rcvt,
-            has_tlvs,
-            tlv_hmac_key,
-            verify_tlv_hmac,
-            ctx,
-        )
+        ValidatedBase::Open(process_unauth_packet(data, src, ctx)?)
+    };
+
+    // No allocation, activity refresh, receive count, or replay classification
+    // occurs before base parsing and the configured authentication have passed.
+    let mut ctx = ctx.clone();
+    let counter_session = if let Some((counters, drop_replayed)) = tracking {
+        let session = ctx.session_manager?.get_or_create_session(session_key?);
+        session.record_received();
+        let verdict = evaluate_replay(&session, data, counters);
+        if drop_replayed && verdict == crate::session::ReplayVerdict::Replay {
+            return None;
+        }
+        ctx.reflector_rx_count = Some(session.get_received_count());
+        ctx.reflector_tx_count = Some(session.get_transmitted_count());
+        ctx.last_reflection = Some(session.get_last_reflection());
+        Some(session)
+    } else {
+        None
+    };
+    let reflector_seq = if ctx.stateful_reflector {
+        counter_session
+            .as_ref()
+            .map(|session| session.generate_sequence_number())
+            .or_else(|| {
+                ctx.session_manager.map(|manager| {
+                    manager.generate_sequence_number(
+                        session_key.expect("identity checked before processing"),
+                    )
+                })
+            })
+    } else {
+        None
+    };
+    let ctx = &ctx;
+    let result = match packet {
+        ValidatedBase::Auth(packet) => {
+            // Use TLV-aware assembly if packet has TLVs
+            if has_tlvs {
+                Some(assemble_auth_answer_with_tlvs(
+                    &packet,
+                    data,
+                    ctx.clock_source,
+                    rcvt,
+                    ttl,
+                    ctx.error_estimate_wire,
+                    resolved_hmac_key,
+                    reflector_seq,
+                    ctx.tlv_mode,
+                    tlv_hmac_key,
+                    verify_tlv_hmac,
+                    ctx,
+                ))
+            } else {
+                Some(StampResponse {
+                    data: assemble_auth_answer_symmetric(
+                        &packet,
+                        data,
+                        ctx.clock_source,
+                        rcvt,
+                        ttl,
+                        ctx.error_estimate_wire,
+                        // B6: use the per-SSID-resolved key (falls back to
+                        // ctx.hmac_key when no HmacKeySet is configured). Using
+                        // ctx.hmac_key directly here would emit unsigned
+                        // responses when --hmac-key-dir is the key source.
+                        resolved_hmac_key,
+                        reflector_seq,
+                    ),
+                    cos_request: None,
+                    return_path_action: ReturnPathAction::Normal,
+                    reflected_control: None,
+                    // The symmetric no-TLV path never parses a Destination Node
+                    // Address TLV, so there is nothing to pin.
+                    reply_source: None,
+                })
+            }
+        }
+        ValidatedBase::Open(packet) => {
+            // Use TLV-aware assembly if packet has TLVs
+            if has_tlvs {
+                Some(assemble_unauth_answer_with_tlvs(
+                    &packet,
+                    data,
+                    ctx.clock_source,
+                    rcvt,
+                    ttl,
+                    ctx.error_estimate_wire,
+                    reflector_seq,
+                    ctx.tlv_mode,
+                    tlv_hmac_key,
+                    verify_tlv_hmac,
+                    ctx,
+                ))
+            } else {
+                Some(StampResponse {
+                    data: assemble_unauth_answer_symmetric(
+                        &packet,
+                        data,
+                        ctx.clock_source,
+                        rcvt,
+                        ttl,
+                        ctx.error_estimate_wire,
+                        reflector_seq,
+                    ),
+                    cos_request: None,
+                    reply_source: None,
+                    return_path_action: ReturnPathAction::Normal,
+                    reflected_control: None,
+                })
+            }
+        }
     };
 
     #[cfg(feature = "metrics")]
@@ -1717,26 +1861,21 @@ pub fn process_stamp_packet(
         }
     }
 
-    result
+    let response = result?;
+    if let Some(session) = &counter_session {
+        commit_replay(session, data);
+    }
+    Some((response, counter_session))
 }
 
-/// Processes an authenticated STAMP packet.
-///
-/// `resolved_hmac_key` is the per-SSID key already resolved by
-/// `process_stamp_packet`; it shadows `ctx.hmac_key` so the auth path
-/// behaves correctly under B6's `--hmac-key-dir` configuration.
-#[allow(clippy::too_many_arguments)]
+/// Parses and authenticates the base before any persistent session mutation.
+/// The canonical zero-filled buffer retains RFC 8762 §4.6 short-packet behavior.
 fn process_auth_packet(
     data: &[u8],
     src: SocketAddr,
-    ttl: u8,
-    rcvt: u64,
-    has_tlvs: bool,
     resolved_hmac_key: Option<&HmacKey>,
-    tlv_hmac_key: Option<&HmacKey>,
-    verify_tlv_hmac: bool,
     ctx: &ProcessingContext,
-) -> Option<StampResponse> {
+) -> Option<PacketAuthenticated> {
     // Parse packet leniently with canonical buffer for HMAC verification
     // Per RFC 8762 §4.6, short packets are zero-filled and HMAC must be
     // verified against the canonical (zero-padded) representation
@@ -1806,123 +1945,22 @@ fn process_auth_packet(
         return None;
     }
 
-    // Generate reflector sequence number only after successful validation
-    let reflector_seq = ctx
-        .session_manager
-        .filter(|_| ctx.stateful_reflector)
-        .map(|mgr| {
-            mgr.generate_sequence_number(
-                ctx.packet_session_key(data, src, true)
-                    .expect("identity checked before processing"),
-            )
-        });
-
-    // Use TLV-aware assembly if packet has TLVs
-    if has_tlvs {
-        Some(assemble_auth_answer_with_tlvs(
-            &packet,
-            data,
-            ctx.clock_source,
-            rcvt,
-            ttl,
-            ctx.error_estimate_wire,
-            resolved_hmac_key,
-            reflector_seq,
-            ctx.tlv_mode,
-            tlv_hmac_key,
-            verify_tlv_hmac,
-            ctx,
-        ))
-    } else {
-        Some(StampResponse {
-            data: assemble_auth_answer_symmetric(
-                &packet,
-                data,
-                ctx.clock_source,
-                rcvt,
-                ttl,
-                ctx.error_estimate_wire,
-                // B6: use the per-SSID-resolved key (falls back to
-                // ctx.hmac_key when no HmacKeySet is configured). Using
-                // ctx.hmac_key directly here would emit unsigned
-                // responses when --hmac-key-dir is the key source.
-                resolved_hmac_key,
-                reflector_seq,
-            ),
-            cos_request: None,
-            return_path_action: ReturnPathAction::Normal,
-            reflected_control: None,
-            // The symmetric no-TLV path never parses a Destination Node
-            // Address TLV, so there is nothing to pin.
-            reply_source: None,
-        })
-    }
+    Some(packet)
 }
 
-/// Processes an unauthenticated STAMP packet.
-#[allow(clippy::too_many_arguments)]
+/// Parses the open-mode base before any persistent session mutation.
 fn process_unauth_packet(
     data: &[u8],
     src: SocketAddr,
-    ttl: u8,
-    rcvt: u64,
-    has_tlvs: bool,
-    tlv_hmac_key: Option<&HmacKey>,
-    verify_tlv_hmac: bool,
     ctx: &ProcessingContext,
-) -> Option<StampResponse> {
+) -> Option<PacketUnauthenticated> {
     let packet_result = if ctx.strict_packets {
         PacketUnauthenticated::from_bytes(data)
     } else {
         Ok(PacketUnauthenticated::from_bytes_lenient(data))
     };
-
     match packet_result {
-        Ok(packet) => {
-            // Generate reflector sequence number only after successful validation
-            let reflector_seq = ctx
-                .session_manager
-                .filter(|_| ctx.stateful_reflector)
-                .map(|mgr| {
-                    mgr.generate_sequence_number(
-                        ctx.packet_session_key(data, src, false)
-                            .expect("identity checked before processing"),
-                    )
-                });
-
-            // Use TLV-aware assembly if packet has TLVs
-            if has_tlvs {
-                Some(assemble_unauth_answer_with_tlvs(
-                    &packet,
-                    data,
-                    ctx.clock_source,
-                    rcvt,
-                    ttl,
-                    ctx.error_estimate_wire,
-                    reflector_seq,
-                    ctx.tlv_mode,
-                    tlv_hmac_key,
-                    verify_tlv_hmac,
-                    ctx,
-                ))
-            } else {
-                Some(StampResponse {
-                    data: assemble_unauth_answer_symmetric(
-                        &packet,
-                        data,
-                        ctx.clock_source,
-                        rcvt,
-                        ttl,
-                        ctx.error_estimate_wire,
-                        reflector_seq,
-                    ),
-                    cos_request: None,
-                    reply_source: None,
-                    return_path_action: ReturnPathAction::Normal,
-                    reflected_control: None,
-                })
-            }
-        }
+        Ok(packet) => Some(packet),
         Err(e) => {
             log::warn!(
                 "Failed to deserialize unauthenticated packet from {}: {} (strict mode)",
@@ -2777,6 +2815,95 @@ pub fn assemble_auth_answer_with_tlvs(
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+
+    /// Runs for pnet-only builds too, without requiring a raw capture channel.
+    #[test]
+    fn tracked_processing_validates_before_any_session_mutation() {
+        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+        for strict in [false, true] {
+            for stateful in [false, true] {
+                let manager = Arc::new(SessionManager::new(None, Some(1)));
+                let counters = ReflectorCounters::new();
+                let ctx = ProcessingContext {
+                    session_manager: Some(&manager),
+                    hmac_key: Some(&key),
+                    strict_packets: strict,
+                    stateful_reflector: stateful,
+                    ..test_ctx(0, 0)
+                };
+                let mut data = [0u8; AUTH_BASE_SIZE];
+                data[3] = 100;
+                data[25] = 1;
+                let mac = crate::crypto::compute_packet_hmac(&key, &data, AUTH_PACKET_HMAC_OFFSET);
+                data[AUTH_PACKET_HMAC_OFFSET..].copy_from_slice(&mac);
+                let mut forged = data;
+                forged[AUTH_PACKET_HMAC_OFFSET] ^= 1;
+                assert!(process_session_packet_isolated(
+                    &forged,
+                    loopback_src(),
+                    64,
+                    true,
+                    &ctx,
+                    &counters,
+                    true
+                )
+                .is_none());
+                assert_eq!(manager.session_count(), 0);
+                let (response, session) = process_session_packet_isolated(
+                    &data,
+                    loopback_src(),
+                    64,
+                    true,
+                    &ctx,
+                    &counters,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(
+                    u32::from_be_bytes(response.data[..4].try_into().unwrap()),
+                    if stateful { 0 } else { 100 }
+                );
+                let before = manager.session_summaries_extended().pop().unwrap();
+                assert!(process_session_packet_isolated(
+                    &forged,
+                    loopback_src(),
+                    64,
+                    true,
+                    &ctx,
+                    &counters,
+                    true
+                )
+                .is_none());
+                assert_eq!(
+                    manager
+                        .session_summaries_extended()
+                        .pop()
+                        .unwrap()
+                        .last_active,
+                    before.last_active
+                );
+                assert_eq!(session.get_received_count(), 1);
+                assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 0);
+                // Revoking the required base key must not refresh an existing session.
+                let no_key = ProcessingContext {
+                    hmac_key: None,
+                    require_hmac: true,
+                    ..ctx
+                };
+                assert!(process_session_packet_isolated(
+                    &data,
+                    loopback_src(),
+                    64,
+                    true,
+                    &no_key,
+                    &counters,
+                    true
+                )
+                .is_none());
+                assert_eq!(session.get_received_count(), 1);
+            }
+        }
+    }
 
     #[test]
     fn identity_parser_rejects_ambiguous_micro_session_ids() {

@@ -65,3 +65,11 @@ stateless/stateful replies. It checks independent SSIDs and micro-sessions,
 source-port admission, and Linux wildcard-bind destination separation. Session
 unit tests cover counters, replay windows, Follow-Up isolation, expiry and
 persistent provisioning; control tests cover ambiguous expiry (409).
+
+`session_auth_admission_test.rs` exercises real nix receive loops and inspects
+shared state: bad HMAC slot exhaustion, invalid refreshes on an existing session,
+unknown SSIDs, key revocation/rotation, strict short-packet rejection, IPv4/IPv6,
+and stateful/stateless accounting. It also verifies a valid base HMAC plus an
+invalid TLV HMAC still receives an I-flag response. The shared
+`tracked_processing_validates_before_any_session_mutation` unit test runs in
+pnet-only builds without requiring raw capture capability.

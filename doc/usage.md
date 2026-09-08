@@ -420,3 +420,11 @@ Malformed TLVs provide no micro-session identity and retain ordinary M-flag
 echo processing if the remaining identity is admitted.
 Shutdown JSON/text and the control API identify these distinct sessions; SNMP
 retains its existing unique internal session index and source-address columns.
+
+Base-packet rejection does not allocate a session, extend its idle timeout,
+increment its receive count, consume a stateful sequence, or affect replay and
+Follow-Up state. This includes bad base HMACs, unknown/revoked per-SSID keys,
+and short packets rejected by `--strict-packets`. These packets still enter
+aggregate receive/drop counters. A valid base packet with a failed TLV HMAC
+retains RFC 8972's I-flag reply behavior. Session caps and drain behavior remain
+separate from authentication admission.
