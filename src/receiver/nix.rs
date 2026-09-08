@@ -416,15 +416,20 @@ pub async fn run_receiver(
             }
         }
 
-        // Use nix recvmsg to get TTL from control messages
+        // Keep ancillary metadata while letting Tokio clear cached readiness
+        // when recvmsg reaches EAGAIN. Calling the raw syscall alone leaves
+        // readable() ready forever after the first datagram is consumed.
         let mut iov = [IoSliceMut::new(&mut buf)];
 
-        match recvmsg::<SockaddrStorage>(
-            tokio_socket.as_raw_fd(),
-            &mut iov,
-            Some(&mut cmsg_buf),
-            MsgFlags::MSG_DONTWAIT,
-        ) {
+        match tokio_socket.try_io(tokio::io::Interest::READABLE, || {
+            recvmsg::<SockaddrStorage>(
+                tokio_socket.as_raw_fd(),
+                &mut iov,
+                Some(&mut cmsg_buf),
+                MsgFlags::MSG_DONTWAIT,
+            )
+            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+        }) {
             Ok(msg) => {
                 let len = msg.bytes;
                 let src_storage = msg.address;
@@ -957,8 +962,9 @@ pub async fn run_receiver(
                     }
                 }
             }
-            Err(nix::errno::Errno::EAGAIN) => {
-                // No data available, will retry after next readable notification
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // try_io cleared stale readiness; the next iteration can
+                // sleep while still servicing cleanup/shutdown/error-queue work.
                 continue;
             }
             Err(e) => {

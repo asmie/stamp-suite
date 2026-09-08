@@ -53,6 +53,16 @@ per-packet metadata through `recvmsg` control messages. The kernel performs UDP
 demultiplexing and checksum validation; userspace only sees traffic destined
 for the bound port.
 
+Raw receives run inside `UdpSocket::try_io(Interest::READABLE, ...)` after
+waiting for readability. Converting `recvmsg` errors to `std::io::Error`
+lets Tokio clear cached readiness on `WouldBlock`; a raw syscall outside
+this wrapper leaves the socket appearing readable after its queue empties.
+The sender uses the same pattern for ECN and kernel RX timestamps. It still
+returns `WouldBlock` to its outer loop so TX error-queue draining, timers,
+and shutdown handling remain available. `tests/idle_cpu_test.rs` exercises
+the real Linux reflector process before and after idle, while sender unit
+tests verify readiness clearing and preservation of ancillary metadata.
+
 **`pnet` backend (default on Windows, opt-in elsewhere)**
 
 Captures frames at the datalink layer via libpcap / Npcap, parses Ethernet /

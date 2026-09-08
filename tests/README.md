@@ -11,6 +11,7 @@ this file documents the opt-in invocations.
 | --- | --- | --- |
 | `config_file_test.rs` | TOML config parsing and validation. | yes |
 | `loopback_test.rs` | UDP-loopback round-trips on `127.0.0.1` (and one `[::1]`). | yes |
+| `idle_cpu_test.rs` | Real reflector process: bounded idle CPU after traffic, then receipt of another packet; IPv4/IPv6 and optional kernel timestamps. Linux nix backend; reads child CPU accounting from `/proc`. | yes, Linux nix |
 | `loopback_ipv6_test.rs` | TLV-by-TLV IPv6 parity via `process_stamp_packet`. | yes |
 | `tlv_flag_semantics.rs` | RFC 8972 U/M/I + draft-asymmetrical C flag conformance. | yes |
 | `ber_regression_test.rs` | BER (Types 240/241/242) on-wire counts. | yes |

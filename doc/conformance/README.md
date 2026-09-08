@@ -2,6 +2,13 @@
 
 Status date: **2026-08-05**. Branch: **1.0-line**.
 
+**Review follow-up (2026-09-08):** the status and clause scores below are
+historical, not a current conformance sign-off. The [September review](../reviews/2026-09-08/review.md)
+identified 16 findings, including behavior previously scored Compliant.
+The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
+verification one item at a time. Citation maintenance does not re-score
+requirements or close the remaining findings.
+
 This document rolls up the eight clause-level conformance matrices in this
 directory into a single compliance statement for the stamp-suite 1.0 line.
 Every count below is read verbatim from each matrix's own `Summary:` line.
@@ -96,6 +103,13 @@ because both sat inside behaviour the matrices recorded as Compliant:
   omits it from.
 
 ## Citation verification
+
+**Mechanical refresh, 2026-09-08:** corrected the 24 references flagged by
+the September review, including ambiguous CLI-field and Session-method
+anchors checked against the source. The current checker reports **542
+citations: 108 verified, 434 unverifiable, 0 stale**. This updates reference
+locations only; the historical counts below and the clause scores are not
+evidence that the September behavioral findings have all been fixed.
 
 The `file:line` citations in the matrices are the link between a clause and its
 evidence, and they drift whenever the code moves. `scripts/check_conformance_citations.py`

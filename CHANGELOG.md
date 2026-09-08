@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Clear Tokio socket readiness after a raw `recvmsg` returns `WouldBlock`.
+  The nix reflector and the sender's ECN/kernel-timestamp receive paths now
+  sleep when idle after traffic instead of consuming a CPU core. Regression
+  tests cover IPv4/IPv6, ancillary metadata, and receiving again after idle.
+
 ## [1.0.0] - 2026-08-05
 
 First stable release. Everything below shipped as 1.0.0, including the

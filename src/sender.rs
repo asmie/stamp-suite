@@ -1842,11 +1842,6 @@ pub async fn run_sender(
         .with_congestion(congestion.as_ref().map(|state| state.summary())))
 }
 
-/// Receives one datagram. With kernel RX timestamping enabled (feature
-/// "hwtstamp") it uses recvmsg and returns the kernel receive timestamp
-/// (T4) in STAMP wire format alongside the length; otherwise a plain
-/// `recv`. May return `WouldBlock` on spurious readiness wakeups (e.g.
-/// pending error-queue events) — callers drain the error queue and retry.
 /// Receives one datagram, returning `(len, kernel_t4, reply_ecn)`.
 ///
 /// - `kernel_t4`: with kernel RX timestamping enabled (feature "hwtstamp")
@@ -1861,7 +1856,8 @@ pub async fn run_sender(
 /// `nix` — a mandatory dependency on those platforms regardless of the
 /// "hwtstamp" build feature) when either is needed; a plain `recv` is used
 /// otherwise. May return `WouldBlock` on spurious readiness wakeups (e.g.
-/// pending error-queue events) — callers drain the error queue and retry.
+/// pending error-queue events). `try_io` clears stale readiness first;
+/// callers can drain the error queue and retry without spinning.
 async fn recv_packet(
     socket: &tokio::net::UdpSocket,
     buf: &mut [u8],
@@ -1875,37 +1871,33 @@ async fn recv_packet(
         socket.readable().await?;
         let mut cmsg_buf = vec![0u8; 256];
         let mut iov = [std::io::IoSliceMut::new(buf)];
-        return match nix::sys::socket::recvmsg::<nix::sys::socket::SockaddrStorage>(
-            socket.as_raw_fd(),
-            &mut iov,
-            Some(&mut cmsg_buf),
-            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
-        ) {
-            Ok(msg) => {
-                let len = msg.bytes;
-                #[cfg(feature = "hwtstamp")]
-                let ts = if kernel_rx {
-                    msg.cmsgs()
-                        .ok()
-                        .and_then(crate::hwtstamp::extract_kernel_rx_timestamp)
-                        .map(|k| crate::time::timestamp_from_parts(k.secs, k.nanos, cs))
-                } else {
-                    None
-                };
-                #[cfg(not(feature = "hwtstamp"))]
-                let ts: Option<u64> = None;
-                let ecn = if want_reply_ecn {
-                    extract_reply_ecn_from_cmsgs(&msg)
-                } else {
-                    None
-                };
-                Ok((len, ts, ecn))
-            }
-            Err(nix::errno::Errno::EAGAIN) => {
-                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
-            }
-            Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
-        };
+        return socket.try_io(tokio::io::Interest::READABLE, || {
+            let msg = nix::sys::socket::recvmsg::<nix::sys::socket::SockaddrStorage>(
+                socket.as_raw_fd(),
+                &mut iov,
+                Some(&mut cmsg_buf),
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            )
+            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+            let len = msg.bytes;
+            #[cfg(feature = "hwtstamp")]
+            let ts = if kernel_rx {
+                msg.cmsgs()
+                    .ok()
+                    .and_then(crate::hwtstamp::extract_kernel_rx_timestamp)
+                    .map(|k| crate::time::timestamp_from_parts(k.secs, k.nanos, cs))
+            } else {
+                None
+            };
+            #[cfg(not(feature = "hwtstamp"))]
+            let ts: Option<u64> = None;
+            let ecn = if want_reply_ecn {
+                extract_reply_ecn_from_cmsgs(&msg)
+            } else {
+                None
+            };
+            Ok((len, ts, ecn))
+        });
     }
     let _ = cs;
     let _ = kernel_rx;
@@ -6278,5 +6270,102 @@ mod tests {
         let reparsed = ReflectedPacketAuthenticated::from_bytes(&reply_bytes).unwrap();
         assert_eq!(reparsed.ssid, 0xBEEF);
         assert_eq!(reparsed.mbz4, [0; 6]);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn check_recv_packet_readiness(ip: &str, kernel_rx: bool, want_ecn: bool) {
+        use std::os::fd::AsRawFd;
+        use tokio::time::timeout;
+
+        let receiver = UdpSocket::bind((ip, 0)).await.unwrap();
+        let peer = UdpSocket::bind((ip, 0)).await.unwrap();
+        receiver.connect(peer.local_addr().unwrap()).await.unwrap();
+        peer.connect(receiver.local_addr().unwrap()).await.unwrap();
+        if want_ecn {
+            enable_reply_tos_reception(receiver.as_raw_fd(), ip == "::1").unwrap();
+        }
+        #[cfg(feature = "hwtstamp")]
+        if kernel_rx {
+            let enabled = crate::hwtstamp::enable_socket_timestamping(
+                receiver.as_raw_fd(),
+                true,
+                false,
+                false,
+            );
+            assert!(
+                enabled.rx_kernel,
+                "loopback kernel RX timestamping unavailable"
+            );
+        }
+
+        let mut buf = [0u8; 64];
+        for payload in [b"first".as_slice(), b"after idle".as_slice()] {
+            let (len, timestamp, ecn) = timeout(Duration::from_secs(2), async {
+                loop {
+                    peer.send(payload).await.unwrap();
+                    let received = loop {
+                        match recv_packet(
+                            &receiver,
+                            &mut buf,
+                            kernel_rx,
+                            want_ecn,
+                            ClockFormat::NTP,
+                        )
+                        .await
+                        {
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                            result => break result.unwrap(),
+                        }
+                    };
+                    if !kernel_rx || received.1.is_some() {
+                        break received;
+                    }
+                    // Linux enables RX timestamping through a deferred static
+                    // key, so initial packets can legitimately lack a cmsg.
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(&buf[..len], payload);
+            assert_eq!(timestamp.is_some(), kernel_rx);
+            assert_eq!(ecn, want_ecn.then_some(0));
+
+            // A consumed datagram can leave one cached readiness event. A
+            // raw EAGAIN must clear it, rather than waking every future read.
+            match timeout(
+                Duration::from_millis(30),
+                recv_packet(&receiver, &mut buf, kernel_rx, want_ecn, ClockFormat::NTP),
+            )
+            .await
+            {
+                Ok(Err(e)) => assert_eq!(e.kind(), std::io::ErrorKind::WouldBlock),
+                Err(_) => {} // Already waiting for fresh readiness is fine.
+                Ok(Ok(_)) => panic!("received a datagram when none was sent"),
+            }
+            assert!(
+                timeout(Duration::from_millis(30), receiver.readable())
+                    .await
+                    .is_err(),
+                "an empty socket retained stale readable readiness"
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn recv_packet_clears_readiness_for_ecn() {
+        for ip in ["127.0.0.1", "::1"] {
+            check_recv_packet_readiness(ip, false, true).await;
+        }
+    }
+
+    #[cfg(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos")))]
+    #[tokio::test]
+    async fn recv_packet_clears_readiness_for_kernel_timestamps() {
+        for ip in ["127.0.0.1", "::1"] {
+            check_recv_packet_readiness(ip, true, false).await;
+            check_recv_packet_readiness(ip, true, true).await;
+        }
     }
 }
