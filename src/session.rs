@@ -1,5 +1,7 @@
+pub use crate::session_identity::{SessionAdmission, SessionKey};
+
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -283,13 +285,12 @@ struct SessionEntry {
     last_active: Instant,
 }
 
-/// Manages multiple sessions, one per client (IP:port).
-///
-/// Used in multi-session reflector mode (RFC 8972) where each client
-/// gets its own independent sequence counter.
+/// Maintains independent state for each complete STAMP session identity.
 pub struct SessionManager {
-    /// Map from client address to session entry.
-    sessions: RwLock<HashMap<SocketAddr, SessionEntry>>,
+    /// Map from complete identity to runtime state.
+    sessions: RwLock<HashMap<SessionKey, SessionEntry>>,
+    admission: SessionAdmission,
+    provisioned: HashSet<SessionKey>,
     /// Counter for generating unique session IDs.
     next_session_id: AtomicU32,
     /// Optional timeout after which inactive sessions may be cleaned up.
@@ -316,7 +317,23 @@ impl SessionManager {
     /// for longer than the timeout may be cleaned up via `cleanup_stale_sessions()`.
     /// If `max_sessions` is `Some`, new sessions will be rejected once the limit is reached.
     pub fn new(session_timeout: Option<Duration>, max_sessions: Option<usize>) -> Self {
+        Self::with_admission(
+            session_timeout,
+            max_sessions,
+            SessionAdmission::Permissive,
+            HashSet::new(),
+        )
+    }
+
+    pub fn with_admission(
+        session_timeout: Option<Duration>,
+        max_sessions: Option<usize>,
+        admission: SessionAdmission,
+        provisioned: HashSet<SessionKey>,
+    ) -> Self {
         SessionManager {
+            admission,
+            provisioned,
             sessions: RwLock::new(HashMap::new()),
             next_session_id: AtomicU32::new(0),
             session_timeout,
@@ -324,6 +341,37 @@ impl SessionManager {
             draining: AtomicBool::new(false),
             saturated: AtomicBool::new(false),
         }
+    }
+
+    /// Admission is independent of runtime state: expiry never removes provisioning.
+    pub fn admits(&self, key: &SessionKey) -> bool {
+        self.admission == SessionAdmission::Permissive || self.provisioned.contains(key)
+    }
+
+    pub fn admission(&self) -> SessionAdmission {
+        self.admission
+    }
+
+    pub fn provisioned_count(&self) -> usize {
+        self.provisioned.len()
+    }
+
+    /// Expire exactly one matching runtime entry, refusing an ambiguous client.
+    /// The optional internal session ID is the ID returned by the control API.
+    pub fn expire_matching(
+        &self,
+        client: SocketAddr,
+        session_id: Option<u32>,
+    ) -> Result<bool, &'static str> {
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        let mut matches = sessions.iter().filter(|(key, entry)| {
+            key.client == client && session_id.is_none_or(|id| entry.session.get_id() == id)
+        });
+        let key = matches.next().map(|(key, _)| *key);
+        if matches.next().is_some() {
+            return Err("multiple sessions for client; specify session_id");
+        }
+        Ok(key.is_some_and(|key| sessions.remove(&key).is_some()))
     }
 
     /// Returns true when a new entry must not be stored: the table is at
@@ -339,7 +387,8 @@ impl SessionManager {
     }
 
     /// Removes the session for `client`. Returns true if it existed.
-    pub fn expire_session(&self, client: SocketAddr) -> bool {
+    pub fn expire_session(&self, client: impl Into<SessionKey>) -> bool {
+        let client = client.into();
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         sessions.remove(&client).is_some()
     }
@@ -384,7 +433,8 @@ impl SessionManager {
     ///
     /// Creates a new session if one doesn't exist for the client.
     /// Also updates the last_active time in a single lock acquisition.
-    pub fn generate_sequence_number(&self, client: SocketAddr) -> u32 {
+    pub fn generate_sequence_number(&self, client: impl Into<SessionKey>) -> u32 {
+        let client = client.into();
         let (seq, _session) = self.get_session_and_seq(client);
         seq
     }
@@ -393,14 +443,15 @@ impl SessionManager {
     ///
     /// Creates a new session if one doesn't exist. This is useful for accessing
     /// session state (counters, last reflection) without consuming a sequence number.
-    pub fn get_or_create_session(&self, client: SocketAddr) -> Arc<Session> {
+    pub fn get_or_create_session(&self, client: impl Into<SessionKey>) -> Arc<Session> {
+        let client = client.into();
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
 
         if let Some(entry) = sessions.get_mut(&client) {
             entry.last_active = Instant::now();
             Arc::clone(&entry.session)
         } else {
-            if self.reject_new_entry(sessions.len(), client) {
+            if !self.admits(&client) || self.reject_new_entry(sessions.len(), client.client) {
                 // Return a temporary session that won't be stored
                 return Arc::new(Session::new(u32::MAX));
             }
@@ -429,7 +480,8 @@ impl SessionManager {
     /// creating one or refreshing its activity time. Used by the kernel
     /// TX-timestamp drain to apply late corrections without resurrecting
     /// expired sessions.
-    pub fn get_session(&self, client: SocketAddr) -> Option<Arc<Session>> {
+    pub fn get_session(&self, client: impl Into<SessionKey>) -> Option<Arc<Session>> {
+        let client = client.into();
         let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.get(&client).map(|e| Arc::clone(&e.session))
     }
@@ -439,7 +491,8 @@ impl SessionManager {
     /// Returns both the sequence number and an Arc to the session, allowing the
     /// caller to access session state (e.g., packet counters for Direct Measurement TLV).
     /// Creates a new session if one doesn't exist for the client.
-    pub fn get_session_and_seq(&self, client: SocketAddr) -> (u32, Arc<Session>) {
+    pub fn get_session_and_seq(&self, client: impl Into<SessionKey>) -> (u32, Arc<Session>) {
+        let client = client.into();
         // Take write lock once for both session lookup and activity update
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
 
@@ -448,7 +501,7 @@ impl SessionManager {
             entry.last_active = Instant::now();
             Arc::clone(&entry.session)
         } else {
-            if self.reject_new_entry(sessions.len(), client) {
+            if !self.admits(&client) || self.reject_new_entry(sessions.len(), client.client) {
                 // Return a temporary session that won't be stored
                 let session = Arc::new(Session::new(u32::MAX));
                 return (0, session);
@@ -536,7 +589,22 @@ impl SessionManager {
             .iter()
             .map(|(addr, entry)| {
                 (
-                    *addr,
+                    addr.client,
+                    entry.session.get_received_count(),
+                    entry.session.get_transmitted_count(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn session_summaries_by_key(&self) -> Vec<(SessionKey, u32, u32)> {
+        self.sessions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    *key,
                     entry.session.get_received_count(),
                     entry.session.get_transmitted_count(),
                 )
@@ -552,7 +620,8 @@ impl SessionManager {
             .map(|(addr, entry)| {
                 let (last_seq, _ts) = entry.session.get_last_reflection();
                 SessionSummary {
-                    client_addr: *addr,
+                    key: *addr,
+                    client_addr: addr.client,
                     session_id: entry.session.get_id(),
                     packets_received: entry.session.get_received_count(),
                     packets_transmitted: entry.session.get_transmitted_count(),
@@ -566,6 +635,7 @@ impl SessionManager {
 
 /// Extended session summary for SNMP reporting.
 pub struct SessionSummary {
+    pub key: SessionKey,
     /// Client address (IP:port).
     pub client_addr: SocketAddr,
     /// Session identifier.
@@ -586,6 +656,81 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn complete_identity_isolates_all_runtime_state() {
+        for (source, destination) in [
+            ("127.0.0.1:4000", "127.0.0.1:862"),
+            ("[::1]:4000", "[::1]:862"),
+        ] {
+            let base: SessionKey = format!("42,{source},{destination}").parse().unwrap();
+            let mut other_destination = base;
+            other_destination.local.set_port(863);
+            let keys = [
+                base,
+                SessionKey { ssid: 43, ..base },
+                other_destination,
+                SessionKey {
+                    sender_micro_session_id: Some(1),
+                    ..base
+                },
+                SessionKey {
+                    sender_micro_session_id: Some(2),
+                    ..base
+                },
+            ];
+            let manager = SessionManager::new(None, None);
+            for key in keys {
+                let (seq, session) = manager.get_session_and_seq(key);
+                assert_eq!(seq, 0);
+                assert_eq!(session.get_received_count(), 0);
+                assert_eq!(session.get_transmitted_count(), 0);
+                assert_eq!(session.check_replay(100), ReplayVerdict::New);
+                assert_eq!(session.get_last_reflection().0, 0);
+                session.record_received();
+                session.record_transmitted();
+                session.record_reflection(100, 123);
+            }
+            assert_eq!(manager.session_count(), 5);
+            for key in keys {
+                assert_eq!(manager.generate_sequence_number(key), 1);
+                let session = manager.get_session(key).unwrap();
+                assert_eq!(session.check_replay(100), ReplayVerdict::Replay);
+                assert_eq!(session.get_received_count(), 1);
+                assert_eq!(session.get_transmitted_count(), 1);
+                assert_eq!(session.get_last_reflection(), (100, 123));
+            }
+            assert!(manager.expire_matching(base.client, None).is_err());
+            let id = manager.get_session(base).unwrap().get_id();
+            assert_eq!(manager.expire_matching(base.client, Some(id)), Ok(true));
+            assert!(manager.get_session(base).is_none());
+            assert_eq!(manager.session_count(), 4);
+        }
+    }
+
+    #[test]
+    fn provisioning_survives_runtime_expiry_and_denies_other_identities() {
+        let key: SessionKey = "42,127.0.0.1:4000,127.0.0.1:862,1".parse().unwrap();
+        let manager = SessionManager::with_admission(
+            Some(Duration::ZERO),
+            None,
+            SessionAdmission::Provisioned,
+            HashSet::from([key]),
+        );
+        assert!(manager.admits(&key));
+        assert!(!manager.admits(&SessionKey { ssid: 43, ..key }));
+        assert!(!manager.admits(&SessionKey {
+            sender_micro_session_id: None,
+            ..key
+        }));
+        manager.get_or_create_session(key);
+        assert_eq!(manager.cleanup_stale_sessions(), 1);
+        assert!(manager.admits(&key));
+        assert_eq!(manager.provisioned_count(), 1);
+        manager.get_or_create_session(key);
+        assert!(manager.expire_session(key));
+        assert!(manager.admits(&key));
+    }
 
     // -----------------------------------------------------------------------
     // Replay detection (draft-ietf-ippm-asymmetrical-pkts-14 §5)
@@ -797,8 +942,8 @@ mod tests {
         assert_eq!(mgr.max_sessions(), 2);
         mgr.set_max_sessions(1);
         assert_eq!(mgr.max_sessions(), 1);
-        mgr.get_or_create_session("10.0.0.1:1".parse().unwrap());
-        mgr.get_or_create_session("10.0.0.2:2".parse().unwrap());
+        mgr.get_or_create_session("10.0.0.1:1".parse::<SocketAddr>().unwrap());
+        mgr.get_or_create_session("10.0.0.2:2".parse::<SocketAddr>().unwrap());
         assert_eq!(mgr.session_count(), 1, "cap applies to new creations");
     }
 

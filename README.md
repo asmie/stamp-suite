@@ -16,7 +16,7 @@ A single binary that runs as either a Session-Sender (client) or a Session-Refle
 - Full RFC 8762 compliance — open and authenticated modes
 - RFC 8972 TLV extensions, RFC 9503 (Segment Routing), RFC 9534 (LAG micro-sessions)
 - HMAC packet authentication and TLV integrity
-- Stateful reflector mode with per-client session tracking
+- Stateful reflector mode with full session identity tracking
 - NTP and PTP timestamp formats; real TTL/Hop Limit capture on all platforms
 - Optional Prometheus metrics endpoint and SNMP AgentX sub-agent (Unix)
 - Backward compatible with non-TLV implementations
@@ -112,8 +112,14 @@ stamp-suite -i
 # Bind a specific address/port; print per-packet stats
 stamp-suite -i --local-addr 192.168.1.100 --local-port 8620 -R
 
-# Stateful reflector with per-client sequence tracking (RFC 8972 §4)
+# Stateful reflector with independent session sequences (RFC 8762 §4.2)
 stamp-suite -i --stateful-reflector --session-timeout 600
+
+# Provisioned reflector: only this source/destination/SSID may use the session
+stamp-suite --is-reflector --local-addr 192.0.2.20 --local-port 862 \
+  --stateful-reflector --session-admission provisioned \
+  --reflector-session '42,192.0.2.10:4862,192.0.2.20:862'
+
 ```
 
 ### Sender
@@ -249,3 +255,11 @@ MIT — see [LICENSE](LICENSE).
 - [draft-ietf-ippm-asymmetrical-pkts-14](https://datatracker.ietf.org/doc/draft-ietf-ippm-asymmetrical-pkts/) — Asymmetrical Traffic (IETF IPPM WG, RFC Editor queue)
 - [draft-ietf-ippm-stamp-ext-hdr-07](https://datatracker.ietf.org/doc/draft-ietf-ippm-stamp-ext-hdr/) — Reflected IP header / IPv6 extension headers, basis for TLV Types 246/247 (IETF IPPM WG, active)
 - [draft-gandhi-ippm-stamp-ber-05](https://datatracker.ietf.org/doc/draft-gandhi-ippm-stamp-ber/) — Residual Bit Error Rate Measurement (individual draft)
+
+Session state is separated by both UDP endpoints, SSID, and (when present)
+the sender micro-session ID. `--session-admission permissive` is the legacy
+default: it learns sessions from traffic and does **not** enforce RFC 8972 §3
+pre-provisioning. Use `--session-admission provisioned` and repeat
+`--reflector-session 'SSID,SOURCE,DESTINATION[,SENDER_MICRO_ID]'` for RFC 8972
+session admission; unmatched packets are discarded in both stateless and
+stateful modes. See [session provisioning](doc/usage.md#session-provisioning).

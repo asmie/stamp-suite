@@ -836,9 +836,29 @@ fn handle_stamp_packet(
         .packets_received
         .fetch_add(1, AtomicOrdering::Relaxed);
 
+    let Some(session_key) = super::packet_session_key(
+        data,
+        pkt.src,
+        SocketAddr::new(pkt.dst_addr, config.local_port),
+        config.use_auth,
+    ) else {
+        config
+            .counters
+            .packets_dropped
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        return;
+    };
+    if !config.session_manager.admits(&session_key) {
+        config
+            .counters
+            .packets_dropped
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        return;
+    }
+
     // Get session counters for Direct Measurement and Follow-Up Telemetry.
-    // Always tracked per-client, independent of --stateful-reflector.
-    let counter_session = config.session_manager.get_or_create_session(pkt.src);
+    // Always tracked per session identity, independent of --stateful-reflector.
+    let counter_session = config.session_manager.get_or_create_session(session_key);
     counter_session.record_received();
 
     // draft-ietf-ippm-asymmetrical-pkts-14 §5: classify the received Sequence
@@ -879,11 +899,7 @@ fn handle_stamp_packet(
             hmac_key: config.hmac_key.as_ref(),
             hmac_key_set: keys_guard.as_ref(),
             require_hmac: config.require_hmac,
-            session_manager: if config.stateful_reflector {
-                Some(&config.session_manager)
-            } else {
-                None
-            },
+            session_manager: Some(&config.session_manager),
             stateful_reflector: config.stateful_reflector,
             tlv_mode: config.tlv_mode,
             verify_tlv_hmac: config.verify_tlv_hmac,
@@ -1112,8 +1128,8 @@ fn handle_stamp_packet(
                 .packets_reflected
                 .fetch_add(1, AtomicOrdering::Relaxed);
             // Record transmission for Direct Measurement and Follow-Up Telemetry.
-            // Always tracked per-client, independent of --stateful-reflector.
-            let session = config.session_manager.get_or_create_session(pkt.src);
+            // Always tracked per session identity, independent of --stateful-reflector.
+            let session = config.session_manager.get_or_create_session(session_key);
             session.record_transmitted();
             if response.data.len() >= 4 {
                 let reflected_seq = u32::from_be_bytes([

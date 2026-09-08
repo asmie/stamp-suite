@@ -58,3 +58,10 @@ cargo test --all-features          # default — skips pnet tests
 cargo fmt --all -- --check         # formatting gate
 cargo clippy --all --all-features --tests -- -D warnings   # lint gate
 ```
+
+`session_identity_test.rs` exercises the real nix reflector with IPv4/IPv6,
+open/authenticated traffic, permissive/provisioned admission, and
+stateless/stateful replies. It checks independent SSIDs and micro-sessions,
+source-port admission, and Linux wildcard-bind destination separation. Session
+unit tests cover counters, replay windows, Follow-Up isolation, expiry and
+persistent provisioning; control tests cover ambiguous expiry (409).

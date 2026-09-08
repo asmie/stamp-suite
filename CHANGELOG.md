@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Separate reflector sequences, counters, replay windows, and Follow-Up state
+  by UDP endpoints, SSID, and sender micro-session ID. Add exact static session
+  admission with `--session-admission provisioned` / `--reflector-session`;
+  retain documented permissive admission as the legacy default. Report complete
+  identity in control/shutdown output and require disambiguation for control
+  expiry when one source has multiple sessions.
+
 - Clear Tokio socket readiness after a raw `recvmsg` returns `WouldBlock`.
   The nix reflector and the sender's ECN/kernel-timestamp receive paths now
   sleep when idle after traffic instead of consuming a CPU core. Regression

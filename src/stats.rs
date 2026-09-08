@@ -3,6 +3,7 @@
 //! Provides rich sender statistics (RTT percentiles, jitter, standard deviation),
 //! reflector shutdown summaries, and multiple output formats (text, JSON, CSV).
 
+#[cfg(test)]
 use std::net::SocketAddr;
 
 /// Output format for statistics reporting.
@@ -568,6 +569,9 @@ fn fmt_opt(v: Option<f64>) -> String {
 #[derive(serde::Serialize)]
 pub struct ClientSessionStats {
     pub client: String,
+    pub local: String,
+    pub ssid: u16,
+    pub sender_micro_session_id: Option<u16>,
     pub packets_received: u32,
     pub packets_transmitted: u32,
 }
@@ -604,8 +608,13 @@ impl ReflectorStats {
             println!("Sessions:");
             for s in &self.sessions {
                 println!(
-                    "  {} - rx: {}, tx: {}",
-                    s.client, s.packets_received, s.packets_transmitted
+                    "  {} -> {} SSID={} micro={:?} - rx: {}, tx: {}",
+                    s.client,
+                    s.local,
+                    s.ssid,
+                    s.sender_micro_session_id,
+                    s.packets_received,
+                    s.packets_transmitted
                 );
             }
         }
@@ -635,14 +644,17 @@ pub fn build_reflector_stats(
     packets_received: u64,
     packets_reflected: u64,
     packets_dropped: u64,
-    session_summaries: Vec<(SocketAddr, u32, u32)>,
+    session_summaries: Vec<(crate::session::SessionKey, u32, u32)>,
     active_sessions: usize,
     uptime_seconds: f64,
 ) -> ReflectorStats {
     let sessions = session_summaries
         .into_iter()
         .map(|(addr, rx, tx)| ClientSessionStats {
-            client: addr.to_string(),
+            client: addr.client.to_string(),
+            local: addr.local.to_string(),
+            ssid: addr.ssid,
+            sender_micro_session_id: addr.sender_micro_session_id,
             packets_received: rx,
             packets_transmitted: tx,
         })
@@ -1009,6 +1021,9 @@ mod tests {
             uptime_seconds: 60.0,
             sessions: vec![ClientSessionStats {
                 client: "127.0.0.1:12345".to_string(),
+                local: "127.0.0.1:862".to_string(),
+                ssid: 42,
+                sender_micro_session_id: None,
                 packets_received: 100,
                 packets_transmitted: 98,
             }],
@@ -1046,12 +1061,12 @@ mod tests {
     fn test_build_reflector_stats() {
         let summaries = vec![
             (
-                "127.0.0.1:1001".parse::<SocketAddr>().unwrap(),
+                "127.0.0.1:1001".parse::<SocketAddr>().unwrap().into(),
                 50u32,
                 48u32,
             ),
             (
-                "127.0.0.1:1002".parse::<SocketAddr>().unwrap(),
+                "127.0.0.1:1002".parse::<SocketAddr>().unwrap().into(),
                 30u32,
                 30u32,
             ),

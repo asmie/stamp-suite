@@ -93,6 +93,8 @@ async fn get_status(State(s): State<ControlState>) -> Json<serde_json::Value> {
         "uptime_seconds": s.start_time.elapsed().as_secs(),
         "draining": s.session_manager.is_draining(),
         "sessions": s.session_manager.session_count(),
+        "session_admission": s.session_manager.admission(),
+        "provisioned_sessions": s.session_manager.provisioned_count(),
         "counters": {
             "packets_received": s.counters.packets_received.load(Ordering::Relaxed),
             "packets_reflected": s.counters.packets_reflected.load(Ordering::Relaxed),
@@ -109,6 +111,9 @@ async fn get_status(State(s): State<ControlState>) -> Json<serde_json::Value> {
 #[derive(serde::Serialize)]
 struct SessionDto {
     client: String,
+    local: String,
+    ssid: u16,
+    sender_micro_session_id: Option<u16>,
     session_id: u32,
     packets_received: u32,
     packets_transmitted: u32,
@@ -120,6 +125,9 @@ impl From<SessionSummary> for SessionDto {
     fn from(s: SessionSummary) -> Self {
         Self {
             client: s.client_addr.to_string(),
+            local: s.key.local.to_string(),
+            ssid: s.key.ssid,
+            sender_micro_session_id: s.key.sender_micro_session_id,
             session_id: s.session_id,
             packets_received: s.packets_received,
             packets_transmitted: s.packets_transmitted,
@@ -143,17 +151,20 @@ async fn get_sessions(State(s): State<ControlState>) -> Json<Vec<SessionDto>> {
 #[serde(deny_unknown_fields)]
 struct ExpireRequest {
     client: std::net::SocketAddr,
+    session_id: Option<u32>,
 }
 
 async fn post_expire_session(
     State(s): State<ControlState>,
     Json(req): Json<ExpireRequest>,
 ) -> Response {
-    if s.session_manager.expire_session(req.client) {
-        log::info!("control: session expired client={}", req.client);
-        StatusCode::OK.into_response()
-    } else {
-        err(StatusCode::NOT_FOUND, "no session for that client")
+    match s
+        .session_manager
+        .expire_matching(req.client, req.session_id)
+    {
+        Ok(true) => StatusCode::OK.into_response(),
+        Ok(false) => err(StatusCode::NOT_FOUND, "no matching session"),
+        Err(message) => err(StatusCode::CONFLICT, message),
     }
 }
 
@@ -832,6 +843,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn sessions_expiry_requires_disambiguation_for_shared_source() {
+        let state = test_state();
+        let key: crate::session::SessionKey = "42,127.0.0.1:4000,127.0.0.1:862,7".parse().unwrap();
+        let first = state.session_manager.get_or_create_session(key);
+        state
+            .session_manager
+            .get_or_create_session(crate::session::SessionKey { ssid: 43, ..key });
+        let app = router(state.clone());
+        let entries = get_json(&app, "/v1/sessions").await;
+        assert_eq!(entries.as_array().unwrap().len(), 2);
+        for entry in entries.as_array().unwrap() {
+            assert_eq!(entry["local"], "127.0.0.1:862");
+            assert_eq!(entry["sender_micro_session_id"], 7);
+            assert!(entry["ssid"] == 42 || entry["ssid"] == 43);
+        }
+        for (body, expected) in [
+            (
+                serde_json::json!({"client": key.client}),
+                StatusCode::CONFLICT,
+            ),
+            (
+                serde_json::json!({"client": key.client, "session_id": first.get_id()}),
+                StatusCode::OK,
+            ),
+            (
+                serde_json::json!({"client": key.client, "session_id": first.get_id()}),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/sessions/expire")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        assert_eq!(state.session_manager.session_count(), 1);
     }
 
     #[tokio::test]

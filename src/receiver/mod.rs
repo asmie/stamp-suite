@@ -302,6 +302,66 @@ fn peek_ssid(data: &[u8], use_auth: bool) -> u16 {
     }
 }
 
+/// Extract identity without allocating runtime state. Malformed TLVs supply no
+/// identity and terminate scanning, matching the ordinary M-flag echo rules.
+/// Duplicate Micro-Session IDs are ambiguous and cannot select a session.
+fn packet_session_key(
+    data: &[u8],
+    src: SocketAddr,
+    local: SocketAddr,
+    use_auth: bool,
+) -> Option<crate::session::SessionKey> {
+    let mut key = crate::session::SessionKey {
+        client: src,
+        local,
+        ssid: peek_ssid(data, use_auth),
+        sender_micro_session_id: None,
+    };
+    let base = if use_auth {
+        AUTH_BASE_SIZE
+    } else {
+        UNAUTH_BASE_SIZE
+    };
+    let mut offset = base;
+    while offset < data.len() {
+        let tail = &data[offset..];
+        if tail.len() < 4 {
+            break;
+        }
+        let len = u16::from_be_bytes([tail[2], tail[3]]) as usize;
+        if tail[1] == 11 {
+            if key.sender_micro_session_id.is_some() {
+                return None;
+            }
+            if len != 4 || tail.len() < 8 {
+                break;
+            }
+            key.sender_micro_session_id = Some(u16::from_be_bytes([tail[4], tail[5]]));
+        }
+        if tail.len() < 4 + len {
+            break;
+        }
+        offset += 4 + len;
+    }
+    Some(key)
+}
+
+impl ProcessingContext<'_> {
+    fn packet_session_key(
+        &self,
+        data: &[u8],
+        src: SocketAddr,
+        use_auth: bool,
+    ) -> Option<crate::session::SessionKey> {
+        let local = self
+            .packet_addr_info
+            .as_ref()
+            .map(|info| SocketAddr::new(info.dst_addr, info.dst_port))
+            .unwrap_or_else(|| crate::session::SessionKey::from(src).local);
+        packet_session_key(data, src, local, use_auth)
+    }
+}
+
 /// Resolves the HMAC key to use for an incoming packet.
 ///
 /// Precedence (B6): if `ctx.hmac_key_set` is `Some`, that set is
@@ -617,7 +677,25 @@ pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
 
     ReceiverSharedState {
         counters: Arc::new(ReflectorCounters::new()),
-        session_manager: Arc::new(SessionManager::new(session_timeout, max_sessions)),
+        session_manager: Arc::new(match conf.provisioned_sessions() {
+            Ok(keys) => SessionManager::with_admission(
+                session_timeout,
+                max_sessions,
+                conf.session_admission,
+                keys,
+            ),
+            Err(error) => {
+                // Startup validates first. Library callers that skip validation
+                // must still fail closed rather than enabling permissive admission.
+                log::error!("Invalid session admission configuration: {error}");
+                SessionManager::with_admission(
+                    session_timeout,
+                    max_sessions,
+                    crate::session::SessionAdmission::Provisioned,
+                    Default::default(),
+                )
+            }
+        }),
         start_time: Instant::now(),
         rate_limiter,
         capture_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -638,7 +716,7 @@ pub fn print_reflector_stats(
         counters.packets_received.load(Ordering::Relaxed),
         counters.packets_reflected.load(Ordering::Relaxed),
         counters.packets_dropped.load(Ordering::Relaxed),
-        session_manager.session_summaries(),
+        session_manager.session_summaries_by_key(),
         session_manager.session_count(),
         start_time.elapsed().as_secs_f64(),
     );
@@ -1335,7 +1413,7 @@ pub struct ProcessingContext<'a> {
     pub hmac_key_set: Option<&'a crate::crypto::HmacKeySet>,
     /// Whether HMAC is required.
     pub require_hmac: bool,
-    /// Session manager for stateful mode.
+    /// Session admission and state; live backends supply this in both modes.
     pub session_manager: Option<&'a Arc<SessionManager>>,
     /// Whether the reflector runs in stateful mode (`--stateful-reflector`).
     /// Gates Follow-Up Telemetry reporting: in stateless mode (RFC 8762 §4.2)
@@ -1510,6 +1588,12 @@ pub fn process_stamp_packet(
     use_auth: bool,
     ctx: &ProcessingContext,
 ) -> Option<StampResponse> {
+    if let Some(manager) = ctx.session_manager {
+        let key = ctx.packet_session_key(data, src, use_auth)?;
+        if !manager.admits(&key) {
+            return None;
+        }
+    }
     #[cfg(feature = "metrics")]
     let start_time = if ctx.metrics_enabled {
         Some(std::time::Instant::now())
@@ -1725,7 +1809,13 @@ fn process_auth_packet(
     // Generate reflector sequence number only after successful validation
     let reflector_seq = ctx
         .session_manager
-        .map(|mgr| mgr.generate_sequence_number(src));
+        .filter(|_| ctx.stateful_reflector)
+        .map(|mgr| {
+            mgr.generate_sequence_number(
+                ctx.packet_session_key(data, src, true)
+                    .expect("identity checked before processing"),
+            )
+        });
 
     // Use TLV-aware assembly if packet has TLVs
     if has_tlvs {
@@ -1792,7 +1882,13 @@ fn process_unauth_packet(
             // Generate reflector sequence number only after successful validation
             let reflector_seq = ctx
                 .session_manager
-                .map(|mgr| mgr.generate_sequence_number(src));
+                .filter(|_| ctx.stateful_reflector)
+                .map(|mgr| {
+                    mgr.generate_sequence_number(
+                        ctx.packet_session_key(data, src, false)
+                            .expect("identity checked before processing"),
+                    )
+                });
 
             // Use TLV-aware assembly if packet has TLVs
             if has_tlvs {
@@ -2681,6 +2777,59 @@ pub fn assemble_auth_answer_with_tlvs(
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn identity_parser_rejects_ambiguous_micro_session_ids() {
+        let src: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+        let local: SocketAddr = "127.0.0.1:862".parse().unwrap();
+        for auth in [false, true] {
+            let mut data = vec![
+                0;
+                if auth {
+                    AUTH_BASE_SIZE
+                } else {
+                    UNAUTH_BASE_SIZE
+                }
+            ];
+            let offset = if auth { 26 } else { 14 };
+            data[offset..offset + 2].copy_from_slice(&42u16.to_be_bytes());
+            data.extend_from_slice(&[0, 11, 0, 4, 0, 7, 0, 0]);
+            let key = packet_session_key(&data, src, local, auth).unwrap();
+            assert_eq!(key.ssid, 42);
+            assert_eq!(key.sender_micro_session_id, Some(7));
+            // A learned reflector member must not change the lookup key.
+            *data.last_mut().unwrap() = 9;
+            assert_eq!(packet_session_key(&data, src, local, auth), Some(key));
+            data.extend_from_slice(&[0, 11, 0, 4, 0, 8, 0, 0]);
+            assert!(packet_session_key(&data, src, local, auth).is_none());
+            data.truncate(data.len() - 9);
+            assert_eq!(
+                packet_session_key(&data, src, local, auth)
+                    .unwrap()
+                    .sender_micro_session_id,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn empty_provisioning_drops_packets_without_creating_state() {
+        let manager = Arc::new(SessionManager::with_admission(
+            None,
+            None,
+            crate::session::SessionAdmission::Provisioned,
+            Default::default(),
+        ));
+        for stateful in [false, true] {
+            let ctx = ProcessingContext {
+                session_manager: Some(&manager),
+                stateful_reflector: stateful,
+                ..test_ctx(0, 0)
+            };
+            assert!(process_stamp_packet(&[0; 44], loopback_src(), 64, false, &ctx).is_none());
+            assert_eq!(manager.session_count(), 0);
+        }
+    }
 
     /// Creates a default ProcessingContext for tests with given DSCP/ECN values.
     fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext<'static> {

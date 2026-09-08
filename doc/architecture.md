@@ -134,12 +134,15 @@ above.
 
 ## Packet Processing Pipeline
 
-Both backends, after capturing a packet, hand it to the same shared pipeline in `receiver/mod.rs`:
+Both backends first extract identity and check admission. They currently
+allocate/update runtime counters before authentication (review finding 03,
+still pending); independent sequence generation happens after base validation.
+They then use the shared processing stages in `receiver/mod.rs`:
 
 1. **Parse** — Decode the STAMP base header into `PacketUnauthenticated` or `PacketAuthenticated`.
 2. **HMAC verify** — In authenticated mode, `crypto::verify_packet_hmac` checks the keyed digest over the base packet. Failures increment `hmac_failures_total` and drop the packet.
 3. **TLV pipeline** — Walk the TLV chain. For each known type, run its typed parser; unknown types are preserved and echoed with the U-flag set (per RFC 8972 §4.2).
-4. **Session lookup / update** — Per-client counters (`reflector_rx_count`, `reflector_tx_count`, `last_reflection`) are always tracked. If `--stateful-reflector` is set, a per-client sequence number is also assigned via `SessionManager`.
+4. **Session lookup / update** — Per-session counters (`reflector_rx_count`, `reflector_tx_count`, `last_reflection`) are always tracked. If `--stateful-reflector` is set, a per-session sequence number is also assigned via `SessionManager`.
 5. **RFC 9503 processing** — Destination Node Address matching against `local_addresses`; Return Path action selection (Normal, SuppressReply, AlternateAddress, Srv6Forward, UnsupportedSr). Encoded into a `ReturnPathAction` carried in `StampResponse`; the send path attempts best-effort SRv6 SRH forwarding for `Srv6Forward` (see Return Path TLV below). A *matched* Destination Node Address is also carried as `StampResponse::reply_source`, and both send paths pin it as the reply's IP source address via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message (`src/reply_source.rs`, RFC 9503 §3). That is Linux-only and best-effort: elsewhere, or on any failure, the reply goes out with the OS's choice of source, which is still a correct reply — the SHOULD is about which correct source is preferred. This matters on a wildcard or multi-homed bind, where the kernel picks by route rather than by what the sender asked for; on a single-address bind the two coincide anyway.
 6. **Assemble reply** — `assemble_unauth_answer_with_tlvs` / `assemble_auth_answer_with_tlvs` build the response, populate reflector-side TLV fields (DM counters, Follow-Up Telemetry, Timestamp Info, Location, Class of Service, etc.), and recompute HMACs (base + TLV) if applicable.
 7. **Send** — Reply to the original source, an alternate address (Return Path), or suppress entirely.
@@ -178,7 +181,17 @@ The AgentX event loop runs inside `tokio::task::spawn_blocking`. A separate supe
 
 ## Session Management
 
-`SessionManager` is **always** instantiated, regardless of the `--stateful-reflector` flag. The flag only controls one thing: whether the assembler uses per-client sequence numbering (`ProcessingContext.session_manager: Option<&Arc<SessionManager>>`) instead of a global counter. Per-client packet counters and last-reflection tracking — needed by the Direct Measurement (Type 5) and Follow-Up Telemetry (Type 7) TLVs — run unconditionally because the TLV semantics require them.
+`SessionManager` is **always** instantiated. Both backends extract a
+`SessionKey` from the actual source/destination UDP endpoints, SSID, and optional
+sender micro-session ID before admission. `--session-admission provisioned`
+requires exact membership in immutable startup rules; permissive mode learns
+runtime sessions from traffic. The core also enforces admission when a manager
+is supplied. `--stateful-reflector` controls only sequence generation; stateless
+replies echo the sender sequence. Counters and Follow-Up/replay state are keyed
+by the same full identity in both modes. Kernel TX timestamp correlation retains
+the full key. Runtime expiry leaves provisioning intact. The legacy source-only
+library API maps callers to SSID 0 with an unknown destination; live backends
+always use the full key.
 
 Sessions are reaped after `--session-timeout` seconds of inactivity (default 300 s). When the SNMP feature is enabled, `SessionSummary` / `session_summaries_extended()` exposes per-session data for the SNMP session table.
 
@@ -291,7 +304,7 @@ stamp-suite --remote-addr 192.168.1.100 --direct-measurement
 - **Sender** fills its transmit count (incremented per packet)
 - **Reflector** fills its receive and transmit counts for the client's session
 
-Counters are tracked per-client regardless of whether `--stateful-reflector` is enabled.
+Counters are tracked per full session identity regardless of whether `--stateful-reflector` is enabled.
 
 ### Follow-Up Telemetry TLV (RFC 8972 §4.7)
 

@@ -8,6 +8,8 @@ use crate::{
     tlv::LocationDisclosure,
 };
 
+use crate::session_identity::{SessionAdmission, SessionKey};
+
 pub use crate::clock_format::ClockFormat;
 pub use crate::hwtstamp::HwTsMode;
 pub use crate::stats::OutputFormat;
@@ -309,13 +311,26 @@ pub struct Configuration {
     #[clap(long)]
     pub strict_packets: bool,
 
-    /// Enable stateful reflector mode per RFC 8972 Section 4. The reflector maintains
-    /// independent sequence counters for each client (IP:port) instead of echoing
+    /// Enable stateful reflector mode per RFC 8762 Section 4.2. The reflector maintains
+    /// independent sequence counters for each full session identity instead of echoing
     /// the sender's sequence number, allowing clients to detect reflector-side packet loss.
     #[clap(long)]
     pub stateful_reflector: bool,
 
-    /// Session timeout in seconds for stateful reflector mode. Sessions inactive for
+    /// Session admission: permissive learns incoming sessions; provisioned only
+    /// answers exact --reflector-session identities (RFC 8972 Section 3).
+    #[clap(long, value_enum, default_value = "permissive")]
+    pub session_admission: SessionAdmission,
+
+    /// Provision an exact session; repeat for each tuple/SSID/member. SSID 0
+    /// selects a base session without an explicit SSID. IPv6 uses brackets.
+    #[clap(
+        long = "reflector-session",
+        value_name = "SSID,SOURCE,DESTINATION[,MICRO_ID]"
+    )]
+    pub reflector_sessions: Vec<String>,
+
+    /// Session timeout in seconds for reflector runtime state. Sessions inactive for
     /// this duration may be cleaned up. Default: 300 (5 minutes). Set to 0 to disable.
     #[clap(long, default_value_t = 300)]
     pub session_timeout: u64,
@@ -979,7 +994,46 @@ impl Configuration {
         })
     }
 
+    pub fn provisioned_sessions(
+        &self,
+    ) -> Result<std::collections::HashSet<SessionKey>, ConfigurationError> {
+        let invalid = |msg: String| ConfigurationError::InvalidConfiguration(msg);
+        if (!self.reflector_sessions.is_empty()
+            || self.session_admission == SessionAdmission::Provisioned)
+            && !self.is_reflector
+        {
+            return Err(invalid(
+                "session admission options require --is-reflector".into(),
+            ));
+        }
+        if !self.reflector_sessions.is_empty()
+            && self.session_admission != SessionAdmission::Provisioned
+        {
+            return Err(invalid(
+                "--reflector-session requires --session-admission provisioned".into(),
+            ));
+        }
+        let mut keys = std::collections::HashSet::new();
+        for spec in &self.reflector_sessions {
+            let key: SessionKey = spec.parse().map_err(invalid)?;
+            if key.local.is_ipv4() != self.local_addr.is_ipv4()
+                || (!self.local_addr.is_unspecified() && key.local.ip() != self.local_addr)
+                || key.local.port() != self.local_port
+            {
+                return Err(invalid(format!(
+                    "provisioned destination {} does not match reflector bind address/port",
+                    key.local
+                )));
+            }
+            if !keys.insert(key) {
+                return Err(invalid(format!("duplicate provisioned session: {key}")));
+            }
+        }
+        Ok(keys)
+    }
+
     pub fn validate(&self) -> Result<(), ConfigurationError> {
+        self.provisioned_sessions()?;
         // Surface a bad Location disclosure list at startup rather than
         // silently falling back to a default policy per packet.
         self.location_disclosure()?;
@@ -1561,6 +1615,8 @@ impl Configuration {
         merge!(require_hmac);
         merge!(strict_packets);
         merge!(stateful_reflector);
+        merge!(session_admission);
+        merge!(reflector_sessions);
         merge!(session_timeout);
         merge!(location_disclose);
         merge!(drop_replayed);
@@ -1674,6 +1730,8 @@ pub struct FileConfiguration {
     pub require_hmac: Option<bool>,
     pub strict_packets: Option<bool>,
     pub stateful_reflector: Option<bool>,
+    pub session_admission: Option<SessionAdmission>,
+    pub reflector_sessions: Option<Vec<String>>,
     pub session_timeout: Option<u64>,
     pub location_disclose: Option<String>,
     pub drop_replayed: Option<bool>,
@@ -1781,6 +1839,8 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "require_hmac":  { "type": "boolean" },
     "strict_packets": { "type": "boolean" },
     "stateful_reflector": { "type": "boolean" },
+    "session_admission": { "type": "string", "enum": ["permissive", "provisioned"] },
+    "reflector_sessions": { "type": "array", "items": { "type": "string" } },
     "session_timeout": { "type": "integer", "minimum": 0 },
     "location_disclose": { "type": "string" },
     "drop_replayed": { "type": "boolean" },
@@ -2170,6 +2230,70 @@ mod tests {
         assert!(conf.is_reflector);
         assert!(conf.hmac_key.is_some());
         assert!(conf.validate().is_ok());
+    }
+
+    #[test]
+    fn session_provisioning_validation() {
+        let base = [
+            "test",
+            "--is-reflector",
+            "--local-addr",
+            "0.0.0.0",
+            "--local-port",
+            "862",
+            "--session-admission",
+            "provisioned",
+        ];
+        let mut conf = Configuration::try_parse_from(base).unwrap();
+        assert!(conf.provisioned_sessions().unwrap().is_empty()); // explicit deny-all
+        for spec in [
+            "42,127.0.0.1:4000,127.0.0.1:862",
+            "0,127.0.0.1:4000,127.0.0.1:862",
+            "42,127.0.0.1:4000,127.0.0.1:862,7",
+        ] {
+            conf.reflector_sessions = vec![spec.into()];
+            assert_eq!(conf.provisioned_sessions().unwrap().len(), 1);
+        }
+        for spec in [
+            "42,127.0.0.1:4000,0.0.0.0:862",
+            "42,127.0.0.1:0,127.0.0.1:862",
+            "42,127.0.0.1:4000,127.0.0.1:863",
+            "42,[::1]:4000,[::1]:862",
+            "oops",
+        ] {
+            conf.reflector_sessions = vec![spec.into()];
+            assert!(conf.provisioned_sessions().is_err(), "{spec}");
+        }
+        conf.reflector_sessions = vec!["42,127.0.0.1:4000,127.0.0.1:862".into(); 2];
+        assert!(conf.provisioned_sessions().is_err());
+        conf.reflector_sessions.truncate(1);
+        conf.session_admission = SessionAdmission::Permissive;
+        assert!(conf.provisioned_sessions().is_err());
+        conf.session_admission = SessionAdmission::Provisioned;
+        conf.is_reflector = false;
+        assert!(conf.provisioned_sessions().is_err());
+    }
+
+    #[test]
+    fn session_provisioning_toml_and_ipv6() {
+        let file: FileConfiguration = toml::from_str(
+            "session_admission = 'provisioned'\nreflector_sessions = ['42,[::1]:4000,[::1]:862,7']",
+        )
+        .unwrap();
+        let mut conf = Configuration::try_parse_from([
+            "test",
+            "--is-reflector",
+            "--local-addr",
+            "::",
+            "--local-port",
+            "862",
+        ])
+        .unwrap();
+        conf.session_admission = file.session_admission.unwrap();
+        conf.reflector_sessions = file.reflector_sessions.unwrap();
+        assert_eq!(conf.provisioned_sessions().unwrap().len(), 1);
+        conf.local_addr = "::2".parse().unwrap();
+        assert!(conf.provisioned_sessions().is_err());
     }
 
     #[test]

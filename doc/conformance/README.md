@@ -6,39 +6,38 @@ Status date: **2026-08-05**. Branch: **1.0-line**.
 historical, not a current conformance sign-off. The [September review](../reviews/2026-09-08/review.md)
 identified 16 findings, including behavior previously scored Compliant.
 The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
-verification one item at a time. Citation maintenance does not re-score
-requirements or close the remaining findings.
+verification one item at a time. Finding 02 updates the three session-admission rows for provisioned mode only.
+Other clause scores remain historical; citation maintenance alone does not
+close the remaining findings.
 
 This document rolls up the eight clause-level conformance matrices in this
 directory into a single compliance statement for the stamp-suite 1.0 line.
-Every count below is read verbatim from each matrix's own `Summary:` line.
+Counts below include the finding 02 update to RFC 8972; they are not a new
+full-project audit.
 Where this document goes further than the matrices is in stating, as a
 maintainer decision, which of the residual non-Compliant rows are accepted
 design trade-offs (**Documented exclusions**), and in disclosing the
 experimental/pending-IANA codepoints this implementation stands in for.
 
-**Bottom line:** as of the status date there are **no Partial rows and no open
-Gap rows left**. The fifteen rows that were Partial or open Gap on 2026-07-23
-were closed by the post-review pass (see "Closed since the 1.0 audit" below);
-the only non-Compliant rows remaining are the three SSID-admission Gaps kept
-deliberately under "Documented exclusions" and three Excluded rows, each with a
-named rationale. Nothing was silently dropped or silently re-scored: every
-closed row keeps its original finding in the matrix, with the closure appended
-beneath it.
+The August audit treated three SSID-admission Gaps as an accepted design
+exclusion. Finding 02 replaces that decision with explicit provisioned
+admission. The legacy default remains permissive and does not enforce the
+RFC 8972 §3 provisioning/discard MUSTs. Remaining September findings are
+tracked independently of these historical clause totals.
 
 ## Per-document summary
 
 | Document | Revision frozen | Clauses | Compliant | Partial | Gap | N/A | Excluded |
 |---|---|---:|---:|---:|---:|---:|---:|
 | [RFC 8762](rfc8762.md) — STAMP base protocol | RFC 8762, March 2020 | 62 | 52 | 0 | 0 | 9 | 1 |
-| [RFC 8972](rfc8972.md) — STAMP Optional Extensions | RFC 8972, January 2021 | 151 | 138 | 0 | 3 | 10 | 0 |
+| [RFC 8972](rfc8972.md) — STAMP Optional Extensions | RFC 8972, January 2021 | 151 | 141 | 0 | 0 | 10 | 0 |
 | [RFC 9503](rfc9503.md) — Destination Node Address / Return Path | RFC 9503, October 2023 | 26 | 22 | 0 | 0 | 3 | 1 |
 | [RFC 9534](rfc9534.md) — Micro-session ID (LAG) | RFC 9534, January 2024 | 18 | 15 | 0 | 0 | 3 | 0 |
 | [RFC 8545](rfc8545.md) — TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 (RFC Editor queue) | 47 | 38 | 0 | 0 | 8 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md) — CoS/ECN congestion signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -11, 4 July 2026 | 40 | 38 | 0 | 0 | 2 | 0 |
-| **Total** | | **368** | **320** | **0** | **3** | **42** | **3** |
+| **Total** | | **368** | **323** | **0** | **0** | **42** | **3** |
 
 Each matrix was independently re-verified against a freshly fetched copy of
 its source text on 2026-07-22 (see each file's own "Revision frozen" line and
@@ -64,7 +63,7 @@ rows left in any matrix.
 | **Windows backend limits** | Windows uses the `pnet`/libpcap-Npcap datalink-capture backend as a fallback tier, not the primary `nix` backend Linux/macOS get. This is a documented platform tier, not an unnoticed gap: Windows CI runs the test suite best-effort (non-gating — a Windows test failure does not block the pipeline), and features requiring raw-socket control-message access (kernel timestamping, some CoS/ECN paths) are honestly reported as unsupported at runtime rather than silently degraded. | `doc/architecture.md` ("Windows ❌"); CI `rust.yml` best-effort Windows job |
 | **macOS TX timestamping** | The kernel/hardware timestamping feature has a real, tested RX path on macOS (`SO_TIMESTAMP`/`SCM_TIMESTAMP`, software-tier, µs resolution) but no TX path and no NIC-hardware path — Darwin exposes no equivalent of Linux's `MSG_ERRQUEUE`/`SIOCSHWTSTAMP`. This is a platform capability boundary, disclosed in code and docs, not an oversight. | `src/hwtstamp.rs` (module doc + macOS branch); `doc/architecture.md` hwtstamp section |
 | **NIC-hardware timestamp paths** | The `SIOCSHWTSTAMP` hardware-timestamp tier (Linux, `--hwtstamp on`, needs `CAP_NET_ADMIN` and a NIC that actually supports it) is code-cited and unit-tested for its request/fallback logic, but the live hardware path itself cannot be exercised in ordinary CI (no privileged, hardware-timestamp-capable NIC available there). Verification for this tier is the code citation plus a manual procedure an operator with the right hardware can run; `startup_action()`'s graceful fallback means the binary never *requires* the hardware to start. | `src/hwtstamp.rs`; `doc/architecture.md` ("NIC hardware tier") |
-| **SSID-based session admission** | RFC 8972 §3 MUSTs require a Session-Reflector to be pre-provisioned with session identity (SSID + 4-tuple) and to discard non-matching traffic (`RFC8972-3-6`/`-3-7`/`-3-8`, scored Gap in the matrix). stamp-suite's reflector deliberately accepts any syntactically valid STAMP packet on the bound port — a general-purpose measurement tool, not a provisioned network element — and the RFC's own §3 text places "the means of provisioning" explicitly out of its own scope. The actual admission controls this project ships instead are: the per-source/per-SSID rate limiter, HMAC integrity in authenticated mode, and per-client stateful sequencing when `--stateful-reflector` is set. **Maintainer decision, 2026-07-22:** keep the accept-any design; these three rows remain Gap in `rfc8972.md` for traceability but are treated as closed here, not as outstanding work. | `RFC8972-3-6`, `RFC8972-3-7`, `RFC8972-3-8` in `rfc8972.md`; `src/session.rs` `SessionManager`; `src/receiver/mod.rs` rate limiter wiring |
+| **Legacy permissive session admission** | `--session-admission permissive` remains the compatibility default and does not enforce RFC 8972 §3 provisioning/discard. Select `provisioned` and configure exact `--reflector-session` entries for those requirements. The three formerly excluded Gaps were repaired under finding 02 on 2026-09-08; sequence/counter/replay/Follow-Up state uses full identity in both modes. | `RFC8972-3-6`, `RFC8972-3-7`, `RFC8972-3-8`; [configuration](../usage.md#session-provisioning); `tests/session_identity_test.rs` |
 
 ## Closed since the 1.0 audit
 

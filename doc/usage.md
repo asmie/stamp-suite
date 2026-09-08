@@ -142,7 +142,9 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
 
 ```
       --stateful-reflector         Per-client sequence numbering (RFC 8972 §4)
-      --session-timeout <SEC>      Idle session reaping for stateful mode [default: 300]
+      --session-admission <MODE>   permissive (legacy default) or provisioned
+      --reflector-session <SPEC>   SSID,SOURCE,DESTINATION[,SENDER_MICRO_ID]; repeatable
+      --session-timeout <SEC>      Idle runtime session reaping [default: 300]
       --tlv-mode <ignore|echo>     How to treat incoming TLVs [default: echo]
       --reflector-member-link-id <ID>  RFC 9534 LAG member link ID (decimal or 0x-hex)
       --srv6-return-forwarding     Best-effort SRv6 Return Path SRH forwarding
@@ -374,3 +376,47 @@ The two observability subsystems handle initialization failure differently, by d
 - [README](../README.md) — install and quick-start.
 - [architecture.md](architecture.md) — module layout, receiver backends, TLV reference, Prometheus and SNMP subsystems.
 - [security.md](security.md) — HMAC, key management, systemd hardening.
+
+## Session provisioning
+
+RFC 8972 §3 requires provisioned session identification and dropping unmatched
+packets. Enable this with `--session-admission provisioned`. The default,
+`permissive`, keeps legacy discovery from incoming traffic and does not enforce
+those provisioning requirements. This policy applies with or without
+`--stateful-reflector`; that flag controls independent reflector sequence
+numbers instead of echoing the sender's sequence.
+
+```toml
+is_reflector = true
+local_addr = "192.0.2.20"
+local_port = 862
+session_admission = "provisioned"
+reflector_sessions = [
+  "42,192.0.2.10:4862,192.0.2.20:862",
+  "43,192.0.2.10:4862,192.0.2.20:862,7",
+]
+```
+
+Each entry is `SSID,SOURCE_IP:PORT,DESTINATION_IP:PORT[,SENDER_MICRO_ID]`.
+Repeat `--reflector-session` on the CLI. IPv6 endpoints use brackets, for example
+`42,[2001:db8::10]:4862,[2001:db8::20]:862,7`. All fields match exactly;
+addresses must be concrete and ports nonzero. A wildcard reflector bind may
+accept provisioned concrete destinations of the same family and bound port.
+SSID 0 explicitly provisions a base session without an assigned SSID. Omitting
+the micro ID matches packets without a Micro-Session ID TLV; it is not a wildcard.
+The reflector member ID remains controlled by `--reflector-member-link-id`.
+
+An empty provisioned list denies all traffic. Invalid/duplicate entries,
+entries incompatible with the bind address, sender-side admission options, and
+entries supplied in permissive mode fail startup validation. Per-SSID HMAC keys
+are independent of admission: installing a key does not provision an endpoint.
+Session timeout and control-plane expiry remove runtime counters/replay state,
+not admission rules. Provisioning changes require configuration and restart.
+
+Both admission modes separate sequence numbers, counters, replay windows, and
+Follow-Up state by source endpoint, actual destination endpoint, SSID, and sender
+micro-session ID. Duplicate Micro-Session ID TLVs are dropped as ambiguous.
+Malformed TLVs provide no micro-session identity and retain ordinary M-flag
+echo processing if the remaining identity is admitted.
+Shutdown JSON/text and the control API identify these distinct sessions; SNMP
+retains its existing unique internal session index and source-address columns.

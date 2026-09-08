@@ -13,7 +13,7 @@ This document is the authoritative API contract.
   table, effective caps, key inventory — names only).
 - Close the operational gap with teaparty's meta API while staying honest
   to stamp-suite's model (keys are SSID-scoped, sessions are lazily
-  created per client `IP:port`).
+  created per full tuple/SSID/micro-session identity after admission).
 - Localhost-safe by default, with optional TLS for the cases where loopback
   is not enough.
 
@@ -22,9 +22,11 @@ This document is the authoritative API contract.
 - Sender-mode control (the control plane is reflector-only).
 - mTLS / client-certificate authentication. Server-side TLS is supported
   (see §5); client identity is a bearer token, not a certificate.
-- Session *pre-provisioning* (teaparty's 4-tuple create-with-key). In
-  stamp-suite, "provision a key for a measurement" is `PUT /v1/keys/{ssid}`;
-  the session table entry appears when the client's first packet does.
+- Runtime changes to session provisioning. Static CLI/TOML admission rules
+  are configured with `--session-admission provisioned` and
+  `--reflector-session` (see [usage](usage.md#session-provisioning)).
+  `PUT /v1/keys/{ssid}` installs a key independently of those rules;
+  it does not grant endpoint admission.
 - Config-file persistence of runtime changes. Changes live until process
   exit; persistent settings belong in the TOML config.
 - Runtime change of `--session-timeout` (its cleanup tick interval is
@@ -75,7 +77,7 @@ status code. Request bodies are validated strictly
 |---|---|---|---|---|
 | GET | `/v1/status` | — | 200 | Version, uptime, counters, draining flag |
 | GET | `/v1/sessions` | — | 200 | Session table as JSON array |
-| POST | `/v1/sessions/expire` | `{"client":"ip:port"}` | 200 / 404 | Remove one session |
+| POST | `/v1/sessions/expire` | `{"client":"ip:port","session_id":3}` | 200 / 404 / 409 | Remove one runtime session; ID optional if unambiguous |
 | GET | `/v1/keys` | — | 200 | Key inventory — SSIDs and default-presence only |
 | PUT | `/v1/keys/{ssid}` | `{"key_hex":"…"}` | 204 / 400 | Add or replace a per-SSID key |
 | DELETE | `/v1/keys/{ssid}` | — | 204 / 404 | Remove a per-SSID key |
@@ -88,7 +90,11 @@ status code. Request bodies are validated strictly
 
 `POST` for `sessions/expire` (instead of `DELETE /v1/sessions/{client}`)
 is deliberate: IPv6 literals like `[::1]:5000` are hostile to path
-segments; a JSON body parses as a plain `SocketAddr`.
+segments; a JSON body parses as a plain `SocketAddr`. The optional
+`session_id` selects the internal runtime ID returned by `/v1/sessions` (it is
+not the wire SSID). A client-only request succeeds if exactly one entry matches;
+multiple matches return 409 without removing anything. Expiry does not revoke
+static provisioning, so a subsequent admitted packet can recreate runtime state.
 
 Deleting a key **revokes access**: once a keyset exists, an authenticated
 packet whose SSID resolves to no key (unknown SSID with no default, or the
@@ -106,6 +112,8 @@ without verification, regardless of `--require-hmac`.
   "uptime_seconds": 12345,
   "draining": false,
   "sessions": 17,
+  "session_admission": "provisioned",
+  "provisioned_sessions": 20,
   "counters": {
     "packets_received": 123456,
     "packets_reflected": 123450,
@@ -121,6 +129,9 @@ without verification, regardless of `--require-hmac`.
 [
   {
     "client": "192.0.2.10:4862",
+    "local": "192.0.2.20:862",
+    "ssid": 42,
+    "sender_micro_session_id": null,
     "session_id": 3,
     "packets_received": 1200,
     "packets_transmitted": 1200,
@@ -248,7 +259,7 @@ lines are the audit trail; v1 has no separate audit log.
   feature's `EnabledTimestamping` is currently backend-local; exposing it
   requires threading it into `ReceiverSharedState`).
 - Drain-then-shutdown convenience (`POST /v1/shutdown {"drain_seconds": N}`).
-- Session pre-provisioning, if a concrete teaparty-interop need appears.
+- Runtime updates to static session provisioning, if needed.
 - OpenAPI document generation; Prometheus counters for control actions.
 - Windows/`SIO_TIMESTAMPING`, mTLS client certificates, SNMP SET parity — tracked elsewhere.
 

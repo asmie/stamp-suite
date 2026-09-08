@@ -70,6 +70,7 @@ pub mod sender;
 /// Session state management.
 #[doc(hidden)]
 pub mod session;
+pub mod session_identity;
 /// Best-effort SRv6 return-path forwarding (RFC 9503 §5 + RFC 8754).
 #[doc(hidden)]
 pub mod srv6;

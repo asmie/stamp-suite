@@ -51,6 +51,10 @@ pub async fn run_receiver(
         }
     };
 
+    let local_addr = std_socket
+        .local_addr()
+        .map_err(|e| crate::StartupError::new(format!("Cannot get bound address: {e}")))?;
+
     // Enable TTL/hop limit and TOS/Traffic Class reception via setsockopt using libc directly
     // nix doesn't expose IP_RECVTTL/IP_RECVTOS, so we use libc
     let fd = std_socket.as_raw_fd();
@@ -328,7 +332,7 @@ pub async fn run_receiver(
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
     let tx_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-    let mut tx_id_map: std::collections::HashMap<u32, (SocketAddr, u32)> =
+    let mut tx_id_map: std::collections::HashMap<u32, (crate::session::SessionKey, u32)> =
         std::collections::HashMap::new();
 
     // Session cleanup interval: run at half the timeout period, minimum 1 second
@@ -520,9 +524,27 @@ pub async fn run_receiver(
                     .packets_received
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+                let Some(session_key) = super::packet_session_key(
+                    data,
+                    src_addr,
+                    SocketAddr::new(dst_addr, local_addr.port()),
+                    use_auth,
+                ) else {
+                    counters
+                        .packets_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                };
+                if !session_manager.admits(&session_key) {
+                    counters
+                        .packets_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+
                 // Get session counters for Direct Measurement and Follow-Up Telemetry.
-                // Always tracked per-client, independent of --stateful-reflector.
-                let counter_session = session_manager.get_or_create_session(src_addr);
+                // Always tracked per session identity, independent of --stateful-reflector.
+                let counter_session = session_manager.get_or_create_session(session_key);
                 counter_session.record_received();
 
                 // draft-ietf-ippm-asymmetrical-pkts-14 §5: classify the
@@ -546,7 +568,7 @@ pub async fn run_receiver(
                     src_addr: src_addr.ip(),
                     src_port: src_addr.port(),
                     dst_addr,
-                    dst_port: conf.local_port,
+                    dst_port: local_addr.port(),
                 });
 
                 // Panic-isolated: a panic in processing must not unwind out of
@@ -564,11 +586,7 @@ pub async fn run_receiver(
                         hmac_key: hmac_key.as_ref(),
                         hmac_key_set: keys_guard.as_ref(),
                         require_hmac: conf.require_hmac,
-                        session_manager: if conf.stateful_reflector {
-                            Some(&session_manager)
-                        } else {
-                            None
-                        },
+                        session_manager: Some(&session_manager),
                         stateful_reflector: conf.stateful_reflector,
                         tlv_mode: conf.tlv_mode,
                         verify_tlv_hmac: conf.verify_tlv_hmac,
@@ -863,8 +881,8 @@ pub async fn run_receiver(
                             .packets_reflected
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // Record transmission for Direct Measurement and Follow-Up Telemetry.
-                        // Always tracked per-client, independent of --stateful-reflector.
-                        let session = session_manager.get_or_create_session(src_addr);
+                        // Always tracked per session identity, independent of --stateful-reflector.
+                        let session = session_manager.get_or_create_session(session_key);
                         session.record_transmitted();
                         // Extract the reflected seq from the response packet
                         // (first 4 bytes of reflected packet = sequence_number)
@@ -882,7 +900,7 @@ pub async fn run_receiver(
                             // timestamp above with the kernel TX timestamp.
                             #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
                             if let Some(id) = sent_opt_id {
-                                tx_id_map.insert(id, (src_addr, reflected_seq));
+                                tx_id_map.insert(id, (session_key, reflected_seq));
                             }
                         }
 
