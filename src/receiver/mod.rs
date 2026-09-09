@@ -1333,6 +1333,10 @@ pub struct StampResponse {
 pub struct ProcessingContext<'a> {
     /// Clock format for timestamps.
     pub clock_source: ClockFormat,
+    /// Operator-declared discipline of the system clock, independent of encoding/S.
+    pub clock_sync_source: SyncSource,
+    /// Operator-declared discipline of NIC PHCs, used only for actual hardware T2.
+    pub hardware_clock_sync_source: SyncSource,
     /// Error estimate in wire format.
     pub error_estimate_wire: u16,
     /// Single HMAC key (legacy single-tenant path). Used when no
@@ -1427,9 +1431,9 @@ pub struct ProcessingContext<'a> {
     /// How T2 was produced (`HwAssist` only for NIC hardware timestamps;
     /// kernel-software and userspace timestamps are both `SwLocal`).
     pub rx_method: TimestampMethod,
-    /// How T3 (and the Follow-Up Telemetry record) is produced on the
-    /// reply path, per the socket's timestamping configuration.
-    pub tx_method: TimestampMethod,
+    /// Acquisition method of last_reflection. The current T3 is generated
+    /// in software; socket hardware enablement does not determine this field.
+    pub last_reflection_method: TimestampMethod,
 }
 
 /// Raw IP-layer bytes captured at receive time for reflecting back to the
@@ -1715,7 +1719,9 @@ fn process_stamp_packet_inner(
         }
         ctx.reflector_rx_count = Some(session.get_received_count());
         ctx.reflector_tx_count = Some(session.get_transmitted_count());
-        ctx.last_reflection = Some(session.get_last_reflection());
+        let (seq, timestamp, method) = session.get_last_reflection_with_method();
+        ctx.last_reflection = Some((seq, timestamp));
+        ctx.last_reflection_method = method;
         Some(session)
     } else {
         None
@@ -2092,17 +2098,20 @@ fn apply_semantic_tlv_processing(
     tlv_hmac_key: Option<&HmacKey>,
     base_bytes: &[u8],
 ) -> Option<SemanticResult> {
-    // Update Timestamp Information TLVs (RFC 8972 §4.3). All four value
-    // octets describe this reflector: the In pair characterizes the ingress
-    // that obtained T2, the Out pair the egress that obtained T3. Report each
-    // direction's real acquisition method — a mixed configuration (kernel
-    // software receive, NIC hardware transmit) is exactly what the separate
-    // In/Out fields exist to express.
-    let sync_src = match ctx.clock_source {
-        ClockFormat::NTP => SyncSource::Ntp,
-        ClockFormat::PTP => SyncSource::Ptp,
+    // Sources describe clock discipline, never the selected wire encoding or S
+    // bit. T2 may come from a separately disciplined PHC; current T3 is always
+    // generated in software before send, even when hardware TX is requested.
+    let ingress_source = if ctx.rx_method == TimestampMethod::HwAssist {
+        ctx.hardware_clock_sync_source
+    } else {
+        ctx.clock_sync_source
     };
-    tlvs.update_timestamp_info_tlvs(sync_src, ctx.rx_method, ctx.tx_method);
+    tlvs.update_timestamp_info_tlvs_with_sources(
+        ingress_source,
+        ctx.rx_method,
+        ctx.clock_sync_source,
+        TimestampMethod::SwLocal,
+    );
 
     // Update Direct Measurement TLVs (RFC 8972 §4.5)
     if let (Some(rx), Some(tx)) = (ctx.reflector_rx_count, ctx.reflector_tx_count) {
@@ -2128,7 +2137,7 @@ fn apply_semantic_tlv_processing(
     } else {
         None
     };
-    tlvs.update_follow_up_telemetry_tlvs(reflection, ctx.tx_method);
+    tlvs.update_follow_up_telemetry_tlvs(reflection, ctx.last_reflection_method);
 
     // Discard Access Report TLVs with an invalid Access ID (RFC 8972 §4.6:
     // values other than 1/2 MUST be discarded — marked U, size preserved).
@@ -3312,6 +3321,8 @@ mod tests {
         ProcessingContext {
             replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: ClockFormat::NTP,
+            clock_sync_source: SyncSource::Local,
+            hardware_clock_sync_source: SyncSource::Local,
             error_estimate_wire: 0,
             hmac_key: None,
             hmac_key_set: None,
@@ -3342,7 +3353,7 @@ mod tests {
             reflected_control_min_interval_ns: REFLECTED_CONTROL_MIN_INTERVAL_NS,
             rx_timestamp: None,
             rx_method: TimestampMethod::SwLocal,
-            tx_method: TimestampMethod::SwLocal,
+            last_reflection_method: TimestampMethod::SwLocal,
         }
     }
 

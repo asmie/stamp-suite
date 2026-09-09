@@ -559,6 +559,8 @@ fn test_location_tlv_ipv4_round_trip() {
     let ctx = ProcessingContext {
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
+        clock_sync_source: stamp_suite::tlv::SyncSource::Local,
+        hardware_clock_sync_source: stamp_suite::tlv::SyncSource::Local,
         error_estimate_wire: 0,
         hmac_key: None,
         hmac_key_set: None,
@@ -589,7 +591,7 @@ fn test_location_tlv_ipv4_round_trip() {
         reflected_control_min_interval_ns: 1_000,
         rx_timestamp: None,
         rx_method: TimestampMethod::SwLocal,
-        tx_method: TimestampMethod::SwLocal,
+        last_reflection_method: TimestampMethod::SwLocal,
     };
 
     let src: SocketAddr = "127.0.0.1:12345".parse().unwrap();

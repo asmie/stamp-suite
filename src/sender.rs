@@ -5331,6 +5331,8 @@ mod tests {
         let ctx = ProcessingContext {
             replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: ClockFormat::NTP,
+            clock_sync_source: crate::tlv::SyncSource::Local,
+            hardware_clock_sync_source: crate::tlv::SyncSource::Local,
             error_estimate_wire: 0,
             hmac_key: None,
             hmac_key_set: None,
@@ -5361,7 +5363,7 @@ mod tests {
             reflected_control_min_interval_ns: crate::receiver::REFLECTED_CONTROL_MIN_INTERVAL_NS,
             rx_timestamp: None,
             rx_method: crate::tlv::TimestampMethod::SwLocal,
-            tx_method: crate::tlv::TimestampMethod::SwLocal,
+            last_reflection_method: crate::tlv::TimestampMethod::SwLocal,
         };
         let response = assemble_unauth_answer_with_tlvs(
             &packet,
@@ -5776,6 +5778,8 @@ mod tests {
                 let ctx = ProcessingContext {
                     replay_verdict: crate::session::ReplayVerdict::New,
                     clock_source: ClockFormat::NTP,
+                    clock_sync_source: crate::tlv::SyncSource::Local,
+                    hardware_clock_sync_source: crate::tlv::SyncSource::Local,
                     error_estimate_wire: 0,
                     hmac_key: None,
                     hmac_key_set: None,
@@ -5807,7 +5811,7 @@ mod tests {
                         crate::receiver::REFLECTED_CONTROL_MIN_INTERVAL_NS,
                     rx_timestamp: None,
                     rx_method: crate::tlv::TimestampMethod::SwLocal,
-                    tx_method: crate::tlv::TimestampMethod::SwLocal,
+                    last_reflection_method: crate::tlv::TimestampMethod::SwLocal,
                 };
                 let response = assemble_unauth_answer_with_tlvs(
                     &packet,

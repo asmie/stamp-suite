@@ -1,24 +1,6 @@
-//! End-to-end coverage of PTP timestamp encoding and the Type 3
-//! Timestamp Information TLV reflector behaviour per RFC 8972 §4.3.
-//!
-//! Implementation lives in `src/time.rs::generate_timestamp` (encodes NTP
-//! or PTP based on `ClockFormat`) and `src/receiver/mod.rs` lines around
-//! 1014-1018 (the reflector calls `update_timestamp_info_tlvs` with a
-//! `SyncSource` derived from its local `ctx.clock_source`).
-//!
-//! These tests pin three things:
-//! 1. The PTP wire encoding is "Unix seconds | nanoseconds" — distinct from
-//!    NTP's "seconds-since-1900 | 2^32-fraction" — so a packet with a
-//!    plausible 2026 timestamp has a top-32-bits value below the NTP epoch
-//!    offset when generated as PTP and above it when generated as NTP.
-//! 2. With a PTP-configured reflector (ctx.clock_source = PTP), the
-//!    response Type 3 TLV reports `sync_src_out = Ptp` and
-//!    `timestamp_out = SwLocal`.
-//! 3. Mixed mode: all four value octets describe the *reflector* (RFC 8972
-//!    §4.3, and RFC8972-4.3-2 makes the sender zero every one of them), so a
-//!    PTP-configured reflector reports `Ptp` in both `sync_src_in` and
-//!    `sync_src_out` even when a non-conformant sender wrote `Ntp` into the
-//!    In field, and vice versa.
+//! PTP/NTP encoding and independently declared reflector clock metadata.
+//! Explicit source settings are operator assertions, not evidence of a running
+//! synchronization service. Requests cannot supply the reflector's source.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -42,6 +24,8 @@ fn make_ctx<'a>(clock_source: ClockFormat) -> ProcessingContext<'a> {
     ProcessingContext {
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source,
+        clock_sync_source: SyncSource::Local,
+        hardware_clock_sync_source: SyncSource::Local,
         error_estimate_wire: 0,
         hmac_key: None,
         hmac_key_set: None,
@@ -72,7 +56,7 @@ fn make_ctx<'a>(clock_source: ClockFormat) -> ProcessingContext<'a> {
         reflected_control_min_interval_ns: 1_000,
         rx_timestamp: None,
         rx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
-        tx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
+        last_reflection_method: stamp_suite::tlv::TimestampMethod::SwLocal,
     }
 }
 
@@ -130,7 +114,8 @@ fn ptp_reflector_fills_sync_src_out_ptp() {
     let sender_tlv = TimestampInfoTlv::new(SyncSource::Ptp, TimestampMethod::SwLocal);
     let packet = build_packet_with_timestamp_info(ts, sender_tlv);
 
-    let ctx = make_ctx(ClockFormat::PTP);
+    let mut ctx = make_ctx(ClockFormat::PTP);
+    ctx.clock_sync_source = SyncSource::Ptp;
     let response =
         process_stamp_packet(&packet, src(), 64, false, &ctx).expect("reflector must respond");
 
@@ -145,22 +130,22 @@ fn ptp_reflector_fills_sync_src_out_ptp() {
     assert_eq!(
         tinfo.sync_src_in,
         SyncSource::Ptp,
-        "sender's sync source must be echoed unchanged"
+        "reflector must report its explicitly configured source"
     );
     assert_eq!(
         tinfo.timestamp_in,
         TimestampMethod::SwLocal,
-        "sender's TS method must be echoed unchanged"
+        "reflector T2 is generated in software"
     );
     assert_eq!(
         tinfo.sync_src_out,
         SyncSource::Ptp,
-        "reflector with ClockFormat::PTP must report sync_src_out = Ptp"
+        "explicit PTP discipline must be reported independently of encoding"
     );
     assert_eq!(
         tinfo.timestamp_out,
         TimestampMethod::SwLocal,
-        "reflector method is SwLocal (HW timestamping not yet implemented; F1)"
+        "current T3 is generated in software before sending"
     );
 }
 
@@ -173,7 +158,8 @@ fn ntp_reflector_fills_sync_src_out_ntp() {
     let sender_tlv = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::SwLocal);
     let packet = build_packet_with_timestamp_info(ts, sender_tlv);
 
-    let ctx = make_ctx(ClockFormat::NTP);
+    let mut ctx = make_ctx(ClockFormat::NTP);
+    ctx.clock_sync_source = SyncSource::Ntp;
     let response =
         process_stamp_packet(&packet, src(), 64, false, &ctx).expect("reflector must respond");
 
@@ -206,7 +192,8 @@ fn mixed_mode_reflector_reports_own_clock_in_both_field_pairs() {
     let packet = build_packet_with_timestamp_info(ts, sender_tlv);
 
     // Reflector configured for PTP.
-    let ctx = make_ctx(ClockFormat::PTP);
+    let mut ctx = make_ctx(ClockFormat::PTP);
+    ctx.clock_sync_source = SyncSource::Ptp;
     let response =
         process_stamp_packet(&packet, src(), 64, false, &ctx).expect("reflector must respond");
 
@@ -241,7 +228,8 @@ fn mixed_mode_ntp_reflector_overwrites_ptp_sender_in_field() {
     let sender_tlv = TimestampInfoTlv::new(SyncSource::Ptp, TimestampMethod::SwLocal);
     let packet = build_packet_with_timestamp_info(ts, sender_tlv);
 
-    let ctx = make_ctx(ClockFormat::NTP);
+    let mut ctx = make_ctx(ClockFormat::NTP);
+    ctx.clock_sync_source = SyncSource::Ntp;
     let response =
         process_stamp_packet(&packet, src(), 64, false, &ctx).expect("reflector must respond");
 
@@ -294,4 +282,81 @@ fn ptp_timestamp_appears_in_packet_at_expected_offset() {
         (wire_ts >> 32) < NTP_UNIX_OFFSET,
         "PTP encoding: seconds field must be Unix time (< NTP epoch offset)"
     );
+}
+
+#[test]
+fn default_sync_source_is_independent_of_encoding_and_s_bit() {
+    for format in [ClockFormat::NTP, ClockFormat::PTP] {
+        for synchronized in [false, true] {
+            let mut ctx = make_ctx(format);
+            ctx.error_estimate_wire = if synchronized { 0x8000 } else { 0 };
+            let packet = build_packet_with_timestamp_info(
+                generate_timestamp(format),
+                TimestampInfoTlv::request(),
+            );
+            let response = process_stamp_packet(&packet, src(), 64, false, &ctx).unwrap();
+            let tlvs = TlvList::parse(&response.data[44..]).unwrap();
+            let raw = tlvs
+                .non_hmac_tlvs()
+                .iter()
+                .find(|t| t.tlv_type == TlvType::TimestampInfo)
+                .unwrap();
+            assert_eq!(
+                raw.value,
+                [5, 2, 5, 2],
+                "encoding={format:?}, S={synchronized}"
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_clock_sources_and_hardware_ingress_are_independent() {
+    let sources = [
+        SyncSource::Ntp,
+        SyncSource::Ptp,
+        SyncSource::Gps,
+        SyncSource::Glonass,
+        SyncSource::LoranC,
+        SyncSource::Bds,
+        SyncSource::Galileo,
+        SyncSource::Local,
+        SyncSource::SsuBits,
+    ];
+    for format in [ClockFormat::NTP, ClockFormat::PTP] {
+        for source in sources {
+            for hardware in [false, true] {
+                let mut ctx = make_ctx(format);
+                ctx.clock_sync_source = source;
+                ctx.hardware_clock_sync_source = SyncSource::Gps;
+                ctx.rx_method = if hardware {
+                    TimestampMethod::HwAssist
+                } else {
+                    TimestampMethod::SwLocal
+                };
+                ctx.rx_timestamp = Some(generate_timestamp(format));
+                ctx.last_reflection_method = TimestampMethod::HwAssist;
+                let packet = build_packet_with_timestamp_info(
+                    generate_timestamp(format),
+                    TimestampInfoTlv::request(),
+                );
+                let response = process_stamp_packet(&packet, src(), 64, false, &ctx).unwrap();
+                let tlvs = TlvList::parse(&response.data[44..]).unwrap();
+                let raw = tlvs
+                    .non_hmac_tlvs()
+                    .iter()
+                    .find(|t| t.tlv_type == TlvType::TimestampInfo)
+                    .unwrap();
+                assert_eq!(
+                    raw.value,
+                    [
+                        if hardware { 4 } else { source.to_byte() },
+                        if hardware { 1 } else { 2 },
+                        source.to_byte(),
+                        2
+                    ]
+                );
+            }
+        }
+    }
 }

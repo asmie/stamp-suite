@@ -38,6 +38,8 @@ fn make_ctx<'a>() -> ProcessingContext<'a> {
     ProcessingContext {
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
+        clock_sync_source: stamp_suite::tlv::SyncSource::Local,
+        hardware_clock_sync_source: stamp_suite::tlv::SyncSource::Local,
         error_estimate_wire: 0,
         hmac_key: None,
         hmac_key_set: None,
@@ -68,7 +70,7 @@ fn make_ctx<'a>() -> ProcessingContext<'a> {
         reflected_control_min_interval_ns: 1_000,
         rx_timestamp: None,
         rx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
-        tx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
+        last_reflection_method: stamp_suite::tlv::TimestampMethod::SwLocal,
     }
 }
 

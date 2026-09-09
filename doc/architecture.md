@@ -340,17 +340,17 @@ The Follow-Up Telemetry TLV carries information about the previously reflected p
 stamp-suite --remote-addr 192.168.1.100 --follow-up-telemetry
 ```
 
-The reflector fills in the sequence number and timestamp from the last reflection for the client's session, along with its timestamping method. Like Direct Measurement, this works independently of `--stateful-reflector`.
+In stateful mode, the reflector reads a coherent sequence/timestamp/method record from the session. The method describes the actual stored timestamp, including asynchronous software or hardware TX corrections. Burst copies refresh all three before signing. Stateless replies zero the Follow-Up sequence and timestamp.
 
 ### Timestamp Information TLV (RFC 8972 §4.3)
 
-The Timestamp Info TLV reports the synchronization source and timestamping method at each endpoint:
+The Timestamp Info TLV describes the reflector's ingress T2 and egress T3:
 
 ```bash
 stamp-suite --remote-addr 192.168.1.100 --timestamp-info
 ```
 
-The sender fills its own sync source and method; the reflector fills in its values (e.g., NTP + software-local timestamping).
+The sender zeroes all information fields. The reflector uses explicit system/PHC source settings, independently of NTP/PTP encoding and the Error Estimate S bit. An actual hardware T2 uses the PHC source; software T2 and current T3 use the system source. Current T3 is generated in software. See [clock metadata](usage.md#clock-synchronization-metadata) for configuration and registry values.
 
 ### Access Report TLV (RFC 8972 §4.6)
 
@@ -626,9 +626,11 @@ feature; no extra dependencies).
 - NIC hardware tier ✅ (Linux, `--hwtstamp on`) — sets NIC filters via
   `SIOCSHWTSTAMP` (needs CAP_NET_ADMIN) and requests the raw-hardware
   timestamp slots; every failure falls back to the kernel software tier
-  with a warning. The Timestamp Information TLV reports `HwAssist` only
-  when **both** directions use hardware timestamps; the FUT mode byte
-  reports the TX method.
+  with a warning. Type 3 reports `HwAssist` only for an actual hardware T2;
+  current T3 is software. The FUT mode byte comes from the stored TX report,
+  not the enabled socket tier. Software and hardware reports may arrive
+  separately; correlation is retained while hardware is pending, and a
+  software report cannot overwrite an already corrected hardware record.
 - Windows ❌ — the pnet receiver captures at the datalink layer (no
   socket to timestamp) and a sender-side `SIO_TIMESTAMPING` port is
   future work; the feature compiles to a graceful no-op there.
@@ -638,9 +640,11 @@ feature; no extra dependencies).
 > delays mix the local timestamp domain with the peer's, so hardware
 > timestamps are only meaningful for OWD when the PHC is disciplined to
 > the same timescale as the peer (ptp4l + phc2sys). Round-trip
-> quantities that subtract two timestamps from the same clock
-> (T4−T1, T3−T2) remain valid regardless. `--hwtstamp on` leaves this
-> responsibility with the operator; `auto` never uses the hardware tier.
+> quantities require a consistent clock domain within each endpoint too:
+> hardware T2 and software T3 are different clocks unless explicitly aligned.
+> Declaring their synchronization sources does not perform that alignment.
+> `--hwtstamp on` leaves this responsibility with the operator; `auto` never
+> uses the hardware tier.
 
 **Defensive contract.** Hardware timestamping is a per-NIC capability —
 some adapters support RX, some both, most consumer NICs neither. The

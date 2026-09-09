@@ -356,9 +356,10 @@ fn refresh_telemetry(data: &mut [u8], base: usize, session: &Session, stateful: 
                     value[8..12].copy_from_slice(&session.get_transmitted_count().to_be_bytes());
                 }
                 (7, 16) if stateful => {
-                    let (seq, ts) = session.get_last_reflection();
+                    let (seq, ts, method) = session.get_last_reflection_with_method();
                     value[..4].copy_from_slice(&seq.to_be_bytes());
                     value[4..12].copy_from_slice(&ts.to_be_bytes());
+                    value[12] = method.to_byte();
                 }
                 (7, 16) => value[..12].fill(0),
                 _ => {}
@@ -1107,5 +1108,40 @@ mod tests {
             Some(1)
         );
         assert_eq!(t.remaining, 0);
+    }
+    #[test]
+    fn each_follow_up_copy_reports_its_stored_timestamp_method_and_signature() {
+        let mut t = sample(true, ReturnPathAction::Normal);
+        // Replace the sample's TLVs with Type 3, Follow-Up and final HMAC.
+        t.response.data.truncate(112);
+        t.response.data.extend_from_slice(&[0, 3, 0, 4, 4, 2, 4, 2]);
+        t.response.data.extend_from_slice(&[0, 7, 0, 16]);
+        t.response.data.extend_from_slice(&[0; 16]);
+        t.response.data.extend_from_slice(&[0, 8, 0, 16]);
+        t.response.data.extend_from_slice(&[0; 16]);
+        t.session.record_reflection(42, 100);
+        let counters = ReflectorCounters::new();
+        let limiter = RateLimiter::new(0);
+        for (expected_seq, expected_ts, method) in [
+            (42, 110, crate::tlv::TimestampMethod::HwAssist),
+            (0, 200, crate::tlv::TimestampMethod::SwLocal),
+            (1, 300, crate::tlv::TimestampMethod::HwAssist),
+        ] {
+            assert!(t.session.correct_reflection_timestamp_with_method(
+                expected_seq,
+                expected_ts,
+                method
+            ));
+            assert!(t
+                .send_next(&counters, &limiter, |data, _, _| {
+                    assert_eq!(&data[116..120], &[4, 2, 4, 2]);
+                    assert_eq!(&data[124..128], &expected_seq.to_be_bytes());
+                    assert_eq!(&data[128..136], &expected_ts.to_be_bytes());
+                    assert_eq!(data[136], method.to_byte());
+                    check_sized_signature(data, true);
+                    Ok(data.len())
+                })
+                .is_some());
+        }
     }
 }

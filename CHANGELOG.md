@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Separate reflector synchronization-source declarations from NTP/PTP encoding
+  and the Error Estimate S bit. Add system/PHC source settings defaulting to
+  local, and correct RFC 8972 wire codes (SSU/BITS 3, external sources 4, local 5).
+  Type 3 reports software for current T3; Follow-Up records the actual stored
+  timestamp method, including software fallback and later hardware corrections.
+  Preserve coherent timestamp/method snapshots and reject unrelated error-queue
+  events. Update ProcessingContext callers, CLI/TOML/schema, docs and wire tests.
+
 - Enforce the actual Linux reply-route MTU for Type-12 and reflected-header
   replies, including wildcard binds, alternate destinations and SRH overhead.
   Invalidate bounded MTU caches on route/interface changes, prevent fragmentation,

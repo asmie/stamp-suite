@@ -184,13 +184,6 @@ pub async fn run_receiver(
             enabled
         }
     };
-    #[cfg(feature = "hwtstamp")]
-    let tx_method_cfg = if kernel_ts.tx_hw {
-        crate::tlv::TimestampMethod::HwAssist
-    } else {
-        crate::tlv::TimestampMethod::SwLocal
-    };
-
     // Set non-blocking for tokio
     if let Err(e) = std_socket.set_nonblocking(true) {
         return Err(crate::StartupError::new(format!(
@@ -351,9 +344,18 @@ pub async fn run_receiver(
             for report in
                 crate::hwtstamp::drain_tx_timestamps(tokio_socket.as_raw_fd(), conf.clock_source)
             {
-                if let Some((session, seq)) = tx_id_map.remove(&report.opt_id) {
-                    if let Some(session) = session.upgrade() {
-                        session.correct_reflection_timestamp(seq, report.timestamp);
+                if let Some((session, seq)) = tx_id_map.get(&report.opt_id).cloned() {
+                    let updated = session.upgrade().is_some_and(|session| {
+                        session.correct_reflection_timestamp_with_method(
+                            seq,
+                            report.timestamp,
+                            report.method(),
+                        )
+                    });
+                    // Software and hardware reports can arrive separately. Keep
+                    // correlation after software while a hardware report is pending.
+                    if report.hardware || !kernel_ts.tx_hw || !updated {
+                        tx_id_map.remove(&report.opt_id);
                     }
                 }
             }
@@ -553,6 +555,8 @@ pub async fn run_receiver(
                     let ctx = ProcessingContext {
                         replay_verdict: crate::session::ReplayVerdict::New,
                         clock_source: conf.clock_source,
+                        clock_sync_source: conf.clock_sync_source.into(),
+                        hardware_clock_sync_source: conf.hardware_clock_sync_source.into(),
                         error_estimate_wire,
                         hmac_key: hmac_key.as_ref(),
                         hmac_key_set: keys_guard.as_ref(),
@@ -602,10 +606,7 @@ pub async fn run_receiver(
                         rx_method,
                         #[cfg(not(feature = "hwtstamp"))]
                         rx_method: crate::tlv::TimestampMethod::SwLocal,
-                        #[cfg(feature = "hwtstamp")]
-                        tx_method: tx_method_cfg,
-                        #[cfg(not(feature = "hwtstamp"))]
-                        tx_method: crate::tlv::TimestampMethod::SwLocal,
+                        last_reflection_method: crate::tlv::TimestampMethod::SwLocal,
                     };
                     process_session_packet_isolated(
                         data,

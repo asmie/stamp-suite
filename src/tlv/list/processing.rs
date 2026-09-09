@@ -179,7 +179,22 @@ impl TlvList {
         ingress_method: TimestampMethod,
         egress_method: TimestampMethod,
     ) {
-        let src_byte = sync_src.to_byte();
+        self.update_timestamp_info_tlvs_with_sources(
+            sync_src,
+            ingress_method,
+            sync_src,
+            egress_method,
+        );
+    }
+
+    /// Report the separately disciplined ingress and egress clocks.
+    pub fn update_timestamp_info_tlvs_with_sources(
+        &mut self,
+        ingress_source: SyncSource,
+        ingress_method: TimestampMethod,
+        egress_source: SyncSource,
+        egress_method: TimestampMethod,
+    ) {
         let ingress_byte = ingress_method.to_byte();
         let egress_byte = egress_method.to_byte();
         self.for_each_matching_tlv(
@@ -188,9 +203,9 @@ impl TlvList {
                     && tlv.value.len() == TIMESTAMP_INFO_TLV_VALUE_SIZE
             },
             |tlv| {
-                tlv.value[0] = src_byte;
+                tlv.value[0] = ingress_source.to_byte();
                 tlv.value[1] = ingress_byte;
-                tlv.value[2] = src_byte;
+                tlv.value[2] = egress_source.to_byte();
                 tlv.value[3] = egress_byte;
             },
         );

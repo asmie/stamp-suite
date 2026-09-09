@@ -43,6 +43,8 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
     ProcessingContext {
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
+        clock_sync_source: stamp_suite::tlv::SyncSource::Local,
+        hardware_clock_sync_source: stamp_suite::tlv::SyncSource::Local,
         error_estimate_wire: 0,
         hmac_key,
         hmac_key_set: None,
@@ -73,7 +75,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         reflected_control_min_interval_ns: 1_000,
         rx_timestamp: None,
         rx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
-        tx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
+        last_reflection_method: stamp_suite::tlv::TimestampMethod::SwLocal,
     }
 }
 
@@ -469,15 +471,15 @@ fn kernel_rx_timestamp_overrides_t2() {
 }
 
 #[test]
-fn timestamp_info_reports_hw_only_when_both_directions_hw() {
+fn timestamp_info_current_t3_is_software_even_after_hardware_follow_up() {
     use stamp_suite::tlv::{SyncSource, TimestampInfoTlv, TimestampMethod};
 
     let tlv = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::SwLocal).to_raw();
 
-    // Mixed methods → the single reflector method byte stays SwLocal.
+    // The ingress and egress methods describe different timestamps.
     let mut ctx = make_ctx(None);
     ctx.rx_method = TimestampMethod::HwAssist;
-    ctx.tx_method = TimestampMethod::SwLocal;
+    ctx.last_reflection_method = TimestampMethod::SwLocal;
     let parsed = reflect_unauth(&build_unauth_packet(&tlv.to_bytes()), &ctx);
     let echoed = parsed
         .non_hmac_tlvs()
@@ -487,20 +489,21 @@ fn timestamp_info_reports_hw_only_when_both_directions_hw() {
     assert_eq!(
         echoed.value[3],
         TimestampMethod::SwLocal.to_byte(),
-        "mixed rx/tx methods must report the conservative SwLocal"
+        "current T3 is generated in software"
     );
 
-    // Both directions hardware → HwAssist.
+    // A hardware timestamp for the previous reply does not change current T3.
     let mut ctx = make_ctx(None);
     ctx.rx_method = TimestampMethod::HwAssist;
-    ctx.tx_method = TimestampMethod::HwAssist;
+    ctx.last_reflection_method = TimestampMethod::HwAssist;
     let parsed = reflect_unauth(&build_unauth_packet(&tlv.to_bytes()), &ctx);
     let echoed = parsed
         .non_hmac_tlvs()
         .iter()
         .find(|t| matches!(t.tlv_type, TlvType::TimestampInfo))
         .expect("Timestamp Info echoed");
-    assert_eq!(echoed.value[3], TimestampMethod::HwAssist.to_byte());
+    assert_eq!(echoed.value[1], TimestampMethod::HwAssist.to_byte());
+    assert_eq!(echoed.value[3], TimestampMethod::SwLocal.to_byte());
 }
 
 #[test]
@@ -510,7 +513,7 @@ fn follow_up_telemetry_reports_tx_method() {
     let tlv = FollowUpTelemetryTlv::new().to_raw();
     let mut ctx = make_ctx(None);
     ctx.last_reflection = Some((7, 999));
-    ctx.tx_method = TimestampMethod::HwAssist;
+    ctx.last_reflection_method = TimestampMethod::HwAssist;
 
     let parsed = reflect_unauth(&build_unauth_packet(&tlv.to_bytes()), &ctx);
     let echoed = parsed

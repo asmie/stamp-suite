@@ -28,6 +28,8 @@ fuzz_target!(|data: &[u8]| {
     let ctx = ProcessingContext {
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
+        clock_sync_source: stamp_suite::tlv::SyncSource::Local,
+        hardware_clock_sync_source: stamp_suite::tlv::SyncSource::Local,
         error_estimate_wire: 0,
         hmac_key: None,
         hmac_key_set: None,
@@ -55,7 +57,7 @@ fuzz_target!(|data: &[u8]| {
         sender_port: src.port(),
         rx_timestamp: Some(1),
         rx_method: TimestampMethod::SwLocal,
-        tx_method: TimestampMethod::SwLocal,
+        last_reflection_method: TimestampMethod::SwLocal,
         return_path_allow_alternate: true,
         reflector_member_link_id: Some(1),
         captured_headers: None,

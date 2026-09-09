@@ -1,4 +1,5 @@
 pub use crate::session_identity::{SessionAdmission, SessionKey};
+use crate::tlv::TimestampMethod;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -60,10 +61,8 @@ pub struct Session {
     packets_received: AtomicU32,
     /// Total packets transmitted in this session (for Direct Measurement TLV).
     packets_transmitted: AtomicU32,
-    /// Sequence number of the last reflected packet (for Follow-Up Telemetry TLV).
-    last_reflected_seq: AtomicU32,
-    /// Timestamp of the last reflected packet (for Follow-Up Telemetry TLV).
-    last_reflected_timestamp: AtomicU64,
+    /// Coherent sequence/timestamp/provenance record for Follow-Up Telemetry.
+    last_reflection: RwLock<(u32, u64, TimestampMethod)>,
     /// Replay-detection window for *received* sequence numbers
     /// (draft-ietf-ippm-asymmetrical-pkts-14 §5). Distinct from `curr_seq`,
     /// which is this reflector's own outgoing generator.
@@ -88,8 +87,7 @@ impl Session {
             curr_seq: AtomicU32::new(0),
             packets_received: AtomicU32::new(0),
             packets_transmitted: AtomicU32::new(0),
-            last_reflected_seq: AtomicU32::new(0),
-            last_reflected_timestamp: AtomicU64::new(0),
+            last_reflection: RwLock::new((0, 0, TimestampMethod::SwLocal)),
             replay_state: AtomicU64::new(0),
             active: RwLock::new(true),
         }
@@ -264,34 +262,52 @@ impl Session {
         self.packets_transmitted.load(Ordering::Relaxed)
     }
 
-    /// Records a reflection with the given sequence number and timestamp.
+    /// Records a software-generated transmit timestamp for the new reflection.
     pub fn record_reflection(&self, seq: u32, timestamp: u64) {
-        self.last_reflected_seq.store(seq, Ordering::Relaxed);
-        self.last_reflected_timestamp
-            .store(timestamp, Ordering::Relaxed);
+        *self
+            .last_reflection
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = (seq, timestamp, TimestampMethod::SwLocal);
     }
 
-    /// Returns the last reflection's sequence number and timestamp.
+    /// Returns a consistent sequence/timestamp snapshot.
     pub fn get_last_reflection(&self) -> (u32, u64) {
-        (
-            self.last_reflected_seq.load(Ordering::Relaxed),
-            self.last_reflected_timestamp.load(Ordering::Relaxed),
-        )
+        let (seq, timestamp, _) = self.get_last_reflection_with_method();
+        (seq, timestamp)
     }
 
-    /// Replaces the recorded TX timestamp of the last reflection when `seq`
-    /// still matches — used when a kernel transmit timestamp for that reply
-    /// arrives from the socket error queue after the fact (feature
-    /// "hwtstamp"). Returns false (and changes nothing) when a newer
-    /// reflection has been recorded since.
+    /// Returns the timestamp and the method that actually produced it together.
+    pub fn get_last_reflection_with_method(&self) -> (u32, u64, TimestampMethod) {
+        *self
+            .last_reflection
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Applies a software timestamp correction (compatibility helper).
     pub fn correct_reflection_timestamp(&self, seq: u32, timestamp: u64) -> bool {
-        if self.last_reflected_seq.load(Ordering::Relaxed) == seq {
-            self.last_reflected_timestamp
-                .store(timestamp, Ordering::Relaxed);
-            true
-        } else {
-            false
+        self.correct_reflection_timestamp_with_method(seq, timestamp, TimestampMethod::SwLocal)
+    }
+
+    /// Corrects only the matching reflection, atomically updating its timestamp
+    /// and provenance. A later software report cannot downgrade a hardware one.
+    pub fn correct_reflection_timestamp_with_method(
+        &self,
+        seq: u32,
+        timestamp: u64,
+        method: TimestampMethod,
+    ) -> bool {
+        let mut record = self
+            .last_reflection
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if record.0 != seq
+            || (record.2 == TimestampMethod::HwAssist && method != TimestampMethod::HwAssist)
+        {
+            return false;
         }
+        *record = (seq, timestamp, method);
+        true
     }
 }
 
@@ -1304,5 +1320,39 @@ mod tests {
         // Space freed → a new client is tracked again.
         manager.generate_sequence_number(make_addr(3)).unwrap();
         assert_eq!(manager.session_count(), 1);
+    }
+    #[test]
+    fn reflection_method_tracks_actual_reports_without_stale_downgrades() {
+        let session = Session::new(0);
+        session.record_reflection(7, 100);
+        assert_eq!(
+            session.get_last_reflection_with_method(),
+            (7, 100, TimestampMethod::SwLocal)
+        );
+        assert!(session.correct_reflection_timestamp_with_method(7, 110, TimestampMethod::SwLocal));
+        assert!(session.correct_reflection_timestamp_with_method(
+            7,
+            120,
+            TimestampMethod::HwAssist
+        ));
+        assert!(!session.correct_reflection_timestamp_with_method(
+            7,
+            115,
+            TimestampMethod::SwLocal
+        ));
+        assert_eq!(
+            session.get_last_reflection_with_method(),
+            (7, 120, TimestampMethod::HwAssist)
+        );
+        session.record_reflection(8, 200);
+        assert!(!session.correct_reflection_timestamp_with_method(
+            7,
+            130,
+            TimestampMethod::HwAssist
+        ));
+        assert_eq!(
+            session.get_last_reflection_with_method(),
+            (8, 200, TimestampMethod::SwLocal)
+        );
     }
 }

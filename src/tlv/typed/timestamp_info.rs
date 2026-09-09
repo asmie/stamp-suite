@@ -5,27 +5,21 @@ use crate::tlv::traits::TypedTlv;
 
 /// Synchronization source for Timestamp Information TLV per RFC 8972 §4.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum SyncSource {
-    /// NTP synchronization.
-    Ntp = 1,
-    /// PTP (IEEE 1588) synchronization.
-    Ptp = 2,
-    /// GPS synchronization.
-    Gps = 3,
-    /// GLONASS synchronization.
-    Glonass = 4,
-    /// LORAN-C synchronization.
-    LoranC = 5,
-    /// BDS (BeiDou) synchronization.
-    Bds = 6,
-    /// Galileo synchronization.
-    Galileo = 7,
-    /// Local clock (unsynchronized).
-    Local = 8,
-    /// SSU/BITS synchronization.
-    SsuBits = 9,
-    /// Unknown synchronization source.
+    Ntp,
+    Ptp,
+    SsuBits,
+    /// RFC 8972 Table 7 groups GPS/GLONASS/LORAN-C/BDS/Galileo at code 4.
+    /// Decoding cannot recover which specific external source was used.
+    External,
+    /// Local free-running clock (code 5).
+    Local,
+    /// Named external-source aliases; all encode as code 4 and decode as External.
+    Gps,
+    Glonass,
+    LoranC,
+    Bds,
+    Galileo,
     Unknown(u8),
 }
 
@@ -36,13 +30,9 @@ impl SyncSource {
         match byte {
             1 => Self::Ntp,
             2 => Self::Ptp,
-            3 => Self::Gps,
-            4 => Self::Glonass,
-            5 => Self::LoranC,
-            6 => Self::Bds,
-            7 => Self::Galileo,
-            8 => Self::Local,
-            9 => Self::SsuBits,
+            3 => Self::SsuBits,
+            4 => Self::External,
+            5 => Self::Local,
             n => Self::Unknown(n),
         }
     }
@@ -53,13 +43,14 @@ impl SyncSource {
         match self {
             Self::Ntp => 1,
             Self::Ptp => 2,
-            Self::Gps => 3,
-            Self::Glonass => 4,
-            Self::LoranC => 5,
-            Self::Bds => 6,
-            Self::Galileo => 7,
-            Self::Local => 8,
-            Self::SsuBits => 9,
+            Self::SsuBits => 3,
+            Self::External
+            | Self::Gps
+            | Self::Glonass
+            | Self::LoranC
+            | Self::Bds
+            | Self::Galileo => 4,
+            Self::Local => 5,
             Self::Unknown(n) => n,
         }
     }
@@ -207,7 +198,11 @@ mod tests {
         for src in &sources {
             let byte = src.to_byte();
             let parsed = SyncSource::from_byte(byte);
-            assert_eq!(*src, parsed);
+            if byte == 4 {
+                assert_eq!(parsed, SyncSource::External);
+            } else {
+                assert_eq!(*src, parsed);
+            }
         }
     }
 
@@ -215,11 +210,14 @@ mod tests {
     fn test_sync_source_byte_values() {
         assert_eq!(SyncSource::Ntp.to_byte(), 1);
         assert_eq!(SyncSource::Ptp.to_byte(), 2);
-        assert_eq!(SyncSource::Gps.to_byte(), 3);
-        assert_eq!(SyncSource::Local.to_byte(), 8);
-        assert_eq!(SyncSource::SsuBits.to_byte(), 9);
+        assert_eq!(SyncSource::Gps.to_byte(), 4);
+        assert_eq!(SyncSource::Local.to_byte(), 5);
+        assert_eq!(SyncSource::SsuBits.to_byte(), 3);
         assert_eq!(SyncSource::Unknown(0).to_byte(), 0);
         assert_eq!(SyncSource::Unknown(255).to_byte(), 255);
+        for byte in 0..=255 {
+            assert_eq!(SyncSource::from_byte(byte).to_byte(), byte);
+        }
     }
 
     #[test]
@@ -271,7 +269,7 @@ mod tests {
         let original = TimestampInfoTlv {
             sync_src_in: SyncSource::Ptp,
             timestamp_in: TimestampMethod::HwAssist,
-            sync_src_out: SyncSource::Gps,
+            sync_src_out: SyncSource::External,
             timestamp_out: TimestampMethod::ControlPlane,
         };
         let raw = original.to_raw();

@@ -1,8 +1,8 @@
 //! Hardware-assisted timestamping support (F1).
 //!
-//! Provides a capability probe and `--hwtstamp` mode enum the rest of
-//! the codebase consults when deciding which `TimestampMethod` to
-//! advertise in the RFC 8972 §4.3 Timestamp Information TLV.
+//! Provides capability probes, mode selection, and per-packet timestamp
+//! extraction. Wire metadata uses actual timestamp provenance, not the
+//! capabilities advertised by a NIC or the requested socket tier.
 //!
 //! **Defensive posture.** Per the project's hardware-dependent
 //! contract: this module never panics and never refuses to start the
@@ -234,6 +234,18 @@ pub struct TxTimestampReport {
     pub hardware: bool,
 }
 
+#[cfg(feature = "hwtstamp")]
+impl TxTimestampReport {
+    /// Actual acquisition method, independent of the socket's enabled tier.
+    pub fn method(&self) -> TimestampMethod {
+        if self.hardware {
+            TimestampMethod::HwAssist
+        } else {
+            TimestampMethod::SwLocal
+        }
+    }
+}
+
 /// Enables kernel timestamping on `fd` with a single `SO_TIMESTAMPING`
 /// bitmask (a second setsockopt would overwrite the first, so RX and TX
 /// wishes are combined in one call). `want_hw` additionally requests the
@@ -423,13 +435,17 @@ pub fn drain_tx_timestamps(
                 ControlMessageOwned::ScmTimestampsns(ts) => {
                     stamp = if ts.hw_raw.tv_sec() != 0 || ts.hw_raw.tv_nsec() != 0 {
                         Some((ts.hw_raw.tv_sec(), ts.hw_raw.tv_nsec() as u32, true))
-                    } else {
+                    } else if ts.system.tv_sec() != 0 || ts.system.tv_nsec() != 0 {
                         Some((ts.system.tv_sec(), ts.system.tv_nsec() as u32, false))
+                    } else {
+                        None
                     };
                 }
                 ControlMessageOwned::Ipv4RecvErr(err, _)
                 | ControlMessageOwned::Ipv6RecvErr(err, _) => {
-                    opt_id = Some(err.ee_data);
+                    if is_tx_timestamp_notification(err.ee_origin, err.ee_errno, err.ee_info) {
+                        opt_id = Some(err.ee_data);
+                    }
                 }
                 _ => {}
             }
@@ -443,6 +459,13 @@ pub fn drain_tx_timestamps(
         }
     }
     out
+}
+
+#[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+fn is_tx_timestamp_notification(origin: u8, errno: u32, info: u32) -> bool {
+    // Linux errqueue.h: SO_EE_ORIGIN_TIMESTAMPING=4, SCM_TSTAMP_SND=0.
+    // ICMP errors (whose ee_data may contain an MTU) are not TX packet IDs.
+    origin == 4 && errno == ::nix::libc::ENOMSG as u32 && info == 0
 }
 
 /// Requests NIC-level hardware timestamping filters via `SIOCSHWTSTAMP`
@@ -522,7 +545,7 @@ pub fn interface_for_addr(_addr: std::net::IpAddr) -> Option<String> {
     None
 }
 
-/// Resolves the effective `TimestampMethod` for the given mode and
+/// Describes the available `TimestampMethod` for the given mode and
 /// probe result. This is what the receiver writes into the Type 3
 /// TLV's `timestamp_in`/`timestamp_out` fields and what the sender
 /// reports about itself.
@@ -534,6 +557,7 @@ pub fn interface_for_addr(_addr: std::net::IpAddr) -> Option<String> {
 /// the relevant capability bit is true AND the operator's mode allows
 /// HW. Anything else reports `SwLocal`.
 #[must_use]
+// Capability policy only; not evidence of how a particular timestamp was acquired.
 pub fn effective_method(
     mode: HwTsMode,
     cap: HwTsCapability,
@@ -937,5 +961,43 @@ mod tests {
             ..Default::default()
         }
         .any_hw_supported());
+    }
+    #[cfg(feature = "hwtstamp")]
+    #[test]
+    fn tx_report_method_uses_actual_provenance() {
+        let mut report = TxTimestampReport {
+            opt_id: 7,
+            timestamp: 123,
+            hardware: false,
+        };
+        assert_eq!(report.method(), TimestampMethod::SwLocal);
+        report.hardware = true;
+        assert_eq!(report.method(), TimestampMethod::HwAssist);
+    }
+
+    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+    #[test]
+    fn tx_report_ignores_icmp_and_other_error_queue_events() {
+        assert!(is_tx_timestamp_notification(
+            4,
+            ::nix::libc::ENOMSG as u32,
+            0
+        ));
+        assert!(!is_tx_timestamp_notification(
+            2,
+            ::nix::libc::EMSGSIZE as u32,
+            0
+        ));
+        assert!(!is_tx_timestamp_notification(
+            3,
+            ::nix::libc::ECONNREFUSED as u32,
+            0
+        ));
+        assert!(!is_tx_timestamp_notification(4, 0, 0));
+        assert!(!is_tx_timestamp_notification(
+            4,
+            ::nix::libc::ENOMSG as u32,
+            1
+        ));
     }
 }

@@ -45,6 +45,41 @@ impl fmt::Debug for SecretString {
     }
 }
 
+/// Operator-declared clock discipline, independent of STAMP timestamp encoding.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClockSyncSource {
+    Ntp,
+    Ptp,
+    Gps,
+    Glonass,
+    LoranC,
+    Bds,
+    Galileo,
+    /// No external synchronization source is asserted (the default).
+    #[default]
+    Local,
+    SsuBits,
+}
+
+impl From<ClockSyncSource> for crate::tlv::SyncSource {
+    fn from(source: ClockSyncSource) -> Self {
+        match source {
+            ClockSyncSource::Ntp => Self::Ntp,
+            ClockSyncSource::Ptp => Self::Ptp,
+            ClockSyncSource::Gps => Self::Gps,
+            ClockSyncSource::Glonass => Self::Glonass,
+            ClockSyncSource::LoranC => Self::LoranC,
+            ClockSyncSource::Bds => Self::Bds,
+            ClockSyncSource::Galileo => Self::Galileo,
+            ClockSyncSource::Local => Self::Local,
+            ClockSyncSource::SsuBits => Self::SsuBits,
+        }
+    }
+}
+
 /// Diagnostic log output format. Selected via `--log-format`.
 #[derive(
     Debug,
@@ -241,9 +276,18 @@ pub struct Configuration {
     /// UDP port number for incoming packets
     #[clap(short = 'o', long, default_value_t = 862)]
     pub local_port: u16,
-    /// Clock source to be used
+    /// Timestamp wire encoding (NTP or PTP); does not configure clock synchronization.
     #[clap(short = 'K', long, default_value = "NTP")]
     pub clock_source: ClockFormat,
+    /// Reflector: declared synchronization source of the system clock (Type 3 TLV).
+    /// Independent of --clock-source and --clock-synchronized; no clock service is probed.
+    #[clap(long, value_enum, default_value = "local")]
+    pub clock_sync_source: ClockSyncSource,
+    /// Reflector: declared synchronization source of NIC hardware clocks used for T2.
+    /// Only used when a received timestamp actually comes from hardware. Ensure the
+    /// PHC is aligned with the system clock; this setting does not synchronize it.
+    #[clap(long, value_enum, default_value = "local")]
+    pub hardware_clock_sync_source: ClockSyncSource,
     /// Sender: seconds the reflector clock is ahead of UTC after epoch conversion.
     /// Subtracted from T2/T3 for one-way delay; zero for this suite's UTC clocks.
     /// Set from the peer's time configuration (e.g. its TAI-UTC offset), not its Z bit.
@@ -276,7 +320,7 @@ pub struct Configuration {
     #[clap(long, default_value_t = 1)]
     pub error_multiplier: u8,
 
-    /// Mark clock as synchronized in error estimate.
+    /// Assert the Error Estimate S bit; independent of wire format and Type 3 source.
     #[clap(long)]
     pub clock_synchronized: bool,
 
@@ -1609,6 +1653,8 @@ impl Configuration {
         merge!(remote_port);
         merge!(local_port);
         merge!(clock_source);
+        merge!(clock_sync_source);
+        merge!(hardware_clock_sync_source);
         merge!(reflector_utc_offset);
         merge!(send_delay);
         merge!(count);
@@ -1725,6 +1771,8 @@ pub struct FileConfiguration {
     pub remote_port: Option<u16>,
     pub local_port: Option<u16>,
     pub clock_source: Option<ClockFormat>,
+    pub clock_sync_source: Option<ClockSyncSource>,
+    pub hardware_clock_sync_source: Option<ClockSyncSource>,
     pub reflector_utc_offset: Option<i32>,
     pub send_delay: Option<u16>,
     pub count: Option<u16>,
@@ -1835,6 +1883,8 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "remote_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "local_port":  { "type": "integer", "minimum": 0, "maximum": 65535 },
     "clock_source": { "enum": ["NTP", "PTP"] },
+    "clock_sync_source": { "enum": ["ntp", "ptp", "gps", "glonass", "loran-c", "bds", "galileo", "local", "ssu-bits"] },
+    "hardware_clock_sync_source": { "enum": ["ntp", "ptp", "gps", "glonass", "loran-c", "bds", "galileo", "local", "ssu-bits"] },
     "reflector_utc_offset": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
     "send_delay":  { "type": "integer", "minimum": 0, "maximum": 65535 },
     "count":       { "type": "integer", "minimum": 0, "maximum": 65535 },
@@ -4500,5 +4550,80 @@ mod tests {
         // fall back to the -v/-vv-derived level instead.
         assert_eq!(resolve_log_filter(0, Some("")), "info");
         assert_eq!(resolve_log_filter(1, Some("")), "debug");
+    }
+    #[test]
+    fn clock_sync_sources_parse_merge_and_match_schema() {
+        use crate::tlv::SyncSource;
+        let schema: serde_json::Value = serde_json::from_str(CONFIG_JSON_SCHEMA).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clock.toml");
+        for (index, name) in [
+            "ntp", "ptp", "gps", "glonass", "loran-c", "bds", "galileo", "local", "ssu-bits",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let conf = load_from_args(&[
+                "test",
+                "--clock-source",
+                "PTP",
+                "--clock-sync-source",
+                name,
+                "--hardware-clock-sync-source",
+                name,
+            ])
+            .unwrap();
+            assert_eq!(
+                SyncSource::from(conf.clock_sync_source).to_byte(),
+                [1, 2, 4, 4, 4, 4, 4, 5, 3][index]
+            );
+            assert_eq!(conf.clock_sync_source, conf.hardware_clock_sync_source);
+            assert!(!conf.clock_synchronized);
+            for field in ["clock_sync_source", "hardware_clock_sync_source"] {
+                assert!(schema["properties"][field]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(name)));
+            }
+            std::fs::write(
+                &path,
+                format!("clock_sync_source = {name:?}\nhardware_clock_sync_source = {name:?}\n"),
+            )
+            .unwrap();
+            let file = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap();
+            assert_eq!(file.clock_sync_source, conf.clock_sync_source);
+            assert_eq!(
+                file.hardware_clock_sync_source,
+                conf.hardware_clock_sync_source
+            );
+            let override_conf = load_from_args(&[
+                "test",
+                "--config",
+                path.to_str().unwrap(),
+                "--clock-sync-source",
+                "local",
+                "--hardware-clock-sync-source",
+                "gps",
+            ])
+            .unwrap();
+            assert_eq!(override_conf.clock_sync_source, ClockSyncSource::Local);
+            assert_eq!(
+                override_conf.hardware_clock_sync_source,
+                ClockSyncSource::Gps
+            );
+        }
+        for args in [
+            vec!["test", "--clock-source", "PTP"],
+            vec!["test", "--clock-synchronized"],
+        ] {
+            let conf = load_from_args(&args).unwrap();
+            assert_eq!(conf.clock_sync_source, ClockSyncSource::Local);
+            assert_eq!(conf.hardware_clock_sync_source, ClockSyncSource::Local);
+        }
+        assert!(Configuration::try_parse_from(["test", "--clock-sync-source", "PTP"]).is_err());
+        assert!(
+            toml::from_str::<FileConfiguration>("hardware_clock_sync_source = 'automatic'")
+                .is_err()
+        );
     }
 }

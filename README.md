@@ -154,7 +154,8 @@ Any CLI option can be supplied via a TOML file passed with `--config <PATH>`. Va
 is_reflector       = true
 local_addr         = "192.0.2.10"
 auth_mode          = "O"           # "A" for authenticated
-clock_source       = "NTP"
+clock_source       = "NTP"         # wire encoding only
+clock_sync_source  = "local"       # declared system-clock discipline
 stateful_reflector = true
 hmac_key_file      = "/etc/stamp/hmac.key"
 ```
@@ -164,6 +165,13 @@ stamp-suite --config /etc/stamp/reflector.toml
 ```
 
 The plaintext `hmac_key` field is **deliberately rejected** in the config file — pass the raw key via `--hmac-key`, the `STAMP_HMAC_KEY` environment variable, or `--hmac-key-file <PATH>`. Set `chmod 600` on both the config file and the key file. See [doc/security.md](doc/security.md) for the full key-management story.
+
+Reflectors declare clock discipline with `--clock-sync-source` and, for NIC
+receive timestamps, `--hardware-clock-sync-source` (both default to `local`).
+These settings do not synchronize clocks or infer their state from
+`--clock-source NTP|PTP` or `--clock-synchronized`. See
+[clock metadata](doc/usage.md#clock-synchronization-metadata) for wire values and
+hardware fallback behavior.
 
 For the complete list of supported keys, validation behavior, and error message examples, see [doc/usage.md#configuration-file](doc/usage.md#configuration-file).
 

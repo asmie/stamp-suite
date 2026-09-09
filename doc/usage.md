@@ -46,7 +46,9 @@ local_port = 862
 
 # Protocol behaviour
 auth_mode = "O"              # "A" for authenticated, "O" for open
-clock_source = "NTP"         # "NTP" or "PTP"
+clock_source = "NTP"         # timestamp encoding: "NTP" or "PTP"
+clock_sync_source = "local"  # declared system-clock discipline
+hardware_clock_sync_source = "local" # declared NIC PHC discipline
 tlv_mode = "echo"            # "echo" or "ignore"
 stateful_reflector = true
 session_timeout = 300
@@ -72,7 +74,8 @@ becomes `ber_padding_size`). Examples of non-trivial types:
 | `remote_addr`, `local_addr`, `dest_node_addr`, `return_address` | string (IPv4 or IPv6) | `"192.0.2.10"`, `"2001:db8::1"` |
 | `metrics_addr` | string (`addr:port`) | `"127.0.0.1:9090"` |
 | `auth_mode` | enum | `"A"` or `"O"` |
-| `clock_source` | enum | `"NTP"` or `"PTP"` |
+| `clock_source` | enum | `"NTP"` or `"PTP"` (encoding only) |
+| `clock_sync_source`, `hardware_clock_sync_source` | enum | `"local"`, `"ntp"`, `"ptp"`, `"ssu-bits"`, `"gps"`, `"glonass"`, `"loran-c"`, `"bds"`, `"galileo"` |
 | `reflector_utc_offset` | signed integer | Sender: remote clock seconds ahead of UTC; subtract from T2/T3 for OWD. Default `0`. |
 | `tlv_mode` | enum | `"echo"` or `"ignore"` |
 | `output_format` | enum | `"text"`, `"json"`, or `"csv"` |
@@ -117,7 +120,9 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
   -S, --local-addr <ADDR>          Local address to bind for [default: 0.0.0.0]
   -p, --remote-port <PORT>         UDP port for outgoing packets [default: 862]
   -o, --local-port <PORT>          UDP port for incoming packets [default: 862]
-  -K, --clock-source <NTP|PTP>     Clock format used for timestamps [default: NTP]
+  -K, --clock-source <NTP|PTP>     Timestamp wire encoding [default: NTP]
+      --clock-sync-source <SOURCE> Declared system-clock discipline [default: local]
+      --hardware-clock-sync-source <SOURCE> Declared NIC PHC discipline [default: local]
   -d, --send-delay <MS>            Delay between packets in milliseconds [default: 1000]
   -c, --count <N>                  Number of packets to send [default: 1000]
   -L, --timeout <SEC>              Timeout for lost packets in seconds [default: 5]
@@ -534,6 +539,55 @@ aggregate receive/drop counters. A valid base packet with a failed TLV HMAC
 retains RFC 8972's I-flag reply behavior. Session caps and drain behavior remain
 separate from authentication admission.
 
+
+### Clock synchronization metadata
+
+`--clock-source NTP|PTP` selects the timestamp encoding. It does not establish
+which service disciplines the clock. The reflector's Type-3 Timestamp Information
+TLV uses `--clock-sync-source` for system-clock timestamps and
+`--hardware-clock-sync-source` when T2 actually comes from a NIC PHC. Both default
+to `local`: no external discipline is asserted. Sources are explicit operator
+configuration, not clock-service detection. `--clock-synchronized` independently
+sets the Error Estimate S bit; neither setting changes the other.
+
+| Source setting | RFC 8972 Table 7 wire value |
+| --- | --- |
+| `ntp` | 1 |
+| `ptp` | 2 |
+| `ssu-bits` | 3 |
+| `gps`, `glonass`, `loran-c`, `bds`, `galileo` | 4 (one shared external-source class) |
+| `local` | 5 (local free-running) |
+
+For example, a host disciplined by NTP can still encode timestamps as PTP:
+
+```sh
+stamp-suite --is-reflector --clock-source PTP --clock-sync-source ntp
+```
+
+Type 3 describes the reflector's T2 and T3; the sender requests it with zeroed
+information fields. Ingress method is hardware only for an actual hardware T2.
+Current T3 is generated in software before sending, so its method is software,
+including when `--hwtstamp on` requests a later NIC transmit timestamp. A fallback
+to software T2 uses the system source, not the PHC source.
+
+Stateful Follow-Up Telemetry reports the previous reply's stored timestamp and
+its actual acquisition method together. A kernel software report stays software;
+a later matching hardware report can upgrade both timestamp and method. Delayed
+reports for a different sequence and software downgrades of an existing hardware
+record are rejected. Every burst copy refreshes this record before signing.
+Stateless replies retain zero Follow-Up sequence/timestamp fields.
+
+These declarations do not align a PHC with the system clock, verify lock quality,
+or compensate for different timescales. Align clocks used in the same measurement;
+even round-trip calculations can be biased when T2 is hardware and T3 is software.
+The live regression covers software fallback on loopback; NIC hardware provenance
+and separate clock disciplines use deterministic fixtures, not a physical PTP testbed.
+
+Library callers now supply `ProcessingContext::clock_sync_source`,
+`hardware_clock_sync_source`, and `last_reflection_method` (replacing `tx_method`).
+`SyncSource::from_byte(4)` returns `External`: the wire cannot distinguish the
+individual sources in that class. Named source aliases encode to 4; 6–9 are no
+longer assigned the incorrect legacy meanings.
 
 ### Session capacity, drain, and restart
 

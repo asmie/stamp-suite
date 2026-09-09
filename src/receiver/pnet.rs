@@ -52,6 +52,8 @@ struct PnetSendContext {
 struct CaptureConfig {
     local_port: u16,
     clock_source: ClockFormat,
+    clock_sync_source: crate::tlv::SyncSource,
+    hardware_clock_sync_source: crate::tlv::SyncSource,
     use_auth: bool,
     error_estimate_wire: u16,
     hmac_key: Option<HmacKey>,
@@ -309,6 +311,8 @@ pub async fn run_receiver(
     let capture_config = CaptureConfig {
         local_port: conf.local_port,
         clock_source: conf.clock_source,
+        clock_sync_source: conf.clock_sync_source.into(),
+        hardware_clock_sync_source: conf.hardware_clock_sync_source.into(),
         use_auth,
         error_estimate_wire,
         hmac_key,
@@ -838,6 +842,8 @@ fn handle_stamp_packet(
         let ctx = ProcessingContext {
             replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: config.clock_source,
+            clock_sync_source: config.clock_sync_source,
+            hardware_clock_sync_source: config.hardware_clock_sync_source,
             error_estimate_wire: config.error_estimate_wire,
             hmac_key: config.hmac_key.as_ref(),
             hmac_key_set: keys_guard.as_ref(),
@@ -877,7 +883,7 @@ fn handle_stamp_packet(
                 .load(AtomicOrdering::Relaxed),
             rx_timestamp: None,
             rx_method: crate::tlv::TimestampMethod::SwLocal,
-            tx_method: crate::tlv::TimestampMethod::SwLocal,
+            last_reflection_method: crate::tlv::TimestampMethod::SwLocal,
         };
         process_session_packet_isolated(
             data,

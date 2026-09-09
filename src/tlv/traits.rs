@@ -86,7 +86,7 @@ mod tests {
         let original = TimestampInfoTlv {
             sync_src_in: SyncSource::Ptp,
             timestamp_in: TimestampMethod::HwAssist,
-            sync_src_out: SyncSource::Gps,
+            sync_src_out: SyncSource::External,
             timestamp_out: TimestampMethod::ControlPlane,
         };
         let raw = original.to_raw();
