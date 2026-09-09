@@ -105,7 +105,10 @@ Deleting a key **revokes access**: once a keyset exists, an authenticated
 packet whose SSID resolves to no key (unknown SSID with no default, or the
 last key deleted) is dropped. Removing keys can only make the reflector
 stricter — it never falls back to answering authenticated-layout packets
-without verification, regardless of `--require-hmac`.
+without verification, regardless of `--require-hmac`. A configured default key
+still applies after removing a per-SSID entry. Rotation/revocation affects new
+requests, while already accepted replies (including queued burst copies) retain
+the key used for their validation and assembly. Key changes do not cancel them.
 
 ### Response shapes
 
@@ -186,7 +189,7 @@ fields; `0` consistently means "unlimited/disabled", mirroring the CLI):
 
 | State | Type | Readers | Writer | Notes |
 |---|---|---|---|---|
-| HMAC keyset | `Arc<RwLock<Option<HmacKeySet>>>` | packet loops (read guard per packet) | control plane | The guard is scoped to never cross an `.await` in the nix backend (std guard is not `Send`); acquire → build `ProcessingContext` → process (sync) → drop guard → async send. `ProcessingContext.hmac_key_set: Option<&HmacKeySet>` keeps its borrow type — zero churn in the hot path. |
+| HMAC keyset | `Arc<RwLock<Option<HmacKeySet>>>` | packet loops (read guard per packet) | control plane | The guard never crosses an `.await` in the nix backend: acquire → build `ProcessingContext` → validate/assemble and snapshot the selected key → drop guard → enqueue/send. Both backends pass the owned snapshot from shared processing directly into `Transmission`; they do not look up the key again. The snapshot zeroizes on drop through `HmacKey`. |
 | Runtime caps | `RuntimeCaps` (AtomicU16/U32/Usize) | packet loops, per packet | control plane | pnet receives the `Arc` via `CaptureConfig` (moves into `spawn_blocking`). |
 | Rate limiter | always-constructed `RateLimiter` with atomic rate/burst | packet loops | control plane | `rate == 0` short-circuits to allow; enables turning limiting *on* at runtime even when started unlimited. |
 | Draining / max-sessions | atomics inside `SessionManager` | packet loops | control plane | |
@@ -268,10 +271,14 @@ lines are the audit trail; v1 has no separate audit log.
 - OpenAPI document generation; Prometheus counters for control actions.
 - Windows/`SIO_TIMESTAMPING`, mTLS client certificates, SNMP SET parity — tracked elsewhere.
 
-## 9. Known collision
+## 9. Fallback signing verification
 
-The Task-5 keyset refactor touches the CoS-reject HMAC recompute path,
-which today silently skips recomputation under `--hmac-key-dir`
-(`src/receiver/nix.rs` uses only the legacy single key there). The
-implementation plan flags it: fix in passing only if the diff stays
-small, otherwise file as a follow-up bug.
+Review finding 06 is closed: shared processing carries its selected per-SSID
+or default key into `Transmission`, which signs final bytes after fallback
+mutations. `tests/keyset_fallback_test.rs` covers normal and unsupported-SRv6
+replies, directory/default selection, and rotation during queued bursts in
+open/authenticated mode over IPv4/IPv6. It also verifies authenticated revocation.
+The shared `selected_key_survives_rotation_and_cos_fallback` test injects a CoS
+send failure after key replacement and runs in pnet-only library builds.
+These rotation tests mutate the same shared keyset used by the control handlers;
+they do not claim end-to-end HTTP control-plane interoperability.

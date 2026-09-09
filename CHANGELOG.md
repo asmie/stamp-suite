@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Carry the exact per-SSID key selected during reflector validation into final
+  transmission. Both backends reuse that owned snapshot for base/TLV signatures,
+  fallback flag changes, and queued burst copies. Add key-directory, default-key,
+  rotation, revocation, and CoS/SRv6 fallback regressions.
+
 - Decode reflector timestamps using their Error Estimate Z bit before computing
   one-way delay. Normalize NTP/PTP epochs and unfold wrapped seconds, including
   the 2036 NTP era boundary. Add `--reflector-utc-offset` for an explicitly known

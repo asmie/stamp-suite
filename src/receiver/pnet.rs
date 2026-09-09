@@ -887,7 +887,7 @@ fn handle_stamp_packet(
             &config.counters,
             config.drop_replayed,
         )
-        .map(|(response, session)| {
+        .map(|(response, session, signing_key)| {
             Transmission::new(
                 response,
                 session,
@@ -895,7 +895,7 @@ fn handle_stamp_packet(
                 config.clock_source,
                 config.use_auth,
                 config.stateful_reflector,
-                super::resolve_hmac_key(&ctx, super::peek_ssid(data, config.use_auth)).cloned(),
+                signing_key,
                 pkt.dscp,
                 false,
             )

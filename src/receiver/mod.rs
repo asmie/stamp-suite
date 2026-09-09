@@ -1591,12 +1591,14 @@ pub fn process_stamp_packet(
     use_auth: bool,
     ctx: &ProcessingContext,
 ) -> Option<StampResponse> {
-    process_stamp_packet_inner(data, src, ttl, use_auth, ctx, None).map(|(response, _)| response)
+    process_stamp_packet_inner(data, src, ttl, use_auth, ctx, None)
+        .map(|processed| processed.response)
 }
 
 /// Live backend entry: authenticate, then acquire/update session state, classify
 /// replay, and assemble with the resulting counters. The caller holds one keyset
-/// read guard through this call, so rotation cannot split verification/assembly.
+/// read guard through this call. Return an owned snapshot of the exact key used
+/// for verification/assembly, so backends never resolve a different signing key.
 #[allow(clippy::too_many_arguments)]
 fn process_session_packet_isolated(
     data: &[u8],
@@ -1606,9 +1608,9 @@ fn process_session_packet_isolated(
     ctx: &ProcessingContext,
     counters: &ReflectorCounters,
     drop_replayed: bool,
-) -> Option<(StampResponse, Arc<crate::session::Session>)> {
+) -> Option<(StampResponse, Arc<crate::session::Session>, Option<HmacKey>)> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (response, session) = process_stamp_packet_inner(
+        let processed = process_stamp_packet_inner(
             data,
             src,
             ttl,
@@ -1616,7 +1618,11 @@ fn process_session_packet_isolated(
             ctx,
             Some((counters, drop_replayed)),
         )?;
-        Some((response, session?))
+        Some((
+            processed.response,
+            processed.session?,
+            processed.signing_key,
+        ))
     })) {
         Ok(result) => result,
         Err(_) => {
@@ -1624,6 +1630,13 @@ fn process_session_packet_isolated(
             None
         }
     }
+}
+
+struct ProcessedPacket {
+    response: StampResponse,
+    session: Option<Arc<crate::session::Session>>,
+    /// Owned only for live transmissions; standalone processing does not clone keys.
+    signing_key: Option<HmacKey>,
 }
 
 enum ValidatedBase {
@@ -1638,7 +1651,7 @@ fn process_stamp_packet_inner(
     use_auth: bool,
     ctx: &ProcessingContext,
     tracking: Option<(&ReflectorCounters, bool)>,
-) -> Option<(StampResponse, Option<Arc<crate::session::Session>>)> {
+) -> Option<ProcessedPacket> {
     let session_key = if let Some(manager) = ctx.session_manager {
         let key = ctx.packet_session_key(data, src, use_auth)?;
         if !manager.admits(&key) {
@@ -1870,7 +1883,11 @@ fn process_stamp_packet_inner(
     if let Some(session) = &counter_session {
         commit_replay(session, data);
     }
-    Some((response, counter_session))
+    Some(ProcessedPacket {
+        response,
+        session: counter_session,
+        signing_key: resolved_hmac_key.filter(|_| tracking.is_some()).cloned(),
+    })
 }
 
 /// Parses and authenticates the base before any persistent session mutation.
@@ -2821,6 +2838,97 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
+    #[test]
+    fn selected_key_survives_rotation_and_cos_fallback() {
+        for auth in [false, true] {
+            let selected = HmacKey::new(vec![0xAB; 16]).unwrap();
+            let replacement = HmacKey::new(vec![0xCD; 16]).unwrap();
+            let mut keys = crate::crypto::HmacKeySet::with_default(replacement.clone());
+            keys.insert(42, selected.clone());
+            let base = if auth {
+                AUTH_BASE_SIZE
+            } else {
+                UNAUTH_BASE_SIZE
+            };
+            let mut data = vec![0; base];
+            let error = if auth { 24 } else { 12 };
+            data[if auth { 23 } else { 11 }] = 1;
+            data[error + 1] = 1;
+            data[error + 2..error + 4].copy_from_slice(&42u16.to_be_bytes());
+            data.extend_from_slice(&[0x80, 4, 0, 4, 184, 0, 0, 0]);
+            let mut covered = data[..4].to_vec();
+            covered.extend_from_slice(&data[base..]);
+            data.extend_from_slice(&[0x80, 8, 0, 16]);
+            data.extend_from_slice(&selected.compute(&covered));
+            if auth {
+                let hmac = crate::crypto::compute_packet_hmac(&selected, &data, 96);
+                data[96..112].copy_from_slice(&hmac);
+            }
+            let manager = Arc::new(SessionManager::new(None, None));
+            let counters = ReflectorCounters::new();
+            let (response, session, signing_key) = {
+                let ctx = ProcessingContext {
+                    hmac_key: Some(&replacement), // must lose to the SSID-specific entry
+                    hmac_key_set: Some(&keys),
+                    session_manager: Some(&manager),
+                    stateful_reflector: true,
+                    ..test_ctx(0, 0)
+                };
+                process_session_packet_isolated(
+                    &data,
+                    loopback_src(),
+                    64,
+                    auth,
+                    &ctx,
+                    &counters,
+                    false,
+                )
+                .unwrap()
+            };
+            // Mutating/dropping the source set cannot change an accepted reply.
+            keys.insert(42, replacement.clone());
+            drop(keys);
+            let mut transmission = super::transmit::Transmission::new(
+                response,
+                session,
+                loopback_src(),
+                ClockFormat::NTP,
+                auth,
+                true,
+                signing_key,
+                10,
+                false,
+            );
+            let mut attempts = 0;
+            assert_eq!(
+                transmission.send_next(&counters, &RateLimiter::new(0), |reply, _, options| {
+                    attempts += 1;
+                    if auth {
+                        assert_eq!(
+                            &reply[96..112],
+                            &crate::crypto::compute_packet_hmac(&selected, reply, 96)
+                        );
+                    }
+                    let pos = reply.len() - 20;
+                    assert_eq!(&reply[pos + 1..pos + 4], &[8, 0, 16]);
+                    let mut covered = reply[..4].to_vec();
+                    covered.extend_from_slice(&reply[base..pos]);
+                    assert_eq!(&reply[pos + 4..], &selected.compute(&covered));
+                    assert_ne!(&reply[pos + 4..], &replacement.compute(&covered));
+                    if attempts == 1 {
+                        assert_eq!(options.tos, 184);
+                        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+                    } else {
+                        assert_eq!(options.tos, 40);
+                        Ok(reply.len())
+                    }
+                }),
+                Some(0)
+            );
+            assert_eq!(attempts, 2);
+        }
+    }
+
     /// Runs for pnet-only builds too, without requiring a raw capture channel.
     #[test]
     fn tracked_processing_validates_before_any_session_mutation() {
@@ -2854,7 +2962,7 @@ mod tests {
                 )
                 .is_none());
                 assert_eq!(manager.session_count(), 0);
-                let (response, session) = process_session_packet_isolated(
+                let (response, session, _) = process_session_packet_isolated(
                     &data,
                     loopback_src(),
                     64,

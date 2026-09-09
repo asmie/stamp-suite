@@ -256,6 +256,21 @@ since the variant would itself disclose the observed address family.
 
 ### Authentication
 
+A reflector with `--hmac-key-dir` resolves the request's SSID-specific key first,
+then the directory's default key if present. Once a keyset exists, it takes
+precedence over the legacy single key. An authenticated request with no matching
+or default key is rejected.
+
+The selected key is retained through final reply signing, including CoS rejection,
+unsupported/failed SRv6 return paths, alternate-address fallback, and burst copies.
+Runtime rotation or revocation affects newly processed requests. Replies already
+accepted into the queue finish with their original key; changing keys does not
+cancel those copies. Keep the old key available to the sender long enough to
+validate any outstanding replies during a planned rotation. Removing a per-SSID
+entry still permits that SSID through a configured default key; remove the default
+as well when access must be revoked. Open-mode TLV integrity does not authenticate
+the base packet and does not provide authenticated-mode admission semantics.
+
 ```
       --hmac-key <HEX>             HMAC key, hex string (also via STAMP_HMAC_KEY env)
       --hmac-key-file <PATH>       Path to file containing HMAC key

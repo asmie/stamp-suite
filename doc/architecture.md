@@ -154,8 +154,11 @@ uses the existing monotonic `Instant` path. Signed OWD retains real clock skew.
 ## Packet Processing Pipeline
 
 Both backends use `process_session_packet_isolated` for the following stages.
-A single keyset read guard spans validation and reply assembly, so a concurrent
-key rotation cannot split those operations across different key versions.
+A single keyset read guard spans validation and reply assembly. The shared
+processing result also owns a snapshot of the selected key for live sends;
+neither backend performs a second key lookup. The finalizer uses this same key
+for base/TLV signatures after fallback mutations and for every queued copy.
+Standalone packet processing avoids the snapshot allocation.
 
 1. **Identify and admit** — Extract the complete session key and check the configured admission policy without creating runtime state.
 2. **Parse and authenticate** — Decode the base header; enforce strict length or canonical zero-fill policy, the open-mode shape guard, and configured base HMAC verification. Unknown/revoked keys and invalid base packets stop here. Both backends count rejected processing in aggregate `packets_dropped`; no session is created or refreshed.

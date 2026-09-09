@@ -16,6 +16,7 @@ this file documents the opt-in invocations.
 | `loopback_ipv6_test.rs` | TLV-by-TLV IPv6 parity via `process_stamp_packet`. | yes |
 | `tlv_flag_semantics.rs` | RFC 8972 U/M/I + draft-asymmetrical C flag conformance. | yes |
 | `ber_regression_test.rs` | BER (Types 240/241/242) on-wire counts. | yes |
+| `keyset_fallback_test.rs` | Directory/default keys through normal/SRv6 fallback replies and queued-burst rotation; authenticated revocation, open/auth, IPv4/IPv6. | yes, Unix nix |
 | `mixed_clock_test.rs` | Live sender against independent NTP/PTP peer encoding in both mixed directions; IPv4 open, IPv6 authenticated, explicit UTC offset. | yes |
 | `ptp_e2e_test.rs` | PTP timestamp encoding + Type 3 sync-source reporting. | yes |
 | `malformed_input_test.rs` | Hand-crafted hostile byte sequences at every parser boundary. | yes |

@@ -614,7 +614,7 @@ pub async fn run_receiver(
                         &counters,
                         conf.drop_replayed,
                     )
-                    .map(|(response, session)| {
+                    .map(|(response, session, signing_key)| {
                         Transmission::new(
                             response,
                             session,
@@ -622,8 +622,7 @@ pub async fn run_receiver(
                             conf.clock_source,
                             use_auth,
                             conf.stateful_reflector,
-                            super::resolve_hmac_key(&ctx, super::peek_ssid(data, use_auth))
-                                .cloned(),
+                            signing_key,
                             received_dscp,
                             conf.srv6_return_forwarding && crate::srv6::srh_supported(),
                         )
