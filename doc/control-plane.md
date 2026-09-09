@@ -184,10 +184,10 @@ fields; `0` consistently means "unlimited/disabled", mirroring the CLI):
 - **Caps PATCH** is per-field atomic but not transactional across fields;
   fields are applied independently. Session-cap and drain changes additionally
   take the session-table write lock to serialize with new admission. `reflected_control_max_size`
-  is additionally clamped to the payload ceiling discovered from the
-  egress MTU at startup — a runtime raise cannot reintroduce Type 12
-  replies that fragment on the live link; the response body reports the
-  clamped effective value.
+  reports the administrative payload limit. Each burst copy and routing fallback
+  also checks its actual Linux route MTU immediately before sending; PATCH
+  cannot bypass that check. Queued requests retain the administrative cap
+  captured during request processing.
 
 ## 4. Concurrency and state model
 

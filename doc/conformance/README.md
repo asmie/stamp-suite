@@ -7,12 +7,12 @@ historical, not a current conformance sign-off. The [September review](../review
 identified 16 findings, including behavior previously scored Compliant.
 The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
 verification one item at a time. Finding 02 updates the three session-admission rows for provisioned mode only.
-Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Finding 09 repairs the Type-12 ordering response and reclassifies its stale N-A row as Compliant. Other clause scores remain historical; citation maintenance alone does not
+Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Finding 09 repairs the Type-12 ordering response and reclassifies its stale N-A row as Compliant. Finding 11 implements Linux route-aware sizing and reopens three MTU rows as Partial across the broader platform/route scope. Other clause scores remain historical; citation maintenance alone does not
 close the remaining findings.
 
 This document rolls up the eight clause-level conformance matrices in this
 directory into a single compliance statement for the stamp-suite 1.0 line.
-Counts below include findings 02 (RFC 8972), 07 (RFC 9534), and 09 (Type-12 ordering); they are not a new
+Counts below include findings 02 (RFC 8972), 07 (RFC 9534), 09 (Type-12 ordering), and 11 (route MTU scope); they are not a new
 full-project audit.
 Where this document goes further than the matrices is in stating, as a
 maintainer decision, which of the residual non-Compliant rows are accepted
@@ -34,10 +34,10 @@ tracked independently of these historical clause totals.
 | [RFC 9503](rfc9503.md) — Destination Node Address / Return Path | RFC 9503, October 2023 | 26 | 22 | 0 | 0 | 3 | 1 |
 | [RFC 9534](rfc9534.md) — Micro-session ID (LAG) | RFC 9534, January 2024 | 18 | 9 | 6 | 1 | 2 | 0 |
 | [RFC 8545](rfc8545.md) — TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
-| [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 | 47 | 39 | 0 | 0 | 7 | 1 |
+| [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md) — CoS/ECN congestion signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
-| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -11, 4 July 2026 | 40 | 38 | 0 | 0 | 2 | 0 |
-| **Total** | | **368** | **318** | **6** | **1** | **40** | **3** |
+| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -11, 4 July 2026 | 40 | 36 | 2 | 0 | 2 | 0 |
+| **Total** | | **368** | **315** | **9** | **1** | **40** | **3** |
 
 Each matrix was independently re-verified against a freshly fetched copy of
 its source text on 2026-07-22 (see each file's own "Revision frozen" line and
@@ -80,7 +80,7 @@ the tests.
 | Reply source-address pinning (SHOULD) | Partial | `9503-3-1` | The matched Destination Node Address now reaches the send path (`StampResponse::reply_source`) and both backends pin it via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message. Verified by asserting the *receiver* observes the pinned source. |
 | DSCP/ECN admission-policy layer | Partial | `RFC8972-4.4-8`, `RFC8972-6-3`, `cos-ecn-3.2-3`, `cos-ecn-3.2-6` | `src/cos_policy.rs` separates *permitted* from *capable*: `--allowed-dscp`, `--allowed-ecn`, and destination-scoped `--allowed-dscp-for`. A refused DSCP1 reports RPD=0b01; a refused EC1 forces Not-ECT and reports RPE=0b10. |
 | Extra-Padding-after-HMAC leniency | Partial | `RFC8972-4.8-2` | Both parsers now accept trailing Extra Padding. Required fixing HMAC coverage first: the covered prefix had been derived from the sum of non-HMAC TLV sizes, which is only the true prefix while the HMAC TLV is last. |
-| Live egress-MTU query (reflector side) | Partial | `asym-3-08` | `ioctl(SIOCGIFMTU)` on the egress interface, enforced alongside `--reflected-control-max-size`. The stand-in had been wrong at the default, permitting a 1528-byte datagram on a 1500-byte link. |
+| Live egress-MTU query (reflector side) | Partial | `asym-3-08`, `ext-hdr-3.1-9`, `ext-hdr-3.2-8` | Finding 11 replaces the startup interface stand-in with Linux per-route sizing, bounded notification-invalidated caching and fragmentation prevention. Live veth tests cover both IP families, wildcard/bound sources, link/route changes and alternate targets. Unknown budgets fail closed; exact-size and platform limits are explicit in the current rows. |
 | Reflector ingress clock telemetry | Partial | `RFC8972-4.3-5`, `RFC8972-4.3-6` | All four Timestamp Info octets are now filled from the reflector's own clocks, with the ingress (T2) and egress (T3) methods reported separately. |
 | Replay detection (SHOULD) | Gap | `asym-5-07` | `Session::check_replay` with a 31-entry per-session window in a single `AtomicU64`; counters on `/v1/status`; opt-in `--drop-replayed` for the action. |
 | Send-delay / reflected-burst cross-check | Gap | `asym-5-09` | `reflected_burst_pacing_warning()` warns at startup when `--send-delay` is shorter than the requested burst, naming the minimum. |

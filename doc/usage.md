@@ -209,22 +209,35 @@ waits off the capture thread. Timing is best-effort and can exceed the requested
 interval under load. Rate limiting or a send failure can stop a burst early.
 Pending bursts are not yet bounded independently, and shutdown discards them.
 
-**Reply-size cap and the live egress MTU (draft-ietf-ippm-asymmetrical-pkts
-§3).** `--reflected-control-max-size` bounds the STAMP reply the reflector will
-pad up to for a Type-12 `length` request. On Linux, when `--local-addr` names a
-single interface, the reflector also reads that interface's MTU via `SIOCGIFMTU`
-at startup and enforces whichever cap is smaller, logging the reduction. The
-practical effect at the defaults: on a 1500-byte link the effective cap is 1472
-(MTU less the IPv4 and UDP headers, or 1452 for IPv6), so a maximum-length
-request gets the draft's C-flag/single-reply treatment instead of producing a
-1528-byte datagram that the path would have to fragment. Raise the flag for a
-jumbo link, or lower it to cap replies below the path MTU. The query is
-best-effort — a wildcard bind has no single egress interface, and a failed query
-or a non-Linux platform simply leaves the flag as the only cap. The sender does
-the equivalent check with `getsockopt(IP_MTU)`, which only answers on a
-connected socket and so cannot be used by a reflector. The discovered ceiling
-also bounds runtime updates: a control-plane `PATCH /v1/caps` cannot raise
-`reflected_control_max_size` past it.
+**Reply-size cap and the actual reply route (draft-ietf-ippm-asymmetrical-pkts-14
+§3).** `--reflected-control-max-size` is an administrative STAMP payload limit.
+On Linux, both reflector backends also query the reply's UDP route with
+`RTM_GETROUTE`, including source/destination addresses, UDP ports, DSCP and IPv6
+scope. This works with wildcard binds and alternate return addresses. The budget
+uses the smaller of the route MTU metric and egress interface MTU, less IP/UDP
+headers and any attached SRH. A plain 1500-byte link allows 1472 STAMP bytes over
+IPv4 or 1452 over IPv6. Tunnel-device MTUs account for their outer headers;
+supported SRv6 lightweight route encapsulation reserves its additional overhead.
+Unknown lightweight encapsulation is rejected rather than treated as zero cost.
+
+The per-send-owner cache holds at most 256 routes for 250 ms. Route, interface,
+address and routing-rule notifications invalidate it; unavailable notification
+subscriptions disable caching. Each burst copy and routing fallback checks its
+budget. Fragmentation is disabled for these sends; `EMSGSIZE` forces one fresh
+lookup and resizing retry. Padding can shrink and optional reflected header TLVs
+can be removed; final HMACs cover all changes. An MTU-clamped Type-12 response
+sets C and ends the burst. If fewer than four padding bytes would be needed, the
+reply stays slightly shorter because a TLV header cannot fit. Mandatory fields
+are never truncated: an unsatisfiable budget or unavailable route MTU drops the
+reply. Route MTU lookup is currently Linux-only, so non-Linux reflectors cannot
+send size-controlled or reflected-header replies through this path.
+
+Raising the administrative limit permits larger replies on suitable routes.
+`PATCH /v1/caps` reports that configured limit, with route limits still applied
+at send time. Already queued requests retain their captured administrative cap.
+This performs kernel route/interface lookup, not active path MTU probing; NIC
+offload, arbitrary policy rewriting and encapsulation not visible in the route
+require separate deployment validation.
 
 **Replay detection (draft-ietf-ippm-asymmetrical-pkts-14 §5).** After base
 validation and configured authentication, the reflector classifies each sender

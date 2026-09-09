@@ -8,6 +8,7 @@
 //! - **`ttl-nix`**: Force nix backend
 //! - **`ttl-pnet`**: Force pnet backend
 
+mod mtu;
 mod transmit;
 
 // Explicit feature flags take priority
@@ -581,13 +582,9 @@ pub struct RuntimeCaps {
     /// Type 12 volume limit (max reply packets per request); 0 disables
     /// asymmetric reflection.
     pub reflected_control_max_count: std::sync::atomic::AtomicU16,
-    /// Type 12 reply-size cap in octets (egress-MTU stand-in).
+    /// Administrative Type 12 reply-size cap in octets; send-time route MTU
+    /// enforcement can further reduce the actual payload.
     pub reflected_control_max_size: std::sync::atomic::AtomicU16,
-    /// Startup-immutable payload ceiling discovered from the live egress MTU
-    /// (`u16::MAX` when undiscoverable). Control-plane updates to
-    /// `reflected_control_max_size` are clamped to this, so a runtime PATCH
-    /// cannot reintroduce replies that fragment on the link.
-    pub reflected_control_size_ceiling: u16,
     /// Type 12 rate limit: minimum inter-packet interval in nanoseconds.
     pub reflected_control_min_interval_ns: AtomicU32,
 }
@@ -600,12 +597,9 @@ impl RuntimeCaps {
             reflected_control_max_count: std::sync::atomic::AtomicU16::new(
                 conf.reflected_control_max_count,
             ),
-            // Live egress MTU, when it can be read, bounds this alongside the
-            // configured value (draft-ietf-ippm-asymmetrical-pkts-14 §3).
             reflected_control_max_size: std::sync::atomic::AtomicU16::new(
-                effective_reflected_control_max_size(conf),
+                conf.reflected_control_max_size,
             ),
-            reflected_control_size_ceiling: reflected_control_size_ceiling(conf),
             reflected_control_min_interval_ns: AtomicU32::new(
                 conf.reflected_control_min_interval_ns,
             ),
@@ -621,7 +615,6 @@ impl RuntimeCaps {
             reflected_control_max_size: std::sync::atomic::AtomicU16::new(
                 REFLECTED_CONTROL_MAX_SIZE,
             ),
-            reflected_control_size_ceiling: u16::MAX,
             reflected_control_min_interval_ns: AtomicU32::new(REFLECTED_CONTROL_MIN_INTERVAL_NS),
         }
     }
@@ -833,16 +826,11 @@ pub fn should_apply_fallback_tos(attempted: u8, fallback: u8, last: u8) -> bool 
 
 /// Reads an interface's MTU with `ioctl(SIOCGIFMTU)`.
 ///
-/// The reflector cannot use the sender's `getsockopt(IP_MTU)` route lookup:
-/// that only answers on a *connected* socket, and a reflector's socket is bound
-/// to a local address and replies to arbitrary peers. Querying the egress
-/// interface by name is the equivalent that works for a bound socket.
-///
 /// A throwaway UDP socket supplies the descriptor — `SIOCGIFMTU` only needs
 /// *some* socket of the right family, not the reflector's own.
 ///
 /// Returns `None` on any failure (unknown interface, permission, non-Linux), so
-/// callers fall back to their configured value rather than losing the cap.
+/// callers can reject a reply whose egress budget cannot be established.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn interface_mtu(iface: &str) -> Option<u32> {
@@ -887,9 +875,7 @@ pub fn interface_mtu(_iface: &str) -> Option<u32> {
 /// the whole IP datagram, so the IP and UDP headers have to come off before the
 /// two are comparable.
 ///
-/// Floored at [`AUTH_BASE_SIZE`]: a cap below a reply's own mandatory base would
-/// be unsatisfiable, and reporting the floor keeps the reply-shaping arithmetic
-/// meaningful instead of collapsing to zero on an unusably small MTU.
+/// No base-size floor: a reply whose mandatory fields cannot fit is dropped.
 #[must_use]
 pub fn mtu_payload_cap(mtu: u32, is_ipv6: bool) -> u16 {
     use crate::tlv::{IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE};
@@ -901,65 +887,9 @@ pub fn mtu_payload_cap(mtu: u32, is_ipv6: bool) -> u16 {
         IPV4_FIXED_HEADER_SIZE as u32
     };
     let payload = mtu.saturating_sub(ip_hdr).saturating_sub(UDP_HEADER);
-    let clamped = payload.min(u16::MAX as u32) as u16;
-    clamped.max(AUTH_BASE_SIZE as u16)
-}
-
-/// Resolves the reply-size cap the reflector should actually enforce
-/// (draft-ietf-ippm-asymmetrical-pkts-14 §3).
-///
-/// `--reflected-control-max-size` stands in for the egress MTU, and the draft's
-/// MTU-exceeded behaviour is only correct insofar as it matches reality. This
-/// takes the **smaller** of the configured value and the live interface MTU's
-/// payload capacity, so:
-///
-/// - an operator who left the default (1500) on a 1500-byte link no longer
-///   invites a 1528-byte datagram — the STAMP payload cap becomes 1472 and the
-///   draft's C-flag/MTU path fires where it genuinely should;
-/// - an operator who deliberately configured something smaller keeps it;
-/// - a jumbo link is not silently capped at a stale 1500 if the operator raised
-///   the flag to match.
-///
-/// Best-effort by design (per this project's convention for anything that
-/// depends on the platform): a wildcard bind has no single egress interface, and
-/// a failed or unavailable query leaves the configured value untouched.
-#[must_use]
-pub fn effective_reflected_control_max_size(conf: &Configuration) -> u16 {
-    let configured = conf.reflected_control_max_size;
-    let live = reflected_control_size_ceiling(conf);
-    let effective = configured.min(live);
-    if effective != configured {
-        log::info!(
-            "reply-size cap reduced from {configured} to {effective} bytes: the egress              MTU leaves {live} bytes of STAMP payload              (draft-ietf-ippm-asymmetrical-pkts-14 §3)"
-        );
-    }
-    effective
-}
-
-/// The payload ceiling discovered from the live egress MTU, independent of
-/// the configured `--reflected-control-max-size`: what the link can carry,
-/// as opposed to what the operator asked for. `u16::MAX` when no single
-/// interface / MTU can be determined (wildcard bind, failed query).
-///
-/// Stored in [`RuntimeCaps`] at startup so control-plane cap updates stay
-/// bounded by it — a runtime PATCH must not reintroduce Type 12 replies
-/// that fragment or fail on the live link.
-#[must_use]
-pub fn reflected_control_size_ceiling(conf: &Configuration) -> u16 {
-    let Some(iface) = crate::hwtstamp::interface_for_addr(conf.local_addr) else {
-        log::debug!(
-            "egress MTU not queried (no single interface for {}); reply-size cap              unbounded by MTU",
-            conf.local_addr
-        );
-        return u16::MAX;
-    };
-    let Some(mtu) = interface_mtu(&iface) else {
-        log::debug!("egress MTU unavailable on {iface}; reply-size cap unbounded by MTU");
-        return u16::MAX;
-    };
-    let live = mtu_payload_cap(mtu, conf.local_addr.is_ipv6());
-    log::debug!("egress MTU on {iface} is {mtu}: {live} bytes of STAMP payload");
-    live
+    // Ordinary UDP/IP lengths exclude jumbograms.
+    let protocol_cap = if is_ipv6 { 65_527 } else { 65_507 };
+    payload.min(protocol_cap) as u16
 }
 
 /// Classifies a received packet against its session's replay window and counts
@@ -1170,6 +1100,8 @@ const AUTH_PACKET_HMAC_OFFSET: usize = 96;
 /// `extra_copies` is 0, no additional sends are needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReflectedControlBehavior {
+    /// Administrative payload cap captured when this request was processed.
+    pub max_size: u16,
     /// Additional reply packets to emit after the primary reply
     /// (i.e. total replies = 1 + `extra_copies`).
     pub extra_copies: u16,
@@ -1198,12 +1130,12 @@ pub struct ReflectedControlBehavior {
 pub const REFLECTED_CONTROL_MAX_COUNT: u16 = 16;
 
 /// Default reflector cap on the reply packet size (in octets) the reflector
-/// will pad up to when honouring a Reflected Control TLV `length` request —
-/// the operator's stand-in for the egress-interface MTU in
+/// will pad up to when honouring a Reflected Control TLV `length` request.
+/// This is an administrative payload limit, not an IP MTU. The shared send
+/// path applies the actual route budget, including header overhead, for
 /// draft-ietf-ippm-asymmetrical-pkts-14 §3. A longer request gets a single
-/// reply padded to this cap with the C flag set. Defaults to a typical
-/// Ethernet MTU. Operators can override at runtime via
-/// `--reflected-control-max-size`.
+/// C-flagged reply if its mandatory fields fit. Operators can override the
+/// administrative value via `--reflected-control-max-size` or the control API.
 pub const REFLECTED_CONTROL_MAX_SIZE: u16 = 1500;
 
 /// Default minimum inter-packet gap (nanoseconds) — the per-request *rate*
@@ -2319,12 +2251,12 @@ fn apply_semantic_tlv_processing(
     // draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2 MTU rule (reflector half): the
     // reflected test packet MUST NOT exceed the IP/IPv6 MTU after the Reflected
     // Fixed/IPv6 Ext Header TLVs; if necessary, one or more of those TLVs MUST
-    // be removed. The reflector fills the sender-sized TLVs in place and never
-    // grows them, so this is a defensive cap keyed to the operator's
-    // `--reflected-control-max-size` (the same egress-MTU stand-in used for
-    // Type-12 padding); it fires only when a request already sits at/over that
-    // size. The base + a reserve for the response HMAC TLV (if keyed) is the
-    // fixed part; TLVs are trimmed to fit the remainder.
+    // be removed. This assembly-time trim applies the administrative limit;
+    // the shared send path additionally resolves the actual reply route and
+    // enforces its payload budget immediately before each datagram. That
+    // second check also accounts for alternate destinations and attached SRH.
+    // The base + a reserve for the response HMAC TLV (if keyed) is the fixed
+    // part; only complete optional header TLVs are removed here.
     {
         // HMAC TLV wire size = 4-byte header + 16-byte value.
         let hmac_reserve = if tlv_hmac_key.is_some() {
@@ -2484,9 +2416,8 @@ fn apply_semantic_tlv_processing(
                 //      Padding TLVs (so replies can shrink below the
                 //      received packet's size), and
                 //  (b) the requested length aligned up to a 4-octet boundary,
-                // capped at max_size — the operator's stand-in for the
-                // egress-interface MTU; exceeding the cap is the C=1 "MTU"
-                // case and the reply is padded to the cap instead.
+                // capped administratively here and by the actual reply
+                // route MTU in the shared send path, before final signatures.
                 tlvs.remove_extra_padding_tlvs();
                 // A keyed reflector appends its own HMAC TLV *after* this
                 // padding decision, whether or not the request carried one
@@ -2534,6 +2465,7 @@ fn apply_semantic_tlv_processing(
                     requested_count - 1
                 };
                 Some(ReflectedControlBehavior {
+                    max_size: ctx.reflected_control_max_size,
                     extra_copies,
                     interval_ns: req
                         .interval_nanoseconds
@@ -5067,13 +4999,10 @@ mod tests {
     }
 
     #[test]
-    fn test_mtu_payload_cap_floors_at_the_auth_base_size() {
-        // An unusably small MTU must not produce a cap below a reply's own
-        // mandatory base, which would make the reply-shaping arithmetic
-        // meaningless rather than merely tight.
-        assert_eq!(mtu_payload_cap(0, false), AUTH_BASE_SIZE as u16);
-        assert_eq!(mtu_payload_cap(68, false), AUTH_BASE_SIZE as u16);
-        assert_eq!(mtu_payload_cap(1, true), AUTH_BASE_SIZE as u16);
+    fn test_mtu_payload_cap_never_exceeds_small_mtu() {
+        assert_eq!(mtu_payload_cap(0, false), 0);
+        assert_eq!(mtu_payload_cap(68, false), 40);
+        assert_eq!(mtu_payload_cap(1, true), 0);
     }
 
     #[test]
@@ -5100,32 +5029,6 @@ mod tests {
         // that the environment cooperates.
         if let Some(mtu) = interface_mtu("lo") {
             assert!(mtu >= 1500, "loopback MTU looks wrong: {mtu}");
-        }
-    }
-
-    #[test]
-    fn test_effective_max_size_keeps_configured_value_on_wildcard_bind() {
-        // A wildcard bind has no single egress interface, so there is nothing
-        // to query and the configured cap must survive untouched.
-        let mut conf = <Configuration as clap::Parser>::parse_from(["test"]);
-        conf.local_addr = "0.0.0.0".parse().unwrap();
-        conf.reflected_control_max_size = 1500;
-        assert_eq!(effective_reflected_control_max_size(&conf), 1500);
-    }
-
-    #[test]
-    fn test_effective_max_size_never_exceeds_the_configured_cap() {
-        // Whatever the live MTU turns out to be in this environment, the
-        // operator's value is an upper bound: the query may only tighten it.
-        let mut conf = <Configuration as clap::Parser>::parse_from(["test"]);
-        conf.local_addr = "127.0.0.1".parse().unwrap();
-        for configured in [128u16, 576, 1500, 9000] {
-            conf.reflected_control_max_size = configured;
-            let effective = effective_reflected_control_max_size(&conf);
-            assert!(
-                effective <= configured,
-                "live MTU must only tighten the cap: {effective} > {configured}"
-            );
         }
     }
 

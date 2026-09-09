@@ -926,31 +926,50 @@ fn run_transmit_loop(
     shutdown: &AtomicBool,
 ) {
     let mut replies = ReplyQueue::default();
+    let mut mtu_cache = super::mtu::MtuCache::default();
     while !shutdown.load(AtomicOrdering::Relaxed) {
         if let Some(mut transmission) = replies.pop_due() {
-            transmission.send_next(counters, limiter, |data, target, options| {
-                let socket = if target.is_ipv4() {
-                    Some(&sockets.send_socket_v4)
-                } else {
-                    sockets.send_socket_v6.as_ref()
-                };
-                let socket = socket.ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::AddrNotAvailable,
-                        "IPv6 socket unavailable",
-                    )
-                })?;
-                #[cfg(unix)]
-                {
-                    use std::os::fd::AsRawFd;
-                    super::transmit::send_datagram(socket.as_raw_fd(), data, target, options)
-                }
-                #[cfg(windows)]
-                {
-                    set_socket_tos(socket, options.tos, target.is_ipv6())?;
-                    socket.send_to(data, target)
-                }
-            });
+            transmission.send_next_with_mtu(
+                counters,
+                limiter,
+                |target, options, refresh| {
+                    let socket = if target.is_ipv4() {
+                        Some(&sockets.send_socket_v4)
+                    } else {
+                        sockets.send_socket_v6.as_ref()
+                    };
+                    let socket = socket.ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::AddrNotAvailable,
+                            "IPv6 socket unavailable",
+                        )
+                    })?;
+                    mtu_cache.payload_cap(socket.local_addr()?, target, options, refresh)
+                },
+                |data, target, options| {
+                    let socket = if target.is_ipv4() {
+                        Some(&sockets.send_socket_v4)
+                    } else {
+                        sockets.send_socket_v6.as_ref()
+                    };
+                    let socket = socket.ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::AddrNotAvailable,
+                            "IPv6 socket unavailable",
+                        )
+                    })?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::fd::AsRawFd;
+                        super::transmit::send_datagram(socket.as_raw_fd(), data, target, options)
+                    }
+                    #[cfg(windows)]
+                    {
+                        set_socket_tos(socket, options.tos, target.is_ipv6())?;
+                        socket.send_to(data, target)
+                    }
+                },
+            );
             replies.schedule_next(transmission);
             continue;
         }
@@ -1008,6 +1027,7 @@ mod tests {
                 reply_source: None,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: Some(super::super::ReflectedControlBehavior {
+                    max_size: 1500,
                     extra_copies: extra,
                     interval_ns: 120_000_000,
                     suppress_reply_ext_headers: false,

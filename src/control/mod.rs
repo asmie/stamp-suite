@@ -288,20 +288,10 @@ async fn patch_caps(State(s): State<ControlState>, Json(p): Json<CapsPatch>) -> 
             .store(v, Ordering::Relaxed);
     }
     if let Some(v) = p.reflected_control_max_size {
-        // Bounded by the payload ceiling the egress MTU allowed at startup:
-        // a runtime raise must not reintroduce Type 12 replies that fragment
-        // or fail on the live link. The response body reports the clamped
-        // effective value.
-        let bounded = v.min(s.caps.reflected_control_size_ceiling);
-        if bounded != v {
-            log::info!(
-                "control: reflected_control_max_size {v} clamped to {bounded} \
-                 (egress-MTU payload ceiling)"
-            );
-        }
+        // This is the administrative limit. Each send also checks its route MTU.
         s.caps
             .reflected_control_max_size
-            .store(bounded, Ordering::Relaxed);
+            .store(v, Ordering::Relaxed);
     }
     if let Some(v) = p.reflected_control_min_interval_ns {
         s.caps
@@ -1033,21 +1023,10 @@ mod tests {
         assert_eq!(v["reflected_control_max_size"], 1500);
     }
 
-    /// A PATCH cannot raise `reflected_control_max_size` past the payload
-    /// ceiling the egress MTU imposed at startup — the response reports the
-    /// clamped effective value, and raises below the ceiling still work.
+    /// PATCH stores the administrative cap; the send path enforces route MTU.
     #[tokio::test]
-    async fn caps_patch_clamps_max_size_to_mtu_ceiling() {
-        let mut state = test_state();
-        // Simulate a startup where a 1500-byte MTU capped the IPv4 payload.
-        let caps = crate::receiver::RuntimeCaps::from_defaults();
-        let caps = crate::receiver::RuntimeCaps {
-            reflected_control_size_ceiling: 1472,
-            ..caps
-        };
-        caps.reflected_control_max_size
-            .store(1472, Ordering::Relaxed);
-        state.caps = Arc::new(caps);
+    async fn caps_patch_updates_administrative_size_limit() {
+        let state = test_state();
         let app = router(state.clone());
 
         let res = app
@@ -1066,18 +1045,18 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
-            v["reflected_control_max_size"], 1472,
-            "PATCH must not exceed the startup MTU payload ceiling"
+            v["reflected_control_max_size"], 65535,
+            "PATCH reports the administrative cap, independent of reply routes"
         );
         assert_eq!(
             state
                 .caps
                 .reflected_control_max_size
                 .load(Ordering::Relaxed),
-            1472
+            65535
         );
 
-        // Lowering below the ceiling still works verbatim.
+        // Lowering the administrative cap works verbatim.
         let res = app
             .clone()
             .oneshot(

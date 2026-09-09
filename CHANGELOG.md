@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enforce the actual Linux reply-route MTU for Type-12 and reflected-header
+  replies, including wildcard binds, alternate destinations and SRH overhead.
+  Invalidate bounded MTU caches on route/interface changes, prevent fragmentation,
+  retry an MTU race once, and regenerate signatures after resizing. Drop replies
+  whose mandatory fields cannot fit or whose route budget is unavailable.
+  Runtime caps now report administrative limits; remove the obsolete startup
+  ceiling helpers/field and add `ReflectedControlBehavior::max_size` for queued
+  request limits. Route MTU lookup is Linux-only.
+
 - Reject new session identities at the capacity limit or during drain instead
   of replying with temporary counters and repeated stateful sequence zero.
   Preserve existing sessions when the cap shrinks; serialize admission with

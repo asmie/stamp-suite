@@ -118,3 +118,25 @@ also skips cleanly.
 * **`no packets captured`** skips — tcpdump produced only the pcap header. Give
   it more lead time or confirm the interface is up; the fixture allows a fixed
   window before generating traffic.
+
+## Reply-route MTU regression
+
+`tests/route_mtu_test.rs` is a separate ignored test that needs `ip`, `unshare`
+and `nsenter`, but no tcpdump or host root. Run it inside an isolated user/network
+namespace (Linux with unprivileged user namespaces enabled):
+
+```sh
+STAMP_MTU_NETNS_TESTS=1 unshare --user --map-root-user --net \
+  cargo test --locked --test route_mtu_test -- --ignored --nocapture
+```
+
+It launches a reflector in a second network namespace, joins it with a temporary
+veth pair, and exchanges independently constructed UDP requests. The matrix
+covers IPv4/IPv6, open/authenticated replies, wildcard/bound reflectors, interface
+MTU decreases and increases, route MTU metrics, and alternate destinations.
+It checks payload lengths, a single C-flagged reply, and final base/TLV HMACs.
+RAII teardown removes the veth and child processes even on assertion failure.
+These are real UDP/kernel-route tests, not packet captures or SRv6 transit tests.
+The test remains ignored in ordinary suites and requires the explicit environment
+gate; report its separate execution result rather than counting an ignored case
+as a pass.

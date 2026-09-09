@@ -805,14 +805,13 @@ pub struct Configuration {
     /// the effective cap, a single reflected packet padded to it is sent with
     /// the C flag set on the echoed TLV.
     ///
-    /// On Linux with a non-wildcard `--local-addr`, the reflector also reads
-    /// the egress interface's MTU (`SIOCGIFMTU`) and enforces whichever cap is
-    /// smaller. So on a 1500-byte link the effective cap is 1472 — the MTU
-    /// minus the IP and UDP headers — even at this flag's 1500 default, which
-    /// is what keeps a maximum-length reply from becoming a 1528-byte
-    /// datagram. Raise this flag for a jumbo link; lower it to cap replies
-    /// below what the path would allow. Best-effort: a wildcard bind, a failed
-    /// query, or a non-Linux platform leaves this value as the only cap.
+    /// Linux checks the actual reply route before each send, including wildcard
+    /// binds and alternate destinations. IP/UDP and SRH overhead reduce the
+    /// payload budget (1472 bytes on a plain 1500-byte IPv4 link, 1452 on IPv6).
+    /// Route/interface notifications and a short cache expiry track changes.
+    /// Replies are dropped if the MTU cannot be determined or mandatory fields
+    /// cannot fit. Non-Linux route MTU lookup is unavailable. Runtime cap updates
+    /// change this administrative limit; they cannot bypass send-time MTU checks.
     #[clap(long, default_value_t = 1500)]
     pub reflected_control_max_size: u16,
 

@@ -320,6 +320,7 @@ pub async fn run_receiver(
 
     // One loop owns every send and its OPT_ID assignment, including burst copies.
     let mut replies = ReplyQueue::default();
+    let mut mtu_cache = super::mtu::MtuCache::default();
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
     let mut tx_counter = 0u32;
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
@@ -376,7 +377,7 @@ pub async fn run_receiver(
                 }
             } => {
                 if let Some(mut transmission) = replies.pop_due() {
-                    if let Some(_sequence) = transmission.send_next(&counters, &shared.rate_limiter, |bytes, target, options| send_datagram(tokio_socket.as_raw_fd(), bytes, target, options)) {
+                    if let Some(_sequence) = transmission.send_next_with_mtu(&counters, &shared.rate_limiter, |target, options, refresh| mtu_cache.payload_cap(tokio_socket.local_addr()?, target, options, refresh), |bytes, target, options| send_datagram(tokio_socket.as_raw_fd(), bytes, target, options)) {
                         #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
                         if kernel_ts.tx_kernel {
                             tx_id_map.insert(tx_counter, (Arc::downgrade(&transmission.session), _sequence));

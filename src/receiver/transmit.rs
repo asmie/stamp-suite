@@ -16,6 +16,7 @@ pub(super) struct SendOptions {
     pub tos: u8,
     pub source: Option<IpAddr>,
     pub srh: Option<Vec<u8>>,
+    pub dont_fragment: bool,
 }
 
 pub(super) struct Transmission {
@@ -65,12 +66,23 @@ impl Transmission {
         }
     }
 
-    /// One owner calls this for every send on its socket. Retries retain the
-    /// sequence but refresh T3 and signatures; successful sends update state.
+    #[cfg(test)]
     pub fn send_next(
         &mut self,
         counters: &ReflectorCounters,
         limiter: &RateLimiter,
+        send: impl FnMut(&[u8], SocketAddr, &SendOptions) -> io::Result<usize>,
+    ) -> Option<u32> {
+        self.send_next_with_mtu(counters, limiter, |_, _, _| Ok(usize::MAX), send)
+    }
+
+    /// Check the destination budget for every copy and routing fallback, then
+    /// shape, timestamp and sign immediately before its actual send attempt.
+    pub fn send_next_with_mtu(
+        &mut self,
+        counters: &ReflectorCounters,
+        limiter: &RateLimiter,
+        mut payload_cap: impl FnMut(SocketAddr, &SendOptions, bool) -> io::Result<usize>,
         mut send: impl FnMut(&[u8], SocketAddr, &SendOptions) -> io::Result<usize>,
     ) -> Option<u32> {
         let Some(_active) = self.session.transmission_guard() else {
@@ -119,6 +131,8 @@ impl Transmission {
                 .reply_source
                 .filter(|s| crate::reply_source::supported() && s.is_ipv4() == target.is_ipv4()),
             srh: None,
+            dont_fragment: self.response.reflected_control.is_some()
+                || has_reflected_headers(&data, base),
         };
         if let ReturnPathAction::Srv6Forward(sids) = &self.response.return_path_action {
             if self.srv6 && target.is_ipv6() {
@@ -129,24 +143,64 @@ impl Transmission {
             }
         }
         let mut cos_fallback = false;
+        let mut refresh_mtu = false;
         loop {
-            let timestamp = crate::time::generate_timestamp(self.clock);
-            let offset = if self.auth { 16 } else { 4 };
-            data[offset..offset + 8].copy_from_slice(&timestamp.to_be_bytes());
-            if let Some(key) = &self.key {
-                if self.auth {
-                    let hmac = crate::crypto::compute_packet_hmac(key, &data, 96);
-                    data[96..112].copy_from_slice(&hmac);
+            // Always start from the untrimmed reply: a fallback route may have
+            // a larger MTU and must not inherit another route's C flag/padding.
+            let mut attempt = data.clone();
+            let mut clamped = false;
+            let budget = if options.dont_fragment {
+                payload_cap(target, &options, refresh_mtu)
+            } else {
+                Ok(usize::MAX)
+            };
+            let result = budget.and_then(|cap| {
+                let cap = cap.min(
+                    self.response
+                        .reflected_control
+                        .map_or(usize::MAX, |b| usize::from(b.max_size)),
+                );
+                clamped = fit_reply(
+                    &mut attempt,
+                    base,
+                    cap,
+                    self.response.reflected_control.is_some(),
+                )?;
+                let timestamp = crate::time::generate_timestamp(self.clock);
+                let offset = if self.auth { 16 } else { 4 };
+                attempt[offset..offset + 8].copy_from_slice(&timestamp.to_be_bytes());
+                if let Some(key) = &self.key {
+                    if self.auth {
+                        let hmac = crate::crypto::compute_packet_hmac(key, &attempt, 96);
+                        attempt[96..112].copy_from_slice(&hmac);
+                    }
+                    sign_tlvs(&mut attempt, base, key);
                 }
-                sign_tlvs(&mut data, base, key);
-            }
-            match send(&data, target, &options) {
-                Ok(_) => {
+                send(&attempt, target, &options).map(|_| timestamp)
+            });
+            match result {
+                Ok(timestamp) => {
+                    if clamped {
+                        self.remaining = 1;
+                    }
                     self.session.record_transmitted();
                     self.session.record_reflection(sequence, timestamp);
                     counters.packets_reflected.fetch_add(1, Ordering::Relaxed);
                     self.remaining -= 1;
                     return Some(sequence);
+                }
+                Err(e) if options.dont_fragment && is_message_too_large(&e) => {
+                    // MTU races must not strip SRH, source pinning or CoS. A
+                    // fresh route query and re-shape gets one bounded retry.
+                    if refresh_mtu {
+                        break;
+                    }
+                    refresh_mtu = true;
+                    continue;
+                }
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                    log::debug!("reply cannot fit the route MTU: {e}");
+                    break;
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     // UDP queue pressure is a failed transmission, never a
@@ -155,6 +209,7 @@ impl Transmission {
                     break;
                 }
                 Err(e) => {
+                    refresh_mtu = false;
                     if options.srh.take().is_some() {
                         super::set_return_path_u_flag_in_response(&mut data, base);
                     } else if options.source.take().is_some() {
@@ -180,6 +235,95 @@ impl Transmission {
         self.remaining = 0;
         None
     }
+}
+
+fn is_message_too_large(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(nix::libc::EMSGSIZE)
+    }
+    #[cfg(not(unix))]
+    {
+        error.raw_os_error() == Some(10040)
+    } // WSAEMSGSIZE
+}
+
+fn has_reflected_headers(data: &[u8], base: usize) -> bool {
+    let mut pos = base;
+    let mut found = false;
+    while pos + 4 <= data.len() {
+        let len = usize::from(u16::from_be_bytes([data[pos + 2], data[pos + 3]])) + 4;
+        if pos + len > data.len() || data[pos] & 0x40 != 0 {
+            return false;
+        }
+        if matches!(data[pos + 1], 246 | 247) && data[pos] & 0xe0 == 0 {
+            found = true;
+        }
+        pos += len;
+    }
+    found && pos == data.len()
+}
+
+/// Preserve complete mandatory TLVs and the final HMAC. Only padding and
+/// reflected header TLVs may be removed. Return true to terminate a burst.
+fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> io::Result<bool> {
+    if data.len() <= cap {
+        return Ok(false);
+    }
+    let cannot_fit = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mandatory reply fields exceed payload budget",
+        )
+    };
+    if base > cap {
+        return Err(cannot_fit());
+    }
+    let mut pos = base;
+    let mut tlvs = Vec::new();
+    while pos < data.len() {
+        if pos + 4 > data.len() {
+            return Err(cannot_fit());
+        }
+        let len = usize::from(u16::from_be_bytes([data[pos + 2], data[pos + 3]])) + 4;
+        if pos + len > data.len() || data[pos] & 0x40 != 0 {
+            return Err(cannot_fit());
+        }
+        if !controlled || data[pos + 1] != 1 {
+            tlvs.push(data[pos..pos + len].to_vec());
+        }
+        pos += len;
+    }
+    let mut size = base + tlvs.iter().map(Vec::len).sum::<usize>();
+    while size > cap {
+        let Some(index) = tlvs
+            .iter()
+            .rposition(|t| matches!(t[1], 246 | 247) && t[0] & 0xe0 == 0)
+        else {
+            return Err(cannot_fit());
+        };
+        size -= tlvs.remove(index).len();
+    }
+    if controlled {
+        if let Some(control) = tlvs.iter_mut().find(|t| t[1] == 12 && t[0] & 0xe0 == 0) {
+            control[0] |= 0x10;
+        }
+        let padding = cap - size;
+        if padding >= 4 {
+            let mut pad = vec![0; padding];
+            pad[1] = 1;
+            pad[2..4].copy_from_slice(&((padding - 4) as u16).to_be_bytes());
+            let index = tlvs.iter().position(|t| t[1] == 8).unwrap_or(tlvs.len());
+            tlvs.insert(index, pad);
+        }
+        // A 1..3-octet remainder cannot encode a TLV; send the shorter valid
+        // packet with C=1, never a malformed tail or an over-MTU packet.
+    }
+    data.truncate(base);
+    for tlv in tlvs {
+        data.extend_from_slice(&tlv);
+    }
+    Ok(controlled)
 }
 
 fn refresh_telemetry(data: &mut [u8], base: usize, session: &Session, stateful: bool) {
@@ -350,6 +494,33 @@ pub(super) fn send_datagram(
     let mut control = Vec::<usize>::new();
     #[cfg(target_os = "linux")]
     {
+        // This socket has one send owner. Restore normal PMTU policy for
+        // ordinary STAMP replies after a size-controlled send on the same fd.
+        let discover: libc::c_int = if options.dont_fragment {
+            libc::IP_PMTUDISC_DO
+        } else {
+            libc::IP_PMTUDISC_WANT
+        };
+        if unsafe {
+            libc::setsockopt(
+                fd,
+                if dst.is_ipv4() {
+                    libc::IPPROTO_IP
+                } else {
+                    libc::IPPROTO_IPV6
+                },
+                if dst.is_ipv4() {
+                    libc::IP_MTU_DISCOVER
+                } else {
+                    libc::IPV6_MTU_DISCOVER
+                },
+                std::ptr::addr_of!(discover).cast(),
+                std::mem::size_of_val(&discover) as _,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         // usize allocation guarantees cmsghdr alignment; zero initialize all padding.
         fn append(control: &mut Vec<usize>, level: i32, kind: i32, bytes: &[u8]) {
             let start = control.len() * std::mem::size_of::<usize>();
@@ -473,6 +644,7 @@ mod tests {
             cos_request: Some((46, 0)),
             return_path_action: action,
             reflected_control: Some(super::super::ReflectedControlBehavior {
+                max_size: 1500,
                 extra_copies: 2,
                 interval_ns: 1,
                 suppress_reply_ext_headers: false,
@@ -704,5 +876,236 @@ mod tests {
             let (_, from) = receiver.recv_from(&mut bytes).unwrap();
             assert_eq!(from.ip(), "127.0.0.2".parse::<IpAddr>().unwrap());
         }
+    }
+    fn sized_sample(auth: bool, size: usize) -> Transmission {
+        let mut t = sample(auth, ReturnPathAction::Normal);
+        let base = if auth { 112 } else { 44 };
+        t.response.data.truncate(base);
+        t.response
+            .data
+            .extend_from_slice(&[0, 12, 0, 12, 5, 220, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0]);
+        let padding = size - base - 16 - if auth { 20 } else { 0 };
+        t.response.data.extend_from_slice(&[0, 1]);
+        t.response
+            .data
+            .extend_from_slice(&((padding - 4) as u16).to_be_bytes());
+        t.response.data.resize(size - if auth { 20 } else { 0 }, 0);
+        if auth {
+            t.response.data.extend_from_slice(&[0, 8, 0, 16]);
+            t.response.data.extend_from_slice(&[0; 16]);
+        }
+        t.response.reply_source = None;
+        t.response.cos_request = None;
+        t
+    }
+
+    fn check_sized_signature(data: &[u8], auth: bool) {
+        if auth {
+            let key = HmacKey::new(vec![0xCD; 16]).unwrap();
+            assert_eq!(
+                &data[96..112],
+                &crate::crypto::compute_packet_hmac(&key, data, 96)
+            );
+            let pos = data.len() - 20;
+            assert_eq!(&data[pos..pos + 4], &[0, 8, 0, 16]);
+            let mut input = data[..4].to_vec();
+            input.extend_from_slice(&data[112..pos]);
+            assert_eq!(&data[pos + 4..], &key.compute(&input));
+        }
+    }
+
+    #[test]
+    fn mtu_clamps_ipv4_ipv6_bursts_and_resigns_final_packet() {
+        for auth in [false, true] {
+            for ipv6 in [false, true] {
+                let mut t = sized_sample(auth, 1500);
+                if ipv6 {
+                    t.source = "[::1]:4000".parse().unwrap();
+                }
+                let cap = super::super::mtu_payload_cap(1500, ipv6) as usize;
+                let counters = ReflectorCounters::new();
+                assert_eq!(
+                    t.send_next_with_mtu(
+                        &counters,
+                        &RateLimiter::new(0),
+                        |_, _, _| Ok(cap),
+                        |data, target, options| {
+                            assert_eq!(target.is_ipv6(), ipv6);
+                            assert!(options.dont_fragment);
+                            assert_eq!(data.len(), cap);
+                            assert_eq!(data[if auth { 112 } else { 44 }] & 0x10, 0x10);
+                            check_sized_signature(data, auth);
+                            Ok(data.len())
+                        }
+                    ),
+                    Some(0)
+                );
+                assert_eq!(t.remaining, 0);
+                assert_eq!(t.session.get_transmitted_count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_route_restores_original_length_and_c_flag() {
+        for auth in [false, true] {
+            let mut t = sized_sample(auth, 1500);
+            let alternate: SocketAddr = "127.0.0.2:4001".parse().unwrap();
+            t.response.return_path_action = ReturnPathAction::AlternateAddress(alternate);
+            let mut calls = 0;
+            assert_eq!(
+                t.send_next_with_mtu(
+                    &ReflectorCounters::new(),
+                    &RateLimiter::new(0),
+                    |target, _, _| Ok(if target == alternate { 1000 } else { 2000 }),
+                    |data, target, _| {
+                        calls += 1;
+                        check_sized_signature(data, auth);
+                        if target == alternate {
+                            assert_eq!(data.len(), 1000);
+                            assert_eq!(data[if auth { 112 } else { 44 }] & 0x10, 0x10);
+                            Err(io::Error::new(
+                                io::ErrorKind::AddrNotAvailable,
+                                "alternate failed",
+                            ))
+                        } else {
+                            assert_eq!(data.len(), 1500);
+                            assert_eq!(data[if auth { 112 } else { 44 }] & 0x10, 0);
+                            Ok(data.len())
+                        }
+                    }
+                ),
+                Some(0)
+            );
+            assert_eq!(calls, 2);
+            assert_eq!(t.remaining, 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mtu_race_refreshes_budget_without_routing_downgrade() {
+        let mut t = sized_sample(true, 1500);
+        t.source = "[::1]:4000".parse().unwrap();
+        t.response.return_path_action = ReturnPathAction::Srv6Forward(vec!["::1".parse().unwrap()]);
+        t.response.reply_source = Some("::1".parse().unwrap());
+        t.response.cos_request = Some((46, 0));
+        let mut attempts = 0;
+        let mut queries = Vec::new();
+        assert_eq!(
+            t.send_next_with_mtu(
+                &ReflectorCounters::new(),
+                &RateLimiter::new(0),
+                |_, _, refresh| {
+                    queries.push(refresh);
+                    Ok(if refresh { 1200 } else { 1500 })
+                },
+                |data, _, options| {
+                    attempts += 1;
+                    assert!(options.srh.is_some());
+                    assert_eq!(options.source, Some("::1".parse().unwrap()));
+                    assert_eq!(options.tos, 184);
+                    check_sized_signature(data, true);
+                    if attempts == 1 {
+                        Err(io::Error::from_raw_os_error(nix::libc::EMSGSIZE))
+                    } else {
+                        assert_eq!(data.len(), 1200);
+                        Ok(data.len())
+                    }
+                }
+            ),
+            Some(0)
+        );
+        assert_eq!(queries, [false, true]);
+        assert_eq!(t.remaining, 0);
+    }
+
+    #[test]
+    fn mandatory_fields_and_unavailable_routes_fail_closed() {
+        for auth in [false, true] {
+            let mut t = sized_sample(auth, 1500);
+            let counters = ReflectorCounters::new();
+            assert_eq!(
+                t.send_next_with_mtu(
+                    &counters,
+                    &RateLimiter::new(0),
+                    |_, _, _| Ok(50),
+                    |_, _, _| panic!("oversize send")
+                ),
+                None
+            );
+            assert_eq!(t.remaining, 0);
+            assert_eq!(t.session.get_transmitted_count(), 0);
+            assert_eq!(counters.packets_dropped.load(Ordering::Relaxed), 1);
+            let mut t = sized_sample(auth, 1500);
+            assert_eq!(
+                t.send_next_with_mtu(
+                    &counters,
+                    &RateLimiter::new(0),
+                    |_, _, _| Err(io::Error::new(io::ErrorKind::Unsupported, "no route MTU")),
+                    |_, _, _| panic!("unchecked send")
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn small_remainders_and_header_trimming_keep_valid_tlvs() {
+        for auth in [false, true] {
+            let base = if auth { 112 } else { 44 };
+            for gap in 0..4 {
+                let mut t = sized_sample(auth, 1500);
+                let mandatory = base + 16 + if auth { 20 } else { 0 };
+                assert!(fit_reply(&mut t.response.data, base, mandatory + gap, true).unwrap());
+                assert_eq!(t.response.data.len(), mandatory);
+                if auth {
+                    sign_tlvs(&mut t.response.data, base, t.key.as_ref().unwrap());
+                }
+            }
+            let mut data = vec![0; base];
+            data.extend_from_slice(&[0, 247, 0, 20]);
+            data.extend_from_slice(&[0; 20]);
+            data.extend_from_slice(&[0, 246, 0, 8]);
+            data.extend_from_slice(&[0; 8]);
+            data.extend_from_slice(&[0, 8, 0, 16]);
+            data.extend_from_slice(&[0; 16]);
+            assert!(!fit_reply(&mut data, base, base + 44, false).unwrap());
+            assert_eq!(data.len(), base + 44);
+            assert_eq!(data[base + 1], 247);
+            assert_eq!(data[base + 25], 8);
+            assert!(!fit_reply(&mut data, base, base + 20, false).unwrap());
+            assert_eq!(data[base + 1], 8);
+        }
+    }
+
+    #[test]
+    fn queued_burst_checks_new_mtu_before_each_copy() {
+        let mut t = sized_sample(false, 1500);
+        let counters = ReflectorCounters::new();
+        let limiter = RateLimiter::new(0);
+        assert_eq!(
+            t.send_next_with_mtu(
+                &counters,
+                &limiter,
+                |_, _, _| Ok(1500),
+                |data, _, _| Ok(data.len())
+            ),
+            Some(0)
+        );
+        assert_eq!(t.remaining, 2);
+        assert_eq!(
+            t.send_next_with_mtu(
+                &counters,
+                &limiter,
+                |_, _, _| Ok(1200),
+                |data, _, _| {
+                    assert_eq!(data.len(), 1200);
+                    Ok(data.len())
+                }
+            ),
+            Some(1)
+        );
+        assert_eq!(t.remaining, 0);
     }
 }
