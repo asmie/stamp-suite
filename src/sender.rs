@@ -88,8 +88,8 @@ struct SenderRecvContext<'a> {
     /// based on the reply's forward-path EC2 and/or reverse-path wire ECN.
     congestion: Option<&'a mut CongestionState>,
     /// The non-zero SSID this sender put on the wire, when it set one. RFC 8972
-    /// §3's zeroed-SSID scenario is only meaningful against a sender that
-    /// actually asked for SSID demultiplexing; `None` disables the check.
+    /// §3 identifies sessions with this value; zero replies use the configured
+    /// compatibility policy. `None` means no SSID was assigned.
     expected_ssid: Option<u16>,
     /// What to do about a reflected packet whose SSID field came back zeroed
     /// (RFC 8972 §3: "An implementation of a Session-Sender MUST support
@@ -919,9 +919,9 @@ pub async fn run_sender(
         eprintln!("Warning: {warning}");
     }
 
-    // RFC 8972 §3 zeroed-SSID control. Only a non-zero SSID makes the scenario
-    // meaningful: with no SSID requested, a zeroed reply field says nothing.
-    let zero_ssid_expected = conf.ssid.filter(|s| *s != 0);
+    // RFC 8972 §3 session identification and zeroed-SSID control. Zero means
+    // no SSID was assigned, so only nonzero configured IDs require a match.
+    let expected_ssid = conf.ssid.filter(|s| *s != 0);
     let mut zero_ssid_seen = false;
 
     let mut congestion = ecn_response_active.then(|| {
@@ -1431,7 +1431,7 @@ pub async fn run_sender(
                                 latched_reflector_msid: &mut latched_reflector_msid,
                                 access_report_state: access_report_state.as_mut(),
                                 congestion: congestion.as_mut(),
-                                expected_ssid: zero_ssid_expected,
+                                expected_ssid,
                                 on_zero_ssid: conf.on_zero_ssid,
                                 zero_ssid_seen: &mut zero_ssid_seen,
                                 #[cfg(feature = "metrics")]
@@ -1571,7 +1571,7 @@ pub async fn run_sender(
                     latched_reflector_msid: &mut latched_reflector_msid,
                     access_report_state: access_report_state.as_mut(),
                     congestion: congestion.as_mut(),
-                    expected_ssid: zero_ssid_expected,
+                    expected_ssid,
                     on_zero_ssid: conf.on_zero_ssid,
                     zero_ssid_seen: &mut zero_ssid_seen,
                     #[cfg(feature = "metrics")]
@@ -1789,7 +1789,7 @@ pub async fn run_sender(
                             latched_reflector_msid: &mut latched_reflector_msid,
                             access_report_state: access_report_state.as_mut(),
                             congestion: congestion.as_mut(),
-                            expected_ssid: zero_ssid_expected,
+                            expected_ssid,
                             on_zero_ssid: conf.on_zero_ssid,
                             zero_ssid_seen: &mut zero_ssid_seen,
                             #[cfg(feature = "metrics")]
@@ -1965,7 +1965,7 @@ fn process_response(
         reflector_send_ts,
         sender_ttl,
         tlv_info,
-        reflected_ssids,
+        reflected_ssid,
         reflector_error,
     ) = if use_auth {
         if use_tlvs {
@@ -2140,15 +2140,17 @@ fn process_response(
         return;
     }
 
-    // RFC 8972 §3 zeroed-SSID scenario. Figure 2 gives the reflected packet a
-    // single SSID field, in the two octets after the reflector's own Error
-    // Estimate; everything else in the RFC 8762 layout stays MBZ. A reflector
-    // that does not implement the field leaves that one field zero, which
-    // means it is not demultiplexing on SSID — the condition `--on-zero-ssid`
-    // governs. (Earlier revisions also inspected the MBZ run after the
-    // Session-Sender Error Estimate, which a conformant peer always zeroes.)
+    // RFC 8972 §3: a nonzero SSID identifies the session and must match.
+    // Figure 2 has one SSID field, after the reflector's Error Estimate.
+    // Zero is the legacy-peer sentinel and uses the separate operator policy.
+    // Reject other sessions before applying measurement or control state.
     if let Some(expected) = ctx.expected_ssid {
-        let reflected_ssid = reflected_ssids;
+        if reflected_ssid != 0 && reflected_ssid != expected {
+            log::debug!(
+                "Discarding reflected packet seq={seq_num}: SSID {reflected_ssid} differs from {expected}"
+            );
+            return;
+        }
         if reflected_ssid == 0 {
             let first_time = !*ctx.zero_ssid_seen;
             *ctx.zero_ssid_seen = true;
@@ -6234,6 +6236,203 @@ mod tests {
         );
     }
 
+    /// A reply from another SSID must not consume a probe or apply control TLVs,
+    /// even when its sequence, Micro-session ID, and signatures are all valid.
+    #[test]
+    fn mismatched_ssid_preserves_measurement_and_control_state() {
+        for auth in [false, true] {
+            for extensions in [false, true] {
+                for policy in [ZeroSsidAction::Continue, ZeroSsidAction::Stop] {
+                    let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+                    let t1 = generate_timestamp(ClockFormat::NTP);
+                    let mut pending = HashMap::from([(
+                        42,
+                        PendingPacket {
+                            send_time: Instant::now(),
+                            send_timestamp: t1,
+                        },
+                    )]);
+                    let mut rtt = RttCollector::new();
+                    let mut owd = OwdCollector::new();
+                    let mut received = 0;
+                    let mut latched = None;
+                    let mut zero = false;
+                    let mut congestion = CongestionState::new(congestion_test_params());
+                    let mut access = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+                    access.tick(Instant::now());
+                    for ssid in [43u16, u16::MAX, 42] {
+                        let reply = ssid_test_reply(auth, extensions, ssid, t1, &key);
+                        let mut ctx = congestion_process_response_ctx(
+                            &mut pending,
+                            &mut rtt,
+                            &mut owd,
+                            &mut received,
+                            &mut latched,
+                            Some(&mut congestion),
+                            &mut zero,
+                        );
+                        ctx.expected_ssid = Some(42);
+                        ctx.on_zero_ssid = policy;
+                        ctx.hmac_key = auth.then_some(&key);
+                        if extensions {
+                            ctx.expected_sender_msid = Some(7);
+                            ctx.access_report_state = Some(&mut access);
+                        }
+                        process_response(
+                            &reply,
+                            auth,
+                            extensions,
+                            ClockFormat::NTP,
+                            Some(t1),
+                            Some(3),
+                            &mut ctx,
+                        );
+                        let accepted = ssid == 42;
+                        assert_eq!(
+                            received,
+                            u32::from(accepted),
+                            "auth={auth} extensions={extensions} ssid={ssid}"
+                        );
+                        assert_eq!(pending.contains_key(&42), !accepted);
+                        assert_eq!(rtt.percentile_ns(50.0).is_some(), accepted);
+                        assert_eq!(owd.summary().is_some(), accepted);
+                        assert_eq!(latched, (accepted && extensions).then_some(9));
+                        assert!(
+                            !zero,
+                            "a nonzero mismatch is not a legacy zero-SSID response"
+                        );
+                        assert_eq!(
+                            congestion.controller.stats().ce_observations,
+                            u64::from(accepted)
+                        );
+                        assert_eq!(
+                            access.outcome(),
+                            if accepted && extensions {
+                                AccessReportOutcome::Acknowledged
+                            } else {
+                                AccessReportOutcome::Pending
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_ssid_policy_applies_in_every_reply_parser() {
+        for auth in [false, true] {
+            for extensions in [false, true] {
+                for policy in [ZeroSsidAction::Continue, ZeroSsidAction::Stop] {
+                    let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+                    let mut pending = HashMap::from([(
+                        42,
+                        PendingPacket {
+                            send_time: Instant::now(),
+                            send_timestamp: 0,
+                        },
+                    )]);
+                    let mut rtt = RttCollector::new();
+                    let mut owd = OwdCollector::new();
+                    let mut received = 0;
+                    let mut latched = None;
+                    let mut zero = false;
+                    let mut ctx = congestion_process_response_ctx(
+                        &mut pending,
+                        &mut rtt,
+                        &mut owd,
+                        &mut received,
+                        &mut latched,
+                        None,
+                        &mut zero,
+                    );
+                    ctx.expected_ssid = Some(42);
+                    ctx.on_zero_ssid = policy;
+                    ctx.hmac_key = auth.then_some(&key);
+                    let reply = ssid_test_reply(auth, extensions, 0, 0, &key);
+                    process_response(
+                        &reply,
+                        auth,
+                        extensions,
+                        ClockFormat::NTP,
+                        None,
+                        None,
+                        &mut ctx,
+                    );
+                    assert!(*ctx.zero_ssid_seen);
+                    let accepted = policy == ZeroSsidAction::Continue;
+                    assert_eq!(*ctx.packets_received, u32::from(accepted));
+                    assert_eq!(ctx.pending.contains_key(&42), !accepted);
+                    // Seeing a legacy zero must not disable subsequent SSID validation.
+                    ctx.pending.insert(
+                        43,
+                        PendingPacket {
+                            send_time: Instant::now(),
+                            send_timestamp: 0,
+                        },
+                    );
+                    let mut wrong = ssid_test_reply(auth, extensions, 99, 0, &key);
+                    let seq_offset = if auth { 48 } else { 24 };
+                    wrong[seq_offset..seq_offset + 4].copy_from_slice(&43u32.to_be_bytes());
+                    if auth {
+                        let mac = compute_packet_hmac(&key, &wrong, 96);
+                        wrong[96..112].copy_from_slice(&mac);
+                    }
+                    process_response(
+                        &wrong,
+                        auth,
+                        extensions,
+                        ClockFormat::NTP,
+                        None,
+                        None,
+                        &mut ctx,
+                    );
+                    assert_eq!(*ctx.packets_received, u32::from(accepted));
+                    assert!(ctx.pending.contains_key(&43));
+                }
+            }
+        }
+    }
+
+    // Independent wire layout: SSID occupies only the reflector's field;
+    // the two bytes after the echoed sender Error Estimate remain MBZ.
+    fn ssid_test_reply(
+        auth: bool,
+        extensions: bool,
+        ssid: u16,
+        timestamp: u64,
+        key: &HmacKey,
+    ) -> Vec<u8> {
+        let base = if auth { 112 } else { 44 };
+        let (ssid_offset, t3, t2, seq, t1) = if auth {
+            (26, 16, 32, 48, 64)
+        } else {
+            (14, 4, 16, 24, 28)
+        };
+        let mut reply = vec![0; base];
+        reply[..4].copy_from_slice(&1u32.to_be_bytes());
+        reply[ssid_offset..ssid_offset + 2].copy_from_slice(&ssid.to_be_bytes());
+        reply[seq..seq + 4].copy_from_slice(&42u32.to_be_bytes());
+        for offset in [t1, t2, t3] {
+            reply[offset..offset + 8].copy_from_slice(&timestamp.to_be_bytes());
+        }
+        if extensions {
+            reply.extend_from_slice(&[0, 11, 0, 4, 0, 7, 0, 9]);
+            reply.extend_from_slice(&[0, 6, 0, 4, 0x10, 0, 0, 0]);
+            if auth {
+                let mut covered = reply[..4].to_vec();
+                covered.extend_from_slice(&reply[base..]);
+                reply.extend_from_slice(&[0, 8, 0, 16]);
+                reply.extend_from_slice(&key.compute(&covered));
+            }
+        }
+        if auth {
+            let mac = compute_packet_hmac(key, &reply, 96);
+            reply[96..112].copy_from_slice(&mac);
+        }
+        reply
+    }
+
     /// RFC8972-3-11: "An implementation of a Session-Sender MUST support
     /// control of its behavior in such a scenario [a zeroed SSID]." The two
     /// actions must actually differ: `stop` refuses to account the reply and
@@ -6242,7 +6441,7 @@ mod tests {
     fn test_zero_ssid_policy_stop_discards_reply_and_latches() {
         use crate::packets::ReflectedPacketUnauthenticated;
 
-        // A reflector that does not implement SSID leaves both fields zero.
+        // A reflector that does not implement SSID leaves the field zero.
         let reflected = ReflectedPacketUnauthenticated {
             sequence_number: 7,
             timestamp: 0,

@@ -272,7 +272,11 @@ The implementation is fully backward compatible:
 - **No TLVs in packet**: Standard RFC 8762 handling is used
 - **TLVs present**: Handled according to `--tlv-mode` setting
 - **Old clients**: Work seamlessly with TLV-enabled reflectors
-- **New clients with SSID**: Reflectors without TLV support will zero-pad the response
+- **Senders with a nonzero SSID**: Replies must echo that SSID. Other nonzero
+  IDs are discarded before measurement and control state updates. A legacy
+  reflector returns zero in the single SSID field; `--on-zero-ssid` controls
+  whether the sender continues or stops. The echoed sender Error Estimate is
+  followed by MBZ bytes, not a second SSID field.
 
 ### TLV Wire Format (RFC 8972 Section 4.2)
 

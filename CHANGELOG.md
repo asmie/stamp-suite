@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject reflected packets whose nonzero SSID differs from the configured sender
+  session before updating measurements or control state. Preserve configurable
+  zero-SSID compatibility and cover open/authenticated replies over IPv4/IPv6.
+
 - Require one usable Micro-session ID for configured sender micro-sessions.
   Reject missing, flagged, malformed, duplicate, or unverifiable IDs before
   consuming measurements; commit reflector-ID learning only for accepted pending
