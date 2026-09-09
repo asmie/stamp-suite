@@ -751,7 +751,7 @@ pub struct Configuration {
     #[clap(long, default_value_t = 65536)]
     pub max_sessions: u32,
 
-    /// Enable the BER TLVs (draft-gandhi-ippm-stamp-ber-05):
+    /// Enable the BER TLVs (draft-gandhi-ippm-stamp-ber-07):
     /// Bit Pattern in Padding (Type 240), Bit Error Count (Type 241), and
     /// Max Bit Error Burst Size (Type 242). Sender-side only; the reflector
     /// computes the counts against the incoming Extra Padding.
@@ -794,6 +794,18 @@ pub struct Configuration {
     /// BER TLVs. Ignored unless `--ber` is set.
     #[clap(long, default_value_t = 64)]
     pub ber_padding_size: usize,
+
+    /// BER computation interval in multiples of --send-delay (must be positive).
+    #[clap(long, default_value_t = 10)]
+    pub ber_interval: u32,
+
+    /// Alarm threshold for bit errors per million padding bits, in either direction.
+    #[clap(long)]
+    pub ber_bit_threshold: Option<f64>,
+
+    /// Alarm threshold for packets with errors per million measured packets.
+    #[clap(long)]
+    pub ber_packet_threshold: Option<f64>,
 
     /// Request asymmetrical reply traffic (draft-ietf-ippm-asymmetrical-pkts §3).
     /// The sender includes a Reflected Test Packet Control TLV (Type 12) asking
@@ -1132,6 +1144,33 @@ impl Configuration {
                  {MAX_PADDING_BYTES} bytes",
                 self.ber_padding_size
             )));
+        }
+
+        if self.ber {
+            let pattern = crate::ber::parse_pattern(self.ber_pattern.as_deref().unwrap_or("ff00"))
+                .map_err(|e| {
+                    ConfigurationError::InvalidConfiguration(format!("Invalid --ber-pattern: {e}"))
+                })?;
+            if self.ber_padding_size == 0 || self.ber_padding_size % pattern.len() != 0 {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "ber_padding_size must be positive and a multiple of the pattern length".into(),
+                ));
+            }
+            if self.ber_interval == 0 || self.send_delay == 0 {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "BER requires positive ber_interval and send_delay".into(),
+                ));
+            }
+            for threshold in [self.ber_bit_threshold, self.ber_packet_threshold]
+                .into_iter()
+                .flatten()
+            {
+                if !threshold.is_finite() || !(0.0..=1_000_000.0).contains(&threshold) {
+                    return Err(ConfigurationError::InvalidConfiguration(
+                        "BER thresholds must be finite and between 0 and 1000000".into(),
+                    ));
+                }
+            }
         }
 
         // RFC 8972 §4.8: in authenticated mode the sender's TLV-bearing
@@ -1726,6 +1765,9 @@ impl Configuration {
         merge!(ber);
         merge_opt!(ber_pattern);
         merge!(ber_padding_size);
+        merge!(ber_interval);
+        merge_opt!(ber_bit_threshold);
+        merge_opt!(ber_packet_threshold);
         merge_opt!(extra_padding);
         merge!(ber_omit_burst);
         merge!(tlv_hmac);
@@ -1844,6 +1886,9 @@ pub struct FileConfiguration {
     pub ber: Option<bool>,
     pub ber_pattern: Option<String>,
     pub ber_padding_size: Option<usize>,
+    pub ber_interval: Option<u32>,
+    pub ber_bit_threshold: Option<f64>,
+    pub ber_packet_threshold: Option<f64>,
     pub extra_padding: Option<usize>,
     pub ber_omit_burst: Option<bool>,
     pub tlv_hmac: Option<TlvHmacMode>,
@@ -1954,9 +1999,12 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "reflector_rate_burst": { "type": "integer", "minimum": 0 },
     "max_sessions": { "type": "integer", "minimum": 0 },
     "ber": { "type": "boolean" },
-    "ber_pattern": { "type": "string", "pattern": "^[0-9a-fA-F]+$" },
+    "ber_pattern": { "type": "string", "pattern": "^(0x)?([0-9a-fA-F]{2})+$" },
     "ber_padding_size": { "type": "integer", "minimum": 0, "maximum": 65347 },
     "extra_padding": { "type": "integer", "minimum": 0, "maximum": 65347 },
+    "ber_interval": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "ber_bit_threshold": { "type": "number", "minimum": 0, "maximum": 1000000 },
+    "ber_packet_threshold": { "type": "number", "minimum": 0, "maximum": 1000000 },
     "ber_omit_burst": { "type": "boolean" },
     "tlv_hmac": { "type": "string", "enum": ["auto", "on", "off"] },
     "reflected_control_count": { "type": "integer", "minimum": 0, "maximum": 65535 },
@@ -2251,6 +2299,59 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+
+    #[test]
+    fn ber_configuration_rejects_invalid_patterns_and_intervals() {
+        use clap::Parser;
+        for extra in [
+            vec!["--ber-padding-size", "3"],
+            vec!["--ber-padding-size", "0"],
+            vec!["--ber-pattern", ""],
+            vec!["--ber-pattern", "fg"],
+            vec!["--ber-pattern", "fff"],
+            vec!["--ber-interval", "0"],
+            vec!["--send-delay", "0"],
+            vec!["--ber-bit-threshold", "NaN"],
+            vec!["--ber-packet-threshold", "1000001"],
+        ] {
+            let args = [vec!["test", "--ber"], extra].concat();
+            let conf = Configuration::try_parse_from(args).unwrap();
+            assert!(conf.validate().is_err());
+        }
+        let conf = Configuration::try_parse_from([
+            "test",
+            "--ber",
+            "--ber-pattern",
+            "0xaaff",
+            "--ber-padding-size",
+            "6",
+        ])
+        .unwrap();
+        assert!(conf.validate().is_ok());
+    }
+
+    #[test]
+    fn ber_config_file_merges_and_validates_measurement_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "ber = true\nber_pattern = \"0xaa55\"\nber_padding_size = 6\nber_interval = 3\nber_bit_threshold = 12.5\nber_packet_threshold = 250.0\n").unwrap();
+        let conf = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap();
+        assert_eq!(conf.ber_interval, 3);
+        assert_eq!(conf.ber_bit_threshold, Some(12.5));
+        assert_eq!(conf.ber_packet_threshold, Some(250.0));
+        assert_eq!(conf.ber_pattern.as_deref(), Some("0xaa55"));
+        let cli = load_from_args(&[
+            "test",
+            "--config",
+            path.to_str().unwrap(),
+            "--ber-interval",
+            "4",
+        ])
+        .unwrap();
+        assert_eq!(cli.ber_interval, 4);
+        std::fs::write(&path, "ber = true\nber_padding_size = 3\n").unwrap();
+        assert!(load_from_args(&["test", "--config", path.to_str().unwrap()]).is_err());
+    }
 
     #[test]
     fn sender_reflector_id_requires_a_sender_micro_session_id() {

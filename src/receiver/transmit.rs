@@ -132,7 +132,8 @@ impl Transmission {
                 .filter(|s| crate::reply_source::supported() && s.is_ipv4() == target.is_ipv4()),
             srh: None,
             dont_fragment: self.response.reflected_control.is_some()
-                || has_reflected_headers(&data, base),
+                || has_reflected_headers(&data, base)
+                || (cfg!(target_os = "linux") && has_ber(&data, base)),
         };
         if let ReturnPathAction::Srv6Forward(sids) = &self.response.return_path_action {
             if self.srv6 && target.is_ipv6() {
@@ -264,6 +265,18 @@ fn has_reflected_headers(data: &[u8], base: usize) -> bool {
     found && pos == data.len()
 }
 
+fn has_ber(data: &[u8], base: usize) -> bool {
+    crate::tlv::TlvList::parse(&data[base..]).is_ok_and(|list| {
+        !list
+            .iter()
+            .any(|t| t.is_integrity_failed() || t.is_malformed())
+            && list
+                .non_hmac_tlvs()
+                .iter()
+                .any(|t| crate::ber::is_ber(t.tlv_type) && !t.is_unrecognized())
+    })
+}
+
 /// Preserve complete mandatory TLVs and the final HMAC. Only padding and
 /// reflected header TLVs may be removed. Return true to terminate a burst.
 fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> io::Result<bool> {
@@ -278,6 +291,23 @@ fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> i
     };
     if base > cap {
         return Err(cannot_fit());
+    }
+    if has_ber(data, base) && !controlled {
+        let list = crate::tlv::TlvList::parse(&data[base..]).map_err(|_| cannot_fit())?;
+        let mut tlvs: Vec<_> = list.iter().cloned().collect();
+        crate::ber::fit_padding(&mut tlvs, cap, base)?;
+        let mut resized = crate::tlv::TlvList::new();
+        for mut tlv in tlvs {
+            // The forward count described the original padding size. Mark
+            // metadata unusable once route MTU trimming changes that size.
+            if crate::ber::is_ber(tlv.tlv_type) {
+                tlv.set_conformant_reflected();
+            }
+            resized.push(tlv).map_err(|_| cannot_fit())?;
+        }
+        data.truncate(base);
+        data.extend_from_slice(&resized.to_bytes());
+        return Ok(false);
     }
     let mut pos = base;
     let mut tlvs = Vec::new();
@@ -318,6 +348,15 @@ fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> i
         }
         // A 1..3-octet remainder cannot encode a TLV; send the shorter valid
         // packet with C=1, never a malformed tail or an over-MTU packet.
+    }
+    if controlled {
+        // A final MTU clamp can resize Type-12 padding again after semantic
+        // processing. Its BER denominator is no longer trustworthy.
+        for tlv in &mut tlvs {
+            if matches!(tlv[1], 240..=242) {
+                tlv[0] |= 0x10;
+            }
+        }
     }
     data.truncate(base);
     for tlv in tlvs {
@@ -374,6 +413,24 @@ fn refresh_telemetry(data: &mut [u8], base: usize, session: &Session, stateful: 
 fn sign_tlvs(data: &mut [u8], base: usize, key: &HmacKey) {
     if data.len() < base + 20 {
         return;
+    }
+    let mut pos = if has_ber(data, base) {
+        base
+    } else {
+        data.len()
+    };
+    while pos + 4 <= data.len() {
+        let length = usize::from(u16::from_be_bytes([data[pos + 2], data[pos + 3]]));
+        if pos + 4 + length > data.len() || data[pos] & 0x40 != 0 {
+            break;
+        }
+        if data[pos + 1] == 8 && length == 16 {
+            let mut input = data[..4].to_vec();
+            input.extend_from_slice(&data[base..pos]);
+            data[pos + 4..pos + 20].copy_from_slice(&key.compute(&input));
+            return;
+        }
+        pos += 4 + length;
     }
     for pos in (base..=data.len() - 20).rev() {
         if data[pos + 1..pos + 4] == [8, 0, 16] && data[pos + 20..].iter().all(|b| *b == 0) {
@@ -1142,6 +1199,64 @@ mod tests {
                     Ok(data.len())
                 })
                 .is_some());
+        }
+    }
+}
+
+#[cfg(test)]
+mod ber_tests {
+    use super::*;
+    use crate::{
+        crypto::HmacKey,
+        tlv::{
+            BerBurstTlv, BerCountTlv, BerPatternTlv, ExtraPaddingTlv, TlvFlags, TlvList, TlvType,
+            TypedTlv,
+        },
+    };
+
+    #[test]
+    fn ber_route_budget_keeps_whole_patterns_and_resigns_c_metadata() {
+        let key = HmacKey::new(vec![0xab; 16]).unwrap();
+        for base in [44, 112] {
+            let mut list = TlvList::new();
+            for mut t in [
+                BerPatternTlv::new(vec![1, 2, 3]).to_raw(),
+                BerCountTlv::new(6).to_raw(),
+                BerBurstTlv::new(3).to_raw(),
+                ExtraPaddingTlv {
+                    padding: [1, 2, 3].repeat(534),
+                }
+                .to_raw(),
+            ] {
+                t.flags = TlvFlags::default();
+                list.push(t).unwrap();
+            }
+            list.set_hmac_response(&key, &[0; 4]);
+            let mut data = vec![0; base];
+            data.extend_from_slice(&list.to_bytes());
+            assert!(has_ber(&data, base));
+            let mut invalid = data.clone();
+            invalid[base] |= 0x20;
+            assert!(
+                !has_ber(&invalid, base),
+                "I-flagged failure echoes stay opaque"
+            );
+
+            assert!(!fit_reply(&mut data, base, 1500, false).unwrap());
+            assert!(data.len() <= 1500);
+            sign_tlvs(&mut data, base, &key);
+            let list = TlvList::parse(&data[base..]).unwrap();
+            assert!(list.verify_hmac(&key, &data[..4], &data[base..]).is_ok());
+            for t in list.non_hmac_tlvs() {
+                if crate::ber::is_ber(t.tlv_type) {
+                    assert!(t.flags.conformant_reflected);
+                }
+                if t.tlv_type == TlvType::ExtraPadding {
+                    assert!(!t.value.is_empty());
+                    assert_eq!(t.value, [1, 2, 3].repeat(t.value.len() / 3));
+                }
+            }
+            assert!(fit_reply(&mut data, base, base + 10, false).is_err());
         }
     }
 }

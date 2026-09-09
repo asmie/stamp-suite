@@ -15,6 +15,22 @@ with NTP era unfolding and epoch conversion. For a peer clock ahead of UTC,
 configure its known offset with `--reflector-utc-offset <SECONDS>` (default 0;
 see [clock settings](doc/usage.md#timestamp--clock)). The per-packet reflector timestamps remain available in `-R` mode for external analysis.
 
+### Residual BER measurement
+
+```bash
+stamp-suite --remote-addr 192.0.2.1 --ber --ber-pattern ff00 \
+  --ber-padding-size 128 --send-delay 100 --ber-interval 10
+```
+
+This computes one-second windows with directional packet/bit totals, error ratios,
+and maximum/average error bursts. Padding must be positive and divisible by the
+pattern length. Optional `--ber-bit-threshold` and `--ber-packet-threshold` values
+are per million; threshold crossings appear in logs and the summary. The sender
+stops BER requests when a peer returns a BER U flag and continues ordinary STAMP.
+Use `--ber-omit-burst` with peers whose Type 242 has another meaning. See
+[measurement semantics and platform limits](doc/architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber)
+and the [BER-07 conformance matrix](doc/conformance/draft-stamp-ber.md).
+
 ### Key features
 
 - Full RFC 8762 compliance — open and authenticated modes
@@ -266,7 +282,7 @@ MIT — see [LICENSE](LICENSE).
 - [RFC 9534 — Extensions for Performance Measurement on a Link Aggregation Group](https://datatracker.ietf.org/doc/html/rfc9534)
 - [draft-ietf-ippm-asymmetrical-pkts-14](https://datatracker.ietf.org/doc/draft-ietf-ippm-asymmetrical-pkts/) — Asymmetrical Traffic (IETF IPPM WG, RFC Editor queue)
 - [draft-ietf-ippm-stamp-ext-hdr-07](https://datatracker.ietf.org/doc/draft-ietf-ippm-stamp-ext-hdr/) — Reflected IP header / IPv6 extension headers, basis for TLV Types 246/247 (IETF IPPM WG, active)
-- [draft-gandhi-ippm-stamp-ber-05](https://datatracker.ietf.org/doc/draft-gandhi-ippm-stamp-ber/) — Residual Bit Error Rate Measurement (individual draft)
+- [draft-gandhi-ippm-stamp-ber-07](https://datatracker.ietf.org/doc/draft-gandhi-ippm-stamp-ber/) — Residual Bit Error Rate Measurement (individual draft)
 
 Session state is separated by both UDP endpoints, SSID, and (when present)
 the sender micro-session ID. `--session-admission permissive` is the legacy

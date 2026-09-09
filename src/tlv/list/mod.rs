@@ -7,13 +7,13 @@ use crate::tlv::core::{RawTlv, TlvError, TlvFlags, TlvType, HMAC_TLV_VALUE_SIZE,
 
 /// A list of TLVs with special handling for HMAC TLV.
 ///
-/// Per RFC 8972, the HMAC TLV must always be the last TLV in the list.
+/// Per RFC 8972, only Extra Padding may follow the HMAC TLV.
 /// For failure echo paths, wire order is preserved to comply with RFC 8972 §4.8.
 #[derive(Debug, Clone, Default)]
 pub struct TlvList {
     /// The TLVs in the list (excluding HMAC).
     tlvs: Vec<RawTlv>,
-    /// Optional HMAC TLV (always serialized last in normal mode).
+    /// Optional HMAC TLV (before BER padding, otherwise serialized last).
     hmac_tlv: Option<RawTlv>,
     /// All TLVs in original wire order (used for failure echo per RFC 8972 §4.8).
     /// When set, `to_bytes()` will use this order instead of the separated fields.
@@ -298,12 +298,23 @@ impl TlvList {
     ///
     /// If wire-order mode is active (from lenient parsing with issues),
     /// TLVs are serialized in their original wire order per RFC 8972 §4.8.
-    /// Otherwise, HMAC TLV is always serialized last per RFC 8972.
+    /// Otherwise, HMAC precedes BER padding or is last per RFC 8972.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.wire_size());
         self.write_to(&mut buf);
         buf
+    }
+
+    /// BER padding remains outside TLV-HMAC coverage so residual errors can
+    /// be measured without accepting corruption of the measurement metadata.
+    fn ber_padding_after_hmac(&self) -> bool {
+        self.tlvs.iter().any(|t| {
+            matches!(
+                t.tlv_type,
+                TlvType::BerPattern | TlvType::BerCount | TlvType::BerBurst
+            )
+        })
     }
 
     /// Writes the TLV list to the provided buffer without allocating.
@@ -316,12 +327,21 @@ impl TlvList {
             return;
         }
 
+        let trailing_padding = self.hmac_tlv.is_some() && self.ber_padding_after_hmac();
         for tlv in &self.tlvs {
-            tlv.write_to(buf);
+            if !trailing_padding || tlv.tlv_type != TlvType::ExtraPadding {
+                tlv.write_to(buf);
+            }
         }
-
         if let Some(ref hmac) = self.hmac_tlv {
             hmac.write_to(buf);
+        }
+        if trailing_padding {
+            for tlv in &self.tlvs {
+                if tlv.tlv_type == TlvType::ExtraPadding {
+                    tlv.write_to(buf);
+                }
+            }
         }
     }
 
@@ -341,9 +361,13 @@ impl TlvList {
         // HMAC TLV. When this list came off the wire we know that prefix
         // exactly; the size-sum fallback is only correct when the HMAC TLV is
         // last, which a legal trailing Extra Padding TLV (§4.8) breaks.
-        let non_hmac_size: usize = self
-            .hmac_wire_offset
-            .unwrap_or_else(|| self.tlvs.iter().map(|t| t.wire_size()).sum());
+        let non_hmac_size: usize = self.hmac_wire_offset.unwrap_or_else(|| {
+            self.tlvs
+                .iter()
+                .filter(|t| !self.ber_padding_after_hmac() || t.tlv_type != TlvType::ExtraPadding)
+                .map(|t| t.wire_size())
+                .sum()
+        });
 
         let mut data = Vec::with_capacity(4 + non_hmac_size);
 
@@ -506,7 +530,9 @@ impl TlvList {
         let seq_len = sequence_number_bytes.len().min(4);
         data.extend_from_slice(&sequence_number_bytes[..seq_len]);
         for tlv in &self.tlvs {
-            tlv.write_to(&mut data);
+            if !self.ber_padding_after_hmac() || tlv.tlv_type != TlvType::ExtraPadding {
+                tlv.write_to(&mut data);
+            }
         }
 
         let hmac = key.compute(&data);

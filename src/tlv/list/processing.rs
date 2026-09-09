@@ -4,6 +4,7 @@
 //! to update TLV fields in-place before reflecting a packet. Being a submodule
 //! of `list`, it can access `TlvList`'s private fields directly.
 
+use crate::ber::xor_popcount_and_max_burst;
 use crate::tlv::core::{
     RawTlv, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE, BER_BURST_TLV_VALUE_SIZE,
     BER_COUNT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
@@ -746,24 +747,8 @@ impl TlvList {
         }
     }
 
-    /// Processes BER TLVs per draft-gandhi-ippm-stamp-ber-05 §3.
-    ///
-    /// Computes the number of error bits and the longest consecutive error
-    /// burst by XORing the received Extra Padding TLV (RFC 8972 Type 1)
-    /// against the pattern carried in the Bit Pattern TLV (Type 240), then
-    /// writes the results into the Bit Error Count (Type 241) and Max Burst
-    /// (Type 242) TLVs.
-    ///
-    /// Per the draft:
-    /// - Each of the three BER TLVs MAY appear at most once per packet.
-    /// - The three TLVs MUST be paired with exactly one Extra Padding TLV.
-    /// - If duplicates or a missing Extra Padding TLV are detected, the
-    ///   offending BER TLVs are marked with the U-flag and no values are
-    ///   computed.
-    ///
-    /// Operates on `self.tlvs`; wire-order mirroring is handled by the
-    /// wire-order copy via `for_each_matching_tlv` where appropriate. This
-    /// processing is a no-op when no BER TLVs are present.
+    /// Measures and repairs BER padding (draft-gandhi-ippm-stamp-ber-07 §4.2).
+    /// Invalid multiplicity or pattern alignment is reflected with C=1.
     pub fn process_ber(&mut self) {
         // Locate indices in self.tlvs
         let mut padding_count = 0usize;
@@ -810,31 +795,69 @@ impl TlvList {
             return;
         }
 
-        // Draft §3: each BER TLV MAY appear only once. Mark duplicates U.
+        // BER-07 §4.2.1: invalid multiplicity is a conformance error.
         let has_duplicate = pattern_count > 1 || count_count > 1 || burst_count > 1;
 
-        // Draft §3: BER TLVs MUST be paired with an Extra Padding TLV.
+        // BER-07 §4.2.1 requires exactly one Extra Padding TLV.
         // Treat missing-or-duplicate Extra Padding as a protocol error too.
         let padding_invalid = padding_count != 1;
 
         if has_duplicate || padding_invalid {
-            Self::mark_ber_tlvs_unrecognized(&mut self.tlvs);
+            Self::mark_ber_tlvs_nonconformant(&mut self.tlvs);
             if let Some(ref mut wire_order) = self.wire_order_tlvs {
-                Self::mark_ber_tlvs_unrecognized(wire_order);
+                Self::mark_ber_tlvs_nonconformant(wire_order);
             }
             return;
         }
 
         // Borrow padding/pattern immutably for the scan, then drop the borrows
         // before mutating count/burst TLVs further down.
-        let (count, max_burst) = {
+        let (count, max_burst, pattern, aligned) = {
             let padding = self.tlvs[padding_idx.unwrap()].value.as_slice();
             let pattern = pattern_idx
                 .map(|i| self.tlvs[i].value.as_slice())
                 .filter(|v| !v.is_empty())
                 .unwrap_or(BER_DEFAULT_PATTERN.as_slice());
-            xor_popcount_and_max_burst(padding, pattern)
+            let (count, burst) = xor_popcount_and_max_burst(padding, pattern);
+            (
+                count,
+                burst,
+                pattern.to_vec(),
+                padding.len() % pattern.len() == 0,
+            )
         };
+
+        if !aligned || pattern_idx.is_some_and(|i| self.tlvs[i].value.is_empty()) {
+            if pattern_idx.is_none() {
+                Self::mark_ber_tlvs_nonconformant(&mut self.tlvs);
+                if let Some(wire) = &mut self.wire_order_tlvs {
+                    Self::mark_ber_tlvs_nonconformant(wire);
+                }
+            }
+            // An empty explicit pattern has no repeat length; the default is
+            // selected by omitting Type 240, not by sending an empty value.
+            for tlv in self
+                .tlvs
+                .iter_mut()
+                .chain(self.wire_order_tlvs.iter_mut().flat_map(|v| v.iter_mut()))
+            {
+                if tlv.tlv_type == TlvType::BerPattern {
+                    tlv.set_conformant_reflected();
+                }
+            }
+            return;
+        }
+        for tlv in self
+            .tlvs
+            .iter_mut()
+            .chain(self.wire_order_tlvs.iter_mut().flat_map(|v| v.iter_mut()))
+        {
+            if tlv.tlv_type == TlvType::ExtraPadding {
+                for (i, byte) in tlv.value.iter_mut().enumerate() {
+                    *byte = pattern[i % pattern.len()];
+                }
+            }
+        }
 
         if let Some(i) = count_idx {
             Self::write_ber_count(&mut self.tlvs[i], count);
@@ -854,6 +877,46 @@ impl TlvList {
                         Self::write_ber_burst(tlv, max_burst);
                     }
                     _ => {}
+                }
+            }
+        }
+    }
+
+    /// Keep repaired BER padding after another extension resizes the reply.
+    /// Changed lengths invalidate the forward count's denominator.
+    pub fn finish_ber_padding(&mut self, original_len: Option<usize>) {
+        if !self.tlvs.iter().any(|t| crate::ber::is_ber(t.tlv_type)) {
+            return;
+        }
+        if self.tlvs.iter().any(|t| {
+            crate::ber::is_ber(t.tlv_type)
+                && (t.flags.conformant_reflected
+                    || t.is_unrecognized()
+                    || t.is_malformed()
+                    || t.is_integrity_failed())
+        }) {
+            return;
+        }
+        let pattern = self
+            .tlvs
+            .iter()
+            .find(|t| t.tlv_type == TlvType::BerPattern)
+            .map_or_else(|| BER_DEFAULT_PATTERN.to_vec(), |t| t.value.clone());
+        if pattern.is_empty() {
+            return;
+        }
+        let length = self
+            .tlvs
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ExtraPadding)
+            .map(|t| t.value.len());
+        if length != original_len {
+            Self::mark_ber_tlvs_nonconformant(&mut self.tlvs);
+        }
+        for tlv in &mut self.tlvs {
+            if tlv.tlv_type == TlvType::ExtraPadding {
+                for (i, byte) in tlv.value.iter_mut().enumerate() {
+                    *byte = pattern[i % pattern.len()];
                 }
             }
         }
@@ -1232,13 +1295,13 @@ impl TlvList {
         }
     }
 
-    fn mark_ber_tlvs_unrecognized(tlvs: &mut [RawTlv]) {
+    fn mark_ber_tlvs_nonconformant(tlvs: &mut [RawTlv]) {
         for tlv in tlvs {
             if matches!(
                 tlv.tlv_type,
                 TlvType::BerPattern | TlvType::BerCount | TlvType::BerBurst
             ) {
-                tlv.set_unrecognized();
+                tlv.set_conformant_reflected();
             }
         }
     }
@@ -1387,44 +1450,6 @@ fn log_reflected_hdr_selector_no_match_once() {
              draft-ietf-ippm-stamp-ext-hdr-11 §5.1/§5.2."
         );
     }
-}
-
-/// XORs `padding` against `pattern` repeated, counts total error bits and the
-/// longest consecutive run of `1` bits spanning byte boundaries. Runs are
-/// counted across the whole padding buffer as a continuous bit stream.
-///
-/// Returns `(error_count, max_consecutive_error_bits)`.
-fn xor_popcount_and_max_burst(padding: &[u8], pattern: &[u8]) -> (u32, u32) {
-    if pattern.is_empty() {
-        // Should never happen (caller filters empty pattern to default), but
-        // be defensive: without a pattern we cannot compare.
-        return (0, 0);
-    }
-
-    let mut count: u32 = 0;
-    let mut current_burst: u32 = 0;
-    let mut max_burst: u32 = 0;
-
-    // Overflow is impossible for any realistic packet: a u32 counts up to 2^32
-    // error bits, which would require a ~536 MB padding TLV. Use plain arithmetic.
-    for (i, &byte) in padding.iter().enumerate() {
-        let expected = pattern[i % pattern.len()];
-        let err = byte ^ expected;
-        count += err.count_ones();
-
-        for bit in (0..8).rev() {
-            if (err >> bit) & 1 == 1 {
-                current_burst += 1;
-                if current_burst > max_burst {
-                    max_burst = current_burst;
-                }
-            } else {
-                current_burst = 0;
-            }
-        }
-    }
-
-    (count, max_burst)
 }
 
 #[cfg(test)]
@@ -2366,8 +2391,8 @@ mod tests {
     }
 
     #[test]
-    fn test_process_ber_missing_extra_padding_flags_u() {
-        // BER TLVs without a companion Extra Padding TLV → all three get U-flag.
+    fn test_process_ber_missing_extra_padding_flags_c() {
+        // BER TLVs without a companion Extra Padding TLV → all three get C-flag.
         let mut list = TlvList::new();
         list.push(BerPatternTlv::new(vec![0xFF]).to_raw()).unwrap();
         list.push(BerCountTlv::default().to_raw()).unwrap();
@@ -2377,14 +2402,14 @@ mod tests {
 
         for tlv in list.non_hmac_tlvs() {
             assert!(
-                tlv.is_unrecognized(),
-                "missing Extra Padding should mark all BER TLVs unrecognized"
+                tlv.flags.conformant_reflected,
+                "missing Extra Padding should mark all BER TLVs nonconformant"
             );
         }
     }
 
     #[test]
-    fn test_process_ber_duplicate_count_tlvs_flag_u() {
+    fn test_process_ber_duplicate_count_tlvs_flag_c() {
         let mut list = TlvList::new();
         list.push(
             ExtraPaddingTlv {
@@ -2409,7 +2434,7 @@ mod tests {
                 )
             })
             .collect();
-        assert!(ber_tlvs.iter().all(|t| t.is_unrecognized()));
+        assert!(ber_tlvs.iter().all(|t| t.flags.conformant_reflected));
     }
 
     #[test]

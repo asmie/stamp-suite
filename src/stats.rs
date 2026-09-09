@@ -146,6 +146,7 @@ impl RttCollector {
             owd: None,
             access_report: None,
             congestion: None,
+            ber: None,
         }
     }
 }
@@ -352,6 +353,9 @@ pub struct CongestionSummary {
 /// Serializable sender statistics snapshot.
 #[derive(serde::Serialize)]
 pub struct StatsSnapshot {
+    /// Residual BER totals and computation intervals, when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ber: Option<crate::ber::BerSummary>,
     pub packets_sent: u32,
     pub packets_received: u32,
     pub packets_lost: u32,
@@ -379,6 +383,12 @@ pub struct StatsSnapshot {
 }
 
 impl StatsSnapshot {
+    #[must_use]
+    pub fn with_ber(mut self, summary: Option<crate::ber::BerSummary>) -> Self {
+        self.ber = summary;
+        self
+    }
+
     /// Attaches one-way-delay statistics from `owd` to this snapshot. A no-op
     /// (leaves `owd` as `None`) when the collector has no samples.
     #[must_use]
@@ -476,6 +486,31 @@ impl StatsSnapshot {
                 owd.reverse_max_ms
             );
         }
+        if let Some(ber) = &self.ber {
+            println!(
+                "{prefix}BER: interval={}ms padding={} bytes disabled_by_peer={}",
+                ber.interval_ms, ber.padding_bytes, ber.disabled_by_peer
+            );
+            for (name, stats) in [("Forward", &ber.forward), ("Reverse", &ber.reverse)] {
+                println!("{prefix}  {name}: packets={} errored={} bits={} errors={} BER={} burst max={} avg={}",
+                    stats.packets_received, stats.packets_with_errors, stats.padding_bits, stats.bit_errors,
+                    stats.bit_error_ratio.map_or_else(|| "n/a".into(), |v| format!("{v:.6e}")),
+                    stats.max_burst_bits.map_or_else(|| "n/a".into(), |v| v.to_string()),
+                    fmt_opt(stats.average_max_burst_bits));
+            }
+            for interval in &ber.intervals {
+                println!(
+                    "{prefix}  BER interval: {}",
+                    serde_json::to_string(interval).unwrap_or_default()
+                );
+            }
+            for alarm in &ber.alarms {
+                println!(
+                    "{prefix}  BER alarm: {}",
+                    serde_json::to_string(alarm).unwrap_or_default()
+                );
+            }
+        }
         if let Some(ar) = &self.access_report {
             println!(
                 "{}Access Report (RFC 8972 §4.6): {} (retransmissions={})",
@@ -526,10 +561,10 @@ impl StatsSnapshot {
              owd_rev_min_ms,owd_rev_avg_ms,owd_rev_max_ms,\
              access_report_outcome,access_report_retransmissions,\
              congestion_ce_replies,congestion_backoffs_applied,\
-             congestion_current_interval_ms,congestion_max_interval_reached_ms"
+             congestion_current_interval_ms,congestion_max_interval_reached_ms,ber"
         );
         println!(
-            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.packets_sent,
             self.packets_received,
             self.packets_lost,
@@ -557,6 +592,12 @@ impl StatsSnapshot {
                 .map_or_else(String::new, |c| c.backoffs_applied.to_string()),
             fmt_opt(self.congestion.map(|c| c.current_interval_ms)),
             fmt_opt(self.congestion.map(|c| c.max_interval_reached_ms)),
+            self.ber.as_ref().map_or_else(String::new, |ber| format!(
+                "\"{}\"",
+                serde_json::to_string(ber)
+                    .unwrap_or_default()
+                    .replace('"', "\"\"")
+            )),
         );
     }
 }
@@ -779,6 +820,7 @@ mod tests {
             owd: None,
             access_report: None,
             congestion: None,
+            ber: None,
         };
         // Should not panic
         snap.print(OutputFormat::Text);
@@ -802,6 +844,7 @@ mod tests {
             owd: None,
             access_report: None,
             congestion: None,
+            ber: None,
         };
         // Should not panic
         snap.print(OutputFormat::Json);
@@ -825,6 +868,7 @@ mod tests {
             owd: None,
             access_report: None,
             congestion: None,
+            ber: None,
         };
         // Should not panic
         snap.print(OutputFormat::Csv);
@@ -847,6 +891,7 @@ mod tests {
             owd: None,
             access_report: None,
             congestion: None,
+            ber: None,
         }
     }
 
@@ -1007,6 +1052,7 @@ mod tests {
             owd: None,
             access_report: None,
             congestion: None,
+            ber: None,
         };
         snap.print(OutputFormat::Json);
     }

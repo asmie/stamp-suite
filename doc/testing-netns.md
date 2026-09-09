@@ -81,7 +81,7 @@ Per-scenario prerequisites:
 | 4b | `scenario_4b_ext_hdr_pnet_capture` | draft-ietf-ippm-stamp-ext-hdr-11 §§3.1/5.1: the `ttl-pnet` backend captures an injected IPv6 Destination Options header and echoes its bytes-from-offset-4 into the Type-246 Reflected field with the C flag **clear**. |
 | 5 | `scenario_5_address_group_filters` | draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1/§3.1.2: a matching L2 (own-MAC) or L3 (own-prefix) Address Group sub-TLV yields a reply; a non-matching one drops the packet (no reply). |
 | 6 | `scenario_6_type12_multi_reply` | draft-ietf-ippm-asymmetrical-pkts-14 §3: multiple reply copies on the wire (count within the requested/cap bound), inter-packet pacing ≈ the requested interval, replies padded beyond the base length. |
-| 7 | `scenario_7_ber_onwire` | draft-gandhi-ippm-stamp-ber §3: the Bit Pattern (0xFF00) fills the Extra Padding TLV on the wire; the reflector's Bit Error Count reads 0 on a clean channel. |
+| 7 | `scenario_7_ber_onwire` | draft-gandhi-ippm-stamp-ber-07 §4: the Bit Pattern (0xFF00) fills the Extra Padding TLV on the wire; the reflector's Bit Error Count reads 0 on a clean channel. |
 | 8 | `scenario_8_ttl_egress_marking` | Sender `--ttl` egress marking: the requested IP TTL / Hop Limit appears on the outgoing test packets. |
 
 ## Building the pnet reflector for scenario 4b

@@ -28,7 +28,7 @@
 //! silently disagree instead of failing to build, which is worse, and no
 //! user has ever asked for one. YAGNI until that changes.
 
-/// Bit Pattern in Padding TLV — `draft-gandhi-ippm-stamp-ber-05` §3.2.
+/// Bit Pattern in Padding TLV — `draft-gandhi-ippm-stamp-ber-07` §3.2.
 ///
 /// The draft defines this TLV but leaves its Type value as an unassigned
 /// placeholder (no IANA allocation exists at revision -05); this crate uses
@@ -48,7 +48,7 @@
 /// independent codepoints and may land separately).
 pub const BER_PATTERN_TLV_TYPE: u8 = 240;
 
-/// Bit Error Count in Padding TLV — `draft-gandhi-ippm-stamp-ber-05` §3.3.
+/// Bit Error Count in Padding TLV — `draft-gandhi-ippm-stamp-ber-07` §3.3.
 ///
 /// Same situation as [`BER_PATTERN_TLV_TYPE`]: no IANA allocation exists at
 /// revision -05, so this crate uses **241** from the "STAMP TLV Types"
@@ -61,7 +61,7 @@ pub const BER_PATTERN_TLV_TYPE: u8 = 240;
 /// TLV's Type value.
 pub const BER_COUNT_TLV_TYPE: u8 = 241;
 
-/// Max Bit Error Burst Size TLV — `draft-gandhi-ippm-stamp-ber-05` §3.4.
+/// Max Bit Error Burst Size TLV — `draft-gandhi-ippm-stamp-ber-07` §3.4.
 ///
 /// The draft defines this TLV alongside the two above, but — unlike
 /// [`BER_PATTERN_TLV_TYPE`]/[`BER_COUNT_TLV_TYPE`], which the draft's own

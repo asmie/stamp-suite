@@ -16,7 +16,8 @@ this file documents the opt-in invocations.
 | `idle_cpu_test.rs` | Real reflector process: bounded idle CPU after traffic, then receipt of another packet; IPv4/IPv6 and optional kernel timestamps. Linux nix backend; reads child CPU accounting from `/proc`. | yes, Linux nix |
 | `loopback_ipv6_test.rs` | TLV-by-TLV IPv6 parity via `process_stamp_packet`. | yes |
 | `tlv_flag_semantics.rs` | RFC 8972 U/M/I + draft-asymmetrical C flag conformance. | yes |
-| `ber_regression_test.rs` | BER (Types 240/241/242) on-wire counts. | yes |
+| `ber_regression_test.rs` | BER-07 counts and bit-error bursts through packet processing. | yes |
+| `ber_measurement_test.rs` | BER-07 IPv4/IPv6 open/auth directional errors, repaired padding, HMAC, duplicate exclusion, unsupported peers and C-flag combinations. Real reflector signing checks require the Linux UDP backend. | yes |
 | `session_capacity_test.rs` | Live cap rejection and continued sequence state, IPv4/IPv6, open/authenticated, both sequencing modes; with `control`, drain/resume, runtime caps, expiry/restart, and drop counters. | yes, Linux nix |
 | `session_ssid_validation_test.rs` | Independent UDP peer: wrong/matching SSIDs and zero-SSID policies, open/authenticated replies over IPv4/IPv6. | yes |
 | `required_micro_session_test.rs` | Independent UDP peer: missing/flagged Micro-session IDs produce no measurement; authenticated valid-ID control, IPv4/IPv6. No physical LAG test. | yes |

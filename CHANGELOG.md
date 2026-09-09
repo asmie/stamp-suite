@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Update BER support to draft-gandhi-ippm-stamp-ber-07: validate pattern
+  alignment, return C for invalid combinations, repair padding and keep it
+  outside TLV-HMAC coverage. Add directional interval statistics, burst
+  aggregates, peer-unsupported shutdown and optional threshold alarms in
+  CLI/TOML/schema and text/JSON/CSV output. Apply Linux route-MTU budgets to
+  BER padding and reject resized replies as measurement inputs. Add wire,
+  integrity, interval and IPv4/IPv6 regression coverage and a BER matrix.
+
 - Separate reflector synchronization-source declarations from NTP/PTP encoding
   and the Error Estimate S bit. Add system/PHC source settings defaulting to
   local, and correct RFC 8972 wire codes (SSU/BITS 3, external sources 4, local 5).

@@ -27,6 +27,9 @@
 //! notice. The stable 1.x surface is the CLI flags, the config-file schema,
 //! and on-the-wire behavior. This crate has an MSRV of Rust 1.93.
 
+#[doc(hidden)]
+pub mod ber;
+
 /// Clock format definitions (NTP/PTP).
 #[doc(hidden)]
 pub mod clock_format;

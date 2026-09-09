@@ -1,5 +1,5 @@
 //! BER Max Bit Error Burst Size TLV (Type 242)
-//! per draft-gandhi-ippm-stamp-ber-05 §3.4.
+//! per draft-gandhi-ippm-stamp-ber-07 §5.3.
 //!
 //! Carries the longest run of consecutive `1` bits observed by the
 //! Session-Reflector when XORing the received Extra Padding against the

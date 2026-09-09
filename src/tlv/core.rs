@@ -66,11 +66,11 @@ pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 12;
 pub const REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE: usize = 8;
 
 /// BER Bit Error Count TLV value size
-/// (draft-gandhi-ippm-stamp-ber §3.3: single u32).
+/// (draft-gandhi-ippm-stamp-ber-07 §5.2: single u32).
 pub const BER_COUNT_TLV_VALUE_SIZE: usize = 4;
 
 /// BER Max Bit Error Burst Size TLV value size
-/// (draft-gandhi-ippm-stamp-ber §3.4: single u32).
+/// (draft-gandhi-ippm-stamp-ber-07 §5.3: single u32).
 pub const BER_BURST_TLV_VALUE_SIZE: usize = 4;
 
 /// Errors that can occur during TLV parsing or processing.
@@ -288,15 +288,15 @@ pub enum TlvType {
     MicroSessionId = 11,
     /// Reflected Test Packet Control TLV (12) - draft-ietf-ippm-asymmetrical-pkts §3.
     ReflectedControl = 12,
-    /// BER Bit Pattern in Padding TLV (240) - draft-gandhi-ippm-stamp-ber §3.2.
+    /// BER Bit Pattern in Padding TLV (240) - draft-gandhi-ippm-stamp-ber-07 §5.1.
     /// Experimental-range codepoint stand-in; see `experimental::BER_PATTERN_TLV_TYPE`
     /// — single edit point for renumbering.
     BerPattern = BER_PATTERN_TLV_TYPE,
-    /// BER Bit Error Count in Padding TLV (241) - draft-gandhi-ippm-stamp-ber §3.3.
+    /// BER Bit Error Count in Padding TLV (241) - draft-gandhi-ippm-stamp-ber-07 §5.2.
     /// Experimental-range codepoint stand-in; see `experimental::BER_COUNT_TLV_TYPE`
     /// — single edit point for renumbering.
     BerCount = BER_COUNT_TLV_TYPE,
-    /// BER Max Bit Error Burst Size TLV (242) - draft-gandhi-ippm-stamp-ber §3.4.
+    /// BER Max Bit Error Burst Size TLV (242) - draft-gandhi-ippm-stamp-ber-07 §5.3.
     /// Experimental-range codepoint stand-in (and a known collision with an
     /// unrelated TLV in another implementation — see the const's doc); see
     /// `experimental::BER_MAX_BURST_TLV_TYPE` — single edit point for renumbering.

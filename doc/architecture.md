@@ -239,12 +239,12 @@ Status labels used in this table — kept aligned with the (forthcoming) standar
 | 5 | Direct Measurement | Sender/reflector packet counters (RFC 8972 §4.5) | supported |
 | 6 | Access Report | Access identifier and return code (RFC 8972 §4.6) | supported |
 | 7 | Follow-Up Telemetry | Previous reflection seq/timestamp (RFC 8972 §4.7) | supported |
-| 8 | HMAC | TLV integrity verification (must be last) | supported |
+| 8 | HMAC | TLV integrity verification (only Extra Padding may follow) | supported |
 | 9 | Destination Node Address | Verify intended reflector identity (RFC 9503 §4) | supported |
 | 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | supported — suppress / alternate address (opt-in `--return-path-allow-alternate`, U-flag fallback when off) / SRv6 best-effort SRH forwarding (opt-in `--srv6-return-forwarding`, Linux+IPv6, graceful U-flag fallback); SR-MPLS echoed with U-flag (out of scope for userspace UDP) |
 | 11 | Micro-session ID | Configured numeric identifiers (RFC 9534 §3.1) | encoding/validation supported; physical LAG association unsupported |
 | 12 | Reflected Test Packet Control | Asymmetrical reply request — count, length, interval (draft-ietf-ippm-asymmetrical-pkts-14, IANA-assigned) | supported — emission, length padding (up to `--reflected-control-max-size`), L2 (§3.1.1) and L3 (§3.1.2) Address Group sub-TLV match against the reflector's own MAC/IP addresses; either mismatching drops the packet |
-| 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-05) | experimental |
+| 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-07) | experimental |
 | 241 | BER Bit Error Count | u32 error-bit count, computed by reflector | experimental |
 | 242 | BER Max Bit Error Burst Size | u32 longest consecutive error run, computed by reflector | experimental — **wire-format collision with teaparty Heartbeat (same Type 242)**; see note below |
 | 246 | Reflected IPv6 Extension Header Data | Reflects received IPv6 Hop-by-Hop / Destination Options headers (draft-ietf-ippm-stamp-ext-hdr) | partial — pnet backend only (nix backend echoes with U-flag) |
@@ -252,7 +252,7 @@ Status labels used in this table — kept aligned with the (forthcoming) standar
 
 **IANA registry**: Type 12 and the C flag (bit 3 of TLV flags) are IANA-assigned per draft-ietf-ippm-asymmetrical-pkts-14. Types 240–251 are *Experimental Use* per RFC 8972 §6 — picks by individual implementations.
 
-**Type 242 collision**: stamp-suite uses Type 242 for *BER Max Bit Error Burst Size* (draft-gandhi-ippm-stamp-ber-05); teaparty uses the same Type 242 for an experimental *Heartbeat* TLV. Both are within the Experimental Use range so neither is wrong per IANA, but the wire formats are mutually incompatible. Until an explicit `experimental-teaparty-compat` build path exists, deployments that mix the two implementations should disable BER on stamp-suite or Heartbeat on teaparty rather than relying on which one wins the byte race.
+**Type 242 collision**: stamp-suite uses Type 242 for *BER Max Bit Error Burst Size* (draft-gandhi-ippm-stamp-ber-07); teaparty uses the same Type 242 for an experimental *Heartbeat* TLV. Both are within the Experimental Use range so neither is wrong per IANA, but the wire formats are mutually incompatible. Use `--ber-omit-burst` when the peer assigns Type 242 to Heartbeat; forward error counts remain available, with forward burst statistics reported as unavailable.
 
 **Backend restriction on Types 246/247**: Both require the reflector to copy raw IP-header bytes into the response, which is only possible when the capture path sees full IP headers. The default `nix` UDP-socket backend cannot provide this — see [Receiver Backends](#receiver-backends) for why the default remains `nix`. On the `nix` backend these TLVs are echoed with the U-flag set per RFC 8972 §4.2 and a one-time warning is logged.
 
@@ -472,7 +472,38 @@ stamp-suite --remote-addr 192.168.1.100 --ber --ber-padding-size 128
 stamp-suite --remote-addr 192.168.1.100 --ber --ber-pattern aa55 --ber-padding-size 256
 ```
 
-The reflector XORs the received padding against the expected pattern (from the Bit Pattern TLV, or 0xFF00 if absent), counts error bits and the longest consecutive error run across byte boundaries, and writes the results into Types 241 and 242. Per draft §3, duplicate BER TLVs or a missing companion Extra Padding TLV cause the reflector to set the U-flag on all BER TLVs and skip the computation.
+The reflector measures errors against the expected pattern, records the count and longest
+bit-error burst, and repairs the padding before replying. Missing/duplicate padding,
+duplicate BER TLVs, and non-divisible pattern lengths get C flags. Empty explicit
+patterns are rejected; omitting Type 240 selects `ff00`. BER padding follows the HMAC
+TLV so errors in padding remain measurable while metadata stays protected.
+
+`--ber-interval N` computes windows of `N × --send-delay` milliseconds (default N=10).
+The configured interval stays fixed if ECN changes the actual send delay. Each accepted
+pending probe contributes at most one BER sample. Duplicate replies and replies with
+missing, invalid, C/I/M-flagged or unverifiable metadata do not inflate the totals.
+A BER U flag disables subsequent BER requests while preserving the other measurements.
+The sender computes forward errors from the reflected count and reverse errors from
+the repaired padding. Text, JSON and CSV summaries include packet/bit totals, error
+ratios, errored packets, maximum/average error bursts, and interval records. CSV appends
+a quoted JSON `ber` cell. Omitted burst requests report null forward burst statistics.
+
+`--ber-bit-threshold` and `--ber-packet-threshold` set thresholds per million in both
+directions. A completed interval crossing above a threshold produces a structured log
+event and an alarm in the summary; remaining above it does not repeat the alarm. Empty
+windows are omitted; the last nonempty partial window is labeled `complete: false` and
+does not trigger threshold alarms. BER follows monotonic receipt time, not the peer's clock.
+
+On Linux, the sender trims padding in whole pattern repetitions using the connected
+route MTU and prevents fragmentation. The reflector checks the actual reply route MTU
+at each send. If reply sizing changes the padding length, BER metadata gets C flags
+because the original forward denominator cannot be preserved. A metadata-only packet
+that cannot fit is dropped. Type-12 resizing can therefore yield no BER sample; use
+symmetric replies for measurement. Non-Linux active PMTU enforcement remains unverified.
+Normal UDP checksums and link CRC/FEC may discard corrupted packets before delivery;
+these statistics describe delivered padding and are not a measurement of raw link BER.
+See the [BER-07 matrix](conformance/draft-stamp-ber.md) for scoped conformance evidence.
+
 
 ### Reflected Fixed / IPv6 Extension Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr)
 

@@ -7,6 +7,7 @@ use std::{
 use tokio::net::UdpSocket;
 
 use crate::{
+    ber::{observation, BerCollector},
     clock_format::ClockFormat,
     configuration::{
         decode_selector, is_auth, Configuration, MalformedMode, TlvHmacMode, ZeroSsidAction,
@@ -49,6 +50,7 @@ struct PendingPacket {
 
 /// Mutable context for processing received responses.
 struct SenderRecvContext<'a> {
+    ber: Option<&'a mut BerCollector>,
     /// Configured remote timescale offset in seconds, removed after decoding.
     reflector_utc_offset: i32,
     pending: &'a mut HashMap<u32, PendingPacket>,
@@ -685,6 +687,37 @@ pub async fn run_sender(
         )));
     }
 
+    if conf.ber {
+        conf.validate()
+            .map_err(|e| crate::StartupError::new(e.to_string()))?;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let value: nix::libc::c_int = nix::libc::IP_PMTUDISC_DO;
+            let (level, option) = if conf.remote_addr.is_ipv6() {
+                (nix::libc::IPPROTO_IPV6, nix::libc::IPV6_MTU_DISCOVER)
+            } else {
+                (nix::libc::IPPROTO_IP, nix::libc::IP_MTU_DISCOVER)
+            };
+            // SAFETY: the socket is live and value is a valid c_int.
+            if unsafe {
+                nix::libc::setsockopt(
+                    socket.as_raw_fd(),
+                    level,
+                    option,
+                    std::ptr::addr_of!(value).cast(),
+                    std::mem::size_of_val(&value) as _,
+                )
+            } != 0
+            {
+                return Err(crate::StartupError::new(format!(
+                    "BER PMTU setup: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+    }
+
     // Mark the egress IP header so the on-the-wire DSCP/ECN matches the Class
     // of Service TLV advertisement (RFC 8972 §4.4) and honour the configured
     // TTL / Hop Limit. Without this the CoS TLV would be advisory only and
@@ -1080,7 +1113,7 @@ pub async fn run_sender(
         log::info!("Extra Padding TLV enabled ({bytes} value octets)");
     }
 
-    // Build BER TLVs (draft-gandhi-ippm-stamp-ber §3). All three are emitted
+    // Build BER TLVs (draft-gandhi-ippm-stamp-ber-07 §4). All three are emitted
     // together, paired with an Extra Padding TLV filled with the repeated pattern.
     if conf.ber {
         let pattern_bytes: Vec<u8> = if let Some(hex) = conf.ber_pattern.as_deref() {
@@ -1093,7 +1126,7 @@ pub async fn run_sender(
                 }
             }
         } else {
-            // Default 0xFF00 per draft §3.2.
+            // Default 0xFF00 per BER-07 §4.1.1.
             vec![0xFF, 0x00]
         };
 
@@ -1192,8 +1225,27 @@ pub async fn run_sender(
         let access = if access_report_state.is_some() { 8 } else { 0 };
         const UDP_HEADER: usize = 8;
         let fixed_overhead = ip_hdr + attached_ext + UDP_HEADER + base + hmac_tlv + dm + access;
+        if conf.ber {
+            crate::ber::fit_padding(&mut extra_tlvs, mtu, fixed_overhead)
+                .map_err(|e| crate::StartupError::new(e.to_string()))?;
+        }
         enforce_egress_mtu(&mut extra_tlvs, mtu, fixed_overhead);
     }
+
+    let mut ber = conf.ber.then(|| {
+        BerCollector::new(
+            parse_hex_pattern(conf.ber_pattern.as_deref().unwrap_or("ff00"))
+                .expect("validated BER pattern"),
+            extra_tlvs
+                .iter()
+                .find(|t| t.tlv_type == TlvType::ExtraPadding)
+                .map_or(0, |t| t.value.len()),
+            !conf.ber_omit_burst,
+            Duration::from_millis(u64::from(conf.ber_interval) * u64::from(conf.send_delay)),
+            Instant::now(),
+            [conf.ber_bit_threshold, conf.ber_packet_threshold],
+        )
+    });
 
     // Check if we need to include TLV extensions.
     // SSID lives in the base header per RFC 8972 §3 — it alone does not force TLV mode.
@@ -1250,6 +1302,10 @@ pub async fn run_sender(
     }
 
     for _ in 0..conf.count {
+        if let Some(ber) = ber.as_mut() {
+            ber.advance(Instant::now());
+            ber.filter_requests(&mut extra_tlvs);
+        }
         let seq_num = sess.generate_sequence_number();
         let send_time = Instant::now();
         let send_timestamp = generate_timestamp(conf.clock_source);
@@ -1419,6 +1475,7 @@ pub async fn run_sender(
                                 apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                             }
                             let mut ctx = SenderRecvContext {
+                ber: ber.as_mut(),
                                 reflector_utc_offset: conf.reflector_utc_offset,
                                 pending: &mut pending,
                                 rtt_collector: &mut rtt_collector,
@@ -1483,6 +1540,7 @@ pub async fn run_sender(
                 } => {
                     let interim = rtt_collector
                         .snapshot(packets_sent, packets_lost)
+                        .with_ber(ber.as_mut().map(|b| b.snapshot(Instant::now())))
                         .with_owd(&owd_collector)
                         .with_access_report(access_report_state.as_ref().map(|state| state.summary()))
                         .with_congestion(congestion.as_ref().map(|state| state.summary()));
@@ -1559,6 +1617,7 @@ pub async fn run_sender(
                     apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                 }
                 let mut ctx = SenderRecvContext {
+                    ber: ber.as_mut(),
                     reflector_utc_offset: conf.reflector_utc_offset,
                     pending: &mut pending,
                     rtt_collector: &mut rtt_collector,
@@ -1644,6 +1703,9 @@ pub async fn run_sender(
             let send_timestamp = generate_timestamp(conf.clock_source);
 
             let mut tlvs = extra_tlvs.clone();
+            if let Some(ber) = ber.as_ref() {
+                ber.filter_requests(&mut tlvs);
+            }
             if conf.direct_measurement {
                 tlvs.push(DirectMeasurementTlv::new(packets_sent + 1).to_raw());
             }
@@ -1777,6 +1839,7 @@ pub async fn run_sender(
                             apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                         }
                         let mut ctx = SenderRecvContext {
+                ber: ber.as_mut(),
                             reflector_utc_offset: conf.reflector_utc_offset,
                             pending: &mut pending,
                             rtt_collector: &mut rtt_collector,
@@ -1842,6 +1905,7 @@ pub async fn run_sender(
 
     Ok(rtt_collector
         .snapshot(packets_sent, packets_lost)
+        .with_ber(ber.as_mut().map(|b| b.snapshot(Instant::now())))
         .with_owd(&owd_collector)
         .with_access_report(access_report_state.as_ref().map(|state| state.summary()))
         .with_congestion(congestion.as_ref().map(|state| state.summary())))
@@ -1957,6 +2021,8 @@ fn process_response(
     // possible (before parsing) for the reverse one-way-delay computation.
     let sender_recv_ts = kernel_t4.unwrap_or_else(|| generate_timestamp(clock_source));
 
+    let mut ber_observation = None;
+
     // Parse response and validate TLVs if extension mode is enabled
     // Use lenient parsing per RFC 8762 §4.6 to handle short packets.
     let (
@@ -2027,6 +2093,18 @@ fn process_response(
             } else {
                 None
             };
+
+            if let Some(ber) = ctx.ber.as_ref() {
+                ber_observation = observation(
+                    &ext_packet.tlvs,
+                    data,
+                    AUTH_BASE_SIZE,
+                    ctx.hmac_key,
+                    &ber.pattern,
+                    ber.summary.padding_bytes,
+                    ber.want_burst,
+                );
+            }
 
             (
                 seq_num,
@@ -2111,6 +2189,18 @@ fn process_response(
         } else {
             None
         };
+
+        if let Some(ber) = ctx.ber.as_ref() {
+            ber_observation = observation(
+                &ext_packet.tlvs,
+                data,
+                UNAUTH_BASE_SIZE,
+                ctx.hmac_key,
+                &ber.pattern,
+                ber.summary.padding_bytes,
+                ber.want_burst,
+            );
+        }
 
         (
             base.sess_sender_seq_number,
@@ -2225,6 +2315,9 @@ fn process_response(
     }
 
     if let Some(pending_packet) = ctx.pending.remove(&seq_num) {
+        if let (Some(ber), Some(observation)) = (ctx.ber.as_mut(), ber_observation) {
+            ber.record(observation, recv_time);
+        }
         *ctx.latched_reflector_msid = next_reflector_msid;
         let rtt_ns = recv_time
             .duration_since(pending_packet.send_time)
@@ -2672,11 +2765,7 @@ fn scaled_reflected_control_tlv(
 }
 
 fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
-    let trimmed = s.strip_prefix("0x").unwrap_or(s);
-    if trimmed.is_empty() {
-        return Err("empty pattern".into());
-    }
-    hex::decode(trimmed).map_err(|e| e.to_string())
+    crate::ber::parse_pattern(s)
 }
 
 /// Builds the Reflected Fixed / IPv6 Extension Header request TLVs
@@ -4905,6 +4994,7 @@ mod tests {
         let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
         access_report_state.tick(Instant::now()); // simulate the original send having armed it
         let mut ctx = SenderRecvContext {
+            ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
@@ -4972,6 +5062,7 @@ mod tests {
         let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
         access_report_state.tick(Instant::now());
         let mut ctx = SenderRecvContext {
+            ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
@@ -5020,6 +5111,7 @@ mod tests {
         zero_ssid_seen: &'a mut bool,
     ) -> SenderRecvContext<'a> {
         SenderRecvContext {
+            ber: None,
             reflector_utc_offset: 0,
             pending,
             rtt_collector,
@@ -5394,6 +5486,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut recv_ctx = SenderRecvContext {
+            ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
@@ -6210,6 +6303,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
@@ -6478,6 +6572,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                ber: None,
                 reflector_utc_offset: 0,
                 pending: &mut pending,
                 rtt_collector: &mut rtt_collector,
@@ -6550,6 +6645,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                ber: None,
                 reflector_utc_offset: 0,
                 pending: &mut pending,
                 rtt_collector: &mut rtt_collector,
@@ -6623,6 +6719,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                ber: None,
                 reflector_utc_offset: 0,
                 pending: &mut pending,
                 rtt_collector: &mut rtt_collector,
@@ -6698,6 +6795,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
@@ -6779,6 +6877,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,

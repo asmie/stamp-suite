@@ -1,5 +1,5 @@
 //! BER Bit Error Count in Padding TLV (Type 241)
-//! per draft-gandhi-ippm-stamp-ber-05 §3.3.
+//! per draft-gandhi-ippm-stamp-ber-07 §5.2.
 //!
 //! Carries the number of error bits observed by the Session-Reflector when
 //! XORing the received Extra Padding TLV against the expected pattern from

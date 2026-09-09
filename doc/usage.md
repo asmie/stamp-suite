@@ -422,9 +422,12 @@ hardware clocks still require deployment-specific clock handling.
       --reflected-ipv6-ext-hdr [LEN[:SELECTORHEX]]  Request a reflected IPv6 extension header (TLV 246, draft-ietf-ippm-stamp-ext-hdr §3.1). REPEATABLE: one occurrence per requested header, in order, with matching lengths. LEN = the header's on-wire size (default 8); optional inline §5.1 selector hex.
       --reflected-ipv6-ext-hdr-selector <HEX>  §5.1 selector (single-header form only): return only the matching extension header; the 4 bytes are the header's on-wire first 4 octets — byte 0 is its Next Header field, NOT its type (requires exactly one --reflected-ipv6-ext-hdr with no inline selector)
       --attach-ext-hdr <KIND[:HEX]>  Attach a REAL IPv6 extension header to the sender's egress packets and request its reflection (draft-ietf-ippm-stamp-ext-hdr §3.1). REPEATABLE. KIND = hbh (Hop-by-Hop, IPV6_HOPOPTS) or dest (Destination Options, IPV6_DSTOPTS); optional HEX is the full header buffer (multiple of 8 octets, byte 0 kernel-assigned; default = 8-octet PadN). Each attached header also emits a matching Type-246 request TLV. Linux + IPv6 destination only (the sticky socket options are not exposed by `libc` on Darwin); elsewhere a warning is logged (on non-IPv4 the request TLV is still sent).
-      --ber                        Enable BER TLVs (draft-gandhi-ippm-stamp-ber, Types 240/241/242)
+      --ber                        Enable BER-07 measurement (experimental Types 240/241/242)
       --ber-pattern <HEX>          Padding bit pattern (default: ff00)
-      --ber-padding-size <BYTES>   Extra Padding length used with --ber [default: 64]
+      --ber-padding-size <BYTES>   Positive multiple of pattern length [default: 64]
+      --ber-interval <N>           Computation window = N × send-delay [default: 10]
+      --ber-bit-threshold <PPM>    Optional bit-error threshold, both directions (0..1000000)
+      --ber-packet-threshold <PPM> Optional errored-packet threshold, both directions (0..1000000)
       --ber-omit-burst             Omit the Max Bit Error Burst Size TLV
                                    (Type 242) from --ber packets. Type 242 is in
                                    the Experimental Use range (RFC 8972 §5.1) and
@@ -616,3 +619,8 @@ them. A subsequent admitted packet for the same identity starts a new internal
 session with sequence zero and fresh measurement/replay state; provisioning
 remains intact. Outgoing burst copies do not refresh the receive-idle timeout.
 A sender restart alone does not reset a still-active reflector session.
+
+BER output includes directional packet and padding-bit totals, error ratios,
+maximum/average error bursts, and nonempty computation windows. `ber_interval`,
+`ber_bit_threshold` and `ber_packet_threshold` are also TOML keys. See
+[BER behavior and limits](architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber).

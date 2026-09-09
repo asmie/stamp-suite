@@ -645,7 +645,7 @@ fn scenario_6_type12_multi_reply() {
 // ==========================================================================
 // Scenario 7 — BER on the wire: the Bit Pattern fills the Extra Padding TLV,
 // and the reflector's Bit Error Count is 0 on a clean channel
-// (draft-gandhi-ippm-stamp-ber §3).
+// (draft-gandhi-ippm-stamp-ber-07 §4).
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]

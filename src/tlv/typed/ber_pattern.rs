@@ -1,24 +1,25 @@
 //! BER Bit Pattern in Padding TLV (Type 240)
-//! per draft-gandhi-ippm-stamp-ber-05 §3.2.
+//! per draft-gandhi-ippm-stamp-ber-07 §5.1.
 //!
 //! Carries the bit pattern the Session-Sender used to fill the companion
 //! RFC 8972 Extra Padding TLV. The Session-Reflector uses it as the expected
 //! pattern when computing the Bit Error Count and Max Burst Size TLVs.
 //!
-//! Per the draft, the default pattern when the value is empty is `0xFF00`
-//! (alternating 0xFF and 0x00 bytes).
+//! Omitting this TLV selects the default `0xFF00` pattern. An explicit empty
+//! value is reflected with C=1; it does not select that default on the wire.
 
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
 
-/// Default bit pattern `{0xFF, 0x00}` used when the sender omits the pattern
-/// value (draft §3.2).
+/// Default bit pattern `{0xFF, 0x00}` used when the sender omits Type 240
+/// (draft §4.1.1).
 pub const BER_DEFAULT_PATTERN: [u8; 2] = [0xFF, 0x00];
 
 /// BER Bit Pattern in Padding TLV (Type 240).
 ///
 /// Variable-length value containing the bit pattern the sender repeated to
-/// fill the Extra Padding TLV. An empty value means "use the default pattern".
+/// fill the Extra Padding TLV. Decoding preserves an invalid empty value for
+/// conformance signaling by the reflector.
 ///
 /// # Wire Format
 ///
@@ -33,7 +34,7 @@ pub const BER_DEFAULT_PATTERN: [u8; 2] = [0xFF, 0x00];
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BerPatternTlv {
-    /// The bit pattern bytes. Empty means "use `BER_DEFAULT_PATTERN`".
+    /// The bit pattern bytes; empty is not a usable on-wire pattern.
     pub pattern: Vec<u8>,
 }
 
@@ -52,8 +53,8 @@ impl BerPatternTlv {
         }
     }
 
-    /// Returns the effective pattern: the explicit one, or `BER_DEFAULT_PATTERN`
-    /// if the TLV carries no pattern bytes.
+    /// Convenience fallback for callers constructing a local pattern. The
+    /// reflector separately rejects empty explicit on-wire patterns with C=1.
     #[must_use]
     pub fn effective_pattern(&self) -> &[u8] {
         if self.pattern.is_empty() {

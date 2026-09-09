@@ -2237,9 +2237,14 @@ fn apply_semantic_tlv_processing(
         ecn_permitted,
     );
 
-    // Process BER TLVs (draft-gandhi-ippm-stamp-ber §3):
+    // Process BER TLVs (draft-gandhi-ippm-stamp-ber-07 §4):
     // compute Bit Error Count and Max Burst against the companion Extra Padding.
     tlvs.process_ber();
+    let ber_padding_len = tlvs
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| t.tlv_type == TlvType::ExtraPadding)
+        .map(|t| t.value.len());
 
     // Process Reflected Fixed / IPv6 Extension Header TLVs
     // (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 3.2). If the backend captured
@@ -2494,6 +2499,8 @@ fn apply_semantic_tlv_processing(
     // TLV — see the RFC 8972 §4.8 adjudication on
     // `TlvList::set_hmac_response` for why this is spec-compliant rather
     // than an unsolicited addition.
+    tlvs.finish_ber_padding(ber_padding_len);
+
     if let Some(key) = tlv_hmac_key {
         let response_seq_bytes = &base_bytes[..4];
         tlvs.set_hmac_response(key, response_seq_bytes);

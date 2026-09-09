@@ -7,12 +7,12 @@ historical, not a current conformance sign-off. The [September review](../review
 identified 16 findings, including behavior previously scored Compliant.
 The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
 verification one item at a time. Finding 02 updates the three session-admission rows for provisioned mode only.
-Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Finding 09 repairs the Type-12 ordering response and reclassifies its stale N-A row as Compliant. Finding 11 implements Linux route-aware sizing and reopens three MTU rows as Partial across the broader platform/route scope. Finding 12 separates synchronization-source declarations from encoding, corrects source code points and records actual TX provenance. Other clause scores remain historical; citation maintenance alone does not
+Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Finding 09 repairs the Type-12 ordering response and reclassifies its stale N-A row as Compliant. Finding 11 implements Linux route-aware sizing and reopens three MTU rows as Partial across the broader platform/route scope. Finding 12 separates synchronization-source declarations from encoding, corrects source code points and records actual TX provenance. Finding 13 adds the BER-07 matrix, repair and directional interval reporting. Other clause scores remain historical; citation maintenance alone does not
 close the remaining findings.
 
-This document rolls up the eight clause-level conformance matrices in this
+This document rolls up the nine clause-level conformance matrices in this
 directory into a single compliance statement for the stamp-suite 1.0 line.
-Counts below include findings 02 (RFC 8972), 07 (RFC 9534), 09 (Type-12 ordering), and 11 (route MTU scope); they are not a new
+Counts below include findings 02 (RFC 8972), 07 (RFC 9534), 09 (Type-12 ordering), 11 (route MTU scope), and 13 (BER-07); they are not a new
 full-project audit.
 Where this document goes further than the matrices is in stating, as a
 maintainer decision, which of the residual non-Compliant rows are accepted
@@ -37,15 +37,16 @@ tracked independently of these historical clause totals.
 | [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md) — CoS/ECN congestion signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -11, 4 July 2026 | 40 | 36 | 2 | 0 | 2 | 0 |
-| **Total** | | **368** | **315** | **9** | **1** | **40** | **3** |
+| [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md) — Residual BER (Types 240–242) | -07, 30 June 2026 | 30 | 27 | 2 | 0 | 1 | 0 |
+| **Total** | | **398** | **342** | **11** | **1** | **41** | **3** |
 
-Each matrix was independently re-verified against a freshly fetched copy of
+The eight pre-existing matrices were independently re-verified against a freshly fetched copy of
 its source text on 2026-07-22 (see each file's own "Revision frozen" line and
 adversarial re-verification log). No clause was re-read against its source text
 in the 2026-08-05 pass: that pass changed *implementation*, and each row it
 touched was re-scored against the same frozen clause text, with the code and
 test evidence for the closure appended to the row. The matrices remain the
-source of truth; the table above is read from their `Summary:` lines.
+source of truth; the table above is read from their `Summary:` lines. The BER matrix was added and verified on 2026-09-09.
 
 ## Documented exclusions
 
@@ -137,9 +138,9 @@ const's doc comment cites as its own single edit point.
 
 | Codepoint | Registry | Const | Draft | What it needs |
 |---|---|---|---|---|
-| Type 240 | STAMP TLV Types (Experimental, 240-251) | `BER_PATTERN_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-05 §3.2 | Draft-side Type allocation |
-| Type 241 | STAMP TLV Types (Experimental, 240-251) | `BER_COUNT_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-05 §3.3 | Draft-side Type allocation |
-| Type 242 | STAMP TLV Types (Experimental, 240-251) | `BER_MAX_BURST_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-05 §3.4 | Draft-side Type allocation; **known collision**, see below |
+| Type 240 | STAMP TLV Types (Experimental, 240-251) | `BER_PATTERN_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.1 | Draft-side Type allocation |
+| Type 241 | STAMP TLV Types (Experimental, 240-251) | `BER_COUNT_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.2 | Draft-side Type allocation |
+| Type 242 | STAMP TLV Types (Experimental, 240-251) | `BER_MAX_BURST_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.3 | Draft-side Type allocation; **known collision**, see below |
 | Type 246 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_IPV6_EXT_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-11 §§3.1/5.1 | IANA allocation of TBA1 |
 | Type 247 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_FIXED_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-11 §§3.2/5.2 | IANA allocation of TBA2 |
 | Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-11 §5.3 | IANA allocation of TBA3 |

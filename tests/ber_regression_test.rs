@@ -1,7 +1,7 @@
 //! Regression tests for the BER (Bit Error Rate) TLV trio per
-//! draft-gandhi-ippm-stamp-ber-05.
+//! draft-gandhi-ippm-stamp-ber-07.
 //!
-//! Implementation lives in `src/sender.rs:249-262` (sender fills Extra
+//! Implementation lives in `src/sender.rs::run_sender` (sender fills Extra
 //! Padding with the configured pattern, attaches BerPattern + zero-init
 //! BerCount + BerBurst) and `src/tlv/list/processing.rs::process_ber`
 //! (reflector XORs the received padding against the pattern, writes the
@@ -75,7 +75,7 @@ fn make_ctx<'a>() -> ProcessingContext<'a> {
 }
 
 /// Builds Extra Padding bytes by repeating the pattern. Matches what the
-/// sender does at `src/sender.rs:252-255`.
+/// sender does at `src/sender.rs::run_sender`.
 fn build_padding_from_pattern(pattern: &[u8], size: usize) -> Vec<u8> {
     let mut padding = Vec::with_capacity(size);
     for i in 0..size {
