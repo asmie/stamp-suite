@@ -147,7 +147,7 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
       --reflector-session <SPEC>   SSID,SOURCE,DESTINATION[,SENDER_MICRO_ID]; repeatable
       --session-timeout <SEC>      Idle runtime session reaping [default: 300]
       --tlv-mode <ignore|echo>     How to treat incoming TLVs [default: echo]
-      --reflector-member-link-id <ID>  RFC 9534 LAG member link ID (decimal or 0x-hex)
+      --reflector-member-link-id <ID>  Configured reflector Micro-session ID (decimal or 0x-hex)
       --srv6-return-forwarding     Best-effort SRv6 Return Path SRH forwarding
                                    (RFC 9503 §5; Linux+IPv6; off by default,
                                    graceful U-flag fallback when unsupported)
@@ -253,6 +253,26 @@ affects what the reflector *answers* — a request for a withheld field is still
 echoed as Answered (not flagged unrecognized), and a withheld IP request keeps
 its generic sub-TLV type rather than being rewritten to the IPv4/IPv6 variant,
 since the variant would itself disclose the observed address family.
+
+### Micro-session ID validation
+
+`--micro-session-id` enables numeric ID validation. The sender requires one usable
+Micro-session ID TLV in every accepted measurement; a base-only reply cannot satisfy
+it. Missing, U/M/I-flagged, malformed, duplicate, wrong, or unverifiable IDs leave
+the probe pending and do not produce RTT/OWD samples. With a configured HMAC key,
+the ID requires a usable, valid TLV HMAC too. A valid later reply can still satisfy
+the probe before its timeout.
+
+The reflector ID must be nonzero. `--reflector-member-link-id` supplies an expected
+value; on a sender it requires `--micro-session-id`. Without a preconfigured
+reflector ID, the sender learns it from the first accepted reply to a pending
+probe and rejects later changes. Learning does not trust unsolicited replies.
+Ordinary sessions without micro-session options retain base-only compatibility.
+
+These flags do **not** bind IDs to interfaces, steer packets over a specific LAG
+member, or identify the physical ingress member. Full per-member LAG measurement
+is unsupported; configuring numbers or UDP tuples alone does not verify it.
+See the [RFC 9534 scope and gaps](conformance/rfc9534.md).
 
 ### Authentication
 
@@ -364,7 +384,7 @@ hardware clocks still require deployment-specific clock handling.
       --return-address <IP>        Return Path alternate reply address (RFC 9503 §5)
       --return-sr-mpls-labels <L>  Comma-separated SR-MPLS label stack (RFC 9503 §5)
       --return-srv6-sids <S>       Comma-separated SRv6 segment list (RFC 9503 §5)
-      --micro-session-id <ID>      Sender micro-session ID for LAG measurement (RFC 9534)
+      --micro-session-id <ID>      Sender numeric Micro-session ID (no physical-link selection)
       --reflected-control-count <N>     Asymmetrical reply count (draft-ietf-ippm-asymmetrical-pkts) [default: 1]
       --reflected-control-length <LEN>  Requested reply packet length, 0 = don't pad [default: 0]
       --reflected-control-interval-ns <NS>  Inter-packet gap [default: 1_000_000]

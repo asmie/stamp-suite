@@ -675,13 +675,13 @@ pub struct Configuration {
     #[clap(long)]
     pub return_path_allow_alternate: bool,
 
-    /// Sender micro-session member link ID for LAG measurement (RFC 9534).
+    /// Sender Micro-session ID for RFC 9534 TLV validation; does not select a physical link.
     /// When set, includes a Micro-session ID TLV in test packets.
     /// Accepts decimal (e.g. `255`) or `0x`-prefixed hex (e.g. `0xff`).
     #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex)]
     pub micro_session_id: Option<u16>,
 
-    /// Reflector member link ID for LAG micro-sessions (RFC 9534).
+    /// Configured reflector ID for RFC 9534 TLV validation; no physical-link association.
     /// When set, the reflector fills this ID into reflected Micro-session ID TLVs.
     /// Accepts decimal (e.g. `171`) or `0x`-prefixed hex (e.g. `0xab`).
     #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex)]
@@ -1326,6 +1326,15 @@ impl Configuration {
                     "reflector_member_link_id must be >= 1".to_string(),
                 ));
             }
+        }
+
+        if !self.is_reflector
+            && self.reflector_member_link_id.is_some()
+            && self.micro_session_id.is_none()
+        {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "sender reflector_member_link_id requires micro_session_id".to_string(),
+            ));
         }
 
         // Mutual-exclusion checks duplicated here so combinations coming
@@ -2198,6 +2207,22 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+
+    #[test]
+    fn sender_reflector_id_requires_a_sender_micro_session_id() {
+        let mut conf =
+            Configuration::parse_from(["stamp-suite", "--reflector-member-link-id", "9"]);
+        assert!(conf
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires micro_session_id"));
+        conf.micro_session_id = Some(7);
+        assert!(conf.validate().is_ok());
+        conf.micro_session_id = None;
+        conf.is_reflector = true;
+        assert!(conf.validate().is_ok());
+    }
 
     #[test]
     fn reflector_utc_offset_file_default_and_signed_cli_override() {

@@ -18,7 +18,7 @@ see [clock settings](doc/usage.md#timestamp--clock)). The per-packet reflector t
 ### Key features
 
 - Full RFC 8762 compliance — open and authenticated modes
-- RFC 8972 TLV extensions, RFC 9503 (Segment Routing), RFC 9534 (LAG micro-sessions)
+- RFC 8972 TLV extensions, RFC 9503 (Segment Routing), RFC 9534 Micro-session ID encoding and numeric validation (physical LAG steering/validation unsupported)
 - HMAC packet authentication and TLV integrity
 - Stateful reflector mode with full session identity tracking
 - NTP and PTP timestamp formats; real TTL/Hop Limit capture on all platforms
@@ -220,7 +220,7 @@ contract and security model: [doc/control-plane.md](doc/control-plane.md).
 
 ## Status
 
-The project is functional for STAMP measurements. Full RFC 8762 / 8972 / 9503 / 9534 support, HMAC authentication on both base packets and TLVs, stateful reflector mode, real TTL capture, optional Prometheus + SNMP. Backward compatible with non-TLV peers. See [doc/architecture.md](doc/architecture.md) for the per-TLV implementation status table.
+The project is functional for STAMP measurements. RFC 8762 / 8972 / 9503 features and RFC 9534 Micro-session ID TLV handling, HMAC authentication on both base packets and TLVs, stateful reflector mode, real TTL capture, optional Prometheus + SNMP. Backward compatible with non-TLV peers. See [doc/architecture.md](doc/architecture.md) for the per-TLV implementation status table.
 
 ### Roadmap
 

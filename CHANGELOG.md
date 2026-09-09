@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require one usable Micro-session ID for configured sender micro-sessions.
+  Reject missing, flagged, malformed, duplicate, or unverifiable IDs before
+  consuming measurements; commit reflector-ID learning only for accepted pending
+  replies. Clarify that numeric TLV validation does not implement physical LAG
+  steering or ingress-member verification.
+
 - Carry the exact per-SSID key selected during reflector validation into final
   transmission. Both backends reuse that owned snapshot for base/TLV signatures,
   fallback flag changes, and queued burst copies. Add key-directory, default-key,

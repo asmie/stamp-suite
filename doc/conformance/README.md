@@ -7,12 +7,12 @@ historical, not a current conformance sign-off. The [September review](../review
 identified 16 findings, including behavior previously scored Compliant.
 The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
 verification one item at a time. Finding 02 updates the three session-admission rows for provisioned mode only.
-Other clause scores remain historical; citation maintenance alone does not
+Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Other clause scores remain historical; citation maintenance alone does not
 close the remaining findings.
 
 This document rolls up the eight clause-level conformance matrices in this
 directory into a single compliance statement for the stamp-suite 1.0 line.
-Counts below include the finding 02 update to RFC 8972; they are not a new
+Counts below include finding 02 (RFC 8972) and finding 07 (RFC 9534); they are not a new
 full-project audit.
 Where this document goes further than the matrices is in stating, as a
 maintainer decision, which of the residual non-Compliant rows are accepted
@@ -32,12 +32,12 @@ tracked independently of these historical clause totals.
 | [RFC 8762](rfc8762.md) — STAMP base protocol | RFC 8762, March 2020 | 62 | 52 | 0 | 0 | 9 | 1 |
 | [RFC 8972](rfc8972.md) — STAMP Optional Extensions | RFC 8972, January 2021 | 151 | 141 | 0 | 0 | 10 | 0 |
 | [RFC 9503](rfc9503.md) — Destination Node Address / Return Path | RFC 9503, October 2023 | 26 | 22 | 0 | 0 | 3 | 1 |
-| [RFC 9534](rfc9534.md) — Micro-session ID (LAG) | RFC 9534, January 2024 | 18 | 15 | 0 | 0 | 3 | 0 |
+| [RFC 9534](rfc9534.md) — Micro-session ID (LAG) | RFC 9534, January 2024 | 18 | 9 | 6 | 1 | 2 | 0 |
 | [RFC 8545](rfc8545.md) — TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 (RFC Editor queue) | 47 | 38 | 0 | 0 | 8 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md) — CoS/ECN congestion signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -11, 4 July 2026 | 40 | 38 | 0 | 0 | 2 | 0 |
-| **Total** | | **368** | **323** | **0** | **0** | **42** | **3** |
+| **Total** | | **368** | **317** | **6** | **1** | **41** | **3** |
 
 Each matrix was independently re-verified against a freshly fetched copy of
 its source text on 2026-07-22 (see each file's own "Revision frozen" line and

@@ -1945,6 +1945,12 @@ fn process_response(
     reply_ecn: Option<u8>,
     ctx: &mut SenderRecvContext,
 ) {
+    let want_msid = ctx.expected_sender_msid.is_some()
+        || ctx.expected_reflector_msid.is_some()
+        || ctx.latched_reflector_msid.is_some();
+    let use_tlvs = use_tlvs || want_msid;
+    // Learning is committed only when the entire reply is accepted for a pending probe.
+    let mut next_reflector_msid = *ctx.latched_reflector_msid;
     let recv_time = Instant::now();
     // T4: prefer the kernel receive timestamp (taken at packet arrival);
     // otherwise the sender's wall-clock timestamp, captured as early as
@@ -1994,7 +2000,7 @@ fn process_response(
             }
 
             // Validate TLVs if present
-            let tlv_info = if ext_packet.has_tlvs() {
+            let tlv_info = if ext_packet.has_tlvs() || want_msid {
                 match validate_reflected_tlvs(
                     &ext_packet.tlvs,
                     data,
@@ -2002,7 +2008,7 @@ fn process_response(
                     ctx.hmac_key,
                     ctx.expected_sender_msid,
                     ctx.expected_reflector_msid,
-                    ctx.latched_reflector_msid,
+                    &mut next_reflector_msid,
                     ctx.access_report_state.is_some(),
                     ctx.congestion.is_some(),
                     #[cfg(feature = "metrics")]
@@ -2075,7 +2081,7 @@ fn process_response(
         let base = &ext_packet.base;
 
         // Validate TLVs if present
-        let tlv_info = if ext_packet.has_tlvs() {
+        let tlv_info = if ext_packet.has_tlvs() || want_msid {
             match validate_reflected_tlvs(
                 &ext_packet.tlvs,
                 data,
@@ -2083,7 +2089,7 @@ fn process_response(
                 ctx.hmac_key,
                 ctx.expected_sender_msid,
                 ctx.expected_reflector_msid,
-                ctx.latched_reflector_msid,
+                &mut next_reflector_msid,
                 ctx.access_report_state.is_some(),
                 ctx.congestion.is_some(),
                 #[cfg(feature = "metrics")]
@@ -2128,6 +2134,11 @@ fn process_response(
             packet.error_estimate,
         )
     };
+
+    if want_msid && !ctx.pending.contains_key(&seq_num) {
+        log::debug!("Discarding micro-session reply for unknown sequence {seq_num}");
+        return;
+    }
 
     // RFC 8972 §3 zeroed-SSID scenario. Figure 2 gives the reflected packet a
     // single SSID field, in the two octets after the reflector's own Error
@@ -2212,6 +2223,7 @@ fn process_response(
     }
 
     if let Some(pending_packet) = ctx.pending.remove(&seq_num) {
+        *ctx.latched_reflector_msid = next_reflector_msid;
         let rtt_ns = recv_time
             .duration_since(pending_packet.send_time)
             .as_nanos() as u64;
@@ -2316,6 +2328,10 @@ enum TlvRejection {
     /// carries the session binding, we cannot attribute the response to this
     /// sender and must drop it.
     MsidMalformed,
+    /// Required binding is absent, unusable, or cannot be integrity-validated.
+    MsidUnavailable,
+    /// More than one Micro-session ID makes the binding ambiguous.
+    MsidAmbiguous,
 }
 
 impl std::fmt::Display for TlvRejection {
@@ -2331,6 +2347,8 @@ impl std::fmt::Display for TlvRejection {
                 "Reflector Micro-session ID mismatch (got reflector_id={}, expected={})",
                 got, expected
             ),
+            Self::MsidUnavailable => write!(f, "required Micro-session ID is missing or unusable"),
+            Self::MsidAmbiguous => write!(f, "multiple Micro-session ID TLVs in reflected packet"),
             Self::MsidMalformed => {
                 write!(f, "malformed Micro-session ID TLV in reflected packet")
             }
@@ -2443,7 +2461,28 @@ fn validate_reflected_tlvs(
     // reflected values the sender consumes today; logging raw bytes is
     // fine, but they MUST NOT influence session binding.)
     let integrity_ok = !hmac_failed && integrity_failed_count == 0;
-    let want_msid = expected_sender_msid.is_some() || expected_reflector_msid.is_some();
+    let want_msid = expected_sender_msid.is_some()
+        || expected_reflector_msid.is_some()
+        || latched_reflector_msid.is_some();
+    let mut validated_msid = false;
+    let mut next_reflector_msid = *latched_reflector_msid;
+    if want_msid {
+        let count = tlvs
+            .non_hmac_tlvs()
+            .iter()
+            .filter(|raw| raw.tlv_type == TlvType::MicroSessionId)
+            .count();
+        if count > 1 {
+            return Err(TlvRejection::MsidAmbiguous);
+        }
+        let usable_hmac = hmac_key.is_none()
+            || tlvs.hmac_tlv().is_some_and(|raw| {
+                !raw.is_unrecognized() && !raw.is_malformed() && !raw.is_integrity_failed()
+            });
+        if count == 0 || !integrity_ok || !usable_hmac {
+            return Err(TlvRejection::MsidUnavailable);
+        }
+    }
     if integrity_ok && (want_msid || track_access_report || track_congestion) {
         for raw in tlvs.non_hmac_tlvs() {
             if raw.is_malformed() {
@@ -2476,6 +2515,9 @@ fn validate_reflected_tlvs(
             if want_msid && raw.tlv_type == crate::tlv::TlvType::MicroSessionId {
                 let parsed =
                     MicroSessionIdTlv::from_raw(raw).map_err(|_| TlvRejection::MsidMalformed)?;
+                if parsed.reflector_micro_session_id == 0 {
+                    return Err(TlvRejection::MsidUnavailable);
+                }
                 // RFC 9534 §3.2 / §3.2-9: our sender_micro_session_id must be
                 // echoed unchanged — a mismatch means the reply belongs to a
                 // different session (or is spoofed); discard.
@@ -2515,8 +2557,9 @@ fn validate_reflected_tlvs(
                         });
                     }
                 } else {
-                    *latched_reflector_msid = Some(parsed.reflector_micro_session_id);
+                    next_reflector_msid = Some(parsed.reflector_micro_session_id);
                 }
+                validated_msid = true;
                 status_parts.push(format!(
                     "MSID:ok(reflector={})",
                     parsed.reflector_micro_session_id
@@ -2524,6 +2567,11 @@ fn validate_reflected_tlvs(
             }
         }
     }
+
+    if want_msid && !validated_msid {
+        return Err(TlvRejection::MsidUnavailable);
+    }
+    *latched_reflector_msid = next_reflector_msid;
 
     // Step 4 — report flagged TLVs and record metrics.
     if unrecognized_count > 0 {
@@ -3689,6 +3737,163 @@ mod tests {
     }
 
     #[test]
+    fn unsolicited_msid_cannot_seed_the_reflector_latch() {
+        let mut pending = HashMap::from([(
+            42,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        )]);
+        let mut rtt = RttCollector::new();
+        let mut owd = OwdCollector::new();
+        let mut received = 0;
+        let mut latched = None;
+        let mut zero = false;
+        let mut congestion = CongestionState::new(congestion_test_params());
+        let mut access = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+        access.tick(Instant::now());
+        for seq in [99u32, 42] {
+            let mut reply = vec![0; 44];
+            reply[24..28].copy_from_slice(&seq.to_be_bytes());
+            reply.extend_from_slice(&[0, 11, 0, 4, 0, 7, 0, 9]);
+            reply.extend_from_slice(&[0, 6, 0, 4, 0x10, 0, 0, 0]);
+            let mut ctx = congestion_process_response_ctx(
+                &mut pending,
+                &mut rtt,
+                &mut owd,
+                &mut received,
+                &mut latched,
+                Some(&mut congestion),
+                &mut zero,
+            );
+            ctx.expected_sender_msid = Some(7);
+            ctx.access_report_state = Some(&mut access);
+            process_response(
+                &reply,
+                false,
+                false,
+                ClockFormat::NTP,
+                None,
+                Some(3),
+                &mut ctx,
+            );
+            assert_eq!(latched, (seq == 42).then_some(9));
+            assert_eq!(received, u32::from(seq == 42));
+            assert_eq!(
+                congestion.controller.stats().ce_observations,
+                u64::from(seq == 42)
+            );
+            assert_eq!(
+                access.outcome(),
+                if seq == 42 {
+                    AccessReportOutcome::Acknowledged
+                } else {
+                    AccessReportOutcome::Pending
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn required_msid_rejects_unusable_reply_without_consuming_state() {
+        let good = vec![0, 11, 0, 4, 0, 7, 0, 9];
+        let mut cases = vec![
+            ("absent", vec![]),
+            ("unrelated", vec![0, 1, 0, 4, 0, 0, 0, 0]),
+            ("short", vec![0, 11, 0, 3, 0, 7, 0]),
+            ("truncated", vec![0, 11, 0, 4, 0, 7]),
+            ("zero-reflector", vec![0, 11, 0, 4, 0, 7, 0, 0]),
+            ("missing-hmac", good.clone()),
+            ("bad-hmac", good.clone()),
+        ];
+        for (name, flag) in [("U", 0x80), ("M", 0x40), ("I", 0x20)] {
+            let mut flagged = good.clone();
+            flagged[0] = flag;
+            cases.push((name, flagged));
+        }
+        cases.push(("duplicate", [good.clone(), good.clone()].concat()));
+        cases.push((
+            "conflicting",
+            [good.clone(), vec![0, 11, 0, 4, 0, 7, 0, 10]].concat(),
+        ));
+        cases.push(("M-before", [vec![0x40, 1, 0, 0], good.clone()].concat()));
+        cases.push(("I-after", [good.clone(), vec![0x20, 1, 0, 0]].concat()));
+        for (auth, keyed) in [(false, false), (false, true), (true, true)] {
+            for extensions in [false, true] {
+                for (name, tail) in &cases {
+                    if !keyed && matches!(*name, "missing-hmac" | "bad-hmac") {
+                        continue;
+                    }
+                    let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+                    let mut pending = HashMap::from([(
+                        42,
+                        PendingPacket {
+                            send_time: Instant::now(),
+                            send_timestamp: 0,
+                        },
+                    )]);
+                    let mut rtt = RttCollector::new();
+                    let mut owd = OwdCollector::new();
+                    let mut received = 0;
+                    let mut latched = None;
+                    let mut zero = false;
+                    for valid in [false, true] {
+                        let base = if auth { 112 } else { 44 };
+                        let mut reply = vec![0; base];
+                        let seq = if auth { 48 } else { 24 };
+                        reply[seq..seq + 4].copy_from_slice(&42u32.to_be_bytes());
+                        reply.extend_from_slice(if valid { &good } else { tail });
+                        if keyed && (valid || *name != "missing-hmac") {
+                            let mut covered = reply[..4].to_vec();
+                            covered.extend_from_slice(&reply[base..]);
+                            let mut mac = key.compute(&covered);
+                            if !valid && *name == "bad-hmac" {
+                                mac[0] ^= 1;
+                            }
+                            reply.extend_from_slice(&[0, 8, 0, 16]);
+                            reply.extend_from_slice(&mac);
+                        }
+                        if auth {
+                            let mac = crate::crypto::compute_packet_hmac(&key, &reply, 96);
+                            reply[96..112].copy_from_slice(&mac);
+                        }
+                        let mut ctx = congestion_process_response_ctx(
+                            &mut pending,
+                            &mut rtt,
+                            &mut owd,
+                            &mut received,
+                            &mut latched,
+                            None,
+                            &mut zero,
+                        );
+                        ctx.expected_sender_msid = Some(7);
+                        ctx.hmac_key = keyed.then_some(&key);
+                        process_response(
+                            &reply,
+                            auth,
+                            extensions,
+                            ClockFormat::NTP,
+                            None,
+                            None,
+                            &mut ctx,
+                        );
+                        assert_eq!(
+                            received,
+                            u32::from(valid),
+                            "{name} auth={auth} keyed={keyed} ext={extensions}"
+                        );
+                        assert_eq!(pending.contains_key(&42), !valid);
+                        assert_eq!(latched, valid.then_some(9));
+                        assert_eq!(rtt.percentile_ns(50.0).is_some(), valid);
+                        assert_eq!(owd.summary().is_some(), valid);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_validate_reflected_tlvs_msid_match_accepts() {
         // RFC 9534 §3.2: reflected MSID TLV must carry the sender's sender_id
         // unchanged; the reflector fills reflector_micro_session_id.
@@ -4047,7 +4252,7 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("I-flagged reply must not be consumed → accept, not reject");
+        .expect_err("a required but untrusted ID must reject the measurement");
 
         assert_eq!(
             latched, None,
@@ -4107,15 +4312,8 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("I-flagged forged MSID must not be consumed → accept");
-
-        let status = status.expect("status produced");
-        assert!(
-            !status.contains("MSID:ok"),
-            "forged MSID value must not be consumed: {}",
-            status
-        );
-        assert!(status.contains("1I"), "I-flag must be reported: {}", status);
+        .expect_err("required binding is unavailable; reject without trusting forged values");
+        assert_eq!(status, TlvRejection::MsidUnavailable);
     }
 
     #[test]
@@ -4141,15 +4339,8 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("M-flagged forged MSID must not be consumed → accept");
-
-        let status = status.expect("status produced");
-        assert!(
-            !status.contains("MSID:ok"),
-            "forged MSID value must not be consumed: {}",
-            status
-        );
-        assert!(status.contains("1M"), "M-flag must be reported: {}", status);
+        .expect_err("required binding is unavailable; reject without trusting forged values");
+        assert_eq!(status, TlvRejection::MsidUnavailable);
     }
 
     #[test]
@@ -4184,18 +4375,9 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("TLV-HMAC failure must stop TLV processing → accept, not reject");
-
-        let status = status.expect("status produced");
-        assert!(status.contains("HMAC:fail"), "got: {}", status);
-        assert!(
-            !status.contains("MSID:ok"),
-            "forged MSID must be ignored on HMAC failure: {}",
-            status
-        );
+        .expect_err("required binding is unavailable; reject without trusting forged values");
+        assert_eq!(status, TlvRejection::MsidUnavailable);
     }
-
-    // --- validate_reflected_tlvs: Access Report ack detection (§4.6) ------
 
     #[test]
     fn test_validate_reflected_tlvs_detects_access_report_ack() {
@@ -6373,8 +6555,9 @@ mod tests {
             mbz3: [0; 3],
         };
         let mut tlvs = TlvList::new();
-        tlvs.push(MicroSessionIdTlv::new(7777, 99).to_raw())
-            .unwrap();
+        let mut id = MicroSessionIdTlv::new(7777, 99).to_raw();
+        id.clear_reflector_flags();
+        tlvs.push(id).unwrap();
         let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
         let buf = ext.to_bytes();
 

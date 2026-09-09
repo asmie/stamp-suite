@@ -242,7 +242,7 @@ Status labels used in this table — kept aligned with the (forthcoming) standar
 | 8 | HMAC | TLV integrity verification (must be last) | supported |
 | 9 | Destination Node Address | Verify intended reflector identity (RFC 9503 §4) | supported |
 | 10 | Return Path | Control reply routing: suppress, alternate address, SR-MPLS, SRv6 (RFC 9503 §5) | supported — suppress / alternate address (opt-in `--return-path-allow-alternate`, U-flag fallback when off) / SRv6 best-effort SRH forwarding (opt-in `--srv6-return-forwarding`, Linux+IPv6, graceful U-flag fallback); SR-MPLS echoed with U-flag (out of scope for userspace UDP) |
-| 11 | Micro-session ID | LAG member link identifiers for per-link measurement (RFC 9534 §3.1) | supported |
+| 11 | Micro-session ID | Configured numeric identifiers (RFC 9534 §3.1) | encoding/validation supported; physical LAG association unsupported |
 | 12 | Reflected Test Packet Control | Asymmetrical reply request — count, length, interval (draft-ietf-ippm-asymmetrical-pkts-14, IANA-assigned) | supported — emission, length padding (up to `--reflected-control-max-size`), L2 (§3.1.1) and L3 (§3.1.2) Address Group sub-TLV match against the reflector's own MAC/IP addresses; either mismatching drops the packet |
 | 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-05) | experimental |
 | 241 | BER Bit Error Count | u32 error-bit count, computed by reflector | experimental |
@@ -396,17 +396,35 @@ The reflector handles each sub-TLV type:
 
 ### Micro-session ID TLV (RFC 9534 §3.1)
 
-The Micro-session ID TLV enables per-member-link performance measurement within Link Aggregation Groups (LAGs). Each member link is identified by a 16-bit ID on both sender and reflector sides:
+The implementation encodes and validates configured 16-bit Micro-session IDs.
+It does not map them to physical interfaces, force a LAG egress member, or verify
+which physical ingress member delivered a packet. Numeric checks and ID learning
+alone do not establish RFC 9534 physical-link conformance. No real-LAG test is
+claimed; the RFC 9534 matrix records the unsupported association/steering clauses.
 
 ```bash
-# Sender: identify this member link as ID 1
+# Sender: advertise numeric ID 1 (does not select a physical member)
 stamp-suite --remote-addr 192.168.1.100 --micro-session-id 1
 
-# Reflector: identify this member link as ID 2
+# Reflector: supply numeric ID 2 when handling a Micro-session ID TLV
 stamp-suite -i --reflector-member-link-id 2
 ```
 
-The sender sets its member link ID in outgoing packets. The reflector validates any non-zero reflector ID in the received TLV (discards on mismatch), echoes the sender ID unchanged, and fills in its own member link ID.
+The sender emits its configured ID in every request. It requires exactly one
+usable Micro-session ID in every measured reply, even a base-only response or one
+received through the base-parser option. The sender ID must match; the reflector
+ID must be nonzero and match its configured or previously learned value. U/M flags
+that make the ID unavailable, an I flag anywhere, duplicate IDs, or failed required
+TLV integrity cause rejection without consuming the probe or changing its learned
+ID. With a configured key, missing or unusable HMAC also prevents ID validation.
+An M flag after an already validated ID stops later TLV processing under RFC 8972.
+
+Learning is staged until the whole reply passes validation and corresponds to a
+pending probe. Rejected or unsolicited micro-session replies cannot acknowledge
+Access Reports or change congestion state. Non-micro sessions retain their existing
+base-reply compatibility. The reflector compares a present, nonzero reflector ID
+with its configured numeric ID, echoes the sender ID, and fills its configured ID;
+that comparison is not a check of the actual ingress member.
 
 ### Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts)
 

@@ -76,7 +76,10 @@ fn verify(data: &[u8], auth: bool, value: u8, fallback: bool) {
         pos += len + 4;
     }
     assert!(found, "missing response HMAC TLV");
-    assert_eq!(found_return_path, fallback, "Return Path TLV must be echoed");
+    assert_eq!(
+        found_return_path, fallback,
+        "Return Path TLV must be echoed"
+    );
 }
 struct Reflector {
     shared: Arc<receiver::ReceiverSharedState>,
