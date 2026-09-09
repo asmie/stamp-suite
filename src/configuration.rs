@@ -244,6 +244,11 @@ pub struct Configuration {
     /// Clock source to be used
     #[clap(short = 'K', long, default_value = "NTP")]
     pub clock_source: ClockFormat,
+    /// Sender: seconds the reflector clock is ahead of UTC after epoch conversion.
+    /// Subtracted from T2/T3 for one-way delay; zero for this suite's UTC clocks.
+    /// Set from the peer's time configuration (e.g. its TAI-UTC offset), not its Z bit.
+    #[clap(long, default_value_t = 0, allow_hyphen_values = true)]
+    pub reflector_utc_offset: i32,
     /// Delay between next packets
     #[clap(short = 'd', long, default_value_t = 1000)]
     pub send_delay: u16,
@@ -1601,6 +1606,7 @@ impl Configuration {
         merge!(remote_port);
         merge!(local_port);
         merge!(clock_source);
+        merge!(reflector_utc_offset);
         merge!(send_delay);
         merge!(count);
         merge!(timeout);
@@ -1716,6 +1722,7 @@ pub struct FileConfiguration {
     pub remote_port: Option<u16>,
     pub local_port: Option<u16>,
     pub clock_source: Option<ClockFormat>,
+    pub reflector_utc_offset: Option<i32>,
     pub send_delay: Option<u16>,
     pub count: Option<u16>,
     pub timeout: Option<u8>,
@@ -1825,6 +1832,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "remote_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "local_port":  { "type": "integer", "minimum": 0, "maximum": 65535 },
     "clock_source": { "enum": ["NTP", "PTP"] },
+    "reflector_utc_offset": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
     "send_delay":  { "type": "integer", "minimum": 0, "maximum": 65535 },
     "count":       { "type": "integer", "minimum": 0, "maximum": 65535 },
     "timeout":     { "type": "integer", "minimum": 0, "maximum": 255 },
@@ -2191,6 +2199,22 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn reflector_utc_offset_file_default_and_signed_cli_override() {
+        for (args, expected) in [
+            (vec!["stamp-suite"], 37),
+            (vec!["stamp-suite", "--reflector-utc-offset", "-19"], -19),
+            (vec!["stamp-suite", "--reflector-utc-offset", "0"], 0),
+        ] {
+            let matches =
+                <Configuration as clap::CommandFactory>::command().get_matches_from(&args);
+            let mut conf =
+                <Configuration as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
+            let file = toml::from_str("reflector_utc_offset = 37").unwrap();
+            conf.merge_file(file, &matches);
+            assert_eq!(conf.reflector_utc_offset, expected);
+        }
+    }
     #[test]
     fn test_valid_configuration_parsing() {
         let args = vec![

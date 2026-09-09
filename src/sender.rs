@@ -28,7 +28,7 @@ use crate::{
         AccessReportOutcome, AccessReportSummary, CongestionSummary, OwdCollector, OwdSample,
         RttCollector, RttSample, StatsSnapshot,
     },
-    time::{generate_timestamp, timestamp_to_nanos},
+    time::{generate_timestamp, timestamp_to_unix_nanos},
     tlv::{
         AccessReportTlv, BerBurstTlv, BerCountTlv, BerPatternTlv, ClassOfServiceTlv,
         DestinationNodeAddressTlv, DirectMeasurementTlv, ExtraPaddingTlv, FollowUpTelemetryTlv,
@@ -49,6 +49,8 @@ struct PendingPacket {
 
 /// Mutable context for processing received responses.
 struct SenderRecvContext<'a> {
+    /// Configured remote timescale offset in seconds, removed after decoding.
+    reflector_utc_offset: i32,
     pending: &'a mut HashMap<u32, PendingPacket>,
     rtt_collector: &'a mut RttCollector,
     owd_collector: &'a mut OwdCollector,
@@ -1417,6 +1419,7 @@ pub async fn run_sender(
                                 apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                             }
                             let mut ctx = SenderRecvContext {
+                                reflector_utc_offset: conf.reflector_utc_offset,
                                 pending: &mut pending,
                                 rtt_collector: &mut rtt_collector,
                                 owd_collector: &mut owd_collector,
@@ -1556,6 +1559,7 @@ pub async fn run_sender(
                     apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                 }
                 let mut ctx = SenderRecvContext {
+                    reflector_utc_offset: conf.reflector_utc_offset,
                     pending: &mut pending,
                     rtt_collector: &mut rtt_collector,
                     owd_collector: &mut owd_collector,
@@ -1773,6 +1777,7 @@ pub async fn run_sender(
                             apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                         }
                         let mut ctx = SenderRecvContext {
+                            reflector_utc_offset: conf.reflector_utc_offset,
                             pending: &mut pending,
                             rtt_collector: &mut rtt_collector,
                             owd_collector: &mut owd_collector,
@@ -1948,111 +1953,52 @@ fn process_response(
 
     // Parse response and validate TLVs if extension mode is enabled
     // Use lenient parsing per RFC 8762 §4.6 to handle short packets.
-    let (seq_num, reflector_recv_ts, reflector_send_ts, sender_ttl, tlv_info, reflected_ssids) =
-        if use_auth {
-            if use_tlvs {
-                // Parse as extended packet with TLVs (lenient, returns canonical buffer)
-                let (ext_packet, canonical_buf) =
-                    ExtendedReflectedPacketAuthenticated::from_bytes_lenient(data);
-                let base = &ext_packet.base;
-                let seq_num = base.sess_sender_seq_number;
-                let recv_ts = base.receive_timestamp;
-                let send_ts = base.timestamp;
-                let ttl = base.sess_sender_ttl;
-                let hmac = base.hmac;
-
-                // Verify base packet HMAC against canonical buffer (RFC 8762 §4.4, §4.6)
-                if let Some(key) = ctx.hmac_key {
-                    if !verify_packet_hmac(
-                        key,
-                        &canonical_buf,
-                        REFLECTED_AUTH_PACKET_HMAC_OFFSET,
-                        &hmac,
-                    ) {
-                        eprintln!(
-                            "HMAC verification failed for reflected packet seq={}",
-                            seq_num
-                        );
-                        #[cfg(feature = "metrics")]
-                        if ctx.metrics_enabled {
-                            crate::metrics::sender_metrics::record_hmac_failure();
-                        }
-                        return;
-                    }
-                }
-
-                // Validate TLVs if present
-                let tlv_info = if ext_packet.has_tlvs() {
-                    match validate_reflected_tlvs(
-                        &ext_packet.tlvs,
-                        data,
-                        AUTH_BASE_SIZE,
-                        ctx.hmac_key,
-                        ctx.expected_sender_msid,
-                        ctx.expected_reflector_msid,
-                        ctx.latched_reflector_msid,
-                        ctx.access_report_state.is_some(),
-                        ctx.congestion.is_some(),
-                        #[cfg(feature = "metrics")]
-                        ctx.metrics_enabled,
-                    ) {
-                        Ok(info) => info,
-                        Err(reason) => {
-                            eprintln!("Discarding reflected packet seq={}: {}", seq_num, reason);
-                            #[cfg(feature = "metrics")]
-                            if ctx.metrics_enabled {
-                                crate::metrics::sender_metrics::record_tlv_error("M");
-                            }
-                            return;
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                (seq_num, recv_ts, send_ts, ttl, tlv_info, base.ssid)
-            } else {
-                // Parse base packet only (lenient, returns canonical buffer)
-                let (packet, canonical_buf) =
-                    ReflectedPacketAuthenticated::from_bytes_lenient(data);
-                let seq_num = packet.sess_sender_seq_number;
-                let recv_ts = packet.receive_timestamp;
-                let send_ts = packet.timestamp;
-                let ttl = packet.sess_sender_ttl;
-                let hmac = packet.hmac;
-
-                // Verify HMAC against canonical buffer when key is present (RFC 8762 §4.4, §4.6)
-                if let Some(key) = ctx.hmac_key {
-                    if !verify_packet_hmac(
-                        key,
-                        &canonical_buf,
-                        REFLECTED_AUTH_PACKET_HMAC_OFFSET,
-                        &hmac,
-                    ) {
-                        eprintln!(
-                            "HMAC verification failed for reflected packet seq={}",
-                            seq_num
-                        );
-                        #[cfg(feature = "metrics")]
-                        if ctx.metrics_enabled {
-                            crate::metrics::sender_metrics::record_hmac_failure();
-                        }
-                        return;
-                    }
-                }
-                (seq_num, recv_ts, send_ts, ttl, None, packet.ssid)
-            }
-        } else if use_tlvs {
-            // Parse as extended packet with TLVs (unauthenticated, lenient)
-            let ext_packet = ExtendedReflectedPacketUnauthenticated::from_bytes_lenient(data);
+    let (
+        seq_num,
+        reflector_recv_ts,
+        reflector_send_ts,
+        sender_ttl,
+        tlv_info,
+        reflected_ssids,
+        reflector_error,
+    ) = if use_auth {
+        if use_tlvs {
+            // Parse as extended packet with TLVs (lenient, returns canonical buffer)
+            let (ext_packet, canonical_buf) =
+                ExtendedReflectedPacketAuthenticated::from_bytes_lenient(data);
             let base = &ext_packet.base;
+            let seq_num = base.sess_sender_seq_number;
+            let recv_ts = base.receive_timestamp;
+            let send_ts = base.timestamp;
+            let ttl = base.sess_sender_ttl;
+            let hmac = base.hmac;
+
+            // Verify base packet HMAC against canonical buffer (RFC 8762 §4.4, §4.6)
+            if let Some(key) = ctx.hmac_key {
+                if !verify_packet_hmac(
+                    key,
+                    &canonical_buf,
+                    REFLECTED_AUTH_PACKET_HMAC_OFFSET,
+                    &hmac,
+                ) {
+                    eprintln!(
+                        "HMAC verification failed for reflected packet seq={}",
+                        seq_num
+                    );
+                    #[cfg(feature = "metrics")]
+                    if ctx.metrics_enabled {
+                        crate::metrics::sender_metrics::record_hmac_failure();
+                    }
+                    return;
+                }
+            }
 
             // Validate TLVs if present
             let tlv_info = if ext_packet.has_tlvs() {
                 match validate_reflected_tlvs(
                     &ext_packet.tlvs,
                     data,
-                    UNAUTH_BASE_SIZE,
+                    AUTH_BASE_SIZE,
                     ctx.hmac_key,
                     ctx.expected_sender_msid,
                     ctx.expected_reflector_msid,
@@ -2064,10 +2010,7 @@ fn process_response(
                 ) {
                     Ok(info) => info,
                     Err(reason) => {
-                        eprintln!(
-                            "Discarding reflected packet seq={}: {}",
-                            base.sess_sender_seq_number, reason
-                        );
+                        eprintln!("Discarding reflected packet seq={}: {}", seq_num, reason);
                         #[cfg(feature = "metrics")]
                         if ctx.metrics_enabled {
                             crate::metrics::sender_metrics::record_tlv_error("M");
@@ -2080,25 +2023,111 @@ fn process_response(
             };
 
             (
-                base.sess_sender_seq_number,
-                base.receive_timestamp,
-                base.timestamp,
-                base.sess_sender_ttl,
+                seq_num,
+                recv_ts,
+                send_ts,
+                ttl,
                 tlv_info,
                 base.ssid,
+                base.error_estimate,
             )
         } else {
-            // Parse base packet only (lenient)
-            let packet = ReflectedPacketUnauthenticated::from_bytes_lenient(data);
+            // Parse base packet only (lenient, returns canonical buffer)
+            let (packet, canonical_buf) = ReflectedPacketAuthenticated::from_bytes_lenient(data);
+            let seq_num = packet.sess_sender_seq_number;
+            let recv_ts = packet.receive_timestamp;
+            let send_ts = packet.timestamp;
+            let ttl = packet.sess_sender_ttl;
+            let hmac = packet.hmac;
+
+            // Verify HMAC against canonical buffer when key is present (RFC 8762 §4.4, §4.6)
+            if let Some(key) = ctx.hmac_key {
+                if !verify_packet_hmac(
+                    key,
+                    &canonical_buf,
+                    REFLECTED_AUTH_PACKET_HMAC_OFFSET,
+                    &hmac,
+                ) {
+                    eprintln!(
+                        "HMAC verification failed for reflected packet seq={}",
+                        seq_num
+                    );
+                    #[cfg(feature = "metrics")]
+                    if ctx.metrics_enabled {
+                        crate::metrics::sender_metrics::record_hmac_failure();
+                    }
+                    return;
+                }
+            }
             (
-                packet.sess_sender_seq_number,
-                packet.receive_timestamp,
-                packet.timestamp,
-                packet.sess_sender_ttl,
+                seq_num,
+                recv_ts,
+                send_ts,
+                ttl,
                 None,
                 packet.ssid,
+                packet.error_estimate,
             )
+        }
+    } else if use_tlvs {
+        // Parse as extended packet with TLVs (unauthenticated, lenient)
+        let ext_packet = ExtendedReflectedPacketUnauthenticated::from_bytes_lenient(data);
+        let base = &ext_packet.base;
+
+        // Validate TLVs if present
+        let tlv_info = if ext_packet.has_tlvs() {
+            match validate_reflected_tlvs(
+                &ext_packet.tlvs,
+                data,
+                UNAUTH_BASE_SIZE,
+                ctx.hmac_key,
+                ctx.expected_sender_msid,
+                ctx.expected_reflector_msid,
+                ctx.latched_reflector_msid,
+                ctx.access_report_state.is_some(),
+                ctx.congestion.is_some(),
+                #[cfg(feature = "metrics")]
+                ctx.metrics_enabled,
+            ) {
+                Ok(info) => info,
+                Err(reason) => {
+                    eprintln!(
+                        "Discarding reflected packet seq={}: {}",
+                        base.sess_sender_seq_number, reason
+                    );
+                    #[cfg(feature = "metrics")]
+                    if ctx.metrics_enabled {
+                        crate::metrics::sender_metrics::record_tlv_error("M");
+                    }
+                    return;
+                }
+            }
+        } else {
+            None
         };
+
+        (
+            base.sess_sender_seq_number,
+            base.receive_timestamp,
+            base.timestamp,
+            base.sess_sender_ttl,
+            tlv_info,
+            base.ssid,
+            base.error_estimate,
+        )
+    } else {
+        // Parse base packet only (lenient)
+        let packet = ReflectedPacketUnauthenticated::from_bytes_lenient(data);
+        (
+            packet.sess_sender_seq_number,
+            packet.receive_timestamp,
+            packet.timestamp,
+            packet.sess_sender_ttl,
+            None,
+            packet.ssid,
+            packet.error_estimate,
+        )
+    };
 
     // RFC 8972 §3 zeroed-SSID scenario. Figure 2 gives the reflected packet a
     // single SSID field, in the two octets after the reflector's own Error
@@ -2198,15 +2227,25 @@ fn process_response(
         // unsynchronised clock offset shifts the split between directions).
         //   forward = T2 − T1 (sender → reflector)
         //   reverse = T4 − T3 (reflector → sender)
-        let t1 = timestamp_to_nanos(pending_packet.send_timestamp, clock_source) as i128;
-        let t2 = timestamp_to_nanos(reflector_recv_ts, clock_source) as i128;
-        let t3 = timestamp_to_nanos(reflector_send_ts, clock_source) as i128;
-        let t4 = timestamp_to_nanos(sender_recv_ts, clock_source) as i128;
-        ctx.owd_collector.record(OwdSample {
-            seq: seq_num,
-            forward_ns: (t2 - t1) as i64,
-            reverse_ns: (t4 - t3) as i64,
-        });
+        let remote_format = ErrorEstimate::from_wire(reflector_error).clock_format();
+        let reference = chrono::Utc::now().timestamp();
+        let remote_reference = reference + i64::from(ctx.reflector_utc_offset);
+        let remote_offset_ns = i128::from(ctx.reflector_utc_offset) * 1_000_000_000;
+        let decoded = (
+            timestamp_to_unix_nanos(pending_packet.send_timestamp, clock_source, reference),
+            timestamp_to_unix_nanos(reflector_recv_ts, remote_format, remote_reference),
+            timestamp_to_unix_nanos(reflector_send_ts, remote_format, remote_reference),
+            timestamp_to_unix_nanos(sender_recv_ts, clock_source, reference),
+        );
+        if let (Some(t1), Some(t2), Some(t3), Some(t4)) = decoded {
+            ctx.owd_collector.record(OwdSample {
+                seq: seq_num,
+                forward_ns: (t2 - remote_offset_ns - t1) as i64,
+                reverse_ns: (t4 - (t3 - remote_offset_ns)) as i64,
+            });
+        } else {
+            log::debug!("Invalid PTP nanoseconds on seq={seq_num}; omitting one-way delay");
+        }
 
         #[cfg(all(unix, feature = "snmp"))]
         if let Some(stats) = ctx.snmp_stats {
@@ -4682,6 +4721,7 @@ mod tests {
         let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
         access_report_state.tick(Instant::now()); // simulate the original send having armed it
         let mut ctx = SenderRecvContext {
+            reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
             owd_collector: &mut owd_collector,
@@ -4748,6 +4788,7 @@ mod tests {
         let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
         access_report_state.tick(Instant::now());
         let mut ctx = SenderRecvContext {
+            reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
             owd_collector: &mut owd_collector,
@@ -4795,6 +4836,7 @@ mod tests {
         zero_ssid_seen: &'a mut bool,
     ) -> SenderRecvContext<'a> {
         SenderRecvContext {
+            reflector_utc_offset: 0,
             pending,
             rtt_collector,
             owd_collector,
@@ -5165,6 +5207,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut recv_ctx = SenderRecvContext {
+            reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
             owd_collector: &mut owd_collector,
@@ -5777,6 +5820,167 @@ mod tests {
         assert_eq!(declared, bytes.len() - TLV_HEADER_SIZE);
     }
 
+    /// Independent wire encoder exercises all four response parser branches.
+    fn check_clock_pair(
+        local: ClockFormat,
+        remote: ClockFormat,
+        auth: bool,
+        extensions: bool,
+        seconds: i64,
+        remote_offset: i32,
+        invalid_ptp: bool,
+    ) {
+        fn wire(sec: i64, ns: u32, format: ClockFormat) -> u64 {
+            let (sec, fraction) = match format {
+                ClockFormat::NTP => (sec + 2_208_988_800, ((ns as u64) << 32) / 1_000_000_000),
+                ClockFormat::PTP => (sec, ns as u64),
+            };
+            ((sec as u32 as u64) << 32) | fraction
+        }
+        // Straddle a whole second, including the NTP era boundary in 2036.
+        let t1 = wire(seconds, 998_000_000, local);
+        let t2 = wire(seconds + 1 + i64::from(remote_offset), 1_000_000, remote);
+        let t3 = wire(seconds + 1 + i64::from(remote_offset), 2_000_000, remote);
+        let t4 = wire(seconds + 1, 7_000_000, local);
+        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+        let base = if auth { 112 } else { 44 };
+        let mut data = vec![0u8; base];
+        data[..4].copy_from_slice(&9u32.to_be_bytes());
+        let (send, error, receive, seq, echo, echo_error, ttl) = if auth {
+            (16, 24, 32, 48, 64, 72, 80)
+        } else {
+            (4, 12, 16, 24, 28, 36, 40)
+        };
+        data[send..send + 8].copy_from_slice(&t3.to_be_bytes());
+        let remote_error: u16 = if remote == ClockFormat::PTP {
+            0xC001
+        } else {
+            0x8001
+        };
+        data[error..error + 2].copy_from_slice(&remote_error.to_be_bytes());
+        data[receive..receive + 8].copy_from_slice(&t2.to_be_bytes());
+        data[seq..seq + 4].copy_from_slice(&7u32.to_be_bytes());
+        data[echo..echo + 8].copy_from_slice(&t1.to_be_bytes());
+        let local_error: u16 = if local == ClockFormat::PTP { 0x4001 } else { 1 };
+        data[echo_error..echo_error + 2].copy_from_slice(&local_error.to_be_bytes());
+        data[ttl] = 64;
+        if extensions {
+            data.extend_from_slice(&[0, 1, 0, 4, 0, 0, 0, 0]);
+        }
+        if invalid_ptp {
+            data[receive + 4..receive + 8].copy_from_slice(&1_000_000_000u32.to_be_bytes());
+        }
+        if auth {
+            let hmac = crate::crypto::compute_packet_hmac(&key, &data, 96);
+            data[96..112].copy_from_slice(&hmac);
+        }
+        let mut pending = HashMap::from([(
+            7,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: t1,
+            },
+        )]);
+        let mut rtt = RttCollector::new();
+        let mut owd = OwdCollector::new();
+        let mut received = 0;
+        let mut latched = None;
+        let mut zero = false;
+        let mut ctx = congestion_process_response_ctx(
+            &mut pending,
+            &mut rtt,
+            &mut owd,
+            &mut received,
+            &mut latched,
+            None,
+            &mut zero,
+        );
+        ctx.hmac_key = auth.then_some(&key);
+        ctx.reflector_utc_offset = remote_offset;
+        process_response(&data, auth, extensions, local, Some(t4), None, &mut ctx);
+        assert_eq!(received, 1);
+        assert!(pending.is_empty());
+        if invalid_ptp {
+            assert!(owd.summary().is_none());
+            assert!(rtt.percentile_ns(50.0).is_some());
+            return;
+        }
+        let summary = owd.summary().unwrap();
+        assert!(
+            (summary.forward_avg_ms - 3.0).abs() <= 0.0000011,
+            "{local:?}/{remote:?} auth={auth} extensions={extensions}: forward {}",
+            summary.forward_avg_ms
+        );
+        assert!(
+            (summary.reverse_avg_ms - 5.0).abs() <= 0.0000011,
+            "{local:?}/{remote:?} auth={auth} extensions={extensions}: reverse {}",
+            summary.reverse_avg_ms
+        );
+    }
+
+    #[test]
+    fn response_mixed_clocks_all_parsers() {
+        for (local, remote) in [
+            (ClockFormat::NTP, ClockFormat::PTP),
+            (ClockFormat::PTP, ClockFormat::NTP),
+        ] {
+            for auth in [false, true] {
+                for extensions in [false, true] {
+                    check_clock_pair(local, remote, auth, extensions, 1_789_000_000, 0, false);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn response_clocks_normalize_configured_timescale() {
+        for local in [ClockFormat::NTP, ClockFormat::PTP] {
+            for remote in [ClockFormat::NTP, ClockFormat::PTP] {
+                for offset in [-37, 0, 37] {
+                    for auth in [false, true] {
+                        for extensions in [false, true] {
+                            check_clock_pair(
+                                local,
+                                remote,
+                                auth,
+                                extensions,
+                                1_789_000_000,
+                                offset,
+                                false,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn response_clocks_across_ntp_era() {
+        for local in [ClockFormat::NTP, ClockFormat::PTP] {
+            for remote in [ClockFormat::NTP, ClockFormat::PTP] {
+                check_clock_pair(local, remote, false, false, 2_085_978_495, 0, false);
+            }
+        }
+    }
+
+    #[test]
+    fn response_invalid_ptp_omits_owd_but_keeps_rtt() {
+        for auth in [false, true] {
+            for extensions in [false, true] {
+                check_clock_pair(
+                    ClockFormat::NTP,
+                    ClockFormat::PTP,
+                    auth,
+                    extensions,
+                    1_789_000_000,
+                    0,
+                    true,
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_process_response_records_forward_one_way_delay() {
         use crate::packets::ReflectedPacketUnauthenticated;
@@ -5791,12 +5995,12 @@ mod tests {
         let reflected = ReflectedPacketUnauthenticated {
             sequence_number: 7,
             timestamp: t3,
-            error_estimate: 0,
+            error_estimate: 0x4001,
             ssid: 0,
             receive_timestamp: t2,
             sess_sender_seq_number: 7,
             sess_sender_timestamp: t1,
-            sess_sender_err_estimate: 0,
+            sess_sender_err_estimate: 0x4001,
             mbz2: [0; 2],
             sess_sender_ttl: 64,
             mbz3: [0; 3],
@@ -5816,6 +6020,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
             owd_collector: &mut owd_collector,
@@ -5886,6 +6091,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                reflector_utc_offset: 0,
                 pending: &mut pending,
                 rtt_collector: &mut rtt_collector,
                 owd_collector: &mut owd_collector,
@@ -5957,6 +6163,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                reflector_utc_offset: 0,
                 pending: &mut pending,
                 rtt_collector: &mut rtt_collector,
                 owd_collector: &mut owd_collector,
@@ -6029,6 +6236,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                reflector_utc_offset: 0,
                 pending: &mut pending,
                 rtt_collector: &mut rtt_collector,
                 owd_collector: &mut owd_collector,
@@ -6103,6 +6311,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
             owd_collector: &mut owd_collector,
@@ -6182,6 +6391,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            reflector_utc_offset: 0,
             pending: &mut pending,
             rtt_collector: &mut rtt_collector,
             owd_collector: &mut owd_collector,

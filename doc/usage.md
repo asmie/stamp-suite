@@ -73,6 +73,7 @@ becomes `ber_padding_size`). Examples of non-trivial types:
 | `metrics_addr` | string (`addr:port`) | `"127.0.0.1:9090"` |
 | `auth_mode` | enum | `"A"` or `"O"` |
 | `clock_source` | enum | `"NTP"` or `"PTP"` |
+| `reflector_utc_offset` | signed integer | Sender: remote clock seconds ahead of UTC; subtract from T2/T3 for OWD. Default `0`. |
 | `tlv_mode` | enum | `"echo"` or `"ignore"` |
 | `output_format` | enum | `"text"`, `"json"`, or `"csv"` |
 | `return_sr_mpls_labels` | integer array | `[100, 200, 300]` |
@@ -262,9 +263,42 @@ since the variant would itself disclose the observed address family.
 
 ### Timestamp / clock
 
+The sender decodes its own T1/T4 using `--clock-source` and the reflector's
+T2/T3 using the reflector Error Estimate's Z bit (0 = NTP, 1 = truncated PTP).
+Both endpoint formats can differ, including in authenticated sessions.
+Decoded timestamps use a common Unix epoch before computing T2−T1 and T4−T3.
+The 32-bit seconds field is unfolded to the era nearest the local wall clock;
+the true timestamp must be within about 68 years of that reference. This handles
+the NTP wrap in 2036 and truncated PTP wrap in 2106 without an era-sized delay.
+
+`--reflector-utc-offset <SECONDS>` is a sender setting for a **known** remote
+clock offset after epoch conversion. It is subtracted from T2/T3, not applied
+to local timestamps or RTT. Default `0` matches this suite's software timestamps:
+both wire encodings are generated from UTC/CLOCK_REALTIME. For a TAI-based peer,
+set the peer's configured TAI−UTC offset; do not infer it from the Z bit or
+assume a fixed offset will remain valid through future leap seconds. For
+example, if the peer configuration specifies an offset of 37 seconds:
+
+```bash
+stamp-suite --remote-addr 192.0.2.1 --clock-source NTP --reflector-utc-offset 37
+```
+
+The equivalent TOML key is `reflector_utc_offset = 37`; an explicit CLI value,
+including zero or a negative value, overrides the file. This does not configure
+a synchronization service, adjust a PHC, or change the suite's outgoing PTP
+clock to TAI. The standard truncated PTP format uses a TAI epoch; deployments
+must account for the peer's actual time source ([RFC 8877 §4.3](https://datatracker.ietf.org/doc/html/rfc8877#section-4.3)).
+
+Unknown clock skew still shifts the two signed OWD measurements in opposite
+directions; negative values are retained. A PTP nanoseconds word of one second
+or more is invalid and omits that reply's OWD sample while preserving valid RTT
+and receive accounting. Leap-second/smear transitions and unsynchronized NIC
+hardware clocks still require deployment-specific clock handling.
+
 ```
       --error-scale <0..63>        Error estimate scale [default: 0]
       --error-multiplier <0..255>  Error estimate multiplier [default: 1]
+      --reflector-utc-offset <SECONDS>  Sender: remote clock offset from UTC [default: 0]
       --clock-synchronized         Mark clock as synchronized in error estimate
 ```
 

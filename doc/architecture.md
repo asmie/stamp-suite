@@ -24,7 +24,7 @@ A single binary plays both roles. The Session-Sender transmits STAMP test packet
   - `receiver/nix.rs` — Default backend on Linux and macOS. Uses a `tokio::net::UdpSocket` with `IP_RECVTTL`, `IP_RECVTOS`, and `IP_PKTINFO` (plus IPv6 equivalents) to extract per-packet metadata via `recvmsg` control messages.
   - `receiver/pnet.rs` — Default backend on Windows; opt-in elsewhere via `--features ttl-pnet`. Captures at the datalink layer via libpcap / Npcap.
 - `session.rs` — `SessionManager` and per-session state. Atomic sequence-number generation, idle-timeout reaping.
-- `time.rs` — Timestamp generation in NTP and PTP formats.
+- `time.rs` — UTC timestamp generation in NTP and truncated PTP encodings; era-aware decoding onto the Unix epoch.
 - `clock_format.rs` — `ClockFormat` enum (NTP / PTP) with parsing.
 - `stamp_modes.rs` — STAMP mode enum (Authenticated / Unauthenticated).
 - `tlv/` — TLV extension support (RFC 8972 + 9503 + 9534 + drafts). Subdivided by TLV type with shared parsing scaffolding.
@@ -131,6 +131,25 @@ If you specifically need TLV 246/247 reflection, or you want to craft
 outgoing packets with non-default IPv6 extension headers, build with
 `--no-default-features --features ttl-pnet` and accept the tradeoffs
 above.
+
+## Sender timestamp arithmetic
+
+`process_response` retains the reflector's Error Estimate in all four parser
+branches (open/authenticated, base/extended). T1/T4 use the local configuration;
+T2/T3 use `ErrorEstimate::clock_format()`, independently of the local format or
+S bit. `timestamp_to_unix_nanos` unfolds each seconds word to the nearest era
+relative to the local wall-clock reference and removes the NTP epoch offset.
+Its signed integer arithmetic preserves sub-millisecond differences around the
+2036 NTP wrap and the 2106 truncated PTP wrap without subtracting large floats.
+An era reference must be within half the 136-year wrap period.
+
+The sender subtracts `reflector_utc_offset` from remote timestamps after decoding,
+using the offset-adjusted wall clock as the remote era reference. This explicit
+setting handles a known remote UTC/TAI difference; Z alone cannot identify it.
+The suite's software timestamp generation remains UTC-based for both encodings.
+Hardware PHC alignment and leap-second policy are separate clock-quality work.
+Invalid PTP fractional words skip OWD collection; valid receive/RTT accounting
+uses the existing monotonic `Instant` path. Signed OWD retains real clock skew.
 
 ## Packet Processing Pipeline
 

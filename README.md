@@ -9,7 +9,11 @@ Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust — RF
 
 ## About
 
-A single binary that runs as either a Session-Sender (client) or a Session-Reflector (server) for measuring round-trip time, packet loss, and one-way delay. Using all four STAMP timestamps, the sender aggregates forward (sender→reflector) and reverse (reflector→sender) one-way delay alongside RTT; OWD figures assume the endpoints share an NTP/PTP-synchronized clock. The per-packet reflector timestamps remain available in `-R` mode for external analysis.
+A single binary that runs as either a Session-Sender (client) or a Session-Reflector (server) for measuring round-trip time, packet loss, and one-way delay. Using all four STAMP timestamps, the sender aggregates forward (sender→reflector) and reverse (reflector→sender) one-way delay alongside RTT; OWD requires synchronized clocks on compatible timescales. Sender and reflector
+may use different wire formats: remote timestamps are decoded using their Z bit,
+with NTP era unfolding and epoch conversion. For a peer clock ahead of UTC,
+configure its known offset with `--reflector-utc-offset <SECONDS>` (default 0;
+see [clock settings](doc/usage.md#timestamp--clock)). The per-packet reflector timestamps remain available in `-R` mode for external analysis.
 
 ### Key features
 

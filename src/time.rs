@@ -27,7 +27,8 @@ pub fn generate_timestamp(cs: ClockFormat) -> u64 {
 
 /// Converts a wire STAMP timestamp back to nanoseconds since its clock epoch
 /// (NTP: 1900-01-01, PTP: 1970-01-01), so two timestamps of the **same**
-/// format can be subtracted to obtain a one-way delay. The upper 32 bits are
+/// format and era can be subtracted. Use [`timestamp_to_unix_nanos`] for
+/// cross-format comparisons or comparisons spanning a seconds-word wrap. The upper 32 bits are
 /// whole seconds in both formats; the lower 32 bits are an NTP binary fraction
 /// or PTP nanoseconds respectively. Returns `u128` to keep the
 /// `seconds * 10^9` product exact for the full 32-bit seconds range.
@@ -42,6 +43,34 @@ pub fn timestamp_to_nanos(value: u64, cs: ClockFormat) -> u128 {
         ClockFormat::PTP => frac,
     };
     secs * 1_000_000_000 + subsec_nanos
+}
+
+/// Decode a wire timestamp onto the Unix epoch, unfolding the 32-bit seconds
+/// word to the era nearest `reference_unix_seconds` (within about 68 years).
+/// The reference must use the same timescale as the timestamp. PTP's seconds
+/// are treated as UTC here; callers must remove a known remote UTC offset.
+/// The Z bit specifies encoding, not synchronization or a UTC offset.
+/// Returns None for an invalid PTP nanoseconds word (>= one second).
+#[must_use]
+pub fn timestamp_to_unix_nanos(
+    value: u64,
+    format: ClockFormat,
+    reference_unix_seconds: i64,
+) -> Option<i128> {
+    let fraction = value as u32;
+    let (epoch_offset, nanos) = match format {
+        ClockFormat::NTP => (
+            i128::from(NTP_UNIX_OFFSET),
+            (u64::from(fraction) * 1_000_000_000) >> 32,
+        ),
+        ClockFormat::PTP if fraction < 1_000_000_000 => (0, u64::from(fraction)),
+        ClockFormat::PTP => return None,
+    };
+    let reference = i128::from(reference_unix_seconds);
+    let seconds = i128::from(value >> 32) - epoch_offset;
+    let era = 1i128 << 32;
+    let delta = (seconds - reference + era / 2).rem_euclid(era) - era / 2;
+    Some((reference + delta) * 1_000_000_000 + i128::from(nanos))
 }
 
 /// Converts a raw `(seconds, nanoseconds)` pair — e.g. a kernel `timespec`
@@ -82,6 +111,42 @@ fn convert_dt_to_ptp(date: DateTime<Utc>) -> u64 {
 mod tests {
     use super::*;
     use crate::time::convert_dt_to_ntp;
+
+    #[test]
+    fn unix_decode_unfolds_both_formats_near_reference() {
+        for seconds in [
+            -2_208_988_801,
+            -1,
+            0,
+            2_085_978_495,
+            2_085_978_496,
+            4_294_967_295,
+            4_294_967_296,
+            8_589_934_592,
+        ] {
+            for format in [ClockFormat::NTP, ClockFormat::PTP] {
+                for nanos in [0, 1, 500_000_000, 999_999_999] {
+                    let wire = timestamp_from_parts(seconds, nanos, format);
+                    let expected = i128::from(seconds) * 1_000_000_000 + i128::from(nanos);
+                    for pivot in [seconds - 60, seconds, seconds + 60] {
+                        let actual = timestamp_to_unix_nanos(wire, format, pivot).unwrap();
+                        assert!(
+                            (actual - expected).abs() <= 1,
+                            "{format:?} {seconds}.{nanos} reference={pivot}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unix_decode_validates_ptp_fraction_without_restricting_ntp() {
+        for fraction in [1_000_000_000u64, u32::MAX as u64] {
+            assert_eq!(timestamp_to_unix_nanos(fraction, ClockFormat::PTP, 0), None);
+            assert!(timestamp_to_unix_nanos(fraction, ClockFormat::NTP, 0).is_some());
+        }
+    }
 
     #[test]
     fn convert_dt_to_ntp_test() {
