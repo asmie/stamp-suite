@@ -73,6 +73,9 @@ pub struct Session {
     /// session as initialized, and bits 30..0 are a bitmap where bit `n` means
     /// "sequence number `high - (n + 1)` has been seen".
     replay_state: AtomicU64,
+    /// Serializes retirement against a datagram currently being transmitted.
+    /// An expired session cannot send queued replies after its identity restarts.
+    active: RwLock<bool>,
 }
 
 impl Session {
@@ -88,7 +91,22 @@ impl Session {
             last_reflected_seq: AtomicU32::new(0),
             last_reflected_timestamp: AtomicU64::new(0),
             replay_state: AtomicU64::new(0),
+            active: RwLock::new(true),
         }
+    }
+
+    /// Keep this guard through the send and its counter/telemetry updates.
+    pub(crate) fn transmission_guard(&self) -> Option<std::sync::RwLockReadGuard<'_, bool>> {
+        let guard = self.active.read().unwrap_or_else(|e| e.into_inner());
+        if *guard {
+            Some(guard)
+        } else {
+            None
+        }
+    }
+
+    fn retire(&self) {
+        *self.active.write().unwrap_or_else(|e| e.into_inner()) = false;
     }
 
     /// Classifies an incoming Sequence Number against the ones this session has
@@ -298,9 +316,8 @@ pub struct SessionManager {
     /// Maximum number of sessions to prevent unbounded growth; 0 means
     /// unlimited. Runtime-adjustable via the control plane.
     max_sessions: AtomicUsize,
-    /// When true, unknown clients receive transient (unstored) sessions —
-    /// replies keep flowing but no new state accretes. Set by the control
-    /// plane's drain endpoint.
+    /// When true, new identities are rejected; existing sessions continue.
+    /// Changes are serialized with session creation by the table write lock.
     draining: AtomicBool,
     /// True while the table is at its cap. Used to log the "cap reached"
     /// warning exactly once per saturation episode instead of once per
@@ -371,7 +388,12 @@ impl SessionManager {
         if matches.next().is_some() {
             return Err("multiple sessions for client; specify session_id");
         }
-        Ok(key.is_some_and(|key| sessions.remove(&key).is_some()))
+        let removed = key.and_then(|key| sessions.remove(&key));
+        if let Some(entry) = &removed {
+            entry.session.retire();
+            self.note_table_shrunk(sessions.len());
+        }
+        Ok(removed.is_some())
     }
 
     /// Returns true when a new entry must not be stored: the table is at
@@ -390,11 +412,17 @@ impl SessionManager {
     pub fn expire_session(&self, client: impl Into<SessionKey>) -> bool {
         let client = client.into();
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
-        sessions.remove(&client).is_some()
+        let removed = sessions.remove(&client);
+        if let Some(entry) = &removed {
+            entry.session.retire();
+            self.note_table_shrunk(sessions.len());
+        }
+        removed.is_some()
     }
 
     /// Enables or disables drain mode (see `draining`).
     pub fn set_draining(&self, draining: bool) {
+        let _sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         self.draining.store(draining, Ordering::Relaxed);
     }
 
@@ -404,9 +432,21 @@ impl SessionManager {
         self.draining.load(Ordering::Relaxed)
     }
 
-    /// Sets the session-table cap; 0 means unlimited.
+    /// Sets the session-table cap; 0 means unlimited. Existing entries are
+    /// never evicted by a smaller cap; only new admission is restricted.
     pub fn set_max_sessions(&self, cap: usize) {
+        let _sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         self.max_sessions.store(cap, Ordering::Relaxed);
+        self.saturated.store(false, Ordering::Relaxed);
+    }
+
+    fn note_table_shrunk(&self, len: usize) {
+        let cap = self.max_sessions.load(Ordering::Relaxed);
+        if cap == 0 || len < cap {
+            self.saturated.store(false, Ordering::Relaxed);
+        }
+        #[cfg(feature = "metrics")]
+        crate::metrics::reflector_metrics::set_active_sessions(len);
     }
 
     /// Current session-table cap; 0 means unlimited.
@@ -421,39 +461,37 @@ impl SessionManager {
     fn note_saturated(&self, max: usize, client: SocketAddr) {
         if !self.saturated.swap(true, Ordering::Relaxed) {
             log::warn!(
-                "Session table reached its cap ({max}); new clients are still \
-                 answered but not tracked until stale entries expire. Raise \
-                 --max-sessions if this is legitimate load."
+                "Session table reached its cap ({max}); new sessions are rejected \
+                 until entries expire or the cap increases. Existing sessions continue."
             );
         }
-        log::debug!("Session limit reached, not tracking new client {client}");
+        log::debug!("Session limit reached, rejecting new client {client}");
     }
 
     /// Generates and returns the next sequence number for a client's session.
     ///
     /// Creates a new session if one doesn't exist for the client.
     /// Also updates the last_active time in a single lock acquisition.
-    pub fn generate_sequence_number(&self, client: impl Into<SessionKey>) -> u32 {
-        let client = client.into();
-        let (seq, _session) = self.get_session_and_seq(client);
-        seq
+    pub fn generate_sequence_number(&self, client: impl Into<SessionKey>) -> Option<u32> {
+        self.get_session_and_seq(client).map(|(seq, _session)| seq)
     }
 
     /// Returns the session for a client without generating a sequence number.
     ///
     /// Creates a new session if one doesn't exist. This is useful for accessing
     /// session state (counters, last reflection) without consuming a sequence number.
-    pub fn get_or_create_session(&self, client: impl Into<SessionKey>) -> Arc<Session> {
+    /// Returns `None` on provisioning, capacity, or drain rejection. No temporary
+    /// session is created, and rejection does not consume an internal session ID.
+    pub fn get_or_create_session(&self, client: impl Into<SessionKey>) -> Option<Arc<Session>> {
         let client = client.into();
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
 
         if let Some(entry) = sessions.get_mut(&client) {
             entry.last_active = Instant::now();
-            Arc::clone(&entry.session)
+            Some(Arc::clone(&entry.session))
         } else {
             if !self.admits(&client) || self.reject_new_entry(sessions.len(), client.client) {
-                // Return a temporary session that won't be stored
-                return Arc::new(Session::new(u32::MAX));
+                return None;
             }
             let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
             let session = Arc::new(Session::new(session_id));
@@ -472,7 +510,7 @@ impl SessionManager {
                 crate::metrics::reflector_metrics::set_active_sessions(sessions.len());
             }
 
-            session
+            Some(session)
         }
     }
 
@@ -491,47 +529,17 @@ impl SessionManager {
     /// Returns both the sequence number and an Arc to the session, allowing the
     /// caller to access session state (e.g., packet counters for Direct Measurement TLV).
     /// Creates a new session if one doesn't exist for the client.
-    pub fn get_session_and_seq(&self, client: impl Into<SessionKey>) -> (u32, Arc<Session>) {
-        let client = client.into();
-        // Take write lock once for both session lookup and activity update
-        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
-
-        let session = if let Some(entry) = sessions.get_mut(&client) {
-            // Existing session - update activity and return
-            entry.last_active = Instant::now();
-            Arc::clone(&entry.session)
-        } else {
-            if !self.admits(&client) || self.reject_new_entry(sessions.len(), client.client) {
-                // Return a temporary session that won't be stored
-                let session = Arc::new(Session::new(u32::MAX));
-                return (0, session);
-            }
-            // Create new session
-            let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
-            let session = Arc::new(Session::new(session_id));
-            sessions.insert(
-                client,
-                SessionEntry {
-                    session: Arc::clone(&session),
-                    last_active: Instant::now(),
-                },
-            );
-            log::debug!("Created new session {} for client {}", session_id, client);
-
-            // Record session creation metrics
-            #[cfg(feature = "metrics")]
-            {
-                crate::metrics::reflector_metrics::record_session_created();
-                crate::metrics::reflector_metrics::set_active_sessions(sessions.len());
-            }
-
-            session
-        };
-
-        // Release lock before generating sequence number
-        drop(sessions);
+    /// Returns `None` if new-session admission is denied or concurrent expiry
+    /// retires the acquired session before sequence allocation.
+    pub fn get_session_and_seq(
+        &self,
+        client: impl Into<SessionKey>,
+    ) -> Option<(u32, Arc<Session>)> {
+        let session = self.get_or_create_session(client)?;
+        let active = session.transmission_guard()?;
         let seq = session.generate_sequence_number();
-        (seq, session)
+        drop(active);
+        Some((seq, session))
     }
 
     /// Removes sessions that have been inactive longer than the timeout.
@@ -551,6 +559,7 @@ impl SessionManager {
         sessions.retain(|addr, entry| {
             let keep = now.duration_since(entry.last_active) < timeout;
             if !keep {
+                entry.session.retire();
                 log::debug!("Removing stale session for client {}", addr);
             }
             keep
@@ -560,17 +569,9 @@ impl SessionManager {
         if removed > 0 {
             log::info!("Cleaned up {} stale sessions", removed);
 
-            // Update active sessions gauge after cleanup
-            #[cfg(feature = "metrics")]
-            crate::metrics::reflector_metrics::set_active_sessions(sessions.len());
+            self.note_table_shrunk(sessions.len());
         }
 
-        // Re-arm the one-shot "cap reached" warning once we drop back below the
-        // cap, so a later saturation episode is reported again.
-        let cap = self.max_sessions.load(Ordering::Relaxed);
-        if cap != 0 && sessions.len() < cap {
-            self.saturated.store(false, Ordering::Relaxed);
-        }
         removed
     }
 
@@ -681,7 +682,7 @@ mod tests {
             ];
             let manager = SessionManager::new(None, None);
             for key in keys {
-                let (seq, session) = manager.get_session_and_seq(key);
+                let (seq, session) = manager.get_session_and_seq(key).unwrap();
                 assert_eq!(seq, 0);
                 assert_eq!(session.get_received_count(), 0);
                 assert_eq!(session.get_transmitted_count(), 0);
@@ -693,7 +694,7 @@ mod tests {
             }
             assert_eq!(manager.session_count(), 5);
             for key in keys {
-                assert_eq!(manager.generate_sequence_number(key), 1);
+                assert_eq!(manager.generate_sequence_number(key).unwrap(), 1);
                 let session = manager.get_session(key).unwrap();
                 assert_eq!(session.check_replay(100), ReplayVerdict::Replay);
                 assert_eq!(session.get_received_count(), 1);
@@ -723,11 +724,11 @@ mod tests {
             sender_micro_session_id: None,
             ..key
         }));
-        manager.get_or_create_session(key);
+        manager.get_or_create_session(key).unwrap();
         assert_eq!(manager.cleanup_stale_sessions(), 1);
         assert!(manager.admits(&key));
         assert_eq!(manager.provisioned_count(), 1);
-        manager.get_or_create_session(key);
+        manager.get_or_create_session(key).unwrap();
         assert!(manager.expire_session(key));
         assert!(manager.admits(&key));
     }
@@ -909,7 +910,7 @@ mod tests {
     fn test_expire_session() {
         let mgr = SessionManager::new(None, None);
         let addr: SocketAddr = "10.0.0.1:5000".parse().unwrap();
-        mgr.get_or_create_session(addr);
+        mgr.get_or_create_session(addr).unwrap();
         assert_eq!(mgr.session_count(), 1);
         assert!(mgr.expire_session(addr));
         assert_eq!(mgr.session_count(), 0);
@@ -921,18 +922,18 @@ mod tests {
         let mgr = SessionManager::new(None, None);
         let known: SocketAddr = "10.0.0.1:5000".parse().unwrap();
         let new_client: SocketAddr = "10.0.0.2:5000".parse().unwrap();
-        mgr.get_or_create_session(known);
+        mgr.get_or_create_session(known).unwrap();
 
         mgr.set_draining(true);
         assert!(mgr.is_draining());
-        mgr.get_or_create_session(new_client);
-        assert_eq!(mgr.session_count(), 1, "draining: new clients not stored");
+        assert!(mgr.get_or_create_session(new_client).is_none());
+        assert_eq!(mgr.session_count(), 1, "draining: new clients rejected");
         // Existing client still tracked.
-        mgr.get_or_create_session(known);
+        mgr.get_or_create_session(known).unwrap();
         assert_eq!(mgr.session_count(), 1);
 
         mgr.set_draining(false);
-        mgr.get_or_create_session(new_client);
+        mgr.get_or_create_session(new_client).unwrap();
         assert_eq!(mgr.session_count(), 2);
     }
 
@@ -942,8 +943,11 @@ mod tests {
         assert_eq!(mgr.max_sessions(), 2);
         mgr.set_max_sessions(1);
         assert_eq!(mgr.max_sessions(), 1);
-        mgr.get_or_create_session("10.0.0.1:1".parse::<SocketAddr>().unwrap());
-        mgr.get_or_create_session("10.0.0.2:2".parse::<SocketAddr>().unwrap());
+        mgr.get_or_create_session("10.0.0.1:1".parse::<SocketAddr>().unwrap())
+            .unwrap();
+        assert!(mgr
+            .get_or_create_session("10.0.0.2:2".parse::<SocketAddr>().unwrap())
+            .is_none());
         assert_eq!(mgr.session_count(), 1, "cap applies to new creations");
     }
 
@@ -967,7 +971,7 @@ mod tests {
         let mgr = SessionManager::new(None, None);
         let addr: SocketAddr = "10.0.0.1:5000".parse().unwrap();
         assert!(mgr.get_session(addr).is_none());
-        mgr.get_or_create_session(addr);
+        mgr.get_or_create_session(addr).unwrap();
         assert!(mgr.get_session(addr).is_some());
         assert_eq!(mgr.session_count(), 1, "get_session must not create");
     }
@@ -1055,17 +1059,17 @@ mod tests {
         let client2 = make_addr(10002);
 
         // First call creates a session
-        let seq1 = manager.generate_sequence_number(client1);
+        let seq1 = manager.generate_sequence_number(client1).unwrap();
         assert_eq!(seq1, 0);
         assert_eq!(manager.session_count(), 1);
 
         // Second call to same client reuses session
-        let seq2 = manager.generate_sequence_number(client1);
+        let seq2 = manager.generate_sequence_number(client1).unwrap();
         assert_eq!(seq2, 1);
         assert_eq!(manager.session_count(), 1);
 
         // Different client gets its own session
-        let seq3 = manager.generate_sequence_number(client2);
+        let seq3 = manager.generate_sequence_number(client2).unwrap();
         assert_eq!(seq3, 0);
         assert_eq!(manager.session_count(), 2);
     }
@@ -1078,13 +1082,13 @@ mod tests {
         let client2 = make_addr(10002);
 
         // Interleave requests from two clients
-        assert_eq!(manager.generate_sequence_number(client1), 0);
-        assert_eq!(manager.generate_sequence_number(client2), 0);
-        assert_eq!(manager.generate_sequence_number(client1), 1);
-        assert_eq!(manager.generate_sequence_number(client1), 2);
-        assert_eq!(manager.generate_sequence_number(client2), 1);
-        assert_eq!(manager.generate_sequence_number(client1), 3);
-        assert_eq!(manager.generate_sequence_number(client2), 2);
+        assert_eq!(manager.generate_sequence_number(client1).unwrap(), 0);
+        assert_eq!(manager.generate_sequence_number(client2).unwrap(), 0);
+        assert_eq!(manager.generate_sequence_number(client1).unwrap(), 1);
+        assert_eq!(manager.generate_sequence_number(client1).unwrap(), 2);
+        assert_eq!(manager.generate_sequence_number(client2).unwrap(), 1);
+        assert_eq!(manager.generate_sequence_number(client1).unwrap(), 3);
+        assert_eq!(manager.generate_sequence_number(client2).unwrap(), 2);
     }
 
     #[test]
@@ -1099,7 +1103,7 @@ mod tests {
                 let client = make_addr(10001 + i);
                 let mut nums = Vec::new();
                 for _ in 0..100 {
-                    nums.push(manager_clone.generate_sequence_number(client));
+                    nums.push(manager_clone.generate_sequence_number(client).unwrap());
                 }
                 nums
             }));
@@ -1124,7 +1128,7 @@ mod tests {
         let manager = SessionManager::new(None, None);
         let client = make_addr(10001);
 
-        manager.generate_sequence_number(client);
+        manager.generate_sequence_number(client).unwrap();
         assert_eq!(manager.session_count(), 1);
 
         // Without timeout, cleanup does nothing
@@ -1139,7 +1143,7 @@ mod tests {
         let manager = SessionManager::new(Some(Duration::from_millis(50)), None);
         let client = make_addr(10001);
 
-        manager.generate_sequence_number(client);
+        manager.generate_sequence_number(client).unwrap();
         assert_eq!(manager.session_count(), 1);
 
         // Wait for timeout (2x the timeout duration for reliability)
@@ -1155,7 +1159,7 @@ mod tests {
         let manager = SessionManager::new(Some(Duration::from_secs(300)), None);
         let client = make_addr(10001);
 
-        manager.generate_sequence_number(client);
+        manager.generate_sequence_number(client).unwrap();
 
         // Session is still active, should not be cleaned up
         assert_eq!(manager.cleanup_stale_sessions(), 0);
@@ -1163,22 +1167,115 @@ mod tests {
     }
 
     #[test]
-    fn test_session_manager_enforces_max_sessions_cap() {
-        // Cap of 2: the first two distinct clients are tracked; a third is
-        // still answered (returns a session) but NOT stored, so an
-        // unauthenticated flood cannot grow the table without bound.
+    fn lowering_cap_preserves_existing_sessions_and_rejection_has_no_state() {
         let manager = SessionManager::new(None, Some(2));
-        manager.generate_sequence_number(make_addr(1));
-        manager.generate_sequence_number(make_addr(2));
+        let first = manager.get_or_create_session(make_addr(1)).unwrap();
+        let second = manager.get_or_create_session(make_addr(2)).unwrap();
+        first.record_received();
+        first.record_reflection(12, 345);
+        first.commit_replay(99);
+        assert_eq!(manager.generate_sequence_number(make_addr(1)), Some(0));
+        manager.set_max_sessions(1);
+        for _ in 0..3 {
+            assert!(manager.get_or_create_session(make_addr(3)).is_none());
+        }
+        assert_eq!(
+            manager.session_count(),
+            2,
+            "lowering the cap must not evict"
+        );
+        assert_eq!(manager.next_session_id.load(Ordering::Relaxed), 2);
+        assert!(Arc::ptr_eq(
+            &first,
+            &manager.get_or_create_session(make_addr(1)).unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &second,
+            &manager.get_or_create_session(make_addr(2)).unwrap()
+        ));
+        assert_eq!(manager.generate_sequence_number(make_addr(1)), Some(1));
+        assert_eq!(first.get_received_count(), 1);
+        assert_eq!(first.get_last_reflection(), (12, 345));
+        assert_eq!(first.classify_replay(99), ReplayVerdict::Replay);
+        manager.expire_session(make_addr(2));
+        assert!(manager.get_or_create_session(make_addr(3)).is_none());
+        manager.expire_session(make_addr(1));
+        assert!(!manager.saturated.load(Ordering::Relaxed));
+        let replacement = manager.get_or_create_session(make_addr(3)).unwrap();
+        assert_eq!(replacement.get_id(), 2);
+    }
+
+    #[test]
+    fn concurrent_admission_never_exceeds_capacity() {
+        let manager = Arc::new(SessionManager::new(None, Some(4)));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let manager = Arc::clone(&manager);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    manager.get_or_create_session(make_addr(i + 1)).is_some()
+                })
+            })
+            .collect();
+        let admitted = threads
+            .into_iter()
+            .map(|t| usize::from(t.join().unwrap()))
+            .sum::<usize>();
+        assert_eq!(admitted, 4);
+        assert_eq!(manager.session_count(), 4);
+        manager.set_draining(true);
+        manager.set_max_sessions(0);
+        assert!(manager.get_or_create_session(make_addr(100)).is_none());
+    }
+
+    #[test]
+    fn provisioned_capacity_and_restart_preserve_admission_but_reset_runtime() {
+        let key: SessionKey = "42,127.0.0.1:4000,127.0.0.1:862,1".parse().unwrap();
+        let other = SessionKey { ssid: 43, ..key };
+        let manager = SessionManager::with_admission(
+            Some(Duration::ZERO),
+            Some(1),
+            SessionAdmission::Provisioned,
+            HashSet::from([key, other]),
+        );
+        let first = manager.get_or_create_session(key).unwrap();
+        first.record_received();
+        first.record_reflection(3, 100);
+        first.commit_replay(7);
+        assert!(manager.get_or_create_session(other).is_none());
+        assert!(manager
+            .get_or_create_session(SessionKey { ssid: 99, ..key })
+            .is_none());
+        assert_eq!(manager.cleanup_stale_sessions(), 1);
+        assert!(first.transmission_guard().is_none());
+        let restarted = manager.get_or_create_session(key).unwrap();
+        assert_ne!(first.get_id(), restarted.get_id());
+        assert_eq!(restarted.generate_sequence_number(), 0);
+        assert_eq!(restarted.get_received_count(), 0);
+        assert_eq!(restarted.get_last_reflection(), (0, 0));
+        assert_eq!(restarted.classify_replay(7), ReplayVerdict::New);
+        assert_eq!(manager.provisioned_count(), 2);
+        assert_eq!(
+            manager.expire_matching(key.client, Some(restarted.get_id())),
+            Ok(true)
+        );
+        assert!(restarted.transmission_guard().is_none());
+        assert!(manager.get_or_create_session(other).is_some());
+    }
+
+    #[test]
+    fn test_session_manager_enforces_max_sessions_cap() {
+        // Cap of 2: preserve the first two identities and reject a third.
+        let manager = SessionManager::new(None, Some(2));
+        manager.generate_sequence_number(make_addr(1)).unwrap();
+        manager.generate_sequence_number(make_addr(2)).unwrap();
         assert_eq!(manager.session_count(), 2);
 
-        // Third distinct client: over the cap → transient, unstored session.
-        let s = manager.get_or_create_session(make_addr(3));
-        assert_eq!(
-            s.get_id(),
-            u32::MAX,
-            "over-cap client must get a transient (unstored) session"
-        );
+        assert!(manager.get_or_create_session(make_addr(3)).is_none());
+        assert!(manager.get_session_and_seq(make_addr(3)).is_none());
+        assert!(manager.generate_sequence_number(make_addr(3)).is_none());
         assert_eq!(
             manager.session_count(),
             2,
@@ -1186,17 +1283,17 @@ mod tests {
         );
 
         // Existing clients are still served from the table.
-        manager.generate_sequence_number(make_addr(1));
+        manager.generate_sequence_number(make_addr(1)).unwrap();
         assert_eq!(manager.session_count(), 2);
     }
 
     #[test]
     fn test_session_cap_reopens_after_cleanup_frees_space() {
         let manager = SessionManager::new(Some(Duration::from_millis(50)), Some(1));
-        manager.generate_sequence_number(make_addr(1));
+        manager.generate_sequence_number(make_addr(1)).unwrap();
         assert_eq!(manager.session_count(), 1);
         // Over cap now — second client is not stored.
-        manager.generate_sequence_number(make_addr(2));
+        assert!(manager.generate_sequence_number(make_addr(2)).is_none());
         assert_eq!(manager.session_count(), 1);
 
         // Let the first entry go stale and clean it up.
@@ -1205,7 +1302,7 @@ mod tests {
         assert_eq!(manager.session_count(), 0);
 
         // Space freed → a new client is tracked again.
-        manager.generate_sequence_number(make_addr(3));
+        manager.generate_sequence_number(make_addr(3)).unwrap();
         assert_eq!(manager.session_count(), 1);
     }
 }

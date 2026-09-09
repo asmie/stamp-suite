@@ -698,15 +698,12 @@ pub struct Configuration {
     #[clap(long, default_value_t = 0)]
     pub reflector_rate_burst: u32,
 
-    /// Maximum number of concurrently tracked client sessions (0 = unlimited).
-    /// The reflector creates a session entry per distinct source `IP:port` to
-    /// hold Direct Measurement / Follow-Up Telemetry counters, so without a cap
-    /// an unauthenticated peer spraying packets from many source ports (or
-    /// spoofed addresses) can grow the table until the process is OOM-killed.
-    /// When the cap is reached, new clients are still answered but not tracked
-    /// (transient counters); stale entries are reclaimed by the periodic
-    /// cleanup. Defaults to 65536. Raise it for very large measurement meshes,
-    /// or set 0 to disable the cap (not recommended on an open reflector).
+    /// Maximum number of tracked session identities (0 = unlimited).
+    /// Sessions use both UDP endpoints, SSID, and optional sender micro ID.
+    /// At the cap, new sessions are rejected in both sequencing modes;
+    /// existing sessions continue with their counters and sequence state.
+    /// Periodic idle expiry or manual expiry frees slots. Lowering the cap
+    /// never evicts active entries. Defaults to 65536.
     #[clap(long, default_value_t = 65536)]
     pub max_sessions: u32,
 

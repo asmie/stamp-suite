@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject new session identities at the capacity limit or during drain instead
+  of replying with temporary counters and repeated stateful sequence zero.
+  Preserve existing sessions when the cap shrinks; serialize admission with
+  runtime controls. Expiry retires pending transmissions before an identity
+  restarts, and session acquisition helpers now return `Option` on rejection.
+
 - Return one U-flagged reply for non-monotonic Type-12 requests in both reflector
   backends. Preserve normal burst handling after sequence wraparound, skip
   requested padding on ordering failures, and apply final HMACs to the flags.

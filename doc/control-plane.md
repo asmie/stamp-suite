@@ -168,18 +168,22 @@ fields; `0` consistently means "unlimited/disabled", mirroring the CLI):
 - **Keys are write-only.** No endpoint ever returns key material; logs
   never contain it; request strings are zeroized after parsing. `key_hex`
   goes through the same `HmacKey::from_hex` validation as the CLI.
-- **Drain** flips `SessionManager.draining`: unknown clients still get
-  *replies* (transient, unstored sessions — same mechanism as the
-  max-sessions cap), but no new state is created; existing sessions are
-  unaffected. Reply behaviour is intentionally preserved so draining a
-  reflector doesn't fail in-flight measurements; it only stops new ones
-  from accreting state.
+- **Drain** rejects new identities in both sequencing modes. Existing sessions
+  and their queued replies continue. Turning drain off restores normal admission.
+- **Session cap** rejects new identities at capacity without evicting existing
+  entries, including when a runtime PATCH lowers the cap below the current count.
+  Provisioned identities also need a slot; provisioning does not reserve capacity.
+- **Expiry** removes the selected runtime identity and retires its transmissions.
+  It waits for a datagram already being sent; old queued copies cannot transmit
+  after expiry returns. Re-admission starts fresh sequence/counter/replay state
+  under a new internal ID. Provisioning survives expiry. Idle cleanup uses the
+  same retirement rule; the idle clock is refreshed by incoming accepted packets.
 - **Shutdown** sets `shutdown_requested`; the nix backend polls it on a
   250 ms tick, pnet per capture iteration. The HTTP response (202) lands
   before the process exits.
 - **Caps PATCH** is per-field atomic but not transactional across fields;
-  each `Some` field is stored independently (Relaxed atomics — these are
-  tuning knobs, not synchronization points). `reflected_control_max_size`
+  fields are applied independently. Session-cap and drain changes additionally
+  take the session-table write lock to serialize with new admission. `reflected_control_max_size`
   is additionally clamped to the payload ceiling discovered from the
   egress MTU at startup — a runtime raise cannot reintroduce Type 12
   replies that fragment on the live link; the response body reports the
@@ -192,8 +196,9 @@ fields; `0` consistently means "unlimited/disabled", mirroring the CLI):
 | HMAC keyset | `Arc<RwLock<Option<HmacKeySet>>>` | packet loops (read guard per packet) | control plane | The guard never crosses an `.await` in the nix backend: acquire → build `ProcessingContext` → validate/assemble and snapshot the selected key → drop guard → enqueue/send. Both backends pass the owned snapshot from shared processing directly into `Transmission`; they do not look up the key again. The snapshot zeroizes on drop through `HmacKey`. |
 | Runtime caps | `RuntimeCaps` (AtomicU16/U32/Usize) | packet loops, per packet | control plane | pnet receives the `Arc` via `CaptureConfig` (moves into `spawn_blocking`). |
 | Rate limiter | always-constructed `RateLimiter` with atomic rate/burst | packet loops | control plane | `rate == 0` short-circuits to allow; enables turning limiting *on* at runtime even when started unlimited. |
-| Draining / max-sessions | atomics inside `SessionManager` | packet loops | control plane | |
-| Session table | existing `RwLock<HashMap<SocketAddr, …>>` | both | both | `expire_session` takes the write lock; `GET /v1/sessions` uses the existing `session_summaries_extended()`. |
+| Draining / max-sessions | atomics inside `SessionManager` | packet loops | control plane | Updates take the table write lock, matching admission. |
+| Session table | existing `RwLock<HashMap<SessionKey, …>>` | both | both | `expire_session` takes the write lock; `GET /v1/sessions` uses the existing `session_summaries_extended()`. |
+| Session lifetime | per-session `RwLock<bool>` | send owner | expiry/cleanup | A read guard covers a send and its state updates; retirement waits for that guard and excludes later queued sends. |
 | Shutdown flag | `Arc<AtomicBool>` | backends (poll) | control plane | |
 | Legacy single `--hmac-key` | unchanged, startup-immutable | packet loops | — | Deliberate boundary: the control plane manages the *keyset* (per-SSID + default); the CLI single key stays fixed. |
 

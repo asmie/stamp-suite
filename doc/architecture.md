@@ -162,7 +162,7 @@ Standalone packet processing avoids the snapshot allocation.
 
 1. **Identify and admit** — Extract the complete session key and check the configured admission policy without creating runtime state.
 2. **Parse and authenticate** — Decode the base header; enforce strict length or canonical zero-fill policy, the open-mode shape guard, and configured base HMAC verification. Unknown/revoked keys and invalid base packets stop here. Both backends count rejected processing in aggregate `packets_dropped`; no session is created or refreshed.
-3. **Session lookup / update** — Acquire the session only after validation. Update its receive counter, classify replay, and snapshot Direct Measurement / Follow-Up state. `--drop-replayed` can suppress ordinary duplicates; a handled Type-12 request uses the mandatory single U-flagged ordering-failure reply. The replay verdict travels in `ProcessingContext` to semantic TLV processing before response signing. Stateful sequence numbers are assigned from this same session handle at transmission; stateless replies echo the sender sequence.
+3. **Session lookup / update** — Acquire the session only after validation. A denied acquisition (provisioning, cap, or drain) drops the packet before receive-state mutation; no temporary session is returned. Update its receive counter, classify replay, and snapshot Direct Measurement / Follow-Up state. `--drop-replayed` can suppress ordinary duplicates; a handled Type-12 request uses the mandatory single U-flagged ordering-failure reply. The replay verdict travels in `ProcessingContext` to semantic TLV processing before response signing. Stateful sequence numbers are assigned from this same session handle at transmission; stateless replies echo the sender sequence.
 4. **TLV pipeline** — Parse/verify extensions and preserve the RFC 8972 flag rules. A valid base packet with an invalid TLV HMAC still receives the required I-flag response; it is not treated as a failed base HMAC.
 5. **RFC 9503 processing** — Destination Node Address matching against `local_addresses`; Return Path action selection (Normal, SuppressReply, AlternateAddress, Srv6Forward, UnsupportedSr). Encoded into a `ReturnPathAction` carried in `StampResponse`; the send path attempts best-effort SRv6 SRH forwarding for `Srv6Forward` (see Return Path TLV below). A *matched* Destination Node Address is also carried as `StampResponse::reply_source`, and both send paths pin it as the reply's IP source address via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message (`src/receiver/transmit.rs`, RFC 9503 §3). That is Linux-only and best-effort: elsewhere, or on any failure, the reply goes out with the OS's choice of source, which is still a correct reply — the SHOULD is about which correct source is preferred. This matters on a wildcard or multi-homed bind, where the kernel picks by route rather than by what the sender asked for; on a single-address bind the two coincide anyway.
 6. **Assemble reply** — `assemble_unauth_answer_with_tlvs` / `assemble_auth_answer_with_tlvs` build the response, populate reflector-side TLV fields (DM counters, Follow-Up Telemetry, Timestamp Info, Location, Class of Service, etc.), and recompute HMACs (base + TLV) if applicable.
@@ -452,7 +452,7 @@ Reflector behaviour (aligned with draft-14 §3 as of this release):
 - Enforces the draft-14 §3 minimum value-field size of 12 octets at parse time. The sender path (`ReflectedControlTlv::encode_value`) emits 4-byte zero placeholders to satisfy this when no real sub-TLV is attached.
 - Both backends use a deadline queue with one entry per active burst. The `nix` receive loop owns all sends, including kernel TX timestamp correlation; `pnet` has a dedicated send worker so inter-copy waits do not block capture. After a successful copy, the next deadline is the current time plus the requested interval. OS scheduling and send work can lengthen the observed interval; nanosecond precision is not guaranteed.
 - Every copy uses the same transport policy. On Linux one `sendmsg` carries CoS, matched source address, and supported SRH together. Other supported platforms set CoS immediately before the sole send owner's syscall. SRH/source/alternate-address failures take the shared best-effort fallback path; flag changes are signed with the request's selected key. Socket queue pressure stops the remaining burst and records a drop without downgrading metadata.
-- Active-burst admission and explicit drain policy remain unbounded/unimplemented respectively (optimization O04). Shutdown discards queued copies; the existing pnet capture timeout can still delay exit.
+- Session drain rejects new identities and lets existing sessions/bursts continue. Expiry retires that session and cancels its remaining copies when serviced. Active-burst queue bounds and a timed burst-drain policy remain optimization O04. Shutdown discards queued copies; the existing pnet capture timeout can still delay exit.
 
 ### Bit Error Rate TLVs (draft-gandhi-ippm-stamp-ber)
 
@@ -713,3 +713,20 @@ regression signal, not as headline marketing figures.
 - [README](../README.md) — install and quick-start.
 - [usage.md](usage.md) — configuration file format, full CLI flag reference.
 - [security.md](security.md) — HMAC, key management, systemd hardening, capability model.
+
+
+### Session admission API and lifetime
+
+`SessionManager::get_or_create_session`, `get_session_and_seq`, and
+`generate_sequence_number` return `Option`: `None` means acquisition was denied
+(or the acquired session expired before sequence allocation). Callers must handle
+rejection instead of substituting a new Session or sequence zero. The shared live
+pipeline propagates rejection in both backends; standalone stateful processing
+also propagates a manager's denial.
+
+The table write lock serializes creation with cap/drain updates. Cap pressure
+never evicts an existing entry. Explicit/idle expiry removes an entry and takes
+its session lifetime write lock before admitting another instance of that
+identity. Each send holds a lifetime read guard through its syscall, retries,
+and counter/Follow-Up updates; retirement excludes later sends using the old Arc.
+The send path never takes the session-table lock while holding this guard.

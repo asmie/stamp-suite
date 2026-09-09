@@ -524,7 +524,8 @@ mod tests {
             .session_manager
             .as_ref()
             .unwrap()
-            .get_or_create_session(client);
+            .get_or_create_session(client)
+            .unwrap();
 
         let handler = StampMibHandler::new(state);
 
@@ -545,7 +546,7 @@ mod tests {
         for port in 0..1005 {
             let client =
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5000 + port as u16);
-            session_manager.get_or_create_session(client);
+            session_manager.get_or_create_session(client).unwrap();
         }
 
         let handler = StampMibHandler::new(state);
@@ -578,7 +579,8 @@ mod tests {
             .session_manager
             .as_ref()
             .unwrap()
-            .get_or_create_session(client);
+            .get_or_create_session(client)
+            .unwrap();
 
         let handler = StampMibHandler::new(state);
         match handler.get(&oids::stamp_refl_active_sessions()).value {

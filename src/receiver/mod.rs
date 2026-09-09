@@ -1761,7 +1761,7 @@ fn process_stamp_packet_inner(
     // occurs before base parsing and the configured authentication have passed.
     let mut ctx = ctx.clone();
     let counter_session = if let Some((counters, drop_replayed)) = tracking {
-        let session = ctx.session_manager?.get_or_create_session(session_key?);
+        let session = ctx.session_manager?.get_or_create_session(session_key?)?;
         session.record_received();
         let verdict = evaluate_replay(&session, data, counters);
         ctx.replay_verdict = verdict;
@@ -1792,16 +1792,10 @@ fn process_stamp_packet_inner(
         // Live sends assign the sequence in transmission order, including queued bursts.
         Some(0)
     } else if ctx.stateful_reflector {
-        counter_session
-            .as_ref()
-            .map(|session| session.generate_sequence_number())
-            .or_else(|| {
-                ctx.session_manager.map(|manager| {
-                    manager.generate_sequence_number(
-                        session_key.expect("identity checked before processing"),
-                    )
-                })
-            })
+        match ctx.session_manager {
+            Some(manager) => Some(manager.generate_sequence_number(session_key?)?),
+            None => None,
+        }
     } else {
         None
     };
@@ -2955,6 +2949,74 @@ mod tests {
                 Some(0)
             );
             assert_eq!(attempts, 2);
+        }
+    }
+
+    #[test]
+    fn capacity_and_drain_reject_new_sessions_before_reply_assembly() {
+        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+        for auth in [false, true] {
+            for stateful in [false, true] {
+                for drain in [false, true] {
+                    let manager = Arc::new(SessionManager::new(None, Some(1)));
+                    let counters = ReflectorCounters::new();
+                    let ctx = ProcessingContext {
+                        session_manager: Some(&manager),
+                        hmac_key: auth.then_some(&key),
+                        stateful_reflector: stateful,
+                        ..test_ctx(0, 0)
+                    };
+                    let known = loopback_src();
+                    let mut unknown = known;
+                    unknown.set_port(known.port() + 1);
+                    let data = replay_control_packet(10, auth, auth.then_some(&key), false);
+                    let (_, session, _) = process_session_packet_isolated(
+                        &data, known, 64, auth, &ctx, &counters, false,
+                    )
+                    .unwrap();
+                    assert_eq!(session.generate_sequence_number(), 0);
+                    if drain {
+                        manager.set_max_sessions(0);
+                        manager.set_draining(true);
+                    }
+                    for seq in 0..3 {
+                        let data = replay_control_packet(seq, auth, auth.then_some(&key), true);
+                        assert!(
+                            process_session_packet_isolated(
+                                &data, unknown, 64, auth, &ctx, &counters, false,
+                            )
+                            .is_none(),
+                            "rejected identity must not get fresh transient state"
+                        );
+                    }
+                    if stateful {
+                        assert!(
+                            process_stamp_packet(&data, unknown, 64, auth, &ctx).is_none(),
+                            "standalone stateful processing must propagate admission rejection"
+                        );
+                    }
+                    assert_eq!(manager.session_count(), 1);
+                    let data = replay_control_packet(11, auth, auth.then_some(&key), false);
+                    let (_, same, _) = process_session_packet_isolated(
+                        &data, known, 64, auth, &ctx, &counters, false,
+                    )
+                    .unwrap();
+                    assert!(Arc::ptr_eq(&session, &same));
+                    assert_eq!(same.generate_sequence_number(), 1);
+                    assert_eq!(same.get_received_count(), 2);
+                    assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 0);
+                    if drain {
+                        manager.set_draining(false);
+                    } else {
+                        manager.set_max_sessions(2);
+                    }
+                    assert!(process_session_packet_isolated(
+                        &data, unknown, 64, auth, &ctx, &counters, false,
+                    )
+                    .is_some());
+                    assert_eq!(manager.session_count(), 2);
+                }
+            }
         }
     }
 

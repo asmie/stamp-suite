@@ -73,6 +73,11 @@ impl Transmission {
         limiter: &RateLimiter,
         mut send: impl FnMut(&[u8], SocketAddr, &SendOptions) -> io::Result<usize>,
     ) -> Option<u32> {
+        let Some(_active) = self.session.transmission_guard() else {
+            counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+            self.remaining = 0;
+            return None;
+        };
         if matches!(
             self.response.return_path_action,
             ReturnPathAction::SuppressReply
@@ -497,6 +502,39 @@ mod tests {
         let mut input = data[..4].to_vec();
         input.extend_from_slice(&data[112..pos]);
         assert_eq!(&data[pos + 4..pos + 20], &key.compute(&input));
+    }
+
+    #[test]
+    fn expiry_cancels_old_burst_before_session_identity_restarts() {
+        for cleanup in [false, true] {
+            let manager = crate::session::SessionManager::new(Some(Duration::ZERO), Some(1));
+            let client: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+            let mut old = sample(true, ReturnPathAction::Normal);
+            old.session = manager.get_or_create_session(client).unwrap();
+            let counters = ReflectorCounters::new();
+            let limiter = RateLimiter::new(0);
+            let send = |data: &[u8], _: SocketAddr, _: &SendOptions| {
+                verify_signatures(data);
+                Ok(data.len())
+            };
+            assert_eq!(old.send_next(&counters, &limiter, send), Some(0));
+            if cleanup {
+                assert_eq!(manager.cleanup_stale_sessions(), 1);
+            } else {
+                assert!(manager.expire_session(client));
+            }
+            let mut fresh = sample(true, ReturnPathAction::Normal);
+            fresh.session = manager.get_or_create_session(client).unwrap();
+            assert_ne!(fresh.session.get_id(), old.session.get_id());
+            assert_eq!(fresh.send_next(&counters, &limiter, send), Some(0));
+            assert_eq!(
+                old.send_next(&counters, &limiter, |_, _, _| panic!("expired burst sent")),
+                None
+            );
+            assert_eq!(old.remaining, 0);
+            assert_eq!(old.session.get_transmitted_count(), 1);
+            assert_eq!(fresh.send_next(&counters, &limiter, send), Some(1));
+        }
     }
 
     #[test]

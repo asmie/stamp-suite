@@ -17,6 +17,7 @@ this file documents the opt-in invocations.
 | `loopback_ipv6_test.rs` | TLV-by-TLV IPv6 parity via `process_stamp_packet`. | yes |
 | `tlv_flag_semantics.rs` | RFC 8972 U/M/I + draft-asymmetrical C flag conformance. | yes |
 | `ber_regression_test.rs` | BER (Types 240/241/242) on-wire counts. | yes |
+| `session_capacity_test.rs` | Live cap rejection and continued sequence state, IPv4/IPv6, open/authenticated, both sequencing modes; with `control`, drain/resume, runtime caps, expiry/restart, and drop counters. | yes, Linux nix |
 | `session_ssid_validation_test.rs` | Independent UDP peer: wrong/matching SSIDs and zero-SSID policies, open/authenticated replies over IPv4/IPv6. | yes |
 | `required_micro_session_test.rs` | Independent UDP peer: missing/flagged Micro-session IDs produce no measurement; authenticated valid-ID control, IPv4/IPv6. No physical LAG test. | yes |
 | `keyset_fallback_test.rs` | Directory/default keys through normal/SRv6 fallback replies and queued-burst rotation; authenticated revocation, open/auth, IPv4/IPv6. | yes, Unix nix |

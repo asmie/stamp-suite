@@ -520,3 +520,32 @@ and short packets rejected by `--strict-packets`. These packets still enter
 aggregate receive/drop counters. A valid base packet with a failed TLV HMAC
 retains RFC 8972's I-flag reply behavior. Session caps and drain behavior remain
 separate from authentication admission.
+
+
+### Session capacity, drain, and restart
+
+`--max-sessions` bounds runtime entries keyed by both UDP endpoints, SSID, and
+optional sender micro ID (default 65536; `0` means unlimited). At the cap, new
+identities receive no reply in either sequencing mode. Rejection creates no
+session, consumes no session ID or stateful sequence, and enters the aggregate
+drop counter. Existing sessions continue with their sequences, counters,
+replay windows, and Follow-Up state. A smaller runtime cap never evicts them.
+
+Provisioning controls which identities may be admitted; it does not reserve
+capacity or bypass the cap. Size the cap for the intended concurrent sessions.
+Idle cleanup, explicit expiry, or increasing the cap can free admission capacity.
+With `--session-timeout 0`, automatic idle cleanup is disabled.
+
+The control API's drain switch rejects new identities, even with an unlimited
+cap, while allowing existing sessions and their queued replies to continue.
+Turning drain off restores admission subject to provisioning and capacity.
+Drain/cap changes serialize with session creation; once a change is acknowledged,
+new acquisitions use the updated policy.
+
+Manual expiry or idle cleanup ends a runtime session. Expiry waits for a send
+already in progress, then prevents the old instance's queued replies from
+transmitting. Queued entries are discarded when the send queue next services
+them. A subsequent admitted packet for the same identity starts a new internal
+session with sequence zero and fresh measurement/replay state; provisioning
+remains intact. Outgoing burst copies do not refresh the receive-idle timeout.
+A sender restart alone does not reset a still-active reflector session.

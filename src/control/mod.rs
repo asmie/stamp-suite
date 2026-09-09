@@ -811,7 +811,7 @@ mod tests {
     async fn sessions_lists_and_expires() {
         let state = test_state();
         let addr: std::net::SocketAddr = "10.0.0.1:5000".parse().unwrap();
-        state.session_manager.get_or_create_session(addr);
+        state.session_manager.get_or_create_session(addr).unwrap();
         let app = router(state.clone());
 
         let v = get_json(&app, "/v1/sessions").await;
@@ -849,10 +849,11 @@ mod tests {
     async fn sessions_expiry_requires_disambiguation_for_shared_source() {
         let state = test_state();
         let key: crate::session::SessionKey = "42,127.0.0.1:4000,127.0.0.1:862,7".parse().unwrap();
-        let first = state.session_manager.get_or_create_session(key);
+        let first = state.session_manager.get_or_create_session(key).unwrap();
         state
             .session_manager
-            .get_or_create_session(crate::session::SessionKey { ssid: 43, ..key });
+            .get_or_create_session(crate::session::SessionKey { ssid: 43, ..key })
+            .unwrap();
         let app = router(state.clone());
         let entries = get_json(&app, "/v1/sessions").await;
         assert_eq!(entries.as_array().unwrap().len(), 2);
