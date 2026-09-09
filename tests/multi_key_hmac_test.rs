@@ -29,6 +29,7 @@ fn make_ctx<'a>(
     hmac_key_set: Option<&'a HmacKeySet>,
 ) -> ProcessingContext<'a> {
     ProcessingContext {
+        replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
         error_estimate_wire: 0,
         hmac_key,

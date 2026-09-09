@@ -26,6 +26,7 @@ fuzz_target!(|data: &[u8]| {
     // Build a context with the optional/amplifying features turned on so those
     // code paths are fuzzed too (the production defaults gate them off).
     let ctx = ProcessingContext {
+        replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
         error_estimate_wire: 0,
         hmac_key: None,

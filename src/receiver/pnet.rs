@@ -76,8 +76,8 @@ struct CaptureConfig {
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
     /// RFC 8972 §4.2.2 Location field-disclosure policy.
     location_disclosure: crate::tlv::LocationDisclosure,
-    /// Suppress the reply to a replayed Sequence Number
-    /// (draft-ietf-ippm-asymmetrical-pkts-14 §5, `--drop-replayed`).
+    /// Suppress ordinary duplicates (`--drop-replayed`); handled Type-12
+    /// requests use the single U-flagged response required by draft §5.
     drop_replayed: bool,
     /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, cos-ecn-01 §3.2).
     cos_policy: crate::cos_policy::CosAdmissionPolicy,
@@ -836,6 +836,7 @@ fn handle_stamp_packet(
     let response_opt = {
         let keys_guard = config.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
         let ctx = ProcessingContext {
+            replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: config.clock_source,
             error_estimate_wire: config.error_estimate_wire,
             hmac_key: config.hmac_key.as_ref(),

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Return one U-flagged reply for non-monotonic Type-12 requests in both reflector
+  backends. Preserve normal burst handling after sequence wraparound, skip
+  requested padding on ordering failures, and apply final HMACs to the flags.
+  Keep this draft-required response active with `--drop-replayed`; ordinary
+  duplicate suppression remains configurable.
+
 - Reject reflected packets whose nonzero SSID differs from the configured sender
   session before updating measurements or control state. Preserve configurable
   zero-SSID compatibility and cover open/authenticated replies over IPv4/IPv6.

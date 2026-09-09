@@ -174,15 +174,11 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
                                    dst-port, ports, src-ip, dst-ip, ips.
                                    Withheld fields are answered as zeroes, so
                                    the reply's size and TLV layout do not change
-      --drop-replayed              Suppress the reply to a packet whose Sequence
-                                   Number was already seen on its session
-                                   (draft-ietf-ippm-asymmetrical-pkts §5).
-                                   Detection and counting are always on; this
-                                   only decides whether a duplicate is answered.
-                                   Off by default — a Session-Sender restarted
-                                   mid-run replays its own numbering, and
-                                   dropping its traffic would break an honest
-                                   measurement
+      --drop-replayed              Suppress ordinary duplicated packets.
+                                   Handled Type-12 requests instead receive one
+                                   U-flagged reply on non-monotonic ordering,
+                                   even with this flag set (draft §5).
+                                   Off by default; detection/counting always on
       --strict-packets             Reject short packets instead of zero-filling (RFC 8762 §4.6)
       --require-hmac               Error out at startup if no HMAC key is configured
       --verify-tlv-hmac            Verify HMAC TLV (RFC 8972) on incoming packets
@@ -230,21 +226,28 @@ connected socket and so cannot be used by a reflector. The discovered ceiling
 also bounds runtime updates: a control-plane `PATCH /v1/caps` cannot raise
 `reflected_control_max_size` past it.
 
-**Replay detection (draft-ietf-ippm-asymmetrical-pkts §5).** The reflector
-classifies the Sequence Number of every received packet against a 31-entry
-per-session window — new, reordered, replayed, or older than the window. This
-runs unconditionally — the draft notes the HMAC TLV is no defence here, since a
-replayed packet carries a valid HMAC. The window itself only advances for
-packets that survive parsing and (when a key is configured) HMAC verification:
-an unverified packet can be *refused* on its verdict but can never *plant* a
-sequence number, so a spoofed packet cannot get a later genuine one dropped
-under `--drop-replayed`. Two counters,
-`packets_replayed` and `packets_reordered`, appear in the control-plane
-`/v1/status` response (reordering is separated out because it is ordinary on a
-real path). Detection never changes what is sent unless `--drop-replayed` is
-set. Per-event logging stays at debug level on purpose: the sequence numbers are
-attacker-controlled, so warning per event would hand a remote peer a
-log-amplification lever.
+**Replay detection (draft-ietf-ippm-asymmetrical-pkts-14 §5).** After base
+validation and configured authentication, the reflector classifies each sender
+Sequence Number against its session's high-water mark and 31-entry replay
+bitmap: new, reordered, duplicated, or older than the window. Serial arithmetic
+handles wraparound from `u32::MAX` to zero. The window is committed after
+response assembly; a failed base HMAC cannot plant a sequence number.
+
+A usable Type-12 request with any non-new verdict receives a single response
+with U=1 on Type 12. Its requested burst, padding, and interval are not applied.
+This behavior is active with either sequencing mode and takes precedence over
+`--drop-replayed`, the Type-12 count/size controls, and a zero requested count.
+Existing identity, integrity, and address-group rejection rules still apply;
+invalid TLVs retain their M/I handling. Base/TLV response signatures cover the
+final flags. A subsequent new request can again receive its requested burst.
+
+`--drop-replayed` optionally suppresses duplicated packets without a handled
+Type-12 request; with `--tlv-mode ignore`, Type 12 is not handled. Reordered and
+out-of-window ordinary packets retain their normal response. Counters
+`packets_replayed` and `packets_reordered` appear in `/v1/status`; ordering
+failures do not prove an attack. Restarting a sender on the same session identity
+may produce these verdicts until numbering advances or the session expires.
+Per-event logging remains at debug level.
 
 RFC 8972 §4.2.2 lets a reflector "leave some fields unreported by filling them
 with zeroes" under local policy and requires an implementation to provide

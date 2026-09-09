@@ -550,6 +550,7 @@ pub async fn run_receiver(
                 let response_opt = {
                     let keys_guard = shared.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
                     let ctx = ProcessingContext {
+                        replay_verdict: crate::session::ReplayVerdict::New,
                         clock_source: conf.clock_source,
                         error_estimate_wire,
                         hmac_key: hmac_key.as_ref(),

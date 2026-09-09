@@ -967,13 +967,12 @@ pub fn reflected_control_size_ceiling(conf: &Configuration) -> u16 {
 ///
 /// The Sequence Number is the first four octets of the base packet in both the
 /// authenticated and unauthenticated layouts (RFC 8762 §4.2/§4.3), so no full
-/// parse is needed — this runs before processing, on the bytes as received.
+/// parse is needed; live processing calls this after base validation.
 ///
 /// Shared by both backends so detection cannot drift between them. Returns the
-/// verdict; acting on it (`--drop-replayed`) is the caller's decision, because
-/// a duplicate is not proof of an attack: a sender restarted mid-run produces
-/// the same pattern, and dropping its traffic would break an honest
-/// measurement.
+/// verdict to the shared pipeline. Type-12 semantic processing uses every
+/// non-New verdict for the mandatory single U-flagged reply. The optional
+/// `--drop-replayed` policy can suppress other duplicated packets.
 ///
 /// Classification only — the window is NOT advanced here. Live processing
 /// calls this after base parsing and configured HMAC verification, so rejected
@@ -1423,6 +1422,10 @@ pub struct ProcessingContext<'a> {
     /// the Sequence Number and Follow-Up Timestamp fields MUST be zeroed
     /// (RFC 8972 §4.7-7) rather than carry the previous reflection.
     pub stateful_reflector: bool,
+    /// Ordering of this verified base packet in its session. Live processing
+    /// supplies the verdict; standalone callers without history use `New`.
+    /// Non-monotonic Type-12 requests receive one U-flagged response (§5).
+    pub replay_verdict: crate::session::ReplayVerdict,
     /// TLV handling mode.
     pub tlv_mode: TlvHandlingMode,
     /// Whether to verify incoming TLV HMAC.
@@ -1761,8 +1764,22 @@ fn process_stamp_packet_inner(
         let session = ctx.session_manager?.get_or_create_session(session_key?);
         session.record_received();
         let verdict = evaluate_replay(&session, data, counters);
+        ctx.replay_verdict = verdict;
         if drop_replayed && verdict == crate::session::ReplayVerdict::Replay {
-            return None;
+            // Type 12 has its own mandatory one-reply ordering failure path
+            // (draft-ietf-ippm-asymmetrical-pkts-14 §5). The optional duplicate
+            // drop policy applies only when that TLV is not being handled.
+            // Inspect only this opt-in duplicate path; semantic processing
+            // still performs normal TLV integrity and address-group checks.
+            let handles_control = ctx.tlv_mode == TlvHandlingMode::Echo
+                && has_tlvs
+                && TlvList::parse_lenient(&data[base_size..])
+                    .0
+                    .get_reflected_control_request()
+                    .is_some();
+            if !handles_control {
+                return None;
+            }
         }
         ctx.reflector_rx_count = Some(session.get_received_count());
         ctx.reflector_tx_count = Some(session.get_transmitted_count());
@@ -2422,6 +2439,17 @@ fn apply_semantic_tlv_processing(
                 tlvs.set_return_path_u_flag();
                 return_path_action = ReturnPathAction::Normal;
                 None
+            } else if ctx.replay_verdict != crate::session::ReplayVerdict::New {
+                // §5 applies to duplicate, reordered, and out-of-window
+                // requests, including valid signed replays. Do not execute
+                // their count, padding, or interval instructions. Finish the
+                // normal TLV signing path after setting U on Type 12.
+                tlvs.set_reflected_control_u_flag();
+                if return_path_action == ReturnPathAction::SuppressReply {
+                    tlvs.set_return_path_u_flag();
+                    return_path_action = ReturnPathAction::Normal;
+                }
+                None
             } else if ctx.reflected_control_max_count == 0 {
                 // Administrative disable (the production default; §5 mandates
                 // support be off by default). Treated as a volume limit of
@@ -2868,6 +2896,7 @@ mod tests {
             let counters = ReflectorCounters::new();
             let (response, session, signing_key) = {
                 let ctx = ProcessingContext {
+                    replay_verdict: crate::session::ReplayVerdict::New,
                     hmac_key: Some(&replacement), // must lose to the SSID-specific entry
                     hmac_key_set: Some(&keys),
                     session_manager: Some(&manager),
@@ -2929,6 +2958,216 @@ mod tests {
         }
     }
 
+    fn replay_control_packet(
+        seq: u32,
+        auth: bool,
+        key: Option<&HmacKey>,
+        control: bool,
+    ) -> Vec<u8> {
+        let base = if auth { 112 } else { 44 };
+        let mut data = vec![0; base];
+        data[..4].copy_from_slice(&seq.to_be_bytes());
+        let ssid = if auth { 26 } else { 14 };
+        data[ssid - 1] = 1;
+        data[ssid..ssid + 2].copy_from_slice(&42u16.to_be_bytes());
+        if control {
+            data.extend_from_slice(&[0x80, 12, 0, 12, 4, 0, 0, 3]);
+            data.extend_from_slice(&100_000_000u32.to_be_bytes());
+            data.extend_from_slice(&[0; 4]);
+        }
+        if let Some(key) = key {
+            if auth {
+                let mac = crate::crypto::compute_packet_hmac(key, &data, 96);
+                data[96..112].copy_from_slice(&mac);
+            }
+            if control {
+                let mut covered = data[..4].to_vec();
+                covered.extend_from_slice(&data[base..]);
+                data.extend_from_slice(&[0x80, 8, 0, 16]);
+                data.extend_from_slice(&key.compute(&covered));
+            }
+        }
+        data
+    }
+
+    /// Both live backends share this entry; also runs in pnet-only builds.
+    #[test]
+    fn non_monotonic_control_gets_one_u_flagged_reply() {
+        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+        for (auth, keyed) in [(false, false), (false, true), (true, true)] {
+            for stateful in [false, true] {
+                for drop_replayed in [false, true] {
+                    for sequences in [
+                        vec![
+                            (1000, false),
+                            (1002, false),
+                            (1000, true),
+                            (1001, true),
+                            (900, true),
+                            (1003, false),
+                        ],
+                        vec![
+                            (u32::MAX - 1, false),
+                            (u32::MAX, false),
+                            (0, false),
+                            (u32::MAX, true),
+                            (1, false),
+                        ],
+                    ] {
+                        let manager = Arc::new(SessionManager::new(None, None));
+                        let counters = ReflectorCounters::new();
+                        let ctx = ProcessingContext {
+                            replay_verdict: crate::session::ReplayVerdict::New,
+                            session_manager: Some(&manager),
+                            hmac_key: keyed.then_some(&key),
+                            stateful_reflector: stateful,
+                            ..test_ctx(0, 0)
+                        };
+                        for (seq, non_monotonic) in sequences {
+                            let data =
+                                replay_control_packet(seq, auth, keyed.then_some(&key), true);
+                            let (response, _, _) = process_session_packet_isolated(
+                                &data, loopback_src(), 64, auth, &ctx, &counters, drop_replayed,
+                            ).expect("Type-12 ordering failures require a reply even with --drop-replayed");
+                            let base = if auth { 112 } else { 44 };
+                            assert_eq!(response.data[base + 1], 12);
+                            assert_eq!(
+                                response.data[base] & 0xC8,
+                                if non_monotonic { 0x80 } else { 0 },
+                                "seq={seq} auth={auth} stateful={stateful} drop={drop_replayed}"
+                            );
+                            assert_eq!(
+                                response.reflected_control.map_or(0, |c| c.extra_copies),
+                                if non_monotonic { 0 } else { 2 }
+                            );
+                            assert_eq!(response.return_path_action, ReturnPathAction::Normal);
+                            if non_monotonic {
+                                assert_eq!(
+                                    response.data.len(),
+                                    data.len(),
+                                    "do not honor requested padding on a replay"
+                                );
+                            } else {
+                                assert_eq!(response.data.len(), 1024);
+                            }
+                            if auth {
+                                assert_eq!(
+                                    &response.data[96..112],
+                                    &crate::crypto::compute_packet_hmac(&key, &response.data, 96)
+                                );
+                            }
+                            if keyed {
+                                assert!(verify_incoming_tlv_hmac(&response.data, base, &key));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_monotonic_control_preserves_tlv_validation_and_group_filters() {
+        for auth in [false, true] {
+            let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+            let manager = Arc::new(SessionManager::new(None, None));
+            let counters = ReflectorCounters::new();
+            let ctx = ProcessingContext {
+                hmac_key: Some(&key),
+                session_manager: Some(&manager),
+                ..test_ctx(0, 0)
+            };
+            let valid = replay_control_packet(42, auth, Some(&key), true);
+            assert!(process_session_packet_isolated(
+                &valid,
+                loopback_src(),
+                64,
+                auth,
+                &ctx,
+                &counters,
+                true
+            )
+            .is_some());
+            let mut corrupted = valid.clone();
+            *corrupted.last_mut().unwrap() ^= 1; // valid base, failed TLV integrity
+            let (response, _, _) = process_session_packet_isolated(
+                &corrupted,
+                loopback_src(),
+                64,
+                auth,
+                &ctx,
+                &counters,
+                true,
+            )
+            .unwrap();
+            let base = if auth { 112 } else { 44 };
+            assert_eq!(response.data[base] & 0x20, 0x20);
+            assert!(response.reflected_control.is_none());
+            assert_eq!(response.data.len(), corrupted.len());
+        }
+        // The ordering response must not override the address-group admission rule.
+        let mut data = replay_control_packet(42, false, None, true);
+        data.truncate(44 + 4 + 8); // replace the four-octet placeholder sub-TLV
+        data[46..48].copy_from_slice(&24u16.to_be_bytes());
+        data.extend_from_slice(&[0, 10, 0, 12]);
+        data.extend_from_slice(&[0xFF; 6]);
+        data.extend_from_slice(&[1; 6]);
+        let ctx = ProcessingContext {
+            replay_verdict: crate::session::ReplayVerdict::Replay,
+            ..test_ctx(0, 0)
+        };
+        let response = process_stamp_packet(&data, loopback_src(), 64, false, &ctx).unwrap();
+        assert_eq!(response.return_path_action, ReturnPathAction::SuppressReply);
+        assert!(response.reflected_control.is_none());
+    }
+
+    #[test]
+    fn non_monotonic_control_does_not_execute_zero_count_or_disabled_requests() {
+        for count in [0u16, 3] {
+            for cap in [0, 16] {
+                let mut data = replay_control_packet(42, false, None, true);
+                data[50..52].copy_from_slice(&count.to_be_bytes());
+                let ctx = ProcessingContext {
+                    replay_verdict: crate::session::ReplayVerdict::Replay,
+                    reflected_control_max_count: cap,
+                    ..test_ctx(0, 0)
+                };
+                let response =
+                    process_stamp_packet(&data, loopback_src(), 64, false, &ctx).unwrap();
+                assert_eq!(response.data[44] & 0xE8, 0x80);
+                assert_eq!(response.return_path_action, ReturnPathAction::Normal);
+                assert!(response.reflected_control.is_none());
+                assert_eq!(response.data.len(), data.len());
+            }
+        }
+    }
+
+    #[test]
+    fn replay_drop_policy_still_controls_ordinary_packets() {
+        for drop_replayed in [false, true] {
+            let manager = Arc::new(SessionManager::new(None, None));
+            let counters = ReflectorCounters::new();
+            let ctx = ProcessingContext {
+                replay_verdict: crate::session::ReplayVerdict::New,
+                session_manager: Some(&manager),
+                ..test_ctx(0, 0)
+            };
+            let data = replay_control_packet(42, false, None, false);
+            for duplicate in [false, true] {
+                let response = process_session_packet_isolated(
+                    &data,
+                    loopback_src(),
+                    64,
+                    false,
+                    &ctx,
+                    &counters,
+                    drop_replayed,
+                );
+                assert_eq!(response.is_none(), duplicate && drop_replayed);
+            }
+        }
+    }
+
     /// Runs for pnet-only builds too, without requiring a raw capture channel.
     #[test]
     fn tracked_processing_validates_before_any_session_mutation() {
@@ -2938,6 +3177,7 @@ mod tests {
                 let manager = Arc::new(SessionManager::new(None, Some(1)));
                 let counters = ReflectorCounters::new();
                 let ctx = ProcessingContext {
+                    replay_verdict: crate::session::ReplayVerdict::New,
                     session_manager: Some(&manager),
                     hmac_key: Some(&key),
                     strict_packets: strict,
@@ -2999,6 +3239,7 @@ mod tests {
                 assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 0);
                 // Revoking the required base key must not refresh an existing session.
                 let no_key = ProcessingContext {
+                    replay_verdict: crate::session::ReplayVerdict::New,
                     hmac_key: None,
                     require_hmac: true,
                     ..ctx
@@ -3062,6 +3303,7 @@ mod tests {
         ));
         for stateful in [false, true] {
             let ctx = ProcessingContext {
+                replay_verdict: crate::session::ReplayVerdict::New,
                 session_manager: Some(&manager),
                 stateful_reflector: stateful,
                 ..test_ctx(0, 0)
@@ -3074,6 +3316,7 @@ mod tests {
     /// Creates a default ProcessingContext for tests with given DSCP/ECN values.
     fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext<'static> {
         ProcessingContext {
+            replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: ClockFormat::NTP,
             error_estimate_wire: 0,
             hmac_key: None,

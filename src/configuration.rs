@@ -379,14 +379,12 @@ pub struct Configuration {
     #[clap(long, value_name = "PREFIX/LEN=SPEC")]
     pub allowed_dscp_for: Vec<String>,
 
-    /// Suppress the reply to a packet whose Sequence Number was already seen
-    /// on its session (draft-ietf-ippm-asymmetrical-pkts-14 §5).
+    /// Suppress duplicated packets without a handled Type-12 request.
     ///
-    /// Detection is always on and counted; this flag makes the reflector act on
-    /// it. Off by default because a duplicate is not proof of an attack — a
-    /// Session-Sender restarted mid-run replays its own numbering, and dropping
-    /// its traffic would break an honest measurement. Turn it on where replayed
-    /// Type-12 requests are a real amplification concern.
+    /// Non-monotonic Type-12 requests always receive a single U-flagged reply
+    /// after validation (draft-ietf-ippm-asymmetrical-pkts-14 §5), even with this
+    /// flag set. Detection and counting are always active. Off by default:
+    /// restarting a sender can repeat sequence numbers without an attack.
     ///
     /// Reflector-side only.
     #[clap(long)]
@@ -4183,7 +4181,7 @@ mod tests {
         let conf = load_from_args(&["test"]).unwrap();
         assert!(
             !conf.drop_replayed,
-            "acting on a duplicate must be opt-in: a restarted sender replays \
+            "dropping an ordinary duplicate must be opt-in: a restarted sender replays \
              its own numbering and dropping it would break honest measurement"
         );
 

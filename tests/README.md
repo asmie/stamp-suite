@@ -11,6 +11,7 @@ this file documents the opt-in invocations.
 | --- | --- | --- |
 | `config_file_test.rs` | TOML config parsing and validation. | yes |
 | `loopback_test.rs` | UDP-loopback round-trips on `127.0.0.1` (and one `[::1]`). | yes |
+| `replay_control_test.rs` | Independent Type-12 peer: single U-flagged replies for duplicate/reordered/old requests, sequence wraparound, SSID isolation, HMACs, both sequencing modes and drop policies, IPv4/IPv6. | yes, Linux nix |
 | `burst_transmission_test.rs` | Live interleaved burst replies: IPv4/IPv6, open/auth, NTP/PTP, stateless/stateful, CoS, DM, Follow-Up, HMAC, and kernel TX correlation. | yes, Linux nix |
 | `idle_cpu_test.rs` | Real reflector process: bounded idle CPU after traffic, then receipt of another packet; IPv4/IPv6 and optional kernel timestamps. Linux nix backend; reads child CPU accounting from `/proc`. | yes, Linux nix |
 | `loopback_ipv6_test.rs` | TLV-by-TLV IPv6 parity via `process_stamp_packet`. | yes |

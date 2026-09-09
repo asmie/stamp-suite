@@ -556,6 +556,7 @@ fn test_location_tlv_ipv4_round_trip() {
     };
 
     let ctx = ProcessingContext {
+        replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
         error_estimate_wire: 0,
         hmac_key: None,

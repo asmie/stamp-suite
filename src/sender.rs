@@ -5329,6 +5329,7 @@ mod tests {
         // --- Reflector side: pure, socket-free assembly ---
         let packet = PacketUnauthenticated::from_bytes(&request_bytes).unwrap();
         let ctx = ProcessingContext {
+            replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: ClockFormat::NTP,
             error_estimate_wire: 0,
             hmac_key: None,
@@ -5773,6 +5774,7 @@ mod tests {
             if received == ack_after {
                 let packet = PacketUnauthenticated::from_bytes(&buf[..len]).unwrap();
                 let ctx = ProcessingContext {
+                    replay_verdict: crate::session::ReplayVerdict::New,
                     clock_source: ClockFormat::NTP,
                     error_estimate_wire: 0,
                     hmac_key: None,

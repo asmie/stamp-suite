@@ -7,12 +7,12 @@ historical, not a current conformance sign-off. The [September review](../review
 identified 16 findings, including behavior previously scored Compliant.
 The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
 verification one item at a time. Finding 02 updates the three session-admission rows for provisioned mode only.
-Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Other clause scores remain historical; citation maintenance alone does not
+Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Finding 09 repairs the Type-12 ordering response and reclassifies its stale N-A row as Compliant. Other clause scores remain historical; citation maintenance alone does not
 close the remaining findings.
 
 This document rolls up the eight clause-level conformance matrices in this
 directory into a single compliance statement for the stamp-suite 1.0 line.
-Counts below include finding 02 (RFC 8972) and finding 07 (RFC 9534); they are not a new
+Counts below include findings 02 (RFC 8972), 07 (RFC 9534), and 09 (Type-12 ordering); they are not a new
 full-project audit.
 Where this document goes further than the matrices is in stating, as a
 maintainer decision, which of the residual non-Compliant rows are accepted
@@ -34,10 +34,10 @@ tracked independently of these historical clause totals.
 | [RFC 9503](rfc9503.md) — Destination Node Address / Return Path | RFC 9503, October 2023 | 26 | 22 | 0 | 0 | 3 | 1 |
 | [RFC 9534](rfc9534.md) — Micro-session ID (LAG) | RFC 9534, January 2024 | 18 | 9 | 6 | 1 | 2 | 0 |
 | [RFC 8545](rfc8545.md) — TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
-| [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 (RFC Editor queue) | 47 | 38 | 0 | 0 | 8 | 1 |
+| [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 | 47 | 39 | 0 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md) — CoS/ECN congestion signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -11, 4 July 2026 | 40 | 38 | 0 | 0 | 2 | 0 |
-| **Total** | | **368** | **317** | **6** | **1** | **41** | **3** |
+| **Total** | | **368** | **318** | **6** | **1** | **40** | **3** |
 
 Each matrix was independently re-verified against a freshly fetched copy of
 its source text on 2026-07-22 (see each file's own "Revision frozen" line and
