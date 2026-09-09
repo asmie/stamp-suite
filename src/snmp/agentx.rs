@@ -27,13 +27,13 @@ const AGENTX_CLEANUPSET_PDU: u8 = 11;
 // PDU header flag bits (RFC 2741 §6.1). We only emit/inspect NETWORK_BYTE_ORDER.
 const AGENTX_FLAG_NETWORK_BYTE_ORDER: u8 = 0x10;
 
-// res.error values for Response PDUs (RFC 2741 §6.2.2.1 / SNMPv2 error-status).
+// res.error values for Response PDUs (RFC 2741 §6.2.16 / SNMPv2 error-status).
 // This sub-agent is read-only, so any SET-phase request is rejected.
 const RES_ERROR_NOT_WRITABLE: u16 = 17;
 const RES_ERROR_COMMIT_FAILED: u16 = 14;
 const RES_ERROR_UNDO_FAILED: u16 = 15;
 
-// Close reasons (RFC 2741 §6.2.6)
+// Close reasons (RFC 2741 §6.2.2)
 const REASON_SHUTDOWN: u8 = 1;
 
 // AgentX protocol version
@@ -43,7 +43,7 @@ const AGENTX_VERSION: u8 = 1;
 const MAX_PDU_PAYLOAD: u32 = 1_048_576;
 
 // Maximum number of SearchRanges processed per GET/GETNEXT/GETBULK PDU.
-// A 1 MB PDU can pack ~65k SearchRanges (min 16 bytes each); combined with
+// A 1 MB PDU can pack ~131k SearchRanges (min 8 bytes each); combined with
 // GETBULK's per-range repetitions and the per-lookup OID-space scan, an
 // unbounded count is a CPU-amplification lever. Real master agents issue a
 // handful of ranges, so this ceiling is generous while bounding worst-case work.
@@ -79,6 +79,8 @@ pub enum AgentXError {
     Protocol(String),
     #[error("Master agent returned error: res_error={0}")]
     ResponseError(u16),
+    #[error("Too many AgentX SearchRanges")]
+    SearchRangeLimit,
     #[error("Unexpected PDU type: {0}")]
     UnexpectedPdu(u8),
 }
@@ -171,10 +173,9 @@ pub fn encode_pdu(
     buf.push(AGENTX_VERSION);
     buf.push(pdu_type);
     // All multi-byte fields below are big-endian (network byte order), so we
-    // MUST advertise NETWORK_BYTE_ORDER (RFC 2741 §6.1). The sub-agent chooses
-    // the session byte order in its Open PDU; the master then uses it in both
-    // directions. Previously this byte was left 0, which falsely declared
-    // little-endian.
+    // MUST advertise NETWORK_BYTE_ORDER (RFC 2741 §6.1). This is a per-PDU
+    // flag, not a session negotiation. Our outgoing PDUs always use it;
+    // little-endian request payloads remain unsupported.
     buf.push(flags | AGENTX_FLAG_NETWORK_BYTE_ORDER);
     buf.push(0); // reserved
     buf.extend_from_slice(&session_id.to_be_bytes());
@@ -375,28 +376,56 @@ pub fn encode_varbind(vb: &VarBind) -> Vec<u8> {
 /// Decodes a SearchRange from a buffer per RFC 2741 §5.2.
 /// Returns (start_oid, end_oid, bytes_consumed).
 pub fn decode_search_range(buf: &[u8]) -> Result<(Oid, Oid, usize), AgentXError> {
-    let (start_oid, include, start_len) = decode_oid(buf)?;
+    let (start_oid, _include, start_len) = decode_oid(buf)?;
     let (end_oid, _end_include, end_len) = decode_oid(&buf[start_len..])?;
 
-    // The include flag is part of the start OID encoding
-    let _ = include;
+    // Bounds-only convenience decoder; request processing uses decode_oid
+    // directly to retain the inclusive-start flag too.
 
     Ok((start_oid, end_oid, start_len + end_len))
 }
 
-/// Parses at most `max` SearchRanges from a PDU payload.
-///
-/// Bounding the count is a DoS guard: a 1 MB PDU could otherwise pack tens of
-/// thousands of SearchRanges (min 16 bytes each), and in GETBULK each range is
-/// multiplied by `max_repetitions` and an OID-space scan. `decode_search_range`
-/// always consumes ≥ 16 bytes, so the loop makes progress and terminates.
-fn parse_search_ranges(payload: &[u8], max: usize) -> Result<Vec<(Oid, Oid)>, AgentXError> {
+/// A search cursor preserves the inclusive start on the first lookup only.
+struct SearchRange {
+    start: Oid,
+    end: Oid,
+    include: bool,
+}
+
+impl SearchRange {
+    fn next(&self, handler: &dyn MibHandler, snapshot: &[Oid]) -> VarBind {
+        if self.include && (self.end.is_empty() || self.start < self.end) {
+            let value = handler.get(&self.start);
+            if !matches!(
+                value.value,
+                VarBindValue::NoSuchObject
+                    | VarBindValue::NoSuchInstance
+                    | VarBindValue::EndOfMibView
+            ) {
+                return value;
+            }
+        }
+        handler.get_next_snapshot(&self.start, &self.end, snapshot)
+    }
+}
+
+/// Parse complete ranges without silently dropping columns from a bulk walk.
+/// The minimum encoded range is two four-octet null OIDs (8 bytes).
+fn parse_search_ranges(payload: &[u8], max: usize) -> Result<Vec<SearchRange>, AgentXError> {
     let mut ranges = Vec::new();
     let mut offset = 0;
-    while offset < payload.len() && ranges.len() < max {
-        let (start_oid, end_oid, consumed) = decode_search_range(&payload[offset..])?;
-        offset += consumed;
-        ranges.push((start_oid, end_oid));
+    while offset < payload.len() {
+        if ranges.len() == max {
+            return Err(AgentXError::SearchRangeLimit);
+        }
+        let (start, include, start_len) = decode_oid(&payload[offset..])?;
+        let (end, _, end_len) = decode_oid(&payload[offset + start_len..])?;
+        offset += start_len + end_len;
+        ranges.push(SearchRange {
+            start,
+            end,
+            include,
+        });
     }
     Ok(ranges)
 }
@@ -437,6 +466,87 @@ pub trait MibHandler: Send + Sync {
     /// override it keep working unchanged.
     fn get_next_snapshot(&self, oid: &Oid, end: &Oid, _snapshot: &[Oid]) -> VarBind {
         self.get_next(oid, end)
+    }
+}
+
+/// Retains every consumed byte across socket timeout/cancellation ticks.
+/// One read per poll keeps cancellation responsive even if a peer trickles data.
+#[derive(Default)]
+struct PduReader {
+    header_bytes: [u8; PDU_HEADER_SIZE],
+    header_read: usize,
+    header: Option<PduHeader>,
+    payload: Vec<u8>,
+    payload_read: usize,
+}
+impl PduReader {
+    fn is_empty(&self) -> bool {
+        self.header_read == 0
+    }
+
+    fn poll(
+        &mut self,
+        stream: &mut impl Read,
+    ) -> Result<Option<(PduHeader, Vec<u8>)>, AgentXError> {
+        let target = if self.header.is_none() {
+            &mut self.header_bytes[self.header_read..]
+        } else {
+            &mut self.payload[self.payload_read..]
+        };
+        let read = match stream.read(target) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "AgentX stream closed within/before a frame",
+                )
+                .into())
+            }
+            Ok(n) => n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(None)
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if self.header.is_none() {
+            self.header_read += read;
+            if self.header_read != PDU_HEADER_SIZE {
+                return Ok(None);
+            }
+            let header = decode_header(&self.header_bytes)?;
+            // This implementation only decodes network-order payloads. Byte
+            // order is a per-PDU flag, not negotiated by the Open exchange.
+            if header.flags & AGENTX_FLAG_NETWORK_BYTE_ORDER == 0 {
+                return Err(AgentXError::Protocol(
+                    "Little-endian AgentX payloads are unsupported".into(),
+                ));
+            }
+            if header.payload_length > MAX_PDU_PAYLOAD {
+                return Err(AgentXError::Protocol(format!(
+                    "PDU payload too large: {} bytes (max {})",
+                    header.payload_length, MAX_PDU_PAYLOAD
+                )));
+            }
+            self.payload = vec![0; header.payload_length as usize];
+            self.header = Some(header);
+        } else {
+            self.payload_read += read;
+        }
+        if self.payload_read == self.payload.len() {
+            let header = self.header.take();
+            let payload = std::mem::take(&mut self.payload);
+            self.header_read = 0;
+            self.payload_read = 0;
+            Ok(header.map(|h| (h, payload)))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -568,65 +678,53 @@ impl AgentXSession {
         // Set a shorter read timeout so we can check for cancellation
         self.stream.set_read_timeout(Some(Duration::from_secs(1)))?;
 
+        let mut reader = PduReader::default();
         loop {
             if cancel.load(Ordering::Relaxed) {
-                let _ = self.close();
+                // An incomplete request cannot be mistaken for the response
+                // to our Close PDU. Abandon that transport on cancellation.
+                if reader.is_empty() {
+                    let _ = self.close();
+                } else {
+                    let _ = self.stream.shutdown(std::net::Shutdown::Both);
+                }
                 return Ok(());
             }
-
-            let mut header_buf = [0u8; PDU_HEADER_SIZE];
-            match self.stream.read_exact(&mut header_buf) {
-                Ok(()) => {}
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => continue,
-                Err(e) => return Err(AgentXError::Io(e)),
-            }
-
-            let header = decode_header(&header_buf)?;
-
-            // We negotiated network byte order in our Open PDU and only decode
-            // multi-byte fields big-endian. A conformant master echoes that for
-            // the whole session; a PDU in the other byte order would be silently
-            // misinterpreted, so reject it explicitly. (connect()/register() use
-            // big-endian unconditionally and are unaffected, so startup is never
-            // blocked by this check.)
-            if header.flags & AGENTX_FLAG_NETWORK_BYTE_ORDER == 0 {
-                return Err(AgentXError::Protocol(format!(
-                    "master sent PDU type {} in little-endian byte order, which is unsupported",
-                    header.pdu_type
-                )));
-            }
-
-            if header.payload_length > MAX_PDU_PAYLOAD {
-                return Err(AgentXError::Protocol(format!(
-                    "PDU payload too large: {} bytes (max {})",
-                    header.payload_length, MAX_PDU_PAYLOAD
-                )));
-            }
-
-            let mut payload = vec![0u8; header.payload_length as usize];
-            if !payload.is_empty() {
-                self.stream.read_exact(&mut payload)?;
-            }
+            let Some((header, payload)) = reader.poll(&mut self.stream)? else {
+                continue;
+            };
 
             match header.pdu_type {
-                AGENTX_GET_PDU => {
-                    let response = self.handle_get(&header, &payload, handler)?;
-                    self.stream.write_all(&response)?;
-                }
-                AGENTX_GETNEXT_PDU => {
-                    let response = self.handle_get_next(&header, &payload, handler)?;
-                    self.stream.write_all(&response)?;
-                }
-                AGENTX_GETBULK_PDU => {
-                    let response = self.handle_get_bulk(&header, &payload, handler)?;
+                AGENTX_GET_PDU | AGENTX_GETNEXT_PDU | AGENTX_GETBULK_PDU => {
+                    let result = match header.pdu_type {
+                        AGENTX_GET_PDU => self.handle_get(&header, &payload, handler),
+                        AGENTX_GETNEXT_PDU => self.handle_get_next(&header, &payload, handler),
+                        _ => self.handle_get_bulk(&header, &payload, handler),
+                    };
+                    let response = match result {
+                        Ok(response) => response,
+                        // RFC 2741 §7.2.3: report the failed range, without
+                        // returning a list whose omitted columns shift R.
+                        Err(AgentXError::SearchRangeLimit) => self.build_response_with_status(
+                            &header,
+                            5,
+                            (MAX_SEARCH_RANGES_PER_PDU + 1) as u16,
+                            &[],
+                        ),
+                        Err(error) => return Err(error),
+                    };
                     self.stream.write_all(&response)?;
                 }
                 AGENTX_CLOSE_PDU => {
+                    if payload.len() != 4 {
+                        return Err(AgentXError::Protocol("Invalid Close payload length".into()));
+                    }
+                    // RFC 2741 §§6.2.2, 7.1.8: acknowledge before teardown.
+                    self.stream.write_all(&self.build_response(&header, &[]))?;
                     log::info!("Master agent closed session");
                     return Ok(());
                 }
-                // SET sequence (RFC 2741 §6.2.4–6.2.6). This sub-agent is
+                // SET sequence (RFC 2741 §§6.2.8–6.2.9). This sub-agent is
                 // read-only, so we reject the request with the appropriate
                 // error instead of silently dropping it — a silent drop leaves
                 // the master waiting for a Response until it times out.
@@ -648,7 +746,7 @@ impl AgentXSession {
                     self.stream.write_all(&resp)?;
                 }
                 AGENTX_CLEANUPSET_PDU => {
-                    // RFC 2741 §6.2.6: no Response is sent for CleanupSet.
+                    // RFC 2741 §6.2.9: no Response is sent for CleanupSet.
                     log::debug!("CleanupSet received; no response required");
                 }
                 other => {
@@ -667,8 +765,8 @@ impl AgentXSession {
     ) -> Result<Vec<u8>, AgentXError> {
         let mut varbinds_buf = Vec::new();
         let ranges = parse_search_ranges(payload, MAX_SEARCH_RANGES_PER_PDU)?;
-        for (start_oid, _end_oid) in &ranges {
-            let vb = handler.get(start_oid);
+        for range in &ranges {
+            let vb = handler.get(&range.start);
             varbinds_buf.extend_from_slice(&encode_varbind(&vb));
         }
 
@@ -688,15 +786,15 @@ impl AgentXSession {
         // Compute the OID-space snapshot once per PDU; reused for every range.
         let snapshot = handler.oid_snapshot();
 
-        for (start_oid, end_oid) in &ranges {
-            let vb = handler.get_next_snapshot(start_oid, end_oid, &snapshot);
+        for range in &ranges {
+            let vb = range.next(handler, &snapshot);
             varbinds_buf.extend_from_slice(&encode_varbind(&vb));
         }
 
         Ok(self.build_response(header, &varbinds_buf))
     }
 
-    /// Handles a GetBulk PDU (simplified — treats as multiple GetNext).
+    /// Handles GetBulk in iteration-first order (RFC 2741 §7.2.3.3).
     fn handle_get_bulk(
         &self,
         header: &PduHeader,
@@ -714,7 +812,8 @@ impl AgentXSession {
         let max_repetitions = max_repetitions.min(100); // Cap to prevent DoS
 
         let mut varbinds_buf = Vec::new();
-        let ranges = parse_search_ranges(&payload[4..], MAX_SEARCH_RANGES_PER_PDU)?;
+        let mut ranges = parse_search_ranges(&payload[4..], MAX_SEARCH_RANGES_PER_PDU)?;
+        let non_repeaters = non_repeaters.min(ranges.len());
 
         // Compute the OID-space snapshot once for the whole PDU, instead of
         // rebuilding it on every one of the (ranges × max_repetitions)
@@ -722,22 +821,33 @@ impl AgentXSession {
         let snapshot = handler.oid_snapshot();
 
         // Process non-repeaters (single GetNext each)
-        for range in ranges.iter().take(non_repeaters.min(ranges.len())) {
-            let vb = handler.get_next_snapshot(&range.0, &range.1, &snapshot);
+        for range in ranges.iter().take(non_repeaters) {
+            let vb = range.next(handler, &snapshot);
             varbinds_buf.extend_from_slice(&encode_varbind(&vb));
         }
 
-        // Process repeaters
-        for range in ranges.iter().skip(non_repeaters) {
-            let mut current_oid = range.0.clone();
-            for _ in 0..max_repetitions {
-                let vb = handler.get_next_snapshot(&current_oid, &range.1, &snapshot);
-                let is_end = matches!(vb.value, VarBindValue::EndOfMibView);
+        // Each row includes every repeating range, even when one has already
+        // reached endOfMibView. Only a fully exhausted row stops the walk.
+        let mut ended = vec![false; ranges.len() - non_repeaters];
+        for _ in 0..max_repetitions {
+            let mut all_ended = true;
+            for (range, ended) in ranges[non_repeaters..].iter_mut().zip(&mut ended) {
+                let vb = if *ended {
+                    VarBind {
+                        oid: range.start.clone(),
+                        value: VarBindValue::EndOfMibView,
+                    }
+                } else {
+                    range.next(handler, &snapshot)
+                };
+                *ended = matches!(vb.value, VarBindValue::EndOfMibView);
+                all_ended &= *ended;
                 varbinds_buf.extend_from_slice(&encode_varbind(&vb));
-                if is_end {
-                    break;
-                }
-                current_oid = vb.oid;
+                range.start = vb.oid;
+                range.include = false;
+            }
+            if all_ended {
+                break;
             }
         }
 
@@ -780,6 +890,94 @@ impl AgentXSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_reader_preserves_every_split_and_transient_error() {
+        struct SplitRead {
+            bytes: Vec<u8>,
+            at: usize,
+            split: usize,
+            pause: Option<io::ErrorKind>,
+        }
+        impl Read for SplitRead {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if self.at == self.split {
+                    if let Some(kind) = self.pause.take() {
+                        return Err(io::Error::from(kind));
+                    }
+                }
+                let end = if self.pause.is_some() {
+                    self.split
+                } else {
+                    self.bytes.len()
+                };
+                let n = out.len().min(end - self.at);
+                out[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
+                self.at += n;
+                Ok(n)
+            }
+        }
+        let first = encode_pdu(AGENTX_GET_PDU, 0, 1, 2, 3, &[0; 16]);
+        let empty = encode_pdu(AGENTX_GET_PDU, 0, 1, 2, 4, &[]);
+        for split in 0..first.len() {
+            for kind in [
+                io::ErrorKind::WouldBlock,
+                io::ErrorKind::TimedOut,
+                io::ErrorKind::Interrupted,
+            ] {
+                let mut input = SplitRead {
+                    bytes: [first.clone(), empty.clone()].concat(),
+                    at: 0,
+                    split,
+                    pause: Some(kind),
+                };
+                let mut reader = PduReader::default();
+                let mut frames = Vec::new();
+                for _ in 0..10 {
+                    if let Some(frame) = reader.poll(&mut input).unwrap() {
+                        frames.push(frame);
+                    }
+                    if frames.len() == 2 {
+                        break;
+                    }
+                }
+                assert_eq!(frames.len(), 2);
+                assert_eq!(frames[0].0.packet_id, 3);
+                assert_eq!(frames[0].1, [0; 16]);
+                assert_eq!(frames[1].0.packet_id, 4);
+                assert!(frames[1].1.is_empty());
+                assert!(reader.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn frame_reader_rejects_oversized_header_before_allocation() {
+        let mut bytes = encode_pdu(AGENTX_GET_PDU, 0, 1, 2, 3, &[]);
+        bytes[16..20].copy_from_slice(&(MAX_PDU_PAYLOAD + 1).to_be_bytes());
+        let mut reader = PduReader::default();
+        assert!(reader.poll(&mut bytes.as_slice()).is_err());
+        assert!(reader.payload.is_empty());
+    }
+
+    #[test]
+    fn frame_reader_rejects_eof_inside_header_or_payload() {
+        let bytes = encode_pdu(AGENTX_GET_PDU, 0, 1, 2, 3, &[0; 8]);
+        for end in [0, 7, 20, 23] {
+            let mut input = &bytes[..end];
+            let mut reader = PduReader::default();
+            loop {
+                match reader.poll(&mut input) {
+                    Ok(None) => {}
+                    Err(AgentXError::Io(e)) => {
+                        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+                        break;
+                    }
+                    other => panic!("unexpected result {other:?}"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_oid_encode_decode_roundtrip_internet() {
@@ -1126,16 +1324,16 @@ mod tests {
 
     #[test]
     fn test_parse_search_ranges_caps_count() {
-        // Each minimal SearchRange is two empty OIDs = 16 zero bytes. A payload
-        // with far more than the cap must be truncated to the cap so a single
-        // PDU cannot drive unbounded per-range work.
-        let n = MAX_SEARCH_RANGES_PER_PDU + 50;
-        let payload = vec![0u8; 16 * n];
-        let ranges = parse_search_ranges(&payload, MAX_SEARCH_RANGES_PER_PDU).unwrap();
+        let payload = vec![0u8; 8 * (MAX_SEARCH_RANGES_PER_PDU + 1)];
+        assert!(parse_search_ranges(&payload, MAX_SEARCH_RANGES_PER_PDU).is_err());
         assert_eq!(
-            ranges.len(),
-            MAX_SEARCH_RANGES_PER_PDU,
-            "range count must be capped to bound CPU work"
+            parse_search_ranges(
+                &payload[..8 * MAX_SEARCH_RANGES_PER_PDU],
+                MAX_SEARCH_RANGES_PER_PDU
+            )
+            .unwrap()
+            .len(),
+            MAX_SEARCH_RANGES_PER_PDU
         );
     }
 

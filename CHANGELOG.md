@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Correct AgentX GETBULK iteration order, end-of-MIB placeholders and inclusive
+  starts. Preserve partial request headers/payloads across timeout checks, stop
+  promptly on cancellation, and acknowledge master Close requests before teardown.
+  Reject excess search ranges with an indexed error instead of silently omitting
+  columns. Add independent master wire fixtures and correct RFC section citations.
+
 - Update BER support to draft-gandhi-ippm-stamp-ber-07: validate pattern
   alignment, return C for invalid combinations, repair padding and keep it
   outside TLV-HMAC coverage. Add directional interval statistics, burst

@@ -8,7 +8,7 @@ identified 16 findings, including behavior previously scored Compliant.
 The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
 verification one item at a time. Finding 02 updates the three session-admission rows for provisioned mode only.
 Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Finding 09 repairs the Type-12 ordering response and reclassifies its stale N-A row as Compliant. Finding 11 implements Linux route-aware sizing and reopens three MTU rows as Partial across the broader platform/route scope. Finding 12 separates synchronization-source declarations from encoding, corrects source code points and records actual TX provenance. Finding 13 adds the BER-07 matrix, repair and directional interval reporting. Other clause scores remain historical; citation maintenance alone does not
-close the remaining findings.
+close the remaining findings. Finding 14 repairs AgentX request ordering/framing and Close acknowledgments; its [targeted record](agentx-review.md) is separate from the STAMP clause totals.
 
 This document rolls up the nine clause-level conformance matrices in this
 directory into a single compliance statement for the stamp-suite 1.0 line.

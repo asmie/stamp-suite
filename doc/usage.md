@@ -624,3 +624,6 @@ BER output includes directional packet and padding-bit totals, error ratios,
 maximum/average error bursts, and nonempty computation windows. `ber_interval`,
 `ber_bit_threshold` and `ber_packet_threshold` are also TOML keys. See
 [BER behavior and limits](architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber).
+
+AgentX query ordering, partial-frame handling, resource limits and verification scope
+are documented in the [AgentX review](conformance/agentx-review.md).

@@ -626,6 +626,25 @@ The MIB (provided in `mibs/STAMP-SUITE-MIB.mib`) exposes:
 
 Sender statistics are updated live during the measurement run (not just at completion), so SNMP polling reflects current progress.
 
+GETBULK emits repeating ranges in iteration order (A1, B1, A2, B2), retains
+end-of-MIB placeholders for exhausted ranges, and stops after an entirely exhausted
+iteration. GETNEXT and the first GETBULK lookup honor inclusive starts; subsequent
+lookups are strictly advancing, and end bounds remain exclusive. One OID snapshot
+is shared across the request. Requests above 256 ranges receive `genErr` at index
+257; repetition work remains capped at 100 complete iterations.
+
+The request reader retains partial headers and payloads across one-second socket
+read timeouts. These timeouts are cancellation checks, not frame boundaries. Incoming
+payloads remain capped at 1 MiB before allocation. EOF or malformed framing ends the
+connection and lets the existing supervisor reconnect. Cancellation during a partial
+frame closes the transport; it cannot treat those bytes as a Close acknowledgment.
+A master-initiated Close receives a correlated success response before teardown.
+
+See the [targeted AgentX review](conformance/agentx-review.md) for RFC references
+and verification scope. The master wire fixtures are independent of the production
+codec; they are not a Net-SNMP interoperability certification.
+
+
 **Note**: The `snmp` feature requires a Unix platform (Linux/macOS) because AgentX uses Unix domain sockets. On non-Unix platforms, `--snmp` prints an error and exits.
 
 ## Hardware-Assisted Timestamping
