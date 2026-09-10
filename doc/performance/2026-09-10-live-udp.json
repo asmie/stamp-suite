@@ -1,0 +1,3051 @@
+{
+  "schema_version": 1,
+  "manifests": {
+    "measurement-manifest.json": {
+      "start_utc": "2026-09-10T13:46:39Z",
+      "build_command": "cargo build --locked --release --bin stamp-suite --example live_udp_bench",
+      "revision": "2c8bb83222b1c7e0041d72c35a7df5f09cf6f861",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+      "runs": [
+        {
+          "name": "nix-ipv4-open-5000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "5000"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv4-auth-5000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "5000",
+            "--authenticated"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv6-open-5000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "5000",
+            "--ipv6"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv6-auth-5000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "5000",
+            "--ipv6",
+            "--authenticated"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv4-open-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv4-auth-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000",
+            "--authenticated"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv6-open-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000",
+            "--ipv6"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv6-auth-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000",
+            "--ipv6",
+            "--authenticated"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv4-open-100000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "100000"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv4-auth-100000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "100000",
+            "--authenticated"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv6-open-100000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "100000",
+            "--ipv6"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv6-auth-100000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "100000",
+            "--ipv6",
+            "--authenticated"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv4-auth-stateful-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000",
+            "--authenticated",
+            "--stateful"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "nix-ipv6-auth-stateful-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000",
+            "--authenticated",
+            "--stateful",
+            "--ipv6"
+          ],
+          "exit_code": 0
+        }
+      ],
+      "end_utc": "2026-09-10T13:52:01Z"
+    },
+    "pnet-measurement-manifest.json": {
+      "start_utc": "2026-09-10T13:53:42Z",
+      "build_command": "cargo build --locked --release --no-default-features --features ttl-pnet --bin stamp-suite --example live_udp_bench",
+      "namespace": "unshare -Urn; ip link set lo up",
+      "runs": [
+        {
+          "name": "pnet-ipv4-open-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "pnet-ipv4-auth-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000",
+            "--authenticated"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "pnet-ipv6-open-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000",
+            "--ipv6"
+          ],
+          "exit_code": 0
+        },
+        {
+          "name": "pnet-ipv6-auth-25000",
+          "command": [
+            "target/release/examples/live_udp_bench",
+            "--rate",
+            "25000",
+            "--ipv6",
+            "--authenticated"
+          ],
+          "exit_code": 0
+        }
+      ],
+      "end_utc": "2026-09-10T13:55:14Z"
+    }
+  },
+  "cases": [
+    {
+      "name": "nix-ipv4-open-5000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": false,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": false,
+          "rate": 5000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 4999.807879049043,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.16,
+              "percent_one_core": 5.333128404318979,
+              "ticks": 16,
+              "wall_seconds": 3.000115277
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"45385\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000190716
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00016611
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.39,
+              "percent_one_core": 12.99950048552751,
+              "ticks": 39,
+              "wall_seconds": 3.000115277
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 5,
+              "unique_during_load": 14995
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4998.333333333333
+          },
+          {
+            "achieved_send_pps": 4999.667393793517,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.18,
+              "percent_one_core": 5.99960087255222,
+              "ticks": 18,
+              "wall_seconds": 3.000199577
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"48283\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000220188
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000208234
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.44,
+              "percent_one_core": 14.665691021794313,
+              "ticks": 44,
+              "wall_seconds": 3.000199577
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 5,
+              "unique_during_load": 14995
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4998.333333333333
+          },
+          {
+            "achieved_send_pps": 4999.849457866057,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.19,
+              "percent_one_core": 6.333142646630338,
+              "ticks": 19,
+              "wall_seconds": 3.000090328
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"51632\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000138319
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000407027
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.42,
+              "percent_one_core": 13.999578482024958,
+              "ticks": 42,
+              "wall_seconds": 3.000090328
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 5,
+              "unique_during_load": 14995
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4998.333333333333
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv4-open-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": false,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": false,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24999.364407826175,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.17,
+              "percent_one_core": 5.6665225991072665,
+              "ticks": 17,
+              "wall_seconds": 3.000076273
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"33408\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000160711
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000147391
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.42,
+              "percent_one_core": 13.999644068382658,
+              "ticks": 42,
+              "wall_seconds": 3.000076273
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 5,
+              "unique_during_load": 74995
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24998.333333333332
+          },
+          {
+            "achieved_send_pps": 24999.457928420587,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.19,
+              "percent_one_core": 6.333196008533215,
+              "ticks": 19,
+              "wall_seconds": 3.00006505
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"50723\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00013696
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000197828
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.44,
+              "percent_one_core": 14.666348651340078,
+              "ticks": 44,
+              "wall_seconds": 3.00006505
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          },
+          {
+            "achieved_send_pps": 24991.01120242485,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.2,
+              "percent_one_core": 6.666491817919266,
+              "ticks": 20,
+              "wall_seconds": 3.000078684
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"39249\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000178796
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000169977
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.46,
+              "percent_one_core": 15.332931181214313,
+              "ticks": 46,
+              "wall_seconds": 3.000078684
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74950
+            },
+            "resume_after_idle": true,
+            "sent": 74975,
+            "skipped_pacing_slots": 25,
+            "unique_receive_pps_during_load": 24983.333333333332
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv4-open-100000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": false,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": false,
+          "rate": 100000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 99930.81794140465,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.54,
+              "percent_one_core": 17.99954692740444,
+              "ticks": 54,
+              "wall_seconds": 3.000075514
+            },
+            "loss_percent": 0.11741160773849232,
+            "missing_after_drain": 352,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"43564\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000173509
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000152757
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.32,
+              "percent_one_core": 43.99889248921085,
+              "ticks": 132,
+              "wall_seconds": 3.000075514
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 46,
+              "unique_during_load": 299402
+            },
+            "resume_after_idle": true,
+            "sent": 299800,
+            "skipped_pacing_slots": 200,
+            "unique_receive_pps_during_load": 99800.66666666667
+          },
+          {
+            "achieved_send_pps": 99997.48126344194,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.57,
+              "percent_one_core": 18.999521440053968,
+              "ticks": 57,
+              "wall_seconds": 3.000075564
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"49894\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000145433
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000161669
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.29,
+              "percent_one_core": 42.99891694328004,
+              "ticks": 129,
+              "wall_seconds": 3.000075564
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 63,
+              "unique_during_load": 299937
+            },
+            "resume_after_idle": true,
+            "sent": 300000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 99979.0
+          },
+          {
+            "achieved_send_pps": 99997.964208112,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.55,
+              "percent_one_core": 18.332960104820533,
+              "ticks": 55,
+              "wall_seconds": 3.000061075
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"34214\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000144427
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000174884
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.3,
+              "percent_one_core": 43.332451156848535,
+              "ticks": 130,
+              "wall_seconds": 3.000061075
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 80,
+              "unique_during_load": 299920
+            },
+            "resume_after_idle": true,
+            "sent": 300000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 99973.33333333333
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv4-auth-5000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": false,
+          "rate": 5000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 4999.830070775384,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.2,
+              "percent_one_core": 6.66644009436718,
+              "ticks": 20,
+              "wall_seconds": 3.000101961
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"55850\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000235263
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000215871
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.51,
+              "percent_one_core": 16.999422240636306,
+              "ticks": 51,
+              "wall_seconds": 3.000101961
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 5,
+              "unique_during_load": 14995
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4998.333333333333
+          },
+          {
+            "achieved_send_pps": 4999.870875001406,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.2,
+              "percent_one_core": 6.666494500001876,
+              "ticks": 20,
+              "wall_seconds": 3.000077477
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"57159\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.01,
+              "percent_one_core": 0.4999198780910982,
+              "ticks": 1,
+              "wall_seconds": 2.000320539
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000318638
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.42,
+              "percent_one_core": 13.999638450003934,
+              "ticks": 42,
+              "wall_seconds": 3.000077477
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 1,
+              "unique_during_load": 14999
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4999.666666666667
+          },
+          {
+            "achieved_send_pps": 4999.870923332243,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.2,
+              "percent_one_core": 6.666494564442991,
+              "ticks": 20,
+              "wall_seconds": 3.000077448
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"44384\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000242012
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000200931
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.5,
+              "percent_one_core": 16.66623641110748,
+              "ticks": 50,
+              "wall_seconds": 3.000077448
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 5,
+              "unique_during_load": 14995
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4998.333333333333
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv4-auth-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": false,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24999.478760867834,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.21,
+              "percent_one_core": 6.999854053042993,
+              "ticks": 21,
+              "wall_seconds": 3.00006255
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"55807\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00024964
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000143829
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.5,
+              "percent_one_core": 16.66631917391189,
+              "ticks": 50,
+              "wall_seconds": 3.00006255
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 44,
+              "unique_during_load": 74956
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24985.333333333332
+          },
+          {
+            "achieved_send_pps": 24999.428454733526,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.22,
+              "percent_one_core": 7.333165680055168,
+              "ticks": 22,
+              "wall_seconds": 3.000068587
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"37043\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000174798
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000142478
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.52,
+              "percent_one_core": 17.332937061948577,
+              "ticks": 52,
+              "wall_seconds": 3.000068587
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          },
+          {
+            "achieved_send_pps": 24999.239481469576,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.24,
+              "percent_one_core": 7.9997566340702635,
+              "ticks": 24,
+              "wall_seconds": 3.000091265
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"49045\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000162284
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000167464
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.52,
+              "percent_one_core": 17.332806040485572,
+              "ticks": 52,
+              "wall_seconds": 3.000091265
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv4-auth-100000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": false,
+          "rate": 100000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 99997.98244070627,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.65,
+              "percent_one_core": 21.666229528819695,
+              "ticks": 65,
+              "wall_seconds": 3.000060528
+            },
+            "loss_percent": 0.018333333333333333,
+            "missing_after_drain": 55,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"60229\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000213979
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000139044
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.5,
+              "percent_one_core": 49.99899122035313,
+              "ticks": 150,
+              "wall_seconds": 3.000060528
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 50,
+              "unique_during_load": 299895
+            },
+            "resume_after_idle": true,
+            "sent": 300000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 99965.0
+          },
+          {
+            "achieved_send_pps": 99963.59515192083,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.72,
+              "percent_one_core": 23.99926259065788,
+              "ticks": 72,
+              "wall_seconds": 3.000092179
+            },
+            "loss_percent": 0.05835278426142047,
+            "missing_after_drain": 175,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"54022\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00016736
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00015569
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.54,
+              "percent_one_core": 51.33175609668492,
+              "ticks": 154,
+              "wall_seconds": 3.000092179
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 100,
+              "unique_during_load": 299625
+            },
+            "resume_after_idle": true,
+            "sent": 299900,
+            "skipped_pacing_slots": 100,
+            "unique_receive_pps_during_load": 99875.0
+          },
+          {
+            "achieved_send_pps": 99997.36676934086,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.82,
+              "percent_one_core": 27.332613583619835,
+              "ticks": 82,
+              "wall_seconds": 3.000078999
+            },
+            "loss_percent": 0.4723333333333333,
+            "missing_after_drain": 1417,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"47124\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000249067
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000220915
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.84,
+              "percent_one_core": 61.331718285195734,
+              "ticks": 184,
+              "wall_seconds": 3.000078999
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 74,
+              "unique_during_load": 298509
+            },
+            "resume_after_idle": true,
+            "sent": 300000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 99503.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv4-auth-stateful-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": false,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": true,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24999.342242306262,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.23,
+              "percent_one_core": 7.666464954307253,
+              "ticks": 23,
+              "wall_seconds": 3.000078933
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"43041\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\" \"--stateful-reflector\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.01,
+              "percent_one_core": 0.4999613319906612,
+              "ticks": 1,
+              "wall_seconds": 2.000154684
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00015146
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.54,
+              "percent_one_core": 17.999526414460508,
+              "ticks": 54,
+              "wall_seconds": 3.000078933
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          },
+          {
+            "achieved_send_pps": 24999.39554794818,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.19,
+              "percent_one_core": 6.333180205480206,
+              "ticks": 19,
+              "wall_seconds": 3.000072536
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"53112\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\" \"--stateful-reflector\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.01,
+              "percent_one_core": 0.49995401847898946,
+              "ticks": 1,
+              "wall_seconds": 2.000183943
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000170841
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.42,
+              "percent_one_core": 13.99966150685098,
+              "ticks": 42,
+              "wall_seconds": 3.000072536
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 35,
+              "unique_during_load": 74965
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24988.333333333332
+          },
+          {
+            "achieved_send_pps": 24999.401589324156,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.21,
+              "percent_one_core": 6.999832445010763,
+              "ticks": 21,
+              "wall_seconds": 3.000071811
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"54467\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\" \"--stateful-reflector\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000153162
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000167596
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.48,
+              "percent_one_core": 15.99961701716746,
+              "ticks": 48,
+              "wall_seconds": 3.000071811
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv6-open-5000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": false,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": true,
+          "rate": 5000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 4996.498419575384,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.36,
+              "percent_one_core": 11.999595937605992,
+              "ticks": 36,
+              "wall_seconds": 3.000101019
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"49969\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000164414
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000205797
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.76,
+              "percent_one_core": 25.33248031272376,
+              "ticks": 76,
+              "wall_seconds": 3.000101019
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 1,
+              "unique_during_load": 14989
+            },
+            "resume_after_idle": true,
+            "sent": 14990,
+            "skipped_pacing_slots": 10,
+            "unique_receive_pps_during_load": 4996.333333333333
+          },
+          {
+            "achieved_send_pps": 4999.896830462168,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.08,
+              "percent_one_core": 2.666611642913156,
+              "ticks": 8,
+              "wall_seconds": 3.000061903
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"58249\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.01,
+              "percent_one_core": 0.49996368613758474,
+              "ticks": 1,
+              "wall_seconds": 2.000145266
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000179433
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.18,
+              "percent_one_core": 5.999876196554601,
+              "ticks": 18,
+              "wall_seconds": 3.000061903
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 5,
+              "unique_during_load": 14995
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4998.333333333333
+          },
+          {
+            "achieved_send_pps": 4999.865728605858,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.08,
+              "percent_one_core": 2.6665950552564577,
+              "ticks": 8,
+              "wall_seconds": 3.000080565
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"57820\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000167058
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000149682
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.18,
+              "percent_one_core": 5.999838874327029,
+              "ticks": 18,
+              "wall_seconds": 3.000080565
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 5,
+              "unique_during_load": 14995
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4998.333333333333
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv6-open-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": false,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": true,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24999.463544844944,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.23,
+              "percent_one_core": 7.666502153752449,
+              "ticks": 23,
+              "wall_seconds": 3.000064376
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"35591\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.01,
+              "percent_one_core": 0.4999576828317886,
+              "ticks": 1,
+              "wall_seconds": 2.000169283
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.0001945
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.56,
+              "percent_one_core": 18.666266113484227,
+              "ticks": 56,
+              "wall_seconds": 3.000064376
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          },
+          {
+            "achieved_send_pps": 24974.3414432657,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.2,
+              "percent_one_core": 6.666490875746602,
+              "ticks": 20,
+              "wall_seconds": 3.000079108
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"53328\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000188927
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000159831
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.53,
+              "percent_one_core": 17.66620082072849,
+              "ticks": 53,
+              "wall_seconds": 3.000079108
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74900
+            },
+            "resume_after_idle": true,
+            "sent": 74925,
+            "skipped_pacing_slots": 75,
+            "unique_receive_pps_during_load": 24966.666666666668
+          },
+          {
+            "achieved_send_pps": 24998.044869580026,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.21,
+              "percent_one_core": 6.999452563482407,
+              "ticks": 21,
+              "wall_seconds": 3.000234634
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"53655\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000181544
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000205892
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.46,
+              "percent_one_core": 15.33213418667575,
+              "ticks": 46,
+              "wall_seconds": 3.000234634
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv6-open-100000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": false,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": true,
+          "rate": 100000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 99997.66942098392,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.65,
+              "percent_one_core": 21.66616170787985,
+              "ticks": 65,
+              "wall_seconds": 3.000069919
+            },
+            "loss_percent": 0.053,
+            "missing_after_drain": 159,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"35784\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000166401
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000297226
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.49,
+              "percent_one_core": 49.66550914575535,
+              "ticks": 149,
+              "wall_seconds": 3.000069919
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 100,
+              "unique_during_load": 299741
+            },
+            "resume_after_idle": true,
+            "sent": 300000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 99913.66666666667
+          },
+          {
+            "achieved_send_pps": 99997.56572592501,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.59,
+              "percent_one_core": 19.666187926098587,
+              "ticks": 59,
+              "wall_seconds": 3.00007303
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"54547\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000164953
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000182914
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.36,
+              "percent_one_core": 45.332229795752674,
+              "ticks": 136,
+              "wall_seconds": 3.00007303
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 8,
+              "unique_during_load": 299992
+            },
+            "resume_after_idle": true,
+            "sent": 300000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 99997.33333333333
+          },
+          {
+            "achieved_send_pps": 99997.9785408638,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.51,
+              "percent_one_core": 16.999656351946847,
+              "ticks": 51,
+              "wall_seconds": 3.000060645
+            },
+            "loss_percent": 0.007666666666666666,
+            "missing_after_drain": 23,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"46307\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00014691
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000155462
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.3,
+              "percent_one_core": 43.33245736770765,
+              "ticks": 130,
+              "wall_seconds": 3.000060645
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 86,
+              "unique_during_load": 299891
+            },
+            "resume_after_idle": true,
+            "sent": 300000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 99963.66666666667
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv6-auth-5000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": true,
+          "rate": 5000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 4999.8889374670325,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.09,
+              "percent_one_core": 2.999933362480219,
+              "ticks": 9,
+              "wall_seconds": 3.000066639
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"46586\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000155778
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000157252
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.18,
+              "percent_one_core": 5.999866724960438,
+              "ticks": 18,
+              "wall_seconds": 3.000066639
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 5,
+              "unique_during_load": 14995
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4998.333333333333
+          },
+          {
+            "achieved_send_pps": 4999.878619613378,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.11,
+              "percent_one_core": 3.6665776543831434,
+              "ticks": 11,
+              "wall_seconds": 3.00007283
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"49011\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000180316
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000153402
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.22,
+              "percent_one_core": 7.333155308766287,
+              "ticks": 22,
+              "wall_seconds": 3.00007283
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 4,
+              "unique_during_load": 14996
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4998.666666666667
+          },
+          {
+            "achieved_send_pps": 4999.875523098976,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.09,
+              "percent_one_core": 2.9999253138593858,
+              "ticks": 9,
+              "wall_seconds": 3.000074688
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"43844\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000168729
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000214387
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.19,
+              "percent_one_core": 6.333175662592037,
+              "ticks": 19,
+              "wall_seconds": 3.000074688
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 8,
+              "unique_during_load": 14992
+            },
+            "resume_after_idle": true,
+            "sent": 15000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 4997.333333333333
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv6-auth-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": true,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24682.693426278693,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.35,
+              "percent_one_core": 11.666364212285675,
+              "ticks": 35,
+              "wall_seconds": 3.000077776
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"56647\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000172971
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000156642
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.73,
+              "percent_one_core": 24.332702499910123,
+              "ticks": 73,
+              "wall_seconds": 3.000077776
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 16,
+              "unique_during_load": 74034
+            },
+            "resume_after_idle": true,
+            "sent": 74050,
+            "skipped_pacing_slots": 950,
+            "unique_receive_pps_during_load": 24678.0
+          },
+          {
+            "achieved_send_pps": 24999.38072367384,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.19,
+              "percent_one_core": 6.333176449997373,
+              "ticks": 19,
+              "wall_seconds": 3.000074315
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"37876\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000190138
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000195209
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.44,
+              "percent_one_core": 14.666303357888651,
+              "ticks": 44,
+              "wall_seconds": 3.000074315
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          },
+          {
+            "achieved_send_pps": 24999.325734852497,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.22,
+              "percent_one_core": 7.333135548890065,
+              "ticks": 22,
+              "wall_seconds": 3.000080914
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"58084\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000141021
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000153951
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.45,
+              "percent_one_core": 14.999595440911499,
+              "ticks": 45,
+              "wall_seconds": 3.000080914
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv6-auth-100000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": true,
+          "rate": 100000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 99964.22624001147,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.66,
+              "percent_one_core": 21.999462927111562,
+              "ticks": 66,
+              "wall_seconds": 3.000073239
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"50079\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00014288
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000154903
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.48,
+              "percent_one_core": 49.332128988068355,
+              "ticks": 148,
+              "wall_seconds": 3.000073239
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 23,
+              "unique_during_load": 299877
+            },
+            "resume_after_idle": true,
+            "sent": 299900,
+            "skipped_pacing_slots": 100,
+            "unique_receive_pps_during_load": 99959.0
+          },
+          {
+            "achieved_send_pps": 99997.9797408153,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.68,
+              "percent_one_core": 22.666208741251467,
+              "ticks": 68,
+              "wall_seconds": 3.000060609
+            },
+            "loss_percent": 0.059666666666666666,
+            "missing_after_drain": 179,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"48660\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.01,
+              "percent_one_core": 0.4999681402802128,
+              "ticks": 1,
+              "wall_seconds": 2.000127447
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000155752
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.48,
+              "percent_one_core": 49.33233667213554,
+              "ticks": 148,
+              "wall_seconds": 3.000060609
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 86,
+              "unique_during_load": 299735
+            },
+            "resume_after_idle": true,
+            "sent": 300000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 99911.66666666667
+          },
+          {
+            "achieved_send_pps": 99997.68995336439,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.76,
+              "percent_one_core": 25.33274812151898,
+              "ticks": 76,
+              "wall_seconds": 3.000069303
+            },
+            "loss_percent": 0.32566666666666666,
+            "missing_after_drain": 977,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"39428\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000159783
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000148125
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 1.75,
+              "percent_one_core": 58.331985806129225,
+              "ticks": 175,
+              "wall_seconds": 3.000069303
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 100,
+              "unique_during_load": 298923
+            },
+            "resume_after_idle": true,
+            "sent": 300000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 99641.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "nix-ipv6-auth-stateful-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": false
+        },
+        "generator_sha256": "1462a9737581121ba2bf91e99e7b1efb1dda94e9ced5863329634e1029a24055",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "eacf975b008ef1cbe6ec5f72d156f0061bd4f37cf1f28389f4ea9eba07fbc1d8",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": true,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": true,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24999.454736892734,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.2,
+              "percent_one_core": 6.666521263171396,
+              "ticks": 20,
+              "wall_seconds": 3.000065433
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"46002\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\" \"--stateful-reflector\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000149942
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00018148
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.47,
+              "percent_one_core": 15.666324968452777,
+              "ticks": 47,
+              "wall_seconds": 3.000065433
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          },
+          {
+            "achieved_send_pps": 24999.424121599077,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.19,
+              "percent_one_core": 6.333187444138433,
+              "ticks": 19,
+              "wall_seconds": 3.000069107
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"59253\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\" \"--stateful-reflector\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000166508
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000148603
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.47,
+              "percent_one_core": 15.666305782868752,
+              "ticks": 47,
+              "wall_seconds": 3.000069107
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          },
+          {
+            "achieved_send_pps": 24999.471269515805,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.2,
+              "percent_one_core": 6.6665256718708825,
+              "ticks": 20,
+              "wall_seconds": 3.000063449
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"35921\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\" \"--stateful-reflector\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000356344
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000154781
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.43,
+              "percent_one_core": 14.333030194522395,
+              "ticks": 43,
+              "wall_seconds": 3.000063449
+            },
+            "replies": {
+              "duplicates": 0,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 25,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 24991.666666666668
+          }
+        ]
+      }
+    },
+    {
+      "name": "pnet-ipv4-open-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": true
+        },
+        "generator_sha256": "851ef0cd5d5a5b96c77a1129c2ee698dd4394bda03a76648cf9fc0ad76ef0aeb",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "d8f06ef26ac26a6e82286a474391c3182e82e027d47093cf09c44fe8ff78fcc1",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": false,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": false,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24999.405530802745,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.21,
+              "percent_one_core": 6.999833548624769,
+              "ticks": 21,
+              "wall_seconds": 3.000071338
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"40035\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000166993
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000162333
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.72,
+              "percent_one_core": 23.999429309570637,
+              "ticks": 72,
+              "wall_seconds": 3.000071338
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          },
+          {
+            "achieved_send_pps": 24999.41465537212,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.21,
+              "percent_one_core": 6.999836103504194,
+              "ticks": 21,
+              "wall_seconds": 3.000070243
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"59434\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000146073
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000172455
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.74,
+              "percent_one_core": 24.666089126633825,
+              "ticks": 74,
+              "wall_seconds": 3.000070243
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          },
+          {
+            "achieved_send_pps": 24991.04588908678,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.22,
+              "percent_one_core": 7.333151177858076,
+              "ticks": 22,
+              "wall_seconds": 3.00007452
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"52774\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000151635
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000144742
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.75,
+              "percent_one_core": 24.999379015425255,
+              "ticks": 75,
+              "wall_seconds": 3.00007452
+            },
+            "replies": {
+              "duplicates": 74975,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 74975
+            },
+            "resume_after_idle": true,
+            "sent": 74975,
+            "skipped_pacing_slots": 25,
+            "unique_receive_pps_during_load": 24991.666666666668
+          }
+        ]
+      }
+    },
+    {
+      "name": "pnet-ipv4-auth-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": true
+        },
+        "generator_sha256": "851ef0cd5d5a5b96c77a1129c2ee698dd4394bda03a76648cf9fc0ad76ef0aeb",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "d8f06ef26ac26a6e82286a474391c3182e82e027d47093cf09c44fe8ff78fcc1",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": false,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24999.20954166043,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.26,
+              "percent_one_core": 8.66639264110895,
+              "ticks": 26,
+              "wall_seconds": 3.000094858
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"41628\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000164993
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000145727
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.83,
+              "percent_one_core": 27.665791892770876,
+              "ticks": 83,
+              "wall_seconds": 3.000094858
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          },
+          {
+            "achieved_send_pps": 24999.40353923096,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.29,
+              "percent_one_core": 9.666436035169303,
+              "ticks": 29,
+              "wall_seconds": 3.000071577
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"48335\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000160599
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000177654
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.9,
+              "percent_one_core": 29.999284247077153,
+              "ticks": 90,
+              "wall_seconds": 3.000071577
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          },
+          {
+            "achieved_send_pps": 24999.4500454316,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.26,
+              "percent_one_core": 8.666476015749621,
+              "ticks": 26,
+              "wall_seconds": 3.000065996
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"127.0.0.1\" \"--local-port\" \"41664\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000209249
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000164704
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.83,
+              "percent_one_core": 27.666058050277638,
+              "ticks": 83,
+              "wall_seconds": 3.000065996
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "pnet-ipv6-open-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": true
+        },
+        "generator_sha256": "851ef0cd5d5a5b96c77a1129c2ee698dd4394bda03a76648cf9fc0ad76ef0aeb",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "d8f06ef26ac26a6e82286a474391c3182e82e027d47093cf09c44fe8ff78fcc1",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": false,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": true,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24999.39723953316,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.25,
+              "percent_one_core": 8.33313241317772,
+              "ticks": 25,
+              "wall_seconds": 3.000072333
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"55864\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000172622
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000137233
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.84,
+              "percent_one_core": 27.999324908277135,
+              "ticks": 84,
+              "wall_seconds": 3.000072333
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          },
+          {
+            "achieved_send_pps": 24999.413997069634,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.24,
+              "percent_one_core": 7.999812479062282,
+              "ticks": 24,
+              "wall_seconds": 3.000070322
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"36881\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000187978
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000144399
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.83,
+              "percent_one_core": 27.66601815675706,
+              "ticks": 83,
+              "wall_seconds": 3.000070322
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          },
+          {
+            "achieved_send_pps": 24999.43856260876,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.24,
+              "percent_one_core": 7.999820340034804,
+              "ticks": 24,
+              "wall_seconds": 3.000067374
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"33474\" \"--hwtstamp\" \"off\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000188279
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000167132
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.8,
+              "percent_one_core": 26.666067800116018,
+              "ticks": 80,
+              "wall_seconds": 3.000067374
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "pnet-ipv6-auth-25000.json",
+      "report": {
+        "affinity": "Cpus_allowed_list:\t0-23",
+        "cpu_model": "model name\t: Intel(R) Core(TM) Ultra 9 275HX",
+        "cpu_ticks_per_second": 100,
+        "generator_debug_assertions": false,
+        "generator_features": {
+          "control": false,
+          "hwtstamp": false,
+          "metrics": false,
+          "snmp": false,
+          "ttl_nix": false,
+          "ttl_pnet": true
+        },
+        "generator_sha256": "851ef0cd5d5a5b96c77a1129c2ee698dd4394bda03a76648cf9fc0ad76ef0aeb",
+        "kernel": "Linux version 6.18.33.2-microsoft-standard-WSL2 (root@f1bbfb02316b) (gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026",
+        "reflector_sha256": "d8f06ef26ac26a6e82286a474391c3182e82e027d47093cf09c44fe8ff78fcc1",
+        "schema_version": 1,
+        "settings": {
+          "authenticated": true,
+          "drain_ms": 500,
+          "idle_seconds": 2,
+          "ipv6": true,
+          "rate": 25000,
+          "reflector": "/home/asmie/projects/stamp-suite/target/release/stamp-suite",
+          "repeats": 3,
+          "seconds": 3,
+          "stateful": false,
+          "workers": 2
+        },
+        "trials": [
+          {
+            "achieved_send_pps": 24982.583189635425,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.27,
+              "percent_one_core": 8.999729768114163,
+              "ticks": 27,
+              "wall_seconds": 3.00009008
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"38585\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.01,
+              "percent_one_core": 0.4999586371720502,
+              "ticks": 1,
+              "wall_seconds": 2.000165465
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00027095
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.89,
+              "percent_one_core": 29.665775902302236,
+              "ticks": 89,
+              "wall_seconds": 3.00009008
+            },
+            "replies": {
+              "duplicates": 74950,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 74950
+            },
+            "resume_after_idle": true,
+            "sent": 74950,
+            "skipped_pacing_slots": 50,
+            "unique_receive_pps_during_load": 24983.333333333332
+          },
+          {
+            "achieved_send_pps": 24999.456870133192,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.28,
+              "percent_one_core": 9.333130564849725,
+              "ticks": 28,
+              "wall_seconds": 3.000065177
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"59853\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000172882
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.00021006
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.9,
+              "percent_one_core": 29.99934824415983,
+              "ticks": 90,
+              "wall_seconds": 3.000065177
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          },
+          {
+            "achieved_send_pps": 24999.112314853846,
+            "generator_load_cpu": {
+              "cpu_seconds": 0.28,
+              "percent_one_core": 9.33300193087877,
+              "ticks": 28,
+              "wall_seconds": 3.000106526
+            },
+            "loss_percent": 0.0,
+            "missing_after_drain": 0,
+            "reflector_command": "env -u STAMP_HMAC_KEY RUST_LOG=\"error\" TOKIO_WORKER_THREADS=\"2\" \"/home/asmie/projects/stamp-suite/target/release/stamp-suite\" \"--is-reflector\" \"--local-addr\" \"::1\" \"--local-port\" \"55777\" \"--hwtstamp\" \"off\" \"-A\" \"A\" \"--hmac-key\" \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+            "reflector_idle_after": {
+              "cpu_seconds": 0.02,
+              "percent_one_core": 0.9999150812118129,
+              "ticks": 2,
+              "wall_seconds": 2.000169852
+            },
+            "reflector_idle_before": {
+              "cpu_seconds": 0.0,
+              "percent_one_core": 0.0,
+              "ticks": 0,
+              "wall_seconds": 2.000153958
+            },
+            "reflector_load_cpu": {
+              "cpu_seconds": 0.88,
+              "percent_one_core": 29.33229178276185,
+              "ticks": 88,
+              "wall_seconds": 3.000106526
+            },
+            "replies": {
+              "duplicates": 75000,
+              "invalid": 0,
+              "out_of_order": 0,
+              "unique_during_drain": 0,
+              "unique_during_load": 75000
+            },
+            "resume_after_idle": true,
+            "sent": 75000,
+            "skipped_pacing_slots": 0,
+            "unique_receive_pps_during_load": 25000.0
+          }
+        ]
+      }
+    }
+  ]
+}

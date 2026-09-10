@@ -115,6 +115,29 @@ fn reflector(format: &str, log_format: &str, quiet: bool) -> (Process, u16) {
     (child, port)
 }
 
+fn csv_cells(row: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut cell = String::new();
+    let mut quoted = false;
+    let mut chars = row.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                cell.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                result.push(std::mem::take(&mut cell));
+            }
+            _ => cell.push(c),
+        }
+    }
+    assert!(!quoted, "unterminated CSV field");
+    result.push(cell);
+    result
+}
+
 fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
     let (mut reflector, port) = reflector(format, log_format, quiet);
     let mut sender = Process::start(
@@ -193,6 +216,7 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
             assert_eq!(reports.last().unwrap()["type"], "summary");
             assert_eq!(reports.last().unwrap()["packets_received"], 3);
             assert!(reports.last().unwrap()["ber"].is_object());
+            assert_eq!(reports.last().unwrap()["measurements"]["unique_replies"], 3);
             for report in &reports {
                 assert_eq!(report["quantile_precision"]["exact_sample_limit"], 4096);
                 assert_eq!(
@@ -212,31 +236,22 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
             let mut lines = stdout.lines();
             let header = lines.next().unwrap();
             assert!(header.starts_with("packets_sent,packets_received,"));
-            assert_eq!(header.split(',').count(), 27);
+            assert_eq!(header.split(',').count(), 28);
             let rows: Vec<_> = lines.collect();
             assert_eq!(rows.len() > 1, periodic);
             for row in &rows {
-                // First 26 fields are numeric/enums; the final BER field is quoted JSON.
-                let cells: Vec<_> = row.splitn(27, ',').collect();
-                assert_eq!(cells.len(), 27);
+                let cells = csv_cells(row);
+                assert_eq!(cells.len(), 28);
                 assert!(
                     cells[0].parse::<u32>().is_ok(),
                     "repeated header or diagnostic: {row}"
                 );
                 assert_eq!(cells[24], "4096");
                 assert_eq!(cells[25].parse::<f64>().unwrap(), 1.0 / 128.0);
-                let encoded = cells[26]
-                    .strip_prefix('"')
-                    .unwrap()
-                    .strip_suffix('"')
-                    .unwrap();
-                assert!(
-                    !encoded.replace("\"\"", "").contains('"'),
-                    "CSV quotes must be doubled"
-                );
-                let ber: serde_json::Value =
-                    serde_json::from_str(&encoded.replace("\"\"", "\"")).unwrap();
+                let ber: serde_json::Value = serde_json::from_str(&cells[26]).unwrap();
+                let measurements: serde_json::Value = serde_json::from_str(&cells[27]).unwrap();
                 assert!(ber.is_object());
+                assert_eq!(measurements["history_limit"], 4096);
             }
             assert_eq!(rows.last().unwrap().split(',').nth(1), Some("3"));
             let reflected: Vec<_> = reflector_stdout.lines().collect();

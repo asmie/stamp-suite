@@ -1,6 +1,9 @@
 # Statistics precision and retention
 
-Sender delay summaries cover all accepted measurements in the run. Reporting
+The original sender RTT/OWD summaries cover first replies to pending probes.
+[Reply and directional summaries](measurements.md) additionally account for
+burst copies, duplicates and late replies. Delay summaries retain their
+accepted measurements across the run. Reporting
 never resets the collectors. RTT and OWD each use a 64-bit observation count;
 collection stops at `u64::MAX` observations rather than wrapping. Existing sender
 wire sequence numbers, send/loss counters and reflector session counters retain
@@ -37,7 +40,7 @@ CSV formatting can introduce additional rounding at the displayed precision.
 `QuantilePrecision` discloses `exact_sample_limit = 4096` and
 `relative_error_bound = 0.0078125` in JSON, including standalone OWD summaries.
 Text prints the same policy. CSV adds `quantile_exact_sample_limit` and
-`quantile_relative_error_bound` before the final BER column. This policy applies
+`quantile_relative_error_bound` before the BER and measurements JSON columns. This policy applies
 independently to each series, even if RTT and usable OWD counts differ. It is a
 conservative bound: it does not imply short series have been approximated.
 

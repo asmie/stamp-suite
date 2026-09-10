@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Report bounded sender reply-copy, duplicate, late and reordering accounting,
+  directional Direct Measurement windows and Follow-Up reverse-delay summaries.
+  Drain requested burst copies within the final timeout. Add `measurements` to
+  sender JSON/text and as CSV column 28; preserve probe and BER summary semantics.
+  Cover independent IPv4/open and IPv6/authenticated peers and document limits.
+
 - Add a Linux live UDP benchmark with paced traffic, validated reply/loss
   accounting, load and idle CPU samples, post-idle probes, repeated trials and
   reproducibility metadata. Cover IPv4/IPv6, open/authenticated and stateful

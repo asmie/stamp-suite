@@ -1,4 +1,7 @@
+pub(crate) mod measurements;
 mod telemetry;
+
+use measurements::{Measurements, ReplyKey};
 
 use telemetry::{FlagCounts, HmacStatus, TlvTelemetry};
 
@@ -44,6 +47,7 @@ use crate::{
 };
 
 /// Internal structure to track packets awaiting responses.
+#[derive(Clone, Copy)]
 struct PendingPacket {
     /// Wall-clock time when the packet was sent.
     send_time: Instant,
@@ -54,6 +58,7 @@ struct PendingPacket {
 
 /// Mutable context for processing received responses.
 struct SenderRecvContext<'a> {
+    measurements: Option<&'a mut Measurements>,
     ber: Option<&'a mut BerCollector>,
     /// Configured remote timescale offset in seconds, removed after decoding.
     reflector_utc_offset: i32,
@@ -931,6 +936,7 @@ pub async fn run_sender_with_output(
 
     let sess = Session::new(0);
     let mut pending: HashMap<u32, PendingPacket> = HashMap::new();
+    let mut measurements = Measurements::new(conf.reflected_control_count);
     // Time-ordered expiry queue for O(k) eviction instead of O(n) HashMap scan.
     // Entries are (deadline, seq_num). Since packets are sent sequentially,
     // deadlines are naturally ordered. Lazy deletion skips already-received entries.
@@ -1447,6 +1453,14 @@ pub async fn run_sender_with_output(
                 send_timestamp,
             },
         );
+        measurements.sent(
+            seq_num,
+            PendingPacket {
+                send_time,
+                send_timestamp,
+            },
+            packets_sent,
+        );
         // Pair this send's kernel OPT_ID with the sequence number so the
         // error-queue drain can retroactively correct the stored T1.
         #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
@@ -1494,7 +1508,8 @@ pub async fn run_sender_with_output(
                                 apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                             }
                             let mut ctx = SenderRecvContext {
-                ber: ber.as_mut(),
+                                measurements: Some(&mut measurements),
+                                ber: ber.as_mut(),
                                 reflector_utc_offset: conf.reflector_utc_offset,
                                 pending: &mut pending,
                                 rtt_collector: &mut rtt_collector,
@@ -1560,6 +1575,7 @@ pub async fn run_sender_with_output(
                 } => {
                     let interim = rtt_collector
                         .snapshot(packets_sent, packets_lost)
+                        .with_measurements(measurements.snapshot())
                         .with_ber(ber.as_mut().map(|b| b.snapshot(Instant::now())))
                         .with_owd(&owd_collector)
                         .with_access_report(access_report_state.as_ref().map(|state| state.summary()))
@@ -1612,7 +1628,7 @@ pub async fn run_sender_with_output(
     let stopped_on_zero_ssid = |seen: bool| seen && conf.on_zero_ssid == ZeroSsidAction::Stop;
     let wait_start = Instant::now();
     while !stopped_on_zero_ssid(zero_ssid_seen)
-        && !pending.is_empty()
+        && (!pending.is_empty() || measurements.needs_burst_wait())
         && wait_start.elapsed() < timeout
     {
         let remaining = timeout.saturating_sub(wait_start.elapsed());
@@ -1637,6 +1653,7 @@ pub async fn run_sender_with_output(
                     apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                 }
                 let mut ctx = SenderRecvContext {
+                    measurements: Some(&mut measurements),
                     ber: ber.as_mut(),
                     reflector_utc_offset: conf.reflector_utc_offset,
                     pending: &mut pending,
@@ -1812,6 +1829,14 @@ pub async fn run_sender_with_output(
                             send_timestamp,
                         },
                     );
+                    measurements.sent(
+                        seq_num,
+                        PendingPacket {
+                            send_time,
+                            send_timestamp,
+                        },
+                        packets_sent,
+                    );
                     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
                     if sender_kernel_ts.tx_kernel {
                         tx_id_to_seq.insert(sender_tx_counter, seq_num);
@@ -1860,7 +1885,8 @@ pub async fn run_sender_with_output(
                             apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                         }
                         let mut ctx = SenderRecvContext {
-                ber: ber.as_mut(),
+                            measurements: Some(&mut measurements),
+                            ber: ber.as_mut(),
                             reflector_utc_offset: conf.reflector_utc_offset,
                             pending: &mut pending,
                             rtt_collector: &mut rtt_collector,
@@ -1927,6 +1953,7 @@ pub async fn run_sender_with_output(
 
     Ok(rtt_collector
         .snapshot(packets_sent, packets_lost)
+        .with_measurements(measurements.snapshot())
         .with_ber(ber.as_mut().map(|b| b.snapshot(Instant::now())))
         .with_owd(&owd_collector)
         .with_access_report(access_report_state.as_ref().map(|state| state.summary()))
@@ -2055,6 +2082,7 @@ fn process_response(
         telemetry,
         reflected_ssid,
         reflector_error,
+        reflector_seq,
     ) = if use_auth {
         if use_tlvs {
             // Parse as extended packet with TLVs (lenient, returns canonical buffer)
@@ -2136,6 +2164,7 @@ fn process_response(
                 telemetry,
                 base.ssid,
                 base.error_estimate,
+                base.sequence_number,
             )
         } else {
             // Parse base packet only (lenient, returns canonical buffer)
@@ -2173,6 +2202,7 @@ fn process_response(
                 None,
                 packet.ssid,
                 packet.error_estimate,
+                packet.sequence_number,
             )
         }
     } else if use_tlvs {
@@ -2232,6 +2262,7 @@ fn process_response(
             telemetry,
             base.ssid,
             base.error_estimate,
+            base.sequence_number,
         )
     } else {
         // Parse base packet only (lenient)
@@ -2244,10 +2275,17 @@ fn process_response(
             None,
             packet.ssid,
             packet.error_estimate,
+            packet.sequence_number,
         )
     };
 
-    if want_msid && !ctx.pending.contains_key(&seq_num) {
+    if want_msid
+        && !ctx.pending.contains_key(&seq_num)
+        && !ctx
+            .measurements
+            .as_ref()
+            .is_some_and(|m| m.answered(seq_num))
+    {
         log::debug!("Discarding micro-session reply for unknown sequence {seq_num}");
         return;
     }
@@ -2285,6 +2323,31 @@ fn process_response(
                 return;
             }
         }
+    }
+
+    if let Some(measurements) = ctx.measurements.as_mut() {
+        let key = ReplyKey {
+            sender: seq_num,
+            reflector: reflector_seq,
+            t3: reflector_send_ts,
+        };
+        let Some((probe, ordinal)) = measurements.accept(key, ctx.pending.get(&seq_num).copied())
+        else {
+            return; // duplicate or outside retained sent-probe history
+        };
+        let reference = chrono::Utc::now().timestamp();
+        let t4_ns = timestamp_to_unix_nanos(sender_recv_ts, clock_source, reference);
+        measurements.observe(
+            key,
+            recv_time.duration_since(probe.send_time).as_nanos() as u64,
+            t4_ns,
+            ErrorEstimate::from_wire(reflector_error).clock_format(),
+            reference,
+            ctx.reflector_utc_offset,
+            ordinal,
+            telemetry.as_ref().and_then(|t| t.direct_measurement),
+            telemetry.as_ref().and_then(|t| t.follow_up),
+        );
     }
 
     // RFC 8972 §4.6: a usable Access Report echo disarms its timer. This
@@ -2401,7 +2464,7 @@ fn process_response(
                 eprintln!("{detail}");
             }
         }
-    } else {
+    } else if ctx.measurements.is_none() {
         eprintln!("Received response for unknown sequence number: {}", seq_num);
     }
 }
@@ -2531,6 +2594,8 @@ fn validate_reflected_tlvs(
         || expected_reflector_msid.is_some()
         || latched_reflector_msid.is_some();
     let mut validated_msid = false;
+    let mut dm_seen = false;
+    let mut follow_seen = false;
     let mut next_reflector_msid = *latched_reflector_msid;
     if want_msid {
         let count = tlvs
@@ -2549,7 +2614,7 @@ fn validate_reflected_tlvs(
             return Err(TlvRejection::MsidUnavailable);
         }
     }
-    if integrity_ok && (want_msid || track_access_report || track_congestion) {
+    if integrity_ok {
         for raw in tlvs.non_hmac_tlvs() {
             if raw.is_malformed() {
                 break; // §4-18: M flag halts remainder.
@@ -2583,6 +2648,34 @@ fn validate_reflected_tlvs(
                 if let Ok(cos) = ClassOfServiceTlv::from_raw(raw) {
                     if cos.ecn2 == 0b11 {
                         telemetry.forward_ce = true;
+                    }
+                }
+            }
+            // Measurement counters/timestamps require a verified HMAC when a
+            // key is configured; legacy control acknowledgements remain separate.
+            if matches!(hmac, HmacStatus::NotRequested | HmacStatus::Verified) {
+                if raw.tlv_type == TlvType::DirectMeasurement {
+                    match DirectMeasurementTlv::from_raw(raw) {
+                        Ok(value) => {
+                            telemetry.direct_measurement = if dm_seen { None } else { Some(value) };
+                            dm_seen = true;
+                        }
+                        Err(_) => {
+                            telemetry.flags.malformed += 1;
+                            break;
+                        }
+                    }
+                }
+                if raw.tlv_type == TlvType::FollowUpTelemetry {
+                    match FollowUpTelemetryTlv::from_raw(raw) {
+                        Ok(value) => {
+                            telemetry.follow_up = if follow_seen { None } else { Some(value) };
+                            follow_seen = true;
+                        }
+                        Err(_) => {
+                            telemetry.flags.malformed += 1;
+                            break;
+                        }
                     }
                 }
             }
@@ -4427,6 +4520,102 @@ mod tests {
         assert_eq!(status, TlvRejection::MsidUnavailable);
     }
 
+    #[test]
+    fn measurement_telemetry_requires_usable_unambiguous_authenticated_values() {
+        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+        for base in [44, 112] {
+            for kind in [TlvType::DirectMeasurement, TlvType::FollowUpTelemetry] {
+                for case in [
+                    "plain",
+                    "signed",
+                    "missing",
+                    "bad-hmac",
+                    "no-key",
+                    "U",
+                    "M",
+                    "I",
+                    "duplicate",
+                    "short",
+                    "M-before",
+                    "I-after",
+                ] {
+                    let mut raw = RawTlv::new(
+                        kind,
+                        vec![
+                            0;
+                            if kind == TlvType::DirectMeasurement {
+                                12
+                            } else {
+                                16
+                            }
+                        ],
+                    );
+                    raw.clear_reflector_flags();
+                    match case {
+                        "U" => raw.set_unrecognized(),
+                        "M" => raw.set_malformed(),
+                        "I" => raw.set_integrity_failed(),
+                        "short" => {
+                            raw.value.pop();
+                        }
+                        _ => (),
+                    }
+                    let mut tlvs = TlvList::new();
+                    let mut stop = RawTlv::new(TlvType::ExtraPadding, Vec::new());
+                    stop.clear_reflector_flags();
+                    if case == "M-before" {
+                        stop.set_malformed();
+                        tlvs.push(stop.clone()).unwrap();
+                    }
+                    tlvs.push(raw.clone()).unwrap();
+                    if case == "duplicate" {
+                        tlvs.push(raw).unwrap();
+                    }
+                    if case == "I-after" {
+                        stop.set_integrity_failed();
+                        tlvs.push(stop).unwrap();
+                    }
+                    if matches!(case, "signed" | "bad-hmac" | "no-key") {
+                        tlvs.set_hmac_response(&key, &[0; 4]);
+                    }
+                    let mut data = vec![0; base];
+                    tlvs.write_to(&mut data);
+                    if case == "bad-hmac" {
+                        *data.last_mut().unwrap() ^= 1;
+                    }
+                    let parsed = TlvList::parse_lenient(&data[base..]).0;
+                    let report = validate_reflected_tlvs(
+                        &parsed,
+                        &data,
+                        base,
+                        matches!(case, "signed" | "bad-hmac" | "missing").then_some(&key),
+                        None,
+                        None,
+                        &mut None,
+                        false,
+                        false,
+                        #[cfg(feature = "metrics")]
+                        false,
+                    )
+                    .unwrap();
+                    let present = if kind == TlvType::DirectMeasurement {
+                        report.direct_measurement.is_some()
+                    } else {
+                        report.follow_up.is_some()
+                    };
+                    assert_eq!(
+                        present,
+                        matches!(case, "plain" | "signed"),
+                        "base={base}, kind={kind:?}, case={case}"
+                    );
+                    if case == "short" {
+                        assert_eq!(report.flags.malformed, 1);
+                    }
+                }
+            }
+        }
+    }
+
     proptest::proptest! {
         #[test]
         fn telemetry_flag_and_hmac_gates_match_decision_oracle(
@@ -5182,6 +5371,7 @@ mod tests {
         let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
         access_report_state.tick(Instant::now()); // simulate the original send having armed it
         let mut ctx = SenderRecvContext {
+            measurements: None,
             ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
@@ -5251,6 +5441,7 @@ mod tests {
         let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
         access_report_state.tick(Instant::now());
         let mut ctx = SenderRecvContext {
+            measurements: None,
             ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
@@ -5301,6 +5492,7 @@ mod tests {
         zero_ssid_seen: &'a mut bool,
     ) -> SenderRecvContext<'a> {
         SenderRecvContext {
+            measurements: None,
             ber: None,
             reflector_utc_offset: 0,
             pending,
@@ -5677,6 +5869,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut recv_ctx = SenderRecvContext {
+            measurements: None,
             ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
@@ -6495,6 +6688,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            measurements: None,
             ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
@@ -6765,6 +6959,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                measurements: None,
                 ber: None,
                 reflector_utc_offset: 0,
                 pending: &mut pending,
@@ -6839,6 +7034,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                measurements: None,
                 ber: None,
                 reflector_utc_offset: 0,
                 pending: &mut pending,
@@ -6914,6 +7110,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                measurements: None,
                 ber: None,
                 reflector_utc_offset: 0,
                 pending: &mut pending,
@@ -6991,6 +7188,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            measurements: None,
             ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,
@@ -7074,6 +7272,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            measurements: None,
             ber: None,
             reflector_utc_offset: 0,
             pending: &mut pending,

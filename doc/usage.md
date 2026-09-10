@@ -199,6 +199,13 @@ initialization. In library code, reuse `stats::StatsOutput` with
 `sender::run_sender_with_output` and the returned final snapshot to share CSV
 header state. The older snapshot printing methods emit standalone reports.
 
+The sender also reports [reply and directional measurements](measurements.md):
+individual burst copies, duplicates/reordering, Direct Measurement counter
+windows and Follow-Up reverse delays. These appear under `measurements` in JSON
+and in the appended 28th CSV column; `ber` remains column 27. Requested copies
+that remain unobserved include reflector policy limits and are not a network-loss
+total. Ordinary RTT/OWD and probe-loss fields retain their first-reply semantics.
+
 ### Reflector mode
 
 ```
@@ -550,7 +557,8 @@ of `-R`, logging and output format. An unusable present TLV HMAC (missing key,
 invalid flags or failed verification) blocks reflected TLV control values;
 invalid-length Access Reports cannot disarm the timer. U skips a TLV, M stops the
 remainder, and I blocks all values. An absent HMAC retains the optional legacy-peer
-policy; required Micro-session IDs and BER have stricter requirements.
+policy; required Micro-session IDs, BER, Direct Measurement and Follow-Up have
+stricter requirements.
 
 With `-R`, diagnostic TLV tokens appear in fixed order (HMAC, Access Report, CE,
 Micro-session ID, U/M/I counts), with each decision shown once even if repeated

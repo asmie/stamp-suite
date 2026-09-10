@@ -28,6 +28,11 @@ BER padding and structural edits; `src/crypto.rs` varies streaming chunk sizes.
 Run the focused subset with `cargo test --locked --lib tlv::list`. Full suites
 also exercise live signing, BER, fallback and burst replies in both backend builds.
 
+Measurement collector tests cover late replies, per-probe burst targets, serial
+wrap/reset, counter gaps/reordering, Follow-Up repeats/ambiguity/clock formats,
+and bounded histories. Typed DM/Follow-Up tests cover U/M/I, malformed/duplicate
+values and absent/corrupt/unverifiable HMACs for both base sizes.
+
 Sender validation tests assert typed Access Report, CE, Micro-session and HMAC
 outcomes. `telemetry_flag_and_hmac_gates_match_decision_oracle` combines U/M/I
 boundaries, signed/unsigned and corrupt/unverifiable input for 44/112-byte bases.
@@ -39,7 +44,8 @@ Access Report, congestion and BER tests exercise integration.
 | File | Purpose | Default-run? |
 | --- | --- | --- |
 | `reply_queue_test.rs` | Real IPv4/open and IPv6/auth queue saturation, capacity recovery without sequence consumption, SIGINT/SIGTERM shutdown, immediate/deadline cancellation and graceful burst completion with counters. | yes, Linux nix |
-| `output_stream_test.rs` | CLI stdout parsing with default/JSON logs, packet details, periodic reports, BER CSV quoting, reflector shutdown, quiet logging, schema and validation errors. | yes, Linux nix |
+| `sender_measurement_test.rs` | Independent IPv4/open and IPv6/authenticated peer verifies delayed burst collection, duplicates, directional counter gaps and mixed-clock Follow-Up summaries. | yes |
+| `output_stream_test.rs` | CLI stdout parsing with default/JSON logs, packet details, periodic reports, BER/measurement CSV quoting, reflector shutdown, quiet logging, schema and validation errors. | yes, Linux nix |
 | `config_file_test.rs` | TOML config parsing and validation. | yes |
 | `loopback_test.rs` | UDP-loopback round-trips on `127.0.0.1` (and one `[::1]`). | yes |
 | `replay_control_test.rs` | Independent Type-12 peer: single U-flagged replies for duplicate/reordered/old requests, sequence wraparound, SSID isolation, HMACs, both sequencing modes and drop policies, IPv4/IPv6. | yes, Linux nix |

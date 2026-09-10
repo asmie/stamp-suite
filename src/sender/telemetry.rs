@@ -1,7 +1,7 @@
 //! Sender decisions consume validated fields; display text is diagnostic only.
 use std::fmt;
 
-use crate::tlv::{AccessReportTlv, MicroSessionIdTlv};
+use crate::tlv::{AccessReportTlv, DirectMeasurementTlv, FollowUpTelemetryTlv, MicroSessionIdTlv};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum HmacStatus {
@@ -44,6 +44,8 @@ pub(super) struct TlvTelemetry {
     /// Any usable CoS TLV reported EC2=CE; later clean TLVs cannot clear it.
     pub forward_ce: bool,
     pub micro_session: Option<MicroSessionIdTlv>,
+    pub direct_measurement: Option<DirectMeasurementTlv>,
+    pub follow_up: Option<FollowUpTelemetryTlv>,
 }
 
 impl fmt::Display for TlvTelemetry {
@@ -99,6 +101,8 @@ mod tests {
             access_report: Some(AccessReportTlv::new(1, 1)),
             forward_ce: true,
             micro_session: Some(MicroSessionIdTlv::new(7777, 42)),
+            direct_measurement: None,
+            follow_up: None,
         };
         assert_eq!(
             report.to_string(),

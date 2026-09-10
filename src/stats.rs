@@ -3,6 +3,10 @@
 //! Provides rich sender statistics (RTT percentiles, jitter, standard deviation),
 //! reflector shutdown summaries, and multiple output formats (text, JSON, CSV).
 
+pub use crate::sender::measurements::{
+    CounterPoint, DelaySummary, DirectSummary, FollowUpSummary, MeasurementSummary,
+};
+
 mod quantiles;
 use quantiles::Quantiles;
 
@@ -156,6 +160,7 @@ impl RttCollector {
 
         StatsSnapshot {
             quantile_precision: QuantilePrecision::default(),
+            measurements: None,
             packets_sent,
             packets_received,
             packets_lost,
@@ -396,6 +401,8 @@ impl Default for QuantilePrecision {
 /// Serializable sender statistics snapshot.
 #[derive(serde::Serialize)]
 pub struct StatsSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measurements: Option<MeasurementSummary>,
     /// Quantile accuracy policy for RTT and both OWD directions.
     pub quantile_precision: QuantilePrecision,
     /// Residual BER totals and computation intervals, when requested.
@@ -428,6 +435,10 @@ pub struct StatsSnapshot {
 }
 
 impl StatsSnapshot {
+    pub fn with_measurements(mut self, summary: MeasurementSummary) -> Self {
+        self.measurements = Some(summary);
+        self
+    }
     #[must_use]
     pub fn with_ber(mut self, summary: Option<crate::ber::BerSummary>) -> Self {
         self.ber = summary;
@@ -493,6 +504,21 @@ impl StatsSnapshot {
             self.quantile_precision.exact_sample_limit,
             self.quantile_precision.relative_error_bound * 100.0,
         );
+        if let Some(m) = &self.measurements {
+            println!("{prefix}Replies: {} unique, {} additional, {} late, {} duplicates, {} reordered, {} unknown",
+                m.unique_replies, m.additional_replies, m.late_replies, m.duplicate_replies, m.reordered_replies, m.unknown_replies);
+            println!("{prefix}Requested replies unobserved: {} (includes policy caps); history evictions: {} probes, {} replies",
+                m.unobserved_requested_replies, m.probes_evicted, m.replies_evicted);
+            println!(
+                "{prefix}Reply RTT: {} samples, avg {} ms",
+                m.reply_rtt.samples,
+                fmt_opt(m.reply_rtt.avg_ms)
+            );
+            println!("{prefix}Direct Measurement window: forward missing {}, reverse missing {}; unavailable {}, discontinuities {}",
+                m.direct_measurement.forward_missing.map_or_else(|| "unavailable".into(), |n| n.to_string()), m.direct_measurement.reverse_missing.map_or_else(|| "unavailable".into(), |n| n.to_string()), m.direct_measurement.unavailable, m.direct_measurement.discontinuities);
+            println!("{prefix}Follow-Up: {} matched, {} repeated, {} unmatched, {} ambiguous, {} unavailable; reverse delay avg {} ms",
+                m.follow_up.matched, m.follow_up.repeated, m.follow_up.unmatched, m.follow_up.ambiguous, m.follow_up.unavailable, fmt_opt(m.follow_up.reverse_delay.avg_ms));
+        }
         if let Some(v) = self.min_rtt_ms {
             println!("{}Min RTT: {:.3} ms", prefix, v);
         }
@@ -621,11 +647,11 @@ impl StatsSnapshot {
              owd_rev_min_ms,owd_rev_avg_ms,owd_rev_max_ms,\
              access_report_outcome,access_report_retransmissions,\
              congestion_ce_replies,congestion_backoffs_applied,\
-             congestion_current_interval_ms,congestion_max_interval_reached_ms,quantile_exact_sample_limit,quantile_relative_error_bound,ber"
+             congestion_current_interval_ms,congestion_max_interval_reached_ms,quantile_exact_sample_limit,quantile_relative_error_bound,ber,measurements"
             );
         }
         println!(
-            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.packets_sent,
             self.packets_received,
             self.packets_lost,
@@ -661,6 +687,7 @@ impl StatsSnapshot {
                     .unwrap_or_default()
                     .replace('"', "\"\"")
             )),
+            self.measurements.as_ref().map_or_else(String::new, |m| format!("\"{}\"", serde_json::to_string(m).unwrap_or_default().replace('"', "\"\""))),
         );
     }
 }
@@ -939,6 +966,7 @@ mod tests {
     fn test_stats_text_format() {
         let snap = StatsSnapshot {
             quantile_precision: QuantilePrecision::default(),
+            measurements: None,
             packets_sent: 10,
             packets_received: 8,
             packets_lost: 2,
@@ -964,6 +992,7 @@ mod tests {
     fn test_stats_json_format() {
         let snap = StatsSnapshot {
             quantile_precision: QuantilePrecision::default(),
+            measurements: None,
             packets_sent: 10,
             packets_received: 8,
             packets_lost: 2,
@@ -989,6 +1018,7 @@ mod tests {
     fn test_stats_csv_format() {
         let snap = StatsSnapshot {
             quantile_precision: QuantilePrecision::default(),
+            measurements: None,
             packets_sent: 10,
             packets_received: 8,
             packets_lost: 2,
@@ -1013,6 +1043,7 @@ mod tests {
     fn base_snapshot() -> StatsSnapshot {
         StatsSnapshot {
             quantile_precision: QuantilePrecision::default(),
+            measurements: None,
             packets_sent: 10,
             packets_received: 8,
             packets_lost: 2,
@@ -1175,6 +1206,7 @@ mod tests {
     fn test_stats_json_none_fields() {
         let snap = StatsSnapshot {
             quantile_precision: QuantilePrecision::default(),
+            measurements: None,
             packets_sent: 5,
             packets_received: 0,
             packets_lost: 5,

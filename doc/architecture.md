@@ -234,15 +234,18 @@ commits learned identity only after SSID and pending-probe admission.
 
 `HmacStatus::Missing` explicitly retains the existing optional legacy-peer policy:
 when a configured key receives no HMAC TLV, ordinary optional Access Report/CoS
-values may still be used. Required Micro-session IDs and BER reject that case.
+values may still be used. Required Micro-session IDs, BER, Direct Measurement
+and Follow-Up reject that case.
 A typed result does not imply cryptographic authentication of an unsigned reply.
 Base-packet validation remains in `process_response`, before these decisions.
 
 Diagnostic tokens retain their names but render once per decision in fixed order:
 HMAC, Access Report, CE, Micro-session ID, then U/M/I counts. Existing BER extraction
 still produces its separate typed `Observation` and performs its own integrity
-check; Direct Measurement/Follow-Up aggregation and burst accounting are later
-work. Allocation measurements and their limits are in
+check. `sender::measurements` keeps bounded probe/reply/counter histories for
+burst and duplicate accounting, Direct Measurement window estimates and Follow-Up
+reverse-delay summaries. See [measurement semantics](measurements.md).
+Allocation measurements for the O07 validator and their limits are in
 [O07 evidence](reviews/2026-09-08/logs/optimization-o07/results.json).
 
 ## Operational Characteristics
@@ -406,6 +409,8 @@ stamp-suite --remote-addr 192.168.1.100 --direct-measurement
 - **Reflector** fills its receive and transmit counts for the client's session
 
 Counters are tracked per full session identity regardless of whether `--stateful-reflector` is enabled.
+The sender reports provisional forward/reverse missing counts over a bounded
+[observed counter window](measurements.md#direct-measurement-counter-window).
 
 ### Follow-Up Telemetry TLV (RFC 8972 §4.7)
 
@@ -415,7 +420,9 @@ The Follow-Up Telemetry TLV carries information about the previously reflected p
 stamp-suite --remote-addr 192.168.1.100 --follow-up-telemetry
 ```
 
-In stateful mode, the reflector reads a coherent sequence/timestamp/method record from the session. The method describes the actual stored timestamp, including asynchronous software or hardware TX corrections. Burst copies refresh all three before signing. Stateless replies zero the Follow-Up sequence and timestamp.
+In stateful mode, the reflector reads a coherent sequence/timestamp/method record from the session. The method describes the actual stored timestamp, including asynchronous software or hardware TX corrections. Burst copies refresh all three before signing. Stateless replies zero the Follow-Up sequence and timestamp. The sender correlates
+usable references against recent independent reflector sequences and reports
+[corrected reverse delays and unresolved references](measurements.md#follow-up-corrected-reverse-delay).
 
 ### Timestamp Information TLV (RFC 8972 §4.3)
 
