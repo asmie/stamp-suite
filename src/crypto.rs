@@ -104,6 +104,20 @@ pub fn read_token_file(path: &Path) -> Result<String, HmacError> {
 /// HMAC-SHA256 truncated to 16 bytes.
 pub struct HmacKey(Vec<u8>);
 
+/// Incremental STAMP HMAC without a concatenated input allocation.
+pub(crate) struct HmacSigner(HmacSha256);
+impl HmacSigner {
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+    pub(crate) fn finish(self) -> [u8; HMAC_OUTPUT_LENGTH] {
+        let full = self.0.finalize().into_bytes();
+        let mut truncated = [0; HMAC_OUTPUT_LENGTH];
+        truncated.copy_from_slice(&full[..HMAC_OUTPUT_LENGTH]);
+        truncated
+    }
+}
+
 impl Clone for HmacKey {
     fn clone(&self) -> Self {
         Self(self.0.clone())
@@ -201,15 +215,30 @@ impl HmacKey {
     /// A 16-byte array containing the truncated HMAC.
     #[must_use]
     pub fn compute(&self, data: &[u8]) -> [u8; HMAC_OUTPUT_LENGTH] {
-        let mut mac = HmacSha256::new_from_slice(&self.0).expect("HMAC can take key of any size");
-        mac.update(data);
-        let result = mac.finalize();
-        let full_hmac = result.into_bytes();
+        self.compute_parts([data])
+    }
 
-        // Truncate to 16 bytes
-        let mut truncated = [0u8; HMAC_OUTPUT_LENGTH];
-        truncated.copy_from_slice(&full_hmac[..HMAC_OUTPUT_LENGTH]);
-        truncated
+    pub(crate) fn signer(&self) -> HmacSigner {
+        HmacSigner(HmacSha256::new_from_slice(&self.0).expect("HMAC can take key of any size"))
+    }
+
+    pub(crate) fn compute_parts<'a>(
+        &self,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> [u8; HMAC_OUTPUT_LENGTH] {
+        let mut signer = self.signer();
+        for part in parts {
+            signer.update(part);
+        }
+        signer.finish()
+    }
+
+    pub(crate) fn verify_parts<'a>(
+        &self,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+        expected: &[u8; HMAC_OUTPUT_LENGTH],
+    ) -> bool {
+        constant_time_compare(&self.compute_parts(parts), expected)
     }
 
     /// Verifies an HMAC using constant-time comparison.
@@ -464,6 +493,22 @@ pub fn verify_packet_hmac(
 
 #[cfg(test)]
 mod tests {
+    proptest::proptest! {
+        #[test]
+        fn incremental_hmac_matches_contiguous_input(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+            chunk in 1usize..128,
+        ) {
+            let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+            let expected = key.compute(&bytes);
+            proptest::prop_assert_eq!(key.compute_parts(bytes.chunks(chunk)), expected);
+            proptest::prop_assert!(key.verify_parts(bytes.chunks(chunk), &expected));
+            let mut bad = expected;
+            bad[0] ^= 1;
+            proptest::prop_assert!(!key.verify_parts(bytes.chunks(chunk), &bad));
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -12,7 +12,7 @@ pub use super::experimental::{
     REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
 };
 
-/// TLV header size in bytes (1 byte flags+type, 2 bytes length).
+/// TLV header size in bytes (1 byte flags, 1 byte type, 2 bytes length).
 pub const TLV_HEADER_SIZE: usize = 4;
 
 /// HMAC TLV value length (16 bytes).
@@ -84,8 +84,8 @@ pub enum TlvError {
     #[error("TLV length {length} exceeds remaining buffer size {available}")]
     LengthExceedsBuffer { length: usize, available: usize },
 
-    /// HMAC TLV is not at the end of the TLV list.
-    #[error("HMAC TLV must be last in the TLV list per RFC 8972")]
+    /// A TLV other than Extra Padding follows HMAC.
+    #[error("Only Extra Padding may follow the HMAC TLV per RFC 8972 section 4.8")]
     HmacNotLast,
 
     /// HMAC TLV has invalid length.
@@ -558,11 +558,15 @@ impl RawTlv {
     /// Writes the TLV to the provided buffer without allocating.
     #[inline]
     pub fn write_to(&self, buf: &mut Vec<u8>) {
-        let length = self.wire_length.unwrap_or(self.value.len() as u16);
-        buf.push(self.flags.to_byte());
-        buf.push(self.tlv_type.to_byte());
-        buf.extend_from_slice(&length.to_be_bytes());
+        buf.extend_from_slice(&self.wire_header());
         buf.extend_from_slice(&self.value);
+    }
+
+    /// Shared by serialization and incremental HMAC, including malformed lengths.
+    pub(crate) fn wire_header(&self) -> [u8; TLV_HEADER_SIZE] {
+        let length = self.wire_length.unwrap_or(self.value.len() as u16);
+        let [hi, lo] = length.to_be_bytes();
+        [self.flags.to_byte(), self.tlv_type.to_byte(), hi, lo]
     }
 
     /// Returns the total size of this TLV when serialized (header + value).

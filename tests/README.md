@@ -20,6 +20,14 @@ They also cover standalone stateless allocation behavior, authentication failure
 before acquisition, and cap/drain/expiry changes after a provisioning decision.
 The counters exist only in test builds; the tests run in both backend builds.
 
+TLV unit/property tests in `src/tlv/list/` cover canonical ownership, mutation
+and removal, opaque truncated tails, arbitrary interleaved duplicate HMACs,
+legal padding on both sides of HMAC, and failure-echo flags/digests. Signing
+properties compare serialized coverage with contiguous HMAC input, including
+BER padding and structural edits; `src/crypto.rs` varies streaming chunk sizes.
+Run the focused subset with `cargo test --locked --lib tlv::list`. Full suites
+also exercise live signing, BER, fallback and burst replies in both backend builds.
+
 | File | Purpose | Default-run? |
 | --- | --- | --- |
 | `reply_queue_test.rs` | Real IPv4/open and IPv6/auth queue saturation, capacity recovery without sequence consumption, SIGINT/SIGTERM shutdown, immediate/deadline cancellation and graceful burst completion with counters. | yes, Linux nix |

@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Store each parsed TLV once, with indices preserving malformed and legal
+  HMAC/padding wire order. Remove mirrored semantic updates, share flag/length
+  validation, borrow BER patterns and stream HMAC input without concatenation.
+  Reserve reply capacity before serialization. Keep duplicate-HMAC partitioning
+  linear and cover malformed tails, mutation and signing with property tests.
+- Repair failure echoes that reordered legal padding around HMAC; reject missing
+  HMAC prefix bytes and preserve malformed digests/flags on regeneration calls.
+  Update TLV ownership documentation and stale conformance source citations.
+
 - Bound sender RTT/OWD storage: exact quantiles through 4096 observations, then
   full-run histograms with <0.78125% magnitude error. Share one RTT sort or
   histogram traversal per snapshot; keep cumulative moments and 64-bit sample

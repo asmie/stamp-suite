@@ -468,18 +468,16 @@ fn sign_tlvs(data: &mut [u8], base: usize, key: &HmacKey) {
             break;
         }
         if data[pos + 1] == 8 && length == 16 {
-            let mut input = data[..4].to_vec();
-            input.extend_from_slice(&data[base..pos]);
-            data[pos + 4..pos + 20].copy_from_slice(&key.compute(&input));
+            let digest = key.compute_parts([&data[..4], &data[base..pos]]);
+            data[pos + 4..pos + 20].copy_from_slice(&digest);
             return;
         }
         pos += 4 + length;
     }
     for pos in (base..=data.len() - 20).rev() {
         if data[pos + 1..pos + 4] == [8, 0, 16] && data[pos + 20..].iter().all(|b| *b == 0) {
-            let mut input = data[..4].to_vec();
-            input.extend_from_slice(&data[base..pos]);
-            data[pos + 4..pos + 20].copy_from_slice(&key.compute(&input));
+            let digest = key.compute_parts([&data[..4], &data[base..pos]]);
+            data[pos + 4..pos + 20].copy_from_slice(&digest);
             return;
         }
     }

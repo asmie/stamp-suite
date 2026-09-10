@@ -178,6 +178,41 @@ and releases its slot only after dropping the retained transmission.
 
 The `ProcessingContext` struct carries per-packet shared state (counters, optional `SessionManager` reference, local addresses, sender port). `ReceiverSharedState` (counters, session manager, start time) lives at the receiver level and is created once via `create_shared_state()` before `run_receiver()`. Standalone library callers now supply `replay_verdict`: use `ReplayVerdict::New` without ordering history, or pass a verdict from caller-managed session state. Live backends compute and replace this field after base validation.
 
+### TLV ownership and signing
+
+`TlvList` owns each `RawTlv` once in `entries`: non-HMAC entries form a borrowed
+prefix and HMAC entries form a suffix. An optional vector of indices preserves
+received order for malformed echoes and legal padding following HMAC. Semantic
+updates modify only the owner; serialization follows indices without a second
+payload copy. Duplicate-HMAC partitioning uses a temporary index permutation
+and linear swaps, avoiding quadratic work on hostile input. Normal lists need
+no partition scratch. BER presence is cached and maintained by structural edits.
+
+Reflector flag clearing, recognition and length validation share a traversal.
+BER processing borrows disjoint pattern/padding slices rather than cloning the
+pattern. Verification hashes the sequence and original covered byte slice;
+signing hashes headers and values incrementally. The live finalizer updates
+HMAC in its existing reply buffer. Assembly reserves room for the incoming
+packet and a possible HMAC before appending TLVs. Queued requests still own
+separate buffers, and parsing still allocates owned values.
+
+Only Extra Padding may follow HMAC, and its position determines which bytes
+are covered. Verification retains the parsed HMAC offset; structural edits
+invalidate it. New signatures select outgoing order, putting BER padding after
+HMAC. Failure echoes retain received order and digest bytes, with required
+flags; regeneration on malformed lists leaves them unchanged. See
+[RFC 8972 section 4.8](https://www.rfc-editor.org/rfc/rfc8972.html#section-4.8).
+
+The public `non_hmac_tlvs()` slice and logical `iter()` order remain available.
+For duplicate HMACs, `hmac_tlv()` and `iter()` select the last HMAC as before;
+`len()`, `wire_size()`, serialization and error-flag counts include every owner.
+`is_wire_order_mode()` retains its failure-only meaning: a valid parsed list
+can preserve trailing padding while returning false. Structural additions to
+valid lists select outgoing order; malformed additions update the indexed view.
+Typed Return Path/sub-TLV decoders and captured-header wrappers may still allocate.
+Local measurement results and limits are recorded with
+[O06 evidence](reviews/2026-09-08/logs/optimization-o06/results.json).
+
 ## Operational Characteristics
 
 A few cross-cutting operational invariants are worth pinning down separately, since they affect every code path that touches the network or the optional subsystems.

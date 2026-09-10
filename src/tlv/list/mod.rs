@@ -11,13 +11,15 @@ use crate::tlv::core::{RawTlv, TlvError, TlvFlags, TlvType, HMAC_TLV_VALUE_SIZE,
 /// For failure echo paths, wire order is preserved to comply with RFC 8972 §4.8.
 #[derive(Debug, Clone, Default)]
 pub struct TlvList {
-    /// The TLVs in the list (excluding HMAC).
-    tlvs: Vec<RawTlv>,
-    /// Optional HMAC TLV (before BER padding, otherwise serialized last).
-    hmac_tlv: Option<RawTlv>,
-    /// All TLVs in original wire order (used for failure echo per RFC 8972 §4.8).
-    /// When set, `to_bytes()` will use this order instead of the separated fields.
-    wire_order_tlvs: Option<Vec<RawTlv>>,
+    /// One owner per TLV: non-HMAC entries first in encounter order, then
+    /// HMAC entries. The prefix keeps non_hmac_tlvs() a borrowed slice.
+    entries: Vec<RawTlv>,
+    non_hmac_len: usize,
+    /// Original order for malformed echoes or padding after HMAC, as indices.
+    /// No payload is cloned and semantic mutations update only the owner.
+    wire_order: Option<Vec<usize>>,
+    has_ber: bool,
+    malformed_echo: bool,
     /// Byte offset of the HMAC TLV within the parsed TLV area, when this list
     /// came from the wire.
     ///
@@ -45,9 +47,7 @@ pub struct TlvList {
 /// excluded so a locally-built list still equals its own parsed round trip.
 impl PartialEq for TlvList {
     fn eq(&self, other: &Self) -> bool {
-        self.tlvs == other.tlvs
-            && self.hmac_tlv == other.hmac_tlv
-            && self.wire_order_tlvs == other.wire_order_tlvs
+        self.serialized_tlvs().eq(other.serialized_tlvs())
     }
 }
 
@@ -63,91 +63,165 @@ impl TlvList {
     /// Returns true if the list is empty (no TLVs including HMAC).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        if let Some(ref wire_order) = self.wire_order_tlvs {
-            wire_order.is_empty()
-        } else {
-            self.tlvs.is_empty() && self.hmac_tlv.is_none()
-        }
+        self.entries.is_empty()
     }
 
     /// Returns the number of TLVs (including HMAC if present).
     #[must_use]
     pub fn len(&self) -> usize {
-        if let Some(ref wire_order) = self.wire_order_tlvs {
-            wire_order.len()
-        } else {
-            self.tlvs.len() + usize::from(self.hmac_tlv.is_some())
-        }
+        self.entries.len()
     }
 
-    /// Returns true if using wire-order preservation mode (for failure echo).
+    /// Returns true for malformed failure echoes. Valid parsed lists may also
+    /// retain padding after HMAC without entering this failure-only mode.
     #[must_use]
     pub fn is_wire_order_mode(&self) -> bool {
-        self.wire_order_tlvs.is_some()
+        self.malformed_echo
     }
 
     /// Adds a TLV to the list.
     ///
-    /// HMAC TLVs are stored separately to ensure they're serialized last.
+    /// HMAC stays in the canonical suffix; valid edits use the outgoing layout.
+    /// Malformed echoes append to their indexed wire view as well.
     ///
     /// # Errors
     /// Returns an error if trying to add multiple HMAC TLVs.
     pub fn push(&mut self, tlv: RawTlv) -> Result<(), TlvError> {
-        if tlv.tlv_type.is_hmac() {
-            if self.hmac_tlv.is_some() {
-                return Err(TlvError::MultipleHmacTlvs);
-            }
-            self.hmac_tlv = Some(tlv);
-        } else {
-            self.tlvs.push(tlv);
+        let is_hmac = tlv.tlv_type.is_hmac();
+        if is_hmac && self.hmac_tlv().is_some() {
+            return Err(TlvError::MultipleHmacTlvs);
         }
+        if !self.malformed_echo {
+            self.wire_order = None;
+        }
+        self.has_ber |= crate::ber::is_ber(tlv.tlv_type);
+        let index = if is_hmac {
+            self.entries.len()
+        } else {
+            self.non_hmac_len
+        };
+        if let Some(order) = &mut self.wire_order {
+            for old in order.iter_mut() {
+                if *old >= index {
+                    *old += 1;
+                }
+            }
+            order.push(index);
+        }
+        self.entries.insert(index, tlv);
+        if !is_hmac {
+            self.non_hmac_len += 1;
+        }
+        self.hmac_wire_offset = None;
         Ok(())
     }
 
-    /// Removes every Extra Padding TLV from the reply chain (both the
-    /// separated and wire-order lists).
+    /// Removes every Extra Padding TLV and repairs any wire-order indices.
     ///
     /// Used by Reflected Test Packet Control processing: rule (a) of
     /// draft-ietf-ippm-asymmetrical-pkts-14 §3 computes the reflected length
     /// "excluding any Extra Padding TLVs" so a Session-Sender can request
     /// replies *shorter* than its test packet.
     pub fn remove_extra_padding_tlvs(&mut self) {
-        self.tlvs.retain(|t| t.tlv_type != TlvType::ExtraPadding);
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            wire_order.retain(|t| t.tlv_type != TlvType::ExtraPadding);
-        }
+        self.retain_non_hmac(|t| t.tlv_type != TlvType::ExtraPadding);
     }
 
     /// Returns an iterator over all TLVs (non-HMAC first, then HMAC).
     pub fn iter(&self) -> impl Iterator<Item = &RawTlv> {
-        self.tlvs.iter().chain(self.hmac_tlv.iter())
+        self.non_hmac_tlvs().iter().chain(self.hmac_tlv())
     }
 
     /// Returns a reference to the HMAC TLV if present.
     #[must_use]
     pub fn hmac_tlv(&self) -> Option<&RawTlv> {
-        self.hmac_tlv.as_ref()
+        self.entries[self.non_hmac_len..].last()
     }
 
     /// Returns the non-HMAC TLVs.
     #[must_use]
     pub fn non_hmac_tlvs(&self) -> &[RawTlv] {
-        &self.tlvs
+        &self.entries[..self.non_hmac_len]
     }
 
-    /// Returns the wire-order TLVs (preserved when the lenient parser saw
-    /// a malformed packet, per RFC 8972 §4.8). Test-only — production code
-    /// reads `self.wire_order_tlvs` directly within this submodule.
+    fn non_hmac_tlvs_mut(&mut self) -> &mut [RawTlv] {
+        &mut self.entries[..self.non_hmac_len]
+    }
+
+    fn hmac_tlv_mut(&mut self) -> Option<&mut RawTlv> {
+        self.entries[self.non_hmac_len..].last_mut()
+    }
+
+    fn retain_non_hmac(&mut self, mut keep: impl FnMut(&RawTlv) -> bool) {
+        let mut mapping = self
+            .wire_order
+            .as_ref()
+            .map(|_| vec![usize::MAX; self.entries.len()]);
+        let old_prefix = self.non_hmac_len;
+        let mut old = 0;
+        let mut new = 0;
+        self.non_hmac_len = 0;
+        self.entries.retain(|tlv| {
+            let retain = old >= old_prefix || keep(tlv);
+            if retain {
+                if let Some(mapping) = &mut mapping {
+                    mapping[old] = new;
+                }
+                new += 1;
+                if old < old_prefix {
+                    self.non_hmac_len += 1;
+                }
+            }
+            old += 1;
+            retain
+        });
+        if let (Some(order), Some(mapping)) = (&mut self.wire_order, mapping) {
+            order.retain_mut(|index| {
+                *index = mapping[*index];
+                *index != usize::MAX
+            });
+        }
+        self.has_ber = self
+            .non_hmac_tlvs()
+            .iter()
+            .any(|t| crate::ber::is_ber(t.tlv_type));
+        self.hmac_wire_offset = None;
+    }
+
+    fn remove_non_hmac(&mut self, index: usize) {
+        self.entries.remove(index);
+        self.non_hmac_len -= 1;
+        if let Some(order) = &mut self.wire_order {
+            order.retain_mut(|old| {
+                if *old == index {
+                    return false;
+                }
+                if *old > index {
+                    *old -= 1;
+                }
+                true
+            });
+        }
+        self.has_ber = self
+            .non_hmac_tlvs()
+            .iter()
+            .any(|t| crate::ber::is_ber(t.tlv_type));
+        self.hmac_wire_offset = None;
+    }
+
+    /// Test-only borrowed view of preserved wire order. Production serialization
+    /// follows indices without allocating a view or cloning payloads.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn wire_order_tlvs(&self) -> Option<&[RawTlv]> {
-        self.wire_order_tlvs.as_deref()
+    pub(crate) fn wire_order_tlvs(&self) -> Option<Vec<&RawTlv>> {
+        self.wire_order
+            .as_ref()
+            .map(|order| order.iter().map(|&i| &self.entries[i]).collect())
     }
 
     /// Parses a TLV list from a buffer.
     ///
     /// # Errors
-    /// Returns an error if parsing fails or HMAC TLV is not last.
+    /// Returns an error if parsing fails or a non-padding TLV follows HMAC.
     pub fn parse(buf: &[u8]) -> Result<Self, TlvError> {
         let mut list = Self::new();
         let mut offset = 0;
@@ -170,16 +244,43 @@ impl TlvList {
 
             if tlv.tlv_type.is_hmac() {
                 found_hmac = true;
-                list.hmac_wire_offset = Some(offset);
                 if tlv.value.len() != HMAC_TLV_VALUE_SIZE {
                     return Err(TlvError::InvalidHmacLength(tlv.value.len()));
                 }
             }
 
+            let is_hmac = tlv.tlv_type.is_hmac();
+            let previous_offset = list.hmac_wire_offset;
             list.push(tlv)?;
+            list.hmac_wire_offset = if is_hmac {
+                Some(offset)
+            } else {
+                previous_offset
+            };
             offset += consumed;
         }
 
+        if let Some(at) = list.hmac_wire_offset.filter(|at| at + 20 < offset) {
+            let mut prefix_bytes = 0;
+            let before_hmac = list
+                .non_hmac_tlvs()
+                .iter()
+                .take_while(|tlv| {
+                    if prefix_bytes < at {
+                        prefix_bytes += tlv.wire_size();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .count();
+            list.wire_order = Some(
+                (0..before_hmac)
+                    .chain(std::iter::once(list.non_hmac_len))
+                    .chain(before_hmac..list.non_hmac_len)
+                    .collect(),
+            );
+        }
         Ok(list)
     }
 
@@ -258,28 +359,60 @@ impl TlvList {
             }
         }
 
-        let need_wire_order = any_malformed || has_multiple_hmac;
-
-        let mut list = Self::new();
-
-        if need_wire_order {
-            for tlv in &parsed_tlvs {
-                if tlv.tlv_type.is_hmac() {
-                    list.hmac_tlv = Some(tlv.clone());
-                } else {
-                    list.tlvs.push(tlv.clone());
+        let malformed_echo = any_malformed || has_multiple_hmac;
+        let need_wire_order = malformed_echo
+            || (found_hmac && parsed_tlvs.last().is_some_and(|t| !t.tlv_type.is_hmac()));
+        let non_hmac_len = parsed_tlvs.iter().filter(|t| !t.tlv_type.is_hmac()).count();
+        let has_ber = parsed_tlvs.iter().any(|t| crate::ber::is_ber(t.tlv_type));
+        let wire_order: Option<Vec<usize>> = need_wire_order.then(|| {
+            let mut next_non_hmac = 0;
+            let mut next_hmac = non_hmac_len;
+            parsed_tlvs
+                .iter()
+                .map(|tlv| {
+                    let next = if tlv.tlv_type.is_hmac() {
+                        &mut next_hmac
+                    } else {
+                        &mut next_non_hmac
+                    };
+                    let index = *next;
+                    *next += 1;
+                    index
+                })
+                .collect()
+        });
+        if has_multiple_hmac {
+            // Arbitrary duplicate HMACs must not turn the stable partition
+            // quadratic. Each swap puts one owner in its final position;
+            // scratch contains only indices, never duplicated payloads.
+            let mut destinations: Vec<usize> = wire_order.as_ref().unwrap().clone();
+            for index in 0..destinations.len() {
+                while destinations[index] != index {
+                    let destination = destinations[index];
+                    parsed_tlvs.swap(index, destination);
+                    destinations.swap(index, destination);
                 }
             }
-            list.wire_order_tlvs = Some(parsed_tlvs);
         } else {
-            for tlv in parsed_tlvs {
-                if tlv.tlv_type.is_hmac() {
-                    list.hmac_tlv = Some(tlv);
-                } else {
-                    list.tlvs.push(tlv);
+            // With at most one HMAC, each rotation shifts at most two owners.
+            let mut prefix = 0;
+            for index in 0..parsed_tlvs.len() {
+                if !parsed_tlvs[index].tlv_type.is_hmac() {
+                    if index != prefix {
+                        parsed_tlvs[prefix..=index].rotate_right(1);
+                    }
+                    prefix += 1;
                 }
             }
         }
+        let mut list = Self {
+            entries: parsed_tlvs,
+            non_hmac_len,
+            wire_order,
+            has_ber,
+            malformed_echo,
+            ..Self::default()
+        };
 
         list.hmac_wire_offset = hmac_wire_offset;
         list.hmac_misplaced = hmac_misplaced;
@@ -296,9 +429,8 @@ impl TlvList {
 
     /// Serializes the TLV list to bytes.
     ///
-    /// If wire-order mode is active (from lenient parsing with issues),
-    /// TLVs are serialized in their original wire order per RFC 8972 §4.8.
-    /// Otherwise, HMAC precedes BER padding or is last per RFC 8972.
+    /// Preserved parsed order is used for malformed echoes and legal padding
+    /// after HMAC. Newly built/signed lists put HMAC before BER padding or last.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.wire_size());
@@ -309,79 +441,69 @@ impl TlvList {
     /// BER padding remains outside TLV-HMAC coverage so residual errors can
     /// be measured without accepting corruption of the measurement metadata.
     fn ber_padding_after_hmac(&self) -> bool {
-        self.tlvs.iter().any(|t| {
-            matches!(
-                t.tlv_type,
-                TlvType::BerPattern | TlvType::BerCount | TlvType::BerBurst
-            )
-        })
+        self.has_ber
     }
 
-    /// Writes the TLV list to the provided buffer without allocating.
+    /// Appends TLVs without a temporary serialization buffer. The supplied
+    /// buffer may grow if its capacity is insufficient.
     #[inline]
     pub fn write_to(&self, buf: &mut Vec<u8>) {
-        if let Some(ref wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order {
-                tlv.write_to(buf);
-            }
-            return;
+        for tlv in self.serialized_tlvs() {
+            tlv.write_to(buf);
         }
+    }
 
-        let trailing_padding = self.hmac_tlv.is_some() && self.ber_padding_after_hmac();
-        for tlv in &self.tlvs {
-            if !trailing_padding || tlv.tlv_type != TlvType::ExtraPadding {
-                tlv.write_to(buf);
-            }
-        }
-        if let Some(ref hmac) = self.hmac_tlv {
-            hmac.write_to(buf);
-        }
-        if trailing_padding {
-            for tlv in &self.tlvs {
-                if tlv.tlv_type == TlvType::ExtraPadding {
-                    tlv.write_to(buf);
-                }
-            }
-        }
+    fn serialized_tlvs(&self) -> impl Iterator<Item = &RawTlv> {
+        let normal = self.wire_order.is_none();
+        let trailing_padding = self.hmac_tlv().is_some() && self.ber_padding_after_hmac();
+        self.wire_order
+            .iter()
+            .flatten()
+            .map(|&index| &self.entries[index])
+            .chain(
+                self.non_hmac_tlvs()
+                    .iter()
+                    .take(if normal { self.non_hmac_len } else { 0 })
+                    .filter(move |t| !trailing_padding || t.tlv_type != TlvType::ExtraPadding),
+            )
+            .chain(self.hmac_tlv().into_iter().filter(move |_| normal))
+            .chain(
+                self.non_hmac_tlvs()
+                    .iter()
+                    .take(if normal && trailing_padding {
+                        self.non_hmac_len
+                    } else {
+                        0
+                    })
+                    .filter(|t| t.tlv_type == TlvType::ExtraPadding),
+            )
     }
 
     /// Returns the total wire size of all TLVs.
     #[must_use]
     pub fn wire_size(&self) -> usize {
-        if let Some(ref wire_order) = self.wire_order_tlvs {
-            wire_order.iter().map(|t| t.wire_size()).sum()
-        } else {
-            self.iter().map(|t| t.wire_size()).sum()
-        }
+        self.entries.iter().map(RawTlv::wire_size).sum()
     }
 
-    /// Builds the HMAC input data per RFC 8972 §4.8.
-    fn build_hmac_input(&self, sequence_number_bytes: &[u8], tlv_bytes: &[u8]) -> Vec<u8> {
-        // The HMAC covers the Sequence Number plus every TLV that precedes the
-        // HMAC TLV. When this list came off the wire we know that prefix
-        // exactly; the size-sum fallback is only correct when the HMAC TLV is
-        // last, which a legal trailing Extra Padding TLV (§4.8) breaks.
-        let non_hmac_size: usize = self.hmac_wire_offset.unwrap_or_else(|| {
-            self.tlvs
+    /// Borrows the original covered prefix, or the current layout after an edit.
+    /// An incomplete supplied prefix is rejected rather than silently omitted.
+    fn hmac_prefix<'a>(&self, tlv_bytes: &'a [u8]) -> Option<&'a [u8]> {
+        let size = self.hmac_wire_offset.unwrap_or_else(|| {
+            if let Some(order) = &self.wire_order {
+                return order
+                    .iter()
+                    .map(|&index| &self.entries[index])
+                    .take_while(|tlv| !tlv.tlv_type.is_hmac())
+                    .map(RawTlv::wire_size)
+                    .sum();
+            }
+            self.non_hmac_tlvs()
                 .iter()
                 .filter(|t| !self.ber_padding_after_hmac() || t.tlv_type != TlvType::ExtraPadding)
-                .map(|t| t.wire_size())
+                .map(RawTlv::wire_size)
                 .sum()
         });
-
-        let mut data = Vec::with_capacity(4 + non_hmac_size);
-
-        if sequence_number_bytes.len() >= 4 {
-            data.extend_from_slice(&sequence_number_bytes[..4]);
-        } else {
-            data.extend_from_slice(sequence_number_bytes);
-        }
-
-        if non_hmac_size <= tlv_bytes.len() {
-            data.extend_from_slice(&tlv_bytes[..non_hmac_size]);
-        }
-
-        data
+        tlv_bytes.get(..size)
     }
 
     /// Extracts the expected HMAC bytes from the HMAC TLV value.
@@ -403,14 +525,15 @@ impl TlvList {
         sequence_number_bytes: &[u8],
         tlv_bytes: &[u8],
     ) -> Result<(), TlvError> {
-        let Some(hmac_tlv) = &self.hmac_tlv else {
+        let Some(hmac) = self.hmac_tlv() else {
             return Ok(());
         };
-
-        let data = self.build_hmac_input(sequence_number_bytes, tlv_bytes);
-        let expected = Self::extract_hmac_bytes(hmac_tlv)?;
-
-        if key.verify(&data, &expected) {
+        let expected = Self::extract_hmac_bytes(hmac)?;
+        let prefix = self
+            .hmac_prefix(tlv_bytes)
+            .ok_or(TlvError::HmacVerificationFailed)?;
+        let sequence = &sequence_number_bytes[..sequence_number_bytes.len().min(4)];
+        if key.verify_parts([sequence, prefix], &expected) {
             Ok(())
         } else {
             Err(TlvError::HmacVerificationFailed)
@@ -427,18 +550,10 @@ impl TlvList {
         sequence_number_bytes: &[u8],
         tlv_bytes: &[u8],
     ) -> bool {
-        let Some(hmac_tlv) = &self.hmac_tlv else {
-            return true;
-        };
-
-        let data = self.build_hmac_input(sequence_number_bytes, tlv_bytes);
-
-        let Ok(expected) = Self::extract_hmac_bytes(hmac_tlv) else {
-            self.mark_all_integrity_failed();
-            return false;
-        };
-
-        if key.verify(&data, &expected) {
+        if self
+            .verify_hmac(key, sequence_number_bytes, tlv_bytes)
+            .is_ok()
+        {
             true
         } else {
             self.mark_all_integrity_failed();
@@ -448,29 +563,17 @@ impl TlvList {
 
     /// Marks ALL TLVs (including HMAC) with I-flag per RFC 8972 §4.8.
     pub fn mark_all_integrity_failed(&mut self) {
-        for tlv in &mut self.tlvs {
+        for tlv in &mut self.entries {
             tlv.set_integrity_failed();
-        }
-        if let Some(ref mut hmac) = self.hmac_tlv {
-            hmac.set_integrity_failed();
-        }
-
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order {
-                tlv.set_integrity_failed();
-            }
         }
     }
 
     /// Returns true if the TLV list contains only Extra Padding TLVs.
     #[must_use]
     pub fn contains_only_extra_padding(&self) -> bool {
-        if self.hmac_tlv.is_some() {
-            return false;
-        }
-        !self.tlvs.is_empty()
+        !self.entries.is_empty()
             && self
-                .tlvs
+                .entries
                 .iter()
                 .all(|t| t.tlv_type == TlvType::ExtraPadding)
     }
@@ -480,63 +583,45 @@ impl TlvList {
     /// Returns a tuple of (unrecognized_count, malformed_count, integrity_failed_count).
     #[must_use]
     pub fn count_error_flags(&self) -> (usize, usize, usize) {
-        let mut unrecognized = 0;
-        let mut malformed = 0;
-        let mut integrity_failed = 0;
-
-        for tlv in &self.tlvs {
-            if tlv.is_unrecognized() {
-                unrecognized += 1;
-            }
-            if tlv.is_malformed() {
-                malformed += 1;
-            }
-            if tlv.is_integrity_failed() {
-                integrity_failed += 1;
-            }
-        }
-
-        if let Some(ref hmac) = self.hmac_tlv {
-            if hmac.is_unrecognized() {
-                unrecognized += 1;
-            }
-            if hmac.is_malformed() {
-                malformed += 1;
-            }
-            if hmac.is_integrity_failed() {
-                integrity_failed += 1;
-            }
-        }
-
-        (unrecognized, malformed, integrity_failed)
+        self.entries.iter().fold((0, 0, 0), |(u, m, i), tlv| {
+            (
+                u + usize::from(tlv.is_unrecognized()),
+                m + usize::from(tlv.is_malformed()),
+                i + usize::from(tlv.is_integrity_failed()),
+            )
+        })
     }
 
     /// Computes and sets the HMAC TLV per RFC 8972 §4.8 for the **sender** path.
     ///
     /// The resulting HMAC TLV carries sender-default flags (U=1, M=0, I=0)
     /// per RFC 8972 §4. Reflectors regenerating an HMAC for a response
-    /// should call [`Self::set_hmac_response`] instead.
+    /// should call [`Self::set_hmac_response`] instead. Malformed echo lists
+    /// are left unchanged; their received HMAC must not be regenerated.
     pub fn set_hmac(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) {
-        // wire_order_tlvs holds a separate clone of the HMAC TLV for the
-        // RFC 8972 §4.8 echo path; we only update self.hmac_tlv here so
-        // calling on a wire-order list would desync the two copies.
-        debug_assert!(
-            self.wire_order_tlvs.is_none(),
-            "HMAC regeneration on a wire-order list would desync hmac_tlv from wire_order_tlvs"
-        );
-
-        let tlvs_size: usize = self.tlvs.iter().map(|t| t.wire_size()).sum();
-        let mut data = Vec::with_capacity(4 + tlvs_size);
-        let seq_len = sequence_number_bytes.len().min(4);
-        data.extend_from_slice(&sequence_number_bytes[..seq_len]);
-        for tlv in &self.tlvs {
+        // Malformed failure echoes preserve received HMAC bytes and flags.
+        if self.malformed_echo {
+            return;
+        }
+        // New signatures use the outbound layout; incoming verification used the
+        // original offset and borrowed bytes before semantic mutation.
+        self.wire_order = None;
+        let mut signer = key.signer();
+        signer.update(&sequence_number_bytes[..sequence_number_bytes.len().min(4)]);
+        for tlv in self.non_hmac_tlvs() {
             if !self.ber_padding_after_hmac() || tlv.tlv_type != TlvType::ExtraPadding {
-                tlv.write_to(&mut data);
+                signer.update(&tlv.wire_header());
+                signer.update(&tlv.value);
             }
         }
-
-        let hmac = key.compute(&data);
-        self.hmac_tlv = Some(RawTlv::new(TlvType::Hmac, hmac.to_vec()));
+        let value = signer.finish();
+        let hmac = RawTlv::new(TlvType::Hmac, value.to_vec());
+        if let Some(old) = self.hmac_tlv_mut() {
+            *old = hmac;
+        } else {
+            self.entries.push(hmac);
+        }
+        self.hmac_wire_offset = None;
     }
 
     /// Computes and sets the HMAC TLV for the **reflector** response path.
@@ -571,25 +656,20 @@ impl TlvList {
     /// `receiver::tests::test_assemble_auth_with_tlvs_adds_hmac_even_when_request_has_none`
     /// for pinning tests.
     pub fn set_hmac_response(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) {
+        if self.malformed_echo {
+            return;
+        }
         self.set_hmac(key, sequence_number_bytes);
-        if let Some(hmac) = self.hmac_tlv.as_mut() {
+        if let Some(hmac) = self.hmac_tlv_mut() {
             hmac.flags = TlvFlags::default();
         }
     }
 
     /// Marks unrecognized TLV types with the U flag.
     pub fn mark_unrecognized_types(&mut self) {
-        for tlv in &mut self.tlvs {
+        for tlv in self.non_hmac_tlvs_mut() {
             if !tlv.tlv_type.is_recognized() {
                 tlv.set_unrecognized();
-            }
-        }
-
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order {
-                if !tlv.tlv_type.is_recognized() {
-                    tlv.set_unrecognized();
-                }
             }
         }
     }
@@ -621,9 +701,13 @@ impl TlvList {
         // RFC 8972 §4: the reflector overwrites U/M/I. The "Otherwise"
         // clauses require setting each to 0 when the named condition does not
         // hold, so clear them first and let the setters below raise as needed.
-        self.clear_reflector_flags();
-        self.mark_unrecognized_types();
-        self.validate_known_tlv_lengths();
+        for tlv in &mut self.entries {
+            tlv.clear_reflector_flags();
+            if !tlv.tlv_type.is_recognized() {
+                tlv.set_unrecognized();
+            }
+            Self::validate_known_tlv_lengths_slice(std::slice::from_mut(tlv));
+        }
 
         // RFC 8972 §4.8: "If the HMAC TLV appears in any other position in a
         // STAMP extended test packet, then the situation MUST be processed as
@@ -638,7 +722,7 @@ impl TlvList {
         }
 
         if let Some(key) = hmac_key {
-            if require_hmac_tlv && self.hmac_tlv.is_none() {
+            if require_hmac_tlv && self.hmac_tlv().is_none() {
                 if !self.contains_only_extra_padding() {
                     self.mark_all_integrity_failed();
                     return false;
@@ -647,7 +731,7 @@ impl TlvList {
             }
 
             self.verify_hmac_and_mark(key, sequence_number_bytes, tlv_bytes)
-        } else if self.hmac_tlv.is_some() {
+        } else if self.hmac_tlv().is_some() {
             self.mark_all_integrity_failed();
             false
         } else {
@@ -664,16 +748,8 @@ impl TlvList {
     /// (draft-ietf-ippm-asymmetrical-pkts-14 §3) — see
     /// [`RawTlv::clear_reflector_flags`], which this delegates to.
     pub fn clear_reflector_flags(&mut self) {
-        for tlv in &mut self.tlvs {
+        for tlv in &mut self.entries {
             tlv.clear_reflector_flags();
-        }
-        if let Some(ref mut hmac) = self.hmac_tlv {
-            hmac.clear_reflector_flags();
-        }
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order {
-                tlv.clear_reflector_flags();
-            }
         }
     }
 
@@ -687,19 +763,10 @@ impl TlvList {
     /// - the value length doesn't match the type's RFC-defined size for
     ///   recognized types.
     ///
-    /// Iterates `self.tlvs`, the dedicated `self.hmac_tlv` slot, and the
-    /// `wire_order_tlvs` echo copy if present, so all three storage views stay
-    /// consistent with the reflector-side flag rules.
+    /// Visits each canonical entry once, including duplicate HMAC entries
+    /// retained in malformed input.
     pub fn validate_known_tlv_lengths(&mut self) {
-        Self::validate_known_tlv_lengths_slice(&mut self.tlvs);
-
-        if let Some(ref mut hmac) = self.hmac_tlv {
-            Self::validate_known_tlv_lengths_slice(std::slice::from_mut(hmac));
-        }
-
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            Self::validate_known_tlv_lengths_slice(wire_order);
-        }
+        Self::validate_known_tlv_lengths_slice(&mut self.entries);
     }
 
     /// Validates known TLV lengths on a single slice and sets M-flag on mismatches.
@@ -746,6 +813,194 @@ impl TlvList {
 
 #[cfg(test)]
 mod tests {
+    proptest::proptest! {
+        #[test]
+        fn canonical_interleaved_duplicate_hmacs_preserve_wire_order(
+            kinds in proptest::collection::vec(proptest::prelude::any::<bool>(), 2..128),
+        ) {
+            let mut bytes = Vec::new();
+            let mut expected = Vec::new();
+            let mut seen_hmac = false;
+            for (i, hmac) in kinds.into_iter().enumerate() {
+                let kind = if hmac { 8 } else { 1 };
+                bytes.extend_from_slice(&[0, kind, 0, 16]);
+                bytes.extend_from_slice(&[i as u8; 16]);
+                expected.extend_from_slice(&[if hmac && seen_hmac { 0x40 } else { 0 }, kind, 0, 16]);
+                expected.extend_from_slice(&[i as u8; 16]);
+                seen_hmac |= hmac;
+            }
+            let (mut list, _) = TlvList::parse_lenient(&bytes);
+            proptest::prop_assert_eq!(list.to_bytes(), expected.clone());
+            list.remove_extra_padding_tlvs();
+            let hmac_bytes: Vec<u8> = expected.chunks_exact(20)
+                .filter(|tlv| tlv[1] == 8).flatten().copied().collect();
+            proptest::prop_assert_eq!(list.to_bytes(), hmac_bytes);
+        }
+
+        #[test]
+        fn canonical_malformed_tail_preserves_bytes_and_removal_order(
+            values in proptest::collection::vec(proptest::collection::vec(proptest::prelude::any::<u8>(), 0..32), 0..16),
+            tail in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+            hmac_first in proptest::prelude::any::<bool>(),
+        ) {
+            // Independent encoder: valid padding/unknown entries followed by an
+            // opaque truncated tail, which itself includes HMAC-looking bytes.
+            let mut segments = Vec::new();
+            for (i, value) in values.iter().enumerate() {
+                let kind = if i % 2 == 0 { 1 } else { 253 };
+                let mut bytes = vec![0, kind, 0, value.len() as u8];
+                bytes.extend_from_slice(value);
+                segments.push(bytes);
+            }
+            if hmac_first {
+                let mut hmac = vec![0, 8, 0, 16];
+                hmac.extend_from_slice(&[0xAB; 16]);
+                segments.push(hmac);
+            }
+            let mut opaque = vec![0, 250, 0, (tail.len() + 60) as u8];
+            opaque.extend_from_slice(&tail);
+            opaque.extend_from_slice(&[0, 8, 0, 16]);
+            opaque.extend_from_slice(&[0xCD; 16]);
+            segments.push(opaque);
+            let (mut list, malformed) = TlvList::parse_lenient(&segments.concat());
+            proptest::prop_assert!(malformed);
+            segments.last_mut().unwrap()[0] |= 0x40;
+            proptest::prop_assert_eq!(list.to_bytes(), segments.concat());
+            proptest::prop_assert_eq!(list.hmac_misplaced(), hmac_first);
+            let order = list.wire_order.as_ref().unwrap();
+            let mut indices = order.clone();
+            indices.sort_unstable();
+            proptest::prop_assert_eq!(indices, (0..list.entries.len()).collect::<Vec<_>>());
+            for tlv in list.non_hmac_tlvs() {
+                proptest::prop_assert!(order.iter().any(|&i| std::ptr::eq(tlv, &list.entries[i])));
+            }
+            list.remove_extra_padding_tlvs();
+            segments.retain(|bytes| bytes[1] != 1);
+            proptest::prop_assert_eq!(list.to_bytes(), segments.concat());
+            proptest::prop_assert_eq!(list.len(), segments.len());
+            proptest::prop_assert_eq!(list.wire_size(), segments.iter().map(Vec::len).sum::<usize>());
+            list.mark_all_integrity_failed();
+            for bytes in &mut segments { bytes[0] |= 0x20; }
+            proptest::prop_assert_eq!(list.to_bytes(), segments.concat());
+        }
+
+        #[test]
+        fn streamed_tlv_hmac_matches_serialized_prefix_with_ber_padding(
+            padding in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048),
+            seq in proptest::prelude::any::<[u8; 4]>(),
+            ber in proptest::prelude::any::<bool>(),
+        ) {
+            let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+            let mut list = TlvList::new();
+            list.push(RawTlv::new(TlvType::ExtraPadding, padding)).unwrap();
+            list.push(RawTlv::new(TlvType::ClassOfService, vec![0; 4])).unwrap();
+            if ber { list.push(RawTlv::new(TlvType::BerCount, vec![0; 4])).unwrap(); }
+            list.set_hmac(&key, &seq);
+            let bytes = list.to_bytes();
+            let prefix = if ber { 16 } else { bytes.len() - 20 };
+            let expected = key.compute(&[seq.as_slice(), &bytes[..prefix]].concat());
+            proptest::prop_assert_eq!(&list.hmac_tlv().unwrap().value, &expected.to_vec());
+            let mut parsed = TlvList::parse(&bytes).unwrap();
+            proptest::prop_assert!(parsed.verify_hmac(&key, &seq, &bytes).is_ok());
+            // A structural mutation followed by regeneration must discard the old
+            // parsed offset and sign the current prefix.
+            parsed.remove_extra_padding_tlvs();
+            parsed.set_hmac_response(&key, &seq);
+            proptest::prop_assert!(parsed.verify_hmac(&key, &seq, &parsed.to_bytes()).is_ok());
+        }
+    }
+
+    #[test]
+    fn canonical_duplicate_hmac_flags_and_header_trim_stay_in_wire_order() {
+        let mut bytes = vec![0, 247, 0, 8];
+        bytes.extend_from_slice(&[7; 8]);
+        for value in [0xAB, 0xCD] {
+            bytes.extend_from_slice(&[0, 8, 0, 16]);
+            bytes.extend_from_slice(&[value; 16]);
+        }
+        let (mut list, malformed) = TlvList::parse_lenient(&bytes);
+        assert!(malformed);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.hmac_tlv().unwrap().value, vec![0xCD; 16]);
+        list.mark_all_integrity_failed();
+        assert_eq!(list.count_error_flags().2, 3);
+        assert_eq!(list.trim_reflected_headers_to_size(44, 84), 1);
+        let echoed = list.to_bytes();
+        assert_eq!(echoed.len(), 40);
+        assert_eq!(echoed[0], 0x20);
+        assert_eq!(echoed[20], 0x60);
+        assert_eq!(&echoed[4..20], &[0xAB; 16]);
+        assert_eq!(&echoed[24..40], &[0xCD; 16]);
+    }
+
+    #[test]
+    fn hmac_verification_rejects_missing_prefix_bytes() {
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let seq = [0; 4];
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::ClassOfService, vec![0; 4]))
+            .unwrap();
+        list.push(RawTlv::new(TlvType::Hmac, key.compute(&seq).to_vec()))
+            .unwrap();
+        assert!(list.verify_hmac(&key, &seq, &[]).is_err());
+    }
+
+    #[test]
+    fn malformed_failure_echo_does_not_regenerate_hmac_or_clear_flags() {
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        for has_hmac in [false, true] {
+            let mut bytes = Vec::new();
+            if has_hmac {
+                bytes.extend_from_slice(&[0, 8, 0, 16]);
+                bytes.extend_from_slice(&[0xCD; 16]);
+            }
+            bytes.extend_from_slice(&[0, 4, 0, 4, 1]);
+            let (mut list, _) = TlvList::parse_lenient(&bytes);
+            list.mark_all_integrity_failed();
+            let before = list.to_bytes();
+            list.set_hmac(&key, &[0; 4]);
+            list.set_hmac_response(&key, &[0; 4]);
+            assert_eq!(list.to_bytes(), before);
+            assert_eq!(list.entries.len(), list.wire_order.as_ref().unwrap().len());
+        }
+    }
+
+    #[test]
+    fn legal_padding_on_both_sides_of_hmac_keeps_its_received_position() {
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let seq = [1, 2, 3, 4];
+        let mut bytes = vec![0, 1, 0, 1, 7, 0, 4, 0, 4, 0, 0, 0, 0];
+        let digest = key.compute(&[seq.as_slice(), bytes.as_slice()].concat());
+        bytes.extend_from_slice(&[0, 8, 0, 16]);
+        bytes.extend_from_slice(&digest);
+        bytes.extend_from_slice(&[0, 1, 0, 1, 9]);
+        for mut list in [
+            TlvList::parse(&bytes).unwrap(),
+            TlvList::parse_lenient(&bytes).0,
+        ] {
+            assert_eq!(list.to_bytes(), bytes);
+            assert!(list.verify_hmac(&key, &seq, &bytes).is_ok());
+            let wrong_key = HmacKey::new(vec![0xCD; 32]).unwrap();
+            assert!(!list.apply_reflector_flags(Some(&wrong_key), &seq, &bytes));
+            let mut expected = bytes.clone();
+            for offset in [0, 5, 13, 33] {
+                expected[offset] |= 0x20;
+            }
+            assert_eq!(list.to_bytes(), expected);
+        }
+    }
+
+    #[test]
+    fn canonical_push_updates_failure_echo_and_logical_views() {
+        let (mut list, _) = TlvList::parse_lenient(&[0, 4, 0, 8, 1]);
+        let previous = list.to_bytes();
+        let extra = RawTlv::new(TlvType::ExtraPadding, vec![2, 3]);
+        let extra_bytes = extra.to_bytes();
+        list.push(extra).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list.to_bytes(), [previous, extra_bytes].concat());
+    }
+
     use super::*;
 
     #[test]
@@ -1034,7 +1289,7 @@ mod tests {
         let raw = list.to_bytes();
         list.apply_reflector_flags(None, &[0u8; 4], &raw);
 
-        // The post-HMAC TLV lives in wire_order_tlvs because parse_lenient
+        // The post-HMAC TLV is retained in indexed wire order because parse_lenient
         // routed everything there once it detected malformed-ness.
         let wire_order = list
             .wire_order_tlvs()

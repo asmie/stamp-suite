@@ -1038,9 +1038,9 @@ pub fn set_return_path_u_flag_in_response(response: &mut [u8], base_packet_size:
 /// response (e.g., after `set_cos_policy_rejected` sets the RP flag) to keep the
 /// HMAC consistent with the packet contents.
 ///
-/// The function locates the HMAC TLV at the end of the response (per RFC 8972 §4.8,
-/// HMAC TLV is always last), recomputes the HMAC over `seq_bytes + preceding TLVs`,
-/// and overwrites the HMAC value in place.
+/// This compatibility helper handles a terminal HMAC, recomputing it over
+/// `seq_bytes + preceding TLVs`. It does not locate HMAC before trailing padding;
+/// live transmission uses the shared finalizer for that layout as well.
 ///
 /// Returns `true` if the HMAC was recomputed, `false` if no HMAC TLV was found.
 pub fn recompute_response_tlv_hmac(
@@ -1055,7 +1055,8 @@ pub fn recompute_response_tlv_hmac(
         return false;
     }
 
-    // HMAC TLV is always serialized last (TlvList::write_to guarantees this)
+    // This compatibility helper handles a terminal HMAC only. Live transmission
+    // uses transmit::sign_tlvs, which also handles BER padding after HMAC.
     let hmac_tlv_offset = data.len() - HMAC_TLV_SIZE;
 
     // Verify the last TLV is actually an HMAC TLV (type byte at offset 1 in header)
@@ -1064,12 +1065,7 @@ pub fn recompute_response_tlv_hmac(
     }
 
     // HMAC input: seq_bytes (first 4 bytes of packet) + all TLV bytes before the HMAC TLV
-    let preceding_len = hmac_tlv_offset - base_packet_size;
-    let mut hmac_input = Vec::with_capacity(4 + preceding_len);
-    hmac_input.extend_from_slice(&data[..4]);
-    hmac_input.extend_from_slice(&data[base_packet_size..hmac_tlv_offset]);
-
-    let hmac = hmac_key.compute(&hmac_input);
+    let hmac = hmac_key.compute_parts([&data[..4], &data[base_packet_size..hmac_tlv_offset]]);
 
     // Overwrite HMAC value in place (value starts after the 4-byte header)
     let value_start = hmac_tlv_offset + TLV_HEADER_SIZE;
@@ -2592,7 +2588,14 @@ pub fn assemble_unauth_answer_with_tlvs(
         reflector_seq,
     );
     let base_bytes = base.to_bytes();
-    let mut response = base_bytes.to_vec();
+    // Each queued response owns its output buffer; reserve the incoming size
+    // and a possible generated TLV HMAC before appending the chain.
+    let capacity = original_data
+        .len()
+        .max(base_bytes.len())
+        .saturating_add(if tlv_hmac_key.is_some() { 20 } else { 0 });
+    let mut response = Vec::with_capacity(capacity);
+    response.extend_from_slice(&base_bytes);
     let mut cos_request: Option<(u8, u8)> = None;
     let mut return_path_action = ReturnPathAction::Normal;
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
@@ -2732,7 +2735,14 @@ pub fn assemble_auth_answer_with_tlvs(
         reflector_seq,
     );
     let base_bytes = base.to_bytes();
-    let mut response = base_bytes.to_vec();
+    // Each queued response owns its output buffer; reserve the incoming size
+    // and a possible generated TLV HMAC before appending the chain.
+    let capacity = original_data
+        .len()
+        .max(base_bytes.len())
+        .saturating_add(if tlv_hmac_key.is_some() { 20 } else { 0 });
+    let mut response = Vec::with_capacity(capacity);
+    response.extend_from_slice(&base_bytes);
     let mut cos_request: Option<(u8, u8)> = None;
     let mut return_path_action = ReturnPathAction::Normal;
     let mut reflected_control: Option<ReflectedControlBehavior> = None;

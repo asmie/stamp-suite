@@ -53,23 +53,15 @@ impl DestinationNodeAddressOutcome {
 }
 
 impl TlvList {
-    /// Calls `f` on every TLV (in both `self.tlvs` and `self.wire_order_tlvs`)
-    /// for which `pred` returns true.
+    /// Calls `f` once on each non-HMAC owner for which `pred` returns true.
     fn for_each_matching_tlv(
         &mut self,
         mut pred: impl FnMut(&RawTlv) -> bool,
         mut f: impl FnMut(&mut RawTlv),
     ) {
-        for tlv in &mut self.tlvs {
+        for tlv in self.non_hmac_tlvs_mut() {
             if pred(tlv) {
                 f(tlv);
-            }
-        }
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order {
-                if pred(tlv) {
-                    f(tlv);
-                }
             }
         }
     }
@@ -79,7 +71,7 @@ impl TlvList {
     /// Returns `Some((dscp1, ecn1))` if a CoS TLV is found and valid.
     #[must_use]
     pub fn get_cos_request(&self) -> Option<(u8, u8)> {
-        for tlv in &self.tlvs {
+        for tlv in self.non_hmac_tlvs() {
             if tlv.tlv_type == TlvType::ClassOfService {
                 if let Ok(cos) = ClassOfServiceTlv::from_raw(tlv) {
                     return Some((cos.dscp1, cos.ecn1));
@@ -500,33 +492,19 @@ impl TlvList {
         local_addrs: &[std::net::IpAddr],
     ) -> DestinationNodeAddressOutcome {
         let mut outcome = DestinationNodeAddressOutcome::Absent;
-        let mut matched = true;
 
-        // Check in separated tlvs
-        for tlv in &mut self.tlvs {
+        // The non-HMAC prefix retains encounter order.
+        for tlv in self.non_hmac_tlvs_mut() {
             if tlv.tlv_type == TlvType::DestinationNodeAddress {
                 if let Ok(dna) = DestinationNodeAddressTlv::from_raw(tlv) {
                     if local_addrs.contains(&dna.address) {
                         outcome = DestinationNodeAddressOutcome::Matched(dna.address);
                     } else {
                         tlv.set_unrecognized();
-                        matched = false;
                         outcome = DestinationNodeAddressOutcome::Unmatched;
                     }
                 }
                 break;
-            }
-        }
-
-        // Also update wire-order TLVs if present
-        if !matched {
-            if let Some(ref mut wire_order) = self.wire_order_tlvs {
-                for tlv in wire_order {
-                    if tlv.tlv_type == TlvType::DestinationNodeAddress {
-                        tlv.set_unrecognized();
-                        break;
-                    }
-                }
             }
         }
 
@@ -553,7 +531,7 @@ impl TlvList {
     ) -> ReturnPathAction {
         // Find the first Return Path TLV
         let rp_idx = self
-            .tlvs
+            .non_hmac_tlvs()
             .iter()
             .position(|tlv| tlv.tlv_type == TlvType::ReturnPath);
 
@@ -561,17 +539,10 @@ impl TlvList {
             return ReturnPathAction::Normal;
         };
 
-        let Ok(rp) = ReturnPathTlv::from_raw(&self.tlvs[idx]) else {
+        let Ok(rp) = ReturnPathTlv::from_raw(&self.non_hmac_tlvs()[idx]) else {
             // Parse failed — set U-flag and return Normal
-            self.tlvs[idx].set_unrecognized();
-            if let Some(ref mut wire_order) = self.wire_order_tlvs {
-                for tlv in wire_order.iter_mut() {
-                    if tlv.tlv_type == TlvType::ReturnPath {
-                        tlv.set_unrecognized();
-                        break;
-                    }
-                }
-            }
+            self.non_hmac_tlvs_mut()[idx].set_unrecognized();
+
             return ReturnPathAction::Normal;
         };
 
@@ -632,25 +603,17 @@ impl TlvList {
         ReturnPathAction::Normal
     }
 
-    /// Sets the U-flag on the Return Path TLV in both separated and wire-order lists.
+    /// Sets the U-flag on the first Return Path owner.
     ///
     /// Public so the receiver can flag the Return Path TLV in the
     /// draft-ietf-ippm-asymmetrical-pkts-14 §4.3 conflict case (no-reply
     /// control code combined with a non-zero Reflected Test Packet Control
     /// TLV).
     pub fn set_return_path_u_flag(&mut self) {
-        for tlv in &mut self.tlvs {
+        for tlv in self.non_hmac_tlvs_mut() {
             if tlv.tlv_type == TlvType::ReturnPath {
                 tlv.set_unrecognized();
                 break;
-            }
-        }
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order.iter_mut() {
-                if tlv.tlv_type == TlvType::ReturnPath {
-                    tlv.set_unrecognized();
-                    break;
-                }
             }
         }
     }
@@ -663,18 +626,12 @@ impl TlvList {
     /// - Echoes the sender's micro-session ID unchanged
     /// - Sets the reflector's micro-session ID to `reflector_member_link_id`
     ///
-    /// Updates both `self.tlvs` and `self.wire_order_tlvs`.
+    /// Indexed wire views observe the same mutation.
     ///
     /// Returns `true` if all validations pass, `false` if a mismatch was found.
     pub fn update_micro_session_id_tlvs(&mut self, reflector_member_link_id: u16) -> bool {
-        if !Self::apply_micro_session_id(&mut self.tlvs, reflector_member_link_id) {
+        if !Self::apply_micro_session_id(self.non_hmac_tlvs_mut(), reflector_member_link_id) {
             return false;
-        }
-
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            if !Self::apply_micro_session_id(wire_order, reflector_member_link_id) {
-                return false;
-            }
         }
 
         true
@@ -686,7 +643,7 @@ impl TlvList {
     /// honoured; duplicates are ignored.
     #[must_use]
     pub fn get_reflected_control_request(&self) -> Option<ReflectedControlTlv> {
-        for tlv in &self.tlvs {
+        for tlv in self.non_hmac_tlvs() {
             if tlv.tlv_type == TlvType::ReflectedControl {
                 if let Ok(parsed) = ReflectedControlTlv::from_raw(tlv) {
                     return Some(parsed);
@@ -707,18 +664,10 @@ impl TlvList {
     /// instead (see `l2_group_matches_any_local` / `l3_group_matches_any_local`
     /// in `receiver::mod`).
     pub fn set_reflected_control_u_flag(&mut self) {
-        for tlv in &mut self.tlvs {
+        for tlv in self.non_hmac_tlvs_mut() {
             if tlv.tlv_type == TlvType::ReflectedControl {
                 tlv.set_unrecognized();
                 break;
-            }
-        }
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order.iter_mut() {
-                if tlv.tlv_type == TlvType::ReflectedControl {
-                    tlv.set_unrecognized();
-                    break;
-                }
             }
         }
     }
@@ -728,21 +677,12 @@ impl TlvList {
     /// Call this when the reflector cannot fully honour the request
     /// (MTU exceeded, rate/volume cap, or local policy).
     ///
-    /// Updates both `self.tlvs` and `self.wire_order_tlvs` to keep the
-    /// response consistent.
+    /// The serialized wire view refers to this same owner.
     pub fn set_reflected_control_c_flag(&mut self) {
-        for tlv in &mut self.tlvs {
+        for tlv in self.non_hmac_tlvs_mut() {
             if tlv.tlv_type == TlvType::ReflectedControl {
                 tlv.set_conformant_reflected();
                 break;
-            }
-        }
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order.iter_mut() {
-                if tlv.tlv_type == TlvType::ReflectedControl {
-                    tlv.set_conformant_reflected();
-                    break;
-                }
             }
         }
     }
@@ -750,7 +690,7 @@ impl TlvList {
     /// Measures and repairs BER padding (draft-gandhi-ippm-stamp-ber-07 §4.2).
     /// Invalid multiplicity or pattern alignment is reflected with C=1.
     pub fn process_ber(&mut self) {
-        // Locate indices in self.tlvs
+        // Locate indices in self.non_hmac_tlvs()
         let mut padding_count = 0usize;
         let mut padding_idx: Option<usize> = None;
         let mut pattern_count = 0usize;
@@ -760,7 +700,7 @@ impl TlvList {
         let mut burst_count = 0usize;
         let mut burst_idx: Option<usize> = None;
 
-        for (i, tlv) in self.tlvs.iter().enumerate() {
+        for (i, tlv) in self.non_hmac_tlvs().iter().enumerate() {
             match tlv.tlv_type {
                 TlvType::ExtraPadding => {
                     padding_count += 1;
@@ -803,92 +743,52 @@ impl TlvList {
         let padding_invalid = padding_count != 1;
 
         if has_duplicate || padding_invalid {
-            Self::mark_ber_tlvs_nonconformant(&mut self.tlvs);
-            if let Some(ref mut wire_order) = self.wire_order_tlvs {
-                Self::mark_ber_tlvs_nonconformant(wire_order);
-            }
+            Self::mark_ber_tlvs_nonconformant(self.non_hmac_tlvs_mut());
+
             return;
         }
 
-        // Borrow padding/pattern immutably for the scan, then drop the borrows
-        // before mutating count/burst TLVs further down.
-        let (count, max_burst, pattern, aligned) = {
-            let padding = self.tlvs[padding_idx.unwrap()].value.as_slice();
-            let pattern = pattern_idx
-                .map(|i| self.tlvs[i].value.as_slice())
-                .filter(|v| !v.is_empty())
-                .unwrap_or(BER_DEFAULT_PATTERN.as_slice());
-            let (count, burst) = xor_popcount_and_max_burst(padding, pattern);
-            (
-                count,
-                burst,
-                pattern.to_vec(),
-                padding.len() % pattern.len() == 0,
-            )
-        };
-
-        if !aligned || pattern_idx.is_some_and(|i| self.tlvs[i].value.is_empty()) {
-            if pattern_idx.is_none() {
-                Self::mark_ber_tlvs_nonconformant(&mut self.tlvs);
-                if let Some(wire) = &mut self.wire_order_tlvs {
-                    Self::mark_ber_tlvs_nonconformant(wire);
+        // Borrow distinct owners directly: scan and repair without cloning the pattern.
+        let (count, max_burst, aligned) = {
+            let (pattern, padding) = self.ber_padding_slices(padding_idx.unwrap(), pattern_idx);
+            let aligned = !pattern.is_empty() && padding.len() % pattern.len() == 0;
+            if aligned {
+                let (count, burst) = xor_popcount_and_max_burst(padding, pattern);
+                for (i, byte) in padding.iter_mut().enumerate() {
+                    *byte = pattern[i % pattern.len()];
                 }
+                (count, burst, true)
+            } else {
+                (0, 0, false)
             }
-            // An empty explicit pattern has no repeat length; the default is
-            // selected by omitting Type 240, not by sending an empty value.
-            for tlv in self
-                .tlvs
-                .iter_mut()
-                .chain(self.wire_order_tlvs.iter_mut().flat_map(|v| v.iter_mut()))
-            {
+        };
+        if !aligned {
+            if pattern_idx.is_none() {
+                Self::mark_ber_tlvs_nonconformant(self.non_hmac_tlvs_mut());
+            }
+            for tlv in self.non_hmac_tlvs_mut() {
                 if tlv.tlv_type == TlvType::BerPattern {
                     tlv.set_conformant_reflected();
                 }
             }
             return;
         }
-        for tlv in self
-            .tlvs
-            .iter_mut()
-            .chain(self.wire_order_tlvs.iter_mut().flat_map(|v| v.iter_mut()))
-        {
-            if tlv.tlv_type == TlvType::ExtraPadding {
-                for (i, byte) in tlv.value.iter_mut().enumerate() {
-                    *byte = pattern[i % pattern.len()];
-                }
-            }
-        }
 
         if let Some(i) = count_idx {
-            Self::write_ber_count(&mut self.tlvs[i], count);
+            Self::write_ber_count(&mut self.non_hmac_tlvs_mut()[i], count);
         }
         if let Some(i) = burst_idx {
-            Self::write_ber_burst(&mut self.tlvs[i], max_burst);
-        }
-
-        // Mirror into wire-order slice if present.
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            for tlv in wire_order.iter_mut() {
-                match tlv.tlv_type {
-                    TlvType::BerCount if tlv.value.len() == BER_COUNT_TLV_VALUE_SIZE => {
-                        Self::write_ber_count(tlv, count);
-                    }
-                    TlvType::BerBurst if tlv.value.len() == BER_BURST_TLV_VALUE_SIZE => {
-                        Self::write_ber_burst(tlv, max_burst);
-                    }
-                    _ => {}
-                }
-            }
+            Self::write_ber_burst(&mut self.non_hmac_tlvs_mut()[i], max_burst);
         }
     }
 
     /// Keep repaired BER padding after another extension resizes the reply.
     /// Changed lengths invalidate the forward count's denominator.
     pub fn finish_ber_padding(&mut self, original_len: Option<usize>) {
-        if !self.tlvs.iter().any(|t| crate::ber::is_ber(t.tlv_type)) {
+        if !self.has_ber {
             return;
         }
-        if self.tlvs.iter().any(|t| {
+        if self.non_hmac_tlvs().iter().any(|t| {
             crate::ber::is_ber(t.tlv_type)
                 && (t.flags.conformant_reflected
                     || t.is_unrecognized()
@@ -897,27 +797,42 @@ impl TlvList {
         }) {
             return;
         }
-        let pattern = self
-            .tlvs
+        let pattern_idx = self
+            .non_hmac_tlvs()
             .iter()
-            .find(|t| t.tlv_type == TlvType::BerPattern)
-            .map_or_else(|| BER_DEFAULT_PATTERN.to_vec(), |t| t.value.clone());
-        if pattern.is_empty() {
+            .position(|t| t.tlv_type == TlvType::BerPattern);
+        if pattern_idx.is_some_and(|i| self.non_hmac_tlvs()[i].value.is_empty()) {
             return;
         }
         let length = self
-            .tlvs
+            .non_hmac_tlvs()
             .iter()
             .find(|t| t.tlv_type == TlvType::ExtraPadding)
             .map(|t| t.value.len());
         if length != original_len {
-            Self::mark_ber_tlvs_nonconformant(&mut self.tlvs);
+            Self::mark_ber_tlvs_nonconformant(self.non_hmac_tlvs_mut());
         }
-        for tlv in &mut self.tlvs {
-            if tlv.tlv_type == TlvType::ExtraPadding {
-                for (i, byte) in tlv.value.iter_mut().enumerate() {
+        for index in 0..self.non_hmac_len {
+            if self.non_hmac_tlvs()[index].tlv_type == TlvType::ExtraPadding {
+                let (pattern, padding) = self.ber_padding_slices(index, pattern_idx);
+                for (i, byte) in padding.iter_mut().enumerate() {
                     *byte = pattern[i % pattern.len()];
                 }
+            }
+        }
+    }
+
+    fn ber_padding_slices(&mut self, padding: usize, pattern: Option<usize>) -> (&[u8], &mut [u8]) {
+        let tlvs = self.non_hmac_tlvs_mut();
+        match pattern {
+            None => (BER_DEFAULT_PATTERN.as_slice(), &mut tlvs[padding].value),
+            Some(pattern) if pattern < padding => {
+                let (left, right) = tlvs.split_at_mut(padding);
+                (&left[pattern].value, &mut right[0].value)
+            }
+            Some(pattern) => {
+                let (left, right) = tlvs.split_at_mut(pattern);
+                (&right[0].value, &mut left[padding].value)
             }
         }
     }
@@ -990,10 +905,11 @@ impl TlvList {
         captured_fixed: Option<&[Vec<u8>]>,
         captured_ext_headers: Option<&[u8]>,
     ) {
-        Self::apply_reflected_headers(&mut self.tlvs, captured_fixed, captured_ext_headers);
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            Self::apply_reflected_headers(wire_order, captured_fixed, captured_ext_headers);
-        }
+        Self::apply_reflected_headers(
+            self.non_hmac_tlvs_mut(),
+            captured_fixed,
+            captured_ext_headers,
+        );
     }
 
     /// Removes Reflected Fixed/IPv6 Extension Header TLVs (Types 247/246) from
@@ -1002,7 +918,7 @@ impl TlvList {
     /// removed to avoid violating the ... MTU limit"). Type-246 TLVs are removed
     /// before Type-247 (they sit last in §3.3 wire order, so trimming from the
     /// tail keeps survivors ordered); only these two types are removed. Applied
-    /// to both `self.tlvs` and `wire_order_tlvs`. Returns the number removed.
+    /// to the canonical owners and updates wire indices. Returns the number removed.
     ///
     /// Because the reflector fills the sender-sized TLVs in place (never growing
     /// them), this is defensive: in normal operation the reply is no larger than
@@ -1024,15 +940,11 @@ impl TlvList {
         };
         let mut removed = 0usize;
         while base_len + self.wire_size() > max_reply_bytes {
-            let Some(idx) = self.tlvs.iter().rposition(is_header) else {
+            let Some(idx) = self.non_hmac_tlvs().iter().rposition(is_header) else {
                 break; // No header TLV left to drop; remaining oversize is out of scope.
             };
-            self.tlvs.remove(idx);
-            if let Some(ref mut wire_order) = self.wire_order_tlvs {
-                if let Some(widx) = wire_order.iter().rposition(is_header) {
-                    wire_order.remove(widx);
-                }
-            }
+            self.remove_non_hmac(idx);
+
             removed += 1;
         }
         removed
@@ -1083,8 +995,8 @@ impl TlvList {
         // Per-packet consumed sets for Type 246 (ext) and Type 247 (fixed)
         // first-fit-with-consumption pairing (§5.1/§5.2 first-fit-by-length
         // reconciled with §3.1/§3.2 rule 2 ordering). Each captured header is
-        // reflected by at most one TLV. Fresh sets per call mean the `self.tlvs`
-        // and `wire_order_tlvs` views are paired independently.
+        // reflected by at most one TLV. Pair each owner once; wire indices
+        // observe the same filled payload.
         let mut consumed_ext: Vec<bool> = Vec::new();
         let mut consumed_fixed: Vec<bool> = Vec::new();
         for tlv in tlvs {
@@ -1172,10 +1084,8 @@ impl TlvList {
     /// the header consumed makes a second TLV skip it, giving the §3.1 ordering.
     ///
     /// `consumed` is a shared per-packet set of already-reflected captured-header
-    /// indices, threaded across every Type 246 TLV in one view (the caller uses
-    /// a fresh set for each of the `tlvs` and `wire_order_tlvs` views, exactly as
-    /// the old positional `ext_pos` counter was). A TLV that fails to match
-    /// consumes nothing.
+    /// indices, threaded across the canonical Type 246 entries in encounter
+    /// order. A TLV that fails to match consumes nothing.
     fn apply_reflected_ext(
         tlv: &mut RawTlv,
         ext_records: Option<&[&[u8]]>,
@@ -1256,12 +1166,9 @@ impl TlvList {
     /// reply — always the case here, since neither backend attaches reply
     /// headers) and for the cardinality rule (more than one such sub-TLV is
     /// present — the C flag is then set on *every* offending copy). Mutates the
-    /// raw sub-TLV flag bytes in both `self.tlvs` and `self.wire_order_tlvs`.
+    /// raw sub-TLV flag bytes in the canonical owners.
     pub fn set_ipv6_ext_hdr_control_c_flag(&mut self) {
-        Self::mark_ipv6_ext_hdr_control_c(&mut self.tlvs);
-        if let Some(ref mut wire_order) = self.wire_order_tlvs {
-            Self::mark_ipv6_ext_hdr_control_c(wire_order);
-        }
+        Self::mark_ipv6_ext_hdr_control_c(self.non_hmac_tlvs_mut());
     }
 
     fn mark_ipv6_ext_hdr_control_c(tlvs: &mut [RawTlv]) {
@@ -1454,6 +1361,16 @@ fn log_reflected_hdr_selector_no_match_once() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_mutation_visits_each_wire_tlv_once() {
+        let (mut list, malformed) =
+            TlvList::parse_lenient(&[0, 4, 0, 4, 0, 0, 0, 0, 0, 1, 0, 8, 42]);
+        assert!(malformed);
+        let mut visits = 0;
+        list.for_each_matching_tlv(|_| true, |_| visits += 1);
+        assert_eq!(visits, list.non_hmac_tlvs().len());
+    }
+
     use super::*;
     use crate::tlv::core::RawTlv;
     use crate::tlv::{
