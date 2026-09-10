@@ -17,7 +17,7 @@ A single binary plays both roles. The Session-Sender transmits STAMP test packet
 
 - `main.rs` — Entry point and CLI handling. Branches into sender or reflector mode based on `--is-reflector`.
 - `configuration.rs` — Command-line argument parsing (clap derive), TOML config-file merging, validation. Auth-mode helpers (`is_auth`, `is_enc`, `is_open`).
-- `packets.rs` — STAMP packet structures for authenticated and unauthenticated modes. Big-endian fixed-width serialization via `bincode`.
+- `packets.rs` — STAMP packet structures for authenticated and unauthenticated modes, with explicit big-endian fixed-width serialization.
 - `sender.rs` — Session-Sender implementation: packet assembly, send loop, RTT statistics.
 - `receiver/` — Session-Reflector implementations:
   - `receiver/mod.rs` — Shared STAMP-level pipeline. All TLV parsing, HMAC verification, Return Path handling, session tracking, and counter updates live here. Both backends call into the same `process_stamp_packet` after capturing a packet.
@@ -160,9 +160,9 @@ neither backend performs a second key lookup. The finalizer uses this same key
 for base/TLV signatures after fallback mutations and for every queued copy.
 Standalone packet processing avoids the snapshot allocation.
 
-1. **Identify and admit** — Extract the complete session key and check the configured admission policy without creating runtime state.
+1. **Identify and admit** — Extract the complete session key and check immutable provisioning once, returning an internal permit bound to that manager and identity. The permit neither reserves capacity nor creates runtime state.
 2. **Parse and authenticate** — Decode the base header; enforce strict length or canonical zero-fill policy, the open-mode shape guard, and configured base HMAC verification. Unknown/revoked keys and invalid base packets stop here. Both backends count rejected processing in aggregate `packets_dropped`; no session is created or refreshed.
-3. **Session lookup / update** — Acquire the session only after validation. A denied acquisition (provisioning, cap, or drain) drops the packet before receive-state mutation; no temporary session is returned. Update its receive counter, classify replay, and snapshot Direct Measurement / Follow-Up state. `--drop-replayed` can suppress ordinary duplicates; a handled Type-12 request uses the mandatory single U-flagged ordering-failure reply. The replay verdict travels in `ProcessingContext` to semantic TLV processing before response signing. Stateful sequence numbers are assigned from this same session handle at transmission; stateless replies echo the sender sequence.
+3. **Session lookup / update** — Consume the permit only after validation. One table write lock and one `HashMap::entry` lookup refresh an existing session or create an allowed entry. Cap/drain checks use the current settings under that lock; rejection precedes receive-state mutation and returns no temporary session. Provisioning is not checked a second time. Update the acquired session's receive counter, classify replay, and snapshot Direct Measurement / Follow-Up state. `--drop-replayed` can suppress ordinary duplicates; a handled Type-12 request uses the mandatory single U-flagged ordering-failure reply. The replay verdict travels in `ProcessingContext` to semantic TLV processing before response signing. Stateful sequence numbers are assigned from this same session handle at transmission; stateless replies echo the sender sequence.
 4. **TLV pipeline** — Parse/verify extensions and preserve the RFC 8972 flag rules. A valid base packet with an invalid TLV HMAC still receives the required I-flag response; it is not treated as a failed base HMAC.
 5. **RFC 9503 processing** — Destination Node Address matching against `local_addresses`; Return Path action selection (Normal, SuppressReply, AlternateAddress, Srv6Forward, UnsupportedSr). Encoded into a `ReturnPathAction` carried in `StampResponse`; the send path attempts best-effort SRv6 SRH forwarding for `Srv6Forward` (see Return Path TLV below). A *matched* Destination Node Address is also carried as `StampResponse::reply_source`, and both send paths pin it as the reply's IP source address via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message (`src/receiver/transmit.rs`, RFC 9503 §3). That is Linux-only and best-effort: elsewhere, or on any failure, the reply goes out with the OS's choice of source, which is still a correct reply — the SHOULD is about which correct source is preferred. This matters on a wildcard or multi-homed bind, where the kernel picks by route rather than by what the sender asked for; on a single-address bind the two coincide anyway.
 6. **Assemble reply** — `assemble_unauth_answer_with_tlvs` / `assemble_auth_answer_with_tlvs` build the response, populate reflector-side TLV fields (DM counters, Follow-Up Telemetry, Timestamp Info, Location, Class of Service, etc.), and recompute HMACs (base + TLV) if applicable.
@@ -782,6 +782,23 @@ build and environment.
 rejection instead of substituting a new Session or sequence zero. The shared live
 pipeline propagates rejection in both backends; standalone stateful processing
 also propagates a manager's denial.
+
+The internal `SessionAdmissionPermit` carries only the immutable provisioning
+decision. It is consumed once, belongs to one manager/key, and holds no lock
+across authentication. Cap/drain changes or expiry between checking provisioning
+and acquisition still apply. Public session acquisition uses the same path.
+Standalone stateful processing takes its sequence directly from the acquired
+handle under its lifetime guard; standalone stateless processing only checks
+provisioning and does not allocate/refresh runtime state. Neither standalone mode
+updates the live receive/replay counters.
+
+Tests count base-HMAC verifications, provisioning checks and acquisitions across
+both sequencing modes, IP families, new/existing sessions and burst sends. These
+counters compile only in test builds. Earlier correctness fixes already removed
+repeated live authentication and session acquisition; the remaining new-session
+provisioning check and hash-table insertion lookup are now shared. This is an
+operation-count reduction, not a measured throughput gain. The table remains
+unsharded; no multi-session contention measurements justify changing its locking.
 
 The table write lock serializes creation with cap/drain updates. Cap pressure
 never evicts an existing entry. Explicit/idle expiry removes an entry and takes

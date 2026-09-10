@@ -2,7 +2,7 @@ pub use crate::session_identity::{SessionAdmission, SessionKey};
 use crate::tlv::TimestampMethod;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     net::SocketAddr,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -321,6 +321,10 @@ struct SessionEntry {
 
 /// Maintains independent state for each complete STAMP session identity.
 pub struct SessionManager {
+    #[cfg(test)]
+    pub(crate) admission_checks: AtomicUsize,
+    #[cfg(test)]
+    pub(crate) acquisitions: AtomicUsize,
     /// Map from complete identity to runtime state.
     sessions: RwLock<HashMap<SessionKey, SessionEntry>>,
     admission: SessionAdmission,
@@ -341,6 +345,21 @@ pub struct SessionManager {
     /// amplification DoS. Reset by `cleanup_stale_sessions` once the table
     /// drops back below the cap.
     saturated: AtomicBool,
+}
+
+/// One immutable provisioning decision, bound to its manager and full identity.
+/// Consuming it still checks the current cap/drain state under the table lock.
+/// It neither allocates nor pins a runtime session and is not an authentication
+/// credential: the receiver must validate the packet before calling `acquire`.
+pub(crate) struct SessionAdmissionPermit<'a> {
+    manager: &'a SessionManager,
+    key: SessionKey,
+}
+
+impl SessionAdmissionPermit<'_> {
+    pub(crate) fn acquire(self) -> Option<Arc<Session>> {
+        self.manager.get_or_create_admitted(self.key)
+    }
 }
 
 impl SessionManager {
@@ -365,6 +384,10 @@ impl SessionManager {
         provisioned: HashSet<SessionKey>,
     ) -> Self {
         SessionManager {
+            #[cfg(test)]
+            admission_checks: AtomicUsize::new(0),
+            #[cfg(test)]
+            acquisitions: AtomicUsize::new(0),
             admission,
             provisioned,
             sessions: RwLock::new(HashMap::new()),
@@ -378,7 +401,16 @@ impl SessionManager {
 
     /// Admission is independent of runtime state: expiry never removes provisioning.
     pub fn admits(&self, key: &SessionKey) -> bool {
+        #[cfg(test)]
+        self.admission_checks.fetch_add(1, Ordering::Relaxed);
         self.admission == SessionAdmission::Permissive || self.provisioned.contains(key)
+    }
+
+    /// Check immutable provisioning once without touching the runtime table.
+    /// The permit cannot be transferred to another manager or session key.
+    pub(crate) fn admit(&self, key: SessionKey) -> Option<SessionAdmissionPermit<'_>> {
+        self.admits(&key)
+            .then_some(SessionAdmissionPermit { manager: self, key })
     }
 
     pub fn admission(&self) -> SessionAdmission {
@@ -499,34 +531,40 @@ impl SessionManager {
     /// Returns `None` on provisioning, capacity, or drain rejection. No temporary
     /// session is created, and rejection does not consume an internal session ID.
     pub fn get_or_create_session(&self, client: impl Into<SessionKey>) -> Option<Arc<Session>> {
-        let client = client.into();
-        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        self.admit(client.into())?.acquire()
+    }
 
-        if let Some(entry) = sessions.get_mut(&client) {
-            entry.last_active = Instant::now();
-            Some(Arc::clone(&entry.session))
-        } else {
-            if !self.admits(&client) || self.reject_new_entry(sessions.len(), client.client) {
-                return None;
+    fn get_or_create_admitted(&self, client: SessionKey) -> Option<Arc<Session>> {
+        #[cfg(test)]
+        self.acquisitions.fetch_add(1, Ordering::Relaxed);
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        let count = sessions.len();
+        match sessions.entry(client) {
+            Entry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
+                entry.last_active = Instant::now();
+                Some(Arc::clone(&entry.session))
             }
-            let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
-            let session = Arc::new(Session::new(session_id));
-            sessions.insert(
-                client,
-                SessionEntry {
+            Entry::Vacant(vacant) => {
+                if self.reject_new_entry(count, client.client) {
+                    return None;
+                }
+                let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+                let session = Arc::new(Session::new(session_id));
+                vacant.insert(SessionEntry {
                     session: Arc::clone(&session),
                     last_active: Instant::now(),
-                },
-            );
-            log::debug!("Created new session {} for client {}", session_id, client);
+                });
+                log::debug!("Created new session {} for client {}", session_id, client);
 
-            #[cfg(feature = "metrics")]
-            {
-                crate::metrics::reflector_metrics::record_session_created();
-                crate::metrics::reflector_metrics::set_active_sessions(sessions.len());
+                #[cfg(feature = "metrics")]
+                {
+                    crate::metrics::reflector_metrics::record_session_created();
+                    crate::metrics::reflector_metrics::set_active_sessions(count + 1);
+                }
+
+                Some(session)
             }
-
-            Some(session)
         }
     }
 
@@ -673,6 +711,53 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn admission_permit_observes_later_cap_drain_and_expiry_changes() {
+        let first = SessionKey::from("127.0.0.1:1001".parse::<SocketAddr>().unwrap());
+        let second = SessionKey::from("127.0.0.1:1002".parse::<SocketAddr>().unwrap());
+        let denied = SessionKey::from("127.0.0.1:1003".parse::<SocketAddr>().unwrap());
+        let manager = SessionManager::with_admission(
+            None,
+            None,
+            SessionAdmission::Provisioned,
+            [first, second].into_iter().collect(),
+        );
+        assert!(manager.admit(denied).is_none());
+        let pending = manager.admit(second).unwrap();
+        assert_eq!(
+            manager.session_count(),
+            0,
+            "a permit must not allocate state"
+        );
+        let existing = manager.get_or_create_session(first).unwrap();
+        manager.set_max_sessions(1);
+        assert!(pending.acquire().is_none(), "a later cap must apply");
+        assert_eq!(manager.next_session_id.load(Ordering::Relaxed), 1);
+
+        manager.set_max_sessions(0);
+        let pending = manager.admit(second).unwrap();
+        let known = manager.admit(first).unwrap();
+        manager.set_draining(true);
+        assert!(pending.acquire().is_none(), "a later drain must apply");
+        assert!(Arc::ptr_eq(&known.acquire().unwrap(), &existing));
+        assert_eq!(manager.next_session_id.load(Ordering::Relaxed), 1);
+
+        let pending = manager.admit(first).unwrap();
+        manager
+            .expire_matching(first.client, Some(existing.get_id()))
+            .unwrap();
+        assert!(
+            pending.acquire().is_none(),
+            "expiry during drain cannot recreate state"
+        );
+        assert!(existing.transmission_guard().is_none());
+        manager.set_draining(false);
+        let replacement = manager.admit(first).unwrap().acquire().unwrap();
+        assert!(!Arc::ptr_eq(&existing, &replacement));
+        assert_eq!(replacement.get_id(), 1);
+        assert_eq!(replacement.generate_sequence_number(), 0);
+    }
 
     #[test]
     fn complete_identity_isolates_all_runtime_state() {

@@ -13,6 +13,13 @@ The live UDP example measures release-build throughput and process CPU;
 duplicate/reordering accounting. The `idle_cpu_test` regression below separately
 enforces an idle CPU ceiling and verifies resumed reception.
 
+Shared processing unit tests count one base-HMAC verification (authenticated
+mode), one provisioning check and one session acquisition per accepted live
+packet, including all its burst copies, for IPv4/IPv6 and both sequencing modes.
+They also cover standalone stateless allocation behavior, authentication failures
+before acquisition, and cap/drain/expiry changes after a provisioning decision.
+The counters exist only in test builds; the tests run in both backend builds.
+
 | File | Purpose | Default-run? |
 | --- | --- | --- |
 | `output_stream_test.rs` | CLI stdout parsing with default/JSON logs, packet details, periodic reports, BER CSV quoting, reflector shutdown, quiet logging, schema and validation errors. | yes, Linux nix |

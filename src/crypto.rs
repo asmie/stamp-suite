@@ -435,6 +435,11 @@ pub fn compute_packet_hmac(
     key.compute(authenticated_data(packet_bytes, hmac_offset))
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PACKET_HMAC_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Verifies the HMAC of a packet.
 ///
 /// # Arguments
@@ -452,6 +457,8 @@ pub fn verify_packet_hmac(
     hmac_offset: usize,
     expected: &[u8; HMAC_OUTPUT_LENGTH],
 ) -> bool {
+    #[cfg(test)]
+    PACKET_HMAC_VERIFICATIONS.with(|count| count.set(count.get() + 1));
     key.verify(authenticated_data(packet_bytes, hmac_offset), expected)
 }
 

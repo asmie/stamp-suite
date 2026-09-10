@@ -1591,12 +1591,9 @@ fn process_stamp_packet_inner(
     ctx: &ProcessingContext,
     tracking: Option<(&ReflectorCounters, bool)>,
 ) -> Option<ProcessedPacket> {
-    let session_key = if let Some(manager) = ctx.session_manager {
+    let admission = if let Some(manager) = ctx.session_manager {
         let key = ctx.packet_session_key(data, src, use_auth)?;
-        if !manager.admits(&key) {
-            return None;
-        }
-        Some(key)
+        Some(manager.admit(key)?)
     } else {
         None
     };
@@ -1696,10 +1693,20 @@ fn process_stamp_packet_inner(
     // No allocation, activity refresh, receive count, or replay classification
     // occurs before base parsing and the configured authentication have passed.
     let mut ctx = ctx.clone();
-    let counter_session = if let Some((counters, drop_replayed)) = tracking {
-        let session = ctx.session_manager?.get_or_create_session(session_key?)?;
+    let acquired_session = if tracking.is_some() || ctx.stateful_reflector {
+        match admission {
+            Some(permit) => Some(permit.acquire()?),
+            None => None,
+        }
+    } else {
+        // Standalone stateless processing checks provisioning without creating
+        // runtime state, preserving the public processing API's behavior.
+        None
+    };
+    if let Some((counters, drop_replayed)) = tracking {
+        let session = acquired_session.as_ref()?;
         session.record_received();
-        let verdict = evaluate_replay(&session, data, counters);
+        let verdict = evaluate_replay(session, data, counters);
         ctx.replay_verdict = verdict;
         if drop_replayed && verdict == crate::session::ReplayVerdict::Replay {
             // Type 12 has its own mandatory one-reply ordering failure path
@@ -1722,16 +1729,16 @@ fn process_stamp_packet_inner(
         let (seq, timestamp, method) = session.get_last_reflection_with_method();
         ctx.last_reflection = Some((seq, timestamp));
         ctx.last_reflection_method = method;
-        Some(session)
-    } else {
-        None
-    };
+    }
     let reflector_seq = if ctx.stateful_reflector && tracking.is_some() {
         // Live sends assign the sequence in transmission order, including queued bursts.
         Some(0)
     } else if ctx.stateful_reflector {
-        match ctx.session_manager {
-            Some(manager) => Some(manager.generate_sequence_number(session_key?)?),
+        match acquired_session.as_ref() {
+            Some(session) => {
+                let _active = session.transmission_guard()?;
+                Some(session.generate_sequence_number())
+            }
             None => None,
         }
     } else {
@@ -1829,6 +1836,7 @@ fn process_stamp_packet_inner(
     }
 
     let response = result?;
+    let counter_session = acquired_session.filter(|_| tracking.is_some());
     if let Some(session) = &counter_session {
         commit_replay(session, data);
     }
@@ -2901,6 +2909,139 @@ mod tests {
     }
 
     #[test]
+    fn live_packet_authenticates_admits_and_acquires_once_including_burst_sends() {
+        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+        for src in ["127.0.0.1:4000", "[::1]:4000"] {
+            let src: SocketAddr = src.parse().unwrap();
+            for auth in [false, true] {
+                for stateful in [false, true] {
+                    let first = replay_control_packet(10, auth, Some(&key), true);
+                    let identity = test_ctx(0, 0)
+                        .packet_session_key(&first, src, auth)
+                        .unwrap();
+                    let manager = Arc::new(SessionManager::with_admission(
+                        None,
+                        None,
+                        crate::session::SessionAdmission::Provisioned,
+                        [identity].into_iter().collect(),
+                    ));
+                    let mut keys = crate::crypto::HmacKeySet::new();
+                    keys.insert(42, key.clone());
+                    let ctx = ProcessingContext {
+                        session_manager: Some(&manager),
+                        hmac_key_set: Some(&keys),
+                        stateful_reflector: stateful,
+                        ..test_ctx(0, 0)
+                    };
+                    let counters = ReflectorCounters::new();
+                    for index in 0..2 {
+                        let data = replay_control_packet(10 + index, auth, Some(&key), true);
+                        let verifications =
+                            crate::crypto::PACKET_HMAC_VERIFICATIONS.with(|n| n.get());
+                        let (response, session, signing_key) = process_session_packet_isolated(
+                            &data, src, 64, auth, &ctx, &counters, false,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            manager.admission_checks.load(Ordering::Relaxed),
+                            index as usize + 1
+                        );
+                        assert_eq!(
+                            manager.acquisitions.load(Ordering::Relaxed),
+                            index as usize + 1
+                        );
+                        assert!(Arc::ptr_eq(
+                            &session,
+                            &manager.get_session(identity).unwrap()
+                        ));
+                        let mut transmission = super::transmit::Transmission::new(
+                            response,
+                            Arc::clone(&session),
+                            src,
+                            ClockFormat::NTP,
+                            auth,
+                            stateful,
+                            signing_key,
+                            0,
+                            false,
+                        );
+                        assert_eq!(transmission.remaining, 3);
+                        for copy in 0..3 {
+                            let expected = if stateful {
+                                index * 3 + copy
+                            } else {
+                                10 + index
+                            };
+                            assert_eq!(
+                                transmission.send_next(
+                                    &counters,
+                                    &RateLimiter::new(0),
+                                    |reply, _, _| {
+                                        if auth {
+                                            assert_eq!(&reply[96..112], &key.compute(&reply[..96]));
+                                        }
+                                        Ok(reply.len())
+                                    }
+                                ),
+                                Some(expected)
+                            );
+                        }
+                        assert_eq!(session.get_received_count(), index + 1);
+                        assert_eq!(session.get_transmitted_count(), (index + 1) * 3);
+                        assert_eq!(
+                            manager.admission_checks.load(Ordering::Relaxed),
+                            index as usize + 1
+                        );
+                        assert_eq!(
+                            manager.acquisitions.load(Ordering::Relaxed),
+                            index as usize + 1
+                        );
+                        assert_eq!(
+                            crate::crypto::PACKET_HMAC_VERIFICATIONS.with(|n| n.get())
+                                - verifications,
+                            usize::from(auth)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_processing_reuses_admission_and_preserves_stateless_allocation() {
+        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+        for auth in [false, true] {
+            for stateful in [false, true] {
+                let manager = Arc::new(SessionManager::new(None, None));
+                let ctx = ProcessingContext {
+                    session_manager: Some(&manager),
+                    hmac_key: Some(&key),
+                    stateful_reflector: stateful,
+                    ..test_ctx(0, 0)
+                };
+                for index in 0..2 {
+                    let data = replay_control_packet(10 + index, auth, Some(&key), false);
+                    let response =
+                        process_stamp_packet(&data, loopback_src(), 64, auth, &ctx).unwrap();
+                    assert_eq!(
+                        u32::from_be_bytes(response.data[..4].try_into().unwrap()),
+                        if stateful { index } else { 10 + index }
+                    );
+                    assert_eq!(
+                        manager.admission_checks.load(Ordering::Relaxed),
+                        index as usize + 1
+                    );
+                    assert_eq!(
+                        manager.acquisitions.load(Ordering::Relaxed),
+                        if stateful { index as usize + 1 } else { 0 }
+                    );
+                    assert_eq!(manager.session_count(), usize::from(stateful));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn capacity_and_drain_reject_new_sessions_before_reply_assembly() {
         let key = HmacKey::new(vec![0xAB; 16]).unwrap();
         for auth in [false, true] {
@@ -3212,6 +3353,8 @@ mod tests {
                 )
                 .is_none());
                 assert_eq!(manager.session_count(), 0);
+                assert_eq!(manager.admission_checks.load(Ordering::Relaxed), 1);
+                assert_eq!(manager.acquisitions.load(Ordering::Relaxed), 0);
                 let (response, session, _) = process_session_packet_isolated(
                     &data,
                     loopback_src(),
@@ -3246,6 +3389,8 @@ mod tests {
                     before.last_active
                 );
                 assert_eq!(session.get_received_count(), 1);
+                assert_eq!(manager.admission_checks.load(Ordering::Relaxed), 3);
+                assert_eq!(manager.acquisitions.load(Ordering::Relaxed), 1);
                 assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 0);
                 // Revoking the required base key must not refresh an existing session.
                 let no_key = ProcessingContext {
@@ -3265,6 +3410,8 @@ mod tests {
                 )
                 .is_none());
                 assert_eq!(session.get_received_count(), 1);
+                assert_eq!(manager.admission_checks.load(Ordering::Relaxed), 4);
+                assert_eq!(manager.acquisitions.load(Ordering::Relaxed), 1);
             }
         }
     }

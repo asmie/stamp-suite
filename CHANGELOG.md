@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Carry one provisioning decision through authenticated session acquisition.
+  Use one table entry lookup for existing/new sessions, retain cap/drain checks
+  under the write lock, and reuse the acquired handle for standalone sequencing
+  and live transmission. Add operation-count and admission-race regressions.
+
 - Reuse reflector transport metadata and SRH storage across burst copies.
   Route both backends through one mutable sender per socket, cache successful
   PMTU/CoS settings, and reuse bound endpoints for route lookups. Keep fallback
