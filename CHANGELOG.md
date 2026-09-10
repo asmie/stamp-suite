@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep diagnostics on stderr for both log formats and move `-R` packet details
+  there when JSON/CSV measurement output is selected. Log reflector startup
+  notices and emit one CSV header across periodic and final sender reports.
+  Add CLI stream regression tests and remove JSON parsing workarounds from
+  existing wire tests; document output streams and library reporting state.
+
 - Correct AgentX GETBULK iteration order, end-of-MIB placeholders and inclusive
   starts. Preserve partial request headers/payloads across timeout checks, stop
   promptly on cancellation, and acknowledge master Close requests before teardown.

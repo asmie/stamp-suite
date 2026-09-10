@@ -109,9 +109,7 @@ fn check(local_ptp: bool, ipv6_auth: bool) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    // Machine-readable stdout isolation is tracked separately as finding 15.
-    let start = stdout.find('{').expect("JSON statistics");
-    let stats: serde_json::Value = serde_json::from_str(&stdout[start..]).unwrap();
+    let stats: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let owd = &stats["owd"];
     assert_eq!(owd["samples"], 1, "{stdout}");
     for direction in ["forward_avg_ms", "reverse_avg_ms"] {

@@ -15,7 +15,8 @@ use stamp_suite::{receiver, sender};
 /// `-v`/`-vv` count (see `configuration::resolve_log_filter`); the
 /// `--log-format` flag selects between human-readable text (default,
 /// matches the historic `env_logger` output) and one-line JSON for
-/// structured log shippers.
+/// structured log shippers. Diagnostics always go to stderr so stdout
+/// contains only the requested measurement format.
 fn init_logging(format: LogFormat, verbose: u8) {
     use tracing_subscriber::{fmt, EnvFilter};
 
@@ -27,11 +28,16 @@ fn init_logging(format: LogFormat, verbose: u8) {
             // Returns Err if a subscriber is already installed (e.g. by
             // a test process in the same address space); discard that
             // case so re-init doesn't panic.
-            let _ = fmt().with_env_filter(filter).with_target(true).try_init();
+            let _ = fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(filter)
+                .with_target(true)
+                .try_init();
         }
         LogFormat::Json => {
             let _ = fmt()
                 .json()
+                .with_writer(std::io::stderr)
                 .with_env_filter(filter)
                 .with_target(true)
                 .with_current_span(false)
@@ -338,13 +344,14 @@ async fn main() {
         // Same contract as the reflector: a sender that could not bind,
         // connect, or load its key reports failure rather than printing an
         // all-zero statistics block and exiting 0.
+        let mut output = stamp_suite::stats::StatsOutput::new(conf.output_format);
         #[cfg(all(unix, feature = "snmp"))]
-        let outcome = sender::run_sender(&conf, Some(sender_stats)).await;
+        let outcome = sender::run_sender_with_output(&conf, Some(sender_stats), &mut output).await;
         #[cfg(not(all(unix, feature = "snmp")))]
-        let outcome = sender::run_sender(&conf, None).await;
+        let outcome = sender::run_sender_with_output(&conf, None, &mut output).await;
 
         match outcome {
-            Ok(stats) => stats.print(conf.output_format),
+            Ok(stats) => output.print(&stats, false),
             Err(e) => {
                 eprintln!("{e}");
                 std::process::exit(1);

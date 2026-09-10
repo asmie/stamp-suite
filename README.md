@@ -209,6 +209,11 @@ Max RTT: 1.203 ms
 Avg RTT: 0.521 ms
 ```
 
+Use `--output-format json` for JSON lines or `--output-format csv` for one header
+and successive snapshot rows on stdout. Diagnostics go to stderr; `-R` packet
+details also go to stderr in these modes. See [output streams](doc/usage.md#output-streams)
+for periodic reports and redirection examples.
+
 ### Runtime control plane
 
 Build with `--features control` and start the reflector with `--control`

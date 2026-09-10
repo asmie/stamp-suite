@@ -89,9 +89,7 @@ fn check(ip: &str, auth: bool, flags: Option<u8>, accepted: bool) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    // stdout isolation remains finding 15.
-    let start = stdout.find('{').expect("statistics JSON");
-    let stats: serde_json::Value = serde_json::from_str(&stdout[start..]).unwrap();
+    let stats: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(stats["packets_received"], u32::from(accepted), "{stdout}");
     assert_eq!(stats["packets_lost"], u32::from(!accepted), "{stdout}");
     assert_eq!(stats["owd"].is_null(), !accepted, "{stdout}");

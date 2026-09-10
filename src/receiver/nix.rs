@@ -297,7 +297,7 @@ pub async fn run_receiver(
     // interface's hardware address regardless of the bind address.
     let local_macs = super::build_local_macs();
 
-    println!(
+    log::info!(
         "STAMP Reflector listening on {} (nix mode, real TTL)",
         local_addr
     );

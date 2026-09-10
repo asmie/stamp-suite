@@ -281,7 +281,7 @@ pub async fn run_receiver(
         log::info!("TLV handling mode: {:?}", conf.tlv_mode);
     }
 
-    println!(
+    log::info!(
         "STAMP Reflector listening on {} (pnet mode, real TTL)",
         local_addr
     );

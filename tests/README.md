@@ -9,6 +9,7 @@ this file documents the opt-in invocations.
 
 | File | Purpose | Default-run? |
 | --- | --- | --- |
+| `output_stream_test.rs` | CLI stdout parsing with default/JSON logs, packet details, periodic reports, BER CSV quoting, reflector shutdown, quiet logging, schema and validation errors. | yes, Linux nix |
 | `config_file_test.rs` | TOML config parsing and validation. | yes |
 | `loopback_test.rs` | UDP-loopback round-trips on `127.0.0.1` (and one `[::1]`). | yes |
 | `replay_control_test.rs` | Independent Type-12 peer: single U-flagged replies for duplicate/reordered/old requests, sequence wraparound, SSID isolation, HMACs, both sequencing modes and drop policies, IPv4/IPv6. | yes, Linux nix |

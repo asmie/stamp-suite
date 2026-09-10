@@ -127,10 +127,10 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
   -c, --count <N>                  Number of packets to send [default: 1000]
   -L, --timeout <SEC>              Timeout for lost packets in seconds [default: 5]
   -A, --auth-mode <A|O>            A=authenticated, O=open [default: O]
-  -R                               Print per-packet statistics
+  -R                               Print per-packet statistics (stderr for JSON/CSV)
   -i, --is-reflector               Run as Session-Reflector instead of Session-Sender
       --output-format <text|json|csv>  Statistics output format [default: text]
-      --log-format <text|json>     Diagnostic log format [default: text]
+      --log-format <text|json>     Diagnostic log format on stderr [default: text]
   -v, --verbose...                 Increase log verbosity (-v debug, -vv trace);
                                    RUST_LOG overrides
       --hwtstamp <auto|on|off>     Kernel/hardware timestamp handling [default: auto]
@@ -143,6 +143,32 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
   -h, --help                       Print help
   -V, --version                    Print version
 ```
+
+### Output streams
+
+`--output-format` selects measurement output on **stdout**. Sender JSON is
+newline-delimited: periodic snapshots have `"type":"interim"` and the final
+snapshot has `"type":"summary"`. CSV emits one header followed by snapshot rows;
+the final row is the final summary. Optional columns remain present, and the
+`ber` cell contains CSV-quoted JSON when BER is enabled. Reflectors emit one
+shutdown summary, as a JSON object or a CSV header and row.
+
+Diagnostic logs and reflector startup notices go to **stderr**. `--log-format`
+controls tracing events there; `RUST_LOG` and `-v` control their verbosity.
+`-R` packet details remain on stdout for text output and move to stderr for
+JSON/CSV. These explicitly requested details stay plain text and remain visible
+with `RUST_LOG=off`; startup/validation errors can also be plain text even with
+`--log-format json`.
+
+```bash
+stamp-suite --remote-addr 192.0.2.10 --output-format json > measurements.jsonl 2> diagnostics.log
+stamp-suite --remote-addr 192.0.2.10 --output-format csv --report-interval 10 > measurements.csv 2> diagnostics.log
+```
+
+`--print-config-schema` emits only the schema on stdout and exits before logger
+initialization. In library code, reuse `stats::StatsOutput` with
+`sender::run_sender_with_output` and the returned final snapshot to share CSV
+header state. The older snapshot printing methods emit standalone reports.
 
 ### Reflector mode
 

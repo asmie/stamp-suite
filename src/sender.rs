@@ -58,6 +58,7 @@ struct SenderRecvContext<'a> {
     owd_collector: &'a mut OwdCollector,
     packets_received: &'a mut u32,
     print_stats: bool,
+    output_format: crate::stats::OutputFormat,
     hmac_key: Option<&'a HmacKey>,
     /// Sender's Micro-session ID from the outgoing MSID TLV (RFC 9534 §3.2).
     /// Used to validate that the reflector echoed the same sender ID back;
@@ -647,6 +648,8 @@ fn malformed_tlv_bytes(mode: MalformedMode) -> Vec<u8> {
 ///
 /// Sends packets to the configured remote address and waits for reflected responses.
 /// Returns statistics about the measurement session including RTT and packet loss.
+/// For a continuous CSV stream including the final snapshot, use
+/// [`run_sender_with_output`] with a shared [`crate::stats::StatsOutput`].
 ///
 /// When the `metrics` feature is enabled and `--metrics` flag is set, this function
 /// also records Prometheus metrics for packets sent, received, lost, and RTT values.
@@ -655,13 +658,26 @@ pub async fn run_sender(
     #[cfg(all(unix, feature = "snmp"))] snmp_stats: Option<
         std::sync::Arc<crate::snmp::state::SenderSnmpStats>,
     >,
+    #[cfg(not(all(unix, feature = "snmp")))] snmp_stats: Option<()>,
+) -> Result<StatsSnapshot, crate::StartupError> {
+    let mut output = crate::stats::StatsOutput::new(conf.output_format);
+    run_sender_with_output(conf, snmp_stats, &mut output).await
+}
+
+/// Runs a sender with shared reporting state. Use the same `StatsOutput` to print
+/// the returned final snapshot so periodic CSV reports do not repeat the header.
+pub async fn run_sender_with_output(
+    conf: &Configuration,
+    #[cfg(all(unix, feature = "snmp"))] snmp_stats: Option<
+        std::sync::Arc<crate::snmp::state::SenderSnmpStats>,
+    >,
     #[cfg(not(all(unix, feature = "snmp")))] _snmp_stats: Option<()>,
+    output: &mut crate::stats::StatsOutput,
 ) -> Result<StatsSnapshot, crate::StartupError> {
     #[cfg(feature = "metrics")]
     let metrics_enabled = conf.metrics;
     let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
     let remote_addr: SocketAddr = (conf.remote_addr, conf.remote_port).into();
-    let output_format = conf.output_format;
 
     // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: the AIMD congestion-response
     // controller is active exactly when the sender requests ECN
@@ -1482,6 +1498,7 @@ pub async fn run_sender(
                                 owd_collector: &mut owd_collector,
                                 packets_received: &mut packets_received,
                                 print_stats: conf.print_stats,
+                                output_format: conf.output_format,
                                 hmac_key: hmac_key.as_ref(),
                                 expected_sender_msid: conf.micro_session_id,
                                 expected_reflector_msid: conf.reflector_member_link_id,
@@ -1544,7 +1561,7 @@ pub async fn run_sender(
                         .with_owd(&owd_collector)
                         .with_access_report(access_report_state.as_ref().map(|state| state.summary()))
                         .with_congestion(congestion.as_ref().map(|state| state.summary()));
-                    interim.print_interim(output_format);
+                    output.print(&interim, true);
                 }
             }
         }
@@ -1624,6 +1641,7 @@ pub async fn run_sender(
                     owd_collector: &mut owd_collector,
                     packets_received: &mut packets_received,
                     print_stats: conf.print_stats,
+                    output_format: conf.output_format,
                     hmac_key: hmac_key.as_ref(),
                     expected_sender_msid: conf.micro_session_id,
                     expected_reflector_msid: conf.reflector_member_link_id,
@@ -1846,6 +1864,7 @@ pub async fn run_sender(
                             owd_collector: &mut owd_collector,
                             packets_received: &mut packets_received,
                             print_stats: conf.print_stats,
+                            output_format: conf.output_format,
                             hmac_key: hmac_key.as_ref(),
                             expected_sender_msid: conf.micro_session_id,
                             expected_reflector_msid: conf.reflector_member_link_id,
@@ -2371,7 +2390,7 @@ fn process_response(
             let tlv_status = tlv_info
                 .as_ref()
                 .map_or(String::new(), |info| format!(" tlv=[{}]", info));
-            println!(
+            let detail = format!(
                 "seq={} rtt={:.3}ms ttl={} reflector_recv_ts={} reflector_send_ts={}{}",
                 seq_num,
                 rtt_ns as f64 / 1_000_000.0,
@@ -2380,6 +2399,12 @@ fn process_response(
                 reflector_send_ts,
                 tlv_status
             );
+            if ctx.output_format == crate::stats::OutputFormat::Text {
+                println!("{detail}");
+            } else {
+                // Explicit -R output stays visible even when RUST_LOG=off.
+                eprintln!("{detail}");
+            }
         }
     } else {
         eprintln!("Received response for unknown sequence number: {}", seq_num);
@@ -5001,6 +5026,7 @@ mod tests {
             owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
+            output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             expected_sender_msid: None,
             expected_reflector_msid: None,
@@ -5069,6 +5095,7 @@ mod tests {
             owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
+            output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             expected_sender_msid: None,
             expected_reflector_msid: None,
@@ -5118,6 +5145,7 @@ mod tests {
             owd_collector,
             packets_received,
             print_stats: false,
+            output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             expected_sender_msid: None,
             expected_reflector_msid: None,
@@ -5493,6 +5521,7 @@ mod tests {
             owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
+            output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             expected_sender_msid: None,
             expected_reflector_msid: None,
@@ -6310,6 +6339,7 @@ mod tests {
             owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
+            output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             expected_sender_msid: None,
             expected_reflector_msid: None,
@@ -6579,6 +6609,7 @@ mod tests {
                 owd_collector: &mut owd_collector,
                 packets_received: &mut packets_received,
                 print_stats: false,
+                output_format: crate::stats::OutputFormat::Text,
                 hmac_key: None,
                 expected_sender_msid: None,
                 expected_reflector_msid: None,
@@ -6652,6 +6683,7 @@ mod tests {
                 owd_collector: &mut owd_collector,
                 packets_received: &mut packets_received,
                 print_stats: false,
+                output_format: crate::stats::OutputFormat::Text,
                 hmac_key: None,
                 expected_sender_msid: None,
                 expected_reflector_msid: None,
@@ -6726,6 +6758,7 @@ mod tests {
                 owd_collector: &mut owd_collector,
                 packets_received: &mut packets_received,
                 print_stats: false,
+                output_format: crate::stats::OutputFormat::Text,
                 hmac_key: None,
                 expected_sender_msid: None,
                 expected_reflector_msid: None,
@@ -6802,6 +6835,7 @@ mod tests {
             owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
+            output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             // Sender transmitted with sender_msid=7777; reflector's response
             // carries 0xBAD → session binding fails.
@@ -6884,6 +6918,7 @@ mod tests {
             owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
+            output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             expected_sender_msid: Some(7777),
             expected_reflector_msid: None,

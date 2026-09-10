@@ -305,7 +305,7 @@ pub struct Configuration {
     /// Specify work mode - A for authenticated, O for open (unauthenticated) - default "O".
     #[clap(short = 'A', long, value_enum, default_value_t = AuthMode::Open)]
     pub auth_mode: AuthMode,
-    /// Print individual statistics for each packet.
+    /// Print individual packet statistics (stderr for JSON/CSV output, stdout for text).
     #[clap(short = 'R')]
     pub print_stats: bool,
     /// Run as Session Reflector instead of Session Sender.
@@ -628,11 +628,11 @@ pub struct Configuration {
     #[clap(long, value_name = "PATH", requires = "control_tls_cert")]
     pub control_tls_key: Option<PathBuf>,
 
-    /// Output format for statistics (text, json, csv).
+    /// Statistics format on stdout (text, JSON lines, or CSV with one header per run).
     #[clap(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
 
-    /// Diagnostic log format — `text` (default) for journalctl-friendly
+    /// Diagnostic log format on stderr — `text` (default) for journalctl-friendly
     /// human-readable lines, `json` for structured one-line-per-event
     /// output suitable for log aggregators. `RUST_LOG` continues to
     /// control verbosity in both modes.

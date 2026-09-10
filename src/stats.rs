@@ -29,6 +29,34 @@ pub enum OutputFormat {
     Csv,
 }
 
+/// Output state for one sender reporting stream. Reuse it for interim and final
+/// snapshots so CSV has one header, even when a run produces no interim report.
+pub struct StatsOutput {
+    format: OutputFormat,
+    csv_header_printed: bool,
+}
+
+impl StatsOutput {
+    pub fn new(format: OutputFormat) -> Self {
+        Self {
+            format,
+            csv_header_printed: false,
+        }
+    }
+
+    /// Prints one snapshot; `interim` selects the JSON type and text prefix.
+    pub fn print(&mut self, stats: &StatsSnapshot, interim: bool) {
+        match self.format {
+            OutputFormat::Text => stats.print_text(if interim { "[INTERIM] " } else { "" }),
+            OutputFormat::Json => stats.print_json(interim),
+            OutputFormat::Csv => {
+                stats.print_csv(!self.csv_header_printed);
+                self.csv_header_printed = true;
+            }
+        }
+    }
+}
+
 /// A single RTT measurement sample.
 pub struct RttSample {
     /// Packet sequence number.
@@ -414,21 +442,23 @@ impl StatsSnapshot {
         self
     }
 
-    /// Prints the final summary in the given format.
+    /// Prints a standalone final summary in the given format, including a CSV header.
+    /// Use [`StatsOutput`] to combine interim and final reports in one stream.
     pub fn print(&self, format: OutputFormat) {
         match format {
             OutputFormat::Text => self.print_text(""),
             OutputFormat::Json => self.print_json(false),
-            OutputFormat::Csv => self.print_csv(),
+            OutputFormat::Csv => self.print_csv(true),
         }
     }
 
-    /// Prints an interim (periodic) summary in the given format.
+    /// Prints a standalone interim summary, including a CSV header.
+    /// Use [`StatsOutput`] for a stream with a single CSV header.
     pub fn print_interim(&self, format: OutputFormat) {
         match format {
             OutputFormat::Text => self.print_text("[INTERIM] "),
             OutputFormat::Json => self.print_json(true),
-            OutputFormat::Csv => self.print_csv(),
+            OutputFormat::Csv => self.print_csv(true),
         }
     }
 
@@ -549,12 +579,13 @@ impl StatsSnapshot {
         }
     }
 
-    fn print_csv(&self) {
-        // Header + data row. OWD, Access Report, and Congestion columns
+    fn print_csv(&self, header: bool) {
+        // Optional header + data row. OWD, Access Report, and Congestion columns
         // are always present but left empty when no samples were
         // collected / the feature was not enabled.
-        println!(
-            "packets_sent,packets_received,packets_lost,loss_percent,\
+        if header {
+            println!(
+                "packets_sent,packets_received,packets_lost,loss_percent,\
              min_rtt_ms,max_rtt_ms,avg_rtt_ms,median_rtt_ms,\
              p95_rtt_ms,p99_rtt_ms,jitter_ms,std_dev_ms,\
              owd_fwd_min_ms,owd_fwd_avg_ms,owd_fwd_max_ms,\
@@ -562,7 +593,8 @@ impl StatsSnapshot {
              access_report_outcome,access_report_retransmissions,\
              congestion_ce_replies,congestion_backoffs_applied,\
              congestion_current_interval_ms,congestion_max_interval_reached_ms,ber"
-        );
+            );
+        }
         println!(
             "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.packets_sent,
