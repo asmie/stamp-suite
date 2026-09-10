@@ -21,7 +21,7 @@ use crate::{
     error_estimate::ErrorEstimate,
 };
 
-use super::transmit::{DatagramSender, ReplyQueue, Transmission};
+use super::transmit::{DatagramSender, ReplyBudget, ReplyQueue, ShutdownDrain, Transmission};
 
 use super::{
     hmac_key_source_configured, load_hmac_key, print_reflector_stats,
@@ -313,6 +313,12 @@ pub async fn run_receiver(
 
     // One loop owns every send and its OPT_ID assignment, including burst copies.
     let mut replies = ReplyQueue::default();
+    let budget = ReplyBudget::new(
+        conf.reflector_queue_capacity as usize,
+        Arc::clone(&counters),
+    );
+    let grace = Duration::from_millis(u64::from(conf.reflector_shutdown_grace_ms));
+    let mut drain = ShutdownDrain::default();
     let mut mtu_cache = super::mtu::MtuCache::default();
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
     let mut tx_counter = 0u32;
@@ -335,8 +341,21 @@ pub async fn run_receiver(
     // Poll for control-plane shutdown requests (cheap 250 ms tick; the
     // first immediate tick is harmless — the flag starts false).
     let mut shutdown_tick = interval(Duration::from_millis(250));
+    let signal = super::shutdown_signal();
+    tokio::pin!(signal);
 
     loop {
+        if shared
+            .shutdown_requested
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            drain.begin(std::time::Instant::now(), grace);
+        }
+        if drain.finished(std::time::Instant::now(), budget.is_empty()) {
+            drop(replies); // Account for every unsent copy before printing stats.
+            print_reflector_stats(&counters, &session_manager, start_time, output_format);
+            return Ok(());
+        }
         // Apply kernel TX timestamps that arrived on the error queue since
         // the last iteration: correct the Follow-Up Telemetry record of the
         // matching reflection (RFC 8972 §4.7 reports the *previous* reply's
@@ -380,7 +399,8 @@ pub async fn run_receiver(
                     std::future::pending::<()>().await;
                 }
             } => {
-                if let Some(mut transmission) = replies.pop_due() {
+                if let Some(mut queued) = replies.pop_due() {
+                    let transmission = &mut queued.transmission;
                     if let Some(_sequence) = transmission.send_next_with_mtu(&counters, &shared.rate_limiter, |target, options, refresh| mtu_cache.payload_cap(local_addr, target, options, refresh), |bytes, target, options| datagram_sender.send(bytes, target, options)) {
                         #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
                         if kernel_ts.tx_kernel {
@@ -388,11 +408,11 @@ pub async fn run_receiver(
                             tx_counter = tx_counter.wrapping_add(1);
                         }
                     }
-                    replies.schedule_next(transmission);
+                    replies.schedule_next(queued);
                 }
                 continue;
             }
-            result = tokio_socket.readable() => {
+            result = tokio_socket.readable(), if drain.deadline().is_none() => {
                 if let Err(e) = result {
                     eprintln!("Failed to wait for readable: {}", e);
                     continue;
@@ -414,22 +434,22 @@ pub async fn run_receiver(
                 continue;
             }
 
-            _ = tokio::signal::ctrl_c() => {
-                print_reflector_stats(&counters, &session_manager, start_time, output_format);
-                return Ok(());
+            _ = &mut signal, if drain.deadline().is_none() => {
+                drain.begin(std::time::Instant::now(), grace);
+                continue;
             }
 
-            _ = shutdown_tick.tick() => {
-                // Control-plane shutdown (POST /v1/shutdown) — graceful exit
-                // with the same stats dump as Ctrl-C.
-                if shared
-                    .shutdown_requested
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    log::info!("shutdown requested via control plane");
-                    print_reflector_stats(&counters, &session_manager, start_time, output_format);
-                    return Ok(());
+            _ = async {
+                if let Some(at) = drain.deadline() {
+                    tokio::time::sleep_until(at.into()).await;
+                } else {
+                    std::future::pending::<()>().await;
                 }
+            } => { continue; }
+
+            _ = shutdown_tick.tick() => {
+                // Poll the flag at the top even when no socket is readable.
+                continue;
             }
         }
 
@@ -537,6 +557,10 @@ pub async fn run_receiver(
                     .packets_received
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+                let Some(reservation) = budget.reserve() else {
+                    continue;
+                };
+
                 // Build packet address info for Location TLV
                 let packet_addr_info = Some(crate::tlv::PacketAddressInfo {
                     src_addr: src_addr.ip(),
@@ -620,7 +644,7 @@ pub async fn run_receiver(
                         conf.drop_replayed,
                     )
                     .map(|(response, session, signing_key)| {
-                        Transmission::new(
+                        reservation.attach(Transmission::new(
                             response,
                             session,
                             src_addr,
@@ -630,7 +654,7 @@ pub async fn run_receiver(
                             signing_key,
                             received_dscp,
                             conf.srv6_return_forwarding && crate::srv6::srh_supported(),
-                        )
+                        ))
                     })
                 };
                 if let Some(transmission) = response_opt {

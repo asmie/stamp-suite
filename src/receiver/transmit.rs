@@ -7,7 +7,10 @@ use std::{
     collections::BinaryHeap,
     io,
     net::{IpAddr, SocketAddr},
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -482,10 +485,104 @@ fn sign_tlvs(data: &mut [u8], base: usize, key: &HmacKey) {
     }
 }
 
+/// A slot covers processing, channel handoff, queued deadlines and the active
+/// send. Keeping it through every copy bounds combined work in both backends.
+pub(super) struct ReplyBudget {
+    limit: usize,
+    used: AtomicUsize,
+    counters: Arc<ReflectorCounters>,
+}
+
+impl ReplyBudget {
+    pub fn new(limit: usize, counters: Arc<ReflectorCounters>) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            used: AtomicUsize::new(0),
+            counters,
+        })
+    }
+
+    pub fn reserve(self: &Arc<Self>) -> Option<ReplyReservation> {
+        if self
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                if used < self.limit {
+                    Some(used + 1)
+                } else {
+                    None
+                }
+            })
+            .is_err()
+        {
+            self.counters
+                .reply_queue_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            self.counters
+                .packets_dropped
+                .fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(ReplyReservation(Arc::clone(self)))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.used.load(Ordering::Acquire) == 0
+    }
+}
+
+pub(super) struct ReplyReservation(Arc<ReplyBudget>);
+impl ReplyReservation {
+    pub fn attach(self, transmission: Transmission) -> QueuedTransmission {
+        QueuedTransmission {
+            transmission,
+            reservation: self,
+        }
+    }
+}
+impl Drop for ReplyReservation {
+    fn drop(&mut self) {
+        self.0.used.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+pub(super) struct QueuedTransmission {
+    pub transmission: Transmission,
+    reservation: ReplyReservation,
+}
+impl Drop for QueuedTransmission {
+    fn drop(&mut self) {
+        if self.transmission.remaining > 0 {
+            let counters = &self.reservation.0.counters;
+            counters
+                .queued_replies_cancelled
+                .fetch_add(u64::from(self.transmission.remaining), Ordering::Relaxed);
+            counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// A shutdown deadline is set once and cannot be extended by later signals.
+#[derive(Default)]
+pub(super) struct ShutdownDrain {
+    deadline: Option<Instant>,
+}
+impl ShutdownDrain {
+    pub fn begin(&mut self, now: Instant, grace: Duration) {
+        self.deadline.get_or_insert(now + grace);
+    }
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+    pub fn finished(&self, now: Instant, empty: bool) -> bool {
+        self.deadline
+            .is_some_and(|deadline| empty || now >= deadline)
+    }
+}
+
 struct Pending {
     at: Instant,
     order: u64,
-    transmission: Transmission,
+    transmission: QueuedTransmission,
 }
 impl PartialEq for Pending {
     fn eq(&self, other: &Self) -> bool {
@@ -516,7 +613,7 @@ impl ReplyQueue {
     pub fn deadline(&self) -> Option<Instant> {
         self.pending.peek().map(|p| p.at)
     }
-    pub fn push_at(&mut self, transmission: Transmission, at: Instant) {
+    pub fn push_at(&mut self, transmission: QueuedTransmission, at: Instant) {
         self.order = self.order.wrapping_add(1);
         self.pending.push(Pending {
             at,
@@ -524,13 +621,13 @@ impl ReplyQueue {
             transmission,
         });
     }
-    pub fn schedule_next(&mut self, transmission: Transmission) {
-        if transmission.remaining > 0 {
-            let at = Instant::now() + transmission.interval;
+    pub fn schedule_next(&mut self, transmission: QueuedTransmission) {
+        if transmission.transmission.remaining > 0 {
+            let at = Instant::now() + transmission.transmission.interval;
             self.push_at(transmission, at);
         }
     }
-    pub fn pop_due(&mut self) -> Option<Transmission> {
+    pub fn pop_due(&mut self) -> Option<QueuedTransmission> {
         if self.deadline().is_some_and(|at| at <= Instant::now()) {
             self.pending.pop().map(|p| p.transmission)
         } else {
@@ -847,6 +944,92 @@ fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reply_budget_covers_handoff_active_send_and_rescheduled_copies() {
+        let counters = Arc::new(ReflectorCounters::new());
+        let budget = ReplyBudget::new(2, Arc::clone(&counters));
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let first = budget
+            .reserve()
+            .unwrap()
+            .attach(sample(false, ReturnPathAction::Normal));
+        assert!(sender.send(first).is_ok());
+        let second = budget.reserve().unwrap(); // Packet still being authenticated.
+        assert!(budget.reserve().is_none());
+        let mut queue = ReplyQueue::default();
+        queue.push_at(receiver.recv().unwrap(), Instant::now());
+        let mut active = queue.pop_due().unwrap();
+        assert!(
+            budget.reserve().is_none(),
+            "popping must not release the slot"
+        );
+        active
+            .transmission
+            .send_next(&counters, &RateLimiter::new(0), |bytes, _, _| {
+                Ok(bytes.len())
+            })
+            .unwrap();
+        queue.schedule_next(active);
+        assert!(
+            budget.reserve().is_none(),
+            "remaining copies keep their slot"
+        );
+        drop(second); // Authentication failure returns the reservation.
+        assert!(budget.reserve().is_some());
+        drop(queue);
+        assert!(budget.is_empty());
+        assert_eq!(counters.reply_queue_rejected.load(Ordering::Relaxed), 3);
+        assert_eq!(counters.queued_replies_cancelled.load(Ordering::Relaxed), 2);
+        assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.packets_dropped.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn reply_budget_is_shared_by_concurrent_producers_and_closed_handoffs() {
+        let counters = Arc::new(ReflectorCounters::new());
+        let budget = ReplyBudget::new(4, Arc::clone(&counters));
+        let barrier = std::sync::Barrier::new(16);
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let budget = &budget;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let reservation = budget.reserve();
+                    barrier.wait();
+                    assert_eq!(budget.used.load(Ordering::Acquire), 4);
+                    barrier.wait();
+                    drop(reservation);
+                });
+            }
+        });
+        assert!(budget.is_empty());
+        assert_eq!(counters.reply_queue_rejected.load(Ordering::Relaxed), 12);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        drop(receiver);
+        let work = budget
+            .reserve()
+            .unwrap()
+            .attach(sample(true, ReturnPathAction::Normal));
+        drop(sender.try_send(work));
+        assert!(budget.is_empty());
+        assert_eq!(counters.queued_replies_cancelled.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn shutdown_drain_finishes_early_or_at_an_immutable_deadline() {
+        let now = Instant::now();
+        let mut drain = ShutdownDrain::default();
+        assert!(!drain.finished(now, true));
+        drain.begin(now, Duration::from_millis(50));
+        drain.begin(now + Duration::from_millis(40), Duration::from_secs(60));
+        assert!(!drain.finished(now + Duration::from_millis(49), false));
+        assert!(drain.finished(now + Duration::from_millis(50), false));
+        assert!(drain.finished(now, true));
+        let mut immediate = ShutdownDrain::default();
+        immediate.begin(now, Duration::ZERO);
+        assert!(immediate.finished(now, false));
+    }
 
     fn sample(auth: bool, action: ReturnPathAction) -> Transmission {
         let mut data = vec![0; if auth { 112 } else { 44 }];

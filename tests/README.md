@@ -22,6 +22,7 @@ The counters exist only in test builds; the tests run in both backend builds.
 
 | File | Purpose | Default-run? |
 | --- | --- | --- |
+| `reply_queue_test.rs` | Real IPv4/open and IPv6/auth queue saturation, capacity recovery without sequence consumption, SIGINT/SIGTERM shutdown, immediate/deadline cancellation and graceful burst completion with counters. | yes, Linux nix |
 | `output_stream_test.rs` | CLI stdout parsing with default/JSON logs, packet details, periodic reports, BER CSV quoting, reflector shutdown, quiet logging, schema and validation errors. | yes, Linux nix |
 | `config_file_test.rs` | TOML config parsing and validation. | yes |
 | `loopback_test.rs` | UDP-loopback round-trips on `127.0.0.1` (and one `[::1]`). | yes |
@@ -56,6 +57,12 @@ cargo test --locked --no-default-features --features ttl-pnet --lib
 
 `--all-features` selects the nix backend; use the explicit pnet-only build above
 to compile and exercise the pnet worker.
+
+Queue unit tests reserve one shared budget across concurrent producers, handoff,
+active sends and burst rescheduling, and verify released slots/cancelled-copy
+counts. Pnet worker tests exercise grace/deadline shutdown over ordinary UDP;
+the privileged capture fixtures disable session expiry (`--session-timeout 0`)
+and still require the receiver to join promptly after control shutdown.
 
 ## Running the pnet integration tests (C10)
 

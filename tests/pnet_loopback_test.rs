@@ -62,7 +62,7 @@ fn reflector_conf(local_port: u16, auth: AuthMode, hmac_key_hex: Option<&str>) -
         local_port.to_string(),
         "--is-reflector".to_string(),
         "--session-timeout".to_string(),
-        "2".to_string(),
+        "0".to_string(),
     ];
     if matches!(auth, AuthMode::Authenticated) {
         args.push("--auth-mode".to_string());

@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bound reflector work across processing, capture handoff and queued burst copies
+  with `--reflector-queue-capacity` (default 1024). Add an optional shutdown grace
+  period (default immediate cancellation), SIGTERM handling, prompt pnet idle
+  polling, nonblocking reply sockets and owned worker cleanup. Report queue
+  rejections/cancelled copies in reflector summaries and control status; append
+  two reflector CSV columns. Add overload, recovery and shutdown regressions.
+
 - Carry one provisioning decision through authenticated session acquisition.
   Use one table entry lookup for existing/new sessions, retain cap/drain checks
   under the write lock, and reuse the acquired handle for standalone sequencing

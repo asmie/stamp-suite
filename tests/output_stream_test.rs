@@ -49,7 +49,8 @@ impl Process {
             }
             assert!(
                 start.elapsed() < Duration::from_secs(10),
-                "child did not exit"
+                "child {} did not exit; inspect stdout/stderr for its last activity",
+                self.child.id()
             );
             std::thread::sleep(Duration::from_millis(10));
         };
@@ -230,9 +231,9 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
             assert_eq!(reflected.len(), 2);
             assert_eq!(
                 reflected[0],
-                "total_received,total_reflected,total_dropped,active_sessions,uptime_seconds"
+                "total_received,total_reflected,total_dropped,active_sessions,uptime_seconds,reply_queue_rejected,queued_replies_cancelled"
             );
-            assert_eq!(reflected[1].split(',').count(), 5);
+            assert_eq!(reflected[1].split(',').count(), 7);
             assert!(reflected[1]
                 .split(',')
                 .all(|cell| cell.parse::<f64>().is_ok()));

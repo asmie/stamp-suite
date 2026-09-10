@@ -655,6 +655,8 @@ pub struct ReflectorStats {
     pub total_packets_received: u64,
     pub total_packets_reflected: u64,
     pub total_packets_dropped: u64,
+    pub reply_queue_rejected: u64,
+    pub queued_replies_cancelled: u64,
     pub active_sessions: usize,
     pub uptime_seconds: f64,
     pub sessions: Vec<ClientSessionStats>,
@@ -676,6 +678,11 @@ impl ReflectorStats {
         println!("Total packets received: {}", self.total_packets_received);
         println!("Total packets reflected: {}", self.total_packets_reflected);
         println!("Total packets dropped: {}", self.total_packets_dropped);
+        println!("Reply queue rejections: {}", self.reply_queue_rejected);
+        println!(
+            "Queued replies cancelled: {}",
+            self.queued_replies_cancelled
+        );
         println!("Active sessions: {}", self.active_sessions);
         if !self.sessions.is_empty() {
             println!("Sessions:");
@@ -700,14 +707,16 @@ impl ReflectorStats {
     }
 
     fn print_csv(&self) {
-        println!("total_received,total_reflected,total_dropped,active_sessions,uptime_seconds");
+        println!("total_received,total_reflected,total_dropped,active_sessions,uptime_seconds,reply_queue_rejected,queued_replies_cancelled");
         println!(
-            "{},{},{},{},{:.1}",
+            "{},{},{},{},{:.1},{},{}",
             self.total_packets_received,
             self.total_packets_reflected,
             self.total_packets_dropped,
             self.active_sessions,
             self.uptime_seconds,
+            self.reply_queue_rejected,
+            self.queued_replies_cancelled,
         );
     }
 }
@@ -736,6 +745,8 @@ pub fn build_reflector_stats(
         total_packets_received: packets_received,
         total_packets_reflected: packets_reflected,
         total_packets_dropped: packets_dropped,
+        reply_queue_rejected: 0,
+        queued_replies_cancelled: 0,
         active_sessions,
         uptime_seconds,
         sessions,
@@ -1095,6 +1106,8 @@ mod tests {
             total_packets_received: 100,
             total_packets_reflected: 98,
             total_packets_dropped: 2,
+            reply_queue_rejected: 0,
+            queued_replies_cancelled: 0,
             active_sessions: 1,
             uptime_seconds: 60.0,
             sessions: vec![ClientSessionStats {
@@ -1115,6 +1128,8 @@ mod tests {
             total_packets_received: 100,
             total_packets_reflected: 98,
             total_packets_dropped: 2,
+            reply_queue_rejected: 0,
+            queued_replies_cancelled: 0,
             active_sessions: 1,
             uptime_seconds: 60.0,
             sessions: vec![],
@@ -1128,6 +1143,8 @@ mod tests {
             total_packets_received: 100,
             total_packets_reflected: 98,
             total_packets_dropped: 2,
+            reply_queue_rejected: 0,
+            queued_replies_cancelled: 0,
             active_sessions: 1,
             uptime_seconds: 60.0,
             sessions: vec![],

@@ -38,7 +38,7 @@ Role legend: Sender / Reflector / Both / N-A.
 
 | ID | Clause (trimmed quote) | Level | Role | Status | Evidence |
 |----|------------------------|-------|------|--------|----------|
-| cos-ecn-3.1-1 | "The STAMP Session-Sender MAY include a CoS TLV in the STAMP test packet" | MAY | Sender | Compliant | Optional via `--cos` (`configuration.rs:324`, paired with `--dscp`/`--ecn` at `configuration.rs:330,285`); `sender.rs:319-320` adds `ClassOfServiceTlv::new(conf.dscp, conf.ecn)` only when `conf.cos` is true. |
+| cos-ecn-3.1-1 | "The STAMP Session-Sender MAY include a CoS TLV in the STAMP test packet" | MAY | Sender | Compliant | Optional via `--cos` (`src/configuration.rs::Configuration::cos`, paired with `--dscp`/`--ecn` at `src/configuration.rs::Configuration::dscp`); `sender.rs:319-320` adds `ClassOfServiceTlv::new(conf.dscp, conf.ecn)` only when `conf.cos` is true. |
 | cos-ecn-3.1-2 | "CoS (Class of Service) Type: one-octet field; the value MUST be set to 4" | MUST | Both | Compliant | `TlvType::ClassOfService = 4` (`tlv/core.rs:275,323,349`); `COS_TLV_VALUE_SIZE = 4` (`tlv/core.rs:12`) matches "Length: ... set equal to the value 4." |
 | cos-ecn-3.1-3 | "a Session-Sender MUST set the value of the RPD field to 0b00 on transmission" | MUST | Sender | Compliant | `ClassOfServiceTlv::new` (`tlv/typed/cos.rs:52-61`) hardcodes `rpd: 0`; unit test `test_cos_tlv_new` asserts `rpd == 0`. |
 | cos-ecn-3.1-4 | "a Session-Sender MUST set the value of the RPE field to 0b00 on transmission" | MUST | Sender | Compliant | Same constructor hardcodes `rpe: 0`; unit test `test_cos_tlv_new` explicitly asserts `rpe == 0, "sender MUST transmit RPE as 0b00"`. |

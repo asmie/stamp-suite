@@ -235,6 +235,11 @@ curl -s -X POST 127.0.0.1:9091/v1/drain \
 curl -s -X POST 127.0.0.1:9091/v1/shutdown             # graceful shutdown
 ```
 
+Reflectors bound pending work with `--reflector-queue-capacity` (default 1024).
+`--reflector-shutdown-grace-ms` optionally finishes queued replies before exit
+(default 0 cancels immediately). See [burst scheduling and shutdown](doc/usage.md)
+for overflow behavior, cancellation counters and TOML equivalents.
+
 Key material is write-only (never returned or logged). Set
 `--control-token-file` to require a bearer token; keep the bind on
 loopback unless network-level access control is in place. Full API

@@ -34,7 +34,9 @@ use crate::{
     session::SessionManager,
 };
 
-use super::transmit::{DatagramSender, ReplyQueue, Transmission};
+use super::transmit::{
+    DatagramSender, QueuedTransmission, ReplyBudget, ReplyQueue, ShutdownDrain, Transmission,
+};
 
 use super::{
     hmac_key_source_configured, load_hmac_key, print_reflector_stats,
@@ -50,6 +52,9 @@ struct PnetSendContext {
 /// Configuration extracted for the blocking capture loop.
 /// This allows us to move owned data into the spawn_blocking closure.
 struct CaptureConfig {
+    queue_budget: Arc<ReplyBudget>,
+    queue_capacity: usize,
+    shutdown_grace: Duration,
     local_port: u16,
     clock_source: ClockFormat,
     clock_sync_source: crate::tlv::SyncSource,
@@ -185,6 +190,11 @@ pub async fn run_receiver(
     // the v4 socket above on a dual-stack bind. Losing it only costs IPv6
     // replies, which the v4 path cannot serve anyway.
     let send_socket_v6 = std::net::UdpSocket::bind(send_bind_v6).ok();
+    for socket in std::iter::once(&send_socket_v4).chain(send_socket_v6.iter()) {
+        socket.set_nonblocking(true).map_err(|e| {
+            crate::StartupError::new(format!("Cannot make reply socket nonblocking: {e}"))
+        })?;
+    }
 
     // Check if authenticated mode is used
     let use_auth = is_auth(conf.auth_mode);
@@ -222,13 +232,8 @@ pub async fn run_receiver(
     }
 
     // Validate keys and bind ordinary sockets before opening privileged capture.
-    // Configure read timeout for periodic cleanup during idle periods.
-    // Use half the session timeout (min 1s) to allow cleanup of stale counter sessions.
-    let read_timeout = if conf.session_timeout > 0 {
-        Some(Duration::from_secs((conf.session_timeout / 2).max(1)))
-    } else {
-        None
-    };
+    // Bound shutdown polling independently of session expiry, including timeout=0.
+    let read_timeout = Some(Duration::from_millis(100));
     let config = Config {
         read_timeout,
         ..Default::default()
@@ -310,6 +315,12 @@ pub async fn run_receiver(
 
     // Build capture config with all values needed by the blocking loop
     let capture_config = CaptureConfig {
+        queue_budget: ReplyBudget::new(
+            conf.reflector_queue_capacity as usize,
+            Arc::clone(&shared.counters),
+        ),
+        queue_capacity: conf.reflector_queue_capacity as usize,
+        shutdown_grace: Duration::from_millis(u64::from(conf.reflector_shutdown_grace_ms)),
         local_port: conf.local_port,
         clock_source: conf.clock_source,
         clock_sync_source: conf.clock_sync_source.into(),
@@ -349,11 +360,13 @@ pub async fn run_receiver(
     // existing shutdown flag.
     let shutdown_flag = Arc::clone(&shutdown);
     let control_shutdown = Arc::clone(&shared.shutdown_requested);
-    tokio::spawn(async move {
+    let signal = super::shutdown_signal();
+    let task = tokio::spawn(async move {
+        tokio::pin!(signal);
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => break,
+                _ = &mut signal => break,
                 _ = tick.tick() => {
                     if control_shutdown.load(AtomicOrdering::Relaxed) {
                         log::info!("shutdown requested via control plane");
@@ -365,6 +378,11 @@ pub async fn run_receiver(
         shutdown_flag.store(true, AtomicOrdering::Relaxed);
     });
 
+    let mut shutdown_task = CaptureShutdown {
+        task,
+        flag: Arc::clone(&shutdown),
+    };
+
     // Spawn the blocking packet capture loop on a dedicated thread.
     // This prevents starvation of the async runtime which may be running
     // other tasks like the metrics HTTP server.
@@ -373,6 +391,9 @@ pub async fn run_receiver(
         run_capture_loop(rx, capture_config, send_ctx, iface_props);
     })
     .await;
+
+    shutdown_task.task.abort();
+    let _ = (&mut shutdown_task.task).await;
 
     // The capture thread should normally return cleanly on shutdown flag.
     // A panic propagated through the JoinHandle (`result == Err`) means an
@@ -392,6 +413,45 @@ pub async fn run_receiver(
     Ok(())
 }
 
+// Cancelling the async receiver also stops its blocking capture and send work.
+struct CaptureShutdown {
+    task: tokio::task::JoinHandle<()>,
+    flag: Arc<AtomicBool>,
+}
+impl Drop for CaptureShutdown {
+    fn drop(&mut self) {
+        self.flag.store(true, AtomicOrdering::Relaxed);
+        self.task.abort();
+    }
+}
+struct StopCapture(Arc<AtomicBool>);
+impl Drop for StopCapture {
+    fn drop(&mut self) {
+        self.0.store(true, AtomicOrdering::Relaxed);
+    }
+}
+struct TransmitWorker {
+    handle: Option<std::thread::JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
+}
+impl TransmitWorker {
+    fn join(&mut self) {
+        if self
+            .handle
+            .take()
+            .is_some_and(|worker| worker.join().is_err())
+        {
+            log::error!("reflector transmission worker panicked");
+        }
+    }
+}
+impl Drop for TransmitWorker {
+    fn drop(&mut self) {
+        self.shutdown.store(true, AtomicOrdering::Relaxed);
+        self.join();
+    }
+}
+
 /// The blocking packet capture loop, run on a dedicated thread.
 fn run_capture_loop(
     mut rx: Box<dyn DataLinkReceiver>,
@@ -399,13 +459,28 @@ fn run_capture_loop(
     send_ctx: PnetSendContext,
     iface_props: InterfaceProps,
 ) {
-    let (transmitter, receiver) = std::sync::mpsc::channel();
+    let (transmitter, receiver) = std::sync::mpsc::sync_channel(config.queue_capacity);
     let tx_counters = Arc::clone(&config.counters);
     let tx_limiter = Arc::clone(&config.rate_limiter);
     let tx_shutdown = Arc::clone(&config.shutdown);
+    let tx_budget = Arc::clone(&config.queue_budget);
+    let grace = config.shutdown_grace;
     let worker = std::thread::spawn(move || {
-        run_transmit_loop(receiver, send_ctx, &tx_counters, &tx_limiter, &tx_shutdown)
+        let _stop = StopCapture(Arc::clone(&tx_shutdown));
+        run_transmit_loop(
+            receiver,
+            send_ctx,
+            &tx_counters,
+            &tx_limiter,
+            &tx_shutdown,
+            &tx_budget,
+            grace,
+        )
     });
+    let mut worker = TransmitWorker {
+        handle: Some(worker),
+        shutdown: Arc::clone(&config.shutdown),
+    };
     let mut last_cleanup = Instant::now();
     let mut buf = [0u8; 1600];
 
@@ -489,9 +564,7 @@ fn run_capture_loop(
         }
     }
     drop(transmitter);
-    if worker.join().is_err() {
-        log::error!("reflector transmission worker panicked");
-    }
+    worker.join();
 }
 
 /// IP protocol numbers for the two IP-in-IP tunnel encapsulations.
@@ -503,7 +576,7 @@ const MAX_IP_TUNNEL_DEPTH: usize = 4;
 fn handle_packet(
     ethernet: &EthernetPacket,
     config: &CaptureConfig,
-    transmitter: &std::sync::mpsc::Sender<Transmission>,
+    transmitter: &std::sync::mpsc::SyncSender<QueuedTransmission>,
 ) {
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => {
@@ -760,7 +833,7 @@ fn handle_stamp_packet(
     data: &[u8],
     pkt: &PacketMeta,
     config: &CaptureConfig,
-    transmitter: &std::sync::mpsc::Sender<Transmission>,
+    transmitter: &std::sync::mpsc::SyncSender<QueuedTransmission>,
 ) {
     // Rate limit check: drop packet if source exceeds the per-client
     // token bucket. Distinct counter so operators can tell rate-limit
@@ -782,6 +855,13 @@ fn handle_stamp_packet(
         .counters
         .packets_received
         .fetch_add(1, AtomicOrdering::Relaxed);
+
+    if config.shutdown.load(AtomicOrdering::Relaxed) {
+        return;
+    }
+    let Some(reservation) = config.queue_budget.reserve() else {
+        return;
+    };
 
     // Build packet address info for Location TLV.
     // dst_addr comes from the parsed IP header, so it's always the real
@@ -855,7 +935,7 @@ fn handle_stamp_packet(
             config.drop_replayed,
         )
         .map(|(response, session, signing_key)| {
-            Transmission::new(
+            reservation.attach(Transmission::new(
                 response,
                 session,
                 pkt.src,
@@ -865,16 +945,13 @@ fn handle_stamp_packet(
                 signing_key,
                 pkt.dscp,
                 false,
-            )
+            ))
         })
     };
     if let Some(transmission) = response_opt {
-        if transmitter.send(transmission).is_err() {
-            config
-                .counters
-                .packets_dropped
-                .fetch_add(1, AtomicOrdering::Relaxed);
-        }
+        // The shared reservation also bounds the handoff channel. Never block
+        // capture; a closed/full handoff drops and accounts for the owned work.
+        let _ = transmitter.try_send(transmission);
     } else {
         config
             .counters
@@ -885,11 +962,13 @@ fn handle_stamp_packet(
 
 /// Own both sending sockets and interleave burst deadlines with new requests.
 fn run_transmit_loop(
-    receiver: std::sync::mpsc::Receiver<Transmission>,
+    receiver: std::sync::mpsc::Receiver<QueuedTransmission>,
     sockets: PnetSendContext,
     counters: &ReflectorCounters,
     limiter: &super::RateLimiter,
     shutdown: &AtomicBool,
+    budget: &Arc<ReplyBudget>,
+    grace: Duration,
 ) {
     let local_v4 = sockets.send_socket_v4.local_addr().ok();
     let local_v6 = sockets
@@ -900,8 +979,29 @@ fn run_transmit_loop(
     let mut sender_v6 = sockets.send_socket_v6.as_ref().map(DatagramSender::new);
     let mut replies = ReplyQueue::default();
     let mut mtu_cache = super::mtu::MtuCache::default();
-    while !shutdown.load(AtomicOrdering::Relaxed) {
-        if let Some(mut transmission) = replies.pop_due() {
+    let mut drain = ShutdownDrain::default();
+    let mut disconnected = false;
+    loop {
+        if shutdown.load(AtomicOrdering::Relaxed) || disconnected {
+            drain.begin(Instant::now(), grace);
+        }
+        if drain.finished(Instant::now(), budget.is_empty()) {
+            break;
+        }
+        // Admit at most one handoff each iteration so due bursts cannot starve
+        // already reserved requests, even with sub-millisecond intervals.
+        if !disconnected {
+            match receiver.try_recv() {
+                Ok(work) => replies.push_at(work, Instant::now()),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(mut queued) = replies.pop_due() {
+            let transmission = &mut queued.transmission;
             transmission.send_next_with_mtu(
                 counters,
                 limiter,
@@ -931,17 +1031,24 @@ fn run_transmit_loop(
                         .send(data, target, options)
                 },
             );
-            replies.schedule_next(transmission);
+            replies.schedule_next(queued);
             continue;
         }
         let wait = replies.deadline().map_or(Duration::from_millis(250), |at| {
             at.saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(250))
         });
+        let wait = drain.deadline().map_or(wait, |at| {
+            wait.min(at.saturating_duration_since(Instant::now()))
+        });
+        if disconnected {
+            std::thread::sleep(wait);
+            continue;
+        }
         match receiver.recv_timeout(wait) {
             Ok(transmission) => replies.push_at(transmission, Instant::now()),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
         }
     }
 }
@@ -955,6 +1062,82 @@ mod tests {
     use crate::receiver::create_shared_state;
 
     #[test]
+    fn transmit_worker_shutdown_finishes_or_cancels_reserved_bursts() {
+        for (grace, interval, expected) in [
+            (0, 1_000_000_000, 1),
+            (80, 1_000_000_000, 1),
+            (500, 80_000_000, 3),
+        ] {
+            let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let sockets = PnetSendContext {
+                send_socket_v4: std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+                send_socket_v6: None,
+            };
+            let counters = Arc::new(ReflectorCounters::new());
+            let budget = ReplyBudget::new(1, Arc::clone(&counters));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let session = Arc::new(crate::session::Session::new(0));
+            let response = super::super::StampResponse {
+                data: vec![0; 44],
+                cos_request: None,
+                reply_source: None,
+                return_path_action: crate::tlv::ReturnPathAction::Normal,
+                reflected_control: Some(super::super::ReflectedControlBehavior {
+                    max_size: 1500,
+                    extra_copies: 2,
+                    interval_ns: interval,
+                    suppress_reply_ext_headers: false,
+                }),
+            };
+            let transmission = Transmission::new(
+                response,
+                Arc::clone(&session),
+                peer.local_addr().unwrap(),
+                ClockFormat::NTP,
+                false,
+                true,
+                None,
+                0,
+                false,
+            );
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            assert!(sender
+                .send(budget.reserve().unwrap().attach(transmission))
+                .is_ok());
+            let (done_sender, done_receiver) = std::sync::mpsc::channel();
+            let worker_counters = Arc::clone(&counters);
+            let worker_budget = Arc::clone(&budget);
+            let worker_shutdown = Arc::clone(&shutdown);
+            let worker = std::thread::spawn(move || {
+                run_transmit_loop(
+                    receiver,
+                    sockets,
+                    &worker_counters,
+                    &super::super::RateLimiter::new(0),
+                    &worker_shutdown,
+                    &worker_budget,
+                    Duration::from_millis(grace),
+                );
+                done_sender.send(()).unwrap();
+            });
+            peer.recv_from(&mut [0; 128]).unwrap();
+            shutdown.store(true, AtomicOrdering::Relaxed);
+            drop(sender); // Wake the worker without waiting for its periodic poll.
+            assert!(done_receiver.recv_timeout(Duration::from_secs(2)).is_ok());
+            worker.join().unwrap();
+            assert_eq!(session.get_transmitted_count(), expected);
+            assert_eq!(
+                counters
+                    .queued_replies_cancelled
+                    .load(AtomicOrdering::Relaxed),
+                u64::from(3 - expected)
+            );
+            assert!(budget.is_empty());
+        }
+    }
+
+    #[test]
     fn transmit_worker_interleaves_requests_and_burst_deadlines() {
         let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -965,7 +1148,9 @@ mod tests {
         let counters = Arc::new(ReflectorCounters::new());
         let session = Arc::new(crate::session::Session::new(0));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let budget = ReplyBudget::new(4, Arc::clone(&counters));
+        let worker_budget = Arc::clone(&budget);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
         let worker_counters = Arc::clone(&counters);
         let worker_shutdown = Arc::clone(&shutdown);
         let worker = std::thread::spawn(move || {
@@ -975,6 +1160,8 @@ mod tests {
                 &worker_counters,
                 &super::super::RateLimiter::new(0),
                 &worker_shutdown,
+                &worker_budget,
+                Duration::ZERO,
             )
         });
         let make = |seq: u32, extra| {
@@ -1006,11 +1193,15 @@ mod tests {
                 false,
             )
         };
-        sender.send(make(7, 2)).unwrap();
+        assert!(sender
+            .send(budget.reserve().unwrap().attach(make(7, 2)))
+            .is_ok());
         let mut data = [0; 256];
         peer.recv_from(&mut data).unwrap();
         assert_eq!(u32::from_be_bytes(data[..4].try_into().unwrap()), 0);
-        sender.send(make(8, 0)).unwrap();
+        assert!(sender
+            .send(budget.reserve().unwrap().attach(make(8, 0)))
+            .is_ok());
         for (sequence, request) in [(1u32, 8u32), (2, 7), (3, 7)] {
             let previous = data[4..12].to_vec();
             peer.recv_from(&mut data).unwrap();

@@ -99,6 +99,8 @@ async fn get_status(State(s): State<ControlState>) -> Json<serde_json::Value> {
             "packets_received": s.counters.packets_received.load(Ordering::Relaxed),
             "packets_reflected": s.counters.packets_reflected.load(Ordering::Relaxed),
             "packets_dropped": s.counters.packets_dropped.load(Ordering::Relaxed),
+            "reply_queue_rejected": s.counters.reply_queue_rejected.load(Ordering::Relaxed),
+            "queued_replies_cancelled": s.counters.queued_replies_cancelled.load(Ordering::Relaxed),
             "packets_rate_limited": s.counters.packets_rate_limited.load(Ordering::Relaxed),
             // draft-ietf-ippm-asymmetrical-pkts-14 §5 replay detection.
             "packets_replayed": s.counters.packets_replayed.load(Ordering::Relaxed),

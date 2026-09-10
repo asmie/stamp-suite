@@ -126,7 +126,9 @@ the key used for their validation and assembly. Key changes do not cancel them.
     "packets_received": 123456,
     "packets_reflected": 123450,
     "packets_dropped": 4,
-    "packets_rate_limited": 2
+    "packets_rate_limited": 2,
+    "reply_queue_rejected": 0,
+    "queued_replies_cancelled": 0
   }
 }
 ```
@@ -178,9 +180,20 @@ fields; `0` consistently means "unlimited/disabled", mirroring the CLI):
   after expiry returns. Re-admission starts fresh sequence/counter/replay state
   under a new internal ID. Provisioning survives expiry. Idle cleanup uses the
   same retirement rule; the idle clock is refreshed by incoming accepted packets.
-- **Shutdown** sets `shutdown_requested`; the nix backend polls it on a
-  250 ms tick, pnet per capture iteration. The HTTP response (202) lands
-  before the process exits.
+- **Shutdown** sets `shutdown_requested`; both backends observe it through a
+  250 ms control poll. They stop new packet intake and finish accepted work for
+  up to `--reflector-shutdown-grace-ms` (0–60000 ms, default 0), then cancel
+  remaining copies. Pnet capture polls at 100 ms independently of session expiry;
+  send-worker deadlines are checked between nonblocking sends. The grace interval
+  starts when the send loop observes shutdown, and an empty queue exits early.
+  The HTTP response (202) lands before exit; repeated requests do not extend the
+  deadline. Ctrl-C and Unix SIGTERM use the same queue policy.
+- **Queued work** is separately bounded by startup `--reflector-queue-capacity`
+  (default 1024), shared across processing, handoff, deadlines and active sends.
+  Queue overflow drops the new request without creating/refreshing a session.
+  Status exposes `reply_queue_rejected` (requests) and `queued_replies_cancelled`
+  (unsent copies). Both contribute to aggregate dropped packets, once per
+  rejected request or cancelled remainder. Queue settings are not runtime PATCH fields.
 - **Caps PATCH** is per-field atomic but not transactional across fields;
   fields are applied independently. Session-cap and drain changes additionally
   take the session-table write lock to serialize with new admission. `reflected_control_max_size`
@@ -271,7 +284,7 @@ lines are the audit trail; v1 has no separate audit log.
 - `GET /v1/status` gaining a `timestamping` object (the `hwtstamp`
   feature's `EnabledTimestamping` is currently backend-local; exposing it
   requires threading it into `ReceiverSharedState`).
-- Drain-then-shutdown convenience (`POST /v1/shutdown {"drain_seconds": N}`).
+- Per-request shutdown-grace overrides; v1 uses startup `--reflector-shutdown-grace-ms`.
 - Runtime updates to static session provisioning, if needed.
 - OpenAPI document generation; Prometheus counters for control actions.
 - Windows/`SIO_TIMESTAMPING`, mTLS client certificates, SNMP SET parity — tracked elsewhere.

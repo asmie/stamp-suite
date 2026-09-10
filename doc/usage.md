@@ -152,6 +152,11 @@ snapshot has `"type":"summary"`. CSV emits one header followed by snapshot rows;
 the final row is the final summary. Optional columns remain present, and the
 `ber` cell contains CSV-quoted JSON when BER is enabled. Reflectors emit one
 shutdown summary, as a JSON object or a CSV header and row.
+Reflector summaries include `reply_queue_rejected` (requests refused at the
+work limit) and `queued_replies_cancelled` (unsent copies discarded on shutdown
+or a failed handoff). CSV appends these two columns after `uptime_seconds`.
+Queue rejection adds one to aggregate dropped packets; cancelling the remainder
+of a queued request also adds one, regardless of its number of unsent copies.
 
 Diagnostic logs and reflector startup notices go to **stderr**. `--log-format`
 controls tracing events there; `RUST_LOG` and `-v` control their verbosity.
@@ -238,7 +243,35 @@ settings. All copies use the key selected when the request was accepted.
 The nix loop schedules copies by deadline; a dedicated pnet worker keeps burst
 waits off the capture thread. Timing is best-effort and can exceed the requested
 interval under load. Rate limiting or a send failure can stop a burst early.
-Pending bursts are not yet bounded independently, and shutdown discards them.
+`--reflector-queue-capacity` bounds pending requests across packet processing,
+capture handoff, scheduled deadlines and the active send. Its default is 1024;
+zero is rejected. Each request holds one slot until every copy finishes or the
+request is discarded. At capacity, new requests are dropped before authentication
+or session mutation; already accepted work keeps its slots. This is a request
+count limit, not a byte quota; retained payload sizes vary. Session expiry still
+retires queued work, whose slot is released when it is serviced or discarded.
+
+Ctrl-C, SIGTERM on Unix, and `POST /v1/shutdown` stop new packet intake.
+`--reflector-shutdown-grace-ms` allows already queued replies to finish for up
+to the configured interval (0–60000 ms); the default 0 cancels immediately.
+An empty queue exits early. Repeated shutdown requests do not extend the deadline.
+Remaining copies are cancelled at the deadline and included in the shutdown
+summary. The interval starts when the send loop observes shutdown; polling,
+OS scheduling and an in-progress syscall can add latency. Pnet capture checks
+idle shutdown at 100 ms intervals independently of `--session-timeout`, including
+when session expiry is disabled. Its handoff is bounded and nonblocking; capture
+and send workers are joined before the final summary.
+
+The session drain switch (`POST /v1/drain`) remains separate: it rejects new
+session identities while existing sessions can submit work subject to the queue
+limit. To finish accepted work and exit, use shutdown with a grace period.
+
+The equivalent TOML settings are:
+
+```toml
+reflector_queue_capacity = 1024
+reflector_shutdown_grace_ms = 500
+```
 
 **Reply-size cap and the actual reply route (draft-ietf-ippm-asymmetrical-pkts-14
 §3).** `--reflected-control-max-size` is an administrative STAMP payload limit.

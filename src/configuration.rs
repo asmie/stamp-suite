@@ -742,6 +742,16 @@ pub struct Configuration {
     #[clap(long, default_value_t = 0)]
     pub reflector_rate_burst: u32,
 
+    /// Maximum pending reflector requests across processing, handoff and bursts.
+    /// Full queues drop new requests; slots remain reserved until all copies finish.
+    #[clap(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..))]
+    pub reflector_queue_capacity: u32,
+
+    /// Stop accepting packets on shutdown, then finish queued replies for at most
+    /// this many milliseconds. Zero cancels immediately (the default).
+    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=60_000))]
+    pub reflector_shutdown_grace_ms: u32,
+
     /// Maximum number of tracked session identities (0 = unlimited).
     /// Sessions use both UDP endpoints, SSID, and optional sender micro ID.
     /// At the cap, new sessions are rejected in both sequencing modes;
@@ -1088,6 +1098,16 @@ impl Configuration {
     }
 
     pub fn validate(&self) -> Result<(), ConfigurationError> {
+        if self.reflector_queue_capacity == 0 {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "reflector_queue_capacity must be greater than zero".into(),
+            ));
+        }
+        if self.reflector_shutdown_grace_ms > 60_000 {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "reflector_shutdown_grace_ms must not exceed 60000".into(),
+            ));
+        }
         self.provisioned_sessions()?;
         // Surface a bad Location disclosure list at startup rather than
         // silently falling back to a default policy per packet.
@@ -1761,6 +1781,8 @@ impl Configuration {
         merge_opt!(reflector_member_link_id);
         merge!(max_pps);
         merge!(reflector_rate_burst);
+        merge!(reflector_queue_capacity);
+        merge!(reflector_shutdown_grace_ms);
         merge!(max_sessions);
         merge!(ber);
         merge_opt!(ber_pattern);
@@ -1882,6 +1904,8 @@ pub struct FileConfiguration {
     pub reflector_member_link_id: Option<u16>,
     pub max_pps: Option<u32>,
     pub reflector_rate_burst: Option<u32>,
+    pub reflector_queue_capacity: Option<u32>,
+    pub reflector_shutdown_grace_ms: Option<u32>,
     pub max_sessions: Option<u32>,
     pub ber: Option<bool>,
     pub ber_pattern: Option<String>,
@@ -1997,6 +2021,8 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "reflector_member_link_id": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "max_pps": { "type": "integer", "minimum": 0 },
     "reflector_rate_burst": { "type": "integer", "minimum": 0 },
+    "reflector_queue_capacity": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "reflector_shutdown_grace_ms": { "type": "integer", "minimum": 0, "maximum": 60000 },
     "max_sessions": { "type": "integer", "minimum": 0 },
     "ber": { "type": "boolean" },
     "ber_pattern": { "type": "string", "pattern": "^(0x)?([0-9a-fA-F]{2})+$" },
@@ -2295,6 +2321,46 @@ fn parse_u16_nonzero_dec_or_hex(s: &str) -> Result<u16, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn reflector_queue_settings_merge_validate_and_allow_cli_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("queue.toml");
+        std::fs::write(
+            &file,
+            "reflector_queue_capacity = 2\nreflector_shutdown_grace_ms = 125\n",
+        )
+        .unwrap();
+        let conf = load_from_args(&["test", "--config", file.to_str().unwrap()]).unwrap();
+        assert_eq!(conf.reflector_queue_capacity, 2);
+        assert_eq!(conf.reflector_shutdown_grace_ms, 125);
+        let overridden = load_from_args(&[
+            "test",
+            "--config",
+            file.to_str().unwrap(),
+            "--reflector-queue-capacity",
+            "3",
+            "--reflector-shutdown-grace-ms",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(overridden.reflector_queue_capacity, 3);
+        assert_eq!(overridden.reflector_shutdown_grace_ms, 0);
+        for bad in [
+            "reflector_queue_capacity = 0\n",
+            "reflector_shutdown_grace_ms = 60001\n",
+        ] {
+            std::fs::write(&file, bad).unwrap();
+            assert!(load_from_args(&["test", "--config", file.to_str().unwrap()]).is_err());
+        }
+        assert!(
+            Configuration::try_parse_from(["test", "--reflector-queue-capacity", "0"]).is_err()
+        );
+        assert!(
+            Configuration::try_parse_from(["test", "--reflector-shutdown-grace-ms", "60001"])
+                .is_err()
+        );
+    }
     use clap::Parser;
     use std::net::IpAddr;
 

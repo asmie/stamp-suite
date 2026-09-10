@@ -11,6 +11,27 @@
 mod mtu;
 mod transmit;
 
+/// Ctrl-C on all platforms and SIGTERM on Unix use the same queue shutdown policy.
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
+    // Register Unix listeners synchronously before accepting any traffic.
+    #[cfg(unix)]
+    let signals = (
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()),
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()),
+    );
+    async move {
+        #[cfg(unix)]
+        if let (Ok(mut interrupt), Ok(mut terminate)) = signals {
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            }
+            return;
+        }
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 // Explicit feature flags take priority
 #[cfg(feature = "ttl-nix")]
 mod nix;
@@ -380,6 +401,10 @@ fn resolve_hmac_key<'a>(ctx: &'a ProcessingContext, ssid: u16) -> Option<&'a Hma
 
 /// Aggregate packet counters for the reflector.
 pub struct ReflectorCounters {
+    /// Requests refused before processing because all work slots are occupied.
+    pub reply_queue_rejected: AtomicU64,
+    /// Unsent copies discarded when queued work is cancelled (e.g. shutdown).
+    pub queued_replies_cancelled: AtomicU64,
     pub packets_received: AtomicU64,
     pub packets_reflected: AtomicU64,
     pub packets_dropped: AtomicU64,
@@ -403,6 +428,8 @@ pub struct ReflectorCounters {
 impl ReflectorCounters {
     pub fn new() -> Self {
         ReflectorCounters {
+            reply_queue_rejected: AtomicU64::new(0),
+            queued_replies_cancelled: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
             packets_reflected: AtomicU64::new(0),
             packets_dropped: AtomicU64::new(0),
@@ -707,7 +734,7 @@ pub fn print_reflector_stats(
     start_time: Instant,
     output_format: OutputFormat,
 ) {
-    let stats = stats::build_reflector_stats(
+    let mut stats = stats::build_reflector_stats(
         counters.packets_received.load(Ordering::Relaxed),
         counters.packets_reflected.load(Ordering::Relaxed),
         counters.packets_dropped.load(Ordering::Relaxed),
@@ -715,6 +742,8 @@ pub fn print_reflector_stats(
         session_manager.session_count(),
         start_time.elapsed().as_secs_f64(),
     );
+    stats.reply_queue_rejected = counters.reply_queue_rejected.load(Ordering::Relaxed);
+    stats.queued_replies_cancelled = counters.queued_replies_cancelled.load(Ordering::Relaxed);
     stats.print(output_format);
 }
 
