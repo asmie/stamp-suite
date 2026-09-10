@@ -140,7 +140,7 @@ fn route_key(
     if let Some(source) = options.source {
         local.set_ip(source);
     }
-    let overhead = options.srh.as_ref().map_or(0, Vec::len);
+    let overhead = options.srh.as_ref().map_or(0, |srh| srh.len());
     if let Some(srh) = &options.srh {
         let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "invalid SRH");
         let start = 8 + 16 * usize::from(*srh.get(3).ok_or_else(invalid)?);
@@ -557,7 +557,8 @@ mod tests {
             srh: crate::srv6::build_srh(&[
                 "2001:db8::1".parse().unwrap(),
                 "2001:db8::9".parse().unwrap(),
-            ]),
+            ])
+            .map(std::sync::Arc::from),
             dont_fragment: true,
         };
         let (key, overhead) = route_key(local, target, &options).unwrap();
@@ -568,7 +569,7 @@ mod tests {
             1500 - 40 - 8 - 40
         );
         let mut invalid = options;
-        invalid.srh = Some(vec![]);
+        invalid.srh = Some(std::sync::Arc::from([]));
         assert!(route_key(local, target, &invalid).is_err());
     }
 }

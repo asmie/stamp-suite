@@ -31,7 +31,9 @@ this file documents the opt-in invocations.
 
 The shared transmission unit tests cover SRH/source/alternate-address/CoS
 fallback combinations, final signatures, malformed-tail preservation, failed-send
-accounting, and real Linux source pinning. The pnet-only library test
+accounting, and real Linux source pinning. They also verify interleaved IPv4/IPv6
+CoS/source/PMTU settings on one sender, cached option changes and failed retries,
+shared SRH storage across fallbacks/copies, and rejection of incomplete sends. The pnet-only library test
 `transmit_worker_interleaves_requests_and_burst_deadlines` exercises the send
 worker with ordinary UDP sockets and needs no raw capture capability:
 

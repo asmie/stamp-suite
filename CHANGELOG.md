@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reuse reflector transport metadata and SRH storage across burst copies.
+  Route both backends through one mutable sender per socket, cache successful
+  PMTU/CoS settings, and reuse bound endpoints for route lookups. Keep fallback
+  changes local to each copy and reject incomplete sends without counting them.
+  Add socket-isolation/cache regressions and document the ownership contract.
+
 ### Fixed
 
 - Validate pnet startup binds/keys before privileged capture, preserve interface

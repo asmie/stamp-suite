@@ -15,12 +15,52 @@ use std::{
 pub(super) struct SendOptions {
     pub tos: u8,
     pub source: Option<IpAddr>,
-    pub srh: Option<Vec<u8>>,
+    pub srh: Option<Arc<[u8]>>,
     pub dont_fragment: bool,
+}
+
+/// Request-owned transport policy, prepared only when the first copy is eligible.
+/// Attempts clone these options; fallbacks never alter later copies' policy.
+struct TransportPlan {
+    target: SocketAddr,
+    options: SendOptions,
+    unsupported_srh: bool,
+}
+
+impl TransportPlan {
+    fn new(response: &StampResponse, source: SocketAddr, base: usize, srv6: bool) -> Self {
+        let target = match response.return_path_action {
+            ReturnPathAction::AlternateAddress(addr) => addr,
+            _ => source,
+        };
+        let mut options = SendOptions {
+            tos: response.cos_request.map_or(0, |(d, e)| (d << 2) | e),
+            source: response
+                .reply_source
+                .filter(|s| crate::reply_source::supported() && s.is_ipv4() == target.is_ipv4()),
+            srh: None,
+            dont_fragment: response.reflected_control.is_some()
+                || has_reflected_headers(&response.data, base)
+                || (cfg!(target_os = "linux") && has_ber(&response.data, base)),
+        };
+        let mut unsupported_srh = false;
+        if let ReturnPathAction::Srv6Forward(sids) = &response.return_path_action {
+            if srv6 && target.is_ipv6() {
+                options.srh = crate::srv6::build_srh(sids).map(Arc::from);
+            }
+            unsupported_srh = options.srh.is_none();
+        }
+        Self {
+            target,
+            options,
+            unsupported_srh,
+        }
+    }
 }
 
 pub(super) struct Transmission {
     response: StampResponse,
+    plan: Option<TransportPlan>,
     pub session: Arc<Session>,
     source: SocketAddr,
     clock: ClockFormat,
@@ -52,6 +92,7 @@ impl Transmission {
             Duration::from_nanos(response.reflected_control.map_or(0, |b| b.interval_ns) as u64);
         Self {
             response,
+            plan: None,
             session,
             source,
             clock,
@@ -120,28 +161,13 @@ impl Transmission {
         };
         data[..4].copy_from_slice(&sequence.to_be_bytes());
         refresh_telemetry(&mut data, base, &self.session, self.stateful);
-        let mut target = match self.response.return_path_action {
-            ReturnPathAction::AlternateAddress(addr) => addr,
-            _ => self.source,
-        };
-        let mut options = SendOptions {
-            tos: self.response.cos_request.map_or(0, |(d, e)| (d << 2) | e),
-            source: self
-                .response
-                .reply_source
-                .filter(|s| crate::reply_source::supported() && s.is_ipv4() == target.is_ipv4()),
-            srh: None,
-            dont_fragment: self.response.reflected_control.is_some()
-                || has_reflected_headers(&data, base)
-                || (cfg!(target_os = "linux") && has_ber(&data, base)),
-        };
-        if let ReturnPathAction::Srv6Forward(sids) = &self.response.return_path_action {
-            if self.srv6 && target.is_ipv6() {
-                options.srh = crate::srv6::build_srh(sids);
-            }
-            if options.srh.is_none() {
-                super::set_return_path_u_flag_in_response(&mut data, base);
-            }
+        let plan = self.plan.get_or_insert_with(|| {
+            TransportPlan::new(&self.response, self.source, base, self.srv6)
+        });
+        let mut target = plan.target;
+        let mut options = plan.options.clone();
+        if plan.unsupported_srh {
+            super::set_return_path_u_flag_in_response(&mut data, base);
         }
         let mut cos_fallback = false;
         let mut refresh_mtu = false;
@@ -177,7 +203,16 @@ impl Transmission {
                     }
                     sign_tlvs(&mut attempt, base, key);
                 }
-                send(&attempt, target, &options).map(|_| timestamp)
+                send(&attempt, target, &options).and_then(|sent| {
+                    if sent == attempt.len() {
+                        Ok(timestamp)
+                    } else {
+                        Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "incomplete UDP datagram send",
+                        ))
+                    }
+                })
             });
             match result {
                 Ok(timestamp) => {
@@ -203,10 +238,15 @@ impl Transmission {
                     log::debug!("reply cannot fit the route MTU: {e}");
                     break;
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::WriteZero
+                    ) =>
+                {
                     // UDP queue pressure is a failed transmission, never a
                     // reason to downgrade requested routing/CoS metadata.
-                    log::debug!("reflector send queue full: {e}");
+                    log::debug!("reflector datagram was not sent: {e}");
                     break;
                 }
                 Err(e) => {
@@ -499,15 +539,85 @@ impl ReplyQueue {
     }
 }
 
+/// The sole option-setting sender for a borrowed socket. Receive operations may
+/// share the socket, but all sends/options go through this mutable owner.
+/// Successful sticky settings are cached separately for IPv4 and IPv6.
+pub(super) struct DatagramSender<'a> {
+    #[cfg(unix)]
+    fd: std::os::fd::BorrowedFd<'a>,
+    #[cfg(windows)]
+    socket: &'a std::net::UdpSocket,
+    settings: [Option<i32>; 2],
+}
+
+impl<'a> DatagramSender<'a> {
+    #[cfg(unix)]
+    pub fn new(socket: &'a impl std::os::fd::AsFd) -> Self {
+        Self {
+            fd: socket.as_fd(),
+            settings: [None; 2],
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn new(socket: &'a std::net::UdpSocket) -> Self {
+        Self {
+            socket,
+            settings: [None; 2],
+        }
+    }
+
+    pub fn send(
+        &mut self,
+        payload: &[u8],
+        dst: SocketAddr,
+        options: &SendOptions,
+    ) -> io::Result<usize> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            send_datagram(
+                self.fd.as_raw_fd(),
+                payload,
+                dst,
+                options,
+                &mut self.settings,
+            )
+        }
+        #[cfg(windows)]
+        {
+            update_socket_option(
+                &mut self.settings[usize::from(dst.is_ipv6())],
+                i32::from(options.tos),
+                || set_socket_tos(self.socket, options.tos, dst.is_ipv6()),
+            )?;
+            self.socket.send_to(payload, dst)
+        }
+    }
+}
+
+fn update_socket_option(
+    cached: &mut Option<i32>,
+    requested: i32,
+    set: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    if *cached != Some(requested) {
+        set()?;
+        *cached = Some(requested);
+    }
+    Ok(())
+}
+
 /// A single syscall carries CoS, source pinning, and SRH together on Linux.
-/// Other Unix systems set TOS immediately before sendmsg; each backend has one
-/// send owner and never awaits between that setting and the syscall.
+/// Other Unix systems update cached TOS before sendmsg; the mutable send owner
+/// never awaits between setting the socket option and issuing the syscall.
 #[cfg(unix)]
-pub(super) fn send_datagram(
+fn send_datagram(
     fd: std::os::fd::RawFd,
     payload: &[u8],
     dst: SocketAddr,
     options: &SendOptions,
+    settings: &mut [Option<i32>; 2],
 ) -> io::Result<usize> {
     use nix::libc;
     let mut addr4: libc::sockaddr_in = unsafe { std::mem::zeroed() };
@@ -559,26 +669,30 @@ pub(super) fn send_datagram(
         } else {
             libc::IP_PMTUDISC_WANT
         };
-        if unsafe {
-            libc::setsockopt(
-                fd,
-                if dst.is_ipv4() {
-                    libc::IPPROTO_IP
-                } else {
-                    libc::IPPROTO_IPV6
-                },
-                if dst.is_ipv4() {
-                    libc::IP_MTU_DISCOVER
-                } else {
-                    libc::IPV6_MTU_DISCOVER
-                },
-                std::ptr::addr_of!(discover).cast(),
-                std::mem::size_of_val(&discover) as _,
-            )
-        } < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
+        update_socket_option(&mut settings[usize::from(dst.is_ipv6())], discover, || {
+            if unsafe {
+                libc::setsockopt(
+                    fd,
+                    if dst.is_ipv4() {
+                        libc::IPPROTO_IP
+                    } else {
+                        libc::IPPROTO_IPV6
+                    },
+                    if dst.is_ipv4() {
+                        libc::IP_MTU_DISCOVER
+                    } else {
+                        libc::IPV6_MTU_DISCOVER
+                    },
+                    std::ptr::addr_of!(discover).cast(),
+                    std::mem::size_of_val(&discover) as _,
+                )
+            } < 0
+            {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        })?;
         // usize allocation guarantees cmsghdr alignment; zero initialize all padding.
         fn append(control: &mut Vec<usize>, level: i32, kind: i32, bytes: &[u8]) {
             let start = control.len() * std::mem::size_of::<usize>();
@@ -655,32 +769,78 @@ pub(super) fn send_datagram(
     #[cfg(not(target_os = "linux"))]
     {
         let tos = options.tos as libc::c_int;
-        let result = unsafe {
-            libc::setsockopt(
-                fd,
-                if dst.is_ipv4() {
-                    libc::IPPROTO_IP
-                } else {
-                    libc::IPPROTO_IPV6
-                },
-                if dst.is_ipv4() {
-                    libc::IP_TOS
-                } else {
-                    libc::IPV6_TCLASS
-                },
-                std::ptr::addr_of!(tos).cast(),
-                std::mem::size_of_val(&tos) as _,
-            )
-        };
-        if result < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        update_socket_option(&mut settings[usize::from(dst.is_ipv6())], tos, || {
+            let result = unsafe {
+                libc::setsockopt(
+                    fd,
+                    if dst.is_ipv4() {
+                        libc::IPPROTO_IP
+                    } else {
+                        libc::IPPROTO_IPV6
+                    },
+                    if dst.is_ipv4() {
+                        libc::IP_TOS
+                    } else {
+                        libc::IPV6_TCLASS
+                    },
+                    std::ptr::addr_of!(tos).cast(),
+                    std::mem::size_of_val(&tos) as _,
+                )
+            };
+            if result < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        })?;
     }
+
     let sent = unsafe { libc::sendmsg(fd, &msg, 0) };
     if sent < 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(sent as usize)
+    }
+}
+
+/// Sets the IP TOS (Type of Service) / IPv6 Traffic Class on a socket.
+///
+/// Windows implementation using Winsock2 `setsockopt`.
+#[cfg(windows)]
+fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn setsockopt(s: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
+    }
+
+    const IPPROTO_IP: i32 = 0;
+    const IPPROTO_IPV6: i32 = 41;
+    const IP_TOS: i32 = 3;
+    const IPV6_TCLASS: i32 = 39;
+
+    let raw_socket = socket.as_raw_socket() as usize;
+    let tos_val: i32 = tos as i32;
+    let (level, opt) = if is_ipv6 {
+        (IPPROTO_IPV6, IPV6_TCLASS)
+    } else {
+        (IPPROTO_IP, IP_TOS)
+    };
+
+    let result = unsafe {
+        setsockopt(
+            raw_socket,
+            level,
+            opt,
+            &tos_val as *const i32 as *const u8,
+            std::mem::size_of::<i32>() as i32,
+        )
+    };
+    if result != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -732,6 +892,185 @@ mod tests {
         let mut input = data[..4].to_vec();
         input.extend_from_slice(&data[112..pos]);
         assert_eq!(&data[pos + 4..pos + 20], &key.compute(&input));
+    }
+
+    #[test]
+    fn cached_socket_options_skip_repeats_and_retry_failed_changes() {
+        let mut cached = None;
+        let mut sets = 0;
+        for _ in 0..32 {
+            update_socket_option(&mut cached, 2, || {
+                sets += 1;
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(sets, 1, "one setting for an unchanged 32-copy burst");
+        assert!(update_socket_option(&mut cached, 1, || {
+            sets += 1;
+            Err(io::ErrorKind::PermissionDenied.into())
+        })
+        .is_err());
+        assert_eq!(cached, Some(2), "failed option must not become cached");
+        update_socket_option(&mut cached, 1, || {
+            sets += 1;
+            Ok(())
+        })
+        .unwrap();
+        update_socket_option(&mut cached, 1, || panic!("redundant option syscall")).unwrap();
+        update_socket_option(&mut cached, 2, || {
+            sets += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(sets, 4);
+    }
+
+    #[test]
+    fn incomplete_datagram_does_not_count_or_try_fallbacks() {
+        let mut transmission = sample(true, ReturnPathAction::Normal);
+        let counters = ReflectorCounters::new();
+        let mut attempts = 0;
+        assert_eq!(
+            transmission.send_next(&counters, &RateLimiter::new(0), |bytes, _, _| {
+                attempts += 1;
+                Ok(bytes.len() - 1)
+            }),
+            None
+        );
+        assert_eq!(attempts, 1);
+        assert_eq!(transmission.remaining, 0);
+        assert_eq!(transmission.session.get_transmitted_count(), 0);
+        assert_eq!(transmission.session.get_last_reflection(), (0, 0));
+        assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.packets_dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_owner_keeps_interleaved_metadata_and_pmtu_policy_isolated() {
+        use nix::{
+            libc,
+            sys::socket::{recvmsg, ControlMessageOwned, MsgFlags, SockaddrStorage},
+        };
+        use std::{io::IoSliceMut, os::fd::AsRawFd};
+        for ipv6 in [false, true] {
+            let ip = if ipv6 { "::1" } else { "127.0.0.1" };
+            let peer = std::net::UdpSocket::bind((ip, 0)).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let tx = std::net::UdpSocket::bind((if ipv6 { "::" } else { "0.0.0.0" }, 0)).unwrap();
+            let enable: libc::c_int = 1;
+            let level = if ipv6 {
+                libc::IPPROTO_IPV6
+            } else {
+                libc::IPPROTO_IP
+            };
+            let receive_tos = if ipv6 {
+                libc::IPV6_RECVTCLASS
+            } else {
+                libc::IP_RECVTOS
+            };
+            // SAFETY: live fd and correctly sized integer socket option.
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        peer.as_raw_fd(),
+                        level,
+                        receive_tos,
+                        std::ptr::addr_of!(enable).cast(),
+                        std::mem::size_of_val(&enable) as _,
+                    )
+                },
+                0
+            );
+            let mut sender = DatagramSender::new(&tx);
+            // Repeated and alternating requests on one socket must not inherit
+            // source, DSCP/ECN or fragmentation policy from their predecessor.
+            for (index, (tos, controlled, pinned)) in [
+                (185, true, true),
+                (0, false, false),
+                (43, true, false),
+                (43, true, true),
+                (0, false, false),
+                (185, true, true),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let source = if pinned {
+                    Some(if ipv6 { "::1" } else { "127.0.0.2" }.parse().unwrap())
+                } else {
+                    None
+                };
+                let options = SendOptions {
+                    tos,
+                    source,
+                    srh: None,
+                    dont_fragment: controlled,
+                };
+                sender
+                    .send(&[index as u8], peer.local_addr().unwrap(), &options)
+                    .unwrap();
+                let mut bytes = [0; 8];
+                let mut iov = [IoSliceMut::new(&mut bytes)];
+                let mut control = nix::cmsg_space!(libc::c_int);
+                let message = recvmsg::<SockaddrStorage>(
+                    peer.as_raw_fd(),
+                    &mut iov,
+                    Some(&mut control),
+                    MsgFlags::empty(),
+                )
+                .unwrap();
+                assert_eq!(message.bytes, 1);
+                let mut actual_tos = None;
+                for cmsg in message.cmsgs().unwrap() {
+                    match cmsg {
+                        ControlMessageOwned::Ipv4Tos(value) => actual_tos = Some(value),
+                        ControlMessageOwned::Ipv6TClass(value) => actual_tos = Some(value as u8),
+                        _ => {}
+                    }
+                }
+                assert_eq!(actual_tos, Some(tos));
+                let address = message.address.unwrap();
+                if !ipv6 {
+                    assert_eq!(
+                        address.as_sockaddr_in().unwrap().ip(),
+                        if pinned { "127.0.0.2" } else { "127.0.0.1" }
+                            .parse::<std::net::Ipv4Addr>()
+                            .unwrap()
+                    );
+                }
+                assert_eq!(bytes[0], index as u8);
+                let mut discover: libc::c_int = -1;
+                let mut length = std::mem::size_of_val(&discover) as libc::socklen_t;
+                let option = if ipv6 {
+                    libc::IPV6_MTU_DISCOVER
+                } else {
+                    libc::IP_MTU_DISCOVER
+                };
+                // SAFETY: output points at a live integer with its exact size.
+                assert_eq!(
+                    unsafe {
+                        libc::getsockopt(
+                            tx.as_raw_fd(),
+                            level,
+                            option,
+                            std::ptr::addr_of_mut!(discover).cast(),
+                            &mut length,
+                        )
+                    },
+                    0
+                );
+                assert_eq!(
+                    discover,
+                    if controlled {
+                        libc::IP_PMTUDISC_DO
+                    } else {
+                        libc::IP_PMTUDISC_WANT
+                    }
+                );
+            }
+        }
     }
 
     #[test]
@@ -813,6 +1152,7 @@ mod tests {
         transmission.response.reply_source = Some("::1".parse().unwrap());
         let counters = ReflectorCounters::new();
         let limiter = RateLimiter::new(0);
+        let mut shared_header: Option<Arc<[u8]>> = None;
         for seq in 0..3 {
             let mut attempts = 0;
             assert_eq!(
@@ -823,7 +1163,15 @@ mod tests {
                         assert_eq!(options.source, Some("::1".parse().unwrap()));
                     }
                     if attempts == 1 {
-                        assert!(options.srh.is_some());
+                        let header = options.srh.as_ref().unwrap();
+                        if let Some(previous) = &shared_header {
+                            assert!(
+                                Arc::ptr_eq(previous, header),
+                                "SRH storage is reused across copies"
+                            );
+                        } else {
+                            shared_header = Some(Arc::clone(header));
+                        }
                         return Err(io::Error::new(
                             io::ErrorKind::Unsupported,
                             "injected SRH failure",
@@ -910,24 +1258,20 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn every_copy_pins_source_on_the_actual_socket() {
-        use std::os::fd::AsRawFd;
         let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         receiver
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
         let sender = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let mut sender = DatagramSender::new(&sender);
         let mut transmission = sample(false, ReturnPathAction::Normal);
         transmission.source = receiver.local_addr().unwrap();
         let counters = ReflectorCounters::new();
         let limiter = RateLimiter::new(0);
         for seq in 0..3 {
             assert_eq!(
-                transmission.send_next(&counters, &limiter, |data, target, options| send_datagram(
-                    sender.as_raw_fd(),
-                    data,
-                    target,
-                    options
-                )),
+                transmission.send_next(&counters, &limiter, |data, target, options| sender
+                    .send(data, target, options)),
                 Some(seq)
             );
             let mut bytes = [0; 256];

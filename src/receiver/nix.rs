@@ -21,7 +21,7 @@ use crate::{
     error_estimate::ErrorEstimate,
 };
 
-use super::transmit::{send_datagram, ReplyQueue, Transmission};
+use super::transmit::{DatagramSender, ReplyQueue, Transmission};
 
 use super::{
     hmac_key_source_configured, load_hmac_key, print_reflector_stats,
@@ -191,11 +191,11 @@ pub async fn run_receiver(
         )));
     }
 
-    // Wrap in tokio for async readiness notifications. Arc so spawned tasks
-    // (e.g. Reflected Test Packet Control multi-send,
-    // draft-ietf-ippm-asymmetrical-pkts §3) can share the socket.
+    // Wrap in Tokio for async readiness notifications. This loop owns the
+    // socket and every burst send; DatagramSender borrows its descriptor,
+    // so no shared socket allocation or per-burst socket clone is needed.
     let tokio_socket = match UdpSocket::from_std(std_socket) {
-        Ok(s) => Arc::new(s),
+        Ok(s) => s,
         Err(e) => {
             return Err(crate::StartupError::new(format!(
                 "Error: Failed to create tokio socket: {e}"
@@ -322,6 +322,8 @@ pub async fn run_receiver(
         (std::sync::Weak<crate::session::Session>, u32),
     > = std::collections::HashMap::new();
 
+    let mut datagram_sender = DatagramSender::new(&tokio_socket);
+
     // Session cleanup interval: run at half the timeout period, minimum 1 second
     // When session_timeout is 0, checked_div returns None, disabling cleanup
     let cleanup_interval = conf
@@ -379,7 +381,7 @@ pub async fn run_receiver(
                 }
             } => {
                 if let Some(mut transmission) = replies.pop_due() {
-                    if let Some(_sequence) = transmission.send_next_with_mtu(&counters, &shared.rate_limiter, |target, options, refresh| mtu_cache.payload_cap(tokio_socket.local_addr()?, target, options, refresh), |bytes, target, options| send_datagram(tokio_socket.as_raw_fd(), bytes, target, options)) {
+                    if let Some(_sequence) = transmission.send_next_with_mtu(&counters, &shared.rate_limiter, |target, options, refresh| mtu_cache.payload_cap(local_addr, target, options, refresh), |bytes, target, options| datagram_sender.send(bytes, target, options)) {
                         #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
                         if kernel_ts.tx_kernel {
                             tx_id_map.insert(tx_counter, (Arc::downgrade(&transmission.session), _sequence));

@@ -34,7 +34,7 @@ use crate::{
     session::SessionManager,
 };
 
-use super::transmit::{ReplyQueue, Transmission};
+use super::transmit::{DatagramSender, ReplyQueue, Transmission};
 
 use super::{
     hmac_key_source_configured, load_hmac_key, print_reflector_stats,
@@ -743,47 +743,6 @@ fn walk_ipv6_ext_header_chain(payload: &[u8], first_next: u8) -> (Vec<u8>, u8, u
     (out, this_header_type, offset)
 }
 
-/// Sets the IP TOS (Type of Service) / IPv6 Traffic Class on a socket.
-///
-/// Windows implementation using Winsock2 `setsockopt`.
-#[cfg(windows)]
-fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::io::Result<()> {
-    use std::os::windows::io::AsRawSocket;
-
-    #[link(name = "ws2_32")]
-    extern "system" {
-        fn setsockopt(s: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
-    }
-
-    const IPPROTO_IP: i32 = 0;
-    const IPPROTO_IPV6: i32 = 41;
-    const IP_TOS: i32 = 3;
-    const IPV6_TCLASS: i32 = 39;
-
-    let raw_socket = socket.as_raw_socket() as usize;
-    let tos_val: i32 = tos as i32;
-    let (level, opt) = if is_ipv6 {
-        (IPPROTO_IPV6, IPV6_TCLASS)
-    } else {
-        (IPPROTO_IP, IP_TOS)
-    };
-
-    let result = unsafe {
-        setsockopt(
-            raw_socket,
-            level,
-            opt,
-            &tos_val as *const i32 as *const u8,
-            std::mem::size_of::<i32>() as i32,
-        )
-    };
-    if result != 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
 /// Per-packet metadata extracted from IP/UDP headers.
 struct PacketMeta {
     src: SocketAddr,
@@ -932,6 +891,13 @@ fn run_transmit_loop(
     limiter: &super::RateLimiter,
     shutdown: &AtomicBool,
 ) {
+    let local_v4 = sockets.send_socket_v4.local_addr().ok();
+    let local_v6 = sockets
+        .send_socket_v6
+        .as_ref()
+        .and_then(|s| s.local_addr().ok());
+    let mut sender_v4 = DatagramSender::new(&sockets.send_socket_v4);
+    let mut sender_v6 = sockets.send_socket_v6.as_ref().map(DatagramSender::new);
     let mut replies = ReplyQueue::default();
     let mut mtu_cache = super::mtu::MtuCache::default();
     while !shutdown.load(AtomicOrdering::Relaxed) {
@@ -940,41 +906,29 @@ fn run_transmit_loop(
                 counters,
                 limiter,
                 |target, options, refresh| {
-                    let socket = if target.is_ipv4() {
-                        Some(&sockets.send_socket_v4)
-                    } else {
-                        sockets.send_socket_v6.as_ref()
-                    };
-                    let socket = socket.ok_or_else(|| {
+                    let local = if target.is_ipv4() { local_v4 } else { local_v6 };
+                    let local = local.ok_or_else(|| {
                         std::io::Error::new(
                             std::io::ErrorKind::AddrNotAvailable,
-                            "IPv6 socket unavailable",
+                            "reply socket unavailable",
                         )
                     })?;
-                    mtu_cache.payload_cap(socket.local_addr()?, target, options, refresh)
+                    mtu_cache.payload_cap(local, target, options, refresh)
                 },
                 |data, target, options| {
-                    let socket = if target.is_ipv4() {
-                        Some(&sockets.send_socket_v4)
+                    let sender = if target.is_ipv4() {
+                        Some(&mut sender_v4)
                     } else {
-                        sockets.send_socket_v6.as_ref()
+                        sender_v6.as_mut()
                     };
-                    let socket = socket.ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::AddrNotAvailable,
-                            "IPv6 socket unavailable",
-                        )
-                    })?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::fd::AsRawFd;
-                        super::transmit::send_datagram(socket.as_raw_fd(), data, target, options)
-                    }
-                    #[cfg(windows)]
-                    {
-                        set_socket_tos(socket, options.tos, target.is_ipv6())?;
-                        socket.send_to(data, target)
-                    }
+                    sender
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::AddrNotAvailable,
+                                "IPv6 socket unavailable",
+                            )
+                        })?
+                        .send(data, target, options)
                 },
             );
             replies.schedule_next(transmission);
