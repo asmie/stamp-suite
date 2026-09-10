@@ -12,9 +12,9 @@
 //!
 //! Every scenario is `#[ignore]`d and additionally guarded: it runs only with
 //! `STAMP_NETNS_TESTS=1`, as root (or CAP_NET_ADMIN), and when its per-scenario
-//! kernel/tool prerequisites hold. Missing prerequisites **skip cleanly**
-//! (printing `[netns] SKIP …`) — they never fail — mirroring the project's
-//! defensive-hardware-features rule.
+//! kernel/tool prerequisites hold. Set `STAMP_REQUIRE_PRIVILEGED=1` in CI
+//! to fail on every unavailable prerequisite or internal skip. Local optional
+//! runs without that flag print a SKIP notice, which is not wire-test evidence.
 //!
 //! ```bash
 //! sudo -E STAMP_NETNS_TESTS=1 cargo test --test netns_conformance -- --ignored --test-threads=1
@@ -300,13 +300,26 @@ fn scenario_3_srv6_return_path() {
         "SRv6 return-path round-trip received 0 replies (sender stderr: {})",
         run.stderr
     );
-    let srh_seen = replies(&pkts, port)
+    let reflected = replies(&pkts, port);
+    assert!(
+        !reflected.is_empty(),
+        "SRv6 test must observe a captured reply"
+    );
+    let srh_seen = reflected
         .iter()
         .any(|p| p.ext_headers.iter().any(|(t, _)| *t == 43));
     let detail = if srh_seen {
         "reply carried an SRH (routing header) — live send_with_srh verified"
     } else {
-        "reply received via U-flag fallback (kernel declined SRH insertion)"
+        assert!(
+            reflected.iter().any(|p| {
+                reply_tlvs(&p.payload).is_some_and(|tlvs| {
+                    find_tlv(&tlvs, TlvType::ReturnPath).is_some_and(|tlv| tlv.flags.unrecognized)
+                })
+            }),
+            "a reply without SRH must mark the Return Path TLV unsupported"
+        );
+        "reply received via verified U-flag fallback (kernel declined SRH insertion)"
     };
     netns::emit_pass(scen, detail);
 }

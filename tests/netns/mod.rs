@@ -51,10 +51,12 @@ pub const PNET_BIN_ENV: &str = "STAMP_NETNS_PNET_BIN";
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// Prints a uniform SKIP line and returns `()`, so a scenario can early-return
-/// with `return netns::emit_skip("name", &reason);`.
+#[path = "../privileged/mod.rs"]
+mod privileged;
+
+/// Fail in required mode, otherwise report an optional local skip.
 pub fn emit_skip(scenario: &str, reason: &str) {
-    eprintln!("[netns] SKIP {scenario}: {reason}");
+    privileged::unavailable(scenario, reason);
 }
 
 /// Prints a uniform PASS line.
@@ -64,11 +66,11 @@ pub fn emit_pass(scenario: &str, detail: &str) {
 
 fn have_cmd(name: &str) -> bool {
     Command::new(name)
-        .arg("--help")
+        .arg(if name == "ip" { "-V" } else { "--version" })
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.code().is_some())
+        .map(|s| s.success())
         .unwrap_or(false)
 }
 
@@ -144,6 +146,7 @@ impl Drop for Reflector {
 pub struct Capture {
     child: Child,
     path: PathBuf,
+    diagnostics: tempfile::NamedTempFile,
 }
 
 impl Drop for Capture {
@@ -166,8 +169,13 @@ impl Capture {
         unsafe {
             libc::kill(self.child.id() as libc::pid_t, libc::SIGINT);
         }
-        let _ = self.child.wait();
-        parse_pcap(&self.path).unwrap_or_default()
+        let status = self.child.wait().expect("wait for tcpdump");
+        assert!(
+            status.success(),
+            "tcpdump failed: {}",
+            std::fs::read_to_string(self.diagnostics.path()).unwrap_or_default()
+        );
+        parse_pcap(&self.path).expect("read valid tcpdump pcap")
     }
 }
 
@@ -416,7 +424,10 @@ impl NetnsFixture {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("stamp-netns-{}.pcap", self.id));
         let path_s = path.to_string_lossy().into_owned();
+        let diagnostics = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+        let diagnostic_file = diagnostics.reopen().map_err(|e| e.to_string())?;
         let child = Command::new("ip")
+            .env("LC_ALL", "C")
             .args([
                 "netns",
                 "exec",
@@ -427,6 +438,7 @@ impl NetnsFixture {
                 "-n",
                 "-p",
                 "-U",
+                "--immediate-mode",
                 "-s",
                 "0",
                 // Stay root rather than dropping to the unprivileged `tcpdump`
@@ -438,22 +450,34 @@ impl NetnsFixture {
                 "root",
                 "-w",
                 &path_s,
-                "udp",
+                "ip or ip6",
             ])
             .stdout(Stdio::null())
-            // Discard stderr entirely: consuming it and closing the pipe early
-            // (e.g. after matching "listening on") can SIGPIPE tcpdump and lose
-            // the capture, so we don't parse readiness from it — we simply wait.
-            .stderr(Stdio::null())
+            // A file keeps readiness and failure diagnostics without risking
+            // SIGPIPE from closing a stderr reader while tcpdump is running.
+            .stderr(Stdio::from(diagnostic_file))
             .spawn()
             .map_err(|e| format!("spawn tcpdump: {e}"))?;
-
-        // tcpdump writes the 24-byte pcap header immediately, then attaches to
-        // the interface. There is no race-free readiness signal we can consume
-        // without risking its stderr pipe, so wait a conservative window before
-        // any traffic is generated.
-        thread::sleep(Duration::from_millis(800));
-        Ok(Capture { child, path })
+        let mut capture = Capture {
+            child,
+            path,
+            diagnostics,
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let diagnostics =
+                std::fs::read_to_string(capture.diagnostics.path()).map_err(|e| e.to_string())?;
+            if let Some(status) = capture.child.try_wait().map_err(|e| e.to_string())? {
+                return Err(format!("tcpdump exited {status}: {diagnostics}"));
+            }
+            if diagnostics.contains("listening on") {
+                return Ok(capture);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("tcpdump readiness timeout: {diagnostics}"));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Sends a raw UDP payload to the reflector from a socket created *inside*

@@ -31,6 +31,7 @@ citations shared by a row that names several items.
 STALE requires: at least one adjacent identifier is defined in the cited file,
 and NONE of the adjacent identifiers' extents intersect the cited range.
 """
+import argparse
 import glob
 import json
 import os
@@ -38,7 +39,12 @@ import re
 import sys
 from collections import Counter
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+parser.add_argument("--json", action="store_true")
+parser.add_argument("--details", action="store_true", help="include all citations, including unverified evidence")
+args = parser.parse_args()
+ROOT = os.path.abspath(args.root)
 CITE = re.compile(r'([A-Za-z0-9_./-]+\.rs):(\d+)(?:-(\d+))?')
 BACKTICK = re.compile(r'`([^`]+)`')
 GOOD = re.compile(r'^(?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*$')
@@ -135,7 +141,7 @@ for md in sorted(glob.glob(os.path.join(ROOT, "doc/conformance/*.md"))):
                 rows.append(rec)
                 continue
             src = lines_of(path)
-            if lo > len(src):
+            if lo < 1 or hi < lo or hi > len(src):
                 rec["status"] = "OUT-OF-RANGE"
                 rec["file_len"] = len(src)
                 rows.append(rec)
@@ -171,8 +177,11 @@ for md in sorted(glob.glob(os.path.join(ROOT, "doc/conformance/*.md"))):
 c = Counter(r["status"] for r in rows)
 stale = [r for r in rows if r["status"] in ("STALE", "OUT-OF-RANGE", "unresolved")]
 
-if "--json" in sys.argv:
-    print(json.dumps({"counts": dict(c), "problems": stale}, indent=1))
+if args.json:
+    report = {"counts": dict(c), "problems": stale}
+    if args.details:
+        report["citations"] = rows
+    print(json.dumps(report, indent=1))
 else:
     print(f"citations examined: {len(rows)}")
     for k in ("ok", "unverifiable", "STALE", "OUT-OF-RANGE", "unresolved"):

@@ -15,8 +15,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.stamp-suite]
 path = ".."
-# The fuzz harnesses prefer pnet to keep recvmsg types out of fuzzed code
-# paths, but the parsers themselves are backend-independent.
+# Parsers are backend-independent; snmp exposes the AgentX decoder targets.
 default-features = false
 features = ["snmp"]
 

@@ -23,9 +23,9 @@ async fn free_port() -> u16 {
 
 #[tokio::test]
 async fn reflector_reports_bind_failure() {
-    let port = free_port().await;
-    // Hold the port so the reflector cannot have it.
-    let _squatter = UdpSocket::bind(("127.0.0.1", port)).await.unwrap();
+    // Keep the original socket bound so another test cannot steal the port.
+    let _squatter = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = _squatter.local_addr().unwrap().port();
 
     let conf = Configuration::parse_from([
         "stamp-suite",
@@ -101,8 +101,8 @@ async fn sender_reports_missing_key_in_authenticated_mode() {
 
 #[tokio::test]
 async fn sender_reports_bind_failure() {
-    let port = free_port().await;
-    let _squatter = UdpSocket::bind(("127.0.0.1", port)).await.unwrap();
+    let _squatter = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = _squatter.local_addr().unwrap().port();
 
     let conf = Configuration::parse_from([
         "stamp-suite",

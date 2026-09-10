@@ -1,0 +1,80 @@
+name: Conformance evidence
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [master, 1.0-line]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  TOKIO_WORKER_THREADS: 2
+
+jobs:
+  evidence:
+    name: Matrix and citation consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test evidence checkers
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Check matrix counts
+        run: python3 scripts/check_conformance_counts.py --json
+      - name: Check source citations
+        run: python3 scripts/check_conformance_citations.py --json --details > citations.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-citations
+          path: citations.json
+
+  fuzz-build:
+    name: Locked fuzz harness build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --manifest-path fuzz/Cargo.toml
+
+  privileged:
+    name: Required privileged wire tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wire-test tools
+        run: sudo apt-get update && sudo apt-get install -y iproute2 tcpdump util-linux
+      - name: Build pnet fixture and tests without root
+        run: |
+          cargo build --locked --no-default-features --features ttl-pnet --target-dir target/pnet
+          cargo test --locked --no-default-features --features ttl-pnet --target-dir target/pnet --test pnet_loopback_test --no-run --message-format=json > pnet-artifacts.json
+      - name: Require pnet wire tests
+        run: python3 scripts/run_privileged_test.py pnet-artifacts.json pnet_loopback_test 3 sudo -n env STAMP_REQUIRE_PRIVILEGED=1 TOKIO_WORKER_THREADS=2
+      - name: Build nix namespace tests without root
+        run: cargo test --locked --all-features --test netns_conformance --test route_mtu_test --no-run --message-format=json > netns-artifacts.json
+      - name: Require namespace and SRv6 scenarios
+        # Private mount/network namespaces isolate /run/netns and sysctls.
+        run: |
+          sudo -n unshare --mount --net --fork --mount-proc bash -euc '
+            mount --make-rprivate /
+            mkdir -p /run/netns
+            mount -t tmpfs tmpfs /run/netns
+            ip link set lo up
+            sysctl -w net.ipv6.conf.all.seg6_enabled=1
+            STAMP_REQUIRE_PRIVILEGED=1 STAMP_NETNS_TESTS=1 STAMP_NETNS_PNET_BIN="$PWD/target/pnet/debug/stamp-suite" TOKIO_WORKER_THREADS=2 python3 scripts/run_privileged_test.py netns-artifacts.json netns_conformance 9
+          '
+      - name: Require reply-route MTU tests
+        run: python3 scripts/run_privileged_test.py netns-artifacts.json route_mtu_test 1 sudo -n unshare --net --fork env STAMP_REQUIRE_PRIVILEGED=1 STAMP_MTU_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: privileged-test-artifacts
+          path: '*-artifacts.json'

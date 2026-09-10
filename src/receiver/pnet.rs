@@ -147,37 +147,6 @@ pub async fn run_receiver(
         is_point_to_point: interface.is_point_to_point(),
     };
 
-    // Configure read timeout for periodic cleanup during idle periods.
-    // Use half the session timeout (min 1s) to allow cleanup of stale counter sessions.
-    let read_timeout = if conf.session_timeout > 0 {
-        Some(Duration::from_secs((conf.session_timeout / 2).max(1)))
-    } else {
-        None
-    };
-    let config = Config {
-        read_timeout,
-        ..Default::default()
-    };
-
-    // Create a channel to receive on
-    let (_, rx) = match datalink::channel(&interface, config) {
-        Ok(Ethernet(tx, rx)) => (tx, rx),
-        Ok(_) => {
-            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::new(format!(
-                "Unhandled channel type for interface {}",
-                interface.name
-            )));
-        }
-        Err(e) => {
-            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::new(format!(
-                "Unable to create capture channel on {}: {e}",
-                interface.name
-            )));
-        }
-    };
-
     // We need UDP sockets to send responses - one for each address family
     // since pnet captures at the datalink layer and may see both IPv4 and IPv6 packets.
     //
@@ -204,7 +173,7 @@ pub async fn run_receiver(
         Err(e) => {
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
             return Err(crate::StartupError::new(format!(
-                "Cannot bind IPv4 send socket on {send_bind_v4}: {e}"
+                "Cannot bind to address {send_bind_v4} (IPv4 send socket): {e}"
             )));
         }
     };
@@ -251,6 +220,38 @@ pub async fn run_receiver(
              Refusing to run without the key that was asked for",
         ));
     }
+
+    // Validate keys and bind ordinary sockets before opening privileged capture.
+    // Configure read timeout for periodic cleanup during idle periods.
+    // Use half the session timeout (min 1s) to allow cleanup of stale counter sessions.
+    let read_timeout = if conf.session_timeout > 0 {
+        Some(Duration::from_secs((conf.session_timeout / 2).max(1)))
+    } else {
+        None
+    };
+    let config = Config {
+        read_timeout,
+        ..Default::default()
+    };
+
+    // Create a channel to receive on
+    let (_, rx) = match datalink::channel(&interface, config) {
+        Ok(Ethernet(tx, rx)) => (tx, rx),
+        Ok(_) => {
+            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
+            return Err(crate::StartupError::new(format!(
+                "Unhandled channel type for interface {}",
+                interface.name
+            )));
+        }
+        Err(e) => {
+            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
+            return Err(crate::StartupError::new(format!(
+                "Unable to create capture channel on {}: {e}",
+                interface.name
+            )));
+        }
+    };
 
     // Build error estimate from configuration with Z flag set based on clock source
     let error_estimate = ErrorEstimate::with_clock_format(

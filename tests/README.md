@@ -70,9 +70,15 @@ sudo setcap cap_net_raw+eip "$BIN"
 "$BIN" --ignored
 ```
 
-The tests will **skip themselves** (print a notice and return success)
-if the running process has neither uid 0 nor `CAP_NET_RAW` in its
-effective set, so the wrong invocation can't produce a false failure.
+Set `STAMP_REQUIRE_PRIVILEGED=1` for evidence runs. Missing effective
+`CAP_NET_RAW` then fails; root alone is not assumed to carry the capability.
+Without required mode these ignored tests may report a local prerequisite skip;
+that return is not a successful wire test. Authenticated replies must arrive
+and verify their HMAC. The fixture requests shutdown and joins its capture worker.
+
+`.github/workflows/conformance.yml` runs required raw pnet, namespace and MTU
+checks. It builds each backend separately without root, selects exact Cargo
+artifacts and rejects empty/wrong-backend test lists before running with privilege.
 
 ## Running everything else
 

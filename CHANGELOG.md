@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Validate pnet startup binds/keys before privileged capture, preserve interface
+  errors, and repair startup tests. Require valid authenticated pnet replies and
+  join fixture workers on shutdown. Add strict privileged CI, exact artifact/test
+  count checks, capture readiness/error reporting, SRv6 fallback evidence,
+  matrix/rollup drift checks and full citation inventories. Refresh
+  conformance limits, stale totals and the separate fuzz lockfile; Clippy repair
+  remains deferred to the final remediation checkpoint.
+
 - Keep diagnostics on stderr for both log formats and move `-R` packet details
   there when JSON/CSV measurement output is selected. Log reflector startup
   notices and emit one CSV header across periodic and final sender reports.

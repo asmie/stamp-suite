@@ -14,11 +14,21 @@ normal `cargo test` run never touches the network.
 
 ## Running
 
+Use `STAMP_REQUIRE_PRIVILEGED=1` whenever results will count as conformance
+or CI evidence. Every call to the harness's skip path then fails, including
+missing tools, unavailable SRv6, capture timeouts and the absent pnet binary.
+Without the flag these remain optional local probes; a printed SKIP followed
+by Cargo's `ok` does not mean the scenario ran. The CI workflow also verifies
+that the selected binaries contain exactly nine namespace, three raw pnet and
+one MTU test, preventing `--all-features` from silently selecting an empty pnet suite.
+
+
 The tier is opted in with the `STAMP_NETNS_TESTS=1` environment variable and
-must run as root (or with `CAP_NET_ADMIN`). The canonical invocation:
+must run as effective root (host root or mapped root in a user namespace)
+with the namespace/network capabilities the operations require. The canonical invocation:
 
 ```bash
-sudo -E STAMP_NETNS_TESTS=1 \
+sudo -E STAMP_REQUIRE_PRIVILEGED=1 STAMP_NETNS_TESTS=1 \
     cargo test --test netns_conformance -- --ignored --test-threads=1 --nocapture
 ```
 
@@ -28,7 +38,7 @@ sudo -E STAMP_NETNS_TESTS=1 \
 * `--test-threads=1` serialises them. The fixture already uses unique namespace,
   interface, address and port names per test, so parallel runs are safe, but
   serial output is easier to read and lighter on the box.
-* `--nocapture` surfaces the `[netns] PASS …` / `[netns] SKIP …` lines.
+* `--nocapture` surfaces the `[netns] PASS …` / `[privileged] SKIP …` lines.
 
 ### Running without a usable `sudo` (rootless via user namespaces)
 
@@ -38,27 +48,28 @@ the whole tier as *mapped* root. `ip netns` needs a writable `/run/netns`, so
 shadow `/run` with a tmpfs inside the namespace first:
 
 ```bash
-unshare -Urnm --map-root-user bash -c '
+unshare -Urnm --map-root-user bash -ec '
+  mount --make-rprivate /
   mount -t tmpfs none /run
   mkdir -p /run/netns
-  export STAMP_NETNS_TESTS=1
-  cargo test --offline --test netns_conformance -- --ignored --test-threads=1 --nocapture
+  ip link set lo up
+  sysctl -w net.ipv6.conf.all.seg6_enabled=1
+  export STAMP_REQUIRE_PRIVILEGED=1 STAMP_NETNS_TESTS=1
+  cargo test --locked --offline --test netns_conformance -- --ignored --test-threads=1 --nocapture
 '
 ```
 
 Inside this namespace the effective UID is 0 (so the root gate passes) and you
-hold `CAP_NET_ADMIN`/`CAP_NET_RAW` for the namespace's own resources. Kernel
-features that are globally disabled (e.g. SRv6, see below) still skip.
+hold `CAP_NET_ADMIN`/`CAP_NET_RAW` for the namespace's own resources. Unavailable kernel prerequisites still fail in required mode or skip in optional mode.
 
 ## Prerequisites
 
-Common (all scenarios), enforced by the gate — missing any of these **skips**
-cleanly, it never fails:
+Common (all scenarios), enforced by the gate — missing any of these **fails in required mode** (otherwise reports an optional skip):
 
 | Requirement | Why |
 |---|---|
 | `STAMP_NETNS_TESTS=1` | explicit opt-in |
-| root / `CAP_NET_ADMIN` | create namespaces + veth, bind, capture |
+| effective root with namespace/network capabilities | create namespaces + veth, bind, capture |
 | `ip` (iproute2) | namespace/veth/address setup |
 | `tcpdump` | on-wire capture |
 | `ss` (iproute2) *(recommended)* | reflector readiness probe (falls back to a timed wait if absent) |
@@ -91,14 +102,16 @@ captures IPv6 extension headers. Scenario 4b therefore uses a separately-built
 reflector binary:
 
 ```bash
-cargo build --features ttl-pnet
-export STAMP_NETNS_PNET_BIN="$PWD/target/debug/stamp-suite"
+cargo build --locked --no-default-features --features ttl-pnet --target-dir target/pnet
+export STAMP_NETNS_PNET_BIN="$PWD/target/pnet/debug/stamp-suite"
 ```
 
-Then run the tier as above. Without `STAMP_NETNS_PNET_BIN`, 4b skips. The
+Then run the tier as above. Keep this binary in a separate target directory
+or copy it before building nix; both backends otherwise share the output path.
+Without `STAMP_NETNS_PNET_BIN`, 4b fails in required mode (skips in optional mode). The
 scenario injects a Destination Options extension header via a sticky
 `IPV6_DSTOPTS` socket option; if the kernel/namespace declines the option it
-also skips cleanly.
+fails in required mode, or skips in optional local mode.
 
 ## Troubleshooting
 
@@ -115,9 +128,13 @@ also skips cleanly.
   cited clause. Capture with the same fixture parameters and inspect.
 * **Leftover namespaces** after a hard kill (`SIGKILL` skips `Drop`): list with
   `ip netns list` and remove `stnsr*` / `stnss*` with `ip netns del <name>`.
-* **`no packets captured`** skips — tcpdump produced only the pcap header. Give
-  it more lead time or confirm the interface is up; the fixture allows a fixed
-  window before generating traffic.
+* **`no packets captured`** — fails in required mode. The fixture waits for
+  tcpdump's actual readiness notice, checks its exit status and retains startup
+  diagnostics. It uses immediate capture and an IP/IPv6 filter so extension-header
+  traffic is not excluded by a plain UDP filter. Check interface state and traffic.
+* **SRv6 fallback** — a passing scenario may verify a captured reply with the
+  Return Path U flag instead of an SRH. Its PASS message distinguishes these
+  outcomes; only observed SRH traffic is forwarding evidence.
 
 ## Reply-route MTU regression
 

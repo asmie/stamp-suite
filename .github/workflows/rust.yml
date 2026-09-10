@@ -119,7 +119,7 @@ jobs:
         with:
           key: test-${{ matrix.os }}-${{ matrix.rust }}
       - name: Run tests
-        run: cargo test --verbose ${{ matrix.features }}
+        run: cargo test --locked --verbose ${{ matrix.features }}
 
   # Best-effort, informational Windows test coverage. NOT part of the
   # gating `test` matrix above -- see the comment on that job for why.
@@ -269,9 +269,9 @@ jobs:
       - name: Test (${{ matrix.name }})
         run: |
           if [ -n "${{ matrix.features }}" ]; then
-            cargo test --verbose --features ${{ matrix.features }}
+            cargo test --locked --verbose --no-default-features --features ${{ matrix.features }}
           else
-            cargo test --verbose
+            cargo test --locked --verbose
           fi
         shell: bash
 

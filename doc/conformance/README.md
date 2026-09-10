@@ -1,17 +1,17 @@
 # stamp-suite conformance — compliance statement
 
-Status date: **2026-08-05**. Branch: **1.0-line**.
+Evidence refresh: **2026-09-10**. Historical audit: **2026-08-05**. Branch: **1.0-line**.
 
-**Review follow-up (2026-09-08):** the status and clause scores below are
+**September remediation:** the status and clause scores below are
 historical, not a current conformance sign-off. The [September review](../reviews/2026-09-08/review.md)
 identified 16 findings, including behavior previously scored Compliant.
 The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
 verification one item at a time. Finding 02 updates the three session-admission rows for provisioned mode only.
 Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Finding 09 repairs the Type-12 ordering response and reclassifies its stale N-A row as Compliant. Finding 11 implements Linux route-aware sizing and reopens three MTU rows as Partial across the broader platform/route scope. Finding 12 separates synchronization-source declarations from encoding, corrects source code points and records actual TX provenance. Finding 13 adds the BER-07 matrix, repair and directional interval reporting. Other clause scores remain historical; citation maintenance alone does not
-close the remaining findings. Finding 14 repairs AgentX request ordering/framing and Close acknowledgments; its [targeted record](agentx-review.md) is separate from the STAMP clause totals.
+establish semantic compliance. Finding 14 repairs AgentX request ordering/framing and Close acknowledgments; its [targeted record](agentx-review.md) is separate from the STAMP clause totals. Finding 15 separates machine-readable output; finding 16 checks evidence consistency and requires privileged CI scenarios to execute. Clippy and the optimization checkpoints remain pending.
 
 This document rolls up the nine clause-level conformance matrices in this
-directory into a single compliance statement for the stamp-suite 1.0 line.
+directory into an evidence inventory for the stamp-suite 1.0 line.
 Counts below include findings 02 (RFC 8972), 07 (RFC 9534), 09 (Type-12 ordering), 11 (route MTU scope), and 13 (BER-07); they are not a new
 full-project audit.
 Where this document goes further than the matrices is in stating, as a
@@ -46,15 +46,15 @@ adversarial re-verification log). No clause was re-read against its source text
 in the 2026-08-05 pass: that pass changed *implementation*, and each row it
 touched was re-scored against the same frozen clause text, with the code and
 test evidence for the closure appended to the row. The matrices remain the
-source of truth; the table above is read from their `Summary:` lines. The BER matrix was added and verified on 2026-09-09.
+source of truth; the table above and their `Summary:` lines are checked against individual clause rows by `scripts/check_conformance_counts.py`. The BER matrix was added and verified on 2026-09-09.
 
 ## Documented exclusions
 
-These are non-Compliant rows (or feature-scope boundaries the matrices don't
-score at all) that this project has deliberately decided **not** to close,
-with a stated rationale. These are not "still open" — they are closed as
-accepted design, and as of the status date they are the *only* non-Compliant
-rows left in any matrix.
+These are accepted scope boundaries, distinct from the open Partial/Gap rows.
+Physical LAG association and steering remain incomplete (six Partial and one
+Gap in RFC 9534). Route-MTU coverage remains platform-limited (five Partial
+rows across Type 12, reflected headers and BER). Those twelve rows have not
+been closed by the exclusions below.
 
 | Exclusion | Rationale | Pointer |
 |---|---|---|
@@ -69,8 +69,8 @@ rows left in any matrix.
 ## Closed since the 1.0 audit
 
 The 2026-07-23 statement listed eleven open items covering fifteen matrix rows —
-ten scored Partial and five scored Gap. **All fifteen were closed in the
-post-review pass of 2026-08-04/05.** They are recorded here rather than deleted,
+ten scored Partial and five scored Gap. **The August pass recorded all fifteen as closed. September checks reopened
+some scope claims; the current row scores and rollup take precedence.** They are recorded here rather than deleted,
 so the statement remains readable against its predecessor: each matrix row keeps
 its original finding with the closure appended beneath it, naming the code and
 the tests.
@@ -104,30 +104,24 @@ because both sat inside behaviour the matrices recorded as Compliant:
 
 ## Citation verification
 
-**Mechanical refresh, 2026-09-08:** corrected the 24 references flagged by
-the September review, including ambiguous CLI-field and Session-method
-anchors checked against the source. The current checker reports **542
-citations: 108 verified, 434 unverifiable, 0 stale**. This updates reference
-locations only; the historical counts below and the clause scores are not
-evidence that the September behavioral findings have all been fixed.
+The current checker reports **381 numeric citations: 88 matched to a named
+source construct, 293 mechanically unverifiable, 0 detected stale references**.
+This is a bookkeeping result, not a semantic sign-off. An anchor overlap does
+not prove a requirement is met; unverifiable and path-only references still
+need human review when their associated behavior changes. Earlier totals
+(540/542) describe historical revisions and are superseded here.
 
-The `file:line` citations in the matrices are the link between a clause and its
-evidence, and they drift whenever the code moves. `scripts/check_conformance_citations.py`
-checks them and exits non-zero on drift, so this can gate CI rather than being
-rediscovered by the next audit.
+```bash
+python3 scripts/check_conformance_citations.py --json --details
+python3 scripts/check_conformance_counts.py --json
+```
 
-As of the status date: **540 line-bearing citations, 0 drifted.** Of those, 108
-are positively machine-verified — the cited range intersects the extent of an
-identifier the row names beside it — and 432 cannot be machine-checked, because
-the citation follows prose that names no identifier, or names one defined in a
-different file (a call site rather than a definition). Every citation resolves to
-an existing file and an in-range line.
-
-Fourteen citations that the tool could not pin to a single construct had their
-line numbers **deliberately removed** during the 2026-08-05 refresh, keeping the
-file path and the identifier the prose already names. A coarse citation that is
-correct is worth more than a precise one that is confidently wrong, and those
-rows are now out of the drift surface for good.
+The first command checks both range endpoints, file resolution and heuristic
+identifier overlap, and includes the full unverified inventory with `--details`.
+The second compares clause statuses, unique IDs, matrix summaries/Counts footers
+and the rollup, failing on missing matrices or mismatches. Both run in
+`.github/workflows/conformance.yml`; regression fixtures prove drift is rejected.
+Neither checker rereads RFCs or upgrades historical clause scores automatically.
 
 ## Experimental-codepoint disclosure
 
@@ -172,54 +166,36 @@ see the module doc comment in `src/tlv/experimental.rs`).
 
 ## Verification tiers
 
-- **Unit tests** — 933 tests under `cargo test --lib` (`cargo test
-  --all-features`), covering packet/TLV parsing and serialization, flag
-  derivation, session state, HMAC, congestion control, SNMP encoding, and
-  every semantic TLV-processing path exercised without a socket.
-- **Integration / loopback tests** — real `tokio`/`std` UDP sockets on
-  `127.0.0.1`/`::1` across `tests/loopback_test.rs`,
-  `tests/loopback_ipv6_test.rs`, `tests/tlv_flag_semantics.rs`,
-  `tests/multi_key_hmac_test.rs`, `tests/malformed_input_test.rs`,
-  `tests/ber_regression_test.rs`, `tests/ptp_e2e_test.rs`, and
-  `tests/control_api_test.rs` (the REST API, via `tower`'s `oneshot` —
-  no sockets there specifically, but exercised end to end otherwise).
-- **Property tests** — `proptest` invariants in `tests/proptest_tlv.rs`
-  (TLV round-trip/parsing fuzz-style properties) and inline in
-  `src/rate_control.rs` (AIMD congestion-controller invariants: interval
-  never exceeds the configured cap, monotonic growth on repeated CE, etc.).
-- **Fuzzing** — 8 targets under `fuzz/fuzz_targets/` (`raw_tlv_parse`,
-  `tlv_list_parse`, `tlv_list_parse_lenient`, `packet_unauth_parse`,
-  `packet_auth_parse`, `process_stamp_packet`, `agentx_decode_header`,
-  `agentx_decode_oid`), run on demand and on a weekly CI schedule
-  (`.github/workflows/fuzz.yml`, Sundays 03:30 UTC).
-- **Privileged network-namespace tier** — `tests/netns_conformance.rs`
-  (9 scenarios, all `#[ignore]`-gated and additionally opt-in via
-  `STAMP_NETNS_TESTS=1` plus a root/`CAP_NET_ADMIN` check), exercising
-  real on-wire IP TOS/ECN/TTL marking, IPv6 extension headers, Address
-  Group filtering, and Type-12 multi-reply pacing over Linux `veth` pairs.
-  Full prerequisites and running instructions: `doc/testing-netns.md`. The
-  SRv6 return-path scenario (`scenario_3_srv6_return_path`) is additionally
-  gated on kernel `seg6` support and is this line's first live exercise of
-  the SRH-send path; live-send verification elsewhere in this codebase is
-  otherwise construction-only (unit-tested SRH building) plus a manual
-  procedure, not automated CI.
-- **Cross-implementation testing (local, informational)** — ad hoc
-  interoperability runs against another, unnamed STAMP implementation on
-  the local network, used to sanity-check wire-format assumptions (e.g. the
-  CoS TLV layout fix, the Type-242 collision noted above) during
-  development. Informational only: not part of the automated gate, and not
-  reproducible in CI, so it carries no weight in the counts above.
+- **Unit and ordinary integration suites:** run separately for default,
+  all-features and pnet-only builds. All-features selects nix and cannot verify
+  pnet execution. Results are recorded by checkpoint rather than keeping a
+  timeless unit-test count here. See [test inventory](../../tests/README.md).
+- **Properties and fuzzing:** deterministic/property suites run through Cargo;
+  eight fuzz targets are compiled from the separate locked fuzz manifest and
+  exercised by the scheduled fuzz workflow. Compilation is not fuzz execution.
+- **Privileged wire tests:** three raw pnet tests, nine namespace scenarios and
+  one reply-route MTU regression. The conformance workflow builds without root,
+  selects exact Cargo artifacts, verifies nonempty expected test counts and runs
+  with `STAMP_REQUIRE_PRIVILEGED=1`. A missing privilege/tool, unsupported kernel
+  prerequisite or internal skip fails that job. Local exploratory runs may omit
+  strict mode, but an internal skip is not wire evidence. See
+  [namespace procedures](../testing-netns.md).
+- **Platform and hardware limits:** local September results are Linux evidence.
+  macOS CI and best-effort Windows CI retain their separate scopes. No physical
+  NIC timestamp or LAG-member test is claimed. Earlier informal interoperability
+  runs are not reproducible certification; AgentX has its separate targeted record.
 
-## Sign-off
+## Current residual and evidence limits
 
-Every Gap identified during the audit was either fixed in the 1.0 line's
-commits, closed in the post-review pass recorded above, or moved into
-"Documented exclusions" with a maintainer rationale and date. Nothing found was
-left unaddressed and undocumented, and no row was re-scored without its
-supporting code and tests named in the matrix.
+The clause inventory is **398 rows: 342 Compliant, 11 Partial, 1 Gap,
+41 N/A and 3 Excluded**. The three session-admission rows are Compliant only
+under their documented provisioned-mode conditions. The remaining LAG and
+platform-MTU rows are open scope limits, not accepted exclusions or finished
+optimizations. The historical Compliant rows have not all received a fresh
+semantic audit in this evidence checkpoint.
 
-As of the status date the residual is: **three Gap rows** (the SSID-admission
-trio, kept deliberately) and **three Excluded rows**, all six under "Documented
-exclusions"; **no Partial rows**. This statement reflects the matrices as they
-stand on the date above, on branch `1.0-line`; it is not re-issued automatically
-and should be revisited whenever a matrix's own `Summary:` line changes.
+The [repair tracker](../reviews/2026-09-08/progress.md) records findings and
+remaining optimization work. Finding 16's [test results](../reviews/2026-09-08/logs/finding-16/results.json)
+state what actually ran, including expected negative checks and environment
+limits. Clippy repair remains the user's final checkpoint; this statement does
+not claim a green remote CI run or release sign-off.

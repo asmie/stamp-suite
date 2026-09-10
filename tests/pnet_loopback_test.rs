@@ -6,15 +6,11 @@
 //! of unprivileged CI runs; opt-in invocation:
 //!
 //! ```bash
-//! sudo setcap cap_net_raw,cap_net_admin=eip $(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/test_runner_or_target_test_binary
-//! cargo test --features ttl-pnet --test pnet_loopback_test -- --ignored
+//! sudo -E env STAMP_REQUIRE_PRIVILEGED=1 cargo test --locked --no-default-features --features ttl-pnet --test pnet_loopback_test -- --ignored --test-threads=1
 //! ```
 //!
-//! Or, more pragmatically:
-//!
-//! ```bash
-//! sudo -E cargo test --features ttl-pnet --test pnet_loopback_test -- --ignored
-//! ```
+//! Required mode fails if CAP_NET_RAW is absent. Authenticated traffic must
+//! receive a valid signed reply; no reply is a test failure.
 //!
 //! See tests/README.md for full instructions.
 
@@ -38,34 +34,19 @@ use stamp_suite::packets::{
 use stamp_suite::receiver;
 use stamp_suite::time::generate_timestamp;
 
-/// Returns true when the process has CAP_NET_RAW or is running as root.
-/// pnet datalink capture needs one of these on Linux. Parses
-/// `/proc/self/status` for both the uid and the effective capability set
-/// to avoid pulling in libc/nix as a dev-dep.
+mod privileged;
+
+/// Inspect the effective capability, rather than assuming container root has it.
 fn has_raw_capability() -> bool {
-    use std::fs;
-    let Ok(status) = fs::read_to_string("/proc/self/status") else {
-        return false;
-    };
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("Uid:") {
-            // Uid: real effective saved fs (tab-separated)
-            if let Some(real) = rest.split_whitespace().next() {
-                if real.trim() == "0" {
-                    return true;
-                }
-            }
-        }
-        if let Some(rest) = line.strip_prefix("CapEff:") {
-            if let Ok(caps) = u64::from_str_radix(rest.trim(), 16) {
-                // CAP_NET_RAW = bit 13.
-                if caps & (1u64 << 13) != 0 {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("CapEff:")
+                    .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+            })
+        })
+        .is_some_and(|caps| caps & (1 << 13) != 0)
 }
 
 /// Build a minimum Configuration suitable for driving the pnet receiver
@@ -80,6 +61,8 @@ fn reflector_conf(local_port: u16, auth: AuthMode, hmac_key_hex: Option<&str>) -
         "--local-port".to_string(),
         local_port.to_string(),
         "--is-reflector".to_string(),
+        "--session-timeout".to_string(),
+        "2".to_string(),
     ];
     if matches!(auth, AuthMode::Authenticated) {
         args.push("--auth-mode".to_string());
@@ -96,9 +79,9 @@ fn reflector_conf(local_port: u16, auth: AuthMode, hmac_key_hex: Option<&str>) -
 /// Skip-pattern shared across all integration tests in this module.
 async fn skip_unless_pnet_capable() -> Option<()> {
     if !has_raw_capability() {
-        eprintln!(
-            "Skipping pnet loopback test: process lacks CAP_NET_RAW. \
-             Run with sudo or `setcap cap_net_raw+eip`."
+        privileged::unavailable(
+            "pnet loopback",
+            "process lacks CAP_NET_RAW; run with sudo or setcap",
         );
         return None;
     }
@@ -119,12 +102,18 @@ async fn one_packet_round_trip(
     let conf = reflector_conf(local_port, auth, hmac_key_hex);
     let shared = receiver::create_shared_state(&conf);
     let shared_capture_alive = shared.capture_alive.clone();
+    let shutdown = shared.shutdown_requested.clone();
+    struct ShutdownOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for ShutdownOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let _shutdown_guard = ShutdownOnDrop(shutdown.clone());
 
     // Start the receiver in the background. Move conf+shared into the
     // task so they outlive run_receiver's borrow.
-    let handle = tokio::spawn(async move {
-        let _ = receiver::run_receiver(&conf, &shared).await;
-    });
+    let handle = tokio::spawn(async move { receiver::run_receiver(&conf, &shared).await });
 
     // Give the pnet capture thread time to attach to the interface;
     // then check capture_alive in case it bailed out (e.g. bad perms).
@@ -149,8 +138,14 @@ async fn one_packet_round_trip(
     let mut buf = [0u8; 2048];
     let recv = timeout(Duration::from_secs(3), sender.recv_from(&mut buf)).await;
 
-    // Whatever the outcome, tear down the receiver.
-    handle.abort();
+    // A JoinHandle abort cannot stop spawn_blocking capture. Request shutdown
+    // and wait for both capture and transmission workers to leave.
+    shutdown.store(true, Ordering::Relaxed);
+    timeout(Duration::from_secs(4), handle)
+        .await
+        .expect("pnet shutdown timed out")
+        .expect("receiver task panicked")
+        .expect("receiver failed");
 
     match recv {
         Ok(Ok((n, _))) => Some(buf[..n].to_vec()),
@@ -215,20 +210,20 @@ async fn pnet_authenticated_mode_loopback_round_trip() {
         mbz1c: [0; 6],
         hmac: [0; 16],
     };
-    let bytes = packet.to_bytes().to_vec();
-    let reply = one_packet_round_trip(48863, AuthMode::Authenticated, Some(key_hex), bytes).await;
-    // Note: without a proper HMAC the reflector will likely drop. The
-    // point of this test on the integration side is to prove the pnet
-    // pipeline forwards into our process_stamp_packet path; either
-    // Some(reply) (HMAC-disabled-by-default contract) or None
-    // (HMAC-required-correct) is observable. Don't hard-fail here — the
-    // unauth test above already exercises the success path.
-    if let Some(reply) = reply {
-        assert!(
-            reply.len() >= receiver::AUTH_BASE_SIZE,
-            "auth reply size must be at least the auth base"
-        );
-    }
+    let key = stamp_suite::crypto::HmacKey::new(hex::decode(key_hex).unwrap()).unwrap();
+    let mut bytes = packet.to_bytes().to_vec();
+    let mac = stamp_suite::crypto::compute_packet_hmac(&key, &bytes, 96);
+    bytes[96..112].copy_from_slice(&mac);
+    let reply = one_packet_round_trip(48863, AuthMode::Authenticated, Some(key_hex), bytes)
+        .await
+        .expect("authenticated pnet reflector must reply");
+    let parsed = stamp_suite::packets::ReflectedPacketAuthenticated::from_bytes(&reply)
+        .expect("authenticated reply must parse");
+    assert_eq!(parsed.sess_sender_seq_number, 7);
+    assert_eq!(
+        &reply[96..112],
+        &stamp_suite::crypto::compute_packet_hmac(&key, &reply, 96)
+    );
 }
 
 #[tokio::test]
