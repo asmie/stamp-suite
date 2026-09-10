@@ -144,6 +144,30 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
   -V, --version                    Print version
 ```
 
+### Statistics precision and retention
+
+RTT and both one-way-delay directions keep exact quantiles through 4,096
+samples per series. Longer runs use bounded histograms covering **all** samples,
+with less than **0.78125% error in magnitude** relative to the selected exact
+order statistic. Zero and extrema stay exact. Counts, minima/maxima, means,
+RTT successive variation and population standard deviation remain cumulative.
+The sample counters are 64-bit; neither reporting nor histogram conversion
+resets them. See [statistics methodology](statistics.md) for rank selection,
+rounding, memory bounds and the distinction from timestamp measurement error.
+
+JSON includes `quantile_precision` (`exact_sample_limit: 4096`,
+`relative_error_bound: 0.0078125`), also in a standalone OWD summary. Text
+summaries explain the policy. Sender CSV inserts `quantile_exact_sample_limit`
+and `quantile_relative_error_bound` immediately before the final `ber` cell.
+These are conservative bounds; short series remain exact.
+
+BER retains the latest 1,024 completed nonempty intervals and 1,024 alarms,
+plus the current partial interval in snapshots. `intervals_omitted` and
+`alarms_omitted` disclose older records evicted from the summary; lifetime
+BER totals and threshold-crossing logs remain cumulative. Save periodic output
+and alarm logs externally if you need longer history. `-R` can stream RTT packet
+details without retaining them in memory.
+
 ### Output streams
 
 `--output-format` selects measurement output on **stdout**. Sender JSON is

@@ -177,6 +177,7 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
     if format == "text" {
         assert!(stdout.contains("seq=0 rtt="));
         assert!(stdout.contains("--- STAMP Statistics ---"));
+        assert!(stdout.contains("Quantiles: exact through 4096 samples"));
         assert!(reflector_stdout.contains("--- STAMP Reflector Statistics ---"));
     } else {
         assert!(
@@ -192,6 +193,15 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
             assert_eq!(reports.last().unwrap()["type"], "summary");
             assert_eq!(reports.last().unwrap()["packets_received"], 3);
             assert!(reports.last().unwrap()["ber"].is_object());
+            for report in &reports {
+                assert_eq!(report["quantile_precision"]["exact_sample_limit"], 4096);
+                assert_eq!(
+                    report["quantile_precision"]["relative_error_bound"],
+                    1.0 / 128.0
+                );
+                assert_eq!(report["ber"]["intervals_omitted"], 0);
+                assert_eq!(report["ber"]["alarms_omitted"], 0);
+            }
             assert_eq!(reports.len() > 1, periodic);
             assert!(reports[..reports.len() - 1]
                 .iter()
@@ -202,18 +212,20 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
             let mut lines = stdout.lines();
             let header = lines.next().unwrap();
             assert!(header.starts_with("packets_sent,packets_received,"));
-            assert_eq!(header.split(',').count(), 25);
+            assert_eq!(header.split(',').count(), 27);
             let rows: Vec<_> = lines.collect();
             assert_eq!(rows.len() > 1, periodic);
             for row in &rows {
-                // First 24 fields are numeric/enums; the final BER field is quoted JSON.
-                let cells: Vec<_> = row.splitn(25, ',').collect();
-                assert_eq!(cells.len(), 25);
+                // First 26 fields are numeric/enums; the final BER field is quoted JSON.
+                let cells: Vec<_> = row.splitn(27, ',').collect();
+                assert_eq!(cells.len(), 27);
                 assert!(
                     cells[0].parse::<u32>().is_ok(),
                     "repeated header or diagnostic: {row}"
                 );
-                let encoded = cells[24]
+                assert_eq!(cells[24], "4096");
+                assert_eq!(cells[25].parse::<f64>().unwrap(), 1.0 / 128.0);
+                let encoded = cells[26]
                     .strip_prefix('"')
                     .unwrap()
                     .strip_suffix('"')

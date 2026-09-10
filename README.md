@@ -46,7 +46,7 @@ and the [BER-07 conformance matrix](doc/conformance/draft-stamp-ber.md).
 
 The Session-Sender transmits test packets to the Session-Reflector, which timestamps and reflects them back. Comparing timestamps yields:
 
-- Round-trip time (RTT) — aggregated min/max/avg/median/p95/p99 over the run
+- Round-trip time (RTT) — cumulative min/max/avg and bounded-memory median/p95/p99 over the run ([precision and retention](doc/statistics.md))
 - One-way delay (OWD) — forward and reverse min/avg/median/max, assuming NTP/PTP-synchronized endpoints
 - Packet loss rate
 - Per-packet reflector receive/send timestamps in `-R` mode — usable for external one-way-delay analysis when both endpoints share an NTP/PTP-synced clock

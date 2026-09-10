@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bound sender RTT/OWD storage: exact quantiles through 4096 observations, then
+  full-run histograms with <0.78125% magnitude error. Share one RTT sort or
+  histogram traversal per snapshot; keep cumulative moments and 64-bit sample
+  counts. Repair variance overflow/cancellation using centered online updates.
+  Disclose precision in text/JSON and two sender CSV columns before BER.
+- Retain at most 1024 completed BER intervals and 1024 alarms, with omission
+  counters and a current partial interval. Preserve lifetime totals and alarm
+  logs. Add full-range, long-run, accuracy and output regressions; document
+  retention and correct the RTT jitter metric's inaccurate RFC 3550 attribution.
+
 - Bound reflector work across processing, capture handoff and queued burst copies
   with `--reflector-queue-capacity` (default 1024). Add an optional shutdown grace
   period (default immediate cancellation), SIGTERM handling, prompt pnet idle

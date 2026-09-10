@@ -2,7 +2,14 @@
 //! Only the first accepted reply to each pending probe contributes; missing or
 //! invalid metadata never becomes a zero-error sample. Intervals use monotonic
 //! receive time and a fixed multiple of the configured transmit interval.
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
+
+/// Maximum retained completed intervals and alarms, independently. Lifetime
+/// direction totals and live alarm logging are unaffected by history eviction.
+pub const BER_HISTORY_LIMIT: usize = 1024;
 
 use crate::{
     crypto::HmacKey,
@@ -186,8 +193,10 @@ pub struct BerSummary {
     pub padding_bytes: usize,
     pub forward: DirectionSummary,
     pub reverse: DirectionSummary,
-    pub intervals: Vec<IntervalSummary>,
-    pub alarms: Vec<Alarm>,
+    pub intervals: VecDeque<IntervalSummary>,
+    pub alarms: VecDeque<Alarm>,
+    pub intervals_omitted: u64,
+    pub alarms_omitted: u64,
 }
 
 pub(crate) struct BerCollector {
@@ -223,8 +232,10 @@ impl BerCollector {
                 padding_bytes: padding,
                 forward: DirectionSummary::default(),
                 reverse: DirectionSummary::default(),
-                intervals: Vec::new(),
-                alarms: Vec::new(),
+                intervals: VecDeque::new(),
+                alarms: VecDeque::new(),
+                intervals_omitted: 0,
+                alarms_omitted: 0,
             },
         }
     }
@@ -236,7 +247,11 @@ impl BerCollector {
         self.current.complete = true;
         if self.current.forward.packets_received != 0 {
             self.check_alarms();
-            self.summary.intervals.push(self.current.clone());
+            if self.summary.intervals.len() == BER_HISTORY_LIMIT {
+                self.summary.intervals.pop_front();
+                self.summary.intervals_omitted += 1;
+            }
+            self.summary.intervals.push_back(self.current.clone());
         }
         // Empty intervals are omitted and carry no usable BER observation.
         self.current = IntervalSummary {
@@ -275,7 +290,11 @@ impl BerCollector {
                         "BER threshold crossing: {}",
                         serde_json::to_string(&alarm).unwrap_or_default()
                     );
-                    self.summary.alarms.push(alarm);
+                    if self.summary.alarms.len() == BER_HISTORY_LIMIT {
+                        self.summary.alarms.pop_front();
+                        self.summary.alarms_omitted += 1;
+                    }
+                    self.summary.alarms.push_back(alarm);
                 }
                 self.above[d * 2 + m] = above;
             }
@@ -317,7 +336,7 @@ impl BerCollector {
         self.advance(now);
         let mut result = self.summary.clone();
         if self.current.forward.packets_received != 0 {
-            result.intervals.push(self.current.clone());
+            result.intervals.push_back(self.current.clone());
         }
         result
     }
@@ -407,6 +426,66 @@ pub(crate) fn fit_padding(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn long_run_bounds_history_and_preserves_totals_and_alarm_transitions() {
+        let start = Instant::now();
+        let mut collector = BerCollector::new(
+            vec![0],
+            1,
+            true,
+            Duration::from_millis(1),
+            start,
+            [Some(0.0); 2],
+        );
+        let intervals = (BER_HISTORY_LIMIT * 2 + 20) as u64;
+        for index in 0..intervals {
+            let errors = if index % 2 == 0 { 1 } else { 0 };
+            collector.record(
+                Observation::Sample {
+                    bits: 8,
+                    forward_errors: errors,
+                    forward_burst: Some(errors),
+                    reverse_errors: errors,
+                    reverse_burst: errors,
+                },
+                start + Duration::from_millis(index),
+            );
+        }
+        let snapshot = collector.snapshot(start + Duration::from_millis(intervals));
+        assert_eq!(snapshot.forward.packets_received, intervals);
+        assert_eq!(snapshot.reverse.bit_errors, intervals / 2);
+        assert_eq!(snapshot.intervals.len(), BER_HISTORY_LIMIT);
+        assert_eq!(
+            snapshot.intervals_omitted,
+            intervals - BER_HISTORY_LIMIT as u64
+        );
+        assert_eq!(snapshot.intervals[0].index, snapshot.intervals_omitted);
+        assert_eq!(snapshot.alarms.len(), BER_HISTORY_LIMIT);
+        assert_eq!(
+            snapshot.alarms_omitted,
+            intervals * 2 - BER_HISTORY_LIMIT as u64
+        );
+        assert!(snapshot.alarms.iter().all(|alarm| alarm.interval % 2 == 0));
+        collector.record(
+            Observation::Sample {
+                bits: 8,
+                forward_errors: 0,
+                forward_burst: Some(0),
+                reverse_errors: 0,
+                reverse_burst: 0,
+            },
+            start + Duration::from_millis(intervals),
+        );
+        let partial = collector.snapshot(start + Duration::from_millis(intervals));
+        assert_eq!(partial.intervals.len(), BER_HISTORY_LIMIT + 1);
+        assert!(!partial.intervals.back().unwrap().complete);
+        assert_eq!(partial.intervals_omitted, snapshot.intervals_omitted);
+        assert_eq!(collector.summary.intervals.len(), BER_HISTORY_LIMIT);
+        let json = serde_json::to_value(partial).unwrap();
+        assert_eq!(json["intervals_omitted"], snapshot.intervals_omitted);
+        assert!(json["intervals"].is_array());
+    }
+
     use super::*;
     use crate::tlv::{BerPatternTlv, ExtraPaddingTlv, TlvFlags};
 

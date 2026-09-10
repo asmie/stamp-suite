@@ -19,6 +19,7 @@ A single binary plays both roles. The Session-Sender transmits STAMP test packet
 - `configuration.rs` — Command-line argument parsing (clap derive), TOML config-file merging, validation. Auth-mode helpers (`is_auth`, `is_enc`, `is_open`).
 - `packets.rs` — STAMP packet structures for authenticated and unauthenticated modes, with explicit big-endian fixed-width serialization.
 - `sender.rs` — Session-Sender implementation: packet assembly, send loop, RTT statistics.
+- `stats.rs` / `stats/quantiles.rs` — cumulative moments and bounded full-run quantiles; [precision and retention](statistics.md).
 - `receiver/` — Session-Reflector implementations:
   - `receiver/mod.rs` — Shared STAMP-level pipeline. All TLV parsing, HMAC verification, Return Path handling, session tracking, and counter updates live here. Both backends call into the same `process_stamp_packet` after capturing a packet.
   - `receiver/nix.rs` — Default backend on Linux and macOS. Uses a `tokio::net::UdpSocket` with `IP_RECVTTL`, `IP_RECVTOS`, and `IP_PKTINFO` (plus IPv6 equivalents) to extract per-packet metadata via `recvmsg` control messages.
@@ -505,6 +506,10 @@ directions. A completed interval crossing above a threshold produces a structure
 event and an alarm in the summary; remaining above it does not repeat the alarm. Empty
 windows are omitted; the last nonempty partial window is labeled `complete: false` and
 does not trigger threshold alarms. BER follows monotonic receipt time, not the peer's clock.
+History uses bounded deques: the latest 1024 completed nonempty intervals and 1024
+alarms, plus the current partial interval in snapshots. `intervals_omitted` and
+`alarms_omitted` count evictions. Lifetime directional aggregates and live alarm
+logging are independent of retention. Snapshot cloning is therefore bounded too.
 
 On Linux, the sender trims padding in whole pattern repetitions using the connected
 route MTU and prevents fragmentation. The reflector checks the actual reply route MTU

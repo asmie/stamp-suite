@@ -3,6 +3,9 @@
 //! Provides rich sender statistics (RTT percentiles, jitter, standard deviation),
 //! reflector shutdown summaries, and multiple output formats (text, JSON, CSV).
 
+mod quantiles;
+use quantiles::Quantiles;
+
 #[cfg(test)]
 use std::net::SocketAddr;
 
@@ -69,11 +72,13 @@ pub struct RttSample {
 
 /// Collects RTT samples and computes derived statistics.
 pub struct RttCollector {
-    samples: Vec<RttSample>,
+    quantiles: Quantiles<u64>,
     min_ns: Option<u64>,
     max_ns: Option<u64>,
     sum_ns: u128,
-    sum_sq_ns: u128,
+    variance_origin: Option<u64>,
+    centered_mean_ns: f64,
+    m2_ns: f64,
     jitter_sum_ns: u128,
     jitter_count: u64,
     last_rtt_ns: Option<u64>,
@@ -83,49 +88,53 @@ impl RttCollector {
     /// Creates a new empty collector.
     pub fn new() -> Self {
         RttCollector {
-            samples: Vec::new(),
+            quantiles: Quantiles::default(),
             min_ns: None,
             max_ns: None,
             sum_ns: 0,
-            sum_sq_ns: 0,
+            variance_origin: None,
+            centered_mean_ns: 0.0,
+            m2_ns: 0.0,
             jitter_sum_ns: 0,
             jitter_count: 0,
             last_rtt_ns: None,
         }
     }
 
-    /// Records a new RTT sample.
+    /// Records a new RTT sample. Collection stops at u64::MAX observations.
     pub fn record(&mut self, sample: RttSample) {
         let rtt = sample.rtt_ns;
+        if !self.quantiles.record(rtt) {
+            return;
+        }
 
         self.min_ns = Some(self.min_ns.map_or(rtt, |m| m.min(rtt)));
         self.max_ns = Some(self.max_ns.map_or(rtt, |m| m.max(rtt)));
         self.sum_ns += rtt as u128;
-        self.sum_sq_ns += (rtt as u128) * (rtt as u128);
+        // Welford population variance, centered on the first integer sample before
+        // conversion to f64. This preserves small spreads on a large baseline.
+        let origin = *self.variance_origin.get_or_insert(rtt);
+        let centered = (i128::from(rtt) - i128::from(origin)) as f64;
+        let delta = centered - self.centered_mean_ns;
+        self.centered_mean_ns += delta / self.quantiles.count() as f64;
+        self.m2_ns += delta * (centered - self.centered_mean_ns);
 
-        // RFC 3550 jitter: mean |RTT_i - RTT_{i-1}|
+        // Mean absolute successive RTT difference, in receive order.
         if let Some(prev) = self.last_rtt_ns {
             let delta = rtt.abs_diff(prev);
             self.jitter_sum_ns += delta as u128;
             self.jitter_count += 1;
         }
         self.last_rtt_ns = Some(rtt);
-
-        self.samples.push(sample);
     }
 
-    /// Returns the p-th percentile RTT in nanoseconds (0.0..=100.0).
+    /// Returns the p-th percentile RTT in nanoseconds. Exact through 4096
+    /// samples, then <0.78125% magnitude error; all observations contribute.
     pub fn percentile_ns(&self, p: f64) -> Option<u64> {
-        if self.samples.is_empty() {
-            return None;
-        }
-        let mut sorted: Vec<u64> = self.samples.iter().map(|s| s.rtt_ns).collect();
-        sorted.sort_unstable();
-        let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
-        Some(sorted[idx.min(sorted.len() - 1)])
+        self.quantiles.percentiles([p])[0]
     }
 
-    /// Returns mean jitter in nanoseconds (RFC 3550 definition).
+    /// Returns mean absolute successive RTT difference in nanoseconds.
     pub fn jitter_ns(&self) -> Option<u64> {
         if self.jitter_count == 0 {
             return None;
@@ -133,28 +142,20 @@ impl RttCollector {
         Some((self.jitter_sum_ns / self.jitter_count as u128) as u64)
     }
 
-    /// Returns standard deviation of RTT in nanoseconds.
+    /// Returns population standard deviation of RTT in nanoseconds.
     pub fn std_dev_ns(&self) -> Option<f64> {
-        let n = self.samples.len();
-        if n < 2 {
-            return None;
-        }
-        let mean = self.sum_ns as f64 / n as f64;
-        let mean_sq = self.sum_sq_ns as f64 / n as f64;
-        let variance = mean_sq - mean * mean;
-        if variance < 0.0 {
-            // Floating-point rounding — treat as zero
-            return Some(0.0);
-        }
-        Some(variance.sqrt())
+        let n = self.quantiles.count();
+        (n >= 2).then(|| (self.m2_ns / n as f64).max(0.0).sqrt())
     }
 
     /// Builds a snapshot of current statistics.
     pub fn snapshot(&self, packets_sent: u32, packets_lost: u32) -> StatsSnapshot {
-        let packets_received = self.samples.len() as u32;
+        let packets_received = self.quantiles.count();
+        let [median, p95, p99] = self.quantiles.percentiles([50.0, 95.0, 99.0]);
         let total = packets_sent.max(1) as f64;
 
         StatsSnapshot {
+            quantile_precision: QuantilePrecision::default(),
             packets_sent,
             packets_received,
             packets_lost,
@@ -166,9 +167,9 @@ impl RttCollector {
             } else {
                 None
             },
-            median_rtt_ms: self.percentile_ns(50.0).map(ns_to_ms),
-            p95_rtt_ms: self.percentile_ns(95.0).map(ns_to_ms),
-            p99_rtt_ms: self.percentile_ns(99.0).map(ns_to_ms),
+            median_rtt_ms: median.map(ns_to_ms),
+            p95_rtt_ms: p95.map(ns_to_ms),
+            p99_rtt_ms: p99.map(ns_to_ms),
             jitter_ms: self.jitter_ns().map(ns_to_ms),
             std_dev_ms: self.std_dev_ns().map(|ns| ns / 1_000_000.0),
             owd: None,
@@ -211,7 +212,7 @@ pub struct OwdSample {
 /// Accumulates the samples for one OWD direction and derives min/max/mean/median.
 #[derive(Default)]
 struct OwdDirection {
-    samples: Vec<i64>,
+    quantiles: Quantiles<i64>,
     min_ns: Option<i64>,
     max_ns: Option<i64>,
     sum_ns: i128,
@@ -219,26 +220,22 @@ struct OwdDirection {
 
 impl OwdDirection {
     fn record(&mut self, v: i64) {
+        if !self.quantiles.record(v) {
+            return;
+        }
         self.min_ns = Some(self.min_ns.map_or(v, |m| m.min(v)));
         self.max_ns = Some(self.max_ns.map_or(v, |m| m.max(v)));
         self.sum_ns += i128::from(v);
-        self.samples.push(v);
     }
 
     fn mean_ns(&self) -> Option<f64> {
-        let n = self.samples.len();
+        let n = self.quantiles.count();
         (n > 0).then(|| self.sum_ns as f64 / n as f64)
     }
 
-    /// Median using the same nearest-rank rounding as [`RttCollector::percentile_ns`].
+    /// Median uses the same rounded zero-based rank as [`RttCollector::percentile_ns`].
     fn median_ns(&self) -> Option<i64> {
-        if self.samples.is_empty() {
-            return None;
-        }
-        let mut sorted = self.samples.clone();
-        sorted.sort_unstable();
-        let idx = (0.5 * (sorted.len() - 1) as f64).round() as usize;
-        Some(sorted[idx])
+        self.quantiles.percentiles([50.0])[0]
     }
 }
 
@@ -249,7 +246,6 @@ impl OwdDirection {
 pub struct OwdCollector {
     forward: OwdDirection,
     reverse: OwdDirection,
-    count: u32,
 }
 
 impl OwdCollector {
@@ -260,17 +256,18 @@ impl OwdCollector {
     }
 
     /// Records one packet's forward and reverse one-way delays.
+    /// Collection stops at u64::MAX observations.
     pub fn record(&mut self, sample: OwdSample) {
         self.forward.record(sample.forward_ns);
         self.reverse.record(sample.reverse_ns);
-        self.count += 1;
     }
 
     /// Summarises the collected samples, or `None` if none were recorded.
     #[must_use]
     pub fn summary(&self) -> Option<OwdSummary> {
         Some(OwdSummary {
-            samples: self.count,
+            quantile_precision: QuantilePrecision::default(),
+            samples: self.forward.quantiles.count(),
             forward_min_ms: ns_i64_to_ms(self.forward.min_ns?),
             forward_avg_ms: self.forward.mean_ns()? / 1_000_000.0,
             forward_max_ms: ns_i64_to_ms(self.forward.max_ns?),
@@ -291,7 +288,8 @@ impl OwdCollector {
 /// with the round-trip time.
 #[derive(serde::Serialize)]
 pub struct OwdSummary {
-    pub samples: u32,
+    pub quantile_precision: QuantilePrecision,
+    pub samples: u64,
     pub forward_min_ms: f64,
     pub forward_avg_ms: f64,
     pub forward_max_ms: f64,
@@ -378,14 +376,33 @@ pub struct CongestionSummary {
     pub base_interval_ms: f64,
 }
 
+/// Full-run quantile policy. Error is relative to the magnitude of the exact
+/// order statistic; zero and extrema remain exact. This is value error, not a
+/// statistical confidence interval or a bound on timestamp measurement error.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct QuantilePrecision {
+    pub exact_sample_limit: usize,
+    pub relative_error_bound: f64,
+}
+impl Default for QuantilePrecision {
+    fn default() -> Self {
+        Self {
+            exact_sample_limit: quantiles::EXACT_LIMIT,
+            relative_error_bound: quantiles::RELATIVE_ERROR,
+        }
+    }
+}
+
 /// Serializable sender statistics snapshot.
 #[derive(serde::Serialize)]
 pub struct StatsSnapshot {
+    /// Quantile accuracy policy for RTT and both OWD directions.
+    pub quantile_precision: QuantilePrecision,
     /// Residual BER totals and computation intervals, when requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ber: Option<crate::ber::BerSummary>,
     pub packets_sent: u32,
-    pub packets_received: u32,
+    pub packets_received: u64,
     pub packets_lost: u32,
     pub loss_percent: f64,
     pub min_rtt_ms: Option<f64>,
@@ -470,6 +487,12 @@ impl StatsSnapshot {
             "{}Packets lost: {} ({:.1}%)",
             prefix, self.packets_lost, self.loss_percent
         );
+        println!(
+            "{}Quantiles: exact through {} samples per series; otherwise <{:.5}% magnitude error",
+            prefix,
+            self.quantile_precision.exact_sample_limit,
+            self.quantile_precision.relative_error_bound * 100.0,
+        );
         if let Some(v) = self.min_rtt_ms {
             println!("{}Min RTT: {:.3} ms", prefix, v);
         }
@@ -521,6 +544,12 @@ impl StatsSnapshot {
                 "{prefix}BER: interval={}ms padding={} bytes disabled_by_peer={}",
                 ber.interval_ms, ber.padding_bytes, ber.disabled_by_peer
             );
+            if ber.intervals_omitted != 0 || ber.alarms_omitted != 0 {
+                println!(
+                    "{prefix}  Older BER history omitted: intervals={} alarms={}",
+                    ber.intervals_omitted, ber.alarms_omitted
+                );
+            }
             for (name, stats) in [("Forward", &ber.forward), ("Reverse", &ber.reverse)] {
                 println!("{prefix}  {name}: packets={} errored={} bits={} errors={} BER={} burst max={} avg={}",
                     stats.packets_received, stats.packets_with_errors, stats.padding_bits, stats.bit_errors,
@@ -592,11 +621,11 @@ impl StatsSnapshot {
              owd_rev_min_ms,owd_rev_avg_ms,owd_rev_max_ms,\
              access_report_outcome,access_report_retransmissions,\
              congestion_ce_replies,congestion_backoffs_applied,\
-             congestion_current_interval_ms,congestion_max_interval_reached_ms,ber"
+             congestion_current_interval_ms,congestion_max_interval_reached_ms,quantile_exact_sample_limit,quantile_relative_error_bound,ber"
             );
         }
         println!(
-            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.packets_sent,
             self.packets_received,
             self.packets_lost,
@@ -624,6 +653,8 @@ impl StatsSnapshot {
                 .map_or_else(String::new, |c| c.backoffs_applied.to_string()),
             fmt_opt(self.congestion.map(|c| c.current_interval_ms)),
             fmt_opt(self.congestion.map(|c| c.max_interval_reached_ms)),
+            self.quantile_precision.exact_sample_limit,
+            self.quantile_precision.relative_error_bound,
             self.ber.as_ref().map_or_else(String::new, |ber| format!(
                 "\"{}\"",
                 serde_json::to_string(ber)
@@ -755,6 +786,65 @@ pub fn build_reflector_stats(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn long_run_keeps_cumulative_moments_and_signed_owd() {
+        let mut rtt = RttCollector::new();
+        let mut owd = OwdCollector::new();
+        for seq in 0..100_000 {
+            rtt.record(RttSample {
+                seq,
+                rtt_ns: 1_000_000_000_000 + 2 * u64::from(seq % 2),
+                ttl: 64,
+            });
+            owd.record(OwdSample {
+                seq,
+                forward_ns: if seq % 2 == 0 { i64::MIN } else { i64::MAX },
+                reverse_ns: -7_777_777,
+            });
+        }
+        let snapshot = rtt.snapshot(100_000, 0).with_owd(&owd);
+        assert_eq!(snapshot.packets_received, 100_000);
+        assert!((snapshot.avg_rtt_ms.unwrap() - 1_000_000.000_001).abs() < 1e-9);
+        assert_eq!(rtt.jitter_ns(), Some(2));
+        assert!((rtt.std_dev_ns().unwrap() - 1.0).abs() < 1e-12);
+        let summary = snapshot.owd.as_ref().unwrap();
+        assert_eq!(summary.samples, 100_000);
+        assert_eq!(summary.forward_avg_ms, -0.000_000_5);
+        assert_eq!(summary.reverse_avg_ms, -7.777_777);
+        assert_eq!(summary.reverse_median_ms, -7.777_777);
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap()["quantile_precision"]["exact_sample_limit"],
+            4096
+        );
+    }
+
+    #[test]
+    fn variance_preserves_small_spread_on_a_large_baseline() {
+        let mut collector = RttCollector::new();
+        for rtt_ns in [1_000_000_000_000, 1_000_000_000_002] {
+            collector.record(RttSample {
+                seq: 0,
+                rtt_ns,
+                ttl: 64,
+            });
+        }
+        assert_eq!(collector.std_dev_ns(), Some(1.0));
+    }
+
+    #[test]
+    fn full_range_rtt_does_not_overflow_variance() {
+        let mut collector = RttCollector::new();
+        for rtt_ns in [u64::MAX, u64::MAX - 2] {
+            collector.record(RttSample {
+                seq: 0,
+                rtt_ns,
+                ttl: 64,
+            });
+        }
+        assert_eq!(collector.std_dev_ns(), Some(1.0));
+        assert_eq!(collector.jitter_ns(), Some(2));
+    }
+
     use super::*;
 
     #[test]
@@ -848,6 +938,7 @@ mod tests {
     #[test]
     fn test_stats_text_format() {
         let snap = StatsSnapshot {
+            quantile_precision: QuantilePrecision::default(),
             packets_sent: 10,
             packets_received: 8,
             packets_lost: 2,
@@ -872,6 +963,7 @@ mod tests {
     #[test]
     fn test_stats_json_format() {
         let snap = StatsSnapshot {
+            quantile_precision: QuantilePrecision::default(),
             packets_sent: 10,
             packets_received: 8,
             packets_lost: 2,
@@ -896,6 +988,7 @@ mod tests {
     #[test]
     fn test_stats_csv_format() {
         let snap = StatsSnapshot {
+            quantile_precision: QuantilePrecision::default(),
             packets_sent: 10,
             packets_received: 8,
             packets_lost: 2,
@@ -919,6 +1012,7 @@ mod tests {
 
     fn base_snapshot() -> StatsSnapshot {
         StatsSnapshot {
+            quantile_precision: QuantilePrecision::default(),
             packets_sent: 10,
             packets_received: 8,
             packets_lost: 2,
@@ -1080,6 +1174,7 @@ mod tests {
     #[test]
     fn test_stats_json_none_fields() {
         let snap = StatsSnapshot {
+            quantile_precision: QuantilePrecision::default(),
             packets_sent: 5,
             packets_received: 0,
             packets_lost: 5,
@@ -1175,7 +1270,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C11: RFC 3550 jitter and percentile edge cases.
+    // C11: Successive RTT variation and percentile edge cases.
 
     /// Empty collector: percentile_ns over any p must return None, never
     /// panic with a sort-empty / index-out-of-bounds.
@@ -1190,7 +1285,7 @@ mod tests {
         }
     }
 
-    /// Single sample: jitter and std_dev are undefined per RFC 3550. Our
+    /// Single sample: successive variation and std_dev need two samples. Our
     /// implementation returns None for both rather than 0 or NaN.
     #[test]
     fn test_single_sample_jitter_and_stddev_undefined() {
@@ -1200,7 +1295,11 @@ mod tests {
             rtt_ns: 5_000_000,
             ttl: 64,
         });
-        assert_eq!(c.jitter_ns(), None, "RFC 3550 jitter requires ≥ 2 samples");
+        assert_eq!(
+            c.jitter_ns(),
+            None,
+            "successive RTT variation requires ≥ 2 samples"
+        );
         assert_eq!(
             c.std_dev_ns(),
             None,
@@ -1228,8 +1327,8 @@ mod tests {
         );
     }
 
-    /// Negative-skew sequence: RTTs that decrease across the window. RFC
-    /// 3550 jitter uses |Δ| so the result must be positive and equal to
+    /// Negative-skew sequence: RTTs that decrease across the window. Mean
+    /// successive RTT variation uses |Δ| so the result must be positive and equal to
     /// the abs-difference mean.
     #[test]
     fn test_negative_skew_jitter_uses_abs_diff() {

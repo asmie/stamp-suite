@@ -124,3 +124,12 @@ and stateful/stateless accounting. It also verifies a valid base HMAC plus an
 invalid TLV HMAC still receives an I-flag response. The shared
 `tracked_processing_validates_before_any_session_mutation` unit test runs in
 pnet-only builds without requiring raw capture capability.
+
+
+Statistics unit tests cover exact-to-histogram promotion at 4096 observations,
+all magnitude bucket boundaries, sorted independent signed/unsigned quantile
+oracles, full-range variance and cancellation errors, fixed storage through one
+million samples, and cumulative long-run RTT/OWD summaries. BER history tests
+verify bounded retention, omission counters, lifetime totals and continued alarm
+transitions. `output_stream_test.rs` checks precision metadata and BER omission
+fields in CLI output, including periodic JSON/CSV.
