@@ -213,6 +213,38 @@ Typed Return Path/sub-TLV decoders and captured-header wrappers may still alloca
 Local measurement results and limits are recorded with
 [O06 evidence](reviews/2026-09-08/logs/optimization-o06/results.json).
 
+### Validated sender telemetry
+
+`validate_reflected_tlvs` returns `Result<TlvTelemetry, TlvRejection>`.
+The internal result in `src/sender/telemetry.rs` carries TLV/flag counts,
+`HmacStatus`, the first usable Access Report, any forward CE observation, and
+validated Micro-session IDs. Control decisions read those fields directly.
+`Display` formats packet diagnostics only when `-R` requests them; parsing does
+not build or search status strings. This is an internal Rust type, not a new
+JSON/CSV schema or CLI output stream.
+
+The validator counts flags across all canonical TLVs, including duplicate HMACs,
+and determines integrity before consuming values. U skips a TLV; M stops the
+remainder; any I flag or failed/unavailable present HMAC blocks all values.
+An HMAC with no key, unusable flags or missing covered bytes cannot acknowledge
+an Access Report or report forward CE. A locally invalid Access Report length
+adds a malformed diagnostic count and stops further value consumption. Required
+Micro-session IDs retain rejection and tentative-latch behavior; the caller
+commits learned identity only after SSID and pending-probe admission.
+
+`HmacStatus::Missing` explicitly retains the existing optional legacy-peer policy:
+when a configured key receives no HMAC TLV, ordinary optional Access Report/CoS
+values may still be used. Required Micro-session IDs and BER reject that case.
+A typed result does not imply cryptographic authentication of an unsigned reply.
+Base-packet validation remains in `process_response`, before these decisions.
+
+Diagnostic tokens retain their names but render once per decision in fixed order:
+HMAC, Access Report, CE, Micro-session ID, then U/M/I counts. Existing BER extraction
+still produces its separate typed `Observation` and performs its own integrity
+check; Direct Measurement/Follow-Up aggregation and burst accounting are later
+work. Allocation measurements and their limits are in
+[O07 evidence](reviews/2026-09-08/logs/optimization-o07/results.json).
+
 ## Operational Characteristics
 
 A few cross-cutting operational invariants are worth pinning down separately, since they affect every code path that touches the network or the optional subsystems.

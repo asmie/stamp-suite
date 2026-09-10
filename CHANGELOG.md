@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Return typed sender TLV telemetry for Access Report acknowledgements, forward
+  congestion and validated micro-session IDs; format diagnostics only for `-R`.
+  Remove control decisions based on status strings and transient formatting
+  allocations. Preserve summary schemas and diagnostic stream routing.
+- Block telemetry from present but unverifiable HMACs, and reject invalid-length
+  Access Report acknowledgements. Count flags across duplicate HMACs. Add mixed
+  flag/integrity and output-mode regressions; update stale sender citations.
+
 - Store each parsed TLV once, with indices preserving malformed and legal
   HMAC/padding wire order. Remove mirrored semantic updates, share flag/length
   validation, borrow BER patterns and stream HMAC input without concatenation.

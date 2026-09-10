@@ -28,6 +28,14 @@ BER padding and structural edits; `src/crypto.rs` varies streaming chunk sizes.
 Run the focused subset with `cargo test --locked --lib tlv::list`. Full suites
 also exercise live signing, BER, fallback and burst replies in both backend builds.
 
+Sender validation tests assert typed Access Report, CE, Micro-session and HMAC
+outcomes. `telemetry_flag_and_hmac_gates_match_decision_oracle` combines U/M/I
+boundaries, signed/unsigned and corrupt/unverifiable input for 44/112-byte bases.
+Other regressions cover missing HMAC key/bytes, invalid Access Report length,
+unusable HMAC flags, duplicate-HMAC counts and identical control decisions with
+printing on/off in text/JSON/CSV modes. Existing live output, session admission,
+Access Report, congestion and BER tests exercise integration.
+
 | File | Purpose | Default-run? |
 | --- | --- | --- |
 | `reply_queue_test.rs` | Real IPv4/open and IPv6/auth queue saturation, capacity recovery without sequence consumption, SIGINT/SIGTERM shutdown, immediate/deadline cancellation and graceful burst completion with counters. | yes, Linux nix |

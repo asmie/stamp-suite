@@ -1,3 +1,7 @@
+mod telemetry;
+
+use telemetry::{FlagCounts, HmacStatus, TlvTelemetry};
+
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
@@ -530,8 +534,7 @@ fn enforce_egress_mtu(extra_tlvs: &mut Vec<RawTlv>, mtu: usize, fixed_overhead: 
 /// Best-effort: TOS reception is optional plumbing (see
 /// [`extract_reply_ecn_from_cmsgs`]), so a failure here only disables the
 /// reverse-path half of the congestion response — forward-path detection
-/// via the reflected CoS TLV's EC2 field (the "CoS:CE" marker in
-/// `validate_reflected_tlvs`'s status string) is unaffected either way.
+/// via the validated CoS TLV's EC2 field is unaffected either way.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn enable_reply_tos_reception(fd: std::os::fd::RawFd, is_ipv6: bool) -> std::io::Result<()> {
     use nix::libc;
@@ -2049,7 +2052,7 @@ fn process_response(
         reflector_recv_ts,
         reflector_send_ts,
         sender_ttl,
-        tlv_info,
+        telemetry,
         reflected_ssid,
         reflector_error,
     ) = if use_auth {
@@ -2085,7 +2088,7 @@ fn process_response(
             }
 
             // Validate TLVs if present
-            let tlv_info = if ext_packet.has_tlvs() || want_msid {
+            let telemetry = if ext_packet.has_tlvs() || want_msid {
                 match validate_reflected_tlvs(
                     &ext_packet.tlvs,
                     data,
@@ -2099,7 +2102,7 @@ fn process_response(
                     #[cfg(feature = "metrics")]
                     ctx.metrics_enabled,
                 ) {
-                    Ok(info) => info,
+                    Ok(info) => Some(info),
                     Err(reason) => {
                         eprintln!("Discarding reflected packet seq={}: {}", seq_num, reason);
                         #[cfg(feature = "metrics")]
@@ -2130,7 +2133,7 @@ fn process_response(
                 recv_ts,
                 send_ts,
                 ttl,
-                tlv_info,
+                telemetry,
                 base.ssid,
                 base.error_estimate,
             )
@@ -2178,7 +2181,7 @@ fn process_response(
         let base = &ext_packet.base;
 
         // Validate TLVs if present
-        let tlv_info = if ext_packet.has_tlvs() || want_msid {
+        let telemetry = if ext_packet.has_tlvs() || want_msid {
             match validate_reflected_tlvs(
                 &ext_packet.tlvs,
                 data,
@@ -2192,7 +2195,7 @@ fn process_response(
                 #[cfg(feature = "metrics")]
                 ctx.metrics_enabled,
             ) {
-                Ok(info) => info,
+                Ok(info) => Some(info),
                 Err(reason) => {
                     eprintln!(
                         "Discarding reflected packet seq={}: {}",
@@ -2226,7 +2229,7 @@ fn process_response(
             base.receive_timestamp,
             base.timestamp,
             base.sess_sender_ttl,
-            tlv_info,
+            telemetry,
             base.ssid,
             base.error_estimate,
         )
@@ -2284,17 +2287,13 @@ fn process_response(
         }
     }
 
-    // RFC 8972 §4.6: "This timer MUST be disarmed upon reception of the
-    // reflected STAMP test packet that includes the Access Report TLV."
-    // `tlv_info`'s "AccessReport:ack" marker (set by `validate_reflected_tlvs`
-    // only when the TLV survived the same U/M/I/HMAC gating as every other
-    // reflected value) is the acknowledgment signal. This applies regardless
-    // of whether `seq_num` still has a `pending` entry — the ack is about the
-    // TLV's own delivery, not this specific packet's RTT accounting.
+    // RFC 8972 §4.6: a usable Access Report echo disarms its timer. This
+    // typed decision is independent of diagnostics and of pending RTT state.
+    // Session identity was checked above; U/M/I/HMAC gating happened in validation.
     if let Some(state) = ctx.access_report_state.as_mut() {
-        if tlv_info
-            .as_deref()
-            .is_some_and(|s| s.contains("AccessReport:ack"))
+        if telemetry
+            .as_ref()
+            .is_some_and(|info| info.access_report.is_some())
         {
             state.acknowledge();
         }
@@ -2307,16 +2306,12 @@ fn process_response(
     // Independent of whether this reply matched a `pending` entry — like
     // the Access Report ack above, this is about the congestion signal
     // carried by the reply, not this particular RTT sample. The forward-path
-    // signal comes from `tlv_info`'s "CoS:CE" marker (set by
-    // `validate_reflected_tlvs` only under the same integrity gate as every
-    // other reflected TLV value — RFC 8972 §4.8-17 — so a reply that failed
-    // TLV-HMAC verification or carries an I-flagged CoS TLV cannot be used
-    // to force a spurious backoff); the reverse-path signal is the reply's
-    // own on-wire ECN, which carries no TLV-level integrity to gate on (DSCP/
-    // ECN are mutable-in-transit IP header fields by design, same as the
-    // reflector's own treatment of the *incoming* test packet's ECN).
+    // signal comes from the validated `forward_ce` field, so failed or
+    // unavailable TLV integrity cannot force a spurious backoff. The reverse
+    // signal is the reply's mutable IP header ECN, which has no TLV integrity,
+    // like the reflector's treatment of the incoming test packet's ECN.
     if let Some(state) = ctx.congestion.as_mut() {
-        let forward_ce = tlv_info.as_deref().is_some_and(|s| s.contains("CoS:CE"));
+        let forward_ce = telemetry.as_ref().is_some_and(|info| info.forward_ce);
         let reverse_ce = reply_ecn == Some(0b11);
         if forward_ce || reverse_ce {
             state.controller.on_ce_observed();
@@ -2387,7 +2382,7 @@ fn process_response(
         }
 
         if ctx.print_stats {
-            let tlv_status = tlv_info
+            let tlv_status = telemetry
                 .as_ref()
                 .map_or(String::new(), |info| format!(" tlv=[{}]", info));
             let detail = format!(
@@ -2411,16 +2406,6 @@ fn process_response(
     }
 }
 
-/// Validates TLVs in a reflected packet and returns a status string.
-///
-/// Checks for:
-/// - Unrecognized TLV types (U-flag)
-/// - Malformed TLVs (M-flag)
-/// - Integrity failures (I-flag)
-/// - TLV HMAC verification (if key is provided)
-///
-/// The `base_size` parameter specifies the fixed base packet size (44 for unauthenticated,
-/// 112 for authenticated) to correctly locate TLV bytes in the packet data.
 /// Reason a reflected packet is rejected without updating sender state.
 ///
 /// Returned as the error variant of [`validate_reflected_tlvs`]. The caller
@@ -2487,6 +2472,9 @@ fn micro_session_request_tlv(sender_id: u16, reflector_id: Option<u16>) -> RawTl
     MicroSessionIdTlv::new(sender_id, reflector_id.unwrap_or(0)).to_raw()
 }
 
+/// Return typed decision fields after U/M/I/HMAC and required identifier checks.
+/// Wire bytes start at `base_size` (44 open, 112 authenticated). Diagnostic
+/// formatting is deferred to Display and never drives sender state changes.
 #[allow(clippy::too_many_arguments)]
 fn validate_reflected_tlvs(
     tlvs: &TlvList,
@@ -2496,91 +2484,49 @@ fn validate_reflected_tlvs(
     expected_sender_msid: Option<u16>,
     expected_reflector_msid: Option<u16>,
     latched_reflector_msid: &mut Option<u16>,
-    // RFC 8972 §4.6: when the sender is tracking an in-flight Access Report
-    // TLV, scan for its (gated) presence in the reply and surface it via the
-    // "AccessReport:ack" marker in the returned status string. `false` when
-    // `--access-report` was not set — the scan is skipped entirely, matching
-    // prior behaviour for every caller that doesn't use it.
+    // Decode these values only when their respective state machines are active.
     track_access_report: bool,
-    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: when the AIMD congestion
-    // controller is active, scan for a CE-marked (0b11) EC2 field in the
-    // reflected CoS TLV and surface it via the "CoS:CE" marker — gated by
-    // the same `integrity_ok` check as MSID/AccessReport below (RFC 8972
-    // §4.8-17: "HMAC MUST be verified before using any data in the
-    // included STAMP TLVs"), so a tampered or unverifiable reply cannot be
-    // used to force a spurious rate reduction. `false` when the controller
-    // is inactive.
     track_congestion: bool,
     #[cfg(feature = "metrics")] metrics_enabled: bool,
-) -> Result<Option<String>, TlvRejection> {
-    let mut status_parts = Vec::new();
-    let tlv_count = tlvs.len();
-
-    // Step 1 — tally per-TLV flags (U/M/I) up front. Integrity decisions are
-    // made BEFORE any reflected TLV value is consumed (RFC 8972 §4, §4.8-12:
-    // "HMAC MUST be verified before using any data in the included STAMP
-    // TLVs").
-    let mut unrecognized_count = 0;
-    let mut malformed_count = 0;
-    let mut integrity_failed_count = 0;
-    for tlv in tlvs.non_hmac_tlvs() {
-        if tlv.is_unrecognized() {
-            unrecognized_count += 1;
+) -> Result<TlvTelemetry, TlvRejection> {
+    let (unrecognized, malformed, integrity_failed) = tlvs.count_error_flags();
+    let hmac = match (hmac_key, tlvs.hmac_tlv()) {
+        (_, Some(_)) if tlvs.hmac_misplaced() => HmacStatus::Failed,
+        (_, Some(raw))
+            if raw.is_unrecognized() || raw.is_malformed() || raw.is_integrity_failed() =>
+        {
+            HmacStatus::Unverified
         }
-        if tlv.is_malformed() {
-            malformed_count += 1;
-        }
-        if tlv.is_integrity_failed() {
-            integrity_failed_count += 1;
-        }
-    }
-    if let Some(hmac_tlv) = tlvs.hmac_tlv() {
-        if hmac_tlv.is_integrity_failed() {
-            integrity_failed_count += 1;
-        }
-        if hmac_tlv.is_malformed() {
-            malformed_count += 1;
-        }
-    }
-
-    // Step 2 — TLV-HMAC verification result, computed before consuming any
-    // value. `hmac_failed` gates value consumption below (RFC 8972 §4.8-17).
-    let mut hmac_failed = false;
-    if let Some(key) = hmac_key {
-        if let Some(hmac_tlv) = tlvs.hmac_tlv() {
-            if hmac_tlv.is_integrity_failed() {
-                // Reflector echoed our HMAC with I-flag — it couldn't verify.
-                status_parts.push("HMAC:unverified".to_string());
-                hmac_failed = true;
-            } else if base_size >= 4 && data.len() > base_size {
-                // Use the fixed base_size to locate TLV bytes correctly
-                // (avoids fragility with trailing padding or non-TLV bytes).
-                let seq_bytes = &data[..4];
-                let tlv_bytes = &data[base_size..];
-                if tlvs.verify_hmac(key, seq_bytes, tlv_bytes).is_ok() {
-                    status_parts.push("HMAC:ok".to_string());
-                } else {
-                    status_parts.push("HMAC:fail".to_string());
-                    hmac_failed = true;
-                }
+        (Some(key), Some(_)) => {
+            if base_size < 4 || data.len() <= base_size {
+                HmacStatus::Unverified
+            } else if tlvs
+                .verify_hmac(key, &data[..4], &data[base_size..])
+                .is_ok()
+            {
+                HmacStatus::Verified
+            } else {
+                HmacStatus::Failed
             }
-        } else {
-            // No HMAC TLV in response (reflector may not support it).
-            status_parts.push("no-hmac".to_string());
         }
-    }
-
-    // Step 3 — consume reflected TLV values for decisions ONLY when the
-    // extension TLVs' integrity is intact:
-    //   RFC 8972 §4-19 / §4.8-16 — an I-flagged TLV ⇒ discard all TLVs, stop.
-    //   RFC 8972 §4.8-17        — TLV-HMAC failure ⇒ stop processing TLVs.
-    // Within the loop, per-TLV flags gate individual TLVs:
-    //   RFC 8972 §4-18 (M) — stop processing the remainder of the packet;
-    //   RFC 8972 §4-17 (U) — skip processing of that TLV.
-    // (Micro-session ID and the Access Report ack marker are the only
-    // reflected values the sender consumes today; logging raw bytes is
-    // fine, but they MUST NOT influence session binding.)
-    let integrity_ok = !hmac_failed && integrity_failed_count == 0;
+        (None, Some(_)) => HmacStatus::Unverified,
+        (Some(_), None) => HmacStatus::Missing,
+        (None, None) => HmacStatus::NotRequested,
+    };
+    let mut telemetry = TlvTelemetry {
+        tlv_count: tlvs.len(),
+        flags: FlagCounts {
+            unrecognized,
+            malformed,
+            integrity_failed,
+        },
+        hmac,
+        ..TlvTelemetry::default()
+    };
+    // Integrity gates all values before U skips a TLV or M stops the remainder.
+    // Missing optional HMAC retains the legacy-peer policy; required MSID below
+    // still rejects it. A present but unverifiable HMAC never permits values.
+    let integrity_ok = hmac.permits_optional_values() && integrity_failed == 0;
     let want_msid = expected_sender_msid.is_some()
         || expected_reflector_msid.is_some()
         || latched_reflector_msid.is_some();
@@ -2619,7 +2565,15 @@ fn validate_reflected_tlvs(
                 // above; I-flagged/TLV-HMAC-failed replies are excluded by
                 // the surrounding `integrity_ok` gate) is the acknowledgment
                 // signal `process_response` looks for.
-                status_parts.push("AccessReport:ack".to_string());
+                match AccessReportTlv::from_raw(raw) {
+                    Ok(report) => {
+                        telemetry.access_report.get_or_insert(report);
+                    }
+                    Err(_) => {
+                        telemetry.flags.malformed += 1;
+                        break;
+                    }
+                }
             }
             if track_congestion && raw.tlv_type == TlvType::ClassOfService {
                 // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: EC2 = 0b11 signals
@@ -2628,7 +2582,7 @@ fn validate_reflected_tlvs(
                 // reflected value consumed above.
                 if let Ok(cos) = ClassOfServiceTlv::from_raw(raw) {
                     if cos.ecn2 == 0b11 {
-                        status_parts.push("CoS:CE".to_string());
+                        telemetry.forward_ce = true;
                     }
                 }
             }
@@ -2680,10 +2634,7 @@ fn validate_reflected_tlvs(
                     next_reflector_msid = Some(parsed.reflector_micro_session_id);
                 }
                 validated_msid = true;
-                status_parts.push(format!(
-                    "MSID:ok(reflector={})",
-                    parsed.reflector_micro_session_id
-                ));
+                telemetry.micro_session = Some(parsed);
             }
         }
     }
@@ -2693,44 +2644,21 @@ fn validate_reflected_tlvs(
     }
     *latched_reflector_msid = next_reflector_msid;
 
-    // Step 4 — report flagged TLVs and record metrics.
-    if unrecognized_count > 0 {
-        status_parts.push(format!("{}U", unrecognized_count));
-        #[cfg(feature = "metrics")]
-        if metrics_enabled {
-            for _ in 0..unrecognized_count {
-                crate::metrics::sender_metrics::record_tlv_error("U");
+    #[cfg(feature = "metrics")]
+    if metrics_enabled {
+        for (count, flag) in [
+            (telemetry.flags.unrecognized, "U"),
+            (telemetry.flags.malformed, "M"),
+            (telemetry.flags.integrity_failed, "I"),
+        ] {
+            for _ in 0..count {
+                crate::metrics::sender_metrics::record_tlv_error(flag);
             }
         }
     }
-    if malformed_count > 0 {
-        status_parts.push(format!("{}M", malformed_count));
-        #[cfg(feature = "metrics")]
-        if metrics_enabled {
-            for _ in 0..malformed_count {
-                crate::metrics::sender_metrics::record_tlv_error("M");
-            }
-        }
-    }
-    if integrity_failed_count > 0 {
-        status_parts.push(format!("{}I", integrity_failed_count));
-        #[cfg(feature = "metrics")]
-        if metrics_enabled {
-            for _ in 0..integrity_failed_count {
-                crate::metrics::sender_metrics::record_tlv_error("I");
-            }
-        }
-    }
-
-    Ok(if status_parts.is_empty() {
-        Some(format!("{} TLVs", tlv_count))
-    } else {
-        Some(format!("{} TLVs, {}", tlv_count, status_parts.join(", ")))
-    })
+    Ok(telemetry)
 }
 
-/// Parses an ASCII hex string (with optional `0x` prefix) into a byte vector.
-/// Empty input is rejected because an empty BER pattern is meaningless.
 /// Builds the Reflected Test Packet Control TLV
 /// (draft-ietf-ippm-asymmetrical-pkts-14 §3) when the configuration requests
 /// asymmetric replies (count > 1) and/or attaches an IPv6 Extension Header
@@ -2789,6 +2717,8 @@ fn scaled_reflected_control_tlv(
     build_reflected_control_tlv(length, count, scaled_ns, no_ext_hdr).map(|c| c.to_raw())
 }
 
+/// Parses an ASCII hex string (with optional `0x` prefix) into a byte vector.
+/// Empty input is rejected because an empty BER pattern is meaningless.
 fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
     crate::ber::parse_pattern(s)
 }
@@ -4035,10 +3965,9 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("matching MSID must return Ok")
-        .expect("status produced");
+        .expect("matching MSID must return Ok");
 
-        assert!(status.contains("MSID:ok"), "got: {}", status);
+        assert!(status.micro_session.is_some(), "got: {}", status);
     }
 
     #[test]
@@ -4127,10 +4056,9 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("no MSID binding requested → accept")
-        .expect("status produced");
+        .expect("no MSID binding requested → accept");
 
-        assert!(!status.contains("MSID"));
+        assert!(!status.micro_session.is_some());
     }
 
     #[test]
@@ -4215,9 +4143,15 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("reflector MSID match must accept")
-        .expect("status produced");
-        assert!(status.contains("MSID:ok(reflector=34)"), "got: {}", status);
+        .expect("reflector MSID match must accept");
+        assert!(
+            status
+                .micro_session
+                .as_ref()
+                .is_some_and(|msid| msid.reflector_micro_session_id == 34),
+            "got: {}",
+            status
+        );
         // Pre-known configuration takes precedence and must never be
         // superseded by a first-seen value: the zero-config latch stays
         // untouched (RFC 9534 §3.2-11/-12).
@@ -4253,9 +4187,8 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("first reply must be accepted")
-        .expect("status produced");
-        assert!(status1.contains("MSID:ok"), "got: {}", status1);
+        .expect("first reply must be accepted");
+        assert!(status1.micro_session.is_some(), "got: {}", status1);
         assert_eq!(
             latched,
             Some(0x22),
@@ -4279,9 +4212,8 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("second reply with the same reflector ID must also be accepted")
-        .expect("status produced");
-        assert!(status2.contains("MSID:ok"), "got: {}", status2);
+        .expect("second reply with the same reflector ID must also be accepted");
+        assert!(status2.micro_session.is_some(), "got: {}", status2);
         assert_eq!(latched, Some(0x22), "latch must remain unchanged");
     }
 
@@ -4495,6 +4427,249 @@ mod tests {
         assert_eq!(status, TlvRejection::MsidUnavailable);
     }
 
+    proptest::proptest! {
+        #[test]
+        fn telemetry_flag_and_hmac_gates_match_decision_oracle(
+            entries in proptest::collection::vec((proptest::prelude::any::<bool>(), 0u8..8), 0..20),
+            signed in proptest::prelude::any::<bool>(),
+            with_key in proptest::prelude::any::<bool>(),
+            corrupt in proptest::prelude::any::<bool>(),
+            auth in proptest::prelude::any::<bool>(),
+        ) {
+            let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+            let mut tlvs = TlvList::new();
+            let mut access = false;
+            let mut ce = false;
+            let mut halted = false;
+            let mut flag_counts = [0; 3];
+            for &(is_access, flags) in &entries {
+                let mut raw = if is_access { AccessReportTlv::new(1, 1).to_raw() }
+                    else { ClassOfServiceTlv { dscp1: 0, ecn1: 1, dscp2: 0, ecn2: 3, rpd: 0, rpe: 0 }.to_raw() };
+                raw.flags = crate::tlv::TlvFlags::default();
+                raw.flags.unrecognized = flags & 1 != 0;
+                raw.flags.malformed = flags & 2 != 0;
+                raw.flags.integrity_failed = flags & 4 != 0;
+                for (i, count) in flag_counts.iter_mut().enumerate() {
+                    *count += usize::from(flags & (1 << i) != 0);
+                }
+                halted |= flags & 2 != 0;
+                if !halted && flags & 1 == 0 {
+                    access |= is_access;
+                    ce |= !is_access;
+                }
+                tlvs.push(raw).unwrap();
+            }
+            // Formatting-looking payload cannot create a control decision.
+            let mut opaque = RawTlv::new(TlvType::Unknown(253), b"AccessReport:ack, CoS:CE".to_vec());
+            opaque.clear_reflector_flags();
+            tlvs.push(opaque).unwrap();
+            if signed { tlvs.set_hmac_response(&key, &[0; 4]); }
+            let base = if auth { 112 } else { 44 };
+            let mut data = vec![0; base];
+            tlvs.write_to(&mut data);
+            if signed && corrupt { *data.last_mut().unwrap() ^= 1; }
+            let parsed = TlvList::parse_lenient(&data[base..]).0;
+            let report = validate_reflected_tlvs(
+                &parsed, &data, base, with_key.then_some(&key), None, None,
+                &mut None, true, true,
+                #[cfg(feature = "metrics")]
+                false,
+            ).unwrap();
+            let usable = flag_counts[2] == 0 && (!signed || (with_key && !corrupt));
+            proptest::prop_assert_eq!(report.access_report.is_some(), usable && access);
+            proptest::prop_assert_eq!(report.forward_ce, usable && ce);
+            proptest::prop_assert_eq!(report.flags.unrecognized, flag_counts[0]);
+            proptest::prop_assert_eq!(report.flags.malformed, flag_counts[1]);
+            proptest::prop_assert_eq!(report.flags.integrity_failed, flag_counts[2]);
+            proptest::prop_assert!(report.micro_session.is_none());
+        }
+    }
+
+    #[test]
+    fn telemetry_unusable_hmac_flags_block_all_decisions() {
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        for flag in [0x80, 0x40, 0x20] {
+            let mut tlvs = TlvList::new();
+            let mut access = AccessReportTlv::new(1, 1).to_raw();
+            access.clear_reflector_flags();
+            tlvs.push(access).unwrap();
+            tlvs.set_hmac_response(&key, &[0; 4]);
+            let mut data = vec![0; 44];
+            tlvs.write_to(&mut data);
+            let at = data.len() - 20;
+            data[at] = flag; // HMAC's own flags are outside its covered prefix.
+            let parsed = TlvList::parse_lenient(&data[44..]).0;
+            let report = validate_reflected_tlvs(
+                &parsed,
+                &data,
+                44,
+                Some(&key),
+                None,
+                None,
+                &mut None,
+                true,
+                true,
+                #[cfg(feature = "metrics")]
+                false,
+            )
+            .unwrap();
+            assert_eq!(report.hmac, HmacStatus::Unverified);
+            assert!(report.access_report.is_none());
+            assert!(!report.forward_ce);
+        }
+    }
+
+    #[test]
+    fn telemetry_duplicate_hmacs_include_every_integrity_flag() {
+        let mut bytes = vec![0x20, 8, 0, 16];
+        bytes.extend_from_slice(&[0; 16]);
+        bytes.extend_from_slice(&[0, 8, 0, 16]);
+        bytes.extend_from_slice(&[0; 16]);
+        let tlvs = TlvList::parse_lenient(&bytes).0;
+        let report = validate_reflected_tlvs(
+            &tlvs,
+            &[0; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            true,
+            true,
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.tlv_count, 2);
+        assert_eq!(report.flags.integrity_failed, 1);
+        assert_eq!(report.hmac, HmacStatus::Failed);
+        assert!(report.access_report.is_none());
+    }
+
+    #[test]
+    fn telemetry_control_decisions_do_not_depend_on_formatting() {
+        for print in [false, true] {
+            for output in [
+                crate::stats::OutputFormat::Text,
+                crate::stats::OutputFormat::Json,
+                crate::stats::OutputFormat::Csv,
+            ] {
+                let mut tlvs = TlvList::new();
+                for mut raw in [
+                    AccessReportTlv::new(1, 1).to_raw(),
+                    ClassOfServiceTlv {
+                        dscp1: 0,
+                        ecn1: 1,
+                        dscp2: 0,
+                        ecn2: 3,
+                        rpd: 0,
+                        rpe: 0,
+                    }
+                    .to_raw(),
+                ] {
+                    raw.clear_reflector_flags();
+                    tlvs.push(raw).unwrap();
+                }
+                let mut data = vec![0; 44];
+                tlvs.write_to(&mut data);
+                let mut pending = HashMap::new();
+                pending.insert(
+                    0,
+                    PendingPacket {
+                        send_time: Instant::now(),
+                        send_timestamp: 0,
+                    },
+                );
+                let mut rtt = RttCollector::new();
+                let mut owd = OwdCollector::new();
+                let mut received = 0;
+                let mut latched = None;
+                let mut zero = false;
+                let mut congestion = CongestionState::new(congestion_test_params());
+                let mut access = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+                access.tick(Instant::now());
+                let mut ctx = congestion_process_response_ctx(
+                    &mut pending,
+                    &mut rtt,
+                    &mut owd,
+                    &mut received,
+                    &mut latched,
+                    Some(&mut congestion),
+                    &mut zero,
+                );
+                ctx.access_report_state = Some(&mut access);
+                ctx.print_stats = print;
+                ctx.output_format = output;
+                process_response(&data, false, true, ClockFormat::NTP, None, None, &mut ctx);
+                assert_eq!(received, 1);
+                assert!(pending.is_empty());
+                assert_eq!(access.outcome(), AccessReportOutcome::Acknowledged);
+                assert_eq!(congestion.controller.stats().ce_observations, 1);
+                assert_eq!(
+                    congestion.controller.current_interval(),
+                    Duration::from_millis(200)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn telemetry_missing_hmac_bytes_cannot_acknowledge() {
+        assert_unverifiable_hmac_cannot_acknowledge(true);
+    }
+
+    #[test]
+    fn telemetry_missing_hmac_key_cannot_acknowledge() {
+        assert_unverifiable_hmac_cannot_acknowledge(false);
+    }
+
+    fn assert_unverifiable_hmac_cannot_acknowledge(with_key: bool) {
+        let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+        let mut tlvs = TlvList::new();
+        let mut access = AccessReportTlv::new(1, 1).to_raw();
+        access.clear_reflector_flags();
+        tlvs.push(access).unwrap();
+        tlvs.set_hmac_response(&key, &[0; 4]);
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0; 44],
+            44,
+            with_key.then_some(&key),
+            None,
+            None,
+            &mut None,
+            true,
+            false,
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .unwrap();
+        assert!(!status.access_report.is_some(), "{status}");
+    }
+
+    #[test]
+    fn telemetry_bad_access_report_length_cannot_acknowledge() {
+        let mut tlvs = TlvList::new();
+        let mut raw = RawTlv::new(TlvType::AccessReport, vec![0x10, 1]);
+        raw.clear_reflector_flags();
+        tlvs.push(raw).unwrap();
+        let status = validate_reflected_tlvs(
+            &tlvs,
+            &[0; 44],
+            44,
+            None,
+            None,
+            None,
+            &mut None,
+            true,
+            false,
+            #[cfg(feature = "metrics")]
+            false,
+        )
+        .unwrap();
+        assert!(!status.access_report.is_some(), "{status}");
+    }
+
     #[test]
     fn test_validate_reflected_tlvs_detects_access_report_ack() {
         let mut raw = AccessReportTlv::new(1, 1).to_raw();
@@ -4515,17 +4690,16 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("clean Access Report TLV must return Ok")
-        .expect("status produced");
+        .expect("clean Access Report TLV must return Ok");
 
-        assert!(status.contains("AccessReport:ack"), "got: {}", status);
+        assert!(status.access_report.is_some(), "got: {}", status);
     }
 
     #[test]
     fn test_validate_reflected_tlvs_ignores_access_report_when_not_tracking() {
         // Backward compatibility: when the sender never requested tracking
         // (e.g. `--access-report` was not set), the presence of an Access
-        // Report TLV must not spuriously affect the status string.
+        // Report TLV must not produce an acknowledgement decision.
         let mut raw = AccessReportTlv::new(1, 1).to_raw();
         raw.clear_reflector_flags();
         let mut tlvs = TlvList::new();
@@ -4544,10 +4718,9 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok regardless of tracking")
-        .expect("status produced");
+        .expect("Ok regardless of tracking");
 
-        assert!(!status.contains("AccessReport"), "got: {}", status);
+        assert!(!status.access_report.is_some(), "got: {}", status);
     }
 
     #[test]
@@ -4572,15 +4745,14 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok even though unrecognized")
-        .expect("status produced");
+        .expect("Ok even though unrecognized");
 
         assert!(
-            !status.contains("AccessReport:ack"),
+            !status.access_report.is_some(),
             "U-flagged TLV must not count as an ack: {}",
             status
         );
-        assert!(status.contains("1U"), "got: {}", status);
+        assert!(status.flags.unrecognized == 1, "got: {}", status);
     }
 
     #[test]
@@ -4605,15 +4777,14 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok even though integrity-failed")
-        .expect("status produced");
+        .expect("Ok even though integrity-failed");
 
         assert!(
-            !status.contains("AccessReport:ack"),
+            !status.access_report.is_some(),
             "I-flagged TLV must not count as an ack: {}",
             status
         );
-        assert!(status.contains("1I"), "got: {}", status);
+        assert!(status.flags.integrity_failed == 1, "got: {}", status);
     }
 
     #[test]
@@ -4643,11 +4814,10 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok — M just halts the scan, doesn't reject")
-        .expect("status produced");
+        .expect("Ok — M just halts the scan, doesn't reject");
 
         assert!(
-            !status.contains("AccessReport:ack"),
+            !status.access_report.is_some(),
             "M-flag must halt the scan before the later Access Report TLV: {}",
             status
         );
@@ -4680,11 +4850,10 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok")
-        .expect("status produced");
+        .expect("Ok");
 
-        assert!(status.contains("MSID:ok"), "got: {}", status);
-        assert!(status.contains("AccessReport:ack"), "got: {}", status);
+        assert!(status.micro_session.is_some(), "got: {}", status);
+        assert!(status.access_report.is_some(), "got: {}", status);
     }
 
     // --- validate_reflected_tlvs: CoS EC2 CE detection
@@ -4718,10 +4887,9 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("clean CE-marked CoS TLV must return Ok")
-        .expect("status produced");
+        .expect("clean CE-marked CoS TLV must return Ok");
 
-        assert!(status.contains("CoS:CE"), "got: {}", status);
+        assert!(status.forward_ce, "got: {}", status);
     }
 
     #[test]
@@ -4756,10 +4924,9 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok regardless of tracking")
-        .expect("status produced");
+        .expect("Ok regardless of tracking");
 
-        assert!(!status.contains("CoS:CE"), "got: {}", status);
+        assert!(!status.forward_ce, "got: {}", status);
     }
 
     #[test]
@@ -4791,10 +4958,9 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok")
-        .expect("status produced");
+        .expect("Ok");
 
-        assert!(!status.contains("CoS:CE"), "got: {}", status);
+        assert!(!status.forward_ce, "got: {}", status);
     }
 
     #[test]
@@ -4827,11 +4993,10 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok even though unrecognized")
-        .expect("status produced");
+        .expect("Ok even though unrecognized");
 
         assert!(
-            !status.contains("CoS:CE"),
+            !status.forward_ce,
             "U-flagged TLV must not count as a CE signal: {}",
             status
         );
@@ -4868,11 +5033,10 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok even though integrity-failed")
-        .expect("status produced");
+        .expect("Ok even though integrity-failed");
 
         assert!(
-            !status.contains("CoS:CE"),
+            !status.forward_ce,
             "I-flagged TLV must not count as a CE signal: {}",
             status
         );
@@ -4913,11 +5077,10 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("Ok — M just halts the scan, doesn't reject")
-        .expect("status produced");
+        .expect("Ok — M just halts the scan, doesn't reject");
 
         assert!(
-            !status.contains("CoS:CE"),
+            !status.forward_ce,
             "M-flag must halt the scan before the later CoS TLV: {}",
             status
         );
@@ -4945,7 +5108,8 @@ mod tests {
         cos.clear_reflector_flags();
         tlvs.push(cos).unwrap();
         // A bogus HMAC TLV value that will never verify against the data.
-        tlvs.push(crate::tlv::RawTlv::new(
+        tlvs.push(crate::tlv::RawTlv::with_flags(
+            crate::tlv::TlvFlags::default(),
             crate::tlv::TlvType::Hmac,
             vec![0u8; 16],
         ))
@@ -4965,12 +5129,11 @@ mod tests {
             #[cfg(feature = "metrics")]
             false,
         )
-        .expect("TLV-HMAC failure must stop TLV processing → accept, not reject")
-        .expect("status produced");
+        .expect("TLV-HMAC failure must stop TLV processing → accept, not reject");
 
-        assert!(status.contains("HMAC:fail"), "got: {}", status);
+        assert!(status.hmac == HmacStatus::Failed, "got: {}", status);
         assert!(
-            !status.contains("CoS:CE"),
+            !status.forward_ce,
             "forged CE signal must be ignored on HMAC failure: {}",
             status
         );

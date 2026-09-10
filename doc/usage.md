@@ -545,6 +545,19 @@ A matching reply can still complete the pending probe. A zero reply uses
 Continuing after a zero reply does not disable checks on later nonzero replies.
 Omitting `--ssid`, or setting it to `0`, leaves SSID validation inactive.
 
+Access Report acknowledgement and ECN congestion control operate independently
+of `-R`, logging and output format. An unusable present TLV HMAC (missing key,
+invalid flags or failed verification) blocks reflected TLV control values;
+invalid-length Access Reports cannot disarm the timer. U skips a TLV, M stops the
+remainder, and I blocks all values. An absent HMAC retains the optional legacy-peer
+policy; required Micro-session IDs and BER have stricter requirements.
+
+With `-R`, diagnostic TLV tokens appear in fixed order (HMAC, Access Report, CE,
+Micro-session ID, U/M/I counts), with each decision shown once even if repeated
+TLVs support it. Text details use stdout; JSON/CSV details use stderr. Summary
+schemas are unchanged. `HMAC:unverified` distinguishes a present HMAC that could
+not be verified from `HMAC:fail` and the absent-HMAC `no-hmac` diagnostic.
+
 **Note:** `--access-report`'s retransmission procedure (RFC 8972 §4.6) can extend the sender's total run time past what `--count`/`--send-delay` alone would predict. If the reflector never echoes the Access Report TLV back, the sender keeps retransmitting and waiting — independently of the main send loop — until the retry budget (`access-report-timeout * (1 + access-report-retries)`, up to 15 seconds at the defaults of 3s/4 retries) is exhausted, at which point the procedure aborts and the run ends (the measurement itself is unaffected either way). A run using `--count 1` with `--access-report` set will therefore take at least as long as that retry budget whenever the reflector doesn't support (or drops) the TLV.
 
 **Note (AIMD congestion response, draft-ietf-ippm-stamp-cos-ecn-01 §3.4):** whenever `--cos` is combined with `--ecn 1` (ECT1) or `--ecn 2` (ECT0), the sender activates an AIMD controller that dictates the inter-packet send interval instead of a fixed `--send-delay`. On each CE (Congestion Experienced) observation the interval is multiplied by `--ecn-backoff-factor` (capped at `--ecn-max-delay`); after each reply that was *not* CE-marked, the interval shrinks by `--ecn-recovery-step` back toward `--send-delay` (never faster). CE is detected from either direction the draft's §3.4 MUSTs cover: the reflected CoS TLV's EC2 field (forward path, sender→reflector) and the reply packet's own on-wire ECN (reverse path, reflector→sender). Reading the reply's on-wire ECN requires `IP_RECVTOS`/`IPV6_RECVTCLASS` support and is available on **Linux and macOS only**; on other platforms only the forward-path (EC2) direction is detected — a startup warning is logged. When a Reflected Test Packet Control TLV is also requested (`--reflected-control-count` > 1 or `--reflected-control-no-ext-hdr`), its `interval_nanoseconds` field is scaled by the same controller for future packets (§3.4-3). There is no flag to disable this response while ECN measurement is requested — the draft's MUST is unconditional in that case. Congestion-response counters (CE replies seen, backoffs applied, current/peak interval) appear in the stats output; see `--print-stats`/`--output-format`.
