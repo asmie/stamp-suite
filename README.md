@@ -244,6 +244,7 @@ contract and security model: [doc/control-plane.md](doc/control-plane.md).
 
 - **[doc/usage.md](doc/usage.md)** — configuration file format, supported TOML keys, validation messages, full CLI flag reference.
 - **[doc/architecture.md](doc/architecture.md)** — module layout, receiver backends, packet processing pipeline, full TLV reference, Prometheus and SNMP subsystems.
+- **[doc/benchmarks.md](doc/benchmarks.md)** — reproducible live UDP throughput/CPU measurements and in-process regression benchmarks.
 - **[doc/control-plane.md](doc/control-plane.md)** — runtime control-plane REST API: endpoints, concurrency model, security model.
 - **[doc/security.md](doc/security.md)** — threat model, HMAC and TLV integrity, key sourcing, file permissions, the `stamp` system user, systemd hardening, capability model, vulnerability reporting.
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add a Linux live UDP benchmark with paced traffic, validated reply/loss
+  accounting, load and idle CPU samples, post-idle probes, repeated trials and
+  reproducibility metadata. Cover IPv4/IPv6, open/authenticated and stateful
+  baseline workloads; document generator limits and remove unsourced speed figures.
+
 ### Changed
 
 - Reuse reflector transport metadata and SRH storage across burst copies.

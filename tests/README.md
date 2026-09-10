@@ -7,6 +7,12 @@ this file documents the opt-in invocations.
 
 ## Files
 
+Performance measurements are documented in [benchmarks.md](../doc/benchmarks.md).
+The live UDP example measures release-build throughput and process CPU;
+`cargo test --locked --example live_udp_bench` checks its reply validation and
+duplicate/reordering accounting. The `idle_cpu_test` regression below separately
+enforces an idle CPU ceiling and verifies resumed reception.
+
 | File | Purpose | Default-run? |
 | --- | --- | --- |
 | `output_stream_test.rs` | CLI stdout parsing with default/JSON logs, packet details, periodic reports, BER CSV quoting, reflector shutdown, quiet logging, schema and validation errors. | yes, Linux nix |

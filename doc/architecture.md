@@ -757,12 +757,15 @@ Bench cases:
   verification on the success path.
 - `auth_full_chain` — authenticated mode + the same TLV chain.
 
-Reference numbers on a 2024-era x86_64 laptop (Intel i7, single core,
-release build): `unauth_no_tlvs` ≈ 100 ns/op (~10 Mpps single-threaded
-parse-and-assemble); `auth_no_tlvs` ≈ 1.5–2 µs/op dominated by HMAC.
-Real numbers vary with CPU, OpenSSL/RustCrypto build, and tokio
-runtime overhead in the receive path. Treat the benches as a
-regression signal, not as headline marketing figures.
+`examples/live_udp_bench.rs` measures the complete reflector over real loopback
+UDP, including achieved send/receive rates, loss, generator/reflector CPU, and
+idle CPU before and after load. It supports IPv4/IPv6, authentication and stateful
+sequencing, records repeated trials and binary/environment metadata, and checks
+that reception resumes after idle. See [benchmarks.md](benchmarks.md) for release
+build commands, accounting definitions and measurement limits. In-process
+operations/sec and generator-limited loopback results are not NIC capacity
+measurements. Performance claims require recorded measurements for the actual
+build and environment.
 
 ## See Also
 

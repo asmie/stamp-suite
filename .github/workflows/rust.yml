@@ -120,6 +120,9 @@ jobs:
           key: test-${{ matrix.os }}-${{ matrix.rust }}
       - name: Run tests
         run: cargo test --locked --verbose ${{ matrix.features }}
+      - name: Check live benchmark accounting
+        if: runner.os == 'Linux'
+        run: cargo test --locked --example live_udp_bench ${{ matrix.features }}
 
   # Best-effort, informational Windows test coverage. NOT part of the
   # gating `test` matrix above -- see the comment on that job for why.

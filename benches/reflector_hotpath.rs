@@ -4,8 +4,9 @@
 //! pipeline (no real UDP) so the benches measure parse + HMAC + TLV
 //! processing + response assembly without the kernel scheduler in the
 //! loop. That isolates the cost we control from socket-level noise; the
-//! integration tests under `tests/loopback*` already cover the
-//! kernel-level path.
+//! integration tests under `tests/loopback*` cover kernel-level correctness.
+//! For live UDP throughput and process CPU measurements, see
+//! `examples/live_udp_bench.rs` and `doc/benchmarks.md`.
 //!
 //! Benches:
 //! - `unauth_no_tlvs` — baseline 44-byte unauth packet, no TLVs.
