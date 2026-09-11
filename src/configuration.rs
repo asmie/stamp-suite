@@ -1214,7 +1214,7 @@ impl Configuration {
                 .map_err(|e| {
                     ConfigurationError::InvalidConfiguration(format!("Invalid --ber-pattern: {e}"))
                 })?;
-            if self.ber_padding_size == 0 || self.ber_padding_size % pattern.len() != 0 {
+            if self.ber_padding_size == 0 || !self.ber_padding_size.is_multiple_of(pattern.len()) {
                 return Err(ConfigurationError::InvalidConfiguration(
                     "ber_padding_size must be positive and a multiple of the pattern length".into(),
                 ));

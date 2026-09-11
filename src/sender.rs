@@ -1,7 +1,7 @@
 pub(crate) mod measurements;
 mod telemetry;
 
-use measurements::{Measurements, ReplyKey};
+use measurements::{Measurements, ReplyKey, ReplyObservation};
 
 use telemetry::{FlagCounts, HmacStatus, TlvTelemetry};
 
@@ -2341,19 +2341,20 @@ fn process_response(
         };
         let reference = chrono::Utc::now().timestamp();
         let t4_ns = timestamp_to_unix_nanos(sender_recv_ts, clock_source, reference);
-        measurements.observe(
+        measurements.observe(ReplyObservation {
             key,
-            recv_time.duration_since(probe.send_time).as_nanos() as u64,
+            rtt_ns: recv_time.duration_since(probe.send_time).as_nanos() as u64,
             t4_ns,
-            ErrorEstimate::from_wire(reflector_error).clock_format(),
+            format: ErrorEstimate::from_wire(reflector_error).clock_format(),
             reference,
-            ctx.reflector_utc_offset,
+            offset: ctx.reflector_utc_offset,
             ordinal,
-            telemetry.as_ref().and_then(|t| t.direct_measurement),
-            telemetry.as_ref().and_then(|t| t.follow_up),
-            ctx.local_error_estimate
+            dm: telemetry.as_ref().and_then(|t| t.direct_measurement),
+            follow: telemetry.as_ref().and_then(|t| t.follow_up),
+            quality: ctx
+                .local_error_estimate
                 .map(|e| (e, ErrorEstimate::from_wire(reflector_error))),
-        );
+        });
     }
 
     // RFC 8972 §4.6: a usable Access Report echo disarms its timer. This

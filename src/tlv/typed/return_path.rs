@@ -255,12 +255,11 @@ impl ReturnPathTlv {
         }
         Some(
             sub.value
-                .chunks_exact(16)
-                .map(|chunk| {
-                    let mut octets = [0u8; 16];
-                    octets.copy_from_slice(chunk);
-                    Ipv6Addr::from(octets)
-                })
+                .as_chunks::<16>()
+                .0
+                .iter()
+                .copied()
+                .map(Ipv6Addr::from)
                 .collect(),
         )
     }

@@ -231,6 +231,20 @@ impl Direct {
     }
 }
 
+/// Validated timing and telemetry for one accepted reply.
+pub(super) struct ReplyObservation {
+    pub key: ReplyKey,
+    pub rtt_ns: u64,
+    pub t4_ns: Option<i128>,
+    pub format: ClockFormat,
+    pub reference: i64,
+    pub offset: i32,
+    pub ordinal: Option<u32>,
+    pub dm: Option<DirectMeasurementTlv>,
+    pub follow: Option<FollowUpTelemetryTlv>,
+    pub quality: Option<(ErrorEstimate, ErrorEstimate)>,
+}
+
 pub(super) struct Measurements {
     copies: u16,
     satisfied: u64,
@@ -364,19 +378,19 @@ impl Measurements {
         self.reply_order.push_back(key);
         Some(result)
     }
-    pub(super) fn observe(
-        &mut self,
-        key: ReplyKey,
-        rtt_ns: u64,
-        t4_ns: Option<i128>,
-        format: ClockFormat,
-        reference: i64,
-        offset: i32,
-        ordinal: Option<u32>,
-        dm: Option<DirectMeasurementTlv>,
-        follow: Option<FollowUpTelemetryTlv>,
-        quality: Option<(ErrorEstimate, ErrorEstimate)>,
-    ) {
+    pub(super) fn observe(&mut self, observation: ReplyObservation) {
+        let ReplyObservation {
+            key,
+            rtt_ns,
+            t4_ns,
+            format,
+            reference,
+            offset,
+            ordinal,
+            dm,
+            follow,
+            quality,
+        } = observation;
         self.rtt.record(i128::from(rtt_ns));
         if let Some(dm) = dm {
             if let Some(ordinal) = ordinal {
@@ -474,18 +488,18 @@ mod tests {
         }
     }
     fn observe(m: &mut Measurements, k: ReplyKey, follow: Option<FollowUpTelemetryTlv>) {
-        m.observe(
-            k,
-            1_000_000,
-            Some(10_000_000_000),
-            ClockFormat::PTP,
-            10,
-            0,
-            Some(k.sender + 1),
-            None,
+        m.observe(ReplyObservation {
+            key: k,
+            rtt_ns: 1_000_000,
+            t4_ns: Some(10_000_000_000),
+            format: ClockFormat::PTP,
+            reference: 10,
+            offset: 0,
+            ordinal: Some(k.sender + 1),
+            dm: None,
             follow,
-            None,
-        );
+            quality: None,
+        });
     }
     fn dm(s: u32, rx: u32, tx: u32) -> DirectMeasurementTlv {
         DirectMeasurementTlv {
@@ -617,40 +631,40 @@ mod tests {
         m.sent(1, p, 2);
         let a = key(0, 10, 1);
         m.accept(a, Some(p)).unwrap();
-        m.observe(
-            a,
-            1,
-            Some(10_000_000_000),
-            ClockFormat::PTP,
-            10,
-            0,
-            Some(1),
-            None,
-            None,
-            Some((
+        m.observe(ReplyObservation {
+            key: a,
+            rtt_ns: 1,
+            t4_ns: Some(10_000_000_000),
+            format: ClockFormat::PTP,
+            reference: 10,
+            offset: 0,
+            ordinal: Some(1),
+            dm: None,
+            follow: None,
+            quality: Some((
                 ErrorEstimate::from_wire(0x8001),
                 ErrorEstimate::from_wire(0xc002),
             )),
-        );
+        });
         let b = key(1, 11, 2);
         m.accept(b, Some(p)).unwrap();
         // Current packet NTP does not change the earlier packet's PTP format.
-        m.observe(
-            b,
-            1,
-            None,
-            ClockFormat::NTP,
-            10,
-            0,
-            Some(2),
-            None,
-            Some(FollowUpTelemetryTlv {
+        m.observe(ReplyObservation {
+            key: b,
+            rtt_ns: 1,
+            t4_ns: None,
+            format: ClockFormat::NTP,
+            reference: 10,
+            offset: 0,
+            ordinal: Some(2),
+            dm: None,
+            follow: Some(FollowUpTelemetryTlv {
                 sequence_number: 10,
                 follow_up_timestamp: 9u64 << 32,
                 timestamp_mode: TimestampMethod::SwLocal,
             }),
-            None,
-        );
+            quality: None,
+        });
         assert_eq!(m.snapshot().follow_up.reverse_delay.avg_ms, Some(1000.0));
         assert_eq!(m.snapshot().follow_up.clock_quality.both_synchronized, 1);
         assert_eq!(
@@ -662,18 +676,18 @@ mod tests {
                 .format,
             ClockFormat::PTP
         );
-        m.observe(
-            b,
-            1,
-            None,
-            ClockFormat::NTP,
-            10,
-            0,
-            Some(2),
-            None,
-            Some(FollowUpTelemetryTlv::new()),
-            None,
-        );
+        m.observe(ReplyObservation {
+            key: b,
+            rtt_ns: 1,
+            t4_ns: None,
+            format: ClockFormat::NTP,
+            reference: 10,
+            offset: 0,
+            ordinal: Some(2),
+            dm: None,
+            follow: Some(FollowUpTelemetryTlv::new()),
+            quality: None,
+        });
         assert_eq!(m.snapshot().follow_up.unavailable, 1);
     }
     #[test]

@@ -1,6 +1,6 @@
 # stamp-suite conformance — compliance statement
 
-Evidence refresh: **2026-09-10**. Historical audit: **2026-08-05**. Branch: **1.0-line**.
+Evidence refresh: **2026-09-11**. Historical audit: **2026-08-05**. Branch: **1.0-line**.
 
 **September remediation:** the status and clause scores below are
 historical, not a current conformance sign-off. The [September review](../reviews/2026-09-08/review.md)
@@ -8,7 +8,7 @@ identified 16 findings, including behavior previously scored Compliant.
 The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
 verification one item at a time. Finding 02 updates the three session-admission rows for provisioned mode only.
 Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Finding 09 repairs the Type-12 ordering response and reclassifies its stale N-A row as Compliant. Finding 11 implements Linux route-aware sizing and reopens three MTU rows as Partial across the broader platform/route scope. Finding 12 separates synchronization-source declarations from encoding, corrects source code points and records actual TX provenance. Finding 13 adds the BER-07 matrix, repair and directional interval reporting. Other clause scores remain historical; citation maintenance alone does not
-establish semantic compliance. Finding 14 repairs AgentX request ordering/framing and Close acknowledgments; its [targeted record](agentx-review.md) is separate from the STAMP clause totals. Finding 15 separates machine-readable output; finding 16 checks evidence consistency and requires privileged CI scenarios to execute. Clippy and the optimization checkpoints remain pending.
+establish semantic compliance. Finding 14 repairs AgentX request ordering/framing and Close acknowledgments; its [targeted record](agentx-review.md) is separate from the STAMP clause totals. Finding 15 separates machine-readable output; finding 16 checks evidence consistency and requires privileged CI scenarios to execute. All sixteen findings, eleven optimization checkpoints and the final Clippy cleanup are implemented; the tracker records verification and remaining scope limits.
 
 This document rolls up the nine clause-level conformance matrices in this
 directory into an evidence inventory for the stamp-suite 1.0 line.
@@ -210,7 +210,8 @@ optimizations. The historical Compliant rows have not all received a fresh
 semantic audit in this evidence checkpoint.
 
 The [repair tracker](../reviews/2026-09-08/progress.md) records findings and
-remaining optimization work. Finding 16's [test results](../reviews/2026-09-08/logs/finding-16/results.json)
+completed optimization work. Finding 16's [test results](../reviews/2026-09-08/logs/finding-16/results.json)
 state what actually ran, including expected negative checks and environment
-limits. Clippy repair remains the user's final checkpoint; this statement does
-not claim a green remote CI run or release sign-off.
+limits. The [final verification record](../reviews/2026-09-08/logs/final-clippy/README.md)
+covers warnings-denied Clippy across four feature configurations and the final
+local checks. This statement does not claim a green remote CI run or release sign-off.

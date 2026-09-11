@@ -261,7 +261,8 @@ The project is functional for STAMP measurements. RFC 8762 / 8972 / 9503 feature
 
 ### Roadmap
 
-- [ ] Enhanced statistics and reporting
+- [x] Bounded statistics, directional loss and BER, Follow-Up delays, clock quality,
+  and JSON/CSV measurement reporting; see [measurement semantics](doc/measurements.md).
 
 ## Contributing
 

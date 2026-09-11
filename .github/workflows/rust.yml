@@ -29,15 +29,17 @@ jobs:
         run: cargo fmt --all -- --check
 
   clippy:
-    name: Clippy
+    name: Clippy (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - features: ""
+          - args: ""
             name: default
-          - features: ttl-nix
+          - args: --features ttl-nix
             name: ttl-nix
+          - args: --all-features
+            name: all-features
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -47,12 +49,7 @@ jobs:
         with:
           key: clippy-${{ matrix.name }}
       - name: Clippy (${{ matrix.name }})
-        run: |
-          if [ -n "${{ matrix.features }}" ]; then
-            cargo clippy --all --tests --features ${{ matrix.features }} -- -D warnings
-          else
-            cargo clippy --all --tests -- -D warnings
-          fi
+        run: cargo clippy --locked --all-targets ${{ matrix.args }} -- -D warnings
         shell: bash
 
   clippy-pnet:
@@ -70,11 +67,11 @@ jobs:
       # `feature = "ttl-pnet" AND NOT feature = "ttl-nix"`, so it's
       # compiled out under --all-features on any platform (ttl-nix wins
       # there) and is otherwise not covered by the `clippy` job (which
-      # only runs default/ttl-nix legs). This dedicated job is the sole
+      # also runs an all-features leg). This dedicated job is the sole
       # pnet-backend lint gate and a stable, individually addressable
       # required check.
       - name: Clippy (ttl-pnet, no default features)
-        run: cargo clippy --no-default-features --features ttl-pnet --tests -- -D warnings
+        run: cargo clippy --locked --no-default-features --features ttl-pnet --all-targets -- -D warnings
 
   test:
     name: Test (${{ matrix.os }}, ${{ matrix.rust }})

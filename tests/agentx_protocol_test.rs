@@ -155,8 +155,8 @@ fn bindings(mut data: &[u8]) -> Vec<(u16, Vec<u32>)> {
         } else {
             vec![1, 3, 6, 1, data[5] as u32]
         };
-        for chunk in data[8..8 + 4 * n].chunks_exact(4) {
-            name.push(u32::from_be_bytes(chunk.try_into().unwrap()));
+        for chunk in data[8..8 + 4 * n].as_chunks::<4>().0 {
+            name.push(u32::from_be_bytes(*chunk));
         }
         let len = 8
             + 4 * n

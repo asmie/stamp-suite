@@ -442,10 +442,10 @@ pub fn drain_tx_timestamps(
                     };
                 }
                 ControlMessageOwned::Ipv4RecvErr(err, _)
-                | ControlMessageOwned::Ipv6RecvErr(err, _) => {
-                    if is_tx_timestamp_notification(err.ee_origin, err.ee_errno, err.ee_info) {
-                        opt_id = Some(err.ee_data);
-                    }
+                | ControlMessageOwned::Ipv6RecvErr(err, _)
+                    if is_tx_timestamp_notification(err.ee_origin, err.ee_errno, err.ee_info) =>
+                {
+                    opt_id = Some(err.ee_data);
                 }
                 _ => {}
             }

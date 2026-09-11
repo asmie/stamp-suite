@@ -101,13 +101,12 @@ pub(crate) fn observation(
                     return None;
                 }
             }
-            TlvType::BerBurst => {
+            TlvType::BerBurst
                 if burst
                     .replace(BerBurstTlv::from_raw(tlv).ok()?.max_burst)
-                    .is_some()
-                {
-                    return None;
-                }
+                    .is_some() =>
+            {
+                return None;
             }
             _ => {}
         }

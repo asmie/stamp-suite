@@ -832,7 +832,7 @@ mod tests {
             let (mut list, _) = TlvList::parse_lenient(&bytes);
             proptest::prop_assert_eq!(list.to_bytes(), expected.clone());
             list.remove_extra_padding_tlvs();
-            let hmac_bytes: Vec<u8> = expected.chunks_exact(20)
+            let hmac_bytes: Vec<u8> = expected.as_chunks::<20>().0.iter()
                 .filter(|tlv| tlv[1] == 8).flatten().copied().collect();
             proptest::prop_assert_eq!(list.to_bytes(), hmac_bytes);
         }

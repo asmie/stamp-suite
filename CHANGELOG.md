@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Resolve Clippy warnings across default, nix, pnet and all-feature builds.
+  Group accepted sender reply observations into a named record and extend CI
+  lint gates to all targets, including an all-features leg.
+
 - Return typed sender TLV telemetry for Access Report acknowledgements, forward
   congestion and validated micro-session IDs; format diagnostics only for `-R`.
   Remove control decisions based on status strings and transient formatting
