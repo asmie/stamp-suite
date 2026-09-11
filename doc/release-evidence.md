@@ -121,12 +121,12 @@ implementation/matrix changes should update the frozen draft revision. The
 monitor does not automatically audit normative text, IANA code points or errata;
 release review should check each RFC's linked errata page and retain the result.
 
-The September 11 run detected **ext-hdr -13 versus implemented -11** and an
-approaching asymmetrical-pkts expiry. The [delta review](conformance/ext-hdr-13-review.md)
-records new requirements and current limits. The monitor deliberately continues
-to return **1** for this known drift; its alert is evidence, not a passing
-conformance result. RFC 8545 and RFC 2741 baselines use the verified RFC Editor
-statuses, Proposed Standard and Draft Standard respectively.
+The September 11 run detected ext-hdr -13 while the implementation followed -11.
+The subsequent [revision-13 implementation review](conformance/ext-hdr-13-review.md)
+updates the code, matrix and pin; an offline replay of the saved metadata now
+checks against that reviewed baseline. This replay does not establish current
+live metadata. RFC 8545 and RFC 2741 retain their verified RFC Editor statuses,
+Proposed Standard and Draft Standard respectively.
 
 STAMP YANG management and full TWAMP-Control remain explicit product scope
 choices. This release-evidence work does not add either feature or turn them

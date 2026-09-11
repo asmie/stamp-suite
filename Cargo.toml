@@ -49,6 +49,8 @@ snmp = []
 hwtstamp = []
 
 [dependencies]
+getrandom = "0.4"
+socket2 = "0.6"
 chrono = "0.4.45"
 clap = { version = "4.6", features = ["derive", "env"] }
 log = "0.4"

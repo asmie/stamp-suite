@@ -119,7 +119,7 @@ The canonical reference is `stamp-suite --help` (this list is generated from the
   -r, --remote-addr <ADDR>         Remote address for Session Reflector [default: 0.0.0.0]
   -S, --local-addr <ADDR>          Local address to bind for [default: 0.0.0.0]
   -p, --remote-port <PORT>         UDP port for outgoing packets [default: 862]
-  -o, --local-port <PORT>          UDP port for incoming packets [default: 862]
+  -o, --local-port <PORT>          Local UDP port [sender: randomized dynamic port; reflector: 862]
   -K, --clock-source <NTP|PTP>     Timestamp wire encoding [default: NTP]
       --clock-sync-source <SOURCE> Declared system-clock discipline [default: local]
       --hardware-clock-sync-source <SOURCE> Declared NIC PHC discipline [default: local]
@@ -476,7 +476,7 @@ hardware clocks still require deployment-specific clock handling.
                                    --send-delay
                                    (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)
                                    [default: 50]
-      --ttl <1..255>               IP TTL / IPv6 Hop Limit for outgoing test
+      --ttl <TTL>  TTL/Hop Limit for outgoing packets: 255 only, on both endpoints (draft ext-hdr-13 §3.1).
                                    packets [default: OS default] (Linux/macOS)
       --location                   Location TLV (RFC 8972 §4.2)
       --timestamp-info             Timestamp Information TLV (RFC 8972 §4.3)
@@ -508,11 +508,11 @@ hardware clocks still require deployment-specific clock handling.
                                             startup and names the minimum
                                             (draft-ietf-ippm-asymmetrical-pkts
                                             §5 SHOULD NOT)
-      --reflected-fixed-hdr [SELECTORHEX]   Request a reflected IPv4/IPv6 fixed header (TLV 247, draft-ietf-ippm-stamp-ext-hdr §3.2). REPEATABLE: one occurrence per requested IP header (e.g. outer+inner for an IP-in-IP tunnel), each pairing positionally with the reflector's outer→inner capture. Optional inline §5.2 selector hex.
+      --reflected-fixed-hdr [SELECTORHEX]  Request the one originated fixed header (Type 247, draft ext-hdr-13 §3.3); optional four-octet selector.
       --reflected-fixed-hdr-selector <HEX>  §5.2 selector (single-header form only): first bytes must match the received IP header, else the reflector sets the C flag (requires exactly one --reflected-fixed-hdr with no inline selector)
-      --reflected-ipv6-ext-hdr [LEN[:SELECTORHEX]]  Request a reflected IPv6 extension header (TLV 246, draft-ietf-ippm-stamp-ext-hdr §3.1). REPEATABLE: one occurrence per requested header, in order, with matching lengths. LEN = the header's on-wire size (default 8); optional inline §5.1 selector hex.
-      --reflected-ipv6-ext-hdr-selector <HEX>  §5.1 selector (single-header form only): return only the matching extension header; the 4 bytes are the header's on-wire first 4 octets — byte 0 is its Next Header field, NOT its type (requires exactly one --reflected-ipv6-ext-hdr with no inline selector)
-      --attach-ext-hdr <KIND[:HEX]>  Attach a REAL IPv6 extension header to the sender's egress packets and request its reflection (draft-ietf-ippm-stamp-ext-hdr §3.1). REPEATABLE. KIND = hbh (Hop-by-Hop, IPV6_HOPOPTS) or dest (Destination Options, IPV6_DSTOPTS); optional HEX is the full header buffer (multiple of 8 octets, byte 0 kernel-assigned; default = 8-octet PadN). Each attached header also emits a matching Type-246 request TLV. Linux + IPv6 destination only (the sticky socket options are not exposed by `libc` on Darwin); elsewhere a warning is logged (on non-IPv4 the request TLV is still sent).
+      --reflected-ipv6-ext-hdr [LEN[:SELECTORHEX]]  Select an attached IPv6 header (Type 246, draft ext-hdr-13 §3.2). Repeatable, in wire order; replaces automatic attachment requests. LEN=8..2048 in multiples of eight; selector up to eight octets.
+      --reflected-ipv6-ext-hdr-selector <HEX>  Eight-octet selector for one explicit Type 246 request; starts with the target header’s Next Header byte, not its type. Short selectors are zero-padded.
+      --attach-ext-hdr <KIND[:HEX]>  Linux/IPv6 only: attach at most one hbh then one dest header and request reflection. HEX length must match Hdr Ext Len. Default eight-byte PadN. Failure aborts startup.
       --ber                        Enable BER-07 measurement (experimental Types 240/241/242)
       --ber-pattern <HEX>          Padding bit pattern (default: ff00)
       --ber-padding-size <BYTES>   Positive multiple of pattern length [default: 64]
@@ -777,3 +777,30 @@ concrete pnet binds, authenticated/open bursts, alternate returns and CLI sender
 The [clock-quality fields](measurements.md#clock-quality-accompanying-delay)
 expose synchronization declarations and error estimates without claiming to verify
 clock-service or hardware synchronization.
+
+
+### Draft revision 13 migration
+
+Header reflection now follows revision 13, which remains an Internet-Draft.
+Upgrade both endpoints together: Type 246's Requested selector grew from four
+bytes to eight. Type 247 stays at four. Selectors are preserved in replies; an
+all-zero eight-byte Type 246 request has no reflected data tail.
+
+The default sender local port is now 0, selecting a randomized port in
+49152–65535. A reflector still defaults to 862. Explicit sender local and remote
+ports must differ. Outgoing TTL/Hop Limit is 255; lower `--ttl` or TOML values
+are rejected, while lower received hop counts are accepted. Set `local_port = 0`
+in sender configurations that previously copied the reflector's listening port.
+
+`--session-loss-threshold N` / `session_loss_threshold = N` configures consecutive
+unanswered probes before failure (default 3, range 1–65535). Per-probe `--timeout`
+defines loss. With timeout 0 no deadline-based failure is generated. State logs
+and the JSON/CSV `measurements.session_state` record report idle, active, failed
+and recovery; see [measurement semantics](measurements.md). Existing output
+columns remain in place; the nested measurements object gains a field.
+
+Header requests require Linux and a known egress route MTU. Explicit Type 246
+requests require matching `--attach-ext-hdr` headers; omit explicit requests to
+reflect all attached headers automatically. Zero-checksum mode is not exposed.
+Raw capture rejects corrupt or incomplete offloaded checksums; arrange a capture
+point with complete wire checksums rather than disabling validation.

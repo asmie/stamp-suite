@@ -299,7 +299,7 @@ MIT — see [LICENSE](LICENSE).
 - [RFC 9503 — Extensions for Segment Routing Networks](https://datatracker.ietf.org/doc/html/rfc9503)
 - [RFC 9534 — Extensions for Performance Measurement on a Link Aggregation Group](https://datatracker.ietf.org/doc/html/rfc9534)
 - [draft-ietf-ippm-asymmetrical-pkts-14](https://datatracker.ietf.org/doc/draft-ietf-ippm-asymmetrical-pkts/) — Asymmetrical Traffic (IETF IPPM WG, RFC Editor queue)
-- [draft-ietf-ippm-stamp-ext-hdr-07](https://datatracker.ietf.org/doc/draft-ietf-ippm-stamp-ext-hdr/) — Reflected IP header / IPv6 extension headers, basis for TLV Types 246/247 (IETF IPPM WG, active)
+- [draft-ietf-ippm-stamp-ext-hdr-13](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-13.txt) — Reflected IP header / IPv6 extension headers, basis for TLV Types 246/247 (Internet-Draft)
 - [draft-gandhi-ippm-stamp-ber-07](https://datatracker.ietf.org/doc/draft-gandhi-ippm-stamp-ber/) — Residual Bit Error Rate Measurement (individual draft)
 
 Session state is separated by both UDP endpoints, SSID, and (when present)
@@ -313,3 +313,10 @@ stateful modes. See [session provisioning](doc/usage.md#session-provisioning).
 For IPv6 link-local endpoints, use `--local-scope-id` and `--remote-scope-id`
 with the relevant numeric interface index. See [interface zones](doc/usage.md#link-local-ipv6-interface-zones)
 for reflector binds, config files and scoped session provisioning.
+
+
+Header reflection follows **draft-ietf-ippm-stamp-ext-hdr-13** (an Internet-Draft).
+Revision-11 Type 246 peers require a coordinated upgrade. Sender ports now default
+to randomized dynamic ports; outgoing TTL/Hop Limit is 255 on both endpoints.
+See [migration and configuration](doc/usage.md#draft-revision-13-migration) and the
+[conformance matrix](doc/conformance/draft-stamp-ext-hdr.md).

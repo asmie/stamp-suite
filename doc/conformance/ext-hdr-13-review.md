@@ -1,29 +1,50 @@
-# Extension-header draft -13 adoption review (2026-09-11)
+# Extension-header draft revision 13 implementation review
 
-The revision monitor found
-[draft-ietf-ippm-stamp-ext-hdr-13](https://datatracker.ietf.org/doc/html/draft-ietf-ippm-stamp-ext-hdr-13)
-(9 September 2026). The implementation and 40-row
-[matrix](draft-stamp-ext-hdr.md) remain frozen at
-[-11](https://datatracker.ietf.org/doc/html/draft-ietf-ippm-stamp-ext-hdr-11).
-The release-evidence checkpoint compares the documents; it does not claim -13
-adoption or silently relabel the old clauses.
+The user authorized updating the feature from revision 11 to
+[draft-ietf-ippm-stamp-ext-hdr-13](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-13.txt).
+Both revisions are Internet-Drafts, not published RFC standards.
 
-| Delta from -11 | Current implementation / release implication |
-| --- | --- |
-| New §3.1 IP/UDP header requirements, including source-port recommendations, direction disambiguation and TTL/Hop Limit 255 | On Linux/macOS, sender `--ttl 255` and suitable local ports can be configured; the CLI retains its previous defaults and permits lower TTL values. That sender option does not establish a reflector TTL policy. A new-profile configuration/validation audit and wire regressions are needed before claiming these requirements. |
-| New §6 UDP checksum policy, including narrowly constrained zero-checksum operation | Normal UDP sockets retain OS checksum behavior. No IPv6 zero-checksum mode is exposed. Supporting that optional mode would require its full endpoint, integrity, rate and middlebox constraints, not merely disabling a checksum. Pnet receive-side handling must be audited separately from the kernel UDP path. |
-| New §7.1 idle/active/failed notifications, with a configured consecutive-loss threshold and recovery | Existing aggregate loss counters and final/periodic summaries do not implement that notification state machine. This is an additional behavior gap against -13. |
-| Expanded §7.2 rate-limiting considerations | Rate/cap and queue controls exist; claims about policing relative to offered traffic and notification correlation need a new-profile review. |
-| Section renumbering and new references | The prior §§3.1/3.2/3.3 become §§3.2/3.3/3.4; the old operational/security sections move. Existing -11 citations are explicitly revision-bound and must not be mechanically renumbered while retaining old requirement text. |
+The earlier September comparison missed a wire-format change: **Type 246 now
+has an eight-octet Requested field and a Length−8 Reflected field**. The full-text
+implementation audit corrects that omission. Type 247 retains its four-octet
+Requested field. The [new 60-row matrix](draft-stamp-ext-hdr.md) replaces the
+old matrix; previous findings/results remain historical evidence.
 
-Release decision: retain the documented -11 profile and experimental code
-points. The standards monitor reports the difference as **review needed** (exit
-1). A release must not claim complete -13 conformance based on the unchanged
--11 scores. Adoption is additional protocol work beyond the original sixteen
-findings and eleven optimization checkpoints; the newly identified requirements
-are recorded here for a separate scope decision. No clause scores are changed.
+Changes include:
 
-The raw -11/-13 source texts, textual diff and public metadata are retained with
-the O11 review artifacts. The new normative text is materially different, so
-this drift is not treated as a stale citation that can be repaired by changing
-a version number alone.
+- Match and preserve all eight Type 246 Requested octets; copy only header[8..].
+  Enforce selector widths, valid attachment lengths/order and request cardinality.
+  Explicit requests select attached headers rather than adding duplicate requests.
+- Use TTL/Hop Limit 255 on both endpoints. Sender source ports default to randomized
+  dynamic ports; explicit sender and reflector ports must differ for direction
+  disambiguation. Reflectors retain their listening source port.
+- Validate raw-capture IP framing and UDP checksums using the innermost IP endpoints
+  before STAMP admission. Reject truncated, fragmented, corrupt and zero-checksum
+  capture datagrams. Normal kernel UDP checksums remain enabled.
+- Report idle/active/failed state transitions through structured logs and sender
+  summaries, with a configurable consecutive-loss threshold and recovery on a
+  validated reply. Invalid-session and duplicate packets do not drive recovery.
+- Recheck sender route MTU and trim optional header requests; prevent fragmentation
+  and fail closed when a reliable budget or requested attachment is unavailable.
+- Update revision pins, citations, examples, protocol regression fixtures and
+  checksum-aware privileged capture fixtures.
+
+The supported profile does not enable optional IPv6 zero-checksum operation.
+Header origination requires Linux and a known route MTU. Nix still uses the draft's
+C-flag fallback for unavailable raw headers; reverse-header insertion uses the
+specified cannot-add C-flag response on both backends. Successful raw reflection
+requires a capture point with complete wire checksums. Incomplete checksum-offload
+frames (notably local loopback traffic) are rejected, never treated as verified
+measurements. Private veth tests disable TX checksum offload; loopback tests inject
+complete checksums and also check rejection of corrupt packets.
+
+An eight-byte Type 246 request has no Reflected tail; an all-zero Requested field
+therefore remains all zero on a successful reply. Selectors are not reconstructed
+from replies. Revision-11 peers interpret the same experimental codepoint differently:
+upgrade both endpoints together. No automatic version negotiation or IANA assignment
+is claimed. SSIDs remain provisioned rather than automatically generated. Operators
+must provision both endpoints and sufficient processing capacity, deploy within the
+draft's administrative-domain assumptions, and correlate policing/overload counters
+with failure notifications before attributing loss to the network.
+
+Verification and environment limits: [revision-13 evidence](../reviews/2026-09-08/logs/revision-13/README.md).

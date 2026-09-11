@@ -190,3 +190,12 @@ concrete binds. The host network remains unchanged. `mixed_clock_test` checks
 local/remote S combinations, error decoding and untrusted echoed local metadata.
 Clock-quality unit tests distinguish invalid, absent and unsynchronized estimates;
 Follow-Up tests attach quality to the referenced earlier reply.
+
+
+Revision-13 coverage lives in `ext_hdr_revision13_test.rs` (independent IPv4/IPv6
+TTL/port/state peers), `tlv_flag_semantics.rs` (raw eight-byte selector/tail oracles)
+and pnet checksum unit/privileged tests. Loopback raw tests inject complete UDP
+checksums and first verify that corrupted checksums produce no replies. Private
+veth fixtures require `ethtool` to disable TX offload on their own interfaces;
+partial offloaded capture frames are rejected by design. No host NIC change is
+required. These checks supplement the existing MTU and protocol-combination tiers.

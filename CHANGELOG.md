@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Update header reflection to draft ext-hdr-13: eight-octet Type 246 selectors,
+  strict request/attachment validation, sender route-MTU checks and checksum
+  verification before raw-capture admission. Type 247 retains four-octet selectors.
+  This changes the experimental Type 246 wire format; upgrade both peers together.
+- Default sender source ports to randomized dynamic ports, require distinct
+  sender/reflector ports, and transmit TTL/Hop Limit 255 on both endpoints.
+  Reject lower configured TTL values; continue accepting lower received values.
+- Add configurable sender idle/active/failed notifications and validated recovery,
+  with structured logs and a `measurements.session_state` summary field.
+
+
 - Resolve Clippy warnings across default, nix, pnet and all-feature builds.
   Group accepted sender reply observations into a named record and extend CI
   lint gates to all targets, including an all-features leg.

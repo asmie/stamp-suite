@@ -5,7 +5,7 @@
 //! headers, SRv6 SRH routing, Address Group (MAC/IP) filtering, and Type-12
 //! multi-reply pacing. Each is mapped to the conformance-matrix clauses it
 //! evidences (RFC 8762 §4.x + erratum 8199, RFC 8972 §4.4, RFC 9503 §4,
-//! draft-ietf-ippm-asymmetrical-pkts-14, draft-ietf-ippm-stamp-ext-hdr-11,
+//! draft-ietf-ippm-asymmetrical-pkts-14, draft-ietf-ippm-stamp-ext-hdr-13,
 //! draft-ietf-ippm-stamp-cos-ecn-01, draft-gandhi-ippm-stamp-ber).
 //!
 //! # Running
@@ -327,7 +327,7 @@ fn scenario_3_srv6_return_path() {
 // ==========================================================================
 // Scenario 4a — ext-hdr on the nix backend: a Type-246 request the backend
 // cannot satisfy comes back with the C flag (Conformance) set
-// (draft-ietf-ippm-stamp-ext-hdr-11 §5.1, -11 semantics).
+// (draft-ietf-ippm-stamp-ext-hdr-13 §5.1, revision-13 semantics).
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]
@@ -354,7 +354,7 @@ fn scenario_4a_ext_hdr_nix_c_flag() {
     };
 
     let mut args = roundtrip_sender_args();
-    args.push("--reflected-ipv6-ext-hdr");
+    args.extend(["--attach-ext-hdr", "dest", "--reflected-ipv6-ext-hdr"]);
     let run = fx.run_sender(refl, send, &args);
     thread::sleep(Duration::from_millis(150));
     let pkts = cap.stop();
@@ -374,7 +374,7 @@ fn scenario_4a_ext_hdr_nix_c_flag() {
     let tlvs = reply_tlvs(&reply.payload).expect("parse reflected TLVs");
     let ext = find_tlv(&tlvs, TlvType::ReflectedIpv6ExtHdr)
         .expect("reflected Type-246 TLV present in reply");
-    // The nix (UDP-socket) backend has no data-plane access, so -11 §5.1
+    // The nix (UDP-socket) backend has no data-plane access, so revision-13 §5.1
     // requires it to echo the TLV with the Conformance flag set — NOT the
     // pre-11 U-flag.
     assert!(
@@ -383,7 +383,7 @@ fn scenario_4a_ext_hdr_nix_c_flag() {
     );
     assert!(
         !ext.flags.unrecognized,
-        "-11 uses the C flag, not the U flag, for ext-hdr failure"
+        "Revision 13 uses the C flag, not the U flag, for ext-hdr failure"
     );
 
     netns::emit_pass(scen, "Type-246 returned with C flag set by the nix backend");
@@ -391,7 +391,7 @@ fn scenario_4a_ext_hdr_nix_c_flag() {
 
 // ==========================================================================
 // Scenario 4b — real ext-hdr capture + reflection on the pnet backend
-// (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 5.1). Requires a pnet-feature
+// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 5.1). Requires a pnet-feature
 // reflector binary (STAMP_NETNS_PNET_BIN) and kernel IPV6_DSTOPTS injection.
 // ==========================================================================
 #[test]
@@ -429,14 +429,14 @@ fn scenario_4b_ext_hdr_pnet_capture() {
         Err(e) => return netns::emit_skip(scen, &format!("tcpdump: {e}")),
     };
 
-    // Craft a test packet with a Type-246 request whose Length (8) equals the
-    // 8-byte Destination Options header we inject via a sticky IPV6_DSTOPTS
+    // Craft a test packet with a Type-246 request whose Length (16) equals the
+    // 16-byte Destination Options header we inject via a sticky IPV6_DSTOPTS
     // socket option.
-    let req_tlv = ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw();
+    let req_tlv = ReflectedIpv6ExtHdrTlv::request_with_capacity(16).to_raw();
     let mut tlvs = TlvList::new();
     tlvs.push(req_tlv).expect("push Type-246 request");
     let payload = ExtendedPacketUnauthenticated::with_tlvs(base_unauth(9), tlvs).to_bytes();
-    let dstopts = netns::build_destopts_padn();
+    let dstopts = vec![0, 1, 1, 12, 0, 0, 0, 0, 11, 12, 13, 14, 15, 16, 17, 18];
     let dst = SocketAddr::new(IpAddr::V6(refl_v6), port);
 
     let reply =
@@ -469,20 +469,20 @@ fn scenario_4b_ext_hdr_pnet_capture() {
     let rtlvs = reply_tlvs(&reply).expect("parse reflected TLVs");
     let ext =
         find_tlv(&rtlvs, TlvType::ReflectedIpv6ExtHdr).expect("reflected Type-246 TLV present");
-    // Success path: C flag clear, and the Reflected field (value[4..]) equals
-    // the captured header's bytes from offset 4 (§5.1: Requested(4)+Reflected).
+    // Success path: C flag clear, and the Reflected field (value[8..]) equals
+    // the captured header's bytes from offset 8 (§5.1: Requested(8)+Reflected).
     assert!(
         !ext.flags.conformant_reflected,
         "pnet backend captured the header, so the C flag must be clear"
     );
     assert!(
-        ext.value.len() >= 8,
-        "Type-246 value should be the 8-byte header"
+        ext.value.len() == 16,
+        "Type-246 value should be the 16-byte header"
     );
     assert_eq!(
-        &ext.value[4..8],
-        &req_ext[4..8],
-        "Reflected field must echo the on-wire ext-header bytes from offset 4"
+        &ext.value[8..16],
+        &req_ext[8..16],
+        "Reflected field must echo the on-wire ext-header bytes from offset 8"
     );
 
     netns::emit_pass(
@@ -776,7 +776,7 @@ fn scenario_8_ttl_egress_marking() {
     };
 
     let mut args = roundtrip_sender_args();
-    args.extend(["--ttl", "33"]);
+    args.extend(["--ttl", "255"]);
     let run = fx.run_sender(refl, send, &args);
     thread::sleep(Duration::from_millis(150));
     let pkts = cap.stop();
@@ -795,10 +795,10 @@ fn scenario_8_ttl_egress_marking() {
         .first()
         .expect("a test packet on the wire");
     assert_eq!(
-        req.ttl, 33,
-        "sender must set IP TTL to the requested 33 (got {})",
+        req.ttl, 255,
+        "sender must set IP TTL to the required 255 (got {})",
         req.ttl
     );
 
-    netns::emit_pass(scen, "outgoing test packets carry IP TTL = 33 on the wire");
+    netns::emit_pass(scen, "outgoing test packets carry IP TTL = 255 on the wire");
 }

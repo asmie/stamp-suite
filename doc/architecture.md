@@ -122,8 +122,8 @@ The other consequence is that a handful of features that genuinely require
 raw IP-header visibility — currently just the Reflected Fixed Header Data
 (Type 247) and Reflected IPv6 Extension Header Data (Type 246) TLVs from
 draft-ietf-ippm-stamp-ext-hdr — are only populated on the pnet backend.
-On the nix backend the reflector echoes the TLV with the U-flag set per
-RFC 8972 §4.2, and logs a one-time warning suggesting a rebuild with
+On the nix backend the reflector echoes the TLV with the C flag set per
+draft revision 13 §§5.1/5.2, and logs a one-time warning suggesting a rebuild with
 `--features ttl-pnet` if header reflection is actually needed. This
 follows the draft's own "may be unsupported by the reflector" semantics,
 so the sender sees a spec-compliant response either way.
@@ -338,14 +338,14 @@ Status labels used in this table — kept aligned with the (forthcoming) standar
 | 240 | BER Bit Pattern in Padding | Repeated bit pattern carried alongside Extra Padding (draft-gandhi-ippm-stamp-ber-07) | experimental |
 | 241 | BER Bit Error Count | u32 error-bit count, computed by reflector | experimental |
 | 242 | BER Max Bit Error Burst Size | u32 longest consecutive error run, computed by reflector | experimental — **wire-format collision with teaparty Heartbeat (same Type 242)**; see note below |
-| 246 | Reflected IPv6 Extension Header Data | Reflects received IPv6 Hop-by-Hop / Destination Options headers (draft-ietf-ippm-stamp-ext-hdr) | partial — pnet backend only (nix backend echoes with U-flag) |
-| 247 | Reflected Fixed Header Data | Reflects the raw 20-byte IPv4 or 40-byte IPv6 fixed header (draft-ietf-ippm-stamp-ext-hdr) | partial — pnet backend only (nix backend echoes with U-flag) |
+| 246 | Reflected IPv6 Extension Header Data | Reflects received IPv6 Hop-by-Hop / Destination Options headers (draft-ietf-ippm-stamp-ext-hdr) | pnet captures headers; nix returns the specified C flag |
+| 247 | Reflected Fixed Header Data | Reflects the raw 20-byte IPv4 or 40-byte IPv6 fixed header (draft-ietf-ippm-stamp-ext-hdr) | pnet captures headers; nix returns the specified C flag |
 
 **IANA registry**: Type 12 and the C flag (bit 3 of TLV flags) are IANA-assigned per draft-ietf-ippm-asymmetrical-pkts-14. Types 240–251 are *Experimental Use* per RFC 8972 §6 — picks by individual implementations.
 
 **Type 242 collision**: stamp-suite uses Type 242 for *BER Max Bit Error Burst Size* (draft-gandhi-ippm-stamp-ber-07); teaparty uses the same Type 242 for an experimental *Heartbeat* TLV. Both are within the Experimental Use range so neither is wrong per IANA, but the wire formats are mutually incompatible. Use `--ber-omit-burst` when the peer assigns Type 242 to Heartbeat; forward error counts remain available, with forward burst statistics reported as unavailable.
 
-**Backend restriction on Types 246/247**: Both require the reflector to copy raw IP-header bytes into the response, which is only possible when the capture path sees full IP headers. The default `nix` UDP-socket backend cannot provide this — see [Receiver Backends](#receiver-backends) for why the default remains `nix`. On the `nix` backend these TLVs are echoed with the U-flag set per RFC 8972 §4.2 and a one-time warning is logged.
+**Backend restriction on Types 246/247**: Both require the reflector to copy raw IP-header bytes into the response, which is only possible when the capture path sees full IP headers. The default `nix` UDP-socket backend cannot provide this — see [Receiver Backends](#receiver-backends) for why the default remains `nix`. On the `nix` backend these TLVs are echoed with the C flag set per draft revision 13 §§5.1/5.2 and a one-time warning is logged.
 
 ### TLV Handling Modes
 
@@ -609,80 +609,43 @@ these statistics describe delivered padding and are not a measurement of raw lin
 See the [BER-07 matrix](conformance/draft-stamp-ber.md) for scoped conformance evidence.
 
 
-### Reflected Fixed / IPv6 Extension Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr)
+### Reflected Fixed / IPv6 Extension Header Data TLVs (draft revision 13)
 
-Two experimental TLVs let the sender ask the reflector to echo the bytes of the
-received IP headers — useful for diagnosing DSCP remarking, TTL decrement,
-Flow Label rewriting, or tampering with IPv6 Hop-by-Hop / Destination Options
-by intermediate routers.
-
-| Type | Name | Content |
-|------|------|---------|
-| 246 | Reflected IPv6 Extension Header Data | Concatenated Hop-by-Hop (NextHeader 0) and Destination Options (NextHeader 60) extension headers, each prefixed with its NextHeader byte and HdrExtLen byte as they appeared on the wire |
-| 247 | Reflected Fixed Header Data | Raw 20-byte IPv4 or 40-byte IPv6 fixed header as received |
-
-Type numbers are TBD in the draft; this implementation uses 246/247 from RFC
-8972's experimental range.
+The feature implements draft-ietf-ippm-stamp-ext-hdr-13, an Internet-Draft.
+Type 246 carries Requested(8) plus Reflected(Length−8); Type 247 carries
+Requested(4) plus Reflected(Length−4). Length is the target header's complete
+size. A zero selector matches the first unconsumed matching-length header;
+nonzero selectors match all eight or four on-wire octets. The Requested field
+is preserved, and only the corresponding header tail is copied.
 
 ```bash
-# Ask the reflector to reflect the IPv4/IPv6 fixed header
+# One originated fixed IP header, reflected when the backend can capture it.
 stamp-suite --remote-addr 192.168.1.100 --reflected-fixed-hdr
 
-# IPv6 test with reflected extension headers
-stamp-suite --remote-addr 2001:db8::1 --reflected-ipv6-ext-hdr
+# Linux: a real 16-byte Destination Options header plus its matching request.
+stamp-suite --local-addr :: --remote-addr 2001:db8::1 \
+  --attach-ext-hdr dest:0001010c000000000b0c0d0e0f101112
 ```
 
-**Backend requirement:** these TLVs require the reflector to copy raw IP-header
-bytes into the response, which is only possible when the reflector captures at
-the datalink layer. Only the `pnet` backend can do this (see
-[Receiver Backends](#receiver-backends)).
+Pnet validates IP/UDP framing and checksums before admitting captured packets,
+including the innermost endpoint addresses for IP-in-IP. Raw capture must expose
+complete wire checksums; checksum-offload partial frames are rejected. Nix cannot
+access the raw headers and echoes recognized requests with **C**, preserving their
+values and lengths. Missing headers, selectors or length matches also produce C.
+Both backends set C in the control sub-TLV when reverse-header insertion is requested
+but cannot be performed. These are specified fallback behaviors, not U-flag responses.
 
-- On the **pnet** backend (Windows default, or `--features ttl-pnet` on Unix):
-  the reflector populates the TLV Value with the captured bytes. For IPv4
-  packets the TLV is truncated to the fixed 20-byte header, so IPv4 options
-  are not reflected.
-- On the **nix** backend (Linux/macOS default): the kernel hides raw IP
-  headers from the application, so the reflector has nothing to copy. The
-  TLVs are echoed with the sender-advertised Length preserved (zero-filled
-  Value) and the U-flag set per RFC 8972 §4.2 and draft §3.1/§3.2 ("If, for
-  any reason, the Session-Reflector does not use the received TLV for
-  reflecting data, it MUST return the TLV as unrecognized"). A one-time
-  warning tells the operator to rebuild with `--features ttl-pnet` if
-  header reflection is required. The sender sees a protocol-compliant
-  response either way.
-- A sender-requested Type 246 TLV on an IPv4 packet, or on an IPv6 packet
-  without any extension headers, legitimately produces a zero-filled Value
-  at the sender-advertised capacity — this is **not** the same as the
-  U-flag case and is treated as a valid "no data" response.
-- Per draft-ietf-ippm-stamp-ext-hdr-08 §5.2, the Type 247 TLV Length MUST
-  equal 20 (IPv4) or 40 (IPv6). If the sender's requested Length does not
-  match the captured header (e.g. a 20-byte request reaches an IPv6
-  reflector), the reflector zero-fills the Value and sets the U-flag
-  rather than silently truncating or zero-padding. This conformance check
-  ships in stamp-suite as of this release.
-- **§3.1/§3.2 "non-zero first 4 bytes" selector (implemented).** When the
-  sender pre-populates the first 4 bytes of the request Value with a non-zero
-  pattern, the reflector matches it against the captured header(s) before
-  copying. For Type 246 this disambiguates multiple extension headers of the
-  same length: the reflector walks the captured records (`[type][HdrExtLen][body]`,
-  `(HdrExtLen+1)*8` bytes each) and copies **only** the record whose first 4
-  bytes match the selector; if none matches it zero-fills and sets the U-flag.
-  For Type 247 (one fixed header) it is a validation gate: the selector must
-  equal the received header's first 4 bytes, else U-flag. A zero selector (the
-  default) preserves the legacy behavior — Type 246 concatenates every captured
-  header, Type 247 copies the fixed header. Senders opt in with
-  `--reflected-ipv6-ext-hdr-selector <hex>` / `--reflected-fixed-hdr-selector <hex>`;
-  this is dormant until a sender sets it, so no existing exchange changes.
-  - **Selector byte-0 caveat.** stamp-suite's reflected representation stores
-    each extension header's byte 0 as the header *type* (`0x00` Hop-by-Hop,
-    `0x3C` Destination Options — the protocol number from the preceding Next
-    Header field), with bytes 1..3 equal to the wire bytes. The reflector
-    matches the selector against this reflected representation (the only
-    internally-consistent choice, since that is what it copies back), so a
-    stamp-suite selector's byte 0 is the header type, not the on-wire Next
-    Header pointer. Fully wire-accurate matching would require reworking the
-    capture format and is deferred (Types 246/247 use experimental codepoints
-    that are already stamp-suite-specific).
+Sender attachment supports one HBH then one Destination Options header on Linux.
+Explicit Type 246 requests replace automatic requests and must match the attached
+headers in order; ambiguous same-length subsets require selectors. One Type 247
+request is supported for the sender's single IP header. Attachment/MTU setup failure
+aborts header-request origination. MTU is rechecked before normal sends, optional
+header TLVs are removed when needed, and PMTU/DF prevents oversized fragmentation.
+
+Experimental Type 246/247 and sub-TLV 240 values require peer agreement. Type 246
+is wire-incompatible with revision 11. See the [revision-13 matrix](conformance/draft-stamp-ext-hdr.md)
+for the supported profile and [measurement semantics](measurements.md) for the
+new session-state notifications.
 
 ## Prometheus Metrics
 

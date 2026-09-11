@@ -49,6 +49,10 @@ pub async fn run_receiver(
         }
     };
 
+    crate::net_policy::set_hops(&std_socket).map_err(|e| {
+        crate::StartupError::new(format!("Cannot set reply TTL/Hop Limit 255: {e}"))
+    })?;
+
     let local_addr = std_socket
         .local_addr()
         .map_err(|e| crate::StartupError::new(format!("Cannot get bound address: {e}")))?;
@@ -623,7 +627,7 @@ pub async fn run_receiver(
                         return_path_allow_alternate: conf.return_path_allow_alternate,
                         reflector_member_link_id: conf.reflector_member_link_id,
                         // nix UDP-socket backend cannot observe raw IP headers.
-                        // draft-ietf-ippm-stamp-ext-hdr-11 TLV 246/247 requests are
+                        // draft-ietf-ippm-stamp-ext-hdr-13 TLV 246/247 requests are
                         // echoed with the C flag (Conformance) set — case (b),
                         // done in apply_semantic_tlv_processing.
                         captured_headers: None,

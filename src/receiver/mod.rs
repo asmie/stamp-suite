@@ -1136,7 +1136,7 @@ pub struct ReflectedControlBehavior {
     /// Nanoseconds between consecutive sends.
     pub interval_ns: u32,
     /// Set when exactly one IPv6 Extension Header Control sub-TLV
-    /// (draft-ietf-ippm-stamp-ext-hdr-11 §5.3) was present. Under -11 the
+    /// (draft-ietf-ippm-stamp-ext-hdr-13 §5.3) was present. Under revision 13 the
     /// sub-TLV asks the reflector to add matching IPv6 extension headers to
     /// its OWN reply packet. Neither backend can do that, so rule 4 sets the C
     /// flag in the reflected sub-TLV's Sub-TLV Flags (see
@@ -1188,7 +1188,7 @@ enum ReflectedControlSubTlv {
     L2Group { mask: Vec<u8>, group: Vec<u8> },
     /// Layer 3 Address Group (sub-TLV type 11) — IP prefix match.
     L3Group { prefix_len: u8, prefix: Vec<u8> },
-    /// IPv6 Extension Header Control (draft-ietf-ippm-stamp-ext-hdr-11
+    /// IPv6 Extension Header Control (draft-ietf-ippm-stamp-ext-hdr-13
     /// §5.3) — presence-only (Sub-TLV Length 0) request to add matching IPv6
     /// extension headers to the reply. This reflector cannot add reply
     /// extension headers, so its presence yields the C flag on the reflected
@@ -1467,7 +1467,7 @@ pub struct ProcessingContext<'a> {
 }
 
 /// Raw IP-layer bytes captured at receive time for reflecting back to the
-/// sender via TLV Types 246 and 247 (draft-ietf-ippm-stamp-ext-hdr-11).
+/// sender via TLV Types 246 and 247 (draft-ietf-ippm-stamp-ext-hdr-13).
 ///
 /// Populated only by backends that capture at the datalink layer (pnet).
 /// UDP-socket backends (nix) cannot observe these bytes and leave the
@@ -1477,7 +1477,7 @@ pub struct CapturedHeaders {
     /// Raw IP fixed headers (20 bytes for IPv4, 40 bytes for IPv6), ordered
     /// outer→inner. In the common (non-tunneled) case this holds exactly one
     /// header; an IP-in-IP tunnel (IP protocol 4 / next-header 41) contributes
-    /// one record per stacked IP header for draft-ietf-ippm-stamp-ext-hdr-11
+    /// one record per stacked IP header for draft-ietf-ippm-stamp-ext-hdr-13
     /// §3.2 rule 2 positional pairing of multiple Type-247 TLVs.
     pub fixed_headers: Vec<Vec<u8>>,
     /// IPv6 Hop-by-Hop, Destination Options, Routing (incl. SRH) and Fragment
@@ -2285,9 +2285,9 @@ fn apply_semantic_tlv_processing(
         .map(|t| t.value.len());
 
     // Process Reflected Fixed / IPv6 Extension Header TLVs
-    // (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 3.2). If the backend captured
+    // (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 3.3). If the backend captured
     // raw IP bytes, copy the matched header's [4..] into the TLV's Reflected
-    // field; otherwise set the C flag (Conformance) per -11 §5.1/§5.2. A nix
+    // field; otherwise set the C flag (Conformance) per revision 13 §5.1/§5.2. A nix
     // UDP-socket backend hands us `captured_headers = None`, so this correctly
     // signals "could not reflect" to senders that requested header reflection.
     let (captured_fixed, captured_ext): (Option<&[Vec<u8>]>, Option<&[u8]>) =
@@ -2300,7 +2300,7 @@ fn apply_semantic_tlv_processing(
         };
     tlvs.process_reflected_headers_multi(captured_fixed, captured_ext);
 
-    // draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2 MTU rule (reflector half): the
+    // draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3 MTU rule (reflector half): the
     // reflected test packet MUST NOT exceed the IP/IPv6 MTU after the Reflected
     // Fixed/IPv6 Ext Header TLVs; if necessary, one or more of those TLVs MUST
     // be removed. This assembly-time trim applies the administrative limit;
@@ -2324,7 +2324,7 @@ fn apply_semantic_tlv_processing(
             log::warn!(
                 "Removed {removed} Reflected Fixed/IPv6 Ext Header TLV(s) (Type 246/247) from \
                  the reply to stay within the {}-byte reply-size limit \
-                 (draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2)",
+                 (draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3)",
                 ctx.reflected_control_max_size
             );
         }
@@ -2387,7 +2387,7 @@ fn apply_semantic_tlv_processing(
                 return None;
             }
 
-            // draft-ietf-ippm-stamp-ext-hdr-11 §5.3: the 'IPv6 Extension Header
+            // draft-ietf-ippm-stamp-ext-hdr-13 §5.3: the 'IPv6 Extension Header
             // Control' Sub-TLV asks the reflector to add matching IPv6 extension
             // headers to its OWN reply packet. Neither backend can add reply
             // extension headers, so rule 4 requires the C flag in that sub-TLV's

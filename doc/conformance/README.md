@@ -36,9 +36,9 @@ tracked independently of these historical clause totals.
 | [RFC 8545](rfc8545.md) — TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md) — CoS/ECN congestion signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
-| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -11, 4 July 2026 | 40 | 36 | 2 | 0 | 2 | 0 |
+| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -13, 9 September 2026 | 60 | 54 | 0 | 0 | 6 | 0 |
 | [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md) — Residual BER (Types 240–242) | -07, 30 June 2026 | 30 | 27 | 2 | 0 | 1 | 0 |
-| **Total** | | **398** | **342** | **11** | **1** | **41** | **3** |
+| **Total** | | **418** | **360** | **9** | **1** | **45** | **3** |
 
 The eight pre-existing matrices were independently re-verified against a freshly fetched copy of
 its source text on 2026-07-22 (see each file's own "Revision frozen" line and
@@ -81,7 +81,7 @@ the tests.
 | Reply source-address pinning (SHOULD) | Partial | `9503-3-1` | The matched Destination Node Address now reaches the send path (`StampResponse::reply_source`) and both backends pin it via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message. Verified by asserting the *receiver* observes the pinned source. |
 | DSCP/ECN admission-policy layer | Partial | `RFC8972-4.4-8`, `RFC8972-6-3`, `cos-ecn-3.2-3`, `cos-ecn-3.2-6` | `src/cos_policy.rs` separates *permitted* from *capable*: `--allowed-dscp`, `--allowed-ecn`, and destination-scoped `--allowed-dscp-for`. A refused DSCP1 reports RPD=0b01; a refused EC1 forces Not-ECT and reports RPE=0b10. |
 | Extra-Padding-after-HMAC leniency | Partial | `RFC8972-4.8-2` | Both parsers now accept trailing Extra Padding. Required fixing HMAC coverage first: the covered prefix had been derived from the sum of non-HMAC TLV sizes, which is only the true prefix while the HMAC TLV is last. |
-| Live egress-MTU query (reflector side) | Partial | `asym-3-08`, `ext-hdr-3.1-9`, `ext-hdr-3.2-8` | Finding 11 replaces the startup interface stand-in with Linux per-route sizing, bounded notification-invalidated caching and fragmentation prevention. Live veth tests cover both IP families, wildcard/bound sources, link/route changes and alternate targets. Unknown budgets fail closed; exact-size and platform limits are explicit in the current rows. |
+| Live egress-MTU query (reflector side) | Partial | `asym-3-08`, `ext-hdr-3.2-9`, `ext-hdr-3.2-10`, `ext-hdr-3.3-8`, `ext-hdr-3.3-9` | Finding 11 replaces the startup interface stand-in with Linux per-route sizing, bounded notification-invalidated caching and fragmentation prevention. Live veth tests cover both IP families, wildcard/bound sources, link/route changes and alternate targets. Unknown budgets fail closed; revision-13 MTU requirements are Compliant within the supported profile. Asymmetrical exact-size and platform limits remain explicit in the current rows. |
 | Reflector clock metadata | Partial | `RFC8972-4.3-5`–`RFC8972-4.3-8`, `RFC8972-5.4-1` | Finding 12 replaces format/capability inference with explicit system/PHC discipline, correct registry values and actual timestamp methods. Sources remain operator declarations; physical clock synchronization is not verified. The current packet's software T3 and the previous reply's corrected Follow-Up timestamp are distinguished. |
 | Replay detection (SHOULD) | Gap | `asym-5-07` | `Session::check_replay` with a 31-entry per-session window in a single `AtomicU64`; counters on `/v1/status`; opt-in `--drop-replayed` for the action. |
 | Send-delay / reflected-burst cross-check | Gap | `asym-5-09` | `reflected_burst_pacing_warning()` warns at startup when `--send-delay` is shorter than the requested burst, naming the minimum. |
@@ -135,9 +135,9 @@ const's doc comment cites as its own single edit point.
 | Type 240 | STAMP TLV Types (Experimental, 240-251) | `BER_PATTERN_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.1 | Draft-side Type allocation |
 | Type 241 | STAMP TLV Types (Experimental, 240-251) | `BER_COUNT_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.2 | Draft-side Type allocation |
 | Type 242 | STAMP TLV Types (Experimental, 240-251) | `BER_MAX_BURST_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.3 | Draft-side Type allocation; **known collision**, see below |
-| Type 246 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_IPV6_EXT_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-11 §§3.1/5.1 | IANA allocation of TBA1 |
-| Type 247 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_FIXED_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-11 §§3.2/5.2 | IANA allocation of TBA2 |
-| Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-11 §5.3 | IANA allocation of TBA3 |
+| Type 246 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_IPV6_EXT_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-13 §§3.2/5.1 | IANA allocation of TBA1 |
+| Type 247 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_FIXED_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-13 §§3.3/5.2 | IANA allocation of TBA2 |
+| Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-13 §5.3 | IANA allocation of TBA3 |
 
 Of the three `draft-gandhi-ippm-stamp-ber` TLVs, only Types 240/241 (Bit
 Pattern, Bit Error Count) are cited by the draft's own Implementation Status
@@ -196,17 +196,18 @@ see the module doc comment in `src/tlv/experimental.rs`).
   verified with live packets, and a real Net-SNMP master fixture verifies MIB
   reads and reconnect. Hardware validation has a two-host procedure with
   explicit unavailable/fallback outcomes. The scheduled standards monitor
-  detected ext-hdr -13; the matrix remains frozen at -11. See
+  detected ext-hdr -13; its implementation and matrix have now been updated. See
   [release evidence](../release-evidence.md) and the
-  [new-revision delta](ext-hdr-13-review.md).
+  [revision-13 implementation review](ext-hdr-13-review.md).
 
 ## Current residual and evidence limits
 
-The clause inventory is **398 rows: 342 Compliant, 11 Partial, 1 Gap,
-41 N/A and 3 Excluded**. The three session-admission rows are Compliant only
+The clause inventory is **418 rows: 360 Compliant, 9 Partial, 1 Gap,
+45 N/A and 3 Excluded**. The three session-admission rows are Compliant only
 under their documented provisioned-mode conditions. The remaining LAG and
 platform-MTU rows are open scope limits, not accepted exclusions or finished
-optimizations. The historical Compliant rows have not all received a fresh
+optimizations. The ext-hdr matrix was separately re-audited against revision 13; other
+historical Compliant rows have not all received a fresh
 semantic audit in this evidence checkpoint.
 
 The [repair tracker](../reviews/2026-09-08/progress.md) records findings and

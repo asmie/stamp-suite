@@ -107,7 +107,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install wire-test tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 tcpdump util-linux
+        run: sudo apt-get update && sudo apt-get install -y iproute2 tcpdump util-linux ethtool
       - name: Build pnet fixture and tests without root
         run: |
           cargo build --locked --no-default-features --features ttl-pnet --target-dir target/pnet

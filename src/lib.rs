@@ -40,6 +40,7 @@ pub mod configuration;
 /// HMAC cryptographic operations for packet authentication.
 #[doc(hidden)]
 pub mod cos_policy;
+mod net_policy;
 mod net_scope;
 
 #[doc(hidden)]

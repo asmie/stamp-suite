@@ -1,4 +1,5 @@
 pub(crate) mod measurements;
+pub(crate) mod session_state;
 mod telemetry;
 
 use measurements::{Measurements, ReplyKey, ReplyObservation};
@@ -402,21 +403,18 @@ fn apply_egress_ip_options(
 }
 
 /// Attaches the real IPv6 extension headers requested via `--attach-ext-hdr`
-/// (draft-ietf-ippm-stamp-ext-hdr-11 §3.1) to the sender's egress socket via
+/// (draft-ietf-ippm-stamp-ext-hdr-13 §3.2) to the sender's egress socket via
 /// the sticky `IPV6_HOPOPTS` / `IPV6_DSTOPTS` socket options, so the headers
 /// ride on every subsequent test packet the kernel emits. Byte 0 (Next Header)
 /// of each buffer is assigned by the kernel; the rest is passed verbatim.
 ///
-/// Best-effort: a per-header failure is logged and skipped (the matching
-/// Type-246 request TLV is still sent, and the reflector then reports the C
-/// flag for the header it never sees). Linux only — the `libc` crate exports
-/// `IPV6_HOPOPTS` / `IPV6_DSTOPTS` for `linux_like` targets only, and the
-/// sticky-option technique is the one proved on the wire by the netns tier.
-/// Note that the kernel keeps a single sticky buffer per option, so at most one
-/// Hop-by-Hop and one Destination Options header can be attached this way;
-/// supplying several of the same kind leaves only the last in effect.
+/// Any attachment failure aborts startup. Configuration permits one HBH header
+/// followed by one Destination Options header, matching sticky socket semantics.
 #[cfg(target_os = "linux")]
-fn apply_attach_ext_hdrs(fd: std::os::fd::RawFd, specs: &[crate::configuration::AttachExtHdrSpec]) {
+fn apply_attach_ext_hdrs(
+    fd: std::os::fd::RawFd,
+    specs: &[crate::configuration::AttachExtHdrSpec],
+) -> std::io::Result<()> {
     use nix::libc;
 
     use crate::configuration::AttachExtHdrKind;
@@ -439,21 +437,16 @@ fn apply_attach_ext_hdrs(fd: std::os::fd::RawFd, specs: &[crate::configuration::
             )
         };
         if rc < 0 {
-            log::warn!(
-                "Failed to attach {label} IPv6 extension header ({} bytes): {} — the matching \
-                 Type-246 request TLV is still sent; the reflector will report the C flag for \
-                 the header it never receives",
-                spec.bytes.len(),
-                std::io::Error::last_os_error()
-            );
+            return Err(std::io::Error::last_os_error());
         } else {
             log::info!(
                 "Attached {label} IPv6 extension header ({} bytes) to egress packets \
-                 (draft-ietf-ippm-stamp-ext-hdr-11 §3.1)",
+                 (draft-ietf-ippm-stamp-ext-hdr-13 §3.2)",
                 spec.bytes.len()
             );
         }
     }
+    Ok(())
 }
 
 /// Returns the egress route/interface MTU for the (connected) sender socket via
@@ -496,11 +489,11 @@ fn egress_mtu(_socket: &UdpSocket) -> Option<u32> {
 
 /// Removes Reflected Fixed/IPv6 Extension Header TLVs (Types 247/246) from
 /// `extra_tlvs` until the assembled packet fits within `mtu`
-/// (draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2: "one or more ... TLVs MUST be
+/// (draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3: "one or more ... TLVs MUST be
 /// removed to avoid violating the ... MTU limit"). `fixed_overhead` is every
 /// on-wire byte outside `extra_tlvs` (IP + attached ext headers + UDP + STAMP
 /// base + the per-packet HMAC/DM/Access TLVs). Type-246 TLVs are removed before
-/// Type-247 (they sit last in §3.3 wire order, so trimming from the tail keeps
+/// Type-247 (they sit last in §3.4 wire order, so trimming from the tail keeps
 /// the survivors ordered). Only these two TLV types are ever removed.
 fn enforce_egress_mtu(extra_tlvs: &mut Vec<RawTlv>, mtu: usize, fixed_overhead: usize) {
     let wire = |tlvs: &[RawTlv]| -> usize {
@@ -525,7 +518,7 @@ fn enforce_egress_mtu(extra_tlvs: &mut Vec<RawTlv>, mtu: usize, fixed_overhead: 
     if removed > 0 {
         log::warn!(
             "Removed {removed} Reflected Fixed/IPv6 Ext Header TLV(s) (Type 246/247) to keep the \
-             test packet within the {mtu}-byte MTU (draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2)"
+             test packet within the {mtu}-byte MTU (draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3)"
         );
     }
 }
@@ -697,7 +690,7 @@ pub async fn run_sender_with_output(
     // field (§3.4-2/-3's "EC1 field").
     let ecn_response_active = conf.cos && matches!(conf.ecn, 1 | 2);
 
-    let socket = match UdpSocket::bind(local_addr).await {
+    let std_socket = match crate::net_policy::bind_sender(local_addr, remote_addr) {
         Ok(s) => s,
         Err(e) => {
             return Err(crate::StartupError::new(format!(
@@ -706,13 +699,19 @@ pub async fn run_sender_with_output(
         }
     };
 
-    if let Err(e) = socket.connect(remote_addr).await {
-        return Err(crate::StartupError::new(format!(
-            "Cannot connect to address {remote_addr}: {e}"
-        )));
-    }
+    crate::net_policy::set_hops(&std_socket)
+        .map_err(|e| crate::StartupError::new(format!("Cannot set TTL/Hop Limit 255: {e}")))?;
+    std_socket
+        .set_nonblocking(true)
+        .map_err(|e| crate::StartupError::new(e.to_string()))?;
+    let socket =
+        UdpSocket::from_std(std_socket).map_err(|e| crate::StartupError::new(e.to_string()))?;
 
-    if conf.ber {
+    if conf.ber
+        || !conf.attach_ext_hdr.is_empty()
+        || !conf.reflected_fixed_hdr.is_empty()
+        || !conf.reflected_ipv6_ext_hdr.is_empty()
+    {
         conf.validate()
             .map_err(|e| crate::StartupError::new(e.to_string()))?;
         #[cfg(target_os = "linux")]
@@ -757,7 +756,7 @@ pub async fn run_sender_with_output(
 
         if egress_tos.is_some() || conf.ttl.is_some() {
             let is_ipv6 = socket.local_addr().is_ok_and(|a| a.is_ipv6());
-            match apply_egress_ip_options(socket.as_raw_fd(), is_ipv6, egress_tos, conf.ttl) {
+            match apply_egress_ip_options(socket.as_raw_fd(), is_ipv6, egress_tos, None) {
                 Ok(()) => {
                     if let Some(tos) = egress_tos {
                         log::info!(
@@ -793,7 +792,7 @@ pub async fn run_sender_with_output(
         }
     }
 
-    // draft-ietf-ippm-stamp-ext-hdr-11 §3.1: attach the real IPv6 extension
+    // draft-ietf-ippm-stamp-ext-hdr-13 §3.2: attach the real IPv6 extension
     // headers requested via --attach-ext-hdr. IPv6 destinations only, and
     // Linux only (see `apply_attach_ext_hdrs` — the sticky IPV6_HOPOPTS /
     // IPV6_DSTOPTS options are not exposed by `libc` on Darwin).
@@ -804,7 +803,9 @@ pub async fn run_sender_with_output(
         let attach_specs = conf.attach_ext_hdrs();
         if !attach_specs.is_empty() {
             if conf.remote_addr.is_ipv6() {
-                apply_attach_ext_hdrs(socket.as_raw_fd(), &attach_specs);
+                apply_attach_ext_hdrs(socket.as_raw_fd(), &attach_specs).map_err(|e| {
+                    crate::StartupError::new(format!("Cannot attach requested IPv6 header: {e}"))
+                })?;
             } else {
                 log::warn!(
                     "--attach-ext-hdr is IPv6-only (IPv6 extension headers do not exist for \
@@ -821,15 +822,15 @@ pub async fn run_sender_with_output(
             log::warn!(
                 "--attach-ext-hdr (real IPv6 extension header attachment) requires Linux; \
                  the header(s) are not attached on this platform, but the matching Type-246 \
-                 request TLV(s) are still sent (draft-ietf-ippm-stamp-ext-hdr-11 §3.1)"
+                 request TLV(s) are still sent (draft-ietf-ippm-stamp-ext-hdr-13 §3.2)"
             );
         }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        if conf.cos || conf.ttl.is_some() {
+        if conf.cos {
             log::warn!(
-                "Egress DSCP/ECN/TTL marking is only supported on Linux/macOS; \
+                "Egress DSCP/ECN marking is only supported on Linux/macOS; \
                  the outgoing IP header will use OS defaults"
             );
         }
@@ -840,6 +841,15 @@ pub async fn run_sender_with_output(
                  field is active on this platform (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)"
             );
         }
+    }
+
+    // Connect after setting sticky IPv6 headers: IPV6_HOPOPTS/IPV6_DSTOPTS
+    // invalidate Linux's cached route. Connecting last populates the route
+    // used by the pre-send MTU check, without transmitting a probe first.
+    if let Err(e) = socket.connect(remote_addr).await {
+        return Err(crate::StartupError::new(format!(
+            "Cannot connect to address {remote_addr}: {e}"
+        )));
     }
 
     // Kernel timestamping (feature "hwtstamp"): kernel RX timestamps give a
@@ -938,6 +948,10 @@ pub async fn run_sender_with_output(
     let sess = Session::new(0);
     let mut pending: HashMap<u32, PendingPacket> = HashMap::new();
     let mut measurements = Measurements::new(conf.reflected_control_count);
+    measurements.monitor = Some(session_state::Monitor::new(
+        conf.session_loss_threshold,
+        Duration::from_secs(u64::from(conf.timeout)),
+    ));
     // Time-ordered expiry queue for O(k) eviction instead of O(n) HashMap scan.
     // Entries are (deadline, seq_num). Since packets are sent sequentially,
     // deadlines are naturally ordered. Lazy deletion skips already-received entries.
@@ -1189,7 +1203,7 @@ pub async fn run_sender_with_output(
     }
 
     // Reflected Fixed / IPv6 Extension Header Data TLVs
-    // (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 3.2). The value is
+    // (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 3.3). The value is
     // Requested(4) + Reflected(Length-4): sent with a zero (or selector)
     // Requested field and a zero-initialised Reflected field; the reflector
     // fills the Reflected field when it has raw-capture access to IP headers,
@@ -1206,16 +1220,26 @@ pub async fn run_sender_with_output(
         TlvHmacMode::Off => false,
     };
 
-    // draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2 MTU rule (sender half): the
+    // draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3 MTU rule (sender half): the
     // resulting test packets MUST NOT exceed the IP/IPv6 MTU after adding the
     // Reflected Fixed/IPv6 Extension Header TLVs; if necessary, one or more of
     // those TLVs MUST be removed. Compare the worst-case assembled packet size
     // against the egress interface MTU (route MTU via getsockopt on Linux;
-    // 1280 for IPv6 / 1500 for IPv4 when unknown) and trim Type 246/247 TLVs to
+    // fail closed for header requests when unknown) and trim Type 246/247 TLVs to
     // fit. Only these two TLV types are removed — the draft binds this rule to
     // them specifically; oversize from other TLVs is out of scope here.
+    let header_requests = !conf.attach_ext_hdr.is_empty()
+        || !conf.reflected_fixed_hdr.is_empty()
+        || !conf.reflected_ipv6_ext_hdr.is_empty();
+    let header_fixed_overhead;
     {
-        let mtu = egress_mtu(&socket).unwrap_or(if conf.remote_addr.is_ipv6() {
+        let route_mtu = egress_mtu(&socket);
+        if header_requests && route_mtu.is_none() {
+            return Err(crate::StartupError::new(
+                "Header reflection requires a known egress route MTU",
+            ));
+        }
+        let mtu = route_mtu.unwrap_or(if conf.remote_addr.is_ipv6() {
             1280
         } else {
             1500
@@ -1251,6 +1275,7 @@ pub async fn run_sender_with_output(
         let access = if access_report_state.is_some() { 8 } else { 0 };
         const UDP_HEADER: usize = 8;
         let fixed_overhead = ip_hdr + attached_ext + UDP_HEADER + base + hmac_tlv + dm + access;
+        header_fixed_overhead = fixed_overhead;
         if conf.ber {
             crate::ber::fit_padding(&mut extra_tlvs, mtu, fixed_overhead)
                 .map_err(|e| crate::StartupError::new(e.to_string()))?;
@@ -1327,7 +1352,26 @@ pub async fn run_sender_with_output(
         timer.tick().await;
     }
 
+    let prepare_header_requests =
+        |extra_tlvs: &mut Vec<RawTlv>| -> Result<(), crate::StartupError> {
+            if header_requests {
+                let mtu = egress_mtu(&socket).ok_or_else(|| {
+                    crate::StartupError::new("Cannot determine current header-reflection route MTU")
+                })? as usize;
+                enforce_egress_mtu(extra_tlvs, mtu, header_fixed_overhead);
+                if header_fixed_overhead
+                    + extra_tlvs.iter().map(|t| 4 + t.value.len()).sum::<usize>()
+                    > mtu
+                {
+                    return Err(crate::StartupError::new(
+                        "Mandatory test packet fields exceed the route MTU",
+                    ));
+                }
+            }
+            Ok(())
+        };
     for _ in 0..conf.count {
+        prepare_header_requests(&mut extra_tlvs)?;
         if let Some(ber) = ber.as_mut() {
             ber.advance(Instant::now());
             ber.filter_requests(&mut extra_tlvs);
@@ -1490,6 +1534,7 @@ pub async fn run_sender_with_output(
         let deadline = tokio::time::Instant::now() + send_delay;
 
         loop {
+            let state_deadline = measurements.monitor.as_ref().and_then(|m| m.deadline());
             // Use unbiased select to ensure fair scheduling between receiving
             // responses and the send timer. Biased select would starve the timer
             // under heavy receive load, reducing packet send rates.
@@ -1563,6 +1608,15 @@ pub async fn run_sender_with_output(
                     }
                 }
 
+                _ = async {
+                    match state_deadline {
+                        Some(at) => tokio::time::sleep_until(at.into()).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    if let Some(m) = measurements.monitor.as_mut() { m.advance(Instant::now()); }
+                }
+
                 _ = tokio::time::sleep_until(deadline) => {
                     // Send delay expired, time to send next packet
                     break;
@@ -1617,6 +1671,10 @@ pub async fn run_sender_with_output(
         if zero_ssid_seen && conf.on_zero_ssid == ZeroSsidAction::Stop {
             break;
         }
+    }
+
+    if let Some(m) = measurements.monitor.as_mut() {
+        m.idle();
     }
 
     // Final wait phase for remaining responses. Ends as soon as the
@@ -1728,12 +1786,16 @@ pub async fn run_sender_with_output(
             .is_some_and(|state| state.has_started() && !state.is_terminal())
     {
         let now = Instant::now();
+        if let Some(m) = measurements.monitor.as_mut() {
+            m.advance(now);
+        }
         let attach = access_report_state
             .as_mut()
             .map(|state| state.tick(now))
             .unwrap_or(false);
 
         if attach {
+            prepare_header_requests(&mut extra_tlvs)?;
             // An ordinary test packet: the same extra-TLV set the main loop
             // uses, optionally Direct Measurement, and (always, since
             // `attach` is true) the Access Report TLV — built fresh from
@@ -1872,6 +1934,11 @@ pub async fn run_sender_with_output(
         else {
             break;
         };
+        let deadline = measurements
+            .monitor
+            .as_ref()
+            .and_then(|m| m.deadline())
+            .map_or(deadline, |state_deadline| deadline.min(state_deadline));
         let deadline = tokio::time::Instant::from_std(deadline);
 
         tokio::select! {
@@ -1955,6 +2022,9 @@ pub async fn run_sender_with_output(
         stats.inc_lost_by(remaining_lost);
     }
 
+    if let Some(m) = measurements.monitor.as_mut() {
+        m.idle();
+    }
     Ok(rtt_collector
         .snapshot(packets_sent, packets_lost)
         .with_measurements(measurements.snapshot())
@@ -2766,7 +2836,7 @@ fn validate_reflected_tlvs(
 /// Builds the Reflected Test Packet Control TLV
 /// (draft-ietf-ippm-asymmetrical-pkts-14 §3) when the configuration requests
 /// asymmetric replies (count > 1) and/or attaches an IPv6 Extension Header
-/// Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-11 §5.3). Returns `None` for
+/// Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-13 §5.3). Returns `None` for
 /// plain symmetric measurements so trivial sessions are not amplified.
 fn build_reflected_control_tlv(
     length: u16,
@@ -2828,14 +2898,14 @@ fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Builds the Reflected Fixed / IPv6 Extension Header request TLVs
-/// (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 3.2) for the outgoing packet,
+/// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 3.3) for the outgoing packet,
 /// honoring the optional §5.1/§5.2 Requested-field selectors. Assumes `conf`
 /// has passed `validate()` (so any selector decodes and fits); a stray decode
 /// error degrades to the zero-filled request rather than panicking.
 fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
     let mut out = Vec::new();
 
-    // draft-ietf-ippm-stamp-ext-hdr-11 §3.3: the Reflected Fixed Header Data
+    // draft-ietf-ippm-stamp-ext-hdr-13 §3.4: the Reflected Fixed Header Data
     // (Type 247) TLVs MUST be added before the Reflected IPv6 Extension Header
     // Data (Type 246) TLVs, so emit every 247 first.
     let fixed_family_len = if conf.remote_addr.is_ipv4() {
@@ -2869,7 +2939,7 @@ fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
         );
     }
 
-    // draft-ietf-ippm-stamp-ext-hdr-11 §3.1: for every real IPv6 extension
+    // draft-ietf-ippm-stamp-ext-hdr-13 §3.2: for every real IPv6 extension
     // header the sender attaches (`--attach-ext-hdr`), emit a matching Type-246
     // request TLV so the reflector copies it back. The attached headers appear
     // on the wire before any externally-supplied ones, and each carries an
@@ -2883,13 +2953,15 @@ fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
     } else {
         Vec::new()
     };
-    for attach in &attach_specs {
-        out.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(attach.bytes.len()).to_raw());
+    if conf.reflected_ipv6_ext_hdr.is_empty() {
+        for attach in &attach_specs {
+            out.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(attach.bytes.len()).to_raw());
+        }
     }
     if !attach_specs.is_empty() {
         log::info!(
             "Attaching {} real IPv6 extension header(s) with matching Type-246 request TLV(s) \
-             (draft-ietf-ippm-stamp-ext-hdr-11 §3.1)",
+             (draft-ietf-ippm-stamp-ext-hdr-13 §3.2)",
             attach_specs.len()
         );
     }
@@ -3138,8 +3210,9 @@ pub fn create_extended_auth_packet(
 mod tests {
     use super::*;
 
-    // --- draft-ietf-ippm-stamp-ext-hdr-11 header-reflection request TLVs ----
+    // --- draft-ietf-ippm-stamp-ext-hdr-13 header-reflection request TLVs ----
 
+    #[cfg(target_os = "linux")]
     fn ext_hdr_conf(extra: &[&str]) -> crate::configuration::Configuration {
         use clap::Parser;
         let mut args = vec!["test", "--remote-addr"];
@@ -3152,11 +3225,13 @@ mod tests {
         conf
     }
 
+    #[cfg(target_os = "linux")]
     fn tlvs_of(tlvs: &[RawTlv], ty: TlvType) -> Vec<&RawTlv> {
         tlvs.iter().filter(|t| t.tlv_type == ty).collect()
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn ext_hdr_multi_requests_emit_multiple_type246_tlvs_in_order() {
         // §3.1 rule 2: multiple occurrences → multiple Type-246 TLVs with
         // matching lengths, in order. The inline `LEN:SELECTORHEX` form carries
@@ -3165,7 +3240,11 @@ mod tests {
             "--reflected-ipv6-ext-hdr",
             "8",
             "--reflected-ipv6-ext-hdr",
-            "16:3c000102",
+            "16:1101010400000000",
+            "--attach-ext-hdr",
+            "hbh",
+            "--attach-ext-hdr",
+            "dest:00010104000000000000000000000000",
         ]);
         let tlvs = reflected_header_request_tlvs(&conf);
         let ext = tlvs_of(&tlvs, TlvType::ReflectedIpv6ExtHdr);
@@ -3178,41 +3257,49 @@ mod tests {
         assert_eq!(ext[1].value.len(), 16, "inline LEN is honoured");
         assert_eq!(
             &ext[1].value[..4],
-            &[0x3c, 0x00, 0x01, 0x02],
+            &[0x11, 0x01, 0x01, 0x04],
             "inline selector populates the Requested field"
         );
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn ext_hdr_single_form_backward_compatible_with_standalone_selector() {
         let conf = ext_hdr_conf(&[
             "--reflected-ipv6-ext-hdr",
             "--reflected-ipv6-ext-hdr-selector",
-            "3c000102",
+            "1100010400000000",
+            "--attach-ext-hdr",
+            "dest",
         ]);
         let tlvs = reflected_header_request_tlvs(&conf);
         let ext = tlvs_of(&tlvs, TlvType::ReflectedIpv6ExtHdr);
         assert_eq!(ext.len(), 1);
-        assert_eq!(&ext[0].value[..4], &[0x3c, 0x00, 0x01, 0x02]);
+        assert_eq!(&ext[0].value[..8], &[0x11, 0, 1, 4, 0, 0, 0, 0]);
     }
 
     #[test]
-    fn fixed_hdr_multi_requests_emit_multiple_type247_tlvs() {
-        // §3.2 rule 2 (sender half): multiple occurrences → multiple Type-247
-        // TLVs of matching length.
-        let conf = ext_hdr_conf(&["--reflected-fixed-hdr", "--reflected-fixed-hdr"]);
-        let tlvs = reflected_header_request_tlvs(&conf);
-        let fixed = tlvs_of(&tlvs, TlvType::ReflectedFixedHdr);
-        assert_eq!(fixed.len(), 2, "two occurrences → two Type-247 TLVs");
-        assert!(fixed
-            .iter()
-            .all(|t| t.value.len() == IPV6_FIXED_HEADER_SIZE));
+    fn fixed_hdr_multi_requests_are_rejected_without_multiple_originated_headers() {
+        use clap::Parser;
+        let conf =
+            Configuration::parse_from(["test", "--reflected-fixed-hdr", "--reflected-fixed-hdr"]);
+        assert!(conf
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("only one fixed IP header"));
     }
 
     #[test]
-    fn fixed_hdr_before_ext_hdr_per_section_3_3() {
+    #[cfg(target_os = "linux")]
+    fn fixed_hdr_before_ext_hdr_per_section_3_4() {
         // §3.3: every Type-247 TLV MUST precede every Type-246 TLV.
-        let conf = ext_hdr_conf(&["--reflected-ipv6-ext-hdr", "--reflected-fixed-hdr"]);
+        let conf = ext_hdr_conf(&[
+            "--attach-ext-hdr",
+            "dest",
+            "--reflected-ipv6-ext-hdr",
+            "--reflected-fixed-hdr",
+        ]);
         let tlvs = reflected_header_request_tlvs(&conf);
         let first_246 = tlvs
             .iter()
@@ -3224,6 +3311,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn attach_ext_hdr_emits_matching_type246_request() {
         // §3.1: attaching a real header MUST add a corresponding Type-246 TLV.
         // Default (no HEX) is an 8-octet header ⇒ Length 8, all-zeros Requested.
@@ -3236,16 +3324,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn attach_ext_hdr_custom_hex_sizes_the_request_tlv() {
         // A 16-octet attached header ⇒ a Length-16 Type-246 request TLV.
-        let conf = ext_hdr_conf(&["--attach-ext-hdr", "hbh:00000104000000000000000000000000"]);
+        let conf = ext_hdr_conf(&["--attach-ext-hdr", "hbh:00010104000000000000000000000000"]);
         let tlvs = reflected_header_request_tlvs(&conf);
         let ext = tlvs_of(&tlvs, TlvType::ReflectedIpv6ExtHdr);
         assert_eq!(ext.len(), 1);
         assert_eq!(ext[0].value.len(), 16);
     }
 
-    // --- Sender MTU enforcement (draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§3.2) --
+    // --- Sender MTU enforcement (draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3) --
 
     #[test]
     fn enforce_egress_mtu_trims_header_tlvs_to_fit() {
@@ -3588,7 +3677,7 @@ mod tests {
 
         // Ext-hdr control requested → TLV emitted even at count 1, carrying the
         // presence-only IPv6 Extension Header Control sub-TLV
-        // (draft-ietf-ippm-stamp-ext-hdr-11 §5.3; experimental type 240).
+        // (draft-ietf-ippm-stamp-ext-hdr-13 §5.3; experimental type 240).
         let tlv = build_reflected_control_tlv(0, 1, 1_000_000, true).expect("TLV for one-way mode");
         assert_eq!(tlv.sub_tlvs, vec![0x00, 240, 0x00, 0x00]);
     }

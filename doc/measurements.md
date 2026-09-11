@@ -191,3 +191,27 @@ No clock-service polling, PHC discipline, UTC offset discovery, leap-second/smea
 compensation or synchronization certification is introduced. Use the existing
 `--clock-synchronized`, `--error-scale`, `--error-multiplier` and
 `--reflector-utc-offset` settings based on the endpoints' clock configuration.
+
+
+### Session-state notifications (draft ext-hdr-13 §7.1)
+
+The sender logs state changes with target `stamp_suite::session_state` and includes
+`session_state` within `measurements` in summaries. It becomes active after a
+validated reply while transmitting, failed after `--session-loss-threshold`
+consecutive unanswered probes, and active again when replies resume. Each probe's
+`--timeout` supplies its deadline; timeout 0 disables loss-driven failure. A session
+that never received a reply is not falsely declared failed from an active state.
+The sender reports idle when transmission stops; final draining still contributes
+timing/loss statistics but does not reactivate an idle sender. If an Access Report
+retry originates another probe, monitoring resumes and its own loss deadlines
+are serviced until retries finish. Normal errors/cancellation drop the monitor
+and report idle when a transition is needed.
+
+Notifications count probes, not requested burst copies. Duplicate, invalid-session
+and unauthenticated replies do not reset failure detection. A newer successful
+probe ends the preceding loss run; older unanswered probes still count as packet
+loss but cannot trigger a fresh failure after recovery. Lookup is constant-time,
+and queued deadlines are drained in send order. Notification counters remain
+cumulative; no unbounded event history is retained. Configure enough endpoint
+capacity for offered traffic and correlate queue/cap/policing counters with failed
+state: local overload and path loss are indistinguishable from missing replies.

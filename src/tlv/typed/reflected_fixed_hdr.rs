@@ -1,5 +1,5 @@
 //! Reflected Fixed Header Data TLV (Type 247) per
-//! draft-ietf-ippm-stamp-ext-hdr-11 §§3.2, 5.2.
+//! draft-ietf-ippm-stamp-ext-hdr-13 §§3.3, 5.2.
 //!
 //! # Wire Format (-11 Figure 7)
 //!
@@ -67,7 +67,7 @@ impl ReflectedFixedHdrTlv {
 
     /// Creates a sender request TLV sized for the destination's IP family.
     ///
-    /// Per draft-ietf-ippm-stamp-ext-hdr-11 §5.2 the sender sets Length to 20
+    /// Per draft-ietf-ippm-stamp-ext-hdr-13 §5.2 the sender sets Length to 20
     /// (IPv4) or 40 (IPv6): the first 4 octets are the all-zeros Requested
     /// field and the remaining 16 / 36 are the zero-initialised Reflected
     /// field. Only the address family is consulted; the address bytes are
@@ -82,7 +82,7 @@ impl ReflectedFixedHdrTlv {
     }
 
     /// Creates a sender request TLV whose first 4 octets carry the Requested
-    /// selector (draft-ietf-ippm-stamp-ext-hdr-11 §5.2) — the target IP
+    /// selector (draft-ietf-ippm-stamp-ext-hdr-13 §5.2) — the target IP
     /// header's first 4 octets — padded with the zero-initialised Reflected
     /// field to `total_len` (the IP fixed-header length: 20 or 40).
     /// `total_len` is grown to fit `prefix`.

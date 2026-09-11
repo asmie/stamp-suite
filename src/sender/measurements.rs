@@ -93,6 +93,7 @@ pub struct FollowUpSummary {
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct MeasurementSummary {
+    pub session_state: super::session_state::Summary,
     pub history_limit: usize,
     pub probes_evicted: u64,
     pub replies_evicted: u64,
@@ -246,6 +247,7 @@ pub(super) struct ReplyObservation {
 }
 
 pub(super) struct Measurements {
+    pub(super) monitor: Option<super::session_state::Monitor>,
     copies: u16,
     satisfied: u64,
     probes: HashMap<u32, Probe>,
@@ -262,6 +264,7 @@ pub(super) struct Measurements {
 impl Measurements {
     pub(super) fn new(copies: u16) -> Self {
         Self {
+            monitor: None,
             copies: copies.max(1),
             satisfied: 0,
             probes: HashMap::new(),
@@ -280,6 +283,9 @@ impl Measurements {
         }
     }
     pub(super) fn sent(&mut self, seq: u32, packet: PendingPacket, ordinal: u32) {
+        if let Some(m) = self.monitor.as_mut() {
+            m.sent(seq, packet.send_time);
+        }
         self.summary.requested_replies += u64::from(self.copies);
         self.remember(seq, packet, Some(ordinal));
     }
@@ -347,6 +353,9 @@ impl Measurements {
         }
         probe.replies = probe.replies.saturating_add(1);
         let result = (probe.packet, probe.ordinal);
+        if let Some(m) = self.monitor.as_mut() {
+            m.reply(key.sender, std::time::Instant::now());
+        }
         self.summary.unique_replies += 1;
         self.summary.last_reflector_sequence = Some(key.reflector);
         if key.reflector != key.sender {
@@ -461,6 +470,9 @@ impl Measurements {
     }
     pub(super) fn snapshot(&self) -> MeasurementSummary {
         let mut summary = self.summary.clone();
+        if let Some(m) = self.monitor.as_ref() {
+            summary.session_state = m.summary();
+        }
         summary.unobserved_requested_replies =
             summary.requested_replies.saturating_sub(self.satisfied);
         summary.reply_rtt = self.rtt.summary();

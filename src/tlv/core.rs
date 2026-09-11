@@ -302,14 +302,14 @@ pub enum TlvType {
     /// `experimental::BER_MAX_BURST_TLV_TYPE` — single edit point for renumbering.
     BerBurst = BER_MAX_BURST_TLV_TYPE,
     /// Reflected IPv6 Extension Header Data TLV (246) -
-    /// draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 5.1. Reflects received
+    /// draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 5.1. Reflects received
     /// Hop-by-Hop and Destination Options extension headers; requires
     /// raw-capture backend. Experimental-range codepoint stand-in (IANA
     /// TBA1); see `experimental::REFLECTED_IPV6_EXT_HDR_TLV_TYPE` — single
     /// edit point for renumbering.
     ReflectedIpv6ExtHdr = REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
     /// Reflected Fixed Header Data TLV (247) -
-    /// draft-ietf-ippm-stamp-ext-hdr-11 §§3.2, 5.2. Reflects the raw IPv4/IPv6
+    /// draft-ietf-ippm-stamp-ext-hdr-13 §§3.3, 5.2. Reflects the raw IPv4/IPv6
     /// fixed header (20/40 bytes); requires raw-capture backend.
     /// Experimental-range codepoint stand-in (IANA TBA2); see
     /// `experimental::REFLECTED_FIXED_HDR_TLV_TYPE` — single edit point for

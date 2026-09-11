@@ -129,10 +129,27 @@ async fn one_packet_round_trip(
         .await
         .expect("bind sender socket");
     let target: SocketAddr = (IpAddr::V4(Ipv4Addr::LOCALHOST), local_port).into();
-    sender
-        .send_to(&sender_packet, target)
-        .await
-        .expect("send to reflector");
+    // Loopback exposes CHECKSUM_PARTIAL frames before checksum completion.
+    // Inject complete wire checksums instead of relaxing receiver validation.
+    send_wire_udp(
+        sender.local_addr().unwrap().port(),
+        target,
+        &sender_packet,
+        false,
+    );
+    let mut rejected = [0; 2048];
+    assert!(
+        timeout(Duration::from_millis(100), sender.recv_from(&mut rejected))
+            .await
+            .is_err(),
+        "invalid UDP checksum must not create a reflected measurement"
+    );
+    send_wire_udp(
+        sender.local_addr().unwrap().port(),
+        target,
+        &sender_packet,
+        true,
+    );
 
     // Await a reply.
     let mut buf = [0u8; 2048];
@@ -253,4 +270,43 @@ async fn pnet_tlv_chain_loopback_round_trip() {
         reply.len() > receiver::UNAUTH_BASE_SIZE,
         "reply must include reflected TLV chain"
     );
+}
+
+fn send_wire_udp(source_port: u16, target: SocketAddr, payload: &[u8], valid: bool) {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::from(libc::SOCK_RAW),
+        Some(socket2::Protocol::from(libc::IPPROTO_RAW)),
+    )
+    .unwrap();
+    let len = (payload.len() + 8) as u16;
+    let mut udp = Vec::new();
+    udp.extend_from_slice(&source_port.to_be_bytes());
+    udp.extend_from_slice(&target.port().to_be_bytes());
+    udp.extend_from_slice(&len.to_be_bytes());
+    udp.extend_from_slice(&[0; 2]);
+    udp.extend_from_slice(payload);
+    let mut pseudo = vec![127, 0, 0, 1, 127, 0, 0, 1, 0, 17];
+    pseudo.extend_from_slice(&len.to_be_bytes());
+    pseudo.extend_from_slice(&udp);
+    let mut sum = 0u32;
+    for pair in pseudo.chunks(2) {
+        sum += u32::from(pair[0]) * 256 + u32::from(*pair.get(1).unwrap_or(&0));
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    let checksum = !(sum as u16);
+    let checksum = if checksum == 0 { u16::MAX } else { checksum };
+    udp[6..8].copy_from_slice(&checksum.to_be_bytes());
+    if !valid {
+        udp[6] ^= 0x80;
+    }
+    let mut ip = vec![
+        0x45, 0, 0, 0, 0, 0, 0, 0, 64, 17, 0, 0, 127, 0, 0, 1, 127, 0, 0, 1,
+    ];
+    ip[2..4].copy_from_slice(&(len + 20).to_be_bytes());
+    ip.extend(udp);
+    // IPPROTO_RAW enables IP_HDRINCL; Linux fills the IP header checksum.
+    socket.send_to(&ip, &target.into()).unwrap();
 }

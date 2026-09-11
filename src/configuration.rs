@@ -279,8 +279,13 @@ pub struct Configuration {
     /// UDP port number for outgoing packets
     #[clap(short = 'p', long, default_value_t = 862)]
     pub remote_port: u16,
-    /// UDP port number for incoming packets
-    #[clap(short = 'o', long, default_value_t = 862)]
+    /// Local UDP port: randomized dynamic sender port (0), or 862 for a reflector.
+    #[clap(
+        short = 'o',
+        long,
+        default_value_t = 0,
+        default_value_if("is_reflector", "true", "862")
+    )]
     pub local_port: u16,
     /// Timestamp wire encoding (NTP or PTP); does not configure clock synchronization.
     #[clap(short = 'K', long, default_value = "NTP")]
@@ -308,6 +313,10 @@ pub struct Configuration {
     /// Amount of time to wait for packet until consider it lost (in seconds).
     #[clap(short = 'L', long, default_value_t = 5)]
     pub timeout: u8,
+    /// Consecutive unanswered probes before an active session is reported failed.
+    /// Uses --timeout per probe; 0 timeout disables loss-driven state changes.
+    #[clap(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..))]
+    pub session_loss_threshold: u16,
     /// Specify work mode - A for authenticated, O for open (unauthenticated) - default "O".
     #[clap(short = 'A', long, value_enum, default_value_t = AuthMode::Open)]
     pub auth_mode: AuthMode,
@@ -528,10 +537,8 @@ pub struct Configuration {
     #[clap(long, default_value_t = 50)]
     pub ecn_recovery_step: u32,
 
-    /// IP TTL (IPv4) / Hop Limit (IPv6) for outgoing test packets (1-255).
-    /// When unset the operating-system default is used. The sender applies
-    /// this to the egress socket (Linux/macOS only).
-    #[clap(long, value_parser = clap::value_parser!(u8).range(1..=255))]
+    /// Outgoing TTL / Hop Limit. Draft ext-hdr-13 requires 255 (the default).
+    #[clap(long, value_parser = clap::value_parser!(u8).range(255..=255))]
     pub ttl: Option<u8>,
 
     /// Diagnostic: append a deliberately malformed TLV to every sent packet to
@@ -846,7 +853,7 @@ pub struct Configuration {
     pub reflected_control_interval_ns: u32,
 
     /// Append the IPv6 Extension Header Control sub-TLV
-    /// (draft-ietf-ippm-stamp-ext-hdr-11 §5.3) to the Reflected Test Packet
+    /// (draft-ietf-ippm-stamp-ext-hdr-13 §5.3) to the Reflected Test Packet
     /// Control TLV. Under -11 this sub-TLV asks the reflector to add matching
     /// IPv6 extension headers to its own reply packets; a reflector that cannot
     /// do so returns the sub-TLV with the C flag set in its Sub-TLV Flags.
@@ -895,22 +902,11 @@ pub struct Configuration {
     #[clap(long, default_value_t = 1_000)]
     pub reflected_control_min_interval_ns: u32,
 
-    /// Request that the reflector copy the received IP fixed header
-    /// (IPv4: 20 bytes, IPv6: 40 bytes) back via TLV Type 247
-    /// (draft-ietf-ippm-stamp-ext-hdr-11 §§3.2, 5.2). Reflectors built with the
-    /// `ttl-nix` backend cannot observe the IP header and will echo the
-    /// TLV with the C flag (Conformance) set.
-    ///
-    /// Repeatable (`--reflected-fixed-hdr --reflected-fixed-hdr ...`): each
-    /// occurrence adds one Type-247 request TLV, so multiple stacked IP headers
-    /// (e.g. an IP-in-IP tunnel) can each be requested and paired positionally
-    /// with the reflector's outer→inner capture (§3.2 rule 2). Each occurrence
-    /// takes an OPTIONAL inline value `[SELECTORHEX]` — a hex §5.2 selector
-    /// (the target IP header's first 4 on-wire octets) used to disambiguate
-    /// same-length headers. Bare `--reflected-fixed-hdr` (no value) requests one
-    /// header with an all-zeros Requested field; the standalone
-    /// `--reflected-fixed-hdr-selector` remains valid for that single-header
-    /// form.
+    /// Request the received IP fixed header in Type 247 (draft ext-hdr-13 §§3.3, 5.2).
+    /// The sender originates one IP header and permits one request. The optional hex
+    /// selector is at most four bytes, zero-padded to the four-octet Requested field.
+    /// Nix reflectors return C when raw headers are unavailable. Header requests
+    /// require a known Linux egress route MTU.
     #[clap(
         long,
         value_name = "[SELECTORHEX]",
@@ -920,22 +916,12 @@ pub struct Configuration {
     )]
     pub reflected_fixed_hdr: Vec<String>,
 
-    /// Request that the reflector copy IPv6 Hop-by-Hop and Destination
-    /// Options extension headers back via TLV Type 246
-    /// (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 5.1). Reflectors built with the
-    /// `ttl-nix` backend cannot observe extension headers and will echo
-    /// the TLV with the C flag (Conformance) set.
-    ///
-    /// Repeatable: each occurrence adds one Type-246 request TLV, so multiple
-    /// IPv6 extension headers can be requested with matching lengths and in
-    /// order (§3.1 rule 2). Each occurrence takes an OPTIONAL inline value
-    /// `[LEN[:SELECTORHEX]]`: `LEN` is the requested TLV Length (the target
-    /// extension header's on-wire size, default 8) and `SELECTORHEX` is an
-    /// optional hex §5.1 selector (the header's first 4 on-wire octets). Bare
-    /// `--reflected-ipv6-ext-hdr` (no value) requests one header at the default
-    /// length with an all-zeros Requested field; the standalone
-    /// `--reflected-ipv6-ext-hdr-selector` remains valid for that single-header
-    /// form.
+    /// Select attached IPv6 headers for Type 246 reflection (draft ext-hdr-13 §§3.2, 5.1).
+    /// Repeatable `LEN[:SELECTORHEX]` values replace the automatic --attach-ext-hdr
+    /// requests. LEN is a multiple of eight (8..2048); the selector is at most eight
+    /// bytes, zero-padded to the eight-octet Requested field. Requests must match
+    /// attached headers in wire order. Ambiguous subsets require a selector.
+    /// Nix reflectors return C when raw headers are unavailable.
     #[clap(
         long,
         value_name = "[LEN[:SELECTORHEX]]",
@@ -945,43 +931,25 @@ pub struct Configuration {
     )]
     pub reflected_ipv6_ext_hdr: Vec<String>,
 
-    /// Attach a real IPv6 extension header to the sender's own egress packets
-    /// and request its reflection (draft-ietf-ippm-stamp-ext-hdr-11 §3.1: "the
-    /// Session-Sender MUST add a corresponding 'Reflected IPv6 Extension Header
-    /// Data' TLV"). Repeatable; each occurrence takes `KIND[:HEX]` where KIND is
-    /// `hbh` (Hop-by-Hop, attached via `IPV6_HOPOPTS`) or `dest` (Destination
-    /// Options, `IPV6_DSTOPTS`) and the optional HEX is the full extension
-    /// header buffer (a multiple of 8 octets; byte 0, the Next Header field, is
-    /// overwritten by the kernel). With no HEX an 8-octet PadN header is used.
-    /// Each attached header also gets a matching Type-246 request TLV (Length =
-    /// header size, all-zeros Requested field: byte 0 is kernel-assigned so no
-    /// selector can be predicted; positional pairing handles ordering).
-    /// Linux + IPv6 destinations only (the sticky `IPV6_HOPOPTS`/`IPV6_DSTOPTS`
-    /// options are not exposed by `libc` on Darwin); on other platforms or an
-    /// IPv4 destination the header is not attached (a one-time warning is
-    /// logged), though on non-IPv4 the request TLV is still emitted.
+    /// Attach an IPv6 Hop-by-Hop (hbh) or Destination Options (dest) header and
+    /// request its reflection (draft ext-hdr-13 §3.2). Linux/IPv6 only. At most one
+    /// of each kind, in hbh then dest order. Optional HEX supplies the entire header
+    /// whose size must match Hdr Ext Len; byte 0 (Next Header) is kernel-assigned.
+    /// Default: an eight-byte PadN header. Attachment failure aborts startup.
+    /// Explicit --reflected-ipv6-ext-hdr requests replace automatic requests.
     #[clap(long, value_name = "KIND[:HEX]", action = clap::ArgAction::Append)]
     pub attach_ext_hdr: Vec<String>,
 
-    /// Selector for the Type 246 Requested field
-    /// (draft-ietf-ippm-stamp-ext-hdr-11 §5.1). Hex string (e.g. "11000102");
-    /// its bytes populate the 4-octet Requested field so the reflector returns
-    /// only the matching extension header (disambiguating multiple same-length
-    /// headers). These are the target header's on-wire first 4 octets: byte 0
-    /// is the header's own Next Header field (naming what follows it), byte 1 is
-    /// HdrExtLen, then the first 2 option octets — NOT the header's own type.
-    /// Must contain at least one non-zero byte. Requires
-    /// `--reflected-ipv6-ext-hdr`.
+    /// Type 246 eight-octet Requested selector (draft ext-hdr-13 §5.1), e.g.
+    /// 1100010400000000. The header's Next Header byte comes first; up to eight
+    /// hex-decoded bytes are zero-padded. Requires one --reflected-ipv6-ext-hdr
+    /// and a matching attached header. At least one byte must be nonzero.
     #[clap(long, value_name = "HEX")]
     pub reflected_ipv6_ext_hdr_selector: Option<String>,
 
-    /// Selector for the Type 247 Requested field
-    /// (draft-ietf-ippm-stamp-ext-hdr-11 §5.2). Hex string whose bytes populate
-    /// the 4-octet Requested field and must match the start of the received IP
-    /// fixed header; on mismatch the reflector echoes the TLV with the C flag
-    /// (Conformance) set. At most 20 bytes (IPv4) or 40 bytes (IPv6) by the
-    /// destination family, and at least one non-zero byte. Requires
-    /// `--reflected-fixed-hdr`.
+    /// Type 247 four-octet Requested selector (draft ext-hdr-13 §5.2). Up to four
+    /// hex-decoded bytes, zero-padded; at least one must be nonzero. Requires one
+    /// --reflected-fixed-hdr without an inline selector.
     #[clap(long, value_name = "HEX")]
     pub reflected_fixed_hdr_selector: Option<String>,
 }
@@ -1396,9 +1364,9 @@ impl Configuration {
                 self.ecn_max_delay, self.send_delay
             )));
         }
-        if self.ttl == Some(0) {
+        if self.ttl.is_some_and(|ttl| ttl != 255) {
             return Err(ConfigurationError::InvalidConfiguration(
-                "ttl value 0 is invalid (must be 1-255)".to_string(),
+                "ttl must be 255 for draft ext-hdr-13".to_string(),
             ));
         }
         if let Some(id) = self.access_report {
@@ -1550,14 +1518,25 @@ impl Configuration {
             ));
         }
 
-        // draft-ietf-ippm-stamp-ext-hdr-11 §§3.1/3.2/5.1/5.2 header-reflection
+        // draft-ietf-ippm-stamp-ext-hdr-13 §§3.2/3.3/5.1/5.2 header-reflection
         // request flags (repeatable) plus the §3.1 real-header attachment flag.
+        if self.session_loss_threshold == 0 {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "session_loss_threshold must be positive".into(),
+            ));
+        }
+        if !self.is_reflector && self.local_port != 0 && self.local_port == self.remote_port {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "sender local and remote ports must differ to distinguish reverse-direction probes"
+                    .into(),
+            ));
+        }
         self.validate_ext_hdr_flags()?;
 
         Ok(())
     }
 
-    /// Validates the draft-ietf-ippm-stamp-ext-hdr-11 header-reflection flags:
+    /// Validates the draft-ietf-ippm-stamp-ext-hdr-13 header-reflection flags:
     /// the repeatable `--reflected-ipv6-ext-hdr` / `--reflected-fixed-hdr`
     /// request specs, the `--attach-ext-hdr` attachment specs, and the
     /// backward-compatible standalone selector flags. Each occurrence is parsed
@@ -1571,7 +1550,7 @@ impl Configuration {
             parse_ext_hdr_request_spec(spec)
                 .map_err(|e| cfg_err(format!("invalid --reflected-ipv6-ext-hdr `{spec}`: {e}")))?;
         }
-        let fixed_max = if self.remote_addr.is_ipv4() { 20 } else { 40 };
+        let fixed_max = 4;
         for spec in &self.reflected_fixed_hdr {
             let parsed = parse_fixed_hdr_request_spec(spec)
                 .map_err(|e| cfg_err(format!("invalid --reflected-fixed-hdr `{spec}`: {e}")))?;
@@ -1579,7 +1558,7 @@ impl Configuration {
                 if sel.len() > fixed_max {
                     return Err(cfg_err(format!(
                         "--reflected-fixed-hdr selector is {} bytes; the maximum for the \
-                         destination family is {fixed_max} (the IP fixed-header length)",
+                         Requested field is {fixed_max} octets",
                         sel.len()
                     )));
                 }
@@ -1588,6 +1567,77 @@ impl Configuration {
         for spec in &self.attach_ext_hdr {
             parse_attach_ext_hdr_spec(spec)
                 .map_err(|e| cfg_err(format!("invalid --attach-ext-hdr `{spec}`: {e}")))?;
+        }
+
+        if !self.is_reflector {
+            if self.reflected_fixed_hdr.len() > 1 {
+                return Err(cfg_err("only one fixed IP header is originated; at most one fixed-header request is allowed".into()));
+            }
+            let attached = self.attach_ext_hdrs();
+            if !attached.is_empty() {
+                if !self.remote_addr.is_ipv6() {
+                    return Err(cfg_err(
+                        "--attach-ext-hdr requires an IPv6 destination".into(),
+                    ));
+                }
+                #[cfg(not(target_os = "linux"))]
+                return Err(cfg_err("--attach-ext-hdr requires Linux".into()));
+                if attached.len() > 2
+                    || attached.windows(2).any(|pair| {
+                        pair[0].kind != AttachExtHdrKind::HopByHop
+                            || pair[1].kind != AttachExtHdrKind::DestOpts
+                    })
+                {
+                    return Err(cfg_err(
+                        "attach at most one hbh and one dest header, in that order".into(),
+                    ));
+                }
+            }
+            let requests = self.ext_hdr_requests();
+            if requests.len() > attached.len() {
+                return Err(cfg_err("each IPv6 header request requires a corresponding --attach-ext-hdr; explicit requests replace automatic requests".into()));
+            }
+            let mut next = 0;
+            for request in &requests {
+                let selector = request.selector.clone().or_else(|| {
+                    self.reflected_ipv6_ext_hdr_selector
+                        .as_deref()
+                        .and_then(|s| decode_selector(s).ok())
+                });
+                let mut requested = [0u8; 8];
+                if let Some(bytes) = selector.as_ref() {
+                    if bytes.len() <= 8 {
+                        requested[..bytes.len()].copy_from_slice(bytes);
+                    }
+                }
+                let matched = attached
+                    .iter()
+                    .enumerate()
+                    .skip(next)
+                    .find(|(index, header)| {
+                        let mut first = header.bytes[..8].to_vec();
+                        first[0] = if *index + 1 < attached.len() { 60 } else { 17 };
+                        header.bytes.len() == request.length
+                            && (selector.is_none() || first == requested)
+                    });
+                let Some((index, _)) = matched else {
+                    return Err(cfg_err(
+                        "IPv6 header requests must match attached lengths/selectors in wire order"
+                            .into(),
+                    ));
+                };
+                if selector.is_none()
+                    && requests.len() < attached.len()
+                    && attached
+                        .iter()
+                        .filter(|h| h.bytes.len() == request.length)
+                        .count()
+                        > 1
+                {
+                    return Err(cfg_err("selecting a subset of same-length headers requires an eight-octet selector".into()));
+                }
+                next = index + 1;
+            }
         }
 
         // Backward-compatible standalone selectors: valid only for the
@@ -1622,7 +1672,7 @@ impl Configuration {
             if bytes.len() > MAX_IPV6_EXT_HDR_SELECTOR_BYTES {
                 return Err(cfg_err(format!(
                     "--reflected-ipv6-ext-hdr-selector is {} bytes; the maximum is {} \
-                     (one IPv6 extension header)",
+                     (the Requested field)",
                     bytes.len(),
                     MAX_IPV6_EXT_HDR_SELECTOR_BYTES
                 )));
@@ -1657,7 +1707,7 @@ impl Configuration {
             if bytes.len() > fixed_max {
                 return Err(cfg_err(format!(
                     "--reflected-fixed-hdr-selector is {} bytes; the maximum for the \
-                     destination family is {fixed_max} (the IP fixed-header length)",
+                     Requested field is {fixed_max} octets",
                     bytes.len()
                 )));
             }
@@ -1683,6 +1733,8 @@ impl Configuration {
         let mut conf = <Self as clap::FromArgMatches>::from_arg_matches(&matches)
             .map_err(|e| ConfigurationError::InvalidConfiguration(e.to_string()))?;
 
+        let mut local_port_configured =
+            matches.value_source("local_port") == Some(clap::parser::ValueSource::CommandLine);
         if let Some(path) = conf.config.clone() {
             let contents = std::fs::read_to_string(&path).map_err(|e| {
                 ConfigurationError::ConfigFileError(format!(
@@ -1712,9 +1764,13 @@ impl Configuration {
                     path.display()
                 ))
             })?;
+            local_port_configured |= file.local_port.is_some();
             conf.merge_file(file, &matches);
         }
 
+        if !local_port_configured {
+            conf.local_port = if conf.is_reflector { 862 } else { 0 };
+        }
         conf.validate()?;
         Ok(conf)
     }
@@ -1763,6 +1819,7 @@ impl Configuration {
         merge!(send_delay);
         merge!(count);
         merge!(timeout);
+        merge!(session_loss_threshold);
         merge!(auth_mode);
         merge!(print_stats);
         merge!(is_reflector);
@@ -1888,6 +1945,7 @@ pub struct FileConfiguration {
     pub send_delay: Option<u16>,
     pub count: Option<u16>,
     pub timeout: Option<u8>,
+    pub session_loss_threshold: Option<u16>,
     pub auth_mode: Option<AuthMode>,
     pub print_stats: Option<bool>,
     pub is_reflector: Option<bool>,
@@ -2006,6 +2064,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "reflector_utc_offset": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
     "send_delay":  { "type": "integer", "minimum": 0, "maximum": 65535 },
     "count":       { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "session_loss_threshold": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "timeout":     { "type": "integer", "minimum": 0, "maximum": 255 },
     "auth_mode":   { "enum": ["A", "O"] },
     "print_stats": { "type": "boolean" },
@@ -2038,7 +2097,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "ecn_backoff_factor": { "type": "number", "exclusiveMinimum": 1.0 },
     "ecn_max_delay": { "type": "integer", "minimum": 1 },
     "ecn_recovery_step": { "type": "integer", "minimum": 1 },
-    "ttl":  { "type": "integer", "minimum": 1, "maximum": 255 },
+    "ttl":  { "type": "integer", "const": 255 },
     "malformed": { "enum": ["bad-flags", "bad-length"] },
     "access_report": { "type": "integer", "minimum": 1, "maximum": 15 },
     "access_return_code": { "type": "integer", "minimum": 0, "maximum": 255 },
@@ -2145,12 +2204,11 @@ pub fn resolve_log_filter(verbose: u8, env: Option<&str>) -> String {
 /// absurd one must fail validation, not panic or OOM at send time.
 pub const MAX_PADDING_BYTES: usize = 65_507 - 112 - 4 - 20 - 16 - 8;
 
-/// Maximum length of a Type 246 selector: one full IPv6 extension header,
-/// `(255 + 1) * 8` bytes (draft-ietf-ippm-stamp-ext-hdr-11 §5.1).
-pub(crate) const MAX_IPV6_EXT_HDR_SELECTOR_BYTES: usize = 2048;
+/// Type 246 Requested field width (draft-ietf-ippm-stamp-ext-hdr-13 §5.1).
+pub(crate) const MAX_IPV6_EXT_HDR_SELECTOR_BYTES: usize = 8;
 
 /// Decodes a hex selector string (optional `0x` prefix) into bytes for the
-/// draft-ietf-ippm-stamp-ext-hdr-11 §5.1/§5.2 Requested-field request TLVs.
+/// draft-ietf-ippm-stamp-ext-hdr-13 §5.1/§5.2 Requested-field request TLVs.
 /// Requires non-empty input with at least one non-zero byte — an all-zero
 /// Requested field would be indistinguishable from "no selector requested".
 pub(crate) fn decode_selector(s: &str) -> Result<Vec<u8>, String> {
@@ -2169,7 +2227,7 @@ pub(crate) fn decode_selector(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// A parsed `--reflected-ipv6-ext-hdr` occurrence
-/// (draft-ietf-ippm-stamp-ext-hdr-11 §§3.1, 5.1). Each occurrence becomes one
+/// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 5.1). Each occurrence becomes one
 /// Type-246 request TLV of Length `length`, with an optional inline §5.1
 /// selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2182,7 +2240,7 @@ pub struct ExtHdrRequestSpec {
 }
 
 /// A parsed `--reflected-fixed-hdr` occurrence
-/// (draft-ietf-ippm-stamp-ext-hdr-11 §§3.2, 5.2). Each occurrence becomes one
+/// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.3, 5.2). Each occurrence becomes one
 /// Type-247 request TLV (Length is the destination family's IP fixed-header
 /// size), with an optional inline §5.2 selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2201,7 +2259,7 @@ pub enum AttachExtHdrKind {
 }
 
 /// A parsed `--attach-ext-hdr` occurrence: a real IPv6 extension header the
-/// sender attaches to its own egress packets (draft-ietf-ippm-stamp-ext-hdr-11
+/// sender attaches to its own egress packets (draft-ietf-ippm-stamp-ext-hdr-13
 /// §3.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachExtHdrSpec {
@@ -2233,7 +2291,7 @@ pub(crate) fn parse_ext_hdr_request_spec(s: &str) -> Result<ExtHdrRequestSpec, S
         Some((l, r)) => (l.trim(), Some(r.trim())),
         None => (s, None),
     };
-    let mut length = if len_part.is_empty() {
+    let length = if len_part.is_empty() {
         crate::tlv::DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY
     } else {
         len_part
@@ -2242,14 +2300,12 @@ pub(crate) fn parse_ext_hdr_request_spec(s: &str) -> Result<ExtHdrRequestSpec, S
     };
     // A zero-length request names no extension header. Omit the value to get
     // the default length instead of asking for nothing.
-    if length == 0 {
-        return Err(
-            "length 0 requests no extension header; omit the value to use the default".to_string(),
-        );
+    if length < 8 || !length.is_multiple_of(8) {
+        return Err("length must be a positive multiple of 8 octets".to_string());
     }
-    if length > MAX_IPV6_EXT_HDR_SELECTOR_BYTES {
+    if length > 2048 {
         return Err(format!(
-            "length {length} exceeds the maximum of {MAX_IPV6_EXT_HDR_SELECTOR_BYTES} \
+            "length {length} exceeds the maximum of 2048 \
              (one IPv6 extension header)"
         ));
     }
@@ -2262,7 +2318,6 @@ pub(crate) fn parse_ext_hdr_request_spec(s: &str) -> Result<ExtHdrRequestSpec, S
                     bytes.len()
                 ));
             }
-            length = length.max(bytes.len());
             Some(bytes)
         }
         _ => None,
@@ -2311,6 +2366,11 @@ pub(crate) fn parse_attach_ext_hdr_spec(s: &str) -> Result<AttachExtHdrSpec, Str
              (RFC 8200)",
             bytes.len()
         ));
+    }
+    if bytes.len() > 2048 || bytes.len() != (usize::from(bytes[1]) + 1) * 8 {
+        return Err(
+            "extension-header size must match Hdr Ext Len and be at most 2048 octets".into(),
+        );
     }
     Ok(AttachExtHdrSpec { kind, bytes })
 }
@@ -2938,7 +2998,7 @@ mod tests {
         assert_eq!(conf.remote_addr, "0.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(conf.local_addr, "0.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(conf.remote_port, 862);
-        assert_eq!(conf.local_port, 862);
+        assert_eq!(conf.local_port, 0);
         assert_eq!(conf.clock_source, ClockFormat::NTP);
         assert_eq!(conf.send_delay, 1000);
         assert_eq!(conf.count, 1000);
@@ -3629,7 +3689,9 @@ mod tests {
     use clap::CommandFactory;
 
     fn load_from_args(args: &[&str]) -> Result<Configuration, ConfigurationError> {
-        let matches = Configuration::command().get_matches_from(args);
+        let matches = Configuration::command()
+            .try_get_matches_from(args)
+            .map_err(|e| ConfigurationError::InvalidConfiguration(e.to_string()))?;
         Configuration::load_from_matches(matches)
     }
 
@@ -4594,10 +4656,37 @@ mod tests {
         assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr=0"]).is_err());
         assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr=0:11000102"]).is_err());
 
-        // The bare flag and an explicit non-zero length still work.
-        assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr"]).is_ok());
-        assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr=8"]).is_ok());
-        assert!(load_from_args(&["test", "--reflected-ipv6-ext-hdr=8:11000102"]).is_ok());
+        #[cfg(target_os = "linux")]
+        {
+            // The bare flag and an explicit non-zero length still work.
+            assert!(load_from_args(&[
+                "test",
+                "--remote-addr",
+                "::1",
+                "--attach-ext-hdr",
+                "dest",
+                "--reflected-ipv6-ext-hdr"
+            ])
+            .is_ok());
+            assert!(load_from_args(&[
+                "test",
+                "--remote-addr",
+                "::1",
+                "--attach-ext-hdr",
+                "dest",
+                "--reflected-ipv6-ext-hdr=8"
+            ])
+            .is_ok());
+            assert!(load_from_args(&[
+                "test",
+                "--remote-addr",
+                "::1",
+                "--attach-ext-hdr",
+                "dest",
+                "--reflected-ipv6-ext-hdr=8:1100010400000000"
+            ])
+            .is_ok());
+        }
     }
 
     #[test]
@@ -4773,7 +4862,7 @@ mod tests {
         let path = dir.path().join("scopes.toml");
         std::fs::write(&path, "local_addr = 'fe80::1'\nremote_addr = 'fe80::2'\nlocal_scope_id = 7\nremote_scope_id = 8\n").unwrap();
         let conf = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap();
-        assert_eq!(conf.local_socket_addr().to_string(), "[fe80::1%7]:862");
+        assert_eq!(conf.local_socket_addr().to_string(), "[fe80::1%7]:0");
         assert_eq!(conf.remote_socket_addr().to_string(), "[fe80::2%8]:862");
         let conf = load_from_args(&[
             "test",
@@ -4873,5 +4962,84 @@ mod tests {
             toml::from_str::<FileConfiguration>("hardware_clock_sync_source = 'automatic'")
                 .is_err()
         );
+    }
+    #[test]
+    fn revision13_defaults_and_file_role_choose_correct_local_port() {
+        assert_eq!(load_from_args(&["test"]).unwrap().local_port, 0);
+        assert_eq!(
+            load_from_args(&["test", "--is-reflector"])
+                .unwrap()
+                .local_port,
+            862
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stamp.toml");
+        std::fs::write(&path, "is_reflector = true\nsession_loss_threshold = 5\n").unwrap();
+        let conf = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap();
+        assert_eq!(conf.local_port, 862);
+        assert_eq!(conf.session_loss_threshold, 5);
+        assert_eq!(
+            load_from_args(&[
+                "test",
+                "--config",
+                path.to_str().unwrap(),
+                "--local-port",
+                "0"
+            ])
+            .unwrap()
+            .local_port,
+            0
+        );
+        std::fs::write(&path, "ttl = 64\n").unwrap();
+        assert!(load_from_args(&["test", "--config", path.to_str().unwrap()]).is_err());
+    }
+    #[test]
+    fn revision13_rejects_invalid_headers_selectors_and_direction_ports() {
+        for args in [
+            vec!["test", "--ttl", "64"],
+            vec!["test", "--local-port", "862"],
+            vec!["test", "--session-loss-threshold", "0"],
+            vec!["test", "--reflected-fixed-hdr=4500000001"],
+            vec!["test", "--reflected-ipv6-ext-hdr=8"],
+            vec![
+                "test",
+                "--remote-addr",
+                "::1",
+                "--attach-ext-hdr",
+                "hbh",
+                "--attach-ext-hdr",
+                "hbh",
+            ],
+            vec![
+                "test",
+                "--remote-addr",
+                "::1",
+                "--attach-ext-hdr",
+                "dest",
+                "--attach-ext-hdr",
+                "hbh",
+            ],
+            vec![
+                "test",
+                "--remote-addr",
+                "::1",
+                "--attach-ext-hdr",
+                "dest",
+                "--reflected-ipv6-ext-hdr=7",
+            ],
+            vec![
+                "test",
+                "--remote-addr",
+                "::1",
+                "--attach-ext-hdr",
+                "dest",
+                "--reflected-ipv6-ext-hdr=8:110001040000000001",
+            ],
+        ] {
+            assert!(
+                load_from_args(&args).is_err(),
+                "unexpectedly accepted {args:?}"
+            );
+        }
     }
 }

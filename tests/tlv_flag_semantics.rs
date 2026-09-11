@@ -724,7 +724,7 @@ fn reflected_control_value(length: u16, count: u16, interval_ns: u32) -> Vec<u8>
 }
 
 /// Builds a Type 12 value with `n` IPv6 Extension Header Control sub-TLVs
-/// (draft-ietf-ippm-stamp-ext-hdr-11 §5.3) appended after the fixed fields:
+/// (draft-ietf-ippm-stamp-ext-hdr-13 §5.3) appended after the fixed fields:
 /// each is flags=0, type=240 (experimental stand-in for TBA3), length=0.
 fn reflected_control_value_with_ext_hdr_controls(
     length: u16,
@@ -756,7 +756,7 @@ fn echoed_reflected_control_value(response_data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn reflected_control_single_ext_hdr_control_sets_c_on_subtlv() {
-    // draft-ietf-ippm-stamp-ext-hdr-11 §5.3 rule 4: a single IPv6 Extension
+    // draft-ietf-ippm-stamp-ext-hdr-13 §5.3 rule 4: a single IPv6 Extension
     // Header Control sub-TLV asks the reflector to ADD matching IPv6 extension
     // headers to its OWN reply. Neither backend can, so the C flag MUST be set
     // in the sub-TLV's Sub-TLV Flags (not on the parent Type 12 TLV flags).
@@ -804,7 +804,7 @@ fn reflected_control_single_ext_hdr_control_sets_c_on_subtlv() {
 
 #[test]
 fn reflected_control_duplicate_ext_hdr_control_sets_c_on_all_copies() {
-    // draft-ietf-ippm-stamp-ext-hdr-11 §5.3 cardinality rule: more than one
+    // draft-ietf-ippm-stamp-ext-hdr-13 §5.3 cardinality rule: more than one
     // IPv6 Extension Header Control sub-TLV is a violation; the C flag MUST be
     // set in the Sub-TLV Flags of EVERY offending copy.
     let raw = RawTlv::new(
@@ -1704,7 +1704,7 @@ fn a1_reflected_control_l2_matches_l3_fails_still_suppresses() {
 }
 
 // ---------------------------------------------------------------------------
-// draft-ietf-ippm-stamp-ext-hdr-11 §5.1 Requested-field selector — end to end
+// draft-ietf-ippm-stamp-ext-hdr-13 §5.1 Requested-field selector — end to end
 // (sender-built request TLV → reflector match against captured headers).
 
 #[test]
@@ -1713,7 +1713,7 @@ fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
     // only in body: the §5.1 disambiguation case. The sender's non-zero
     // Requested field must pull back only the matching header. Since the
     // selector equals rec_b's first 4 on-wire octets, the reflected value is
-    // Requested(rec_b[..4]) + Reflected(rec_b[4..]) == rec_b.
+    // Requested(rec_b[..8]) + Reflected(rec_b[8..]) == rec_b.
     let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
     let rec_b = [0x3Cu8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
     let mut blob = Vec::new();
@@ -1725,7 +1725,10 @@ fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
     };
 
     // Sender request carrying rec_b's first 4 on-wire bytes as the Requested field.
-    let request = ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0xB1, 0xB2], 8);
+    let request = ReflectedIpv6ExtHdrTlv::request_with_selector(
+        &[0x3C, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6],
+        8,
+    );
     let packet = build_unauth_packet(&tlv_to_chain(&request.to_raw()));
 
     let mut ctx = make_ctx(None);
@@ -1738,14 +1741,14 @@ fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
         .find(|t| t.tlv_type == TlvType::ReflectedIpv6ExtHdr)
         .expect("Type 246 must be echoed");
     assert_eq!(
-        &echoed.value[..4],
-        &[0x3C, 0x00, 0xB1, 0xB2],
+        &echoed.value[..8],
+        &[0x3C, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6],
         "Requested field preserved exactly as received"
     );
     assert_eq!(
-        &echoed.value[4..],
-        &rec_b[4..],
-        "Reflected field = matched header[4..]"
+        &echoed.value[8..],
+        &rec_b[8..],
+        "Reflected field = matched header[8..]"
     );
     assert_eq!(
         echoed.flags.to_byte() & 0x90,
@@ -1784,8 +1787,56 @@ fn reflected_ipv6_ext_hdr_selector_no_match_sets_c_flag_end_to_end() {
         "must NOT set the U flag under -11"
     );
     assert_eq!(
-        &echoed.value[..4],
-        &[0x3C, 0x00, 0xFF, 0xFF],
+        &echoed.value[..8],
+        &[0x3C, 0x00, 0xFF, 0xFF, 0, 0, 0, 0],
         "Requested field preserved on failure"
     );
+}
+
+#[test]
+fn revision13_selector_uses_all_eight_octets_and_reflects_only_the_tail() {
+    // Independent raw Type-246 encoder. Headers share their first four octets,
+    // so a revision-11 implementation would select the wrong header.
+    let first = [17, 1, 1, 12, 1, 2, 3, 4, 10, 11, 12, 13, 14, 15, 16, 17];
+    let second = [17, 1, 1, 12, 5, 6, 7, 8, 20, 21, 22, 23, 24, 25, 26, 27];
+    let captured = CapturedHeaders {
+        fixed_headers: vec![],
+        ipv6_ext_headers: [first, second].concat(),
+    };
+    for selector in [second[..8].to_vec(), vec![0; 8]] {
+        let mut chain = vec![0x80, 246, 0, 16];
+        chain.extend_from_slice(&selector);
+        chain.extend_from_slice(&[0; 8]);
+        let mut ctx = make_ctx(None);
+        ctx.captured_headers = Some(&captured);
+        let reply = reflect_unauth(&build_unauth_packet(&chain), &ctx);
+        let tlv = &reply.non_hmac_tlvs()[0];
+        assert_eq!(tlv.flags.to_byte(), 0);
+        assert_eq!(&tlv.value[..8], selector);
+        assert_eq!(
+            &tlv.value[8..],
+            if selector.iter().all(|b| *b == 0) {
+                &first[8..]
+            } else {
+                &second[8..]
+            }
+        );
+    }
+}
+
+#[test]
+fn revision13_rejects_requests_shorter_than_eight_octets() {
+    let captured = CapturedHeaders {
+        fixed_headers: vec![],
+        ipv6_ext_headers: vec![17, 0, 1, 4, 0, 0, 0, 0],
+    };
+    for len in 0..8 {
+        let mut chain = vec![0x80, 246, 0, len];
+        chain.extend(vec![0; usize::from(len)]);
+        let mut ctx = make_ctx(None);
+        ctx.captured_headers = Some(&captured);
+        let reply = reflect_unauth(&build_unauth_packet(&chain), &ctx);
+        let tlv = &reply.non_hmac_tlvs()[0];
+        assert!(tlv.flags.conformant_reflected || tlv.is_malformed());
+    }
 }

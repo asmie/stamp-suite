@@ -91,7 +91,7 @@ pub const BER_COUNT_TLV_TYPE: u8 = 241;
 /// other implementation's Heartbeat TLV.
 pub const BER_MAX_BURST_TLV_TYPE: u8 = 242;
 
-/// Reflected IPv6 Extension Header Data TLV — `draft-ietf-ippm-stamp-ext-hdr-11`
+/// Reflected IPv6 Extension Header Data TLV — `draft-ietf-ippm-stamp-ext-hdr-13`
 /// §§3.1, 5.1. IANA codepoint **TBA1** in the draft text.
 ///
 /// This crate uses **246** from the "STAMP TLV Types" registry's
@@ -111,7 +111,7 @@ pub const BER_MAX_BURST_TLV_TYPE: u8 = 242;
 /// section).
 pub const REFLECTED_IPV6_EXT_HDR_TLV_TYPE: u8 = 246;
 
-/// Reflected Fixed Header Data TLV — `draft-ietf-ippm-stamp-ext-hdr-11`
+/// Reflected Fixed Header Data TLV — `draft-ietf-ippm-stamp-ext-hdr-13`
 /// §§3.2, 5.2. IANA codepoint **TBA2** in the draft text.
 ///
 /// This crate uses **247** from the "STAMP TLV Types" registry's
@@ -125,7 +125,7 @@ pub const REFLECTED_IPV6_EXT_HDR_TLV_TYPE: u8 = 246;
 pub const REFLECTED_FIXED_HDR_TLV_TYPE: u8 = 247;
 
 /// IPv6 Extension Header Control sub-TLV, carried inside the Reflected Test
-/// Packet Control TLV (Type 12) — `draft-ietf-ippm-stamp-ext-hdr-11` §5.3.
+/// Packet Control TLV (Type 12) — `draft-ietf-ippm-stamp-ext-hdr-13` §5.3.
 /// IANA codepoint **TBA3** in the draft text.
 ///
 /// Note the registry: unlike the three constants above (which are top-level

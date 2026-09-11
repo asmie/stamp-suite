@@ -194,6 +194,9 @@ pub async fn run_receiver(
     // replies, which the v4 path cannot serve anyway.
     let send_socket_v6 = std::net::UdpSocket::bind(send_bind_v6).ok();
     for socket in std::iter::once(&send_socket_v4).chain(send_socket_v6.iter()) {
+        crate::net_policy::set_hops(socket).map_err(|e| {
+            crate::StartupError::new(format!("Cannot set reply TTL/Hop Limit 255: {e}"))
+        })?;
         socket.set_nonblocking(true).map_err(|e| {
             crate::StartupError::new(format!("Cannot make reply socket nonblocking: {e}"))
         })?;
@@ -582,154 +585,128 @@ fn handle_packet(
     config: &CaptureConfig,
     transmitter: &std::sync::mpsc::SyncSender<QueuedTransmission>,
 ) {
-    match ethernet.get_ethertype() {
-        EtherTypes::Ipv4 => {
-            if let Some(header) = Ipv4Packet::new(ethernet.payload()) {
-                // Capture the raw 20-byte IPv4 fixed header for Reflected Fixed
-                // Header Data TLV (Type 247). IHL * 4 gives the total IPv4 header
-                // length (including options); the draft reflects only the fixed
-                // 20-byte header, so clamp to that.
-                let ipv4_bytes = header.packet();
-                let fixed_len = std::cmp::min(ipv4_bytes.len(), crate::tlv::IPV4_FIXED_HEADER_SIZE);
-                let mut fixed_headers = vec![ipv4_bytes[..fixed_len].to_vec()];
-                let mut ext_headers: Vec<u8> = Vec::new();
-                // Descend any IP-in-IP tunnel (§3.2 rule 2: multiple stacked IP
-                // headers) to reach the innermost UDP datagram.
-                let (final_proto, upper) = descend_ip_tunnel(
-                    header.get_next_level_protocol().0,
-                    header.payload(),
-                    &mut fixed_headers,
-                    &mut ext_headers,
-                );
-                if final_proto == IpNextHeaderProtocols::Udp.0 {
-                    if let Some(udp) = UdpPacket::new(upper) {
-                        if udp.get_destination() == config.local_port {
-                            let captured = super::CapturedHeaders {
-                                fixed_headers,
-                                ipv6_ext_headers: ext_headers,
-                            };
-                            let pkt = PacketMeta {
-                                src: SocketAddr::new(
-                                    IpAddr::V4(header.get_source()),
-                                    udp.get_source(),
-                                ),
-                                dst_addr: IpAddr::V4(header.get_destination()),
-                                ttl: header.get_ttl(),
-                                dscp: header.get_dscp(),
-                                ecn: header.get_ecn(),
-                                captured,
-                            };
-                            handle_stamp_packet(udp.payload(), &pkt, config, transmitter);
-                        }
-                    }
-                }
-            }
-        }
-        EtherTypes::Ipv6 => {
-            if let Some(header) = Ipv6Packet::new(ethernet.payload()) {
-                // Capture the 40-byte IPv6 fixed header and any Hop-by-Hop /
-                // Destination Options / Routing (incl. SRH) / Fragment extension
-                // headers for TLV Types 247/246.
-                let ipv6_bytes = header.packet();
-                let fixed_len = std::cmp::min(ipv6_bytes.len(), crate::tlv::IPV6_FIXED_HEADER_SIZE);
-                let mut fixed_headers = vec![ipv6_bytes[..fixed_len].to_vec()];
-                let (mut ext_headers, final_next, payload_offset) =
-                    extract_ipv6_ext_headers(&header);
-                // Descend any IP-in-IP tunnel after the outer ext-header chain.
-                let (final_proto, upper) = descend_ip_tunnel(
-                    final_next.0,
-                    &ipv6_bytes[payload_offset.min(ipv6_bytes.len())..],
-                    &mut fixed_headers,
-                    &mut ext_headers,
-                );
-
-                if final_proto == IpNextHeaderProtocols::Udp.0 {
-                    if let Some(udp) = UdpPacket::new(upper) {
-                        if udp.get_destination() == config.local_port {
-                            let traffic_class = header.get_traffic_class();
-                            let captured = super::CapturedHeaders {
-                                fixed_headers,
-                                ipv6_ext_headers: ext_headers,
-                            };
-                            let pkt = PacketMeta {
-                                src: crate::net_scope::received_endpoint(
-                                    IpAddr::V6(header.get_source()),
-                                    udp.get_source(),
-                                    config.interface_index,
-                                ),
-                                dst_addr: IpAddr::V6(header.get_destination()),
-                                ttl: header.get_hop_limit(),
-                                dscp: (traffic_class >> 2) & 0x3F,
-                                ecn: traffic_class & 0x03,
-                                captured,
-                            };
-                            handle_stamp_packet(udp.payload(), &pkt, config, transmitter);
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
+    let version = match ethernet.get_ethertype() {
+        EtherTypes::Ipv4 => 4,
+        EtherTypes::Ipv6 => 6,
+        _ => return,
+    };
+    let Some((udp, mut pkt)) = checked_udp(ethernet.payload(), version) else {
+        return;
+    };
+    if udp.get_destination() != config.local_port {
+        return;
     }
+    pkt.src =
+        crate::net_scope::received_endpoint(pkt.src.ip(), udp.get_source(), config.interface_index);
+    handle_stamp_packet(udp.payload(), &pkt, config, transmitter);
 }
 
-/// Descends an IP-in-IP tunnel chain (draft-ietf-ippm-stamp-ext-hdr-11 §3.2
-/// rule 2): while `proto` names an encapsulated IPv4 (protocol 4) or IPv6
-/// (protocol 41) header inside `bytes`, capture that inner header's fixed part
-/// into `fixed_headers` (outer→inner) and, for IPv6, append its extension
-/// headers to `ext_headers`, then advance to the encapsulated payload. Returns
-/// the first non-tunnel protocol number and the remaining upper-layer bytes
-/// (e.g. the UDP datagram). Bounded by [`MAX_IP_TUNNEL_DEPTH`].
-fn descend_ip_tunnel<'a>(
-    mut proto: u8,
-    mut bytes: &'a [u8],
-    fixed_headers: &mut Vec<Vec<u8>>,
-    ext_headers: &mut Vec<u8>,
-) -> (u8, &'a [u8]) {
-    for _ in 0..MAX_IP_TUNNEL_DEPTH {
-        match proto {
-            PROTO_IPV4_IN_IP => {
-                let Some(inner) = Ipv4Packet::new(bytes) else {
-                    break;
-                };
-                let inner_bytes = inner.packet();
-                let flen = std::cmp::min(inner_bytes.len(), crate::tlv::IPV4_FIXED_HEADER_SIZE);
-                if flen < crate::tlv::IPV4_FIXED_HEADER_SIZE {
-                    break;
-                }
-                fixed_headers.push(inner_bytes[..flen].to_vec());
-                proto = inner.get_next_level_protocol().0;
-                // Advance past the full inner IPv4 header (IHL words).
-                let ihl = (inner.get_header_length() as usize) * 4;
-                let advance = ihl.max(crate::tlv::IPV4_FIXED_HEADER_SIZE).min(bytes.len());
-                bytes = &bytes[advance..];
+/// Validate IP framing and the innermost UDP checksum before STAMP admission.
+/// Capture sockets bypass kernel UDP validation. Zero checksums are deliberately
+/// unsupported in both families; no checksum-offload bypass is inferred here.
+fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, PacketMeta)> {
+    let mut captured = super::CapturedHeaders {
+        fixed_headers: Vec::new(),
+        ipv6_ext_headers: Vec::new(),
+    };
+    for _ in 0..=MAX_IP_TUNNEL_DEPTH {
+        let (src, dst, ttl, tos, proto, offset, end) = if version == 4 {
+            let ip = Ipv4Packet::new(bytes)?;
+            let ihl = usize::from(ip.get_header_length()) * 4;
+            let end = usize::from(ip.get_total_length());
+            if ip.get_version() != 4
+                || ihl < 20
+                || end < ihl
+                || end > bytes.len()
+                || ip.get_fragment_offset() != 0
+                || ip.get_flags() & 1 != 0
+                || pnet::packet::ipv4::checksum(&ip) != ip.get_checksum()
+            {
+                return None;
             }
-            PROTO_IPV6_IN_IP => {
-                let Some(inner) = Ipv6Packet::new(bytes) else {
-                    break;
-                };
-                let inner_bytes = inner.packet();
-                let flen = std::cmp::min(inner_bytes.len(), crate::tlv::IPV6_FIXED_HEADER_SIZE);
-                if flen < crate::tlv::IPV6_FIXED_HEADER_SIZE {
-                    break;
-                }
-                fixed_headers.push(inner_bytes[..flen].to_vec());
-                let (inner_ext, inner_next, inner_off) = extract_ipv6_ext_headers(&inner);
-                ext_headers.extend_from_slice(&inner_ext);
-                proto = inner_next.0;
-                bytes = &bytes[inner_off.min(bytes.len())..];
+            captured.fixed_headers.push(bytes[..ihl].to_vec());
+            (
+                IpAddr::V4(ip.get_source()),
+                IpAddr::V4(ip.get_destination()),
+                ip.get_ttl(),
+                (ip.get_dscp() << 2) | ip.get_ecn(),
+                ip.get_next_level_protocol().0,
+                ihl,
+                end,
+            )
+        } else {
+            let ip = Ipv6Packet::new(bytes)?;
+            let end = 40 + usize::from(ip.get_payload_length());
+            if ip.get_version() != 6 || end > bytes.len() || end == 40 {
+                return None;
             }
-            _ => break,
+            let ip = Ipv6Packet::new(&bytes[..end])?;
+            captured.fixed_headers.push(bytes[..40].to_vec());
+            let (ext, next, offset) = extract_ipv6_ext_headers(&ip);
+            if offset > end {
+                return None;
+            }
+            captured.ipv6_ext_headers.extend_from_slice(&ext);
+            (
+                IpAddr::V6(ip.get_source()),
+                IpAddr::V6(ip.get_destination()),
+                ip.get_hop_limit(),
+                ip.get_traffic_class(),
+                next.0,
+                offset,
+                end,
+            )
+        };
+        let upper = bytes.get(offset..end)?;
+        if proto == IpNextHeaderProtocols::Udp.0 {
+            let udp = UdpPacket::new(upper)?;
+            let len = usize::from(udp.get_length());
+            if len < 8 || len != upper.len() || udp.get_checksum() == 0 {
+                return None;
+            }
+            let checksum = match (src, dst) {
+                (IpAddr::V4(src), IpAddr::V4(dst)) => {
+                    pnet::packet::udp::ipv4_checksum(&udp, &src, &dst)
+                }
+                (IpAddr::V6(src), IpAddr::V6(dst)) => {
+                    pnet::packet::udp::ipv6_checksum(&udp, &src, &dst)
+                }
+                _ => return None,
+            };
+            let checksum = if checksum == 0 { u16::MAX } else { checksum };
+            if checksum != udp.get_checksum() {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, AtomicOrdering::Relaxed) {
+                    log::warn!("Raw capture UDP checksum validation failed; corrupt and checksum-offload partial frames are rejected. Use a capture point with completed wire checksums.");
+                }
+                return None;
+            }
+            let pkt = PacketMeta {
+                src: SocketAddr::new(src, udp.get_source()),
+                dst_addr: dst,
+                ttl,
+                dscp: tos >> 2,
+                ecn: tos & 3,
+                captured,
+            };
+            return Some((udp, pkt));
         }
+        version = match proto {
+            PROTO_IPV4_IN_IP => 4,
+            PROTO_IPV6_IN_IP => 6,
+            _ => return None,
+        };
+        bytes = upper;
     }
-    (proto, bytes)
+    None
 }
 
 /// Walks the IPv6 extension-header chain after the 40-byte fixed header,
 /// returning:
 /// - the extension-header bytes concatenated **verbatim as on the wire**: each
 ///   record starts with its own Next Header octet (naming what follows), then
-///   HdrExtLen, then the header body — per draft-ietf-ippm-stamp-ext-hdr-11
+///   HdrExtLen, then the header body — per draft-ietf-ippm-stamp-ext-hdr-13
 ///   §3.1/§5.1 (the reflector's first-4-byte Requested selector matches these
 ///   on-wire octets);
 /// - the final NextHeader protocol number (UDP if the chain leads to UDP);
@@ -812,6 +789,9 @@ fn walk_ipv6_ext_header_chain(payload: &[u8], first_next: u8) -> (Vec<u8>, u8, u
         }
         // This header's own Next Header field (byte 0) names the FOLLOWING
         // header. Emit the header verbatim.
+        if this_header_type == 44 && (rec[2] != 0 || rec[3] & 0xf9 != 0) {
+            break; // No reassembly at the capture layer; only atomic fragments proceed.
+        }
         let this_next = rec[0];
         out.extend_from_slice(&rec[..len]);
         this_header_type = this_next;
@@ -1230,7 +1210,7 @@ mod tests {
     }
     use clap::Parser;
 
-    /// draft-ietf-ippm-stamp-ext-hdr-11 §3.1/§5.1: captured extension headers
+    /// draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§5.1: captured extension headers
     /// must be stored verbatim as on the wire — byte 0 is the header's OWN Next
     /// Header field (naming what follows), NOT the header's own type (which is
     /// carried in the preceding Next Header pointer). This is what the
@@ -1262,7 +1242,7 @@ mod tests {
         assert_eq!(payload_offset, 48, "40-byte fixed + 8-byte HBH");
     }
 
-    /// draft-ietf-ippm-stamp-ext-hdr-11 §3.1 rule 2 / §3.1's example list:
+    /// draft-ietf-ippm-stamp-ext-hdr-13 §3.2 rule 2 / §3.2's example list:
     /// the walk must traverse and capture a Routing Header (type 43, incl. the
     /// Segment Routing Header / routing type 4) in the chain, in order, and
     /// continue to the upper layer.
@@ -1292,10 +1272,10 @@ mod tests {
     /// A Fragment header (type 44) is a fixed 8 octets; its second byte is
     /// Reserved, not a Hdr Ext Len, so the walk must not treat it as a length.
     #[test]
-    fn walk_captures_fragment_header_as_fixed_eight_octets() {
+    fn walk_captures_atomic_fragment_header_as_fixed_eight_octets() {
         // Fragment header: next=UDP(17), Reserved byte = 0xAB (must be ignored
         // for length purposes), then 6 more octets = 8 total.
-        let payload = [17u8, 0xAB, 0x00, 0x08, 0x11, 0x22, 0x33, 0x44];
+        let payload = [17u8, 0xAB, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44];
         let (out, final_next, walked) = walk_ipv6_ext_header_chain(&payload, FRAGMENT);
         assert_eq!(walked, 8, "Fragment header is always 8 octets");
         assert_eq!(final_next, 17, "terminates at UDP");
@@ -1354,5 +1334,104 @@ mod tests {
             !shared.capture_alive.load(AtomicOrdering::Relaxed),
             "capture_alive must clear when capture cannot start"
         );
+    }
+}
+
+#[cfg(test)]
+mod revision13_tests {
+    use super::*;
+    // Independent Internet checksum oracle for raw fixture bytes.
+    fn checksum(bytes: &[u8]) -> u16 {
+        let mut sum = 0u32;
+        for pair in bytes.chunks(2) {
+            sum += u32::from(pair[0]) * 256 + u32::from(*pair.get(1).unwrap_or(&0));
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+    fn packet(v6: bool) -> Vec<u8> {
+        let mut udp = vec![0xc0, 1, 3, 94, 0, 12, 0, 0, 1, 2, 3, 4];
+        let mut ip = if v6 {
+            let mut ip = vec![0; 40];
+            ip[0] = 0x60;
+            ip[5] = 12;
+            ip[6] = 17;
+            ip[7] = 254;
+            ip[23] = 1;
+            ip[39] = 2;
+            ip
+        } else {
+            vec![
+                0x45, 0, 0, 32, 0, 0, 0, 0, 254, 17, 0, 0, 127, 0, 0, 1, 127, 0, 0, 2,
+            ]
+        };
+        let mut pseudo = if v6 {
+            ip[8..40].to_vec()
+        } else {
+            ip[12..20].to_vec()
+        };
+        if v6 {
+            pseudo.extend_from_slice(&[0, 0, 0, 12, 0, 0, 0, 17]);
+        } else {
+            pseudo.extend_from_slice(&[0, 17, 0, 12]);
+        }
+        pseudo.extend_from_slice(&udp);
+        let sum = checksum(&pseudo);
+        udp[6..8].copy_from_slice(&sum.to_be_bytes());
+        if !v6 {
+            let sum = checksum(&ip);
+            ip[10..12].copy_from_slice(&sum.to_be_bytes());
+        }
+        ip.extend(udp);
+        ip
+    }
+    #[test]
+    fn capture_validates_checksums_lengths_addresses_and_fragments() {
+        for v6 in [false, true] {
+            let version = if v6 { 6 } else { 4 };
+            let offset = if v6 { 40 } else { 20 };
+            let bytes = packet(v6);
+            let (_, meta) = checked_udp(&bytes, version).unwrap();
+            assert_eq!(meta.ttl, 254); // Lower received hop counts are admitted.
+            for index in [offset + 6, offset + 8, if v6 { 23 } else { 12 }] {
+                let mut corrupt = bytes.clone();
+                corrupt[index] ^= 1;
+                assert!(checked_udp(&corrupt, version).is_none());
+            }
+            let mut zero = bytes.clone();
+            zero[offset + 6..offset + 8].fill(0);
+            assert!(checked_udp(&zero, version).is_none());
+            assert!(checked_udp(&bytes[..bytes.len() - 1], version).is_none());
+            let mut fragment = bytes.clone();
+            if v6 {
+                fragment[6] = 44;
+                fragment[5] += 8;
+                fragment.splice(40..40, [17, 0, 0, 1, 0, 0, 0, 1]);
+            } else {
+                fragment[6] = 0x20;
+                fragment[10..12].fill(0);
+                let sum = checksum(&fragment[..20]);
+                fragment[10..12].copy_from_slice(&sum.to_be_bytes());
+            }
+            assert!(checked_udp(&fragment, version).is_none());
+        }
+    }
+    #[test]
+    fn tunnel_udp_uses_innermost_addresses_for_checksum_and_session_identity() {
+        let inner = packet(true);
+        let mut outer = packet(false)[..20].to_vec();
+        outer[9] = 41;
+        let len = (20 + inner.len()) as u16;
+        outer[2..4].copy_from_slice(&len.to_be_bytes());
+        outer[10..12].fill(0);
+        let sum = checksum(&outer);
+        outer[10..12].copy_from_slice(&sum.to_be_bytes());
+        outer.extend(inner);
+        let (_, meta) = checked_udp(&outer, 4).unwrap();
+        assert_eq!(meta.src.ip(), "::1".parse::<IpAddr>().unwrap());
+        assert_eq!(meta.dst_addr, "::2".parse::<IpAddr>().unwrap());
+        assert_eq!(meta.captured.fixed_headers.len(), 2);
     }
 }

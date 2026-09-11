@@ -273,6 +273,8 @@ impl NetnsFixture {
         ip(&["-n", ns, "addr", "add", &v6s, "dev", dev, "nodad"])?;
         ip(&["-n", ns, "link", "set", dev, "up"])?;
         ip(&["-n", ns, "link", "set", "lo", "up"])?;
+        // Only private veth devices: expose complete wire checksums to capture.
+        ip(&["netns", "exec", ns, "ethtool", "-K", dev, "tx", "off"])?;
         Ok(())
     }
 
@@ -576,14 +578,6 @@ fn set_ipv6_dstopts(fd: std::os::fd::RawFd, opts: &[u8]) -> Result<(), String> {
     } else {
         Ok(())
     }
-}
-
-/// Builds a minimal 8-octet IPv6 Destination Options header carrying a single
-/// PadN option (used by scenario 4b). Byte 0 (Next Header) is filled by the
-/// kernel; byte 1 is HdrExtLen (0 ⇒ 8 octets); the remaining 6 octets are a
-/// PadN option (type 1, len 4, four zero bytes).
-pub fn build_destopts_padn() -> Vec<u8> {
-    vec![0x00, 0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00]
 }
 
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
