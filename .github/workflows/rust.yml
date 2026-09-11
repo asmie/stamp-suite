@@ -92,24 +92,8 @@ jobs:
           - os: macos-latest
             rust: stable
             features: ""
-          # Still no Windows leg in this *gating* matrix: `pnet` is an
-          # unconditional Windows target dependency (see Cargo.toml's
-          # `[target.'cfg(target_os = "windows")'.dependencies]`), and its
-          # Windows backend `#[link(name = "Packet")]`s against
-          # Packet.dll/wpcap.dll -- so any test binary built for this
-          # target needs that DLL loadable at process start, even tests
-          # that never touch pnet. The free Npcap installer has no
-          # silent/unattended mode (that's an OEM-only feature; see
-          # nmap/npcap#720 and #545), which is what made this untenable
-          # here previously. Build coverage for Windows is preserved by
-          # the `build-release` matrix below (linking only needs the
-          # Npcap SDK's import libs, not the runtime driver). A
-          # *non-gating*, best-effort `test-windows` job now covers
-          # actually running the test suite by extracting just the
-          # runtime DLLs from the installer instead of running it — see
-          # that job for the full rationale. Promoting it into this
-          # gating matrix depends on that approach proving reliable
-          # across Npcap releases, which hasn't been observed yet.
+          # Windows has a separate bounded runtime gate below, with its
+          # pinned Npcap DLL setup and explicit driver-free test targets.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -124,37 +108,12 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --locked --example live_udp_bench ${{ matrix.features }}
 
-  # Best-effort, informational Windows test coverage. NOT part of the
-  # gating `test` matrix above -- see the comment on that job for why.
-  #
-  # `continue-on-error: true` means a red run here never fails the
-  # workflow or blocks a PR; the "(best-effort, non-gating)" suffix on
-  # the name makes that legible from the checks list without having to
-  # open the job.
-  #
-  # The free Npcap installer cannot be run unattended in CI (no silent
-  # mode without an OEM license: nmap/npcap#720, #545), and a prior
-  # attempt in this workflow to run it with `/S` anyway simply hung. So
-  # instead of running the installer, this job unpacks it as the plain
-  # NSIS self-extracting archive it is (via 7-Zip -- installed through
-  # Chocolatey, which unlike 7-Zip itself is reliably preinstalled on
-  # GitHub-hosted Windows images) and lifts out just the two
-  # redistributable DLLs (`Packet.dll`, `wpcap.dll`) that `pnet`'s
-  # Windows backend needs loadable at process start. It never
-  # registers or starts the actual capture driver/service, which is
-  # fine here: the only tests that would need a live driver
-  # (`tests/pnet_loopback_test.rs`) are already `#[ignore]`d by default
-  # and require CAP_NET_RAW-equivalent privileges this runner doesn't
-  # have anyway, so plain `cargo test` never reaches them.
-  #
-  # If the extraction step ever fails to locate the DLLs (e.g. a future
-  # Npcap release changes its installer's internal layout), the test
-  # step below will simply fail to launch -- annoying but harmless,
-  # since the job is non-gating either way.
+  # Runtime gate for codecs/configuration and UDP sender peers. The full
+  # capture-dependent suite remains informational until a driver-backed
+  # runner is available. DLL extraction does not install a capture driver.
   test-windows:
-    name: "test-windows (best-effort, non-gating)"
+    name: "Windows runtime core (capture driver not required)"
     runs-on: windows-latest
-    continue-on-error: true
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -245,11 +204,25 @@ jobs:
           if ($stagedCount -eq 2) {
             echo "$destDir" >> $env:GITHUB_PATH
           } else {
-            Write-Warning "Incomplete Npcap runtime staged; the test step will fail to launch. Continuing anyway (best-effort job)."
+            throw "Incomplete Npcap runtime: both x64 DLLs are required for the runtime gate."
           }
-      - name: Run tests (ttl-pnet backend)
-        run: cargo test --no-default-features --features ttl-pnet
+      - name: Require portable runtime and UDP sender tests
+        run: >-
+          cargo test --locked --no-default-features --features ttl-pnet
+          --test config_file_test --test malformed_input_test --test proptest_tlv
+          --test mixed_clock_test --test required_micro_session_test
+          --test session_ssid_validation_test --test sender_measurement_test
+          > windows-core.log 2>&1
         shell: bash
+      - name: Full Windows suite (informational capture coverage)
+        continue-on-error: true
+        run: cargo test --locked --no-default-features --features ttl-pnet > windows-full.log 2>&1
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-runtime-results
+          path: windows-*.log
 
   test-features:
     name: Test Features

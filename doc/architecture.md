@@ -825,6 +825,9 @@ implementation:
 
 **Clock-domain limitation.** The kernel RX/TX paths above are implemented.
 Live NIC hardware verification still requires suitable hardware and privileges.
+Use the [two-host hardware procedure](testing-hardware-timestamps.md) to record
+actual RX/Follow-Up TX methods and clock-domain evidence. A capability probe or
+software fallback does not count as a hardware pass.
 The PHC clock-domain hazard remains: NIC hardware timestamps live on the
 PTP hardware clock, which is only meaningful against CLOCK_REALTIME
 T1/T4 when the PHC is synchronized (ptp4l/phc2sys) — the read path must

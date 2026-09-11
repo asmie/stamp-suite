@@ -1,0 +1,26 @@
+name: Standards revision monitor
+
+on:
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  revisions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tracked IETF and RFC Editor metadata
+        run: python3 scripts/check_standards.py --report standards-report.json --cache standards-source
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: standards-revisions
+          path: |
+            standards-report.json
+            standards-source/*.json
+          if-no-files-found: error

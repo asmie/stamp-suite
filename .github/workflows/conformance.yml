@@ -59,6 +59,36 @@ jobs:
           path: interop.json
           if-no-files-found: error
 
+  release-integration:
+    name: Control and reference SNMP master
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install reference tools without starting a system service
+        run: |
+          sudo apt-get update
+          mkdir -p /tmp/stamp-snmp-packages/root
+          cd /tmp/stamp-snmp-packages
+          sudo apt-get --download-only --reinstall --yes \
+            -o Dir::Cache::archives=/tmp/stamp-snmp-packages \
+            install snmp snmpd libsnmp40t64 libsnmp-base libwrap0 libpci3
+          for package in *.deb; do dpkg-deb -x "$package" root; done
+          echo "/tmp/stamp-snmp-packages/root/usr/bin" >> "$GITHUB_PATH"
+          echo "/tmp/stamp-snmp-packages/root/usr/sbin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=/tmp/stamp-snmp-packages/root/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+      - run: cargo build --locked --all-features
+      - name: Require authenticated control and reference-master exchanges
+        run: python3 scripts/release_checks.py --binary target/debug/stamp-suite --report release-integration.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-integration
+          path: release-integration.json
+          if-no-files-found: error
+
   fuzz-build:
     name: Locked fuzz harness build
     runs-on: ubuntu-latest

@@ -3,6 +3,11 @@
 Revision frozen: draft-ietf-ippm-stamp-ext-hdr-**11**, 4 July 2026 (verified 2026-07-22)
 Source: https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-11.txt
 
+**Revision notice (2026-09-11):** the standards monitor detected -13. The
+[adoption delta review](ext-hdr-13-review.md) records additional header,
+checksum and state-notification requirements. This matrix remains explicitly
+frozen at -11 and is not evidence of complete -13 support.
+
 Summary: 40 clauses — 36 Compliant / 2 Partial / 0 Gap / 0 N-A(implementation) + 2 N-A(optional) / 0 Excluded
 
 **September MTU correction (finding 11):** the earlier startup/configured-cap

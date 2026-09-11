@@ -60,8 +60,8 @@ been closed by the exclusions below.
 |---|---|---|
 | **SR-MPLS return-path forwarding** | A userspace UDP-socket reflector cannot push an MPLS label stack onto its own IP reply. By design, any Return Path TLV carrying an SR-MPLS segment list is echoed with the U-flag (`ReturnPathAction::UnsupportedSr`) rather than attempted. | `9503-4.1.3.1-1` (Excluded in the matrix); `src/tlv/list/processing.rs` `has_sr_mpls()` / `process_return_path` |
 | **SNMP SET** | The AgentX sub-agent is a read-only monitoring surface by design (GET/GETNEXT/GETBULK only). A TestSet is answered `notWritable` (Commit/UndoSet get the matching failure code; CleanupSet is a no-op) rather than the PDU being silently dropped, so a manager gets a clean, immediate failure instead of a timeout — that response *is* the compliant behavior for a sub-agent that has chosen not to expose writable OIDs, not a gap in one. | `src/snmp/`; `doc/control-plane.md` ("SNMP SET parity — tracked elsewhere"); `doc/architecture.md` ("`--snmp` requires a Unix platform") |
-| **STAMP YANG** | No implementation gap is scored because no adopted standard exists to implement against: the STAMP YANG individual draft this project tracked has expired, and RFC 9534 §3.2's own text places YANG augmentation for micro-session mapping explicitly out of scope ("The detailed augmentation is not in the scope of this document"). | `rfc9534.md` note under §3.2; project standards-tracking notes |
-| **Windows backend limits** | Windows uses the `pnet`/libpcap-Npcap datalink-capture backend as a fallback tier, not the primary `nix` backend Linux/macOS get. This is a documented platform tier, not an unnoticed gap: Windows CI runs the test suite best-effort (non-gating — a Windows test failure does not block the pipeline), and features requiring raw-socket control-message access (kernel timestamping, some CoS/ECN paths) are honestly reported as unsupported at runtime rather than silently degraded. | `doc/architecture.md` ("Windows ❌"); CI `rust.yml` best-effort Windows job |
+| **STAMP YANG** | YANG management is an explicit product scope choice; it is not implemented. RFC 9534 §3.2 leaves the detailed micro-session mapping augmentation outside that document. This scope decision does not depend on a claim that no newer YANG draft exists. | `rfc9534.md` note under §3.2; [release scope](../release-evidence.md) |
+| **Windows backend limits** | Windows uses pnet/Npcap capture. CI now gates seven portable runtime/UDP-sender targets using staged x64 runtime DLLs; missing DLLs or failed core tests fail the job. The full capture-dependent suite remains informational until a driver-backed fixture is available. Windows hardware/kernel timestamp limits remain explicit. | [Windows gate and release claims](../release-evidence.md#windows-runtime-gate); `.github/workflows/rust.yml` |
 | **macOS TX timestamping** | The kernel/hardware timestamping feature has a real, tested RX path on macOS (`SO_TIMESTAMP`/`SCM_TIMESTAMP`, software-tier, µs resolution) but no TX path and no NIC-hardware path — Darwin exposes no equivalent of Linux's `MSG_ERRQUEUE`/`SIOCSHWTSTAMP`. This is a platform capability boundary, disclosed in code and docs, not an oversight. | `src/hwtstamp.rs` (module doc + macOS branch); `doc/architecture.md` hwtstamp section |
 | **NIC-hardware timestamp paths** | The `SIOCSHWTSTAMP` hardware-timestamp tier (Linux, `--hwtstamp on`, needs `CAP_NET_ADMIN` and a NIC that actually supports it) is code-cited and unit-tested for its request/fallback logic, but the live hardware path itself cannot be exercised in ordinary CI (no privileged, hardware-timestamp-capable NIC available there). Verification for this tier is the code citation plus a manual procedure an operator with the right hardware can run; `startup_action()`'s graceful fallback means the binary never *requires* the hardware to start. | `src/hwtstamp.rs`; `doc/architecture.md` ("NIC hardware tier") |
 | **Legacy permissive session admission** | `--session-admission permissive` remains the compatibility default and does not enforce RFC 8972 §3 provisioning/discard. Select `provisioned` and configure exact `--reflector-session` entries for those requirements. The three formerly excluded Gaps were repaired under finding 02 on 2026-09-08; sequence/counter/replay/Follow-Up state uses full identity in both modes. | `RFC8972-3-6`, `RFC8972-3-7`, `RFC8972-3-8`; [configuration](../usage.md#session-provisioning); `tests/session_identity_test.rs` |
@@ -187,9 +187,18 @@ see the module doc comment in `src/tlv/experimental.rs`).
   strict mode, but an internal skip is not wire evidence. See
   [namespace procedures](../testing-netns.md).
 - **Platform and hardware limits:** local September results are Linux evidence.
-  macOS CI and best-effort Windows CI retain their separate scopes. No physical
+  macOS CI and the bounded Windows runtime gate retain their separate scopes;
+  the full Windows capture-dependent suite remains informational. No physical
   NIC timestamp or LAG-member test is claimed. Earlier informal interoperability
   runs are not reproducible certification; AgentX has its separate targeted record.
+
+- **Release integrations and standards:** authenticated HTTP/HTTPS control is
+  verified with live packets, and a real Net-SNMP master fixture verifies MIB
+  reads and reconnect. Hardware validation has a two-host procedure with
+  explicit unavailable/fallback outcomes. The scheduled standards monitor
+  detected ext-hdr -13; the matrix remains frozen at -11. See
+  [release evidence](../release-evidence.md) and the
+  [new-revision delta](ext-hdr-13-review.md).
 
 ## Current residual and evidence limits
 

@@ -298,5 +298,10 @@ replies, directory/default selection, and rotation during queued bursts in
 open/authenticated mode over IPv4/IPv6. It also verifies authenticated revocation.
 The shared `selected_key_survives_rotation_and_cos_fallback` test injects a CoS
 send failure after key replacement and runs in pnet-only library builds.
-These rotation tests mutate the same shared keyset used by the control handlers;
-they do not claim end-to-end HTTP control-plane interoperability.
+Those Rust rotation tests mutate the shared keyset directly. O11 adds
+`scripts/release_checks.py`: a real CLI reflector controlled through bearer-
+authenticated HTTP and certificate-verified HTTPS, over IPv4/IPv6. It verifies
+rejected tokens, rotation during queued bursts, old/new key admission, deletion,
+default-key fallback, inventory redaction and shutdown using independently
+signed UDP packets. See [release fixtures](release-evidence.md) for commands,
+recorded results and the separate scope of TLS versus mTLS.

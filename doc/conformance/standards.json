@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "documents": [
+    {
+      "kind": "draft",
+      "name": "draft-ietf-ippm-asymmetrical-pkts",
+      "revision": "14",
+      "matrix": "doc/conformance/draft-asymmetrical-pkts.md"
+    },
+    {
+      "kind": "draft",
+      "name": "draft-ietf-ippm-stamp-cos-ecn",
+      "revision": "01",
+      "matrix": "doc/conformance/draft-stamp-cos-ecn.md"
+    },
+    {
+      "kind": "draft",
+      "name": "draft-ietf-ippm-stamp-ext-hdr",
+      "revision": "11",
+      "matrix": "doc/conformance/draft-stamp-ext-hdr.md"
+    },
+    {
+      "kind": "draft",
+      "name": "draft-gandhi-ippm-stamp-ber",
+      "revision": "07",
+      "matrix": "doc/conformance/draft-stamp-ber.md"
+    },
+    {
+      "kind": "rfc",
+      "name": "rfc8762",
+      "expected": {
+        "status": "PROPOSED STANDARD",
+        "updated_by": [
+          "RFC8972"
+        ],
+        "obsoleted_by": []
+      }
+    },
+    {
+      "kind": "rfc",
+      "name": "rfc8972",
+      "expected": {
+        "status": "PROPOSED STANDARD",
+        "updated_by": [],
+        "obsoleted_by": []
+      }
+    },
+    {
+      "kind": "rfc",
+      "name": "rfc9503",
+      "expected": {
+        "status": "PROPOSED STANDARD",
+        "updated_by": [],
+        "obsoleted_by": []
+      }
+    },
+    {
+      "kind": "rfc",
+      "name": "rfc9534",
+      "expected": {
+        "status": "PROPOSED STANDARD",
+        "updated_by": [],
+        "obsoleted_by": []
+      }
+    },
+    {
+      "kind": "rfc",
+      "name": "rfc8545",
+      "expected": {
+        "status": "PROPOSED STANDARD",
+        "updated_by": [],
+        "obsoleted_by": []
+      }
+    },
+    {
+      "kind": "rfc",
+      "name": "rfc2741",
+      "expected": {
+        "status": "DRAFT STANDARD",
+        "updated_by": [],
+        "obsoleted_by": []
+      }
+    }
+  ]
+}

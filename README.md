@@ -251,6 +251,7 @@ contract and security model: [doc/control-plane.md](doc/control-plane.md).
 - **[doc/architecture.md](doc/architecture.md)** — module layout, receiver backends, packet processing pipeline, full TLV reference, Prometheus and SNMP subsystems.
 - **[doc/measurements.md](doc/measurements.md)** — reply-copy accounting, directional counter windows, Follow-Up delay, clock quality and output semantics.
 - **[doc/benchmarks.md](doc/benchmarks.md)** — reproducible live UDP throughput/CPU measurements and in-process regression benchmarks.
+- **[doc/release-evidence.md](doc/release-evidence.md)** — authenticated control and Net-SNMP fixtures, Windows runtime gate, hardware procedure and standards revision monitoring.
 - **[doc/control-plane.md](doc/control-plane.md)** — runtime control-plane REST API: endpoints, concurrency model, security model.
 - **[doc/security.md](doc/security.md)** — threat model, HMAC and TLV integrity, key sourcing, file permissions, the `stamp` system user, systemd hardening, capability model, vulnerability reporting.
 

@@ -27,4 +27,15 @@ Limits: 1 MiB incoming payloads, 256 search ranges and 100 bulk iterations. Read
 SET handling is unchanged. Network-byte-order/default-context operation is the
 supported subset; byte order is a per-PDU flag, not negotiated by Open. This repair
 does not add little-endian payload or named-context support. Net-SNMP tools were
-not installed, so no external Net-SNMP daemon run or macOS runtime evidence is claimed.
+not installed for that original repair; its results are historical.
+
+O11 (11 September 2026) adds and passes a separate real Net-SNMP master/client
+fixture on Linux. `scripts/release_checks.py::snmp_case` starts an isolated
+master and the actual stamp-suite subagent, then verifies authenticated live
+packet counters, two session rows, GET/GETNEXT/walk/GETBULK ordering and the
+end-of-MIB boundary. STAMP continues reflecting while the master is restarted;
+the subagent reconnects with counters and session state preserved. The tools
+are Ubuntu package `5.9.4+dfsg-2ubuntu3`; the daemon reports `5.9.4.pre2`.
+See [release evidence](../release-evidence.md) for commands, captured queries and
+limits. This is reference-master interoperability evidence for the exercised
+subset; no macOS execution or full SNMP certification is claimed.

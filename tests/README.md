@@ -8,6 +8,15 @@ runs separately from Cargo; CI requires both default and all-feature binaries.
 See [independent interoperability fixtures](../doc/testing-interop.md) for its
 frozen payloads, 16 combined configurations, negative oracle checks and limits.
 
+[`release_checks.py`](../scripts/release_checks.py) separately gates four
+authenticated control cases (HTTP/HTTPS over IPv4/IPv6) and a real Net-SNMP master
+case in conformance CI. The latter uses temporary processes and tests live MIB
+counters/table walks, bulk ordering and reconnect. See the
+[release guide](../doc/release-evidence.md) for tools, reports, Windows runtime
+scope and the [hardware procedure](../doc/testing-hardware-timestamps.md).
+Python discovery (`python3 -m unittest discover -s scripts/tests -v`) also checks
+standards-monitor drift, matrix pins and unavailable/malformed source handling.
+
 ## Files
 
 `keyset_fallback_test`, `burst_transmission_test`, `session_auth_admission_test`,

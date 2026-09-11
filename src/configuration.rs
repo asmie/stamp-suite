@@ -575,8 +575,8 @@ pub struct Configuration {
     pub access_report_retries: u32,
 
     /// Enable Timestamp Information TLV (RFC 8972 §4.3).
-    /// The sender includes its sync source and timestamp method;
-    /// the reflector fills in its own values.
+    /// The sender requests the reflector's synchronization sources and timestamp
+    /// methods using zeroed information fields; the reflector fills in its values.
     #[clap(long)]
     pub timestamp_info: bool,
 

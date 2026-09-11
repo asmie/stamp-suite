@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add release fixtures for bearer-authenticated HTTP/HTTPS key rotation with
+  live packets and a real Net-SNMP master, including bulk queries and reconnect.
+  Require a bounded Windows runtime suite and publish a hardware timestamp
+  verification procedure with explicit unavailable/fallback outcomes.
+- Add a weekly standards revision monitor with offline replay and failure
+  reporting. Record the detected extension-header draft -13 changes while
+  retaining the explicitly supported -11 profile and matrix.
+
 - Add independent Python wire fixtures for key-directory bursts, CoS, source
   matching, SRv6 fallback and mixed clocks, with frozen payloads and JSON evidence.
   Gate default/all-feature runs in CI and check the oracle against corrupted
