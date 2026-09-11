@@ -22,6 +22,7 @@ fn src() -> SocketAddr {
 
 fn make_ctx<'a>(clock_source: ClockFormat) -> ProcessingContext<'a> {
     ProcessingContext {
+        packet_local_addr: None,
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source,
         clock_sync_source: SyncSource::Local,

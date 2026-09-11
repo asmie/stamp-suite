@@ -52,6 +52,7 @@ struct PnetSendContext {
 /// Configuration extracted for the blocking capture loop.
 /// This allows us to move owned data into the spawn_blocking closure.
 struct CaptureConfig {
+    interface_index: u32,
     queue_budget: Arc<ReplyBudget>,
     queue_capacity: usize,
     shutdown_grace: Duration,
@@ -126,8 +127,10 @@ pub async fn run_receiver(
     conf: &Configuration,
     shared: &ReceiverSharedState,
 ) -> Result<(), crate::StartupError> {
-    let interface_ip_match =
-        |iface: &NetworkInterface| iface.ips.iter().any(|ip| ip.ip() == conf.local_addr);
+    let interface_ip_match = |iface: &NetworkInterface| {
+        (conf.local_scope_id == 0 || iface.index == conf.local_scope_id)
+            && iface.ips.iter().any(|ip| ip.ip() == conf.local_addr)
+    };
 
     // Find the network interface with the provided local IP address
     let interfaces = datalink::interfaces();
@@ -166,7 +169,7 @@ pub async fn run_receiver(
     // packets_received=4, packets_reflected=4 while the sender saw 100% loss,
     // and the reply on the wire read `10.99.0.2.37745 > 10.99.0.1.50002`
     // instead of coming from :50001.
-    let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
+    let local_addr: SocketAddr = conf.local_socket_addr();
     let send_bind_v4: SocketAddr = match conf.local_addr {
         std::net::IpAddr::V4(v4) => (v4, conf.local_port).into(),
         // Captured IPv4 traffic still needs an IPv4 reply socket when the
@@ -183,7 +186,7 @@ pub async fn run_receiver(
         }
     };
     let send_bind_v6: SocketAddr = match conf.local_addr {
-        std::net::IpAddr::V6(v6) => (v6, conf.local_port).into(),
+        std::net::IpAddr::V6(_) => conf.local_socket_addr(),
         std::net::IpAddr::V4(_) => (std::net::Ipv6Addr::UNSPECIFIED, conf.local_port).into(),
     };
     // Optional: IPv6 may be unavailable, or the port may already be taken by
@@ -315,6 +318,7 @@ pub async fn run_receiver(
 
     // Build capture config with all values needed by the blocking loop
     let capture_config = CaptureConfig {
+        interface_index: interface.index,
         queue_budget: ReplyBudget::new(
             conf.reflector_queue_capacity as usize,
             Arc::clone(&shared.counters),
@@ -648,9 +652,10 @@ fn handle_packet(
                                 ipv6_ext_headers: ext_headers,
                             };
                             let pkt = PacketMeta {
-                                src: SocketAddr::new(
+                                src: crate::net_scope::received_endpoint(
                                     IpAddr::V6(header.get_source()),
                                     udp.get_source(),
+                                    config.interface_index,
                                 ),
                                 dst_addr: IpAddr::V6(header.get_destination()),
                                 ttl: header.get_hop_limit(),
@@ -880,6 +885,11 @@ fn handle_stamp_packet(
     let response_opt = {
         let keys_guard = config.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
         let ctx = ProcessingContext {
+            packet_local_addr: Some(crate::net_scope::received_endpoint(
+                pkt.dst_addr,
+                config.local_port,
+                config.interface_index,
+            )),
             replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: config.clock_source,
             clock_sync_source: config.clock_sync_source,

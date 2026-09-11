@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Expose endpoint synchronization declarations, decoded advertised clock errors
+  and invalid/unknown quality counts alongside OWD and Follow-Up delays. Append
+  `owd_clock_quality` as sender CSV column 29; retain existing delay samples.
+- Preserve IPv6 link-local source/destination zones through session lookup and
+  replies in both backends. Add numeric local/remote scope configuration and
+  isolated link-local burst, alternate-address and sender tests.
+
 - Report bounded sender reply-copy, duplicate, late and reordering accounting,
   directional Direct Measurement windows and Follow-Up reverse-delay summaries.
   Drain requested burst copies within the final timeout. Add `measurements` to

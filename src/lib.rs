@@ -33,12 +33,14 @@ pub mod ber;
 /// Clock format definitions (NTP/PTP).
 #[doc(hidden)]
 pub mod clock_format;
+
 /// Command-line configuration and validation.
 #[doc(hidden)]
 pub mod configuration;
 /// HMAC cryptographic operations for packet authentication.
 #[doc(hidden)]
 pub mod cos_policy;
+mod net_scope;
 
 #[doc(hidden)]
 pub mod crypto;

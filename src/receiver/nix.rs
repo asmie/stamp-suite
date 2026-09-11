@@ -36,7 +36,7 @@ pub async fn run_receiver(
     conf: &Configuration,
     shared: &ReceiverSharedState,
 ) -> Result<(), crate::StartupError> {
-    let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
+    let local_addr: SocketAddr = conf.local_socket_addr();
     let is_ipv6 = conf.local_addr.is_ipv6();
 
     // Create a standard UDP socket
@@ -487,7 +487,13 @@ pub async fn run_receiver(
 
                 // Extract actual destination address from packet info (for Location TLV).
                 // Falls back to configured bind address if pktinfo is unavailable.
-                let dst_addr = extract_dst_addr_from_cmsgs(&msg).unwrap_or(conf.local_addr);
+                let (dst_addr, ingress_interface) = extract_dst_addr_from_cmsgs(&msg)
+                    .unwrap_or((conf.local_addr, conf.local_scope_id));
+                let packet_local_addr = crate::net_scope::received_endpoint(
+                    dst_addr,
+                    local_addr.port(),
+                    ingress_interface,
+                );
 
                 // Extract the kernel receive timestamp (T2) when enabled.
                 // Must happen here while `msg` (and its cmsg buffer) is alive.
@@ -522,7 +528,15 @@ pub async fn run_receiver(
                         if let Some(v4) = src.as_sockaddr_in() {
                             std::net::SocketAddrV4::new(v4.ip(), v4.port()).into()
                         } else if let Some(v6) = src.as_sockaddr_in6() {
-                            std::net::SocketAddrV6::new(v6.ip(), v6.port(), 0, 0).into()
+                            crate::net_scope::received_endpoint(
+                                v6.ip().into(),
+                                v6.port(),
+                                if v6.scope_id() != 0 {
+                                    v6.scope_id()
+                                } else {
+                                    ingress_interface
+                                },
+                            )
                         } else {
                             eprintln!("Unknown source address type");
                             continue;
@@ -579,6 +593,7 @@ pub async fn run_receiver(
                 let response_opt = {
                     let keys_guard = shared.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
                     let ctx = ProcessingContext {
+                        packet_local_addr: Some(packet_local_addr),
                         replay_verdict: crate::session::ReplayVerdict::New,
                         clock_source: conf.clock_source,
                         clock_sync_source: conf.clock_sync_source.into(),
@@ -803,7 +818,7 @@ fn extract_tos_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> O
     None
 }
 
-/// Extract destination IP address from control messages received via recvmsg.
+/// Extract destination IP address and IPv6 interface index from recvmsg metadata.
 ///
 /// Uses IP_PKTINFO (IPv4) or IPV6_PKTINFO (IPv6) to determine the actual
 /// destination address of the received packet. This is needed when the reflector
@@ -811,16 +826,21 @@ fn extract_tos_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> O
 /// the real destination rather than the bind address.
 ///
 /// Returns `None` if packet info could not be extracted from the control messages.
-fn extract_dst_addr_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> Option<IpAddr> {
+fn extract_dst_addr_from_cmsgs(
+    msg: &nix::sys::socket::RecvMsg<SockaddrStorage>,
+) -> Option<(IpAddr, u32)> {
     let cmsgs = msg.cmsgs().ok()?;
 
     for cmsg in cmsgs {
         match cmsg {
             ControlMessageOwned::Ipv4PacketInfo(pktinfo) => {
-                return Some(IpAddr::V4(ipv4_addr_from_pktinfo(&pktinfo)));
+                return Some((IpAddr::V4(ipv4_addr_from_pktinfo(&pktinfo)), 0));
             }
             ControlMessageOwned::Ipv6PacketInfo(pktinfo) => {
-                return Some(IpAddr::V6(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)));
+                return Some((
+                    IpAddr::V6(Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr)),
+                    pktinfo.ipi6_ifindex,
+                ));
             }
             _ => continue,
         }

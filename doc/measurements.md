@@ -2,8 +2,10 @@
 
 The sender includes a `measurements` object in interim and final JSON reports,
 prints a text summary, and appends a quoted JSON `measurements` column to CSV.
-CSV now has 28 columns: its first 26 scalar columns and column 27 (`ber`) retain
-their positions. Use a CSV parser because both JSON columns contain commas.
+CSV now has 29 columns: its first 26 scalar columns, column 27 (`ber`) and
+column 28 (`measurements`) retain their positions. Column 29 is the quoted JSON
+`owd_clock_quality` object, empty when no OWD samples exist. Use a CSV parser
+because these JSON columns contain commas.
 Library users constructing `stats::StatsSnapshot` directly must supply the new
 optional field; `with_measurements` attaches a summary. The summary types are
 exported from `stats`.
@@ -143,3 +145,49 @@ not repeat the forward bit denominator or inflate its existing residual BER
 aggregate. Its directional totals, intervals, alarms and omission counts remain
 in `ber`; they do not represent a per-burst-copy BER metric. See
 [statistics retention](statistics.md) and [BER behavior](architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber).
+
+
+## Clock quality accompanying delay
+
+`owd.clock_quality` in JSON and `owd_clock_quality` in CSV describe exactly the
+original first-pending-reply OWD samples. Text reports their synchronization
+categories and maximum combined advertised error. `measurements.follow_up` has
+its own `clock_quality` object describing only matched correction samples,
+using metadata from the referenced previous reply. Missing/ambiguous references
+and duplicates do not contribute quality samples.
+
+| Field | Meaning |
+| --- | --- |
+| `samples` | Number of associated delay samples. |
+| `both_synchronized` | Both endpoints asserted S=1 and supplied valid nonzero error multipliers. |
+| `unsynchronized` | Usable error estimates, with at least one endpoint asserting S=0. |
+| `invalid_estimate` | At least one invalid error estimate, such as Multiplier=0. |
+| `unknown` | Local/remote quality metadata unavailable (for example, the library's plain `OwdCollector::record`). |
+| `last_sender`, `last_reflector` | Most recent sample's S bit, NTP/PTP format, Scale, Multiplier and decoded `error_ms`; null when metadata is absent. |
+| `max_combined_error_ms` | Largest sum of two usable advertised errors over the samples; null if none. |
+
+The four categories are mutually exclusive and sum to `samples`. Invalid errors
+are null, never a claim of zero uncertainty. The maximum includes usable estimates
+from unsynchronized clocks, so it is **not a bound on actual OWD accuracy**.
+A later unknown sample clears the last endpoints while retaining cumulative counts
+and the maximum from earlier usable estimates.
+
+The sender uses its configured Error Estimate, rather than the reflector's echoed
+sender field. The remote estimate comes from the accepted base reply. Their S bits
+remain operator/peer declarations: neither proves that NTP/PTP is locked, a PHC is
+aligned, or clocks share a compatible timescale. The default tiny scale/multiplier
+is a configured wire value, not a measured workstation timing precision. Existing
+RTT/OWD values remain available with an unsynchronized or invalid declaration;
+metadata qualifies them instead of silently removing previously accepted samples.
+
+[RFC 8762 §4.2.1](https://www.rfc-editor.org/rfc/rfc8762.html#section-4.2.1)
+uses the error interpretation from
+[RFC 4656 §4.1.2](https://www.rfc-editor.org/rfc/rfc4656.html#section-4.1.2):
+`error_seconds = Multiplier * 2^(Scale - 32)`. Zero Multiplier is invalid. The
+same error units apply to NTP and PTP timestamp encodings. A synchronized S bit
+indicates an external UTC synchronization assertion, independent of the Z bit.
+
+No clock-service polling, PHC discipline, UTC offset discovery, leap-second/smear
+compensation or synchronization certification is introduced. Use the existing
+`--clock-synchronized`, `--error-scale`, `--error-multiplier` and
+`--reflector-utc-offset` settings based on the endpoints' clock configuration.

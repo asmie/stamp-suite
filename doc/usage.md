@@ -202,7 +202,8 @@ header state. The older snapshot printing methods emit standalone reports.
 The sender also reports [reply and directional measurements](measurements.md):
 individual burst copies, duplicates/reordering, Direct Measurement counter
 windows and Follow-Up reverse delays. These appear under `measurements` in JSON
-and in the appended 28th CSV column; `ber` remains column 27. Requested copies
+and in CSV column 28; `ber` remains column 27. Clock quality accompanies OWD
+in JSON/text and is appended as CSV column 29 (`owd_clock_quality`). Requested copies
 that remain unobserved include reflector policy limits and are not a network-loss
 total. Ordinary RTT/OWD and probe-loss fields retain their first-reply semantics.
 
@@ -731,3 +732,48 @@ maximum/average error bursts, and nonempty computation windows. `ber_interval`,
 
 AgentX query ordering, partial-frame handling, resource limits and verification scope
 are documented in the [AgentX review](conformance/agentx-review.md).
+
+
+### Link-local IPv6 interface zones
+
+Use numeric interface indices for a link-local local or remote address:
+
+```sh
+ip -j link show eth0  # read this host/network namespace's ifindex
+# Example only: replace 2 with the actual local interface index.
+stamp-suite --local-addr fe80::1 --local-scope-id 2 --local-port 0 \
+  --remote-addr fe80::2 --remote-scope-id 2 --count 10
+stamp-suite -i --local-addr fe80::2 --local-scope-id 2
+```
+
+The CLI accepts the IP and its numeric zone separately; `%eth0` is not part of
+`--local-addr`/`--remote-addr`. Config files use `local_scope_id` and
+`remote_scope_id` (unsigned 32-bit values, default 0). IPv4 endpoints reject a
+nonzero scope. Link-local binds and sender destinations require a nonzero zone;
+an unavailable interface still causes the operating system's bind/connect error.
+Zone numbers are host/namespace-local and need not match between endpoints.
+See [RFC 4007 §11](https://www.rfc-editor.org/rfc/rfc4007.html#section-11).
+
+The nix backend preserves the source link-local scope returned by `recvmsg` and
+retains the destination interface from IPv6 packet info. A wildcard `::` bind
+can therefore return scoped replies and key each session by scoped source and
+destination endpoints. Global/loopback endpoints keep zone 0, so an ingress
+interface does not create a different global-address session. Flow labels are
+not session identifiers.
+
+Provisioned session endpoints use Rust's numeric socket-address syntax, for
+example `42,[fe80::1%2]:5000,[fe80::2%2]:862`. Both zones identify interfaces on
+the **reflector** host. The pnet backend gets the zone from its capture interface
+and uses `local_scope_id` to disambiguate an address present on multiple interfaces;
+it still requires a concrete local address and captures one interface per process.
+
+Delayed replies and fallback-to-original sends retain scope. A link-local Return
+Address TLV cannot carry a zone on the wire; it inherits the original link-local
+sender's zone. Source pinning and route-MTU queries continue on that interface.
+This does not implement arbitrary cross-interface link-local return routing or
+multicast session support. Linux namespace tests cover wildcard/concrete nix binds,
+concrete pnet binds, authenticated/open bursts, alternate returns and CLI senders.
+
+The [clock-quality fields](measurements.md#clock-quality-accompanying-delay)
+expose synchronization declarations and error estimates without claiming to verify
+clock-service or hardware synchronization.

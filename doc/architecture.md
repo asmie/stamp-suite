@@ -248,6 +248,19 @@ reverse-delay summaries. See [measurement semantics](measurements.md).
 Allocation measurements for the O07 validator and their limits are in
 [O07 evidence](reviews/2026-09-08/logs/optimization-o07/results.json).
 
+`OwdCollector::record_with_quality` retains endpoint synchronization declarations
+and advertised error estimates alongside the delay distribution. Follow-Up quality
+uses the referenced reply's metadata. The local estimate comes from configuration,
+not the echoed sender field; neither endpoint's S bit certifies clock discipline.
+See [clock quality](measurements.md#clock-quality-accompanying-delay).
+
+The nix receive path retains IPv6 link-local zones from the source socket address
+and destination packet info. `ProcessingContext::packet_local_addr` preserves the
+complete scoped destination for session identity without adding interface data to
+Location TLV wire fields. Pnet obtains zones from its selected capture interface.
+Scoped endpoints survive deferred transmission and original-target fallback.
+See [scoped IPv6 usage](usage.md#link-local-ipv6-interface-zones).
+
 ## Operational Characteristics
 
 A few cross-cutting operational invariants are worth pinning down separately, since they affect every code path that touches the network or the optional subsystems.

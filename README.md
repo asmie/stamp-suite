@@ -47,7 +47,7 @@ and the [BER-07 conformance matrix](doc/conformance/draft-stamp-ber.md).
 The Session-Sender transmits test packets to the Session-Reflector, which timestamps and reflects them back. Comparing timestamps yields:
 
 - Round-trip time (RTT) — cumulative min/max/avg and bounded-memory median/p95/p99 over the run ([precision and retention](doc/statistics.md))
-- One-way delay (OWD) — forward and reverse min/avg/median/max, assuming NTP/PTP-synchronized endpoints
+- One-way delay (OWD) — forward/reverse min/avg/median/max with endpoint synchronization declarations and advertised clock-error metadata
 - Packet loss rate
 - Per-packet reflector receive/send timestamps in `-R` mode — usable for external one-way-delay analysis when both endpoints share an NTP/PTP-synced clock
 
@@ -249,7 +249,7 @@ contract and security model: [doc/control-plane.md](doc/control-plane.md).
 
 - **[doc/usage.md](doc/usage.md)** — configuration file format, supported TOML keys, validation messages, full CLI flag reference.
 - **[doc/architecture.md](doc/architecture.md)** — module layout, receiver backends, packet processing pipeline, full TLV reference, Prometheus and SNMP subsystems.
-- **[doc/measurements.md](doc/measurements.md)** — reply-copy accounting, directional counter windows, Follow-Up delay and output semantics.
+- **[doc/measurements.md](doc/measurements.md)** — reply-copy accounting, directional counter windows, Follow-Up delay, clock quality and output semantics.
 - **[doc/benchmarks.md](doc/benchmarks.md)** — reproducible live UDP throughput/CPU measurements and in-process regression benchmarks.
 - **[doc/control-plane.md](doc/control-plane.md)** — runtime control-plane REST API: endpoints, concurrency model, security model.
 - **[doc/security.md](doc/security.md)** — threat model, HMAC and TLV integrity, key sourcing, file permissions, the `stamp` system user, systemd hardening, capability model, vulnerability reporting.
@@ -303,3 +303,7 @@ pre-provisioning. Use `--session-admission provisioned` and repeat
 `--reflector-session 'SSID,SOURCE,DESTINATION[,SENDER_MICRO_ID]'` for RFC 8972
 session admission; unmatched packets are discarded in both stateless and
 stateful modes. See [session provisioning](doc/usage.md#session-provisioning).
+
+For IPv6 link-local endpoints, use `--local-scope-id` and `--remote-scope-id`
+with the relevant numeric interface index. See [interface zones](doc/usage.md#link-local-ipv6-interface-zones)
+for reflector binds, config files and scoped session provisioning.

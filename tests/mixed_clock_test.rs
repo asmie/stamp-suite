@@ -61,6 +61,10 @@ fn check(local_ptp: bool, ipv6_auth: bool) {
         "--reflector-utc-offset",
         &offset.to_string(),
     ]);
+    if local_ptp {
+        command.arg("--clock-synchronized");
+    }
+    command.args(["--error-scale", "10", "--error-multiplier", "4"]);
     if ipv6_auth {
         command.args([
             "--auth-mode",
@@ -92,7 +96,11 @@ fn check(local_ptp: bool, ipv6_auth: bool) {
     reply[seq..seq + 4].copy_from_slice(&request[..4]);
     reply[echo..echo + 8].copy_from_slice(&request[ts..ts + 8]);
     reply[echo_err..echo_err + 2].copy_from_slice(&request[err..err + 2]);
-    let estimate: u16 = if remote_ptp { 0x4001 } else { 1 };
+    // The echoed sender Error Estimate is deliberately inaccurate: quality must
+    // use local configuration rather than trusting the echo.
+    reply[echo_err..echo_err + 2].copy_from_slice(&0xffffu16.to_be_bytes());
+    let estimate: u16 =
+        (if remote_ptp { 0x4000 } else { 0 }) | (if ipv6_auth { 0x8000 } else { 0 }) | 0x0802;
     reply[err..err + 2].copy_from_slice(&estimate.to_be_bytes());
     reply[ttl] = 64;
     reply[ts..ts + 8].copy_from_slice(&remote_time(remote_ptp, offset).to_be_bytes());
@@ -112,6 +120,24 @@ fn check(local_ptp: bool, ipv6_auth: bool) {
     let stats: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let owd = &stats["owd"];
     assert_eq!(owd["samples"], 1, "{stdout}");
+    let quality = &owd["clock_quality"];
+    assert_eq!(quality["samples"], 1);
+    assert_eq!(
+        quality["both_synchronized"],
+        u64::from(local_ptp && ipv6_auth)
+    );
+    assert_eq!(
+        quality["unsynchronized"],
+        u64::from(!(local_ptp && ipv6_auth))
+    );
+    assert_eq!(quality["last_sender"]["synchronized"], local_ptp);
+    assert_eq!(quality["last_reflector"]["synchronized"], ipv6_auth);
+    assert_eq!(quality["last_sender"]["scale"], 10);
+    assert_eq!(quality["last_reflector"]["scale"], 8);
+    assert_eq!(
+        quality["max_combined_error_ms"].as_f64().unwrap(),
+        (4.0 * 1024.0 + 2.0 * 256.0) / 4294967296.0 * 1000.0
+    );
     for direction in ["forward_avg_ms", "reverse_avg_ms"] {
         let delay = owd[direction].as_f64().unwrap();
         assert!(delay.abs() < 1000.0, "{direction}: {delay} ms; {stdout}");

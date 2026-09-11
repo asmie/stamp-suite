@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use super::PendingPacket;
 use crate::{
     clock_format::ClockFormat,
+    error_estimate::ErrorEstimate,
+    stats::ClockQuality,
     time::timestamp_to_unix_nanos,
     tlv::{DirectMeasurementTlv, FollowUpTelemetryTlv, TimestampMethod},
 };
@@ -86,6 +88,7 @@ pub struct FollowUpSummary {
     pub ambiguous: u64,
     pub unavailable: u64,
     pub reverse_delay: DelaySummary,
+    pub clock_quality: ClockQuality,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -125,6 +128,7 @@ struct Probe {
 }
 #[derive(Clone, Copy)]
 struct ReplyRecord {
+    quality: Option<(ErrorEstimate, ErrorEstimate)>,
     t4_ns: Option<i128>,
     format: ClockFormat,
     reference: i64,
@@ -371,6 +375,7 @@ impl Measurements {
         ordinal: Option<u32>,
         dm: Option<DirectMeasurementTlv>,
         follow: Option<FollowUpTelemetryTlv>,
+        quality: Option<(ErrorEstimate, ErrorEstimate)>,
     ) {
         self.rtt.record(i128::from(rtt_ns));
         if let Some(dm) = dm {
@@ -405,6 +410,10 @@ impl Measurements {
                         self.follow_delay
                             .record(t4 - (t3 - i128::from(offset) * 1_000_000_000));
                         self.summary.follow_up.matched += 1;
+                        self.summary
+                            .follow_up
+                            .clock_quality
+                            .record(previous.quality);
                         slot.corrected = true;
                     } else {
                         self.summary.follow_up.unavailable += 1;
@@ -417,6 +426,7 @@ impl Measurements {
             }
         }
         let record = ReplyRecord {
+            quality,
             t4_ns,
             format,
             reference,
@@ -474,6 +484,7 @@ mod tests {
             Some(k.sender + 1),
             None,
             follow,
+            None,
         );
     }
     fn dm(s: u32, rx: u32, tx: u32) -> DirectMeasurementTlv {
@@ -606,7 +617,21 @@ mod tests {
         m.sent(1, p, 2);
         let a = key(0, 10, 1);
         m.accept(a, Some(p)).unwrap();
-        observe(&mut m, a, None);
+        m.observe(
+            a,
+            1,
+            Some(10_000_000_000),
+            ClockFormat::PTP,
+            10,
+            0,
+            Some(1),
+            None,
+            None,
+            Some((
+                ErrorEstimate::from_wire(0x8001),
+                ErrorEstimate::from_wire(0xc002),
+            )),
+        );
         let b = key(1, 11, 2);
         m.accept(b, Some(p)).unwrap();
         // Current packet NTP does not change the earlier packet's PTP format.
@@ -624,8 +649,19 @@ mod tests {
                 follow_up_timestamp: 9u64 << 32,
                 timestamp_mode: TimestampMethod::SwLocal,
             }),
+            None,
         );
         assert_eq!(m.snapshot().follow_up.reverse_delay.avg_ms, Some(1000.0));
+        assert_eq!(m.snapshot().follow_up.clock_quality.both_synchronized, 1);
+        assert_eq!(
+            m.snapshot()
+                .follow_up
+                .clock_quality
+                .last_reflector
+                .unwrap()
+                .format,
+            ClockFormat::PTP
+        );
         m.observe(
             b,
             1,
@@ -636,6 +672,7 @@ mod tests {
             Some(2),
             None,
             Some(FollowUpTelemetryTlv::new()),
+            None,
         );
         assert_eq!(m.snapshot().follow_up.unavailable, 1);
     }

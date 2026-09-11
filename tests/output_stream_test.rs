@@ -201,6 +201,7 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
         assert!(stdout.contains("seq=0 rtt="));
         assert!(stdout.contains("--- STAMP Statistics ---"));
         assert!(stdout.contains("Quantiles: exact through 4096 samples"));
+        assert!(stdout.contains("OWD clock declarations:"));
         assert!(reflector_stdout.contains("--- STAMP Reflector Statistics ---"));
     } else {
         assert!(
@@ -236,12 +237,12 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
             let mut lines = stdout.lines();
             let header = lines.next().unwrap();
             assert!(header.starts_with("packets_sent,packets_received,"));
-            assert_eq!(header.split(',').count(), 28);
+            assert_eq!(header.split(',').count(), 29);
             let rows: Vec<_> = lines.collect();
             assert_eq!(rows.len() > 1, periodic);
             for row in &rows {
                 let cells = csv_cells(row);
-                assert_eq!(cells.len(), 28);
+                assert_eq!(cells.len(), 29);
                 assert!(
                     cells[0].parse::<u32>().is_ok(),
                     "repeated header or diagnostic: {row}"
@@ -252,6 +253,9 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
                 let measurements: serde_json::Value = serde_json::from_str(&cells[27]).unwrap();
                 assert!(ber.is_object());
                 assert_eq!(measurements["history_limit"], 4096);
+                let quality: serde_json::Value = serde_json::from_str(&cells[28]).unwrap();
+                assert!(quality["samples"].as_u64().unwrap() >= 1);
+                assert_eq!(quality["samples"], quality["unsynchronized"]);
             }
             assert_eq!(rows.last().unwrap().split(',').nth(1), Some("3"));
             let reflected: Vec<_> = reflector_stdout.lines().collect();

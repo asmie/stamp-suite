@@ -378,9 +378,12 @@ impl ProcessingContext<'_> {
         use_auth: bool,
     ) -> Option<crate::session::SessionKey> {
         let local = self
-            .packet_addr_info
-            .as_ref()
-            .map(|info| SocketAddr::new(info.dst_addr, info.dst_port))
+            .packet_local_addr
+            .or_else(|| {
+                self.packet_addr_info
+                    .as_ref()
+                    .map(|info| SocketAddr::new(info.dst_addr, info.dst_port))
+            })
             .unwrap_or_else(|| crate::session::SessionKey::from(src).local);
         packet_session_key(data, src, local, use_auth)
     }
@@ -1406,6 +1409,8 @@ pub struct ProcessingContext<'a> {
     pub reflector_tx_count: Option<u32>,
     /// Packet address information (for Location TLV).
     pub packet_addr_info: Option<PacketAddressInfo>,
+    /// Actual destination including its receiving interface zone, if available.
+    pub packet_local_addr: Option<SocketAddr>,
     /// Last reflection data: (seq, timestamp) for Follow-Up Telemetry TLV.
     pub last_reflection: Option<(u32, u64)>,
     /// Which Location TLV fields this reflector may report (RFC 8972 §4.2.2
@@ -2885,6 +2890,7 @@ mod tests {
             let counters = ReflectorCounters::new();
             let (response, session, signing_key) = {
                 let ctx = ProcessingContext {
+                    packet_local_addr: None,
                     replay_verdict: crate::session::ReplayVerdict::New,
                     hmac_key: Some(&replacement), // must lose to the SSID-specific entry
                     hmac_key_set: Some(&keys),
@@ -2967,6 +2973,7 @@ mod tests {
                     let mut keys = crate::crypto::HmacKeySet::new();
                     keys.insert(42, key.clone());
                     let ctx = ProcessingContext {
+                        packet_local_addr: None,
                         session_manager: Some(&manager),
                         hmac_key_set: Some(&keys),
                         stateful_reflector: stateful,
@@ -3053,6 +3060,7 @@ mod tests {
             for stateful in [false, true] {
                 let manager = Arc::new(SessionManager::new(None, None));
                 let ctx = ProcessingContext {
+                    packet_local_addr: None,
                     session_manager: Some(&manager),
                     hmac_key: Some(&key),
                     stateful_reflector: stateful,
@@ -3089,6 +3097,7 @@ mod tests {
                     let manager = Arc::new(SessionManager::new(None, Some(1)));
                     let counters = ReflectorCounters::new();
                     let ctx = ProcessingContext {
+                        packet_local_addr: None,
                         session_manager: Some(&manager),
                         hmac_key: auth.then_some(&key),
                         stateful_reflector: stateful,
@@ -3207,6 +3216,7 @@ mod tests {
                         let manager = Arc::new(SessionManager::new(None, None));
                         let counters = ReflectorCounters::new();
                         let ctx = ProcessingContext {
+                            packet_local_addr: None,
                             replay_verdict: crate::session::ReplayVerdict::New,
                             session_manager: Some(&manager),
                             hmac_key: keyed.then_some(&key),
@@ -3263,6 +3273,7 @@ mod tests {
             let manager = Arc::new(SessionManager::new(None, None));
             let counters = ReflectorCounters::new();
             let ctx = ProcessingContext {
+                packet_local_addr: None,
                 hmac_key: Some(&key),
                 session_manager: Some(&manager),
                 ..test_ctx(0, 0)
@@ -3303,6 +3314,7 @@ mod tests {
         data.extend_from_slice(&[0xFF; 6]);
         data.extend_from_slice(&[1; 6]);
         let ctx = ProcessingContext {
+            packet_local_addr: None,
             replay_verdict: crate::session::ReplayVerdict::Replay,
             ..test_ctx(0, 0)
         };
@@ -3318,6 +3330,7 @@ mod tests {
                 let mut data = replay_control_packet(42, false, None, true);
                 data[50..52].copy_from_slice(&count.to_be_bytes());
                 let ctx = ProcessingContext {
+                    packet_local_addr: None,
                     replay_verdict: crate::session::ReplayVerdict::Replay,
                     reflected_control_max_count: cap,
                     ..test_ctx(0, 0)
@@ -3338,6 +3351,7 @@ mod tests {
             let manager = Arc::new(SessionManager::new(None, None));
             let counters = ReflectorCounters::new();
             let ctx = ProcessingContext {
+                packet_local_addr: None,
                 replay_verdict: crate::session::ReplayVerdict::New,
                 session_manager: Some(&manager),
                 ..test_ctx(0, 0)
@@ -3367,6 +3381,7 @@ mod tests {
                 let manager = Arc::new(SessionManager::new(None, Some(1)));
                 let counters = ReflectorCounters::new();
                 let ctx = ProcessingContext {
+                    packet_local_addr: None,
                     replay_verdict: crate::session::ReplayVerdict::New,
                     session_manager: Some(&manager),
                     hmac_key: Some(&key),
@@ -3433,6 +3448,7 @@ mod tests {
                 assert_eq!(counters.packets_replayed.load(Ordering::Relaxed), 0);
                 // Revoking the required base key must not refresh an existing session.
                 let no_key = ProcessingContext {
+                    packet_local_addr: None,
                     replay_verdict: crate::session::ReplayVerdict::New,
                     hmac_key: None,
                     require_hmac: true,
@@ -3499,6 +3515,7 @@ mod tests {
         ));
         for stateful in [false, true] {
             let ctx = ProcessingContext {
+                packet_local_addr: None,
                 replay_verdict: crate::session::ReplayVerdict::New,
                 session_manager: Some(&manager),
                 stateful_reflector: stateful,
@@ -3509,9 +3526,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scoped_session_identity_keeps_both_endpoint_zones() {
+        let mut ctx = test_ctx(0, 0);
+        let client: SocketAddr = "[fe80::1%7]:5000".parse().unwrap();
+        ctx.packet_local_addr = Some("[fe80::2%7]:862".parse().unwrap());
+        let a = ctx.packet_session_key(&[0; 44], client, false).unwrap();
+        assert_eq!(a.local, ctx.packet_local_addr.unwrap());
+        assert_eq!(a.client, client);
+        ctx.packet_local_addr = Some("[fe80::2%8]:862".parse().unwrap());
+        let b = ctx.packet_session_key(&[0; 44], client, false).unwrap();
+        assert_ne!(a, b);
+        let c = ctx
+            .packet_session_key(&[0; 44], "[fe80::1%8]:5000".parse().unwrap(), false)
+            .unwrap();
+        assert_ne!(b, c);
+        assert_eq!(
+            c.to_string().parse::<crate::session::SessionKey>().unwrap(),
+            c
+        );
+    }
+
     /// Creates a default ProcessingContext for tests with given DSCP/ECN values.
     fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext<'static> {
         ProcessingContext {
+            packet_local_addr: None,
             replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: ClockFormat::NTP,
             clock_sync_source: SyncSource::Local,

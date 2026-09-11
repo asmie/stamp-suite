@@ -44,6 +44,7 @@ Access Report, congestion and BER tests exercise integration.
 | File | Purpose | Default-run? |
 | --- | --- | --- |
 | `reply_queue_test.rs` | Real IPv4/open and IPv6/auth queue saturation, capacity recovery without sequence consumption, SIGINT/SIGTERM shutdown, immediate/deadline cancellation and graceful burst completion with counters. | yes, Linux nix |
+| `scoped_ipv6_test.rs` | Isolated veth/netns link-local IPv6 replies, delayed bursts, alternate-address HMACs and CLI sender zones; open/auth and both backend builds. | ignored; command below |
 | `sender_measurement_test.rs` | Independent IPv4/open and IPv6/authenticated peer verifies delayed burst collection, duplicates, directional counter gaps and mixed-clock Follow-Up summaries. | yes |
 | `output_stream_test.rs` | CLI stdout parsing with default/JSON logs, packet details, periodic reports, BER/measurement CSV quoting, reflector shutdown, quiet logging, schema and validation errors. | yes, Linux nix |
 | `config_file_test.rs` | TOML config parsing and validation. | yes |
@@ -155,3 +156,20 @@ million samples, and cumulative long-run RTT/OWD summaries. BER history tests
 verify bounded retention, omission counters, lifetime totals and continued alarm
 transitions. `output_stream_test.rs` checks precision metadata and BER omission
 fields in CLI output, including periodic JSON/CSV.
+
+
+Run the scoped IPv6 fixture only inside isolated namespaces (Linux, `ip`,
+`unshare`, `nsenter` and user-namespace support required):
+
+```sh
+STAMP_SCOPE_NETNS_TESTS=1 unshare -Urn cargo test --locked --test scoped_ipv6_test -- --ignored --nocapture
+STAMP_SCOPE_NETNS_TESTS=1 unshare -Urn cargo test --locked --no-default-features --features ttl-pnet --test scoped_ipv6_test -- --ignored --nocapture
+```
+
+The fixture creates a temporary veth pair and a nested network namespace. It uses
+independent base/Type-12 bytes and HMAC coverage; only the Return Address TLV uses
+the production encoder. Nix checks wildcard and concrete binds; pnet checks
+concrete binds. The host network remains unchanged. `mixed_clock_test` checks
+local/remote S combinations, error decoding and untrusted echoed local metadata.
+Clock-quality unit tests distinguish invalid, absent and unsynchronized estimates;
+Follow-Up tests attach quality to the referenced earlier reply.

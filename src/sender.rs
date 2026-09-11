@@ -58,6 +58,7 @@ struct PendingPacket {
 
 /// Mutable context for processing received responses.
 struct SenderRecvContext<'a> {
+    local_error_estimate: Option<ErrorEstimate>,
     measurements: Option<&'a mut Measurements>,
     ber: Option<&'a mut BerCollector>,
     /// Configured remote timescale offset in seconds, removed after decoding.
@@ -684,8 +685,8 @@ pub async fn run_sender_with_output(
 ) -> Result<StatsSnapshot, crate::StartupError> {
     #[cfg(feature = "metrics")]
     let metrics_enabled = conf.metrics;
-    let local_addr: SocketAddr = (conf.local_addr, conf.local_port).into();
-    let remote_addr: SocketAddr = (conf.remote_addr, conf.remote_port).into();
+    let local_addr: SocketAddr = conf.local_socket_addr();
+    let remote_addr: SocketAddr = conf.remote_socket_addr();
 
     // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: the AIMD congestion-response
     // controller is active exactly when the sender requests ECN
@@ -1508,6 +1509,7 @@ pub async fn run_sender_with_output(
                                 apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                             }
                             let mut ctx = SenderRecvContext {
+                                local_error_estimate: Some(error_estimate),
                                 measurements: Some(&mut measurements),
                                 ber: ber.as_mut(),
                                 reflector_utc_offset: conf.reflector_utc_offset,
@@ -1653,6 +1655,7 @@ pub async fn run_sender_with_output(
                     apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                 }
                 let mut ctx = SenderRecvContext {
+                    local_error_estimate: Some(error_estimate),
                     measurements: Some(&mut measurements),
                     ber: ber.as_mut(),
                     reflector_utc_offset: conf.reflector_utc_offset,
@@ -1885,6 +1888,7 @@ pub async fn run_sender_with_output(
                             apply_tx_corrections(&reports, &mut tx_id_to_seq, &mut pending);
                         }
                         let mut ctx = SenderRecvContext {
+                            local_error_estimate: Some(error_estimate),
                             measurements: Some(&mut measurements),
                             ber: ber.as_mut(),
                             reflector_utc_offset: conf.reflector_utc_offset,
@@ -2347,6 +2351,8 @@ fn process_response(
             ordinal,
             telemetry.as_ref().and_then(|t| t.direct_measurement),
             telemetry.as_ref().and_then(|t| t.follow_up),
+            ctx.local_error_estimate
+                .map(|e| (e, ErrorEstimate::from_wire(reflector_error))),
         );
     }
 
@@ -2422,11 +2428,15 @@ fn process_response(
             timestamp_to_unix_nanos(sender_recv_ts, clock_source, reference),
         );
         if let (Some(t1), Some(t2), Some(t3), Some(t4)) = decoded {
-            ctx.owd_collector.record(OwdSample {
-                seq: seq_num,
-                forward_ns: (t2 - remote_offset_ns - t1) as i64,
-                reverse_ns: (t4 - (t3 - remote_offset_ns)) as i64,
-            });
+            ctx.owd_collector.record_with_quality(
+                OwdSample {
+                    seq: seq_num,
+                    forward_ns: (t2 - remote_offset_ns - t1) as i64,
+                    reverse_ns: (t4 - (t3 - remote_offset_ns)) as i64,
+                },
+                ctx.local_error_estimate
+                    .map(|e| (e, ErrorEstimate::from_wire(reflector_error))),
+            );
         } else {
             log::debug!("Invalid PTP nanoseconds on seq={seq_num}; omitting one-way delay");
         }
@@ -5371,6 +5381,7 @@ mod tests {
         let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
         access_report_state.tick(Instant::now()); // simulate the original send having armed it
         let mut ctx = SenderRecvContext {
+            local_error_estimate: None,
             measurements: None,
             ber: None,
             reflector_utc_offset: 0,
@@ -5441,6 +5452,7 @@ mod tests {
         let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
         access_report_state.tick(Instant::now());
         let mut ctx = SenderRecvContext {
+            local_error_estimate: None,
             measurements: None,
             ber: None,
             reflector_utc_offset: 0,
@@ -5492,6 +5504,7 @@ mod tests {
         zero_ssid_seen: &'a mut bool,
     ) -> SenderRecvContext<'a> {
         SenderRecvContext {
+            local_error_estimate: None,
             measurements: None,
             ber: None,
             reflector_utc_offset: 0,
@@ -5804,6 +5817,7 @@ mod tests {
         // --- Reflector side: pure, socket-free assembly ---
         let packet = PacketUnauthenticated::from_bytes(&request_bytes).unwrap();
         let ctx = ProcessingContext {
+            packet_local_addr: None,
             replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: ClockFormat::NTP,
             clock_sync_source: crate::tlv::SyncSource::Local,
@@ -5869,6 +5883,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut recv_ctx = SenderRecvContext {
+            local_error_estimate: None,
             measurements: None,
             ber: None,
             reflector_utc_offset: 0,
@@ -6254,6 +6269,7 @@ mod tests {
             if received == ack_after {
                 let packet = PacketUnauthenticated::from_bytes(&buf[..len]).unwrap();
                 let ctx = ProcessingContext {
+                    packet_local_addr: None,
                     replay_verdict: crate::session::ReplayVerdict::New,
                     clock_source: ClockFormat::NTP,
                     clock_sync_source: crate::tlv::SyncSource::Local,
@@ -6688,6 +6704,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            local_error_estimate: None,
             measurements: None,
             ber: None,
             reflector_utc_offset: 0,
@@ -6959,6 +6976,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                local_error_estimate: None,
                 measurements: None,
                 ber: None,
                 reflector_utc_offset: 0,
@@ -7034,6 +7052,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                local_error_estimate: None,
                 measurements: None,
                 ber: None,
                 reflector_utc_offset: 0,
@@ -7110,6 +7129,7 @@ mod tests {
         let mut zero_ssid_seen = false;
         {
             let mut ctx = SenderRecvContext {
+                local_error_estimate: None,
                 measurements: None,
                 ber: None,
                 reflector_utc_offset: 0,
@@ -7188,6 +7208,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            local_error_estimate: None,
             measurements: None,
             ber: None,
             reflector_utc_offset: 0,
@@ -7272,6 +7293,7 @@ mod tests {
         let mut packets_received = 0u32;
         let mut latched_reflector_msid = None;
         let mut ctx = SenderRecvContext {
+            local_error_estimate: None,
             measurements: None,
             ber: None,
             reflector_utc_offset: 0,

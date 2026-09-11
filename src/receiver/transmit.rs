@@ -33,7 +33,15 @@ struct TransportPlan {
 impl TransportPlan {
     fn new(response: &StampResponse, source: SocketAddr, base: usize, srv6: bool) -> Self {
         let target = match response.return_path_action {
-            ReturnPathAction::AlternateAddress(addr) => addr,
+            ReturnPathAction::AlternateAddress(addr) => match (addr, source) {
+                (SocketAddr::V6(target), SocketAddr::V6(source))
+                    if target.ip().is_unicast_link_local() && target.scope_id() == 0 =>
+                {
+                    std::net::SocketAddrV6::new(*target.ip(), target.port(), 0, source.scope_id())
+                        .into()
+                }
+                _ => addr,
+            },
             _ => source,
         };
         let mut options = SendOptions {

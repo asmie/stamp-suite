@@ -46,6 +46,7 @@ fn src() -> SocketAddr {
 
 fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
     ProcessingContext {
+        packet_local_addr: None,
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
         clock_sync_source: stamp_suite::tlv::SyncSource::Local,

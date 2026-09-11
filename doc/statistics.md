@@ -40,7 +40,7 @@ CSV formatting can introduce additional rounding at the displayed precision.
 `QuantilePrecision` discloses `exact_sample_limit = 4096` and
 `relative_error_bound = 0.0078125` in JSON, including standalone OWD summaries.
 Text prints the same policy. CSV adds `quantile_exact_sample_limit` and
-`quantile_relative_error_bound` before the BER and measurements JSON columns. This policy applies
+`quantile_relative_error_bound` before the BER, measurements and OWD clock-quality JSON columns. This policy applies
 independently to each series, even if RTT and usable OWD counts differ. It is a
 conservative bound: it does not imply short series have been approximated.
 
@@ -48,6 +48,10 @@ Rust API changes: `StatsSnapshot::packets_received` and `OwdSummary::samples`
 are now `u64`; both summary structs carry `quantile_precision`. `BerSummary`
 uses `VecDeque` for interval/alarm history and adds the two omission counters.
 Consumers constructing these public structs directly must supply the new fields.
+`OwdSummary` additionally carries `clock_quality`. Use `OwdCollector::record_with_quality`
+to attach endpoint estimates; the plain `record` API counts metadata as unknown.
+[Clock-quality semantics](measurements.md#clock-quality-accompanying-delay) apply
+independently of the quantile approximation policy.
 
 ## Cumulative moments
 

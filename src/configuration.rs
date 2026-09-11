@@ -270,6 +270,12 @@ pub struct Configuration {
     /// Local address to bind for
     #[clap(short = 'S', long, default_value = "0.0.0.0")]
     pub local_addr: std::net::IpAddr,
+    /// Numeric IPv6 interface zone for the local bind address (0 = default).
+    #[clap(long, default_value_t = 0)]
+    pub local_scope_id: u32,
+    /// Numeric IPv6 interface zone for the sender destination (0 = default).
+    #[clap(long, default_value_t = 0)]
+    pub remote_scope_id: u32,
     /// UDP port number for outgoing packets
     #[clap(short = 'p', long, default_value_t = 862)]
     pub remote_port: u16,
@@ -1097,7 +1103,44 @@ impl Configuration {
         Ok(keys)
     }
 
+    pub fn local_socket_addr(&self) -> std::net::SocketAddr {
+        Self::socket_addr(self.local_addr, self.local_port, self.local_scope_id)
+    }
+    pub fn remote_socket_addr(&self) -> std::net::SocketAddr {
+        Self::socket_addr(self.remote_addr, self.remote_port, self.remote_scope_id)
+    }
+    fn socket_addr(ip: std::net::IpAddr, port: u16, scope: u32) -> std::net::SocketAddr {
+        match ip {
+            std::net::IpAddr::V4(_) => std::net::SocketAddr::new(ip, port),
+            std::net::IpAddr::V6(ip) => std::net::SocketAddrV6::new(ip, port, 0, scope).into(),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ConfigurationError> {
+        for (name, addr, scope, active) in [
+            ("local", self.local_addr, self.local_scope_id, true),
+            (
+                "remote",
+                self.remote_addr,
+                self.remote_scope_id,
+                !self.is_reflector,
+            ),
+        ] {
+            if !active {
+                continue;
+            }
+            if addr.is_ipv4() && scope != 0 {
+                return Err(ConfigurationError::InvalidConfiguration(format!(
+                    "{name}_scope_id requires an IPv6 address"
+                )));
+            }
+            if matches!(addr, std::net::IpAddr::V6(ip) if ip.is_unicast_link_local()) && scope == 0
+            {
+                return Err(ConfigurationError::InvalidConfiguration(format!(
+                    "link-local {name}_addr requires a nonzero {name}_scope_id"
+                )));
+            }
+        }
         if self.reflector_queue_capacity == 0 {
             return Err(ConfigurationError::InvalidConfiguration(
                 "reflector_queue_capacity must be greater than zero".into(),
@@ -1709,6 +1752,8 @@ impl Configuration {
 
         merge!(remote_addr);
         merge!(local_addr);
+        merge!(local_scope_id);
+        merge!(remote_scope_id);
         merge!(remote_port);
         merge!(local_port);
         merge!(clock_source);
@@ -1832,6 +1877,8 @@ pub enum ConfigurationError {
 pub struct FileConfiguration {
     pub remote_addr: Option<std::net::IpAddr>,
     pub local_addr: Option<std::net::IpAddr>,
+    pub local_scope_id: Option<u32>,
+    pub remote_scope_id: Option<u32>,
     pub remote_port: Option<u16>,
     pub local_port: Option<u16>,
     pub clock_source: Option<ClockFormat>,
@@ -1949,6 +1996,8 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
   "properties": {
     "remote_addr": { "type": "string", "format": "ipvanyaddress" },
     "local_addr":  { "type": "string", "format": "ipvanyaddress" },
+    "local_scope_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "remote_scope_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "remote_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "local_port":  { "type": "integer", "minimum": 0, "maximum": 65535 },
     "clock_source": { "enum": ["NTP", "PTP"] },
@@ -4718,6 +4767,38 @@ mod tests {
         assert_eq!(resolve_log_filter(0, Some("")), "info");
         assert_eq!(resolve_log_filter(1, Some("")), "debug");
     }
+    #[test]
+    fn scoped_ipv6_cli_and_file_preserve_numeric_zones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scopes.toml");
+        std::fs::write(&path, "local_addr = 'fe80::1'\nremote_addr = 'fe80::2'\nlocal_scope_id = 7\nremote_scope_id = 8\n").unwrap();
+        let conf = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap();
+        assert_eq!(conf.local_socket_addr().to_string(), "[fe80::1%7]:862");
+        assert_eq!(conf.remote_socket_addr().to_string(), "[fe80::2%8]:862");
+        let conf = load_from_args(&[
+            "test",
+            "--config",
+            path.to_str().unwrap(),
+            "--remote-scope-id",
+            "9",
+        ])
+        .unwrap();
+        assert_eq!(conf.remote_scope_id, 9);
+        let schema: serde_json::Value = serde_json::from_str(CONFIG_JSON_SCHEMA).unwrap();
+        assert_eq!(schema["properties"]["local_scope_id"]["maximum"], u32::MAX);
+    }
+    #[test]
+    fn scoped_ipv6_rejects_missing_zone_and_ipv4_zone() {
+        for args in [
+            vec!["test", "--remote-addr", "fe80::1"],
+            vec!["test", "--local-addr", "fe80::1"],
+            vec!["test", "--local-scope-id", "3"],
+            vec!["test", "--remote-scope-id", "3"],
+        ] {
+            assert!(load_from_args(&args).is_err(), "{args:?}");
+        }
+    }
+
     #[test]
     fn clock_sync_sources_parse_merge_and_match_schema() {
         use crate::tlv::SyncSource;

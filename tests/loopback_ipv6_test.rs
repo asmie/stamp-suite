@@ -37,6 +37,7 @@ fn make_ctx<'a>(
     addr_info: Option<PacketAddressInfo>,
 ) -> ProcessingContext<'a> {
     ProcessingContext {
+        packet_local_addr: None,
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
         clock_sync_source: stamp_suite::tlv::SyncSource::Local,

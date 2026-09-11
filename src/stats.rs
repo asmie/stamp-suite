@@ -7,6 +7,9 @@ pub use crate::sender::measurements::{
     CounterPoint, DelaySummary, DirectSummary, FollowUpSummary, MeasurementSummary,
 };
 
+mod clock_quality;
+pub use clock_quality::{ClockEstimate, ClockQuality};
+
 mod quantiles;
 use quantiles::Quantiles;
 
@@ -249,6 +252,7 @@ impl OwdDirection {
 /// timestamps (T1..T4) are available.
 #[derive(Default)]
 pub struct OwdCollector {
+    quality: ClockQuality,
     forward: OwdDirection,
     reverse: OwdDirection,
 }
@@ -263,6 +267,22 @@ impl OwdCollector {
     /// Records one packet's forward and reverse one-way delays.
     /// Collection stops at u64::MAX observations.
     pub fn record(&mut self, sample: OwdSample) {
+        self.record_with_quality(sample, None);
+    }
+
+    /// Record delay with locally configured and reflected base Error Estimates.
+    pub fn record_with_quality(
+        &mut self,
+        sample: OwdSample,
+        estimates: Option<(
+            crate::error_estimate::ErrorEstimate,
+            crate::error_estimate::ErrorEstimate,
+        )>,
+    ) {
+        if self.forward.quantiles.count() == u64::MAX {
+            return;
+        }
+        self.quality.record(estimates);
         self.forward.record(sample.forward_ns);
         self.reverse.record(sample.reverse_ns);
     }
@@ -271,6 +291,7 @@ impl OwdCollector {
     #[must_use]
     pub fn summary(&self) -> Option<OwdSummary> {
         Some(OwdSummary {
+            clock_quality: self.quality.clone(),
             quantile_precision: QuantilePrecision::default(),
             samples: self.forward.quantiles.count(),
             forward_min_ms: ns_i64_to_ms(self.forward.min_ns?),
@@ -289,10 +310,12 @@ impl OwdCollector {
 ///
 /// Values assume the sender and reflector clocks are synchronised (e.g. via
 /// NTP/PTP); without synchronisation the forward/reverse split reflects the
-/// clock offset rather than true path delay, though their sum stays consistent
-/// with the round-trip time.
+/// clock offset rather than true path delay. Their sum excludes reflector
+/// residence time.
+/// `clock_quality` discloses declarations and unknown/invalid estimates.
 #[derive(serde::Serialize)]
 pub struct OwdSummary {
+    pub clock_quality: ClockQuality,
     pub quantile_precision: QuantilePrecision,
     pub samples: u64,
     pub forward_min_ms: f64,
@@ -544,6 +567,10 @@ impl StatsSnapshot {
             println!("{}Std Dev: {:.3} ms", prefix, v);
         }
         if let Some(owd) = &self.owd {
+            println!("{prefix}OWD clock declarations: {} both synchronized, {} unsynchronized, {} invalid, {} unknown; max advertised combined error {} ms (not verified accuracy)",
+                owd.clock_quality.both_synchronized, owd.clock_quality.unsynchronized,
+                owd.clock_quality.invalid_estimate, owd.clock_quality.unknown,
+                fmt_opt(owd.clock_quality.max_combined_error_ms));
             println!(
                 "{}One-way delay (assumes synchronized clocks, n={}):",
                 prefix, owd.samples
@@ -647,11 +674,11 @@ impl StatsSnapshot {
              owd_rev_min_ms,owd_rev_avg_ms,owd_rev_max_ms,\
              access_report_outcome,access_report_retransmissions,\
              congestion_ce_replies,congestion_backoffs_applied,\
-             congestion_current_interval_ms,congestion_max_interval_reached_ms,quantile_exact_sample_limit,quantile_relative_error_bound,ber,measurements"
+             congestion_current_interval_ms,congestion_max_interval_reached_ms,quantile_exact_sample_limit,quantile_relative_error_bound,ber,measurements,owd_clock_quality"
             );
         }
         println!(
-            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.packets_sent,
             self.packets_received,
             self.packets_lost,
@@ -688,6 +715,7 @@ impl StatsSnapshot {
                     .replace('"', "\"\"")
             )),
             self.measurements.as_ref().map_or_else(String::new, |m| format!("\"{}\"", serde_json::to_string(m).unwrap_or_default().replace('"', "\"\""))),
+            self.owd.as_ref().map_or_else(String::new, |o| format!("\"{}\"", serde_json::to_string(&o.clock_quality).unwrap_or_default().replace('"', "\"\""))),
         );
     }
 }

@@ -12,6 +12,7 @@ use tokio::net::UdpSocket;
 
 fn make_ctx<'a>() -> ProcessingContext<'a> {
     ProcessingContext {
+        packet_local_addr: None,
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
         clock_sync_source: stamp_suite::tlv::SyncSource::Local,
