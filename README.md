@@ -272,6 +272,10 @@ Before submitting:
 - `cargo clippy --all --all-features --tests -- -D warnings` — linting (CI is strict)
 - `cargo test --all-features` — tests
 
+The [independent wire fixtures](doc/testing-interop.md) run a Python peer against
+the real reflector and record protocol combinations, raw UDP bytes and IP
+metadata. They run separately from Cargo and are required by conformance CI.
+
 ## Versioning
 
 Semantic versioning ([SemVer](http://semver.org/)). See [tags](https://github.com/asmie/stamp-suite/tags) for releases.

@@ -1,10 +1,12 @@
 //! Rejected base packets must not allocate or refresh reflector session state.
 #![cfg(all(unix, any(feature = "ttl-nix", not(feature = "ttl-pnet"))))]
 
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
 use clap::Parser;
 use stamp_suite::{
     configuration::Configuration,
-    crypto::{compute_packet_hmac, HmacKey, HmacKeySet},
+    crypto::{HmacKey, HmacKeySet},
     receiver,
     session::ReplayVerdict,
 };
@@ -130,7 +132,7 @@ fn packet(seq: u32, ssid: u16, key: Option<u8>) -> Vec<u8> {
     bytes[offset - 1] = 1;
     bytes[offset..offset + 2].copy_from_slice(&ssid.to_be_bytes());
     if let Some(key) = key {
-        let mac = compute_packet_hmac(&HmacKey::new(vec![key; 16]).unwrap(), &bytes, 96);
+        let mac = wire_hmac::digest(&[key; 16], &bytes[..96]);
         bytes[96..112].copy_from_slice(&mac);
     }
     bytes

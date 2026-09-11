@@ -280,9 +280,9 @@ pub enum TlvType {
     FollowUpTelemetry = 7,
     /// HMAC TLV (8) - Must be last in the TLV list.
     Hmac = 8,
-    /// Destination Node Address TLV (9) - RFC 9503 §4.
+    /// Destination Node Address TLV (9) - RFC 9503 §3.
     DestinationNodeAddress = 9,
-    /// Return Path TLV (10) - RFC 9503 §5.
+    /// Return Path TLV (10) - RFC 9503 §4.
     ReturnPath = 10,
     /// Micro-session ID TLV (11) - RFC 9534 §3.1.
     MicroSessionId = 11,

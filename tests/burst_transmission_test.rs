@@ -5,7 +5,8 @@
 ))]
 
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags, SockaddrStorage};
-use stamp_suite::crypto::{compute_packet_hmac, HmacKey};
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
 use std::{
     net::UdpSocket,
     os::fd::AsRawFd,
@@ -38,14 +39,14 @@ fn packet(auth: bool, seq: u32, burst: bool) -> Vec<u8> {
         data.extend_from_slice(&[0; 16]);
     }
     if auth {
-        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
-        let hmac = compute_packet_hmac(&key, &data[..112], 96);
+        let key = [0xAB; 16];
+        let hmac = wire_hmac::digest(&key, &data[..96]);
         data[96..112].copy_from_slice(&hmac);
         if burst {
             let mut input = data[..4].to_vec();
             input.extend_from_slice(&data[112..]);
             data.extend_from_slice(&[0x80, 8, 0, 16]);
-            data.extend_from_slice(&key.compute(&input));
+            data.extend_from_slice(&wire_hmac::digest(&key, &input));
         }
     }
     data
@@ -227,12 +228,12 @@ fn exercise(ip: &str, auth: bool, clock: &str, stateful: bool, kernel: bool) {
             assert_eq!(&follow[..12], &[0; 12]);
         }
         if auth {
-            let key = HmacKey::new(vec![0xAB; 16]).unwrap();
-            assert_eq!(&data[96..112], &compute_packet_hmac(&key, &data[..112], 96));
+            let key = [0xAB; 16];
+            assert_eq!(&data[96..112], &wire_hmac::digest(&key, &data[..96]));
             let offset = data.len() - 20;
             let mut input = data[..4].to_vec();
             input.extend_from_slice(&data[112..offset]);
-            assert_eq!(&data[offset + 4..], &key.compute(&input));
+            assert_eq!(&data[offset + 4..], &wire_hmac::digest(&key, &input));
         }
     }
 }

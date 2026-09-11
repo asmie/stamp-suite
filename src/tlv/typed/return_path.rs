@@ -1,11 +1,11 @@
-//! Return Path TLV (Type 10) per RFC 9503 §5.
+//! Return Path TLV (Type 10) per RFC 9503 §4.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::tlv::core::{RawTlv, TlvError, TlvType, RETURN_PATH_CONTROL_CODE_SIZE, TLV_HEADER_SIZE};
 use crate::tlv::list::TlvList;
 
-/// Return Path sub-TLV type identifiers per RFC 9503 §5.
+/// Return Path sub-TLV type identifiers per RFC 9503 §4.
 ///
 /// Sub-TLVs use the standard 4-byte STAMP TLV header format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +48,7 @@ impl ReturnPathSubType {
     }
 }
 
-/// Return Path TLV (Type 10) per RFC 9503 §5.
+/// Return Path TLV (Type 10) per RFC 9503 §4.
 ///
 /// Contains sub-TLVs that specify how the reflector should route its reply.
 /// Sub-TLVs use the standard 4-byte STAMP TLV header (Flags | Type | Length x 2).
@@ -272,7 +272,7 @@ impl Default for ReturnPathTlv {
     }
 }
 
-/// Action determined by processing a Return Path TLV (RFC 9503 §5).
+/// Action determined by processing a Return Path TLV (RFC 9503 §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReturnPathAction {
     /// Normal reply (no Return Path TLV, or Control Code 0x1 same-link).
@@ -281,7 +281,7 @@ pub enum ReturnPathAction {
     SuppressReply,
     /// Reply to an alternate address (Return Address sub-TLV).
     AlternateAddress(SocketAddr),
-    /// SRv6 return path requested (RFC 9503 §5): carries the segment list in
+    /// SRv6 return path requested (RFC 9503 §4): carries the segment list in
     /// path order. The send path attempts best-effort SRH forwarding when it
     /// is enabled and the kernel supports it, otherwise it falls back to a
     /// normal reply with the Return Path U-flag set.

@@ -1,4 +1,4 @@
-//! Best-effort SRv6 return-path forwarding (RFC 9503 §5 + RFC 8754).
+//! Best-effort SRv6 return-path forwarding (RFC 9503 §4 + RFC 8754).
 //!
 //! A userspace UDP Session-Reflector cannot forward over an arbitrary
 //! SR-MPLS label stack, but on Linux it *can* ask the kernel to insert an

@@ -2,7 +2,7 @@
 //!
 //! Hand-crafts adversarial byte sequences along each parser boundary called
 //! out in the audit (RFC 8762 §4.1.x base-packet sizes; RFC 8972 §4.2.1 TLV
-//! layout; HMAC TLV ordering per §4.8; sub-TLV chains per RFC 9503 §5) and
+//! layout; HMAC TLV ordering per §4.8; sub-TLV chains per RFC 9503 §4) and
 //! asserts the reflector:
 //!
 //! - never panics,
@@ -294,7 +294,7 @@ fn group_c_corrupted_hmac_sets_i_flag_on_all_tlvs() {
 }
 
 // ===========================================================================
-// Group D: Return Path sub-TLV nesting (RFC 9503 §5)
+// Group D: Return Path sub-TLV nesting (RFC 9503 §4)
 
 /// Return Path TLV with a sub-TLV whose claimed length exceeds the parent
 /// Return Path Value. Lenient parser must mark malformed without

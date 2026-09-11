@@ -217,7 +217,7 @@ total. Ordinary RTT/OWD and probe-loss fields retain their first-reply semantics
       --tlv-mode <ignore|echo>     How to treat incoming TLVs [default: echo]
       --reflector-member-link-id <ID>  Configured reflector Micro-session ID (decimal or 0x-hex)
       --srv6-return-forwarding     Best-effort SRv6 Return Path SRH forwarding
-                                   (RFC 9503 §5; Linux+IPv6; off by default,
+                                   (RFC 9503 §4; Linux+IPv6; off by default,
                                    graceful U-flag fallback when unsupported)
       --allowed-dscp <SPEC>        DSCP codepoints the reflector may apply to a
                                    reply (RFC 8972 §4.4/§6, cos-ecn-01 §3.2):
@@ -491,11 +491,11 @@ hardware clocks still require deployment-specific clock handling.
       --access-report-retries <N>  Max Access Report TLV retransmissions before
                                    the procedure is aborted (RFC 8972 §4.6);
                                    0 disables retransmission [default: 4]
-      --dest-node-addr <IP>        Destination Node Address TLV (RFC 9503 §4, requires --ssid)
-      --return-path-cc <0|1>       Return Path control code (RFC 9503 §5)
-      --return-address <IP>        Return Path alternate reply address (RFC 9503 §5)
-      --return-sr-mpls-labels <L>  Comma-separated SR-MPLS label stack (RFC 9503 §5)
-      --return-srv6-sids <S>       Comma-separated SRv6 segment list (RFC 9503 §5)
+      --dest-node-addr <IP>        Destination Node Address TLV (RFC 9503 §3, requires --ssid)
+      --return-path-cc <0|1>       Return Path control code (RFC 9503 §4)
+      --return-address <IP>        Return Path alternate reply address (RFC 9503 §4)
+      --return-sr-mpls-labels <L>  Comma-separated SR-MPLS label stack (RFC 9503 §4)
+      --return-srv6-sids <S>       Comma-separated SRv6 segment list (RFC 9503 §4)
       --micro-session-id <ID>      Sender numeric Micro-session ID (no physical-link selection)
       --reflected-control-count <N>     Asymmetrical reply count (draft-ietf-ippm-asymmetrical-pkts) [default: 1]
       --reflected-control-length <LEN>  Requested reply packet length, 0 = don't pad [default: 0]

@@ -4,7 +4,7 @@
 //! cannot reach: real IP TOS/ECN bytes, TTL/Hop-Limit marking, IPv6 extension
 //! headers, SRv6 SRH routing, Address Group (MAC/IP) filtering, and Type-12
 //! multi-reply pacing. Each is mapped to the conformance-matrix clauses it
-//! evidences (RFC 8762 §4.x + erratum 8199, RFC 8972 §4.4, RFC 9503 §5,
+//! evidences (RFC 8762 §4.x + erratum 8199, RFC 8972 §4.4, RFC 9503 §4,
 //! draft-ietf-ippm-asymmetrical-pkts-14, draft-ietf-ippm-stamp-ext-hdr-11,
 //! draft-ietf-ippm-stamp-cos-ecn-01, draft-gandhi-ippm-stamp-ber).
 //!
@@ -249,7 +249,7 @@ fn scenario_2_cos_dscp_ecn_onwire() {
 }
 
 // ==========================================================================
-// Scenario 3 — SRv6 Return Path: SRH attached and routed (RFC 9503 §5 /
+// Scenario 3 — SRv6 Return Path: SRH attached and routed (RFC 9503 §4 /
 // RFC 8754). First live exercise of send_with_srh(). Skips without seg6.
 // ==========================================================================
 #[test]

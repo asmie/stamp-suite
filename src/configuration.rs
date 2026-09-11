@@ -669,11 +669,11 @@ pub struct Configuration {
     #[clap(long, default_value_t = 0)]
     pub report_interval: u32,
 
-    /// Destination Node Address for SR networks (RFC 9503 §4). Requires --ssid.
+    /// Destination Node Address for SR networks (RFC 9503 §3). Requires --ssid.
     #[clap(long, value_name = "IP")]
     pub dest_node_addr: Option<std::net::IpAddr>,
 
-    /// Return Path control code (RFC 9503 §5): 0=no reply, 1=same link reply.
+    /// Return Path control code (RFC 9503 §4): 0=no reply, 1=same link reply.
     #[clap(
         long,
         value_parser = clap::value_parser!(u32),
@@ -681,11 +681,11 @@ pub struct Configuration {
     )]
     pub return_path_cc: Option<u32>,
 
-    /// Return Path alternate reply address (RFC 9503 §5).
+    /// Return Path alternate reply address (RFC 9503 §4).
     #[clap(long, value_name = "IP", conflicts_with = "return_path_cc")]
     pub return_address: Option<std::net::IpAddr>,
 
-    /// Return Path SR-MPLS label stack (RFC 9503 §5). Comma-separated 20-bit labels.
+    /// Return Path SR-MPLS label stack (RFC 9503 §4). Comma-separated 20-bit labels.
     #[clap(
         long,
         value_name = "LABELS",
@@ -694,7 +694,7 @@ pub struct Configuration {
     )]
     pub return_sr_mpls_labels: Option<Vec<u32>>,
 
-    /// Return Path SRv6 segment list (RFC 9503 §5). Comma-separated IPv6 SIDs.
+    /// Return Path SRv6 segment list (RFC 9503 §4). Comma-separated IPv6 SIDs.
     #[clap(
         long,
         value_name = "SIDS",

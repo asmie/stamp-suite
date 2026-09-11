@@ -1,11 +1,11 @@
-//! Destination Node Address TLV (Type 9) per RFC 9503 §4.
+//! Destination Node Address TLV (Type 9) per RFC 9503 §3.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::tlv::core::{TlvError, TlvType, DEST_NODE_ADDR_IPV4_SIZE, DEST_NODE_ADDR_IPV6_SIZE};
 use crate::tlv::traits::TypedTlv;
 
-/// Destination Node Address TLV (Type 9) per RFC 9503 §4.
+/// Destination Node Address TLV (Type 9) per RFC 9503 §3.
 ///
 /// The Session-Sender includes this TLV to specify the intended reflector address.
 /// The Session-Reflector checks if the address matches one of its local addresses

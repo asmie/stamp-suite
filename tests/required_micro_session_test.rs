@@ -1,5 +1,6 @@
 //! A live sender must reject replies without a usable requested Micro-session ID.
-use stamp_suite::crypto::{compute_packet_hmac, HmacKey};
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
 use std::{
     net::UdpSocket,
     process::{Child, Command, Stdio},
@@ -71,14 +72,14 @@ fn check(ip: &str, auth: bool, flags: Option<u8>, accepted: bool) {
         reply.extend_from_slice(&[flags, 11, 0, 4, 0, 7, 0, 9]);
     }
     if auth {
-        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+        let key = [0xAB; 16];
         if flags.is_some() {
             let mut covered = reply[..4].to_vec();
             covered.extend_from_slice(&reply[base..]);
             reply.extend_from_slice(&[0, 8, 0, 16]);
-            reply.extend_from_slice(&key.compute(&covered));
+            reply.extend_from_slice(&wire_hmac::digest(&key, &covered));
         }
-        let mac = compute_packet_hmac(&key, &reply, 96);
+        let mac = wire_hmac::digest(&key, &reply[..96]);
         reply[96..112].copy_from_slice(&mac);
     }
     peer.send_to(&reply, source).unwrap();

@@ -81,7 +81,7 @@ struct CaptureConfig {
     shutdown: Arc<AtomicBool>,
     /// Aggregate packet counters for reporting.
     counters: Arc<ReflectorCounters>,
-    /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
+    /// Local addresses for Destination Node Address TLV matching (RFC 9503 §3).
     /// RFC 8972 §4.2.2 Location field-disclosure policy.
     location_disclosure: crate::tlv::LocationDisclosure,
     /// Suppress ordinary duplicates (`--drop-replayed`); handled Type-12
@@ -96,7 +96,7 @@ struct CaptureConfig {
     local_macs: Vec<[u8; 6]>,
     /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
     reflector_member_link_id: Option<u16>,
-    /// Whether to honour a Return Path "Return Address" sub-TLV (RFC 9503 §5).
+    /// Whether to honour a Return Path "Return Address" sub-TLV (RFC 9503 §4).
     /// Off by default to prevent third-party traffic redirection.
     return_path_allow_alternate: bool,
     /// Per-source rate limiter (always constructed; rate 0 = unlimited,
@@ -307,7 +307,7 @@ pub async fn run_receiver(
     let start_time = shared.start_time;
     let output_format = conf.output_format;
 
-    // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
+    // Build local addresses for Destination Node Address TLV matching (RFC 9503 §3).
     let local_addresses = super::build_local_addresses(conf.local_addr);
 
     // Build local MAC addresses for the Reflected Test Packet Control TLV's

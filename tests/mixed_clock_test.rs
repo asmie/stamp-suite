@@ -1,5 +1,6 @@
 //! Live sender against an independently encoded peer with a different clock format.
-use stamp_suite::crypto::{compute_packet_hmac, HmacKey};
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
 use std::{
     net::UdpSocket,
     process::{Child, Command, Stdio},
@@ -105,8 +106,8 @@ fn check(local_ptp: bool, ipv6_auth: bool) {
     reply[ttl] = 64;
     reply[ts..ts + 8].copy_from_slice(&remote_time(remote_ptp, offset).to_be_bytes());
     if ipv6_auth {
-        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
-        let hmac = compute_packet_hmac(&key, &reply, 96);
+        let key = [0xAB; 16];
+        let hmac = wire_hmac::digest(&key, &reply[..96]);
         reply[96..112].copy_from_slice(&hmac);
     }
     peer.send_to(&reply, source).unwrap();

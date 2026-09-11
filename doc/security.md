@@ -23,7 +23,7 @@ from the reflector's own address). stamp-suite is hardened against the worst of
 this **by default**:
 
 - **No reply redirection by default.** A Return Path TLV "Return Address" sub-TLV
-  (RFC 9503 §5) asks the reflector to send its reply to an address *other than the
+  (RFC 9503 §4) asks the reflector to send its reply to an address *other than the
   packet source*. That is a traffic-redirection primitive, so it is **off by
   default**: the reflector echoes the sub-TLV with the U-flag set and replies to
   the packet source. Enable it only inside a controlled (and preferably

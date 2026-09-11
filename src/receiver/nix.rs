@@ -267,7 +267,7 @@ pub async fn run_receiver(
     let start_time = shared.start_time;
     let output_format = conf.output_format;
 
-    // Build local addresses for Destination Node Address TLV matching (RFC 9503 §4).
+    // Build local addresses for Destination Node Address TLV matching (RFC 9503 §3).
     // Start with the configured bind address; if wildcard, enumerate interface addresses.
     let local_addresses = super::build_local_addresses(conf.local_addr);
     // RFC 8972 §4.2.2 Location field-disclosure policy. `validate()` already

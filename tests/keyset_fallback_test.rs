@@ -1,11 +1,9 @@
 //! Per-SSID signing survives final fallback mutations and in-flight key rotation.
 #![cfg(all(unix, any(feature = "ttl-nix", not(feature = "ttl-pnet"))))]
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
 use clap::Parser;
-use stamp_suite::{
-    configuration::Configuration,
-    crypto::{compute_packet_hmac, HmacKey},
-    receiver,
-};
+use stamp_suite::{configuration::Configuration, crypto::HmacKey, receiver};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::UdpSocket, task::JoinHandle, time::timeout};
 
@@ -33,25 +31,25 @@ fn request(auth: bool, ssid: u16, value: u8, seq: u32, fallback: bool, burst: bo
         data.extend_from_slice(&100_000_000u32.to_be_bytes());
         data.extend_from_slice(&[0; 4]);
     }
-    let key = key(value);
+    let key = [value; 16];
     let mut covered = data[..4].to_vec();
     covered.extend_from_slice(&data[base..]);
     data.extend_from_slice(&[0x80, 8, 0, 16]);
-    data.extend_from_slice(&key.compute(&covered));
+    data.extend_from_slice(&wire_hmac::digest(&key, &covered));
     // Symmetric padding exercises signing with bytes after the HMAC too.
     if !burst {
         data.extend_from_slice(&[0; 9]);
     }
     if auth {
-        let mac = compute_packet_hmac(&key, &data, 96);
+        let mac = wire_hmac::digest(&key, &data[..96]);
         data[96..112].copy_from_slice(&mac);
     }
     data
 }
 fn verify(data: &[u8], auth: bool, value: u8, fallback: bool) {
-    let key = key(value);
+    let key = [value; 16];
     if auth {
-        assert_eq!(&data[96..112], &compute_packet_hmac(&key, data, 96));
+        assert_eq!(&data[96..112], &wire_hmac::digest(&key, &data[..96]));
     }
     let base = if auth { 112 } else { 44 };
     let mut pos = base;
@@ -69,7 +67,10 @@ fn verify(data: &[u8], auth: bool, value: u8, fallback: bool) {
             assert_eq!(data[pos] & 0xE0, 0);
             let mut covered = data[..4].to_vec();
             covered.extend_from_slice(&data[base..pos]);
-            assert_eq!(&data[pos + 4..pos + 4 + len], &key.compute(&covered));
+            assert_eq!(
+                &data[pos + 4..pos + 4 + len],
+                &wire_hmac::digest(&key, &covered)
+            );
             found = true;
             break;
         }

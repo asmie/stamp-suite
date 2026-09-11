@@ -3,9 +3,17 @@
 Default `cargo test --all-features` runs every test in this directory that
 doesn't require special privileges. A small set of tests is gated either
 by Cargo features or by `#[ignore]` so unprivileged CI passes cleanly;
-this file documents the opt-in invocations.
+this file documents the opt-in invocations. The standalone Python wire tier
+runs separately from Cargo; CI requires both default and all-feature binaries.
+See [independent interoperability fixtures](../doc/testing-interop.md) for its
+frozen payloads, 16 combined configurations, negative oracle checks and limits.
 
 ## Files
+
+`keyset_fallback_test`, `burst_transmission_test`, `session_auth_admission_test`,
+`required_micro_session_test` and `mixed_clock_test` build wire bytes manually
+and use `common/wire_hmac.rs` for digests without production HMAC/coverage helpers.
+In-process key/session state mutation remains part of their test setup.
 
 Performance measurements are documented in [benchmarks.md](../doc/benchmarks.md).
 The live UDP example measures release-build throughput and process CPU;

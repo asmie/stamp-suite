@@ -170,6 +170,12 @@ see the module doc comment in `src/tlv/experimental.rs`).
   all-features and pnet-only builds. All-features selects nix and cannot verify
   pnet execution. Results are recorded by checkpoint rather than keeping a
   timeless unit-test count here. See [test inventory](../../tests/README.md).
+- **Independent protocol combinations:** the Python standard-library peer runs
+  against default and all-feature binaries in conformance CI, recording exact
+  UDP bytes, traffic class and source metadata. Frozen requests and corrupted
+  reply checks keep its encoder/verifier independent of production codecs.
+  The SRv6 profile verifies U-flag fallback, not successful SRH transmission;
+  see [fixture contract and coverage map](../testing-interop.md).
 - **Properties and fuzzing:** deterministic/property suites run through Cargo;
   eight fuzz targets are compiled from the separate locked fuzz manifest and
   exercised by the scheduled fuzz workflow. Compilation is not fuzz execution.

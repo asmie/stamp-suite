@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add independent Python wire fixtures for key-directory bursts, CoS, source
+  matching, SRv6 fallback and mixed clocks, with frozen payloads and JSON evidence.
+  Gate default/all-feature runs in CI and check the oracle against corrupted
+  replies. Remove production HMAC helpers from five existing combination suites.
+- Correct stale RFC 9503 section references in source comments, CLI help and docs.
+
 - Expose endpoint synchronization declarations, decoded advertised clock errors
   and invalid/unknown quality counts alongside OWD and Follow-Up delays. Append
   `owd_clock_quality` as sender CSV column 29; retain existing delay samples.

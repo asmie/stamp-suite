@@ -20,7 +20,7 @@ use crate::tlv::{
 
 use super::TlvList;
 
-/// Result of matching a Destination Node Address TLV (RFC 9503 §3/§4).
+/// Result of matching a Destination Node Address TLV (RFC 9503 §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestinationNodeAddressOutcome {
     /// No Destination Node Address TLV was present.
@@ -479,7 +479,7 @@ impl TlvList {
         );
     }
 
-    /// Processes Destination Node Address TLVs per RFC 9503 §4.
+    /// Processes Destination Node Address TLVs per RFC 9503 §3.
     ///
     /// Finds the first Destination Node Address TLV and checks if the address
     /// matches one of the reflector's local addresses. If not, sets the U-flag.
@@ -511,7 +511,7 @@ impl TlvList {
         outcome
     }
 
-    /// Processes Return Path TLVs per RFC 9503 §5.
+    /// Processes Return Path TLVs per RFC 9503 §4.
     ///
     /// Finds the first Return Path TLV, parses its sub-TLVs, and determines
     /// the appropriate action for the reflector.
@@ -582,7 +582,7 @@ impl TlvList {
             return ReturnPathAction::Normal;
         }
 
-        // SRv6 return path (RFC 9503 §5): hand the segment list to the send
+        // SRv6 return path (RFC 9503 §4): hand the segment list to the send
         // path, which attempts best-effort SRH forwarding (RFC 8754) when
         // enabled and kernel-supported, or sets the U-flag on fallback. We do
         // NOT set the U-flag here — whether the request is honoured is decided

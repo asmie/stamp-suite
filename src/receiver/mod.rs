@@ -95,7 +95,7 @@ use crate::{
 };
 
 /// Returns the list of local IP addresses used for Destination Node Address
-/// TLV matching (RFC 9503 §4).
+/// TLV matching (RFC 9503 §3).
 ///
 /// When `bind_addr` is a wildcard (`0.0.0.0` or `::`), enumerates every
 /// interface address on the system. Otherwise returns just `bind_addr`.
@@ -1002,7 +1002,7 @@ pub fn commit_replay(session: &crate::session::Session, data: &[u8]) {
 ///
 /// Walks the TLV area to find a Return Path TLV (type 10) and sets its
 /// unrecognized flag. Used when the reflector cannot honor the requested
-/// return path (e.g., alternate-address send failure) per RFC 9503 §5.
+/// return path (e.g., alternate-address send failure) per RFC 9503 §4.
 ///
 /// Returns `true` if the Return Path TLV was found and updated.
 pub fn set_return_path_u_flag_in_response(response: &mut [u8], base_packet_size: usize) -> bool {
@@ -1343,7 +1343,7 @@ pub struct StampResponse {
     /// Requested DSCP/ECN from CoS TLV (if present).
     /// Tuple of (dscp1, ecn1) that should be applied to the outgoing packet.
     pub cos_request: Option<(u8, u8)>,
-    /// Action determined by Return Path TLV processing (RFC 9503 §5).
+    /// Action determined by Return Path TLV processing (RFC 9503 §4).
     pub return_path_action: ReturnPathAction,
     /// Extra-replies descriptor from a Reflected Test Packet Control TLV
     /// (draft-ietf-ippm-asymmetrical-pkts §3). `None` when the incoming
@@ -1419,7 +1419,7 @@ pub struct ProcessingContext<'a> {
     /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, cos-ecn-01 §3.2): answers
     /// *permitted*, where the backends' setsockopt answers *capable*.
     pub cos_policy: &'a CosAdmissionPolicy,
-    /// Local addresses for Destination Node Address TLV matching (RFC 9503 §4).
+    /// Local addresses for Destination Node Address TLV matching (RFC 9503 §3).
     pub local_addresses: &'a [std::net::IpAddr],
     /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
     /// Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
@@ -1427,10 +1427,10 @@ pub struct ProcessingContext<'a> {
     /// L2 Address Group sub-TLV can ever match (the packet is dropped per
     /// spec, not treated as "unsupported").
     pub local_macs: &'a [[u8; 6]],
-    /// Sender's UDP port for Return Path alternate address replies (RFC 9503 §5).
+    /// Sender's UDP port for Return Path alternate address replies (RFC 9503 §4).
     pub sender_port: u16,
     /// Whether to honour a Return Path "Return Address" sub-TLV by replying to
-    /// the peer-chosen address (RFC 9503 §5). Off by default; when off the
+    /// the peer-chosen address (RFC 9503 §4). Off by default; when off the
     /// reflector echoes the TLV with the U-flag and replies to the packet
     /// source, preventing third-party traffic redirection / reflection.
     pub return_path_allow_alternate: bool,
@@ -2181,7 +2181,7 @@ fn apply_semantic_tlv_processing(
     // values other than 1/2 MUST be discarded — marked U, size preserved).
     tlvs.discard_invalid_access_report_tlvs();
 
-    // Process Destination Node Address TLV (RFC 9503 §4)
+    // Process Destination Node Address TLV (RFC 9503 §3)
     let reply_source = tlvs
         .process_destination_node_address(ctx.local_addresses)
         .pinned_source();
@@ -2194,7 +2194,7 @@ fn apply_semantic_tlv_processing(
         }
     }
 
-    // Process Return Path TLV (RFC 9503 §5). Mutable: the
+    // Process Return Path TLV (RFC 9503 §4). Mutable: the
     // draft-ietf-ippm-asymmetrical-pkts-14 §4.3 conflict rule below may
     // override a no-reply request.
     let mut return_path_action =
@@ -2216,7 +2216,7 @@ fn apply_semantic_tlv_processing(
     //
     // The policy is scoped to where the reply is actually going — which is why
     // this runs after the Return Path TLV: an honoured Return Address
-    // (RFC 9503 §5, `--return-path-allow-alternate`) redirects the reply, and
+    // (RFC 9503 §4, `--return-path-allow-alternate`) redirects the reply, and
     // a destination-scoped rule for that address must win over the original
     // source's.
     let reply_destination = match &return_path_action {

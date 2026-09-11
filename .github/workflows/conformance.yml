@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Test evidence checkers
+      - name: Test evidence checkers and independent wire oracle
         run: python3 -m unittest discover -s scripts/tests -v
       - name: Check matrix counts
         run: python3 scripts/check_conformance_counts.py --json
@@ -32,6 +32,32 @@ jobs:
         with:
           name: conformance-citations
           path: citations.json
+
+  independent-wire:
+    name: Independent UDP fixtures (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            flags: ''
+          - name: all-features
+            flags: '--all-features'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked ${{ matrix.flags }}
+      - name: Require independent protocol combinations
+        run: python3 scripts/interop_stamp.py --binary target/debug/stamp-suite --report interop.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: independent-wire-${{ matrix.name }}
+          path: interop.json
+          if-no-files-found: error
 
   fuzz-build:
     name: Locked fuzz harness build

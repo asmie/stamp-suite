@@ -1062,13 +1062,13 @@ pub async fn run_sender_with_output(
         log::info!("Follow-Up Telemetry TLV enabled");
     }
 
-    // Build Destination Node Address TLV (RFC 9503 §4)
+    // Build Destination Node Address TLV (RFC 9503 §3)
     if let Some(addr) = conf.dest_node_addr {
         extra_tlvs.push(DestinationNodeAddressTlv::new(addr).to_raw());
         log::info!("Destination Node Address TLV enabled ({})", addr);
     }
 
-    // Build Return Path TLV (RFC 9503 §5) — at most one
+    // Build Return Path TLV (RFC 9503 §4) — at most one
     if let Some(cc) = conf.return_path_cc {
         extra_tlvs.push(ReturnPathTlv::with_control_code(cc).to_raw());
         log::info!("Return Path TLV enabled (control code={})", cc);
