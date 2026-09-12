@@ -126,19 +126,20 @@ cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet \
   --test startup_failure_test
 ```
 
-At commit `f853287`, native Windows Server 2025 x64 executed the library and
-all eight selected integration targets: **1033 passed, 1 failed**, with no
-ignored or filtered tests. The earlier scheduler and missing-key fixes passed.
-The remaining occupied-port fixture held a loopback socket while asking the
-reflector to bind a wildcard address; that wildcard bind succeeded on Windows
-and the test instead reached interface discovery.
+At commit `3d56c62`, native Windows Server 2025 x64 passed the library and
+all eight required integration targets: **1034 passed, 0 failed, 0 ignored,
+0 filtered**, across nine summaries. The scheduler, authentication-startup and
+exact wildcard bind-conflict regressions all passed.
 
-The fixture now holds the same wildcard address the reflector will bind,
-preserving its specific bind-error assertion. Both receiver backends pass the
-startup tests locally; native Windows still needs a rerun of this correction.
-The informational full suite was skipped after the required step failed. See
-the [Windows checkpoint](verification/2026-09-12-windows/README.md) for retained
-logs, identity and earlier failure history.
+The informational full attempt did not pass: **1029 passed, 1 failed** across
+16 summaries, then Cargo exited 101. `ptp_sender_ntp_peer_ipv6_auth_offset` timed
+out waiting five seconds for the first sender packet, despite passing in the
+required gate earlier in the same job. The cause is undetermined because the
+timeout path did not retain child process output. Later targets did not run.
+All required CI jobs passed; `continue-on-error` masks this optional failure in
+the overall success conclusion. See the
+[Windows checkpoint](verification/2026-09-12-windows/README.md) for retained
+native logs, final CI status, exact counts and earlier failure history.
 
 A release claiming Windows runtime coverage should retain the successful
 required-gate artifact and native job log for its exact commit. The raw logs
