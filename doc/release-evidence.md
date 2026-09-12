@@ -102,10 +102,11 @@ as executed. The workflow also supports manual dispatch.
 
 ## Windows runtime gate
 
-`rust.yml` requires the library unit suite and seven explicit integration test
+`rust.yml` requires the library unit suite and eight explicit integration test
 targets on Windows:
 configuration files, malformed input, TLV properties, mixed clocks, required
-micro-session validation, SSID validation and sender measurement summaries.
+micro-session validation, SSID validation, sender measurement summaries and
+startup error reporting.
 These exercise codecs, the transmit scheduler and UDP sender peers without
 starting the pnet capture receiver. Scheduler fixtures inject a known MTU; a
 separate regression checks that unavailable route MTU drops a controlled burst
@@ -115,23 +116,29 @@ DLLs' x64 PE machine type. Missing DLLs or a failed core test fail the job.
 Its full-suite step remains informational because a capture-driver fixture is
 not installed. Both logs are uploaded.
 
-The same seven targets can be selected explicitly:
+The same eight targets can be selected explicitly:
 
 ```sh
 cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet \
   --lib --test config_file_test --test malformed_input_test --test proptest_tlv \
   --test mixed_clock_test --test required_micro_session_test \
-  --test session_ssid_validation_test --test sender_measurement_test
+  --test session_ssid_validation_test --test sender_measurement_test \
+  --test startup_failure_test
 ```
 
-At commit `7ae15c3`, native Windows Server 2025 x64 passed all **50 tests**
-in the original seven-target gate. The informational full-suite attempt stopped
-at its library target with **975 passed and 2 failed**: scheduler fixtures
-incorrectly required a platform route-MTU lookup. Those failures did not involve
-a capture driver. The corrected fixtures and newly required library gate still
-need a native run after this follow-up is committed and pushed. See the
-[Windows checkpoint](verification/2026-09-12-windows/README.md) for logs, identity,
-local regression results and the remaining scope.
+At commit `29057c9`, native Windows Server 2025 x64 passed **1028 tests** in
+the library-plus-seven-target gate, including the corrected scheduler fixtures.
+The informational full attempt reached 33 target summaries (**1079 passed,
+2 failed**) before stopping at startup-error tests. Capture-interface discovery
+masked an occupied-port error and a missing authentication key with
+`No interface found with IP address 127.0.0.1`.
+
+The follow-up defers interface discovery until after ordinary socket/key checks
+and adds the startup-error target to the required gate. Wildcard-bind regressions
+reproduce both failures on Linux before the fix and pass afterward. A native
+rerun of this expanded gate remains required. See the
+[Windows checkpoint](verification/2026-09-12-windows/README.md) for retained
+artifacts, exact native identity, local checks and earlier failure history.
 
 A release claiming Windows runtime coverage should retain the successful
 required-gate artifact and native job log for its exact commit. The raw logs

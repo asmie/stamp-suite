@@ -127,34 +127,6 @@ pub async fn run_receiver(
     conf: &Configuration,
     shared: &ReceiverSharedState,
 ) -> Result<(), crate::StartupError> {
-    let interface_ip_match = |iface: &NetworkInterface| {
-        (conf.local_scope_id == 0 || iface.index == conf.local_scope_id)
-            && iface.ips.iter().any(|ip| ip.ip() == conf.local_addr)
-    };
-
-    // Find the network interface with the provided local IP address
-    let interfaces = datalink::interfaces();
-    let interface = interfaces.into_iter().find(interface_ip_match);
-
-    let interface = match interface {
-        Some(iface) => iface,
-        None => {
-            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::new(format!(
-                "No interface found with IP address {}",
-                conf.local_addr
-            )));
-        }
-    };
-
-    // Extract interface properties for macOS special handling (NetworkInterface is not Send)
-    let iface_props = InterfaceProps {
-        is_up: interface.is_up(),
-        is_broadcast: interface.is_broadcast(),
-        is_loopback: interface.is_loopback(),
-        is_point_to_point: interface.is_point_to_point(),
-    };
-
     // We need UDP sockets to send responses - one for each address family
     // since pnet captures at the datalink layer and may see both IPv4 and IPv6 packets.
     //
@@ -236,6 +208,36 @@ pub async fn run_receiver(
              Refusing to run without the key that was asked for",
         ));
     }
+
+    // Interface discovery can itself depend on capture-driver availability.
+    // Report ordinary socket and key failures before consulting that driver.
+    let interface_ip_match = |iface: &NetworkInterface| {
+        (conf.local_scope_id == 0 || iface.index == conf.local_scope_id)
+            && iface.ips.iter().any(|ip| ip.ip() == conf.local_addr)
+    };
+
+    // Find the network interface with the provided local IP address
+    let interfaces = datalink::interfaces();
+    let interface = interfaces.into_iter().find(interface_ip_match);
+
+    let interface = match interface {
+        Some(iface) => iface,
+        None => {
+            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
+            return Err(crate::StartupError::new(format!(
+                "No interface found with IP address {}",
+                conf.local_addr
+            )));
+        }
+    };
+
+    // Extract interface properties for macOS special handling (NetworkInterface is not Send)
+    let iface_props = InterfaceProps {
+        is_up: interface.is_up(),
+        is_broadcast: interface.is_broadcast(),
+        is_loopback: interface.is_loopback(),
+        is_point_to_point: interface.is_point_to_point(),
+    };
 
     // Validate keys and bind ordinary sockets before opening privileged capture.
     // Bound shutdown polling independently of session expiry, including timeout=0.
@@ -1426,18 +1428,20 @@ mod tests {
     /// `capture_alive` flag must transition to `false` so an external
     /// readiness probe can observe the dead capture.
     ///
-    /// 192.0.2.1 is in TEST-NET-1 (RFC 5737) and is not bound to any
-    /// real interface under normal conditions.
+    /// Bind an ephemeral wildcard socket so socket setup succeeds before
+    /// discovery rejects the address, which is not assigned to an interface.
     #[tokio::test]
     async fn run_receiver_clears_capture_alive_on_missing_interface() {
-        let conf = Configuration::parse_from([
+        let mut conf = Configuration::parse_from([
             "stamp-suite",
             "--remote-addr",
             "127.0.0.1",
             "--local-addr",
-            "192.0.2.1",
+            "0.0.0.0",
             "--is-reflector",
         ]);
+        // This library-level failure fixture does not need a fixed STAMP port.
+        conf.local_port = 0;
         let shared = create_shared_state(&conf);
 
         assert!(shared.capture_alive.load(AtomicOrdering::Relaxed));

@@ -27,11 +27,13 @@ async fn reflector_reports_bind_failure() {
     let _squatter = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let port = _squatter.local_addr().unwrap().port();
 
+    // Wildcard binds work without an interface carrying the unspecified IP.
+    // Socket/key errors must be reported before capture interface discovery.
     let conf = Configuration::parse_from([
         "stamp-suite",
         "--is-reflector",
         "--local-addr",
-        "127.0.0.1",
+        "0.0.0.0",
         "--local-port",
         &port.to_string(),
     ]);
@@ -52,7 +54,7 @@ async fn reflector_reports_missing_key_in_authenticated_mode() {
         "stamp-suite",
         "--is-reflector",
         "--local-addr",
-        "127.0.0.1",
+        "0.0.0.0",
         "--local-port",
         &port.to_string(),
         "--auth-mode",

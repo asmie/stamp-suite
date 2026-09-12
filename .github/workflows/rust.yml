@@ -234,6 +234,7 @@ jobs:
           --lib --test config_file_test --test malformed_input_test --test proptest_tlv
           --test mixed_clock_test --test required_micro_session_test
           --test session_ssid_validation_test --test sender_measurement_test
+          --test startup_failure_test
           > windows-core.log 2>&1
         shell: bash
       - name: Full Windows suite (informational capture coverage)

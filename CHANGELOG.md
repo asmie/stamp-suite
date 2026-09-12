@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verify unsupported-MTU drops preserve ordinary replies, and require the
   library unit suite in the native Windows runtime gate.
 
+- Report pnet socket and authentication startup failures before capture-interface
+  discovery, and require the startup-error tests in native Windows CI.
+
 ### Added
 
 - Add release fixtures for bearer-authenticated HTTP/HTTPS key rotation with
