@@ -199,3 +199,10 @@ checksums and first verify that corrupted checksums produce no replies. Private
 veth fixtures require `ethtool` to disable TX offload on their own interfaces;
 partial offloaded capture frames are rejected by design. No host NIC change is
 required. These checks supplement the existing MTU and protocol-combination tiers.
+
+Native macOS verification uses the default and all-features jobs in `rust.yml`.
+The [native evidence runner](../scripts/run_native_tests.py) retains JSON identity,
+exit status, executed/ignored totals and the complete Cargo log, with platform
+and completion guards. See [release verification](../doc/release-evidence.md#macos-runtime-gate).
+The MTU-race unit regression remains active on macOS and checks preservation of
+its supported source-selection policy; it does not require Linux-only pinning.

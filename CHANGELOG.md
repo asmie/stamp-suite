@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordinary replies. Require successful three-namespace forwarding with
   authenticated wire checks and retained captures in conformance CI.
 
+- Correct the macOS MTU-race test's Linux-only source-pinning expectation.
+  Retain native default/all-features Cargo logs and revision-bound JSON reports
+  in CI, with explicit rejection of incomplete or wrong-platform evidence.
+
 ### Added
 
 - Add release fixtures for bearer-authenticated HTTP/HTTPS key rotation with

@@ -1614,6 +1614,9 @@ mod tests {
         t.response.return_path_action = ReturnPathAction::Srv6Forward(vec!["::1".parse().unwrap()]);
         t.response.reply_source = Some("::1".parse().unwrap());
         t.response.cos_request = Some((46, 0));
+        // Our macOS backend does not implement source pinning. Preserve its
+        // supported policy across the MTU retry rather than requiring Linux's.
+        let expected_source = crate::reply_source::supported().then(|| "::1".parse().unwrap());
         let mut attempts = 0;
         let mut queries = Vec::new();
         assert_eq!(
@@ -1627,7 +1630,7 @@ mod tests {
                 |data, _, options| {
                     attempts += 1;
                     assert!(options.srh.is_some());
-                    assert_eq!(options.source, Some("::1".parse().unwrap()));
+                    assert_eq!(options.source, expected_source);
                     assert_eq!(options.tos, 184);
                     check_sized_signature(data, true);
                     if attempts == 1 {

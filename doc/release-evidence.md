@@ -64,6 +64,33 @@ local run used Ubuntu packages `5.9.4+dfsg-2ubuntu3`; the daemon itself reports
 `5.9.4.pre2`. Both identities belong in the evidence, rather than silently
 normalizing the version string. All five cases passed on Linux/WSL2.
 
+## macOS runtime gate
+
+`rust.yml` runs separate native macOS jobs for the default and all-features
+profiles. Each calls `scripts/run_native_tests.py --expected-platform darwin`
+and uploads its JSON report plus raw Cargo log even after a test failure.
+The report records the actual OS/architecture, macOS version, Rust toolchain,
+commit, tracked changes, patch hash, command, exit status and executed/ignored
+counts. `--no-fail-fast` collects failures across test targets. A platform
+mismatch, missing runtime summaries, zero executed tests, filtered tests or
+failed Cargo command cannot produce a successful report. Ignored privileged
+checks are reported separately, never counted as executed.
+
+For a native local Mac, use either profile explicitly:
+
+```sh
+python3 scripts/run_native_tests.py --expected-platform darwin --profile default --report native-macos-default.json
+python3 scripts/run_native_tests.py --expected-platform darwin --profile all-features --report native-macos-all-features.json
+```
+
+The September 11 published macOS job failed a unit-test expectation that required
+Linux-only source pinning. That assertion has been corrected without skipping
+the test or weakening its MTU retry, routing, CoS and signature checks. A new
+native run of the corrected revision remains required; see the
+[macOS checkpoint](verification/2026-09-12-macos/README.md). Workflow definitions
+and successful Linux validation of the reporter are not native macOS evidence.
+The CI workflow also supports manual dispatch after these changes are pushed.
+
 ## Windows runtime gate
 
 `rust.yml` now requires seven explicit runtime test targets on Windows:

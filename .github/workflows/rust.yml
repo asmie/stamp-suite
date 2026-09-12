@@ -5,6 +5,7 @@ on:
     branches: ['**']
   pull_request:
     branches: [master, 1.0-line]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -86,9 +87,6 @@ jobs:
           - os: ubuntu-latest
             rust: beta
             features: --all-features
-          - os: macos-latest
-            rust: stable
-            features: ""
           # Windows has a separate bounded runtime gate below, with its
           # pinned Npcap DLL setup and explicit driver-free test targets.
     steps:
@@ -104,6 +102,33 @@ jobs:
       - name: Check live benchmark accounting
         if: runner.os == 'Linux'
         run: cargo test --locked --example live_udp_bench ${{ matrix.features }}
+
+  test-macos:
+    name: Native macOS (${{ matrix.profile }})
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [default, all-features]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-macos-${{ matrix.profile }}
+      - name: Run native tests and record evidence
+        env:
+          TOKIO_WORKER_THREADS: 2
+        run: python3 scripts/run_native_tests.py --expected-platform darwin --profile ${{ matrix.profile }} --report native-macos-${{ matrix.profile }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-macos-${{ matrix.profile }}
+          path: |
+            native-macos-${{ matrix.profile }}.json
+            native-macos-${{ matrix.profile }}.log
+          if-no-files-found: error
 
   # Runtime gate for codecs/configuration and UDP sender peers. The full
   # capture-dependent suite remains informational until a driver-backed
