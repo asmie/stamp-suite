@@ -83,15 +83,22 @@ python3 scripts/run_native_tests.py --expected-platform darwin --profile default
 python3 scripts/run_native_tests.py --expected-platform darwin --profile all-features --report native-macos-all-features.json
 ```
 
-The source-pinning assertion from the September 11 failure is corrected.
-The next native run, `34701523408` at `b457d8e`, completed both profiles but
-reported 16 failures each: IPv6 startup errors and unsupported size-controlled
-reply expectations in two keyset tests. The follow-up corrects Darwin's hop
-socket option, validates hop metadata types, and extends macOS wire coverage.
-**Successful native verification remains pending a run of these fixes.** See the
-[macOS checkpoint](verification/2026-09-12-macos/README.md) for retained reports
-and exact totals. Workflow definitions and Linux results are not native macOS
-evidence. The workflow also supports manual dispatch.
+Native macOS verification passed at commit
+`7ae15c3136b475fe184d0c6f73bde33999a0bf8b` in
+[run 34702868546](https://github.com/asmie/stamp-suite/actions/runs/34702868546):
+**1150 default / 1234 all-features tests passed**, with zero failed, ignored or
+filtered tests in either profile. Both ran on macOS 26.6.2 arm64 with Rust 1.98.1,
+clean checkouts, 35 suite summaries and Cargo exit zero. The retained reports'
+identities, runner/log hashes and counts were checked against their raw logs.
+
+This rerun verifies the source-pinning assertion correction, Darwin hop policy,
+received-hop decoding and platform-aware keyset tests, including the new mapped
+IPv4 and reflector hop-limit wire checks. See the
+[macOS checkpoint](verification/2026-09-12-macos/README.md) for reports and earlier
+failure history. The result covers the default/all-features socket backend on
+native arm64; pnet capture, Intel Mac runtime and physical NIC/hardware timestamp
+capabilities require separate evidence. Platform-excluded tests are not counted
+as executed. The workflow also supports manual dispatch.
 
 ## Windows runtime gate
 
