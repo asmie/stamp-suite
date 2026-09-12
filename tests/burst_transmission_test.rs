@@ -131,7 +131,7 @@ fn exercise(ip: &str, auth: bool, clock: &str, stateful: bool, kernel: bool) {
     let started = Instant::now();
     loop {
         assert!(
-            !reflector.0.try_wait().unwrap().is_some(),
+            reflector.0.try_wait().unwrap().is_none(),
             "reflector exited"
         );
         warmup

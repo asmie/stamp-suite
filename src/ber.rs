@@ -88,18 +88,15 @@ pub(crate) fn observation(
                 }
                 pattern_seen = true;
             }
-            TlvType::ExtraPadding => {
-                if padding.replace(tlv.value.as_slice()).is_some() {
-                    return None;
-                }
+            TlvType::ExtraPadding if padding.replace(tlv.value.as_slice()).is_some() => {
+                return None;
             }
-            TlvType::BerCount => {
+            TlvType::BerCount
                 if count
                     .replace(BerCountTlv::from_raw(tlv).ok()?.count)
-                    .is_some()
-                {
-                    return None;
-                }
+                    .is_some() =>
+            {
+                return None;
             }
             TlvType::BerBurst
                 if burst

@@ -14,6 +14,10 @@
         # Cargo features compiled into the nix-built binary and exercised
         # by the check phase. Mirrors `cargo build/test --all-features`.
         allFeatures = [ "ttl-nix" "ttl-pnet" "metrics" "snmp" "hwtstamp" "control" ];
+
+        # Shared by the package and lint derivations. After a Cargo.lock change,
+        # temporarily use pkgs.lib.fakeHash, build, then copy the reported hash.
+        cargoDepsHash = "sha256-h6/kN4RysdDOgXQVbuwK+zteOaoMQuyrIxAWeVrg2aY=";
       in
       {
         packages = {
@@ -23,9 +27,7 @@
 
             src = self;
 
-            # Regenerate after any Cargo.lock change: set to pkgs.lib.fakeHash,
-            # run `nix build .#default`, and copy the `got:` hash from the error.
-            cargoHash = "sha256-lC9VmTgT+JV2RnTvdWD0BVAS4HIAu1XXXHIjIiayD94=";
+            cargoHash = cargoDepsHash;
 
             buildFeatures = allFeatures;
             # Honour --all-features for the cargo test phase too so the
@@ -52,9 +54,7 @@
             pname = "stamp-suite-clippy";
             version = "1.0.0";
             src = self;
-            # Regenerate after any Cargo.lock change: set to pkgs.lib.fakeHash,
-            # run `nix build .#default`, and copy the `got:` hash from the error.
-            cargoHash = "sha256-lC9VmTgT+JV2RnTvdWD0BVAS4HIAu1XXXHIjIiayD94=";
+            cargoHash = cargoDepsHash;
             buildFeatures = allFeatures;
             nativeBuildInputs = [ pkgs.clippy ];
             buildPhase = ''

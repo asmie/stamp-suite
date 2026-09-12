@@ -3417,7 +3417,7 @@ mod tests {
         let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
         assert!(!state.has_started(), "fresh state must not have started");
         assert!(
-            !(state.has_started() && !state.is_terminal()),
+            !state.has_started() || state.is_terminal(),
             "the post-loop wait guard must be false for a fresh state"
         );
         // The first tick (the main loop's original send) starts it.
@@ -4251,7 +4251,7 @@ mod tests {
         )
         .expect("no MSID binding requested → accept");
 
-        assert!(!status.micro_session.is_some());
+        assert!(status.micro_session.is_none());
     }
 
     #[test]
@@ -4933,7 +4933,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(!status.access_report.is_some(), "{status}");
+        assert!(status.access_report.is_none(), "{status}");
     }
 
     #[test]
@@ -4956,7 +4956,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(!status.access_report.is_some(), "{status}");
+        assert!(status.access_report.is_none(), "{status}");
     }
 
     #[test]
@@ -5009,7 +5009,7 @@ mod tests {
         )
         .expect("Ok regardless of tracking");
 
-        assert!(!status.access_report.is_some(), "got: {}", status);
+        assert!(status.access_report.is_none(), "got: {}", status);
     }
 
     #[test]
@@ -5037,7 +5037,7 @@ mod tests {
         .expect("Ok even though unrecognized");
 
         assert!(
-            !status.access_report.is_some(),
+            status.access_report.is_none(),
             "U-flagged TLV must not count as an ack: {}",
             status
         );
@@ -5069,7 +5069,7 @@ mod tests {
         .expect("Ok even though integrity-failed");
 
         assert!(
-            !status.access_report.is_some(),
+            status.access_report.is_none(),
             "I-flagged TLV must not count as an ack: {}",
             status
         );
@@ -5106,7 +5106,7 @@ mod tests {
         .expect("Ok — M just halts the scan, doesn't reject");
 
         assert!(
-            !status.access_report.is_some(),
+            status.access_report.is_none(),
             "M-flag must halt the scan before the later Access Report TLV: {}",
             status
         );
