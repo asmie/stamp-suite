@@ -152,8 +152,14 @@ Automatic source-port selection now retries that Windows error within its
 existing 128-candidate bound and preserves the final bind error on exhaustion.
 Explicit ports and unrelated failures still return immediately. Regression tests
 cover both address families, peer-port avoidance, exhaustion, fixed ports and
-random-source failure. Windows core, 20 required mixed-clock repetitions and
-informational full-suite execution still need to run on this correction.
+random-source failure. Native Windows verified the correction at `2548231` in
+[run 34717692891](https://github.com/asmie/stamp-suite/actions/runs/34717692891):
+**1041 core tests, 120 checks across all 20 repetitions, and 1140 informational
+full-suite tests passed**, with zero failures, ignored or filtered tests in each
+log (9, 20 and 35 suite summaries respectively). The informational step itself
+succeeded; these counts do not rely on its `continue-on-error` setting.
+All 24 CI jobs passed, including Nix, both native macOS profiles and every
+Clippy profile. The conformance and push workflows also succeeded.
 The five-second packet deadline and failure diagnostics remain enabled.
 
 A release claiming Windows runtime coverage should retain the successful
