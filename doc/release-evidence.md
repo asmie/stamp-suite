@@ -141,6 +141,16 @@ the overall success conclusion. See the
 [Windows checkpoint](verification/2026-09-12-windows/README.md) for retained
 native logs, final CI status, exact counts and earlier failure history.
 
+The mixed-clock fixture now preserves child stdout, stderr, pre-stop status and
+final exit status on failure. It checks for early child exit during the unchanged
+five-second receive deadline and bounds post-reply shutdown as well. Windows CI
+requires 20 complete mixed-clock suite executions after the core gate, retaining
+`windows-mixed-clock-repeat.log`. Each run includes four wire cases and two
+failure-diagnostic regressions; any failed run fails the step immediately. This
+collects recurrence evidence without retrying a failed run into a success. The
+new diagnostic/repetition gate still needs native execution, and the original
+timeout's cause remains unresolved.
+
 A release claiming Windows runtime coverage should retain the successful
 required-gate artifact and native job log for its exact commit. The raw logs
 alone do not identify their checkout; retain the matching job metadata too.

@@ -225,3 +225,11 @@ failures without depending on an interface matching the configured address.
 Pnet must report those failures before capture-interface discovery, including
 on Windows hosts without a capture driver. These tests remain in the required
 Windows gate; successful capture initialization is a separate capability.
+
+Mixed-clock subprocess fixtures preserve stdout/stderr and exit state when the
+peer receives no packet or the sender fails to exit after a reply. The packet
+wait remains five seconds, with short polls detecting early process exit. Two
+real-process regressions check early-error diagnostics and timeout cleanup.
+Windows CI requires 20 complete executions of this suite and retains the combined
+log; a failed iteration stops the step with Cargo's exit status. This repetition
+is additional runtime evidence, not a fallback for failed tests.

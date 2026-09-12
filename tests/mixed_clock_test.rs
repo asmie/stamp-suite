@@ -2,9 +2,9 @@
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
 use std::{
-    net::UdpSocket,
-    process::{Child, Command, Stdio},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    net::{SocketAddr, UdpSocket},
+    process::{Child, Command, Output, Stdio},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 struct Sender(Option<Child>);
@@ -13,6 +13,87 @@ impl Drop for Sender {
         if let Some(child) = &mut self.0 {
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+}
+
+impl Sender {
+    fn start(command: &mut Command) -> Self {
+        Self(Some(
+            command
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ))
+    }
+
+    fn failure(&mut self, reason: &str) -> String {
+        let mut child = self.0.take().expect("sender still owned");
+        let status_before_stop = child.try_wait();
+        // Stop before collecting pipes: a child blocked writing diagnostics
+        // must not make the test's failure path wait forever.
+        let stop = if matches!(status_before_stop, Ok(Some(_))) {
+            None
+        } else {
+            Some(child.kill())
+        };
+        match child.wait_with_output() {
+            Ok(output) => format!(
+                "{reason}; status before stop: {status_before_stop:?}; kill: {stop:?}; \
+                 final status: {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+            Err(error) => format!(
+                "{reason}; status before stop: {status_before_stop:?}; kill: {stop:?}; \
+                 collecting sender output failed: {error}"
+            ),
+        }
+    }
+
+    fn receive(
+        &mut self,
+        peer: &UdpSocket,
+        request: &mut [u8],
+        timeout: Duration,
+    ) -> Result<(usize, SocketAddr), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(self.failure("timed out waiting for first sender packet"));
+            }
+            peer.set_read_timeout(Some(remaining.min(Duration::from_millis(50))))
+                .unwrap();
+            match peer.recv_from(request) {
+                Ok(packet) => return Ok(packet),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(self.failure(&format!("peer receive failed: {error}"))),
+            }
+            match self.0.as_mut().unwrap().try_wait() {
+                Ok(None) => {}
+                Ok(Some(_)) => return Err(self.failure("sender exited before first packet")),
+                Err(error) => return Err(self.failure(&format!("polling sender failed: {error}"))),
+            }
+        }
+    }
+
+    fn finish(&mut self) -> Output {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.0.as_mut().unwrap().try_wait() {
+                Ok(Some(_)) => return self.0.take().unwrap().wait_with_output().unwrap(),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => panic!("{}", self.failure("sender failed to exit after reply")),
+            }
         }
     }
 }
@@ -31,7 +112,6 @@ fn remote_time(ptp: bool, utc_offset: u64) -> u64 {
 fn check(local_ptp: bool, ipv6_auth: bool) {
     let ip = if ipv6_auth { "::1" } else { "127.0.0.1" };
     let peer = UdpSocket::bind((ip, 0)).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let remote_ptp = !local_ptp;
     // An explicit TAI-like peer offset is exercised without relying on the
     // host's leap-second database or PHC. This is a fixed fixture, not a claim
@@ -74,15 +154,11 @@ fn check(local_ptp: bool, ipv6_auth: bool) {
             "ABABABABABABABABABABABABABABABAB",
         ]);
     }
-    let mut sender = Sender(Some(
-        command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    ));
+    let mut sender = Sender::start(&mut command);
     let mut request = [0; 2048];
-    let (length, source) = peer.recv_from(&mut request).unwrap();
+    let (length, source) = sender
+        .receive(&peer, &mut request, Duration::from_secs(5))
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
     let t2 = remote_time(remote_ptp, offset);
     let base = if ipv6_auth { 112 } else { 44 };
     assert!(length >= base);
@@ -111,7 +187,7 @@ fn check(local_ptp: bool, ipv6_auth: bool) {
         reply[96..112].copy_from_slice(&hmac);
     }
     peer.send_to(&reply, source).unwrap();
-    let output = sender.0.take().unwrap().wait_with_output().unwrap();
+    let output = sender.finish();
     assert!(
         output.status.success(),
         "{}",
@@ -160,4 +236,81 @@ fn ntp_sender_ptp_peer_ipv6_auth_offset() {
 #[test]
 fn ptp_sender_ntp_peer_ipv6_auth_offset() {
     check(true, true);
+}
+
+#[test]
+fn startup_failure_preserves_sender_stderr_and_status() {
+    let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
+    command.arg("--invalid-mixed-clock-fixture-option");
+    let mut sender = Sender::start(&mut command);
+    let diagnostic = sender
+        .receive(&peer, &mut [0; 2048], Duration::from_secs(5))
+        .unwrap_err();
+    assert!(
+        diagnostic.contains("sender exited before first packet"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("invalid-mixed-clock-fixture-option"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("stderr:"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("status before stop: Ok(Some("),
+        "{diagnostic}"
+    );
+    assert!(sender.0.is_none(), "failed child must be reaped");
+}
+
+#[test]
+fn receive_timeout_stops_sender_and_retains_diagnostics() {
+    let remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    remote
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let silent = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
+    command
+        .args([
+            "--local-addr",
+            "127.0.0.1",
+            "--local-port",
+            "0",
+            "--remote-addr",
+            "127.0.0.1",
+            "--remote-port",
+            &remote.local_addr().unwrap().port().to_string(),
+            "--count",
+            "1",
+            "--timeout",
+            "30",
+            "--hwtstamp",
+            "off",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("STAMP_HMAC_KEY");
+    let mut sender = Sender::start(&mut command);
+    sender
+        .receive(&remote, &mut [0; 2048], Duration::from_secs(5))
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
+    // Sender has started and is waiting for a reply on a different socket.
+    let diagnostic = sender
+        .receive(&silent, &mut [0; 2048], Duration::from_millis(100))
+        .unwrap_err();
+    assert!(
+        diagnostic.contains("timed out waiting for first sender packet"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("status before stop: Ok(None)"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("kill: Some(Ok("), "{diagnostic}");
+    assert!(
+        diagnostic.contains("stdout:") && diagnostic.contains("stderr:"),
+        "{diagnostic}"
+    );
+    assert!(sender.0.is_none(), "timed-out child must be reaped");
 }

@@ -237,6 +237,15 @@ jobs:
           --test startup_failure_test
           > windows-core.log 2>&1
         shell: bash
+      - name: Require repeated mixed-clock sender startup
+        shell: bash
+        run: |
+          : > windows-mixed-clock-repeat.log
+          for attempt in $(seq 1 20); do
+            echo "Mixed-clock repetition ${attempt}/20" >> windows-mixed-clock-repeat.log
+            cargo test --locked --no-default-features --features ttl-pnet --test mixed_clock_test \
+              >> windows-mixed-clock-repeat.log 2>&1 || exit "$?"
+          done
       - name: Full Windows suite (informational capture coverage)
         continue-on-error: true
         run: cargo test --locked --no-default-features --features ttl-pnet > windows-full.log 2>&1
