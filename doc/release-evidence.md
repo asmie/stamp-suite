@@ -171,6 +171,12 @@ workflow definitions.
 
 ## Hardware timestamps
 
+Physical-link verification remains pending an external testbed. The
+[September 12 availability check](verification/2026-09-12-physical-preflight/README.md)
+confirmed a local WSL2 `hv_netvsc` interface with software timestamps only and
+no NIC PHC. No physical traffic tests ran. The separate virtual `ptp0` device
+does not establish NIC timestamp delivery.
+
 Use the [two-host hardware procedure](testing-hardware-timestamps.md) on a
 controlled testbed with capable NICs. The O11 host's `ethtool -T eth0` reports
 software timestamps only and no PHC, so no hardware success is recorded here.
