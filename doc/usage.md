@@ -804,3 +804,13 @@ requests require matching `--attach-ext-hdr` headers; omit explicit requests to
 reflect all attached headers automatically. Zero-checksum mode is not exposed.
 Raw capture rejects corrupt or incomplete offloaded checksums; arrange a capture
 point with complete wire checksums rather than disabling validation.
+
+### SRv6 return-path verification
+
+`--srv6-return-forwarding` uses Linux's sticky `IPV6_RTHDR` option on the nix
+backend. A return segment list may name transit SIDs only or include the final
+UDP destination; the reflector reserves the final destination slot in either
+case. The 127-entry SRH capacity includes that slot. Unsupported paths retain
+the U-flag fallback, including pnet. The sole send owner clears a previous SRH
+before sending ordinary replies. The [required namespace test](testing-netns.md)
+verifies successful transit routing and prevents fallback from masking failures.

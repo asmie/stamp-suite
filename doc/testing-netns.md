@@ -87,7 +87,7 @@ Per-scenario prerequisites:
 |---|---|---|
 | 1 | `scenario_1_roundtrip_unauth_and_auth` | Base RFC 8762 §4.2–4.5 sender/reflector round-trip on a real link, unauthenticated and HMAC-authenticated. |
 | 2 | `scenario_2_cos_dscp_ecn_onwire` | RFC 8972 §4.4 CoS reply-TOS + erratum 8199 DSCP/ECN reflection + draft-ietf-ippm-stamp-cos-ecn-01 §3.2 (reply DSCP=DSCP1, ECN=EC1, RPE=0b11) observed on the wire. |
-| 3 | `scenario_3_srv6_return_path` | RFC 9503 §4 / RFC 8754 SRv6 return path — first live exercise of `send_with_srh()`; reports SRH-forwarded vs U-flag fallback. |
+| 3 | `scenario_3_srv6_return_path` | RFC 9503 §4 / RFC 8754: three namespaces with a transit router; requires actual SRH forwarding (fallback fails). Checks both SID-only and explicit-final-SID requests, open/auth, independent HMACs, CoS, Segments Left 1→0 and Hop Limit 255→254. Ordinary replies interleaved on the same reflector must carry no stale SRH. |
 | 4a | `scenario_4a_ext_hdr_nix_c_flag` | draft-ietf-ippm-stamp-ext-hdr-13 §5.1: the nix (UDP-socket) backend has no data-plane access, so a Type-246 request comes back with the **C** (Conformance) flag set — not the pre-11 U-flag. |
 | 4b | `scenario_4b_ext_hdr_pnet_capture` | draft-ietf-ippm-stamp-ext-hdr-13 §§3.2/5.1: the `ttl-pnet` backend captures an injected IPv6 Destination Options header and echoes its bytes-from-offset-8 into the Type-246 Reflected field with the C flag **clear**. |
 | 5 | `scenario_5_address_group_filters` | draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1/§3.1.2: a matching L2 (own-MAC) or L3 (own-prefix) Address Group sub-TLV yields a reply; a non-matching one drops the packet (no reply). |
@@ -159,3 +159,12 @@ gate; report its separate execution result rather than counting an ignored case
 as a pass.
 
 Private veth fixtures disable TX checksum offload with `ethtool` so raw capture sees complete UDP checksums. No host NIC settings are changed. Scenario 4b injects a 16-byte header and checks its eight-byte reflected tail.
+
+### Retaining successful SRv6 evidence
+
+Set `STAMP_NETNS_CAPTURE_DIR` to an output directory to retain each completed
+pcap. CI uploads these pcaps and `netns.log`, in addition to Cargo executable
+manifests. Scenario 3 captures both sides of a real transit router: 12 SRH replies
+and 12 interleaved ordinary replies across open/authenticated modes. A U-flag
+fallback cannot satisfy this scenario. The September 12 run and limitations are
+recorded in [SRv6 verification](verification/2026-09-12-srv6/README.md).

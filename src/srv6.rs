@@ -3,7 +3,9 @@
 //! A userspace UDP Session-Reflector cannot forward over an arbitrary
 //! SR-MPLS label stack, but on Linux it *can* ask the kernel to insert an
 //! SRv6 Segment Routing Header (IPv6 routing header type 4) on its reply by
-//! attaching an `IPV6_RTHDR` ancillary message to a `sendmsg` call.
+//! setting the sticky `IPV6_RTHDR` socket option before `sendmsg`. Linux's
+//! ancillary parser rejects type 4 even when the sticky option is supported.
+//! The reflector's exclusive `DatagramSender` owns and clears that option.
 //!
 //! **Defensive contract.** This is opt-in (`--srv6-return-forwarding`) and
 //! capability-gated: `srh_supported` probes the running kernel once, and the
@@ -11,10 +13,10 @@
 //! Path U-flag" behaviour when SRv6 is unavailable (non-Linux, IPv4 reply, no
 //! seg6 support, or any send error). It never requires SRv6 and never panics.
 //!
-//! **Verification boundary.** The SRH byte construction (`build_srh`) is
-//! pinned by unit tests against RFC 8754. The live kernel send path can only
-//! be exercised on an SRv6-capable multi-hop testbed, so it is intentionally
-//! gated behind the probe and the opt-in flag.
+//! **Verification boundary.** Unit tests pin SRH encoding against RFC 8754.
+//! The required namespace test captures successful forwarding through an
+//! intermediate Linux router, including authenticated replies and isolation
+//! of later ordinary replies. Physical SRv6 fabrics remain a separate testbed.
 
 use std::net::Ipv6Addr;
 
@@ -113,8 +115,11 @@ fn probe_srh_support() -> bool {
 /// Sends `payload` to `dst` with an SRv6 SRH attached as an `IPV6_RTHDR`
 /// ancillary message, so the kernel routes the reply through the segment list.
 ///
-/// Best-effort: callers must gate this behind [`srh_supported`] and fall back
-/// to a normal reply (with the Return Path U-flag set) on `Err`.
+/// Legacy ancillary helper, retained for API compatibility. Linux rejects
+/// type 4 in this per-packet interface even when [`srh_supported`] accepts the
+/// sticky option. The reflector uses its exclusive sticky-option send owner
+/// instead. Callers must handle errors; the probe does not guarantee this
+/// legacy interface succeeds.
 #[cfg(target_os = "linux")]
 pub fn send_with_srh(
     fd: std::os::fd::RawFd,

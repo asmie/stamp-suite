@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix Linux SRv6 replies: use the supported sticky routing-header option,
+  preserve transit SIDs and the final UDP destination, and clear SRH before
+  ordinary replies. Require successful three-namespace forwarding with
+  authenticated wire checks and retained captures in conformance CI.
+
 ### Added
 
 - Add release fixtures for bearer-authenticated HTTP/HTTPS key rotation with

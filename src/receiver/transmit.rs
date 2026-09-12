@@ -56,8 +56,16 @@ impl TransportPlan {
         };
         let mut unsupported_srh = false;
         if let ReturnPathAction::Srv6Forward(sids) = &response.return_path_action {
-            if srv6 && target.is_ipv6() {
-                options.srh = crate::srv6::build_srh(sids).map(Arc::from);
+            if srv6 && target.is_ipv6() && !sids.is_empty() {
+                // Linux replaces Segment List[0] with the UDP destination.
+                // Preserve every requested SID by reserving that final slot.
+                let mut path = sids.clone();
+                if path.last().copied().map(IpAddr::V6) != Some(target.ip()) {
+                    if let IpAddr::V6(destination) = target.ip() {
+                        path.push(destination);
+                    }
+                }
+                options.srh = crate::srv6::build_srh(&path).map(Arc::from);
             }
             unsupported_srh = options.srh.is_none();
         }
@@ -651,6 +659,8 @@ pub(super) struct DatagramSender<'a> {
     #[cfg(windows)]
     socket: &'a std::net::UdpSocket,
     settings: [Option<i32>; 2],
+    #[cfg(target_os = "linux")]
+    srh: Option<Arc<[u8]>>,
 }
 
 impl<'a> DatagramSender<'a> {
@@ -659,6 +669,8 @@ impl<'a> DatagramSender<'a> {
         Self {
             fd: socket.as_fd(),
             settings: [None; 2],
+            #[cfg(target_os = "linux")]
+            srh: None,
         }
     }
 
@@ -685,6 +697,8 @@ impl<'a> DatagramSender<'a> {
                 dst,
                 options,
                 &mut self.settings,
+                #[cfg(target_os = "linux")]
+                &mut self.srh,
             )
         }
         #[cfg(windows)]
@@ -711,7 +725,9 @@ fn update_socket_option(
     Ok(())
 }
 
-/// A single syscall carries CoS, source pinning, and SRH together on Linux.
+/// CoS and source pinning accompany sendmsg; Linux SRH uses the sticky socket
+/// option because the ancillary IPV6_RTHDR parser rejects routing type 4.
+/// The exclusive send owner restores/clears SRH before a different reply.
 /// Other Unix systems update cached TOS before sendmsg; the mutable send owner
 /// never awaits between setting the socket option and issuing the syscall.
 #[cfg(unix)]
@@ -721,6 +737,7 @@ fn send_datagram(
     dst: SocketAddr,
     options: &SendOptions,
     settings: &mut [Option<i32>; 2],
+    #[cfg(target_os = "linux")] srh_setting: &mut Option<Arc<[u8]>>,
 ) -> io::Result<usize> {
     use nix::libc;
     let mut addr4: libc::sockaddr_in = unsafe { std::mem::zeroed() };
@@ -863,8 +880,24 @@ fn send_datagram(
                 }
             }
         }
-        if let Some(srh) = &options.srh {
-            append(&mut control, libc::IPPROTO_IPV6, libc::IPV6_RTHDR, srh);
+        if *srh_setting != options.srh {
+            let bytes = options.srh.as_deref().unwrap_or(&[]);
+            // No await or other sender can interleave this option and sendmsg.
+            // On failure retain the previous cache: a fallback must clear it
+            // successfully before transmitting an ordinary reply.
+            if unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_RTHDR,
+                    bytes.as_ptr().cast(),
+                    bytes.len() as _,
+                )
+            } < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            *srh_setting = options.srh.clone();
         }
         msg.msg_control = control.as_mut_ptr().cast();
         msg.msg_controllen = (control.len() * std::mem::size_of::<usize>()) as _;

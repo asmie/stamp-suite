@@ -175,6 +175,14 @@ impl Capture {
             "tcpdump failed: {}",
             std::fs::read_to_string(self.diagnostics.path()).unwrap_or_default()
         );
+        if let Some(dir) = std::env::var_os("STAMP_NETNS_CAPTURE_DIR") {
+            std::fs::create_dir_all(&dir).expect("create capture evidence directory");
+            std::fs::copy(
+                &self.path,
+                PathBuf::from(dir).join(self.path.file_name().unwrap()),
+            )
+            .expect("retain capture evidence");
+        }
         parse_pcap(&self.path).expect("read valid tcpdump pcap")
     }
 }
@@ -192,6 +200,7 @@ pub struct NetnsFixture {
     id: u32,
     ns_refl: String,
     ns_send: String,
+    ns_transit: String,
     veth_refl: String,
     veth_send: String,
     refl_v4: Ipv4Addr,
@@ -207,6 +216,7 @@ impl Drop for NetnsFixture {
         // is sufficient teardown even if setup failed partway.
         let _ = ip(&["netns", "del", &self.ns_refl]);
         let _ = ip(&["netns", "del", &self.ns_send]);
+        let _ = ip(&["netns", "del", &self.ns_transit]);
     }
 }
 
@@ -231,6 +241,7 @@ impl NetnsFixture {
             id: n,
             ns_refl: format!("stnsr{n}"),
             ns_send: format!("stnss{n}"),
+            ns_transit: format!("stnst{n}"),
             veth_refl: format!("stvr{hex:x}"),
             veth_send: format!("stvs{hex:x}"),
             refl_v4: Ipv4Addr::new(10, oct2, oct3, 2),
@@ -276,6 +287,139 @@ impl NetnsFixture {
         // Only private veth devices: expose complete wire checksums to capture.
         ip(&["netns", "exec", ns, "ethtool", "-K", dev, "tx", "off"])?;
         Ok(())
+    }
+
+    /// Insert a real IPv6 router between the endpoints. All changes are in
+    /// fixture-owned namespaces; the reflector-side capture sees the first hop.
+    pub fn srv6_transit(&self) -> Result<Ipv6Addr, String> {
+        let mut octets = self.refl_v6.octets();
+        octets[15] = 3;
+        let sid = Ipv6Addr::from(octets);
+        octets[1] = 1;
+        let hop_sender = Ipv6Addr::from(octets);
+        octets[15] = 1;
+        let sender_link = Ipv6Addr::from(octets);
+        let peer_dev = format!("stvt{:x}", self.id & 0x00ff_ffff);
+        ip(&["netns", "add", &self.ns_transit])?;
+        ip(&[
+            "-n",
+            &self.ns_send,
+            "link",
+            "set",
+            &self.veth_send,
+            "netns",
+            &self.ns_transit,
+        ])?;
+        ip(&[
+            "-n",
+            &self.ns_transit,
+            "addr",
+            "flush",
+            "dev",
+            &self.veth_send,
+        ])?;
+        ip(&[
+            "-n",
+            &self.ns_transit,
+            "-6",
+            "addr",
+            "add",
+            &format!("{sid}/64"),
+            "dev",
+            &self.veth_send,
+            "nodad",
+        ])?;
+        ip(&["-n", &self.ns_transit, "link", "set", &self.veth_send, "up"])?;
+        ip(&[
+            "link",
+            "add",
+            &self.veth_send,
+            "type",
+            "veth",
+            "peer",
+            "name",
+            &peer_dev,
+        ])?;
+        ip(&["link", "set", &self.veth_send, "netns", &self.ns_send])?;
+        ip(&["link", "set", &peer_dev, "netns", &self.ns_transit])?;
+        for (ns, dev, addr) in [
+            (&self.ns_send, &self.veth_send, sender_link),
+            (&self.ns_transit, &peer_dev, hop_sender),
+        ] {
+            ip(&[
+                "-n",
+                ns,
+                "-6",
+                "addr",
+                "add",
+                &format!("{addr}/64"),
+                "dev",
+                dev,
+                "nodad",
+            ])?;
+            ip(&["-n", ns, "link", "set", dev, "up"])?;
+            ip(&["-n", ns, "link", "set", "lo", "up"])?;
+            ip(&["netns", "exec", ns, "ethtool", "-K", dev, "tx", "off"])?;
+        }
+        ip(&[
+            "-n",
+            &self.ns_send,
+            "-6",
+            "addr",
+            "add",
+            &format!("{}/128", self.send_v6),
+            "dev",
+            &self.veth_send,
+            "nodad",
+        ])?;
+        for (ns, destination, via) in [
+            (&self.ns_refl, self.send_v6, sid),
+            (&self.ns_transit, self.send_v6, sender_link),
+            (&self.ns_send, self.refl_v6, hop_sender),
+        ] {
+            ip(&[
+                "-n",
+                ns,
+                "-6",
+                "route",
+                "add",
+                &format!("{destination}/128"),
+                "via",
+                &via.to_string(),
+            ])?;
+        }
+        for ns in [&self.ns_refl, &self.ns_send, &self.ns_transit] {
+            ip(&[
+                "netns",
+                "exec",
+                ns,
+                "sysctl",
+                "-qw",
+                "net.ipv6.conf.all.seg6_enabled=1",
+            ])?;
+        }
+        for (ns, dev) in [
+            (&self.ns_transit, &self.veth_send),
+            (&self.ns_send, &self.veth_send),
+        ] {
+            ip(&[
+                "netns",
+                "exec",
+                ns,
+                "sysctl",
+                "-qw",
+                &format!("net.ipv6.conf.{dev}.seg6_enabled=1"),
+            ])?;
+        }
+        ip(&[
+            "netns",
+            "exec",
+            &self.ns_transit,
+            "sysctl",
+            "-qw",
+            "net.ipv6.conf.all.forwarding=1",
+        ])?;
+        Ok(sid)
     }
 
     pub fn reflector_v4(&self) -> Ipv4Addr {
@@ -423,8 +567,20 @@ impl NetnsFixture {
     /// Starts a tcpdump capture on the reflector-side veth (sees both the
     /// arriving test packets and the departing reflected packets).
     pub fn start_capture(&self) -> Result<Capture, String> {
+        self.capture_on(&self.ns_refl, &self.veth_refl)
+    }
+
+    pub fn start_sender_capture(&self) -> Result<Capture, String> {
+        self.capture_on(&self.ns_send, &self.veth_send)
+    }
+
+    fn capture_on(&self, ns: &str, dev: &str) -> Result<Capture, String> {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("stamp-netns-{}.pcap", self.id));
+        let path = dir.join(format!(
+            "stamp-netns-{}-{dev}-{}.pcap",
+            self.id,
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         let path_s = path.to_string_lossy().into_owned();
         let diagnostics = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
         let diagnostic_file = diagnostics.reopen().map_err(|e| e.to_string())?;
@@ -433,10 +589,10 @@ impl NetnsFixture {
             .args([
                 "netns",
                 "exec",
-                &self.ns_refl,
+                ns,
                 "tcpdump",
                 "-i",
-                &self.veth_refl,
+                dev,
                 "-n",
                 "-p",
                 "-U",
@@ -630,6 +786,7 @@ pub struct CapturedPacket {
     pub ttl: u8,
     pub src_port: u16,
     pub dst_port: u16,
+    pub destination: IpAddr,
     /// IPv6 extension headers in order, each `(header_type, raw_on_wire_bytes)`
     /// where `header_type` is the IP protocol number naming the header
     /// (0 = Hop-by-Hop, 43 = Routing/SRH, 44 = Fragment, 60 = Destination
@@ -734,6 +891,7 @@ fn decode_ipv4(ip: &[u8], ts_ns: u128) -> Option<CapturedPacket> {
     Some(CapturedPacket {
         ts_ns,
         is_v6: false,
+        destination: IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(&ip[16..20]).ok()?)),
         tos,
         ttl,
         src_port,
@@ -795,6 +953,7 @@ fn decode_ipv6(ip: &[u8], ts_ns: u128) -> Option<CapturedPacket> {
     Some(CapturedPacket {
         ts_ns,
         is_v6: true,
+        destination: IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&ip[24..40]).ok()?)),
         tos: tclass,
         ttl: hop,
         src_port,

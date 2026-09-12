@@ -116,7 +116,8 @@ jobs:
         run: python3 scripts/run_privileged_test.py pnet-artifacts.json pnet_loopback_test 3 sudo -n env STAMP_REQUIRE_PRIVILEGED=1 TOKIO_WORKER_THREADS=2
       - name: Build nix namespace tests without root
         run: cargo test --locked --all-features --test netns_conformance --test route_mtu_test --no-run --message-format=json > netns-artifacts.json
-      - name: Require namespace and SRv6 scenarios
+      - name: Require namespace and successful SRv6 transit scenarios
+        shell: bash
         # Private mount/network namespaces isolate /run/netns and sysctls.
         run: |
           sudo -n unshare --mount --net --fork --mount-proc bash -euc '
@@ -125,12 +126,15 @@ jobs:
             mount -t tmpfs tmpfs /run/netns
             ip link set lo up
             sysctl -w net.ipv6.conf.all.seg6_enabled=1
-            STAMP_REQUIRE_PRIVILEGED=1 STAMP_NETNS_TESTS=1 STAMP_NETNS_PNET_BIN="$PWD/target/pnet/debug/stamp-suite" TOKIO_WORKER_THREADS=2 python3 scripts/run_privileged_test.py netns-artifacts.json netns_conformance 9
-          '
+            STAMP_NETNS_CAPTURE_DIR="$PWD/netns-captures" STAMP_REQUIRE_PRIVILEGED=1 STAMP_NETNS_TESTS=1 STAMP_NETNS_PNET_BIN="$PWD/target/pnet/debug/stamp-suite" TOKIO_WORKER_THREADS=2 python3 scripts/run_privileged_test.py netns-artifacts.json netns_conformance 9
+          ' 2>&1 | tee netns.log
       - name: Require reply-route MTU tests
         run: python3 scripts/run_privileged_test.py netns-artifacts.json route_mtu_test 1 sudo -n unshare --net --fork env STAMP_REQUIRE_PRIVILEGED=1 STAMP_MTU_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: privileged-test-artifacts
-          path: '*-artifacts.json'
+          path: |
+            *-artifacts.json
+            netns.log
+            netns-captures/*.pcap

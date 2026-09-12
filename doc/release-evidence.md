@@ -133,3 +133,12 @@ choices. This release-evidence work does not add either feature or turn them
 into automatic implementation backlog. A future draft revision likewise needs
 an explicit adoption review; it does not retroactively change what the frozen
 matrix claims to have checked.
+
+## Successful SRv6 transit gate
+
+The required namespace scenario now demands successful forwarding through an
+intermediate Linux router. Its two captures verify actual SRH traversal, open
+and authenticated replies, CoS and isolation from subsequent ordinary replies;
+U-flag fallback fails this success gate. See the [September 12 evidence](verification/2026-09-12-srv6/README.md)
+and [remaining verification work](verification/README.md). This closes the local
+Linux/nix SRv6 success gap, without claiming a physical fabric or hardware test.

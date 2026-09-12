@@ -250,7 +250,7 @@ fn scenario_2_cos_dscp_ecn_onwire() {
 
 // ==========================================================================
 // Scenario 3 — SRv6 Return Path: SRH attached and routed (RFC 9503 §4 /
-// RFC 8754). First live exercise of send_with_srh(). Skips without seg6.
+// RFC 8754). Requires actual transit forwarding; skips without seg6.
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]
@@ -269,59 +269,125 @@ fn scenario_3_srv6_return_path() {
         Ok(f) => f,
         Err(e) => return netns::emit_skip(scen, &e),
     };
+    let sid = fx
+        .srv6_transit()
+        .expect("configure private SRv6 transit router");
     let refl = IpAddr::V6(fx.reflector_v6());
     let send = IpAddr::V6(fx.sender_v6());
     let port = fx.port();
+    let sid_text = sid.to_string();
+    let complete_path = format!("{sid},{}", fx.sender_v6());
 
-    let _r = match fx.spawn_reflector(refl, &["--srv6-return-forwarding"], netns::BIN) {
-        Ok(r) => r,
-        Err(e) => return netns::emit_skip(scen, &format!("spawn reflector: {e}")),
-    };
-    let cap = match fx.start_capture() {
-        Ok(c) => c,
-        Err(e) => return netns::emit_skip(scen, &format!("tcpdump: {e}")),
-    };
+    for auth in [false, true] {
+        let mut refl_args = vec!["--srv6-return-forwarding"];
+        if auth {
+            refl_args.extend(["--auth-mode", "A", "--hmac-key", HMAC_HEX]);
+        }
+        let _r = fx.spawn_reflector(refl, &refl_args, netns::BIN).unwrap();
+        // Exercise both a SID-only request (the UDP destination needs a slot)
+        // and an explicit final destination. Interleave normal replies to prove
+        // sticky SRH does not leak across requests on the shared socket.
+        for path in [
+            Some(sid_text.as_str()),
+            None,
+            Some(complete_path.as_str()),
+            None,
+        ] {
+            let first_cap = fx.start_capture().unwrap();
+            let last_cap = fx.start_sender_capture().unwrap();
+            let mut args = roundtrip_sender_args();
+            args.extend(["--cos", "--dscp", "34", "--ecn", "1"]);
+            if let Some(path) = path {
+                args.extend(["--return-srv6-sids", path]);
+            }
+            if auth {
+                args.extend(["--auth-mode", "A", "--hmac-key", HMAC_HEX]);
+            }
+            let run = fx.run_sender(refl, send, &args);
+            thread::sleep(Duration::from_millis(100));
+            let first = first_cap.stop();
+            let last = last_cap.stop();
+            assert_eq!(
+                run.packets_received,
+                Some(3),
+                "auth={auth}, path={path:?}: {}",
+                run.stderr
+            );
+            for (packets, left, hops) in [(&first, 1, 255), (&last, 0, 254)] {
+                let reflected = replies(packets, port);
+                assert_eq!(reflected.len(), 3, "all replies must be captured");
+                for reply in reflected {
+                    assert_eq!(reply.tos, (34 << 2) | 1);
+                    assert_eq!(reply.ttl, hops);
+                    let srh = reply.ext_headers.iter().find(|(kind, _)| *kind == 43);
+                    if path.is_some() {
+                        let srh = &srh
+                            .expect("successful forwarding requires an SRH; fallback is not a pass")
+                            .1;
+                        assert_eq!(srh.len(), 40);
+                        assert_eq!(&srh[..8], &[17, 4, 4, left, 1, 0, 0, 0]);
+                        assert_eq!(&srh[8..24], &fx.sender_v6().octets());
+                        assert_eq!(&srh[24..40], &sid.octets());
+                        assert_eq!(
+                            reply.destination,
+                            if left == 1 { IpAddr::V6(sid) } else { send }
+                        );
+                    } else {
+                        assert!(
+                            srh.is_none(),
+                            "ordinary reply inherited a previous request's SRH"
+                        );
+                        assert_eq!(reply.destination, send);
+                    }
+                    verify_srv6_reply(&reply.payload, auth, path.is_some());
+                }
+            }
+        }
+    }
+    netns::emit_pass(scen, "24 replies: open/auth, transit SID and explicit final SID, SRH 1→0, Hop Limit 255→254, CoS, HMACs and ordinary-reply isolation");
+}
 
-    // Ask the reflector to return via an SRv6 segment list (a single SID: the
-    // reflector's own address, the simplest valid routed segment).
-    let sid = fx.reflector_v6().to_string();
-    let mut args = roundtrip_sender_args();
-    args.extend(["--return-srv6-sids", &sid]);
-    let run = fx.run_sender(refl, send, &args);
-    thread::sleep(Duration::from_millis(150));
-    let pkts = cap.stop();
-
-    // A reply is expected either way: SRH-forwarded (RFC 8754 routing header
-    // present) or, if the kernel refused the SRH, a normal reply with the
-    // Return Path U-flag set. Both are conformant; we assert the round-trip
-    // completed and report which path was taken.
-    assert!(
-        run.packets_received.unwrap_or(0) >= 1,
-        "SRv6 return-path round-trip received 0 replies (sender stderr: {})",
-        run.stderr
-    );
-    let reflected = replies(&pkts, port);
-    assert!(
-        !reflected.is_empty(),
-        "SRv6 test must observe a captured reply"
-    );
-    let srh_seen = reflected
-        .iter()
-        .any(|p| p.ext_headers.iter().any(|(t, _)| *t == 43));
-    let detail = if srh_seen {
-        "reply carried an SRH (routing header) — live send_with_srh verified"
-    } else {
-        assert!(
-            reflected.iter().any(|p| {
-                reply_tlvs(&p.payload).is_some_and(|tlvs| {
-                    find_tlv(&tlvs, TlvType::ReturnPath).is_some_and(|tlv| tlv.flags.unrecognized)
-                })
-            }),
-            "a reply without SRH must mark the Return Path TLV unsupported"
-        );
-        "reply received via verified U-flag fallback (kernel declined SRH insertion)"
+// Independent wire checks: do not reuse production TLV parsing or signers.
+fn verify_srv6_reply(payload: &[u8], auth: bool, expect_path: bool) {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+    let key = hex::decode(HMAC_HEX).unwrap();
+    let sign = |bytes: &[u8]| {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        mac.update(bytes);
+        mac.finalize().into_bytes()
     };
-    netns::emit_pass(scen, detail);
+    let base = if auth { 112 } else { 44 };
+    if auth {
+        assert_eq!(&payload[96..112], &sign(&payload[..96])[..16]);
+    }
+    let mut offset = base;
+    let mut found_path = false;
+    let mut found_hmac = false;
+    while offset < payload.len() {
+        let header = &payload[offset..offset + 4];
+        let length = u16::from_be_bytes([header[2], header[3]]) as usize;
+        let end = offset + 4 + length;
+        assert!(end <= payload.len());
+        if header[1] == 10 {
+            assert_eq!(
+                header[0] & 0xe0,
+                0,
+                "Return Path must succeed, without U/M/C fallback"
+            );
+            found_path = true;
+        }
+        if header[1] == 8 {
+            assert_eq!(length, 16);
+            let mut input = payload[..4].to_vec();
+            input.extend_from_slice(&payload[base..offset]);
+            assert_eq!(&payload[offset + 4..end], &sign(&input)[..16]);
+            found_hmac = true;
+        }
+        offset = end;
+    }
+    assert_eq!(found_path, expect_path);
+    assert_eq!(found_hmac, auth);
 }
 
 // ==========================================================================
