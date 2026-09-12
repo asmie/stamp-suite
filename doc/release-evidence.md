@@ -102,10 +102,14 @@ as executed. The workflow also supports manual dispatch.
 
 ## Windows runtime gate
 
-`rust.yml` now requires seven explicit runtime test targets on Windows:
+`rust.yml` requires the library unit suite and seven explicit integration test
+targets on Windows:
 configuration files, malformed input, TLV properties, mixed clocks, required
 micro-session validation, SSID validation and sender measurement summaries.
-These exercise codecs and UDP sender peers without running a capture reflector.
+These exercise codecs, the transmit scheduler and UDP sender peers without
+starting the pnet capture receiver. Scheduler fixtures inject a known MTU; a
+separate regression checks that unavailable route MTU drops a controlled burst
+while an ordinary reply still succeeds.
 The job retains pinned Npcap SDK/runtime downloads and validates the staged
 DLLs' x64 PE machine type. Missing DLLs or a failed core test fail the job.
 Its full-suite step remains informational because a capture-driver fixture is
@@ -114,17 +118,27 @@ not installed. Both logs are uploaded.
 The same seven targets can be selected explicitly:
 
 ```sh
-cargo test --locked --no-default-features --features ttl-pnet \
-  --test config_file_test --test malformed_input_test --test proptest_tlv \
+cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet \
+  --lib --test config_file_test --test malformed_input_test --test proptest_tlv \
   --test mixed_clock_test --test required_micro_session_test \
   --test session_ssid_validation_test --test sender_measurement_test
 ```
 
-The workflow definition is the new gate; this Linux checkpoint is not a Windows
-execution result. A release claiming Windows runtime coverage should retain
-the successful Windows core artifact for its exact commit. Raw capture and
-hardware timestamp support have separate platform limits. Repository branch
-protection is administered separately from these workflow definitions.
+At commit `7ae15c3`, native Windows Server 2025 x64 passed all **50 tests**
+in the original seven-target gate. The informational full-suite attempt stopped
+at its library target with **975 passed and 2 failed**: scheduler fixtures
+incorrectly required a platform route-MTU lookup. Those failures did not involve
+a capture driver. The corrected fixtures and newly required library gate still
+need a native run after this follow-up is committed and pushed. See the
+[Windows checkpoint](verification/2026-09-12-windows/README.md) for logs, identity,
+local regression results and the remaining scope.
+
+A release claiming Windows runtime coverage should retain the successful
+required-gate artifact and native job log for its exact commit. The raw logs
+alone do not identify their checkout; retain the matching job metadata too.
+Driver-backed pnet capture, physical NIC traffic and hardware timestamps remain
+unverified. Repository branch protection is administered separately from these
+workflow definitions.
 
 ## Hardware timestamps
 

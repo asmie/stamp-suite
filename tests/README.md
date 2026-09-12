@@ -211,3 +211,11 @@ The keyset fallback tests retain ordinary key rotation, default/SSID selection
 and revocation checks on both platforms. Linux additionally verifies queued
 Type-12 burst copies retain their accepted key; macOS verifies the documented
 drop when the route MTU required for a size-controlled reply is unavailable.
+
+The required Windows runtime gate also runs `--lib` with the seven portable
+integration targets listed in [release verification](../doc/release-evidence.md#windows-runtime-gate).
+Pnet worker unit tests send ordinary loopback UDP without starting capture.
+Burst scheduling and shutdown fixtures inject a known route payload cap; an
+additional test exercises unsupported route lookup (injected on Linux, real on
+Windows) and verifies drop accounting, reservation release and subsequent replies.
+These are scheduler tests, not evidence of Windows capture-driver operation.

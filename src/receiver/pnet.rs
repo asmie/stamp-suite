@@ -960,6 +960,37 @@ fn run_transmit_loop(
     budget: &Arc<ReplyBudget>,
     grace: Duration,
 ) {
+    let mut mtu_cache = super::mtu::MtuCache::default();
+    run_transmit_loop_with_mtu(
+        receiver,
+        sockets,
+        counters,
+        limiter,
+        shutdown,
+        budget,
+        grace,
+        |local, target, options, refresh| mtu_cache.payload_cap(local, target, options, refresh),
+    );
+}
+
+// Keep scheduler tests independent of platform route discovery while retaining
+// the same queue, sockets, transmit policy and shutdown path as production.
+#[allow(clippy::too_many_arguments)]
+fn run_transmit_loop_with_mtu(
+    receiver: std::sync::mpsc::Receiver<QueuedTransmission>,
+    sockets: PnetSendContext,
+    counters: &ReflectorCounters,
+    limiter: &super::RateLimiter,
+    shutdown: &AtomicBool,
+    budget: &Arc<ReplyBudget>,
+    grace: Duration,
+    mut payload_cap: impl FnMut(
+        std::net::SocketAddr,
+        std::net::SocketAddr,
+        &super::transmit::SendOptions,
+        bool,
+    ) -> std::io::Result<usize>,
+) {
     let local_v4 = sockets.send_socket_v4.local_addr().ok();
     let local_v6 = sockets
         .send_socket_v6
@@ -968,7 +999,6 @@ fn run_transmit_loop(
     let mut sender_v4 = DatagramSender::new(&sockets.send_socket_v4);
     let mut sender_v6 = sockets.send_socket_v6.as_ref().map(DatagramSender::new);
     let mut replies = ReplyQueue::default();
-    let mut mtu_cache = super::mtu::MtuCache::default();
     let mut drain = ShutdownDrain::default();
     let mut disconnected = false;
     loop {
@@ -1003,7 +1033,7 @@ fn run_transmit_loop(
                             "reply socket unavailable",
                         )
                     })?;
-                    mtu_cache.payload_cap(local, target, options, refresh)
+                    payload_cap(local, target, options, refresh)
                 },
                 |data, target, options| {
                     let sender = if target.is_ipv4() {
@@ -1100,7 +1130,7 @@ mod tests {
             let worker_budget = Arc::clone(&budget);
             let worker_shutdown = Arc::clone(&shutdown);
             let worker = std::thread::spawn(move || {
-                run_transmit_loop(
+                run_transmit_loop_with_mtu(
                     receiver,
                     sockets,
                     &worker_counters,
@@ -1108,6 +1138,7 @@ mod tests {
                     &worker_shutdown,
                     &worker_budget,
                     Duration::from_millis(grace),
+                    |_, _, _, _| Ok(1472),
                 );
                 done_sender.send(()).unwrap();
             });
@@ -1144,7 +1175,7 @@ mod tests {
         let worker_counters = Arc::clone(&counters);
         let worker_shutdown = Arc::clone(&shutdown);
         let worker = std::thread::spawn(move || {
-            run_transmit_loop(
+            run_transmit_loop_with_mtu(
                 receiver,
                 sockets,
                 &worker_counters,
@@ -1152,6 +1183,7 @@ mod tests {
                 &worker_shutdown,
                 &worker_budget,
                 Duration::ZERO,
+                |_, _, _, _| Ok(1472),
             )
         });
         let make = |seq: u32, extra| {
@@ -1208,6 +1240,96 @@ mod tests {
         assert_eq!(session.get_last_reflection().0, 3);
         assert_eq!(counters.packets_reflected.load(AtomicOrdering::Relaxed), 4);
     }
+    #[test]
+    fn transmit_worker_drops_unknown_mtu_burst_and_keeps_serving() {
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let sockets = PnetSendContext {
+            send_socket_v4: std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+            send_socket_v6: None,
+        };
+        let counters = Arc::new(ReflectorCounters::new());
+        let budget = ReplyBudget::new(2, Arc::clone(&counters));
+        let session = Arc::new(crate::session::Session::new(0));
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        for controlled in [true, false] {
+            let mut data = vec![0; 44];
+            data[24..28].copy_from_slice(&u32::from(controlled).to_be_bytes());
+            let response = super::super::StampResponse {
+                data,
+                cos_request: None,
+                reply_source: None,
+                return_path_action: crate::tlv::ReturnPathAction::Normal,
+                reflected_control: controlled.then_some(super::super::ReflectedControlBehavior {
+                    max_size: 1500,
+                    extra_copies: 2,
+                    interval_ns: 0,
+                    suppress_reply_ext_headers: false,
+                }),
+            };
+            let transmission = Transmission::new(
+                response,
+                Arc::clone(&session),
+                peer.local_addr().unwrap(),
+                ClockFormat::NTP,
+                false,
+                true,
+                None,
+                0,
+                false,
+            );
+            assert!(sender
+                .send(budget.reserve().unwrap().attach(transmission))
+                .is_ok());
+        }
+        drop(sender);
+        let mut lookups = 0;
+        let mut mtu_cache = super::super::mtu::MtuCache::default();
+        run_transmit_loop_with_mtu(
+            receiver,
+            sockets,
+            &counters,
+            &super::super::RateLimiter::new(0),
+            &AtomicBool::new(false),
+            &budget,
+            Duration::from_secs(1),
+            |local, target, options, refresh| {
+                lookups += 1;
+                if cfg!(target_os = "linux") {
+                    // Exercise the same failure on Linux, where discovery works.
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "fixture: no route MTU",
+                    ))
+                } else {
+                    // Verify the real unsupported route lookup on Windows/macOS.
+                    mtu_cache.payload_cap(local, target, options, refresh)
+                }
+            },
+        );
+        let mut data = [0; 128];
+        let (len, _) = peer.recv_from(&mut data).unwrap();
+        assert_eq!(len, 44);
+        assert_eq!(&data[24..28], &0u32.to_be_bytes());
+        let error = peer.recv_from(&mut data).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert_eq!(lookups, 1);
+        assert_eq!(session.get_transmitted_count(), 1);
+        assert_eq!(counters.packets_reflected.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(counters.packets_dropped.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(
+            counters
+                .queued_replies_cancelled
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert!(budget.is_empty());
+    }
+
     use clap::Parser;
 
     /// draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§5.1: captured extension headers

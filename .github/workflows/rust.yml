@@ -228,10 +228,10 @@ jobs:
           } else {
             throw "Incomplete Npcap runtime: both x64 DLLs are required for the runtime gate."
           }
-      - name: Require portable runtime and UDP sender tests
+      - name: Require unit, portable runtime and UDP sender tests
         run: >-
-          cargo test --locked --no-default-features --features ttl-pnet
-          --test config_file_test --test malformed_input_test --test proptest_tlv
+          cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet
+          --lib --test config_file_test --test malformed_input_test --test proptest_tlv
           --test mixed_clock_test --test required_micro_session_test
           --test session_ssid_validation_test --test sender_measurement_test
           > windows-core.log 2>&1

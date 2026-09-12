@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   revision-13 wire tests to macOS, including mapped IPv4 TTL 255. Keep key
   rotation coverage active while checking unsupported size-controlled drops.
 
+- Keep pnet burst scheduler tests independent of platform route-MTU support,
+  verify unsupported-MTU drops preserve ordinary replies, and require the
+  library unit suite in the native Windows runtime gate.
+
 ### Added
 
 - Add release fixtures for bearer-authenticated HTTP/HTTPS key rotation with
