@@ -1,11 +1,7 @@
 //! Independent loopback peer for draft ext-hdr-13 header and state policy.
-#![cfg(target_os = "linux")]
-use nix::{
-    libc,
-    sys::socket::{recvmsg, ControlMessageOwned, MsgFlags, SockaddrStorage},
-};
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+use nix::libc;
 use std::{
-    io::IoSliceMut,
     net::UdpSocket,
     os::fd::AsRawFd,
     process::{Child, Command, Stdio},
@@ -48,32 +44,60 @@ fn socket(ip: &str) -> UdpSocket {
     socket
 }
 fn receive(socket: &UdpSocket) -> (Vec<u8>, std::net::SocketAddr, i32) {
-    let mut bytes = [0; 4096];
-    let mut iov = [IoSliceMut::new(&mut bytes)];
-    let mut control = nix::cmsg_space!(libc::c_int);
-    let msg = recvmsg::<SockaddrStorage>(
-        socket.as_raw_fd(),
-        &mut iov,
-        Some(&mut control),
-        MsgFlags::empty(),
-    )
-    .unwrap();
-    let address = msg.address.unwrap();
-    let peer = if let Some(a) = address.as_sockaddr_in() {
-        (*a).into()
-    } else {
-        (*address.as_sockaddr_in6().unwrap()).into()
+    // This socket has one receiver; peek obtains the peer without consuming
+    // the datagram whose ancillary hop metadata is inspected below.
+    let (_, peer) = socket.peek_from(&mut [0u8; 1]).unwrap();
+    let mut bytes = [0u8; 4096];
+    let mut iov = libc::iovec {
+        iov_base: bytes.as_mut_ptr().cast(),
+        iov_len: bytes.len(),
     };
-    let hops = msg
-        .cmsgs()
-        .unwrap()
-        .find_map(|c| match c {
-            ControlMessageOwned::Ipv4Ttl(n) | ControlMessageOwned::Ipv6HopLimit(n) => Some(n),
-            _ => None,
-        })
-        .unwrap();
-    let len = msg.bytes;
-    (bytes[..len].to_vec(), peer, hops)
+    // usize provides cmsghdr alignment on both Darwin and Linux.
+    let mut control = [0usize; 16];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = std::mem::size_of_val(&control) as _;
+    // SAFETY: all receive buffers remain live and writable during recvmsg.
+    let len = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut msg, 0) };
+    assert!(len >= 0, "recvmsg: {}", std::io::Error::last_os_error());
+    assert_eq!(msg.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC), 0);
+    let mut hops = None;
+    // SAFETY: the kernel supplied this bounded, aligned ancillary buffer.
+    unsafe {
+        let mut header = libc::CMSG_FIRSTHDR(&msg);
+        while !header.is_null() {
+            let data_len = (*header).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+            match ((*header).cmsg_level, (*header).cmsg_type) {
+                #[cfg(target_os = "linux")]
+                (libc::IPPROTO_IP, libc::IP_TTL) => {
+                    assert_eq!(data_len, std::mem::size_of::<libc::c_int>());
+                    hops = Some(std::ptr::read_unaligned(
+                        libc::CMSG_DATA(header).cast::<libc::c_int>(),
+                    ));
+                }
+                #[cfg(target_os = "macos")]
+                (libc::IPPROTO_IP, libc::IP_RECVTTL) => {
+                    assert_eq!(data_len, 1);
+                    hops = Some(i32::from(*libc::CMSG_DATA(header)));
+                }
+                (libc::IPPROTO_IPV6, libc::IPV6_HOPLIMIT) => {
+                    assert_eq!(data_len, std::mem::size_of::<libc::c_int>());
+                    hops = Some(std::ptr::read_unaligned(
+                        libc::CMSG_DATA(header).cast::<libc::c_int>(),
+                    ));
+                }
+                _ => {}
+            }
+            header = libc::CMSG_NXTHDR(&msg, header);
+        }
+    }
+    (
+        bytes[..len as usize].to_vec(),
+        peer,
+        hops.expect("received hop metadata"),
+    )
 }
 fn reflected(request: &[u8]) -> Vec<u8> {
     let mut reply = vec![0; 44];
@@ -253,4 +277,44 @@ fn access_report_retry_phase_drives_state_deadlines() {
         1
     );
     assert_eq!(summary["measurements"]["session_state"]["state"], "idle");
+}
+
+#[test]
+fn mapped_ipv4_sender_transmits_ttl_255() {
+    let peer = socket("127.0.0.1");
+    let mut child = Process(Some(
+        Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
+            .args([
+                "--local-addr",
+                "::",
+                "--remote-addr",
+                "::ffff:127.0.0.1",
+                "--remote-port",
+                &peer.local_addr().unwrap().port().to_string(),
+                "--count",
+                "1",
+                "--send-delay",
+                "50",
+                "--timeout",
+                "1",
+                "--output-format",
+                "json",
+            ])
+            .env_remove("STAMP_HMAC_KEY")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let (request, source, ttl) = receive(&peer);
+    assert_eq!(ttl, 255, "mapped IPv4 traffic must use the draft's TTL");
+    peer.send_to(&reflected(&request), source).unwrap();
+    let output = child.0.take().unwrap().wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(summary["packets_received"], 1);
 }

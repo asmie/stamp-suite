@@ -83,13 +83,15 @@ python3 scripts/run_native_tests.py --expected-platform darwin --profile default
 python3 scripts/run_native_tests.py --expected-platform darwin --profile all-features --report native-macos-all-features.json
 ```
 
-The September 11 published macOS job failed a unit-test expectation that required
-Linux-only source pinning. That assertion has been corrected without skipping
-the test or weakening its MTU retry, routing, CoS and signature checks. A new
-native run of the corrected revision remains required; see the
-[macOS checkpoint](verification/2026-09-12-macos/README.md). Workflow definitions
-and successful Linux validation of the reporter are not native macOS evidence.
-The CI workflow also supports manual dispatch after these changes are pushed.
+The source-pinning assertion from the September 11 failure is corrected.
+The next native run, `34701523408` at `b457d8e`, completed both profiles but
+reported 16 failures each: IPv6 startup errors and unsupported size-controlled
+reply expectations in two keyset tests. The follow-up corrects Darwin's hop
+socket option, validates hop metadata types, and extends macOS wire coverage.
+**Successful native verification remains pending a run of these fixes.** See the
+[macOS checkpoint](verification/2026-09-12-macos/README.md) for retained reports
+and exact totals. Workflow definitions and Linux results are not native macOS
+evidence. The workflow also supports manual dispatch.
 
 ## Windows runtime gate
 

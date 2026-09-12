@@ -8,6 +8,9 @@ pub(crate) fn set_hops(socket: &UdpSocket) -> io::Result<()> {
     let sock = socket2::SockRef::from(socket);
     if socket.local_addr()?.is_ipv6() {
         sock.set_unicast_hops_v6(255)?;
+        // Darwin's IPV6_UNICAST_HOPS also sets the TTL for IPv4-mapped
+        // traffic. Its IPv6 socket option handler rejects IPPROTO_IP options.
+        #[cfg(not(target_os = "macos"))]
         if !sock.only_v6()? {
             // IPv4-mapped traffic uses the IPv4 TTL even on this socket.
             sock.set_ttl_v4(255)?;

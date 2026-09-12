@@ -193,7 +193,7 @@ Follow-Up tests attach quality to the referenced earlier reply.
 
 
 Revision-13 coverage lives in `ext_hdr_revision13_test.rs` (independent IPv4/IPv6
-TTL/port/state peers), `tlv_flag_semantics.rs` (raw eight-byte selector/tail oracles)
+TTL/port/state peers on Linux and macOS, including mapped IPv4 TTL 255), `tlv_flag_semantics.rs` (raw eight-byte selector/tail oracles)
 and pnet checksum unit/privileged tests. Loopback raw tests inject complete UDP
 checksums and first verify that corrupted checksums produce no replies. Private
 veth fixtures require `ethtool` to disable TX offload on their own interfaces;
@@ -206,3 +206,8 @@ exit status, executed/ignored totals and the complete Cargo log, with platform
 and completion guards. See [release verification](../doc/release-evidence.md#macos-runtime-gate).
 The MTU-race unit regression remains active on macOS and checks preservation of
 its supported source-selection policy; it does not require Linux-only pinning.
+
+The keyset fallback tests retain ordinary key rotation, default/SSID selection
+and revocation checks on both platforms. Linux additionally verifies queued
+Type-12 burst copies retain their accepted key; macOS verifies the documented
+drop when the route MTU required for a size-controlled reply is unavailable.

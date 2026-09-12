@@ -4,7 +4,11 @@
 mod wire_hmac;
 use clap::Parser;
 use stamp_suite::{configuration::Configuration, crypto::HmacKey, receiver};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 use tokio::{net::UdpSocket, task::JoinHandle, time::timeout};
 
 fn key(value: u8) -> HmacKey {
@@ -186,13 +190,36 @@ async fn check(auth: bool) {
                 verify(&reflector.recv(&socket).await, auth, value, fallback);
             }
         }
+        let drops_before = reflector
+            .shared
+            .counters
+            .packets_dropped
+            .load(Ordering::Relaxed);
         socket
             .send_to(&request(auth, 42, 0xAB, 2, true, true), reflector.target)
             .await
             .unwrap();
-        verify(&reflector.recv(&socket).await, auth, 0xAB, true);
-        // Rotate after acceptance: the two queued copies must retain the old
-        // selected key; a newly accepted request must use the replacement.
+        if cfg!(target_os = "linux") {
+            verify(&reflector.recv(&socket).await, auth, 0xAB, true);
+        } else {
+            // Size-controlled replies require a known route MTU. This backend
+            // deliberately drops them where route lookup is unsupported.
+            assert!(
+                timeout(Duration::from_millis(200), socket.recv_from(&mut [0; 2048]))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                reflector
+                    .shared
+                    .counters
+                    .packets_dropped
+                    .load(Ordering::Relaxed),
+                drops_before + 1
+            );
+        }
+        // Linux queued copies retain the accepted key. On every platform,
+        // newly accepted ordinary requests must use the replacement.
         reflector
             .shared
             .hmac_keys
@@ -201,8 +228,10 @@ async fn check(auth: bool) {
             .as_mut()
             .unwrap()
             .insert(42, key(0x12));
-        for _ in 0..2 {
-            verify(&reflector.recv(&socket).await, auth, 0xAB, true);
+        if cfg!(target_os = "linux") {
+            for _ in 0..2 {
+                verify(&reflector.recv(&socket).await, auth, 0xAB, true);
+            }
         }
         socket
             .send_to(&request(auth, 42, 0x12, 3, true, false), reflector.target)

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Retain native default/all-features Cargo logs and revision-bound JSON reports
   in CI, with explicit rejection of incomplete or wrong-platform evidence.
 
+- Fix macOS IPv6 startup by applying Darwin’s shared IPv6/mapped-IPv4 hop
+  policy. Decode received hop metadata by control-message type and extend
+  revision-13 wire tests to macOS, including mapped IPv4 TTL 255. Keep key
+  rotation coverage active while checking unsupported size-controlled drops.
+
 ### Added
 
 - Add release fixtures for bearer-authenticated HTTP/HTTPS key rotation with

@@ -728,35 +728,67 @@ fn extract_ttl_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> O
 /// Returns `None` if TTL/HopLimit could not be extracted from the control messages.
 #[cfg(target_os = "macos")]
 fn extract_ttl_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> Option<u8> {
-    let cmsgs = msg.cmsgs().ok()?;
-
-    for cmsg in cmsgs {
+    for cmsg in msg.cmsgs().ok()? {
         if let ControlMessageOwned::Unknown(ref ucmsg) = cmsg {
-            let level = ucmsg.cmsg_header.cmsg_level;
-            let data = &ucmsg.data_bytes;
-
-            // IPv4 TTL (level=IPPROTO_IP)
-            if level == libc::IPPROTO_IP {
-                if data.len() >= 4 {
-                    let ttl = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
-                    return Some(ttl.clamp(0, 255) as u8);
-                } else if !data.is_empty() {
-                    return Some(data[0]);
-                }
-            }
-            // IPv6 Hop Limit (level=IPPROTO_IPV6)
-            else if level == libc::IPPROTO_IPV6 {
-                if data.len() >= 4 {
-                    let hoplimit = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
-                    return Some(hoplimit.clamp(0, 255) as u8);
-                } else if !data.is_empty() {
-                    return Some(data[0]);
-                }
+            if let Some(hops) = darwin_hop_value(
+                ucmsg.cmsg_header.cmsg_level,
+                ucmsg.cmsg_header.cmsg_type,
+                &ucmsg.data_bytes,
+            ) {
+                return Some(hops);
             }
         }
     }
-
     None
+}
+
+// Darwin sends IPv4 TTL as one byte under IP_RECVTTL and IPv6 Hop Limit as
+// an int under IPV6_HOPLIMIT. Other metadata at the same level is not a TTL.
+#[cfg(any(target_os = "macos", test))]
+fn darwin_hop_value(level: i32, kind: i32, data: &[u8]) -> Option<u8> {
+    match (level, kind) {
+        (libc::IPPROTO_IP, libc::IP_RECVTTL) if data.len() == 1 => Some(data[0]),
+        (libc::IPPROTO_IPV6, libc::IPV6_HOPLIMIT) => {
+            let bytes: [u8; 4] = data.try_into().ok()?;
+            u8::try_from(i32::from_ne_bytes(bytes)).ok()
+        }
+        _ => None,
+    }
+}
+
+#[test]
+fn darwin_hop_metadata_rejects_unrelated_or_malformed_controls() {
+    assert_eq!(
+        darwin_hop_value(libc::IPPROTO_IP, libc::IP_RECVTTL, &[37]),
+        Some(37)
+    );
+    assert_eq!(
+        darwin_hop_value(
+            libc::IPPROTO_IPV6,
+            libc::IPV6_HOPLIMIT,
+            &255i32.to_ne_bytes()
+        ),
+        Some(255)
+    );
+    assert_eq!(
+        darwin_hop_value(libc::IPPROTO_IP, libc::IP_RECVTOS, &[184]),
+        None
+    );
+    assert_eq!(
+        darwin_hop_value(libc::IPPROTO_IPV6, libc::IPV6_TCLASS, &184i32.to_ne_bytes()),
+        None
+    );
+    for bytes in [
+        &[][..],
+        &[37][..],
+        &(-1i32).to_ne_bytes()[..],
+        &256i32.to_ne_bytes()[..],
+    ] {
+        assert_eq!(
+            darwin_hop_value(libc::IPPROTO_IPV6, libc::IPV6_HOPLIMIT, bytes),
+            None
+        );
+    }
 }
 
 /// Extract TOS (Type of Service) from control messages received via recvmsg.
