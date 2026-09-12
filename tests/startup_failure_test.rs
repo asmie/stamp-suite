@@ -23,8 +23,9 @@ async fn free_port() -> u16 {
 
 #[tokio::test]
 async fn reflector_reports_bind_failure() {
-    // Keep the original socket bound so another test cannot steal the port.
-    let _squatter = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    // Occupy the exact wildcard address the reflector will bind. A socket
+    // bound only to loopback does not establish this conflict on Windows.
+    let _squatter = UdpSocket::bind("0.0.0.0:0").await.unwrap();
     let port = _squatter.local_addr().unwrap().port();
 
     // Wildcard binds work without an interface carrying the unspecified IP.

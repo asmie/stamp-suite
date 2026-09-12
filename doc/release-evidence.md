@@ -126,19 +126,19 @@ cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet \
   --test startup_failure_test
 ```
 
-At commit `29057c9`, native Windows Server 2025 x64 passed **1028 tests** in
-the library-plus-seven-target gate, including the corrected scheduler fixtures.
-The informational full attempt reached 33 target summaries (**1079 passed,
-2 failed**) before stopping at startup-error tests. Capture-interface discovery
-masked an occupied-port error and a missing authentication key with
-`No interface found with IP address 127.0.0.1`.
+At commit `f853287`, native Windows Server 2025 x64 executed the library and
+all eight selected integration targets: **1033 passed, 1 failed**, with no
+ignored or filtered tests. The earlier scheduler and missing-key fixes passed.
+The remaining occupied-port fixture held a loopback socket while asking the
+reflector to bind a wildcard address; that wildcard bind succeeded on Windows
+and the test instead reached interface discovery.
 
-The follow-up defers interface discovery until after ordinary socket/key checks
-and adds the startup-error target to the required gate. Wildcard-bind regressions
-reproduce both failures on Linux before the fix and pass afterward. A native
-rerun of this expanded gate remains required. See the
-[Windows checkpoint](verification/2026-09-12-windows/README.md) for retained
-artifacts, exact native identity, local checks and earlier failure history.
+The fixture now holds the same wildcard address the reflector will bind,
+preserving its specific bind-error assertion. Both receiver backends pass the
+startup tests locally; native Windows still needs a rerun of this correction.
+The informational full suite was skipped after the required step failed. See
+the [Windows checkpoint](verification/2026-09-12-windows/README.md) for retained
+logs, identity and earlier failure history.
 
 A release claiming Windows runtime coverage should retain the successful
 required-gate artifact and native job log for its exact commit. The raw logs
