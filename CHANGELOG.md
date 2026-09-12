@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report pnet socket and authentication startup failures before capture-interface
   discovery, and require the startup-error tests in native Windows CI.
 
+- Retry Windows WSAEACCES when an automatically selected sender port is
+  unavailable, retaining bounded randomized selection and explicit-port errors.
+  Remove the non-Linux unreachable-code warning in IPv6 attachment validation.
+
 ### Added
 
 - Add release fixtures for bearer-authenticated HTTP/HTTPS key rotation with

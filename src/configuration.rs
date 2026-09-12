@@ -1582,6 +1582,7 @@ impl Configuration {
                 }
                 #[cfg(not(target_os = "linux"))]
                 return Err(cfg_err("--attach-ext-hdr requires Linux".into()));
+                #[cfg(target_os = "linux")]
                 if attached.len() > 2
                     || attached.windows(2).any(|pair| {
                         pair[0].kind != AttachExtHdrKind::HopByHop

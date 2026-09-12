@@ -29,7 +29,7 @@ cross-platform validation limits are recorded with the test evidence.
 
 | ID | Clause (paraphrased) | Level | Role | Status | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| ext-hdr-3.1-1 | Choose randomized source UDP ports. | SHOULD | Sender | Compliant | `src/net_policy.rs::bind_sender` uses OS CSPRNG bytes with bounded collision retries. Explicit operator-selected ports remain supported. |
+| ext-hdr-3.1-1 | Choose randomized source UDP ports. | SHOULD | Sender | Compliant | `src/net_policy.rs::bind_sender` uses OS CSPRNG bytes with bounded collision retries, including Windows WSAEACCES for unavailable automatic candidates. Explicit operator-selected ports remain supported. |
 | ext-hdr-3.1-2 | Prefer source ports in 49152–65535. | SHOULD | Sender | Compliant | Default sender binding uses the dynamic range; explicit local ports are an operator override. Reflector source ports retain the provisioned request destination, as required for UDP reply demultiplexing. |
 | ext-hdr-3.1-3 | Source ports distinguish replies from reverse-direction requests. | MUST | Both | Compliant | Sender local and remote ports must differ, including randomized bindings. Reflectors retain their listening port. Connected sender sockets filter the peer tuple. `tests/ext_hdr_revision13_test.rs` verifies source ports. |
 | ext-hdr-3.1-4 | Set outgoing IPv4 TTL and IPv6 Hop Limit to 255. | MUST | Both | Compliant | `src/net_policy.rs::set_hops` is applied before sending in both receiver backends and the sender, using portable socket options; setup failure aborts startup. CLI/TOML reject other TTL values. Independent IPv4/IPv6 wire tests verify 255. |

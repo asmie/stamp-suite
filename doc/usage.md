@@ -787,7 +787,10 @@ bytes to eight. Type 247 stays at four. Selectors are preserved in replies; an
 all-zero eight-byte Type 246 request has no reflected data tail.
 
 The default sender local port is now 0, selecting a randomized port in
-49152–65535. A reflector still defaults to 862. Explicit sender local and remote
+49152–65535. Automatic selection tries another candidate when a port is busy
+or Windows rejects it with WSAEACCES (10013), up to 128 candidate selections.
+Other errors are reported immediately; explicitly requested ports are not retried.
+A reflector still defaults to 862. Explicit sender local and remote
 ports must differ. Outgoing TTL/Hop Limit is 255; lower `--ttl` or TOML values
 are rejected, while lower received hop counts are accepted. Set `local_port = 0`
 in sender configurations that previously copied the reflector's listening port.

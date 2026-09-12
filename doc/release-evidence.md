@@ -141,15 +141,20 @@ the overall success conclusion. See the
 [Windows checkpoint](verification/2026-09-12-windows/README.md) for retained
 native logs, final CI status, exact counts and earlier failure history.
 
-The mixed-clock fixture now preserves child stdout, stderr, pre-stop status and
-final exit status on failure. It checks for early child exit during the unchanged
-five-second receive deadline and bounds post-reply shutdown as well. Windows CI
-requires 20 complete mixed-clock suite executions after the core gate, retaining
-`windows-mixed-clock-repeat.log`. Each run includes four wire cases and two
-failure-diagnostic regressions; any failed run fails the step immediately. This
-collects recurrence evidence without retrying a failed run into a success. The
-new diagnostic/repetition gate still needs native execution, and the original
-timeout's cause remains unresolved.
+The subsequent diagnostic run at `7145178` passed 1036 core tests, then failed
+on repetition 17 with 100 passed and 2 failed tests across 17 repeated suites.
+Both failed children exited before transmitting: automatically selected IPv4
+and IPv6 source ports were rejected with Winsock WSAEACCES (10013). The original
+full-suite timeout lacked these diagnostics; its exact cause cannot be proven
+retroactively, but this rerun establishes an actual sender startup defect.
+
+Automatic source-port selection now retries that Windows error within its
+existing 128-candidate bound and preserves the final bind error on exhaustion.
+Explicit ports and unrelated failures still return immediately. Regression tests
+cover both address families, peer-port avoidance, exhaustion, fixed ports and
+random-source failure. Windows core, 20 required mixed-clock repetitions and
+informational full-suite execution still need to run on this correction.
+The five-second packet deadline and failure diagnostics remain enabled.
 
 A release claiming Windows runtime coverage should retain the successful
 required-gate artifact and native job log for its exact commit. The raw logs
