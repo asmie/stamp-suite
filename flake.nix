@@ -17,7 +17,7 @@
 
         # Shared by the package and lint derivations. After a Cargo.lock change,
         # temporarily use pkgs.lib.fakeHash, build, then copy the reported hash.
-        cargoDepsHash = "sha256-h6/kN4RysdDOgXQVbuwK+zteOaoMQuyrIxAWeVrg2aY=";
+        cargoDepsHash = "sha256-c0baRXgrTGtZINNeIBOi4Wq37jUQKtfjCuIGKhk0Q9k=";
       in
       {
         packages = {
