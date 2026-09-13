@@ -1182,7 +1182,7 @@ impl Configuration {
                 .map_err(|e| {
                     ConfigurationError::InvalidConfiguration(format!("Invalid --ber-pattern: {e}"))
                 })?;
-            if self.ber_padding_size == 0 || !self.ber_padding_size.is_multiple_of(pattern.len()) {
+            if self.ber_padding_size == 0 || self.ber_padding_size % pattern.len() != 0 {
                 return Err(ConfigurationError::InvalidConfiguration(
                     "ber_padding_size must be positive and a multiple of the pattern length".into(),
                 ));
@@ -2301,7 +2301,7 @@ pub(crate) fn parse_ext_hdr_request_spec(s: &str) -> Result<ExtHdrRequestSpec, S
     };
     // A zero-length request names no extension header. Omit the value to get
     // the default length instead of asking for nothing.
-    if length < 8 || !length.is_multiple_of(8) {
+    if length < 8 || length % 8 != 0 {
         return Err("length must be a positive multiple of 8 octets".to_string());
     }
     if length > 2048 {

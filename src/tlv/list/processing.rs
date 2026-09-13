@@ -1089,7 +1089,7 @@ impl TlvList {
         consumed: &mut Vec<bool>,
     ) {
         let value_len = tlv.value.len();
-        if value_len < 8 || !value_len.is_multiple_of(8) {
+        if value_len < 8 || value_len % 8 != 0 {
             tlv.set_conformant_reflected();
             return;
         }

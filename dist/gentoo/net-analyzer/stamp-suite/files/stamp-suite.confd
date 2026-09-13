@@ -1,0 +1,6 @@
+# /etc/conf.d/stamp-suite: extra flags for the reflector.
+# The service always runs `stamp-suite --is-reflector`; append options here,
+# e.g. to require authentication or bind a specific address:
+#   STAMP_SUITE_OPTS="--stateful-reflector --hmac-key-file /etc/stamp-suite/key"
+#   STAMP_SUITE_OPTS="--local-addr 192.0.2.10"
+STAMP_SUITE_OPTS=""

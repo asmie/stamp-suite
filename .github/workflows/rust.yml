@@ -319,12 +319,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.93.0
+      # Pinned to Cargo.toml's rust-version: Debian trixie's rustc. Every
+      # target (tests, benches, examples) must build there, not just the
+      # library — distro builds run the test suite with the distro compiler.
+      - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
       - name: Check MSRV
-        run: cargo check --all-features
+        run: cargo check --locked --all-features --all-targets
 
   doc:
     name: Documentation

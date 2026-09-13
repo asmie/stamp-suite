@@ -1,7 +1,13 @@
 # Builder and runtime MUST share the same Debian release (glibc
 # compatibility) — pin the distro suffix explicitly so a moving `slim`
 # tag can't silently desynchronize them again.
-FROM rust:1.93-slim-trixie AS builder
+#
+# The builder is pinned to the crate's MSRV (Cargo.toml `rust-version`) so
+# the image proves the MSRV build, not just CI's `msrv` job. The official
+# rust:1.85 images were published before trixie existed and only come in
+# bookworm/bullseye flavours, which is why both stages are bookworm. When
+# the MSRV moves to a release that has a trixie image, bump both lines.
+FROM rust:1.85-slim-bookworm AS builder
 
 WORKDIR /usr/src/stamp-suite
 
@@ -37,7 +43,7 @@ RUN touch src/main.rs src/lib.rs && \
     cargo build --release --features "$FEATURES"
 
 # Runtime stage — same Debian release as the builder (see note above).
-FROM debian:trixie-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libcap2-bin \

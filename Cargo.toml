@@ -3,7 +3,9 @@ authors = ['Piotr Olszewski <asmie@asmie.pl>']
 name = "stamp-suite"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.93.0"
+# Debian trixie ships rustc 1.85; every crate in Cargo.lock builds there, so
+# this is the distro-packaging floor. Clippy reads it for MSRV-aware lints.
+rust-version = "1.85.0"
 
 categories = [
     "network-programming",
@@ -96,7 +98,11 @@ pnet = "0.35"
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }
-criterion = { version = "0.8", default-features = false, features = ["html_reports"] }
+# 0.5 is the last criterion whose MSRV fits the 1.85 floor; the bench API used
+# (bench_function / criterion_group / criterion_main) is unchanged between them.
+criterion = { version = "0.5", default-features = false, features = ["html_reports", "cargo_bench_support"] }
+# Renders dist/man/stamp-suite.1 from the clap definition (tests/man_page.rs).
+clap_mangen = "0.3"
 
 # Linux-only: the privileged netns conformance tier (tests/netns_conformance.rs)
 # needs a handful of raw syscalls the standard library does not expose —
@@ -136,6 +142,7 @@ maintainer-scripts = "dist/debian/"
 assets = [
     ["target/release/stamp-suite",                "usr/bin/",                                  "755"],
     ["dist/systemd/stamp-suite.service",          "lib/systemd/system/",                       "644"],
+    ["dist/man/stamp-suite.1",                    "usr/share/man/man1/",                       "644"],
     ["mibs/STAMP-SUITE-MIB.mib",                  "usr/share/snmp/mibs/",                      "644"],
     ["README.md",                                 "usr/share/doc/stamp-suite/README.md",       "644"],
     ["doc/usage.md",                              "usr/share/doc/stamp-suite/usage.md",        "644"],
@@ -149,6 +156,7 @@ summary = "Simple Two-Way Active Measurement Protocol (STAMP)"
 assets = [
     { source = "target/release/stamp-suite",       dest = "/usr/bin/stamp-suite",                         mode = "755" },
     { source = "dist/systemd/stamp-suite.service", dest = "/usr/lib/systemd/system/stamp-suite.service",  mode = "644", config = false },
+    { source = "dist/man/stamp-suite.1",           dest = "/usr/share/man/man1/stamp-suite.1",            mode = "644" },
     { source = "mibs/STAMP-SUITE-MIB.mib",         dest = "/usr/share/snmp/mibs/STAMP-SUITE-MIB.mib",     mode = "644" },
     { source = "LICENSE",                          dest = "/usr/share/doc/stamp-suite/LICENSE",           mode = "644", doc = true },
     { source = "README.md",                        dest = "/usr/share/doc/stamp-suite/README.md",         mode = "644", doc = true },

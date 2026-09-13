@@ -2,7 +2,7 @@ Source: stamp-suite
 Section: net
 Priority: optional
 Maintainer: Piotr Olszewski <asmie@asmie.pl>
-Build-Depends: debhelper-compat (= 13), cargo (>= 1.93.0), rustc (>= 1.93.0)
+Build-Depends: debhelper-compat (= 13), cargo (>= 1.85.0), rustc (>= 1.85.0)
 Standards-Version: 4.6.2
 Homepage: https://github.com/asmie/stamp-suite
 Rules-Requires-Root: no

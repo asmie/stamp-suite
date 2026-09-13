@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Lower the MSRV from 1.93 to 1.85 so the crate builds with the rustc shipped
+  by Debian trixie; the only dependency that needed to move was `criterion`
+  (0.8 → 0.5, dev-only). Ship a generated man page (`dist/man/stamp-suite.1`,
+  kept in sync by `tests/man_page.rs`) in the DEB/RPM/Debian packaging, and
+  publish a source tarball, a `cargo vendor` tarball, and Sigstore build
+  provenance (plus an optional GPG-signed `SHA256SUMS`) with each release so
+  distribution packagers have stable, verifiable inputs. Pin the container
+  builder image to the MSRV (`rust:1.85-slim-bookworm`, runtime
+  `debian:bookworm-slim`). Add a Gentoo overlay tree under `dist/gentoo/`
+  (`net-analyzer/stamp-suite` with USE flags per Cargo feature, OpenRC
+  service files, and `acct-user`/`acct-group` packages).
+
 - Fix Linux SRv6 replies: use the supported sticky routing-header option,
   preserve transit SIDs and the final UDP destination, and clear SRH before
   ordinary replies. Require successful three-namespace forwarding with

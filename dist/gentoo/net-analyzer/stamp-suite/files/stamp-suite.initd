@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# Copyright 2026 Gentoo Authors
+# Distributed under the terms of the GNU General Public License v2
+
+description="STAMP Session-Reflector (RFC 8762)"
+command="/usr/bin/stamp-suite"
+command_args="--is-reflector ${STAMP_SUITE_OPTS}"
+command_user="stamp:stamp"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+# Bind the IANA STAMP port (862/udp) without running as root.
+capabilities="^cap_net_bind_service"
+
+depend() {
+	need net
+	use logger
+}

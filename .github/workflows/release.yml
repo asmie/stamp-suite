@@ -34,8 +34,14 @@ jobs:
           # Extract version from Debian changelog; regex assumes X.Y.Z-N revision-suffix format
           debian_version="$(head -n1 dist/debian/changelog | grep -oP '\(\K[0-9]+\.[0-9]+\.[0-9]+(?=-)' || true)"
           openwrt_version="$(grep -m1 -oP '^PKG_VERSION:=\K.+' dist/openwrt/Makefile || true)"
+          # clap_mangen writes `.TH stamp-suite 1  "stamp-suite X.Y.Z"`; the page is a
+          # committed snapshot (tests/man_page.rs), so a version bump without
+          # `STAMP_UPDATE_MAN=1 cargo test --all-features --test man_page` shows up here.
+          man_version="$(grep -m1 -oP '^\.TH stamp-suite 1 +"stamp-suite \K[0-9]+\.[0-9]+\.[0-9]+' dist/man/stamp-suite.1 || true)"
+          # The Gentoo ebuild carries its version in the filename and fetches the tag archive.
+          gentoo_version="$(ls dist/gentoo/net-analyzer/stamp-suite/stamp-suite-*.ebuild 2>/dev/null | grep -m1 -oP 'stamp-suite-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.ebuild$)' || true)"
 
-          echo "tag=v$tag_version  Cargo.toml=$cargo_version  CHANGELOG.md=$changelog_version  dist/debian/changelog=$debian_version  dist/openwrt/Makefile=$openwrt_version"
+          echo "tag=v$tag_version  Cargo.toml=$cargo_version  CHANGELOG.md=$changelog_version  dist/debian/changelog=$debian_version  dist/openwrt/Makefile=$openwrt_version  dist/man/stamp-suite.1=$man_version  dist/gentoo=$gentoo_version"
 
           fail=0
           check() {
@@ -53,6 +59,8 @@ jobs:
           check "CHANGELOG.md"            "$changelog_version"
           check "dist/debian/changelog"   "$debian_version"
           check "dist/openwrt/Makefile"   "$openwrt_version"
+          check "dist/man/stamp-suite.1"  "$man_version"
+          check "dist/gentoo ebuild"      "$gentoo_version"
 
           if [ "$fail" -ne 0 ]; then
             echo "One or more files are out of sync with tag v$tag_version — see the ::error:: annotations above. Fix the stale file(s) and re-tag." >&2
@@ -68,6 +76,45 @@ jobs:
           # cargo publish requires a token even with --dry-run; value is never transmitted
           CARGO_REGISTRY_TOKEN: unused-dry-run-placeholder
         run: cargo publish --dry-run --locked
+
+  # Stable source inputs for distribution packagers. GitHub's auto-generated
+  # tag tarballs are not guaranteed byte-stable (their checksums changed in
+  # 2023), so Arch/Gentoo/Fedora recipes need one we publish ourselves. The
+  # vendor tarball is what Fedora (rust2rpm) and Gentoo (cargo.eclass) consume
+  # for offline builds. Both are built reproducibly: sorted entries, fixed
+  # ownership, mtimes pinned to the tagged commit, no gzip timestamp.
+  source:
+    name: Source Tarballs
+    needs: [release-preflight]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Assemble source and vendor tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$GITHUB_REF_NAME")"
+
+          git archive --format=tar --prefix="stamp-suite-${ver}/" "$GITHUB_REF_NAME" \
+            | gzip -9n > "stamp-suite-${ver}.tar.gz"
+
+          cargo vendor --locked vendor > /dev/null
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@${SOURCE_DATE_EPOCH}" -cf - vendor \
+            | xz -9 > "stamp-suite-${ver}-vendor.tar.xz"
+
+          ls -l stamp-suite-*.tar.*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: |
+            stamp-suite-*.tar.gz
+            stamp-suite-*-vendor.tar.xz
+          if-no-files-found: error
 
   # Linux DEB/RPM packages (existing) plus a plain tarball per target
   # (new — see the "Artifacts" work item). Kept as one job since it
@@ -248,8 +295,12 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [package, package-macos, publish]
+    needs: [source, package, package-macos, publish]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release and upload assets
+      id-token: write      # Sigstore signing for the provenance attestation
+      attestations: write  # store the attestation on the repository
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -261,6 +312,10 @@ jobs:
           path: dist
           pattern: tarball-*
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          name: source
       - name: Generate SHA256SUMS
         working-directory: dist
         run: |
@@ -271,14 +326,67 @@ jobs:
           # and SHA256SUMS entries carry the same basenames the release
           # attaches its assets under.
           find . -mindepth 2 -type f \
-            \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' \) \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.tar.xz' \) \
             -exec mv -t . {} +
-          sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS
+          sha256sum *.deb *.rpm *.tar.gz *.tar.xz > SHA256SUMS
+          cat SHA256SUMS
+
+      # Signed build provenance for every asset, keyless via Sigstore. Needs
+      # no repository secret. Verify with:
+      #   gh attestation verify <asset> --repo asmie/stamp-suite
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
+            dist/*.tar.xz
+            dist/SHA256SUMS
+
+      # Detached GPG signature over SHA256SUMS — the form Debian/Gentoo/Arch
+      # maintainers habitually check (`gpg --verify SHA256SUMS.asc SHA256SUMS`
+      # then `sha256sum -c`). Skipped, not failed, when no key is configured,
+      # so the attestation above is always present and the signature is an
+      # additive extra.
+      #
+      # ---- ONE-TIME REPO-OWNER SETUP (not performed by this workflow) ----
+      # 1. Create (or pick) a signing key and export the private key ASCII-
+      #    armored: `gpg --armor --export-secret-keys <KEYID>`.
+      # 2. Settings -> Secrets and variables -> Actions -> New repository
+      #    secret `RELEASE_GPG_PRIVATE_KEY` with that armored block; add
+      #    `RELEASE_GPG_PASSPHRASE` too if the key has one.
+      # 3. Publish the public key (`gpg --armor --export <KEYID>`) where
+      #    packagers can find it — e.g. commit it as dist/RELEASE_KEY.asc and
+      #    upload to keys.openpgp.org — and note the fingerprint in README.md.
+      # ----------------------------------------------------------------------
+      - name: Sign SHA256SUMS (if a release key is configured)
+        working-directory: dist
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_PRIVATE_KEY}" ]; then
+            echo "::notice::RELEASE_GPG_PRIVATE_KEY not set; skipping GPG signature (Sigstore attestation still published)"
+            exit 0
+          fi
+          export GNUPGHOME="$(mktemp -d)"
+          printf '%s\n' "${GPG_PRIVATE_KEY}" | gpg --batch --import
+          passphrase_args=()
+          if [ -n "${GPG_PASSPHRASE}" ]; then
+            passphrase_args=(--pinentry-mode loopback --passphrase-fd 0)
+          fi
+          printf '%s' "${GPG_PASSPHRASE}" \
+            | gpg --batch --yes "${passphrase_args[@]}" --armor --detach-sign \
+                  --output SHA256SUMS.asc SHA256SUMS
+          gpg --batch --verify SHA256SUMS.asc SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/**/*.deb
             dist/**/*.rpm
             dist/**/*.tar.gz
+            dist/**/*.tar.xz
             dist/SHA256SUMS
+            dist/SHA256SUMS.asc
           generate_release_notes: true

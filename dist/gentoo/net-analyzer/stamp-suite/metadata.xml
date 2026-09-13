@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>asmie@asmie.pl</email>
+		<name>Piotr Olszewski</name>
+	</maintainer>
+	<longdescription>
+		stamp-suite implements the Simple Two-Way Active Measurement Protocol
+		(STAMP, RFC 8762) and its optional extensions (RFC 8972) for measuring
+		packet loss and network delay. A single binary acts as either the
+		Session-Sender or the Session-Reflector, selected by command-line flag.
+	</longdescription>
+	<use>
+		<flag name="control">Build the localhost control-plane REST API (TLS via rustls) for runtime session, key and shutdown management of the reflector</flag>
+		<flag name="hwtstamp">Use kernel and NIC hardware timestamping (SO_TIMESTAMPING) instead of userspace clocks</flag>
+		<flag name="metrics">Expose Prometheus metrics over HTTP</flag>
+		<flag name="snmp">Build the SNMP AgentX subagent and install the STAMP-SUITE-MIB</flag>
+	</use>
+	<upstream>
+		<remote-id type="github">asmie/stamp-suite</remote-id>
+		<remote-id type="cargo">stamp-suite</remote-id>
+		<bugs-to>https://github.com/asmie/stamp-suite/issues</bugs-to>
+		<changelog>https://github.com/asmie/stamp-suite/blob/master/CHANGELOG.md</changelog>
+		<doc>https://github.com/asmie/stamp-suite/blob/master/doc/usage.md</doc>
+	</upstream>
+</pkgmetadata>

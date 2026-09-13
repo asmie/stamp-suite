@@ -1,0 +1,531 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH stamp-suite 1  "stamp-suite 1.0.0" 
+.SH NAME
+stamp\-suite \- Simple Two\-Way Active Measurement Protocol (STAMP)
+.SH SYNOPSIS
+\fBstamp\-suite\fR [\fB\-\-config\fR] [\fB\-\-print\-config\-schema\fR] [\fB\-r\fR|\fB\-\-remote\-addr\fR] [\fB\-S\fR|\fB\-\-local\-addr\fR] [\fB\-\-local\-scope\-id\fR] [\fB\-\-remote\-scope\-id\fR] [\fB\-p\fR|\fB\-\-remote\-port\fR] [\fB\-o\fR|\fB\-\-local\-port\fR] [\fB\-K\fR|\fB\-\-clock\-source\fR] [\fB\-\-clock\-sync\-source\fR] [\fB\-\-hardware\-clock\-sync\-source\fR] [\fB\-\-reflector\-utc\-offset\fR] [\fB\-d\fR|\fB\-\-send\-delay\fR] [\fB\-c\fR|\fB\-\-count\fR] [\fB\-L\fR|\fB\-\-timeout\fR] [\fB\-\-session\-loss\-threshold\fR] [\fB\-A\fR|\fB\-\-auth\-mode\fR] [\fB\-R \fR] [\fB\-i\fR|\fB\-\-is\-reflector\fR] [\fB\-\-error\-scale\fR] [\fB\-\-error\-multiplier\fR] [\fB\-\-clock\-synchronized\fR] [\fB\-\-hmac\-key\fR] [\fB\-\-hmac\-key\-file\fR] [\fB\-\-hmac\-key\-dir\fR] [\fB\-\-require\-hmac\fR] [\fB\-\-strict\-packets\fR] [\fB\-\-stateful\-reflector\fR] [\fB\-\-session\-admission\fR] [\fB\-\-reflector\-session\fR] [\fB\-\-session\-timeout\fR] [\fB\-\-allowed\-dscp\fR] [\fB\-\-allowed\-ecn\fR] [\fB\-\-allowed\-dscp\-for\fR] [\fB\-\-drop\-replayed\fR] [\fB\-\-location\-disclose\fR] [\fB\-\-tlv\-mode\fR] [\fB\-\-verify\-tlv\-hmac\fR] [\fB\-\-ssid\fR] [\fB\-\-on\-zero\-ssid\fR] [\fB\-\-metrics\fR] [\fB\-\-metrics\-addr\fR] [\fB\-\-cos\fR] [\fB\-\-dscp\fR] [\fB\-\-ecn\fR] [\fB\-\-ecn\-backoff\-factor\fR] [\fB\-\-ecn\-max\-delay\fR] [\fB\-\-ecn\-recovery\-step\fR] [\fB\-\-ttl\fR] [\fB\-\-malformed\fR] [\fB\-\-access\-report\fR] [\fB\-\-access\-return\-code\fR] [\fB\-\-access\-report\-timeout\fR] [\fB\-\-access\-report\-retries\fR] [\fB\-\-timestamp\-info\fR] [\fB\-\-direct\-measurement\fR] [\fB\-\-location\fR] [\fB\-\-follow\-up\-telemetry\fR] [\fB\-\-snmp\fR] [\fB\-\-snmp\-socket\fR] [\fB\-\-control\fR] [\fB\-\-control\-addr\fR] [\fB\-\-control\-token\-file\fR] [\fB\-\-control\-tls\-cert\fR] [\fB\-\-control\-tls\-key\fR] [\fB\-\-output\-format\fR] [\fB\-\-log\-format\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-hwtstamp\fR] [\fB\-\-report\-interval\fR] [\fB\-\-dest\-node\-addr\fR] [\fB\-\-return\-path\-cc\fR] [\fB\-\-return\-address\fR] [\fB\-\-return\-sr\-mpls\-labels\fR] [\fB\-\-return\-srv6\-sids\fR] [\fB\-\-srv6\-return\-forwarding\fR] [\fB\-\-return\-path\-allow\-alternate\fR] [\fB\-\-micro\-session\-id\fR] [\fB\-\-reflector\-member\-link\-id\fR] [\fB\-\-max\-pps\fR] [\fB\-\-reflector\-rate\-burst\fR] [\fB\-\-reflector\-queue\-capacity\fR] [\fB\-\-reflector\-shutdown\-grace\-ms\fR] [\fB\-\-max\-sessions\fR] [\fB\-\-ber\fR] [\fB\-\-extra\-padding\fR] [\fB\-\-ber\-omit\-burst\fR] [\fB\-\-tlv\-hmac\fR] [\fB\-\-ber\-pattern\fR] [\fB\-\-ber\-padding\-size\fR] [\fB\-\-ber\-interval\fR] [\fB\-\-ber\-bit\-threshold\fR] [\fB\-\-ber\-packet\-threshold\fR] [\fB\-\-reflected\-control\-count\fR] [\fB\-\-reflected\-control\-length\fR] [\fB\-\-reflected\-control\-interval\-ns\fR] [\fB\-\-reflected\-control\-no\-ext\-hdr\fR] [\fB\-\-reflected\-control\-max\-count\fR] [\fB\-\-reflected\-control\-max\-size\fR] [\fB\-\-reflected\-control\-min\-interval\-ns\fR] [\fB\-\-reflected\-fixed\-hdr\fR] [\fB\-\-reflected\-ipv6\-ext\-hdr\fR] [\fB\-\-attach\-ext\-hdr\fR] [\fB\-\-reflected\-ipv6\-ext\-hdr\-selector\fR] [\fB\-\-reflected\-fixed\-hdr\-selector\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+.SH DESCRIPTION
+Simple Two\-Way Active Measurement Protocol (STAMP)
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<PATH>\fR
+Path to a TOML configuration file. Values loaded from the file are used as defaults; command\-line flags and environment variables always override them
+.TP
+\fB\-\-print\-config\-schema\fR
+Print the JSON Schema for the TOML configuration file to stdout and exit. The schema can be fed to validators like the `jsonschema` CLI or used by IDE plugins for autocomplete:
+
+`stamp\-suite \-\-print\-config\-schema > stamp\-suite\-config.schema.json`
+
+Then `jsonschema \-i my\-config.toml stamp\-suite\-config.schema.json` (after a TOML→JSON conversion via `taplo`/`yj`).
+.TP
+\fB\-r\fR, \fB\-\-remote\-addr\fR \fI<REMOTE_ADDR>\fR [default: 0.0.0.0]
+Remote address for Session Reflector
+.TP
+\fB\-S\fR, \fB\-\-local\-addr\fR \fI<LOCAL_ADDR>\fR [default: 0.0.0.0]
+Local address to bind for
+.TP
+\fB\-\-local\-scope\-id\fR \fI<LOCAL_SCOPE_ID>\fR [default: 0]
+Numeric IPv6 interface zone for the local bind address (0 = default)
+.TP
+\fB\-\-remote\-scope\-id\fR \fI<REMOTE_SCOPE_ID>\fR [default: 0]
+Numeric IPv6 interface zone for the sender destination (0 = default)
+.TP
+\fB\-p\fR, \fB\-\-remote\-port\fR \fI<REMOTE_PORT>\fR [default: 862]
+UDP port number for outgoing packets
+.TP
+\fB\-o\fR, \fB\-\-local\-port\fR \fI<LOCAL_PORT>\fR [default: 0]
+Local UDP port: randomized dynamic sender port (0), or 862 for a reflector
+.TP
+\fB\-K\fR, \fB\-\-clock\-source\fR \fI<CLOCK_SOURCE>\fR [default: NTP]
+Timestamp wire encoding (NTP or PTP); does not configure clock synchronization
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+NTP: Network Time Protocol timestamp format (RFC 5905)
+.IP \(bu 2
+PTP: Precision Time Protocol timestamp format (IEEE 1588)
+.RE
+.TP
+\fB\-\-clock\-sync\-source\fR \fI<CLOCK_SYNC_SOURCE>\fR [default: local]
+Reflector: declared synchronization source of the system clock (Type 3 TLV). Independent of \-\-clock\-source and \-\-clock\-synchronized; no clock service is probed
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+ntp
+.IP \(bu 2
+ptp
+.IP \(bu 2
+gps
+.IP \(bu 2
+glonass
+.IP \(bu 2
+loran\-c
+.IP \(bu 2
+bds
+.IP \(bu 2
+galileo
+.IP \(bu 2
+local: No external synchronization source is asserted (the default)
+.IP \(bu 2
+ssu\-bits
+.RE
+.TP
+\fB\-\-hardware\-clock\-sync\-source\fR \fI<HARDWARE_CLOCK_SYNC_SOURCE>\fR [default: local]
+Reflector: declared synchronization source of NIC hardware clocks used for T2. Only used when a received timestamp actually comes from hardware. Ensure the PHC is aligned with the system clock; this setting does not synchronize it
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+ntp
+.IP \(bu 2
+ptp
+.IP \(bu 2
+gps
+.IP \(bu 2
+glonass
+.IP \(bu 2
+loran\-c
+.IP \(bu 2
+bds
+.IP \(bu 2
+galileo
+.IP \(bu 2
+local: No external synchronization source is asserted (the default)
+.IP \(bu 2
+ssu\-bits
+.RE
+.TP
+\fB\-\-reflector\-utc\-offset\fR \fI<REFLECTOR_UTC_OFFSET>\fR [default: 0]
+Sender: seconds the reflector clock is ahead of UTC after epoch conversion. Subtracted from T2/T3 for one\-way delay; zero for this suite\*(Aqs UTC clocks. Set from the peer\*(Aqs time configuration (e.g. its TAI\-UTC offset), not its Z bit
+.TP
+\fB\-d\fR, \fB\-\-send\-delay\fR \fI<SEND_DELAY>\fR [default: 1000]
+Delay between next packets
+.TP
+\fB\-c\fR, \fB\-\-count\fR \fI<COUNT>\fR [default: 1000]
+Count of packets to be sent
+.TP
+\fB\-L\fR, \fB\-\-timeout\fR \fI<TIMEOUT>\fR [default: 5]
+Amount of time to wait for packet until consider it lost (in seconds)
+.TP
+\fB\-\-session\-loss\-threshold\fR \fI<SESSION_LOSS_THRESHOLD>\fR [default: 3]
+Consecutive unanswered probes before an active session is reported failed. Uses \-\-timeout per probe; 0 timeout disables loss\-driven state changes
+.TP
+\fB\-A\fR, \fB\-\-auth\-mode\fR \fI<AUTH_MODE>\fR [default: O]
+Specify work mode \- A for authenticated, O for open (unauthenticated) \- default "O"
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+A: Authenticated mode \- packets include HMAC for integrity verification
+.IP \(bu 2
+O: Open (unauthenticated) mode \- packets are sent without HMAC authentication
+.RE
+.TP
+\fB\-R\fR
+Print individual packet statistics (stderr for JSON/CSV output, stdout for text)
+.TP
+\fB\-i\fR, \fB\-\-is\-reflector\fR
+Run as Session Reflector instead of Session Sender
+.TP
+\fB\-\-error\-scale\fR \fI<ERROR_SCALE>\fR [default: 0]
+Error estimate scale (0\-63). Default: 0
+.TP
+\fB\-\-error\-multiplier\fR \fI<ERROR_MULTIPLIER>\fR [default: 1]
+Error estimate multiplier (0\-255). Default: 1
+.TP
+\fB\-\-clock\-synchronized\fR
+Assert the Error Estimate S bit; independent of wire format and Type 3 source
+.TP
+\fB\-\-hmac\-key\fR \fI<HMAC_KEY>\fR
+HMAC key as hex string; at least 32 hex chars (16 bytes) are required.
+
+A shorter key is rejected outright, not warned about. 64 hex chars (32 bytes, matching the HMAC\-SHA\-256 output length) is a good default.
+
+Note: a key passed on the command line is visible in `ps` / `/proc/<pid>/cmdline` to other local users, and an env\-var key is visible to anyone who can read the process environment. Prefer `\-\-hmac\-key\-file` in production. The value is held zeroize\-on\-drop and is redacted from debug output (see `SecretString`).
+.TP
+\fB\-\-hmac\-key\-file\fR \fI<HMAC_KEY_FILE>\fR
+Path to file containing HMAC key
+.TP
+\fB\-\-hmac\-key\-dir\fR \fI<HMAC_KEY_DIR>\fR
+Path to a directory of per\-SSID HMAC key files. Each file\*(Aqs name (minus extension) is interpreted as the SSID in hex; a file named `default.key` becomes the fallback for unknown SSIDs. Mutually exclusive with `\-\-hmac\-key` and `\-\-hmac\-key\-file`. Lets a single reflector serve multiple senders without sharing a key, and enables key rotation by re\-running with a new directory
+.TP
+\fB\-\-require\-hmac\fR
+Require HMAC key to be configured (error if missing in auth mode). Note: When an HMAC key is present, verification is always mandatory per RFC 8762 §4.4
+.TP
+\fB\-\-strict\-packets\fR
+Reject short packets instead of zero\-filling (RFC 8762 Section 4.6). By default, missing bytes are zero\-filled for TWAMP\-Light interoperability
+.TP
+\fB\-\-stateful\-reflector\fR
+Enable stateful reflector mode per RFC 8762 Section 4.2. The reflector maintains independent sequence counters for each full session identity instead of echoing the sender\*(Aqs sequence number, allowing clients to detect reflector\-side packet loss
+.TP
+\fB\-\-session\-admission\fR \fI<SESSION_ADMISSION>\fR [default: permissive]
+Session admission: permissive learns incoming sessions; provisioned only answers exact \-\-reflector\-session identities (RFC 8972 Section 3)
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+permissive: Learn sessions from incoming packets (legacy interoperability mode)
+.IP \(bu 2
+provisioned: Only answer explicitly provisioned session identities
+.RE
+.TP
+\fB\-\-reflector\-session\fR \fI<SSID,SOURCE,DESTINATION[,MICRO_ID]>\fR
+Provision an exact session; repeat for each tuple/SSID/member. SSID 0 selects a base session without an explicit SSID. IPv6 uses brackets
+.TP
+\fB\-\-session\-timeout\fR \fI<SESSION_TIMEOUT>\fR [default: 300]
+Session timeout in seconds for reflector runtime state. Sessions inactive for this duration may be cleaned up. Default: 300 (5 minutes). Set to 0 to disable
+.TP
+\fB\-\-allowed\-dscp\fR \fI<SPEC>\fR [default: all]
+DSCP codepoints the reflector may apply to a reply when a Class of Service TLV requests them (RFC 8972 §4.4/§6, cos\-ecn\-01 §3.2).
+
+`all` (default), `none`, or a comma\-separated list of values and inclusive ranges: `0,8,10\-14,46`. A refused DSCP1 is not applied; the reply keeps the received DSCP and the echoed TLV reports RPD=0b01.
+
+This is the *permitted* check the RFC asks for. Whether the value can actually be set — *capable* — remains a separate question answered by the socket, and a request must clear both.
+
+Reflector\-side only.
+.TP
+\fB\-\-allowed\-ecn\fR \fI<SPEC>\fR [default: all]
+ECN codepoints the reflector may apply to a reply\*(Aqs IP header when a Class of Service TLV requests them (cos\-ecn\-01 §3.2).
+
+`all` (default), `none`, or a comma\-separated list of 0\-3. A refused EC1 forces the reply\*(Aqs ECN bits to Not\-ECT and the echoed TLV reports RPE=0b10.
+
+Reflector\-side only.
+.TP
+\fB\-\-allowed\-dscp\-for\fR \fI<PREFIX/LEN=SPEC>\fR
+Destination\-scoped DSCP policy, overriding `\-\-allowed\-dscp` for replies addressed inside a prefix: `PREFIX/LEN=SPEC`, e.g. `\-\-allowed\-dscp\-for 192.0.2.0/24=0,46`.
+
+Repeatable. The most specific matching prefix wins regardless of the order given, and a matching rule *replaces* the global set rather than adding to it. cos\-ecn\-01 §3.2 names exactly this shape: "a policy ... configured for specific destination addresses or networks".
+
+Reflector\-side only.
+.TP
+\fB\-\-drop\-replayed\fR
+Suppress duplicated packets without a handled Type\-12 request.
+
+Non\-monotonic Type\-12 requests always receive a single U\-flagged reply after validation (draft\-ietf\-ippm\-asymmetrical\-pkts\-14 §5), even with this flag set. Detection and counting are always active. Off by default: restarting a sender can repeat sequence numbers without an attack.
+
+Reflector\-side only.
+.TP
+\fB\-\-location\-disclose\fR \fI<FIELDS>\fR [default: all]
+Which Location TLV fields the reflector may report (RFC 8972 §4.2.2).
+
+§4.2.2 lets a reflector "leave some fields unreported by filling them with zeroes" under local policy, and requires an implementation to provide control over that policy. Comma\-separated: `all` (default), `none`, or any of `src\-port`, `dst\-port`, `ports`, `src\-ip`, `dst\-ip`, `ips`. A withheld field is answered as zeroes, so the reply\*(Aqs size and TLV structure are unchanged.
+
+Reflector\-side only; ignored by the sender.
+.TP
+\fB\-\-tlv\-mode\fR \fI<TLV_MODE>\fR [default: echo]
+TLV handling mode for the reflector (RFC 8972). Default: echo. \- ignore: Strip TLVs from reflected packets (zero\-pad to preserve length) \- echo: Echo TLVs back, marking unknown types with U\-flag
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+ignore: Ignore TLVs \- strip them from reflected packets (zero\-pad to preserve length)
+.IP \(bu 2
+echo: Echo TLVs back to sender, marking unknown types with U\-flag per RFC 8972
+.RE
+.TP
+\fB\-\-verify\-tlv\-hmac\fR
+Verify HMAC TLV in incoming packets (RFC 8972). Requires HMAC key
+.TP
+\fB\-\-ssid\fR \fI<SSID>\fR
+Session\-Sender Identifier to include in sender packets (RFC 8972 §3). Encoded in the two octets of the base STAMP header immediately after Error Estimate (bytes 14\-15 unauth / 26\-27 auth)
+.TP
+\fB\-\-on\-zero\-ssid\fR \fI<ACTION>\fR [default: continue]
+What to do when a reflected packet returns a zeroed SSID field (RFC 8972 §3): `continue` (default) keeps measuring and logs the condition once, `stop` ends the session on the first such reply.
+
+Sender\-side only, and only meaningful together with a non\-zero `\-\-ssid` — without one there is nothing for the reflector to echo.
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+continue: Keep measuring, logging the condition once. The RFC permits continuing, and it is the useful default for a probe pointed at an unknown peer
+.IP \(bu 2
+stop: Stop the session on the first zeroed\-SSID reply. For an operator who requires SSID\-demultiplexed sessions, a reflector that drops the field makes the measurement meaningless
+.RE
+.TP
+\fB\-\-metrics\fR
+Enable Prometheus metrics endpoint (requires "metrics" feature)
+.TP
+\fB\-\-metrics\-addr\fR \fI<METRICS_ADDR>\fR [default: 127.0.0.1:9090]
+Address to bind the metrics HTTP server
+.TP
+\fB\-\-cos\fR
+Enable Class of Service TLV for DSCP/ECN measurement (RFC 8972 §4.4). When enabled, the sender includes a CoS TLV with the requested DSCP/ECN values, and the reflector reports the received DSCP/ECN values
+.TP
+\fB\-\-dscp\fR \fI<DSCP>\fR [default: 0]
+DSCP value to request for reflected packets (0\-63). Only used when \-\-cos is enabled. Common values: 0=Best Effort, 10=AF11, 18=AF21, 26=AF31, 34=AF41, 46=EF
+.TP
+\fB\-\-ecn\fR \fI<ECN>\fR [default: 0]
+ECN value to request for reflected packets (0\-3). Only used when \-\-cos is enabled. 0=Not\-ECT, 1=ECT(1), 2=ECT(0), 3=CE (Congestion Experienced)
+.TP
+\fB\-\-ecn\-backoff\-factor\fR \fI<ECN_BACKOFF_FACTOR>\fR [default: 2]
+Multiplicative backoff factor for the AIMD congestion\-response controller (draft\-ietf\-ippm\-stamp\-cos\-ecn\-01 §3.4): each time a CE\-marked reply is observed, the send interval is multiplied by this factor (capped at `\-\-ecn\-max\-delay`). Must be > 1.0. Active only when `\-\-cos` is set and `\-\-ecn` requests ECT0 (2) or ECT1 (1) — see `\-\-ecn\-max\-delay` / `\-\-ecn\-recovery\-step` for the other two AIMD parameters
+.TP
+\fB\-\-ecn\-max\-delay\fR \fI<ECN_MAX_DELAY>\fR [default: 30000]
+Upper bound (milliseconds) on the AIMD\-controlled send interval — caps how far repeated CE observations can back the sender off (draft\-ietf\-ippm\-stamp\-cos\-ecn\-01 §3.4). Must be >= `\-\-send\-delay` when the controller is active
+.TP
+\fB\-\-ecn\-recovery\-step\fR \fI<ECN_RECOVERY_STEP>\fR [default: 50]
+Additive recovery step (milliseconds): after each reply that was NOT CE\-marked, the AIMD\-controlled send interval shrinks by this amount, down to (never below) `\-\-send\-delay` (draft\-ietf\-ippm\-stamp\-cos\-ecn\-01 §3.4)
+.TP
+\fB\-\-ttl\fR \fI<TTL>\fR
+Outgoing TTL / Hop Limit. Draft ext\-hdr\-13 requires 255 (the default)
+.TP
+\fB\-\-malformed\fR \fI<MALFORMED>\fR
+Diagnostic: append a deliberately malformed TLV to every sent packet to test a reflector\*(Aqs RFC 8972 §4.2 handling. `bad\-flags` sets reserved flag bits; `bad\-length` declares a TLV length that overruns the packet. Not for normal measurements
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+bad\-flags: A structurally valid TLV whose flags octet has reserved bits set (RFC 8972 §4.2 requires reserved bits to be zero)
+.IP \(bu 2
+bad\-length: A TLV whose Length field far exceeds the bytes actually present, so a conformant reflector must set the M\-flag and stop processing
+.RE
+.TP
+\fB\-\-access\-report\fR \fI<ACCESS_REPORT>\fR
+Enable Access Report TLV (RFC 8972 §4.6) with the given Access ID (1\-15; the field is 4 bits wide). Only 1 (3GPP Network) and 2 (Non\-3GPP Network) are currently defined; 0 is never valid and is rejected. Values 3\-15 are accepted (the field may gain further definitions) but log a startup warning since they are not yet a recognized Access ID. The reflector echoes this TLV unchanged
+.TP
+\fB\-\-access\-return\-code\fR \fI<ACCESS_RETURN_CODE>\fR [default: 1]
+Return code for Access Report TLV (default: 1 = available). Only used when \-\-access\-report is enabled
+.TP
+\fB\-\-access\-report\-timeout\fR \fI<ACCESS_REPORT_TIMEOUT>\fR [default: 3]
+Access Report TLV retransmission timer, in seconds (RFC 8972 §4.6: "The default value of the retransmission timer for the Access Report TLV SHOULD be three seconds"). The sender arms this timer after sending a packet carrying the Access Report TLV and retransmits it in the next test packet(s) if the timer expires before the reflector\*(Aqs echo is received. Only used when \-\-access\-report is enabled
+.TP
+\fB\-\-access\-report\-retries\fR \fI<ACCESS_REPORT_RETRIES>\fR [default: 4]
+Maximum number of Access Report TLV retransmissions before the procedure is aborted (RFC 8972 §4.6: "This retransmission SHOULD be repeated up to four times before the procedure is aborted"). 0 disables retransmission: the procedure aborts on the first missed acknowledgment. Only used when \-\-access\-report is enabled
+.TP
+\fB\-\-timestamp\-info\fR
+Enable Timestamp Information TLV (RFC 8972 §4.3). The sender requests the reflector\*(Aqs synchronization sources and timestamp methods using zeroed information fields; the reflector fills in its values
+.TP
+\fB\-\-direct\-measurement\fR
+Enable Direct Measurement TLV (RFC 8972 §4.5). The sender includes its transmit count; the reflector fills receive and transmit counters
+.TP
+\fB\-\-location\fR
+Enable Location TLV (RFC 8972 §4.2). The reflector fills in the observed source/destination addresses and ports
+.TP
+\fB\-\-follow\-up\-telemetry\fR
+Enable Follow\-Up Telemetry TLV (RFC 8972 §4.7). The reflector fills in the previous reflection\*(Aqs sequence number and timestamp
+.TP
+\fB\-\-snmp\fR
+Enable SNMP AgentX sub\-agent (requires "snmp" feature)
+.TP
+\fB\-\-snmp\-socket\fR \fI<SNMP_SOCKET>\fR [default: /var/agentx/master]
+AgentX master agent socket path
+.TP
+\fB\-\-control\fR
+Enable the runtime control\-plane REST API (reflector only; requires the "control" build feature). Design: doc/control\-plane.md
+.TP
+\fB\-\-control\-addr\fR \fI<ADDR>\fR [default: 127.0.0.1:9091]
+Address to bind the control\-plane HTTP server. Keep this on loopback unless network\-level access control is in place
+.TP
+\fB\-\-control\-token\-file\fR \fI<PATH>\fR
+Path to a file containing a static bearer token. When set, every control\-plane request must carry `Authorization: Bearer <token>`
+.TP
+\fB\-\-control\-tls\-cert\fR \fI<PATH>\fR
+PEM certificate chain for the control\-plane API. Serves HTTPS instead of HTTP; requires `\-\-control\-tls\-key`.
+
+A bearer token is mandatory alongside TLS: TLS is what makes exposing this API beyond loopback plausible, and an unauthenticated key\-management and shutdown endpoint is not something to expose, encrypted or not.
+.TP
+\fB\-\-control\-tls\-key\fR \fI<PATH>\fR
+PEM private key matching `\-\-control\-tls\-cert`
+.TP
+\fB\-\-output\-format\fR \fI<OUTPUT_FORMAT>\fR [default: text]
+Statistics format on stdout (text, JSON lines, or CSV with one header per run)
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+text: Human\-readable text output
+.IP \(bu 2
+json: JSON output for machine consumption
+.IP \(bu 2
+csv: CSV output for spreadsheet import
+.RE
+.TP
+\fB\-\-log\-format\fR \fI<LOG_FORMAT>\fR [default: text]
+Diagnostic log format on stderr — `text` (default) for journalctl\-friendly human\-readable lines, `json` for structured one\-line\-per\-event output suitable for log aggregators. `RUST_LOG` continues to control verbosity in both modes
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+text: Human\-readable single\-line output (the default; matches the historic `env_logger` style)
+.IP \(bu 2
+json: Structured JSON, one event per line. Suitable for ingestion by log shippers (Fluent Bit, Vector, journald JSON forwarder)
+.RE
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase log verbosity (\-v debug, \-vv trace); RUST_LOG overrides. Repeatable: absent keeps the current default (`RUST_LOG` if set, otherwise `info`), one `\-v` raises it to `debug`, two or more (`\-vv`, `\-vvv`, ...) raise it to `trace`. An explicit `RUST_LOG` environment variable always wins over `\-v`, at any count \-\- see `resolve_log_filter`
+.TP
+\fB\-\-hwtstamp\fR \fI<HWTSTAMP>\fR [default: auto]
+Kernel/hardware timestamp handling (requires the "hwtstamp" build feature for the read paths). `auto` (default): kernel software timestamps — precise T2/T4 and error\-queue TX correction on Linux, SO_TIMESTAMP receive timestamps on macOS; no privileges, no NIC changes. `on`: additionally attempt NIC hardware timestamping (SIOCSHWTSTAMP + raw\-hardware tier; needs CAP_NET_ADMIN and a synchronized PHC), warning + software fallback when unavailable. `off`: userspace timestamps only
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto: Use kernel *software* timestamps when the build supports them (feature "hwtstamp"); transparently fall back to userspace timestamps otherwise. Never reconfigures the NIC and needs no privileges. This is the default — safe to leave on every host
+.IP \(bu 2
+on: Additionally attempt NIC *hardware* timestamping: sets the NIC timestamp filters (SIOCSHWTSTAMP, needs CAP_NET_ADMIN) and requests the raw\-hardware tier, falling back to kernel software timestamps with a warning when any step fails. Operators are responsible for PHC synchronization (ptp4l/phc2sys) — see doc/architecture.md
+.IP \(bu 2
+off: Always use software timestamping, even when HW is available. Useful for A/B\-style measurement comparisons or as a fallback when a particular NIC\*(Aqs HW path is suspect
+.RE
+.TP
+\fB\-\-report\-interval\fR \fI<REPORT_INTERVAL>\fR [default: 0]
+Periodic reporting interval in seconds (0 = disabled, sender only)
+.TP
+\fB\-\-dest\-node\-addr\fR \fI<IP>\fR
+Destination Node Address for SR networks (RFC 9503 §3). Requires \-\-ssid
+.TP
+\fB\-\-return\-path\-cc\fR \fI<RETURN_PATH_CC>\fR
+Return Path control code (RFC 9503 §4): 0=no reply, 1=same link reply
+.TP
+\fB\-\-return\-address\fR \fI<IP>\fR
+Return Path alternate reply address (RFC 9503 §4)
+.TP
+\fB\-\-return\-sr\-mpls\-labels\fR \fI<LABELS>\fR
+Return Path SR\-MPLS label stack (RFC 9503 §4). Comma\-separated 20\-bit labels
+.TP
+\fB\-\-return\-srv6\-sids\fR \fI<SIDS>\fR
+Return Path SRv6 segment list (RFC 9503 §4). Comma\-separated IPv6 SIDs
+.TP
+\fB\-\-srv6\-return\-forwarding\fR
+Reflector: attempt best\-effort SRv6 return\-path forwarding per RFC 9503 §5 and RFC 8754. When a received Return Path TLV carries an SRv6 Segment List and the kernel supports it, the reflector inserts a Segment Routing Header on its IPv6 reply. Disabled by default; when off (or on a non\-Linux/IPv4/unsupported path) the reflector replies normally and sets the Return Path U\-flag. Linux only
+.TP
+\fB\-\-return\-path\-allow\-alternate\fR
+Reflector: honour a Return Path TLV "Return Address" sub\-TLV (RFC 9503 §5) by sending the reply to the requested address instead of the packet source. Disabled by default: an open reflector that honours arbitrary return addresses can be abused as a traffic\-redirection / reflection gadget aimed at third parties. When off, a Return Address sub\-TLV is echoed with the U\-flag set and the reply goes to the packet source. Only enable inside a controlled (and preferably HMAC\-authenticated) measurement domain
+.TP
+\fB\-\-micro\-session\-id\fR \fI<MICRO_SESSION_ID>\fR
+Sender Micro\-session ID for RFC 9534 TLV validation; does not select a physical link. When set, includes a Micro\-session ID TLV in test packets. Accepts decimal (e.g. `255`) or `0x`\-prefixed hex (e.g. `0xff`)
+.TP
+\fB\-\-reflector\-member\-link\-id\fR \fI<REFLECTOR_MEMBER_LINK_ID>\fR
+Configured reflector ID for RFC 9534 TLV validation; no physical\-link association. When set, the reflector fills this ID into reflected Micro\-session ID TLVs. Accepts decimal (e.g. `171`) or `0x`\-prefixed hex (e.g. `0xab`)
+.TP
+\fB\-\-max\-pps\fR \fI<MAX_PPS>\fR [default: 0]
+Maximum packets per second per source (0 = unlimited). Implemented as a per\-(source IP, SSID) token bucket; see `\-\-reflector\-rate\-burst` for the bucket capacity. Kept under the historic `\-\-max\-pps` name for backward compatibility
+.TP
+\fB\-\-reflector\-rate\-burst\fR \fI<REFLECTOR_RATE_BURST>\fR [default: 0]
+Per\-client token\-bucket burst capacity in packets. 0 = use `\-\-max\-pps` (one\-second worth of capacity), which matches the classic fixed\-window behaviour. Ignored when `\-\-max\-pps` is 0
+.TP
+\fB\-\-reflector\-queue\-capacity\fR \fI<REFLECTOR_QUEUE_CAPACITY>\fR [default: 1024]
+Maximum pending reflector requests across processing, handoff and bursts. Full queues drop new requests; slots remain reserved until all copies finish
+.TP
+\fB\-\-reflector\-shutdown\-grace\-ms\fR \fI<REFLECTOR_SHUTDOWN_GRACE_MS>\fR [default: 0]
+Stop accepting packets on shutdown, then finish queued replies for at most this many milliseconds. Zero cancels immediately (the default)
+.TP
+\fB\-\-max\-sessions\fR \fI<MAX_SESSIONS>\fR [default: 65536]
+Maximum number of tracked session identities (0 = unlimited). Sessions use both UDP endpoints, SSID, and optional sender micro ID. At the cap, new sessions are rejected in both sequencing modes; existing sessions continue with their counters and sequence state. Periodic idle expiry or manual expiry frees slots. Lowering the cap never evicts active entries. Defaults to 65536
+.TP
+\fB\-\-ber\fR
+Enable the BER TLVs (draft\-gandhi\-ippm\-stamp\-ber\-07): Bit Pattern in Padding (Type 240), Bit Error Count (Type 241), and Max Bit Error Burst Size (Type 242). Sender\-side only; the reflector computes the counts against the incoming Extra Padding
+.TP
+\fB\-\-extra\-padding\fR \fI<BYTES>\fR
+Append an Extra Padding TLV of this many value octets to every test packet (RFC 8972 §4.1), independent of `\-\-ber`.
+
+Filled with pseudorandom bytes as §4.2 recommends. Use this to grow test packets for MTU or fragmentation work without turning on BER measurement, which needs a known pattern instead and owns the padding TLV when it is enabled.
+.TP
+\fB\-\-ber\-omit\-burst\fR
+Omit the Max Bit Error Burst Size TLV (Type 242) from `\-\-ber` packets.
+
+Type 242 sits in the Experimental Use range (RFC 8972 §5.1) and is used independently, with an incompatible wire format, by another STAMP implementation\*(Aqs "Heartbeat" TLV. Against such a peer that TLV is misparsed, so this omits it while keeping the rest of the BER exchange intact. Ignored unless `\-\-ber` is set.
+.TP
+\fB\-\-tlv\-hmac\fR \fI<MODE>\fR [default: auto]
+Whether the sender originates an HMAC TLV (RFC 8972 §4.8): `auto` (default, originate when a key is configured), `on` (always; requires a key), `off` (never, even with a key)
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto: Originate an HMAC TLV whenever a key is configured and TLVs are in use. The long\-standing behaviour, and the default
+.IP \(bu 2
+on: Always originate; startup fails if no key is configured
+.IP \(bu 2
+off: Never originate, even with a key configured. The key is then used only for base\-packet authentication and for verifying reflected TLV HMACs
+.RE
+.TP
+\fB\-\-ber\-pattern\fR \fI<HEX>\fR
+Bit pattern used to fill the Extra Padding TLV when `\-\-ber` is set. Hex string (e.g. "ff00" or "aa55"). Defaults to the draft\*(Aqs recommended pattern (0xFF00). Ignored unless `\-\-ber` is set
+.TP
+\fB\-\-ber\-padding\-size\fR \fI<BER_PADDING_SIZE>\fR [default: 64]
+Padding length in bytes for the Extra Padding TLV that accompanies the BER TLVs. Ignored unless `\-\-ber` is set
+.TP
+\fB\-\-ber\-interval\fR \fI<BER_INTERVAL>\fR [default: 10]
+BER computation interval in multiples of \-\-send\-delay (must be positive)
+.TP
+\fB\-\-ber\-bit\-threshold\fR \fI<BER_BIT_THRESHOLD>\fR
+Alarm threshold for bit errors per million padding bits, in either direction
+.TP
+\fB\-\-ber\-packet\-threshold\fR \fI<BER_PACKET_THRESHOLD>\fR
+Alarm threshold for packets with errors per million measured packets
+.TP
+\fB\-\-reflected\-control\-count\fR \fI<REFLECTED_CONTROL_COUNT>\fR [default: 1]
+Request asymmetrical reply traffic (draft\-ietf\-ippm\-asymmetrical\-pkts §3). The sender includes a Reflected Test Packet Control TLV (Type 12) asking the reflector to emit N copies of the reply. Setting this to a value greater than 1 activates the TLV
+.TP
+\fB\-\-reflected\-control\-length\fR \fI<REFLECTED_CONTROL_LENGTH>\fR [default: 0]
+Requested reply packet length for the Reflected Test Packet Control TLV. 0 means "don\*(Aqt pad" (the reflector will set C flag anyway if it cannot honour). Ignored unless `\-\-reflected\-control\-count` > 1
+.TP
+\fB\-\-reflected\-control\-interval\-ns\fR \fI<REFLECTED_CONTROL_INTERVAL_NS>\fR [default: 1000000]
+Inter\-packet gap in nanoseconds for the Reflected Test Packet Control TLV. Ignored unless `\-\-reflected\-control\-count` > 1
+.TP
+\fB\-\-reflected\-control\-no\-ext\-hdr\fR
+Append the IPv6 Extension Header Control sub\-TLV (draft\-ietf\-ippm\-stamp\-ext\-hdr\-13 §5.3) to the Reflected Test Packet Control TLV. Under \-11 this sub\-TLV asks the reflector to add matching IPv6 extension headers to its own reply packets; a reflector that cannot do so returns the sub\-TLV with the C flag set in its Sub\-TLV Flags. Implies emitting the Reflected Control TLV even when `\-\-reflected\-control\-count` is 1
+.TP
+\fB\-\-reflected\-control\-max\-count\fR \fI<REFLECTED_CONTROL_MAX_COUNT>\fR [default: 0]
+Reflector\-side amplification cap (the per\-request *volume* limit of draft\-ietf\-ippm\-asymmetrical\-pkts\-14 §3): maximum number of reply packets the reflector will emit in response to a single Reflected Test Packet Control TLV request. When the sender requests more, the reflector sends a single reflected packet with the C flag set on the echoed TLV, as the draft requires.
+
+Default 0, which **disables** asymmetric reflection — the reflector sends only the single normal reply and sets the C flag. This honours draft\-ietf\-ippm\-asymmetrical\-pkts\-14 §5, which requires the feature be administratively controllable and disabled by default. Set a positive value to opt in (e.g. 16); pair with `\-\-max\-pps` to bound amplification.
+.TP
+\fB\-\-reflected\-control\-max\-size\fR \fI<REFLECTED_CONTROL_MAX_SIZE>\fR [default: 1500]
+Reflector\-side amplification cap for draft\-ietf\-ippm\-asymmetrical\-pkts\-14 §3: maximum reply packet size (in bytes) the reflector will pad up to when honouring a Reflected Test Packet Control TLV `length` request. When the requested length exceeds the effective cap, a single reflected packet padded to it is sent with the C flag set on the echoed TLV.
+
+Linux checks the actual reply route before each send, including wildcard binds and alternate destinations. IP/UDP and SRH overhead reduce the payload budget (1472 bytes on a plain 1500\-byte IPv4 link, 1452 on IPv6). Route/interface notifications and a short cache expiry track changes. Replies are dropped if the MTU cannot be determined or mandatory fields cannot fit. Non\-Linux route MTU lookup is unavailable. Runtime cap updates change this administrative limit; they cannot bypass send\-time MTU checks.
+.TP
+\fB\-\-reflected\-control\-min\-interval\-ns\fR \fI<REFLECTED_CONTROL_MIN_INTERVAL_NS>\fR [default: 1000]
+Reflector\-side amplification cap (the per\-request *rate* limit of draft\-ietf\-ippm\-asymmetrical\-pkts\-14 §3): minimum inter\-packet interval in nanoseconds. A multi\-packet request with a shorter interval gets a single reflected packet with the C flag set on the echoed TLV. Default 1000 (1 µs)
+.TP
+\fB\-\-reflected\-fixed\-hdr\fR [\fI<[SELECTORHEX]>\fR]
+Request the received IP fixed header in Type 247 (draft ext\-hdr\-13 §§3.3, 5.2). The sender originates one IP header and permits one request. The optional hex selector is at most four bytes, zero\-padded to the four\-octet Requested field. Nix reflectors return C when raw headers are unavailable. Header requests require a known Linux egress route MTU
+.TP
+\fB\-\-reflected\-ipv6\-ext\-hdr\fR [\fI<[LEN[:SELECTORHEX]]>\fR]
+Select attached IPv6 headers for Type 246 reflection (draft ext\-hdr\-13 §§3.2, 5.1). Repeatable `LEN[:SELECTORHEX]` values replace the automatic \-\-attach\-ext\-hdr requests. LEN is a multiple of eight (8..2048); the selector is at most eight bytes, zero\-padded to the eight\-octet Requested field. Requests must match attached headers in wire order. Ambiguous subsets require a selector. Nix reflectors return C when raw headers are unavailable
+.TP
+\fB\-\-attach\-ext\-hdr\fR \fI<KIND[:HEX]>\fR
+Attach an IPv6 Hop\-by\-Hop (hbh) or Destination Options (dest) header and request its reflection (draft ext\-hdr\-13 §3.2). Linux/IPv6 only. At most one of each kind, in hbh then dest order. Optional HEX supplies the entire header whose size must match Hdr Ext Len; byte 0 (Next Header) is kernel\-assigned. Default: an eight\-byte PadN header. Attachment failure aborts startup. Explicit \-\-reflected\-ipv6\-ext\-hdr requests replace automatic requests
+.TP
+\fB\-\-reflected\-ipv6\-ext\-hdr\-selector\fR \fI<HEX>\fR
+Type 246 eight\-octet Requested selector (draft ext\-hdr\-13 §5.1), e.g. 1100010400000000. The header\*(Aqs Next Header byte comes first; up to eight hex\-decoded bytes are zero\-padded. Requires one \-\-reflected\-ipv6\-ext\-hdr and a matching attached header. At least one byte must be nonzero
+.TP
+\fB\-\-reflected\-fixed\-hdr\-selector\fR \fI<HEX>\fR
+Type 247 four\-octet Requested selector (draft ext\-hdr\-13 §5.2). Up to four hex\-decoded bytes, zero\-padded; at least one must be nonzero. Requires one \-\-reflected\-fixed\-hdr without an inline selector
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH VERSION
+v1.0.0
+.SH AUTHORS
+Piotr Olszewski

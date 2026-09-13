@@ -86,6 +86,10 @@ nix run . -- --is-reflector
 nix develop      # dev shell with cargo, rustc, rustfmt, clippy
 ```
 
+### Gentoo (overlay)
+
+`dist/gentoo/` is a ready-to-copy overlay tree: `net-analyzer/stamp-suite` (USE flags `control`, `hwtstamp`, `metrics`, `snmp` map to the Cargo features; ships the systemd unit, an OpenRC script and the man page) plus the `acct-user/stamp` and `acct-group/stamp` service-account packages. See [dist/gentoo/README.md](dist/gentoo/README.md) for regenerating `CRATES=` after a lockfile change and for submitting to GURU.
+
 ### Platform support
 
 | Platform | Default backend | TTL capture |
@@ -119,7 +123,7 @@ A breaking change to any of the above requires a major version bump. The Rust **
 
 **Exception — experimental TLV codepoints.** TLV Types 240–242 and 246–247 are experimental/pending-IANA allocations (see [doc/architecture.md](doc/architecture.md) for the per-TLV status table). Renumbering any of these on IANA assignment is treated as a release-noted **minor** version change, not a major one, even though it changes wire behavior.
 
-**MSRV.** The minimum supported Rust version is **1.93**, enforced in CI (`msrv` job in [rust.yml](.github/workflows/rust.yml)). MSRV may be raised in a minor release; any bump is called out in [CHANGELOG.md](CHANGELOG.md).
+**MSRV.** The minimum supported Rust version is **1.85** (the rustc shipped by Debian trixie), enforced in CI (`msrv` job in [rust.yml](.github/workflows/rust.yml)). MSRV may be raised in a minor release; any bump is called out in [CHANGELOG.md](CHANGELOG.md).
 
 ## Usage
 

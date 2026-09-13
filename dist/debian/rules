@@ -12,7 +12,7 @@ override_dh_auto_configure:
 	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "debian/vendor"\n' > $(CARGO_HOME)/config.toml
 
 override_dh_auto_build:
-	cargo build --release --offline
+	cargo build --release --all-features --offline
 
 override_dh_auto_test:
 	cargo test --all-features --offline

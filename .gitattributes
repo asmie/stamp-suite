@@ -7,3 +7,5 @@
 *.sh text
 *.py text
 *.md text
+# Generated roff; keep LF so the snapshot test compares byte-for-byte everywhere.
+dist/man/*.1 text eol=lf
