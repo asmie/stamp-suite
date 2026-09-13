@@ -1,21 +1,9 @@
-//! Pinning a reflected packet's IP source address (RFC 9503 §3).
+//! Reply source-address pinning (RFC 9503 §3).
 //!
-//! When a Destination Node Address TLV matches one of the reflector's own
-//! addresses, RFC 9503 §3 says that address "SHOULD be used as the Source
-//! Address in the IP header of the reply test packet".
-//!
-//! Leaving source selection to the OS satisfies this only by coincidence. On a
-//! single-address bind the kernel picks the same address anyway; on the
-//! wildcard or multi-homed bind that §2 actually motivates — a tunnel-decap
-//! address that is not suitable as a routable source — the kernel picks by
-//! route, not by what the sender asked for. Forcing it takes a per-packet
-//! ancillary message.
-//!
-//! Linux-only, and best-effort by this project's convention for anything
-//! platform-dependent: [`supported`] is `false` elsewhere, and a caller that
-//! tries anyway gets an error to fall back on rather than a dropped reply. A
-//! reply sent from the kernel's choice of source is still a correct STAMP
-//! reply; the SHOULD is about which of several correct answers is preferred.
+//! A matching Destination Node Address TLV selects the reply source. Linux
+//! applies it through per-packet ancillary data, including on wildcard binds
+//! where route-based selection may choose another address.
+//! Unsupported platforms and failed sends fall back to kernel source selection.
 
 // Only the `send_from` signatures need these, and that function exists on Unix
 // only — see its Windows note below.
@@ -32,16 +20,11 @@ pub const fn supported() -> bool {
     cfg!(target_os = "linux")
 }
 
-/// Sends `payload` to `dst` with the IP source address forced to `src`.
-///
-/// The address families of `src` and `dst` must agree — a socket cannot emit an
-/// IPv4 datagram from an IPv6 source — and a mismatch is reported rather than
-/// silently ignored, because silently sending from the wrong source is exactly
-/// the outcome this function exists to prevent.
+/// Sends `payload` to `dst` with source address `src`.
 ///
 /// # Errors
-/// Returns the OS error from `sendmsg`, or `InvalidInput` on a family mismatch.
-/// Callers fall back to an ordinary send.
+/// Returns `InvalidInput` for mismatched address families or the `sendmsg`
+/// error. Callers fall back to an ordinary send.
 #[cfg(target_os = "linux")]
 pub fn send_from(
     fd: std::os::fd::RawFd,
@@ -111,11 +94,8 @@ pub fn send_from(
                 (*cmsg).cmsg_type = libc::IP_PKTINFO;
                 (*cmsg).cmsg_len = libc::CMSG_LEN(data_len as libc::c_uint) as _;
                 let mut info: libc::in_pktinfo = std::mem::zeroed();
-                // `ipi_spec_dst` is the *source* address of an outgoing packet
-                // (it names the local end); `ipi_addr` is left zero so the
-                // kernel keeps choosing the route. Interface 0 means "decide
-                // from the route", which is what we want: only the source
-                // address is being overridden.
+                // `ipi_spec_dst` sets the source. Leave `ipi_addr` and the interface
+                // index zero for kernel route selection.
                 info.ipi_spec_dst.s_addr = u32::from_ne_bytes(v4.octets());
                 std::ptr::copy_nonoverlapping(
                     std::ptr::addr_of!(info).cast::<u8>(),
@@ -147,14 +127,8 @@ pub fn send_from(
     }
 }
 
-/// Source pinning is Linux-only; callers gate on [`supported`] and fall back to
-/// an ordinary send. This stub exists so the other Unix platforms still compile.
-///
-/// Gated to Unix, not merely to "not Linux": `std::os::fd::RawFd` does not exist
-/// on Windows, so a `not(target_os = "linux")` stub fails to compile there. On
-/// Windows this function is absent entirely and callers reach it only from
-/// inside their own `cfg(unix)` blocks — the same arrangement
-/// [`crate::srv6::send_with_srh`] uses.
+/// Unsupported-platform stub; callers fall back to an ordinary send.
+/// Unix-only because `RawFd` is unavailable on Windows. Call sites use `cfg(unix)`.
 #[cfg(all(unix, not(target_os = "linux")))]
 pub fn send_from(
     _fd: std::os::fd::RawFd,

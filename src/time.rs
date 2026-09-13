@@ -5,16 +5,12 @@ use crate::configuration::ClockFormat;
 /// Offset in seconds between NTP epoch (1900-01-01) and Unix epoch (1970-01-01).
 const NTP_UNIX_OFFSET: i64 = 2208988800;
 
-/// Generates timestamp with specified clock format.
-///
-/// generate_timestamp generates timestamp of the current date and time not taking into account
-/// any timezones. Timestamp is generated for UTC.
+/// Returns the current UTC timestamp in the requested STAMP clock format.
 ///
 /// ```
 /// use stamp_suite::configuration::ClockFormat;
 /// use stamp_suite::time::generate_timestamp;
 /// let timestamp = generate_timestamp(ClockFormat::NTP);
-/// println!("Timestamp is {}", timestamp);
 /// ```
 pub fn generate_timestamp(cs: ClockFormat) -> u64 {
     let now = Utc::now();

@@ -1,8 +1,6 @@
 //! TLV (Type-Length-Value) extension support per RFC 8972 Section 4.
 //!
-//! This module provides structures and functions for parsing and serializing
-//! STAMP TLV extensions, enabling optional features like Session-Sender Identifier,
-//! timestamps, telemetry, and HMAC for TLV integrity.
+//! Parses and serializes STAMP extensions for timestamps, telemetry, and HMAC.
 //!
 //! # TLV Wire Format (RFC 8972 Section 4.2)
 //!

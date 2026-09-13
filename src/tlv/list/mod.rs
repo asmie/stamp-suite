@@ -20,16 +20,9 @@ pub struct TlvList {
     wire_order: Option<Vec<usize>>,
     has_ber: bool,
     malformed_echo: bool,
-    /// Byte offset of the HMAC TLV within the parsed TLV area, when this list
-    /// came from the wire.
-    ///
-    /// RFC 8972 §4.8's HMAC covers the Sequence Number plus every TLV
-    /// *preceding* the HMAC TLV. That prefix equals "the total size of all
-    /// non-HMAC TLVs" only while the HMAC TLV is last — which stops holding
-    /// once an Extra Padding TLV legitimately trails it (§4.8: "The HMAC TLV
-    /// MUST follow all TLVs ... except for the Extra Padding TLV"). Recording
-    /// the real offset keeps verification correct in that case; `None` (a
-    /// locally-built list) falls back to the size-sum.
+    /// HMAC offset in the received TLV area (RFC 8972 §4.8).
+    /// Coverage ends here; permitted trailing Extra Padding is excluded.
+    /// Locally built lists use `None` and compute the prefix size from entries.
     hmac_wire_offset: Option<usize>,
     /// A TLV that is neither the HMAC nor an Extra Padding TLV followed the
     /// HMAC TLV on the wire, so the HMAC is not in its required position.
@@ -624,37 +617,12 @@ impl TlvList {
         self.hmac_wire_offset = None;
     }
 
-    /// Computes and sets the HMAC TLV for the **reflector** response path.
+    /// Computes the reflector's HMAC TLV with U=0 (RFC 8972 §4).
     ///
-    /// The reflector recognizes the HMAC type by construction, so per
-    /// RFC 8972 §4 the U flag must be 0.
-    ///
-    /// # Unsolicited HMAC TLV (adjudicated against RFC 8972 §4.8)
-    ///
-    /// Callers invoke this whenever a TLV HMAC key is configured and TLV
-    /// handling is not `Ignore` -- **unconditionally**, regardless of
-    /// whether the Session-Sender's request itself carried an HMAC TLV
-    /// (Type 8). This is deliberate, not an oversight. RFC 8972 §4.8
-    /// states: "All authenticated STAMP base packets (per Sections 4.2.2
-    /// and 4.3.2 of \[RFC8762\]) ... MUST additionally authenticate the
-    /// optional TLVs by including the keyed \[HMAC\] TLV, with the sole
-    /// exception of when there is only one TLV present and it is the
-    /// Extended Padding TLV," and separately, "The HMAC TLV MAY be used
-    /// to protect the integrity of STAMP extensions in the STAMP
-    /// unauthenticated mode. An implementation ... MUST provide controls
-    /// to enable [it]." Both clauses describe a *per-packet, per-role*
-    /// obligation/allowance ("Sections 4.2.2 and 4.3.2" cover the
-    /// Session-Sender's and the Session-Reflector's own authenticated
-    /// packet formats respectively) -- neither ties the reflector's
-    /// inclusion of Type 8 to the sender having included one. Configuring
-    /// a TLV HMAC key on the reflector *is* the "control to enable"
-    /// referenced for unauthenticated mode. Making this conditional on
-    /// mirroring the request would therefore be *more* restrictive than
-    /// the RFC requires (and, in authenticated mode with other TLVs
-    /// present, would violate the MUST). See
-    /// `receiver::tests::test_assemble_unauth_with_tlvs_adds_hmac` and
-    /// `receiver::tests::test_assemble_auth_with_tlvs_adds_hmac_even_when_request_has_none`
-    /// for pinning tests.
+    /// A configured key protects the reply independently of the request's HMAC TLV.
+    /// RFC 8972 §4.8 requires TLV authentication in authenticated mode (except a
+    /// sole Extra Padding TLV) and permits it in unauthenticated mode.
+    /// Callers skip this when TLV handling is `Ignore`.
     pub fn set_hmac_response(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) {
         if self.malformed_echo {
             return;
@@ -709,13 +677,8 @@ impl TlvList {
             Self::validate_known_tlv_lengths_slice(std::slice::from_mut(tlv));
         }
 
-        // RFC 8972 §4.8: "If the HMAC TLV appears in any other position in a
-        // STAMP extended test packet, then the situation MUST be processed as
-        // HMAC verification failure, as defined below in this section" — that
-        // procedure is the I flag on every TLV, not merely the M flag on the
-        // offending one. Checked before the key branches because the rule is
-        // positional: it holds whether or not this reflector has a key with
-        // which it could have verified anything.
+        // A misplaced HMAC sets I on every TLV (RFC 8972 §4.8), even without
+        // a configured key. Check position before verification branches.
         if self.hmac_misplaced {
             self.mark_all_integrity_failed();
             return false;

@@ -1,8 +1,4 @@
-//! Reflector-side TLV mutation methods for TlvList.
-//!
-//! This submodule of `list` provides methods that the Session-Reflector uses
-//! to update TLV fields in-place before reflecting a packet. Being a submodule
-//! of `list`, it can access `TlvList`'s private fields directly.
+//! In-place reflector updates for `TlvList`.
 
 use crate::ber::xor_popcount_and_max_burst;
 use crate::tlv::core::{
@@ -81,32 +77,13 @@ impl TlvList {
         None
     }
 
-    /// Updates any Class of Service TLVs with the received DSCP/ECN values.
+    /// Updates CoS DSCP2/EC2 from ingress metadata and RPD/RPE from the reply
+    /// policy (RFC 8972 §4.4, erratum 8199; cos-ecn-01 §3.2).
+    /// Preserves requested DSCP1/EC1 and reserved bits; mutates without allocation.
     ///
-    /// Per RFC 8972 §4.4 (with verified erratum 8199) the Session-Reflector
-    /// copies the received DSCP and ECN into DSCP2/EC2, and per
-    /// draft-ietf-ippm-stamp-cos-ecn-01 §3.2 it reports via RPD whether the
-    /// requested DSCP1 was used for the reply and via RPE whether the
-    /// reply's ECN was set to EC1. This method only maintains the TLV's own
-    /// bits; when `reply_ecn_applied` is false (RPE = 0b10, "unable"), -01
-    /// additionally requires the reply's on-wire ECN bits be forced to
-    /// 0b00 — that half of the rule is applied by the backends to the
-    /// actual IP header, via `ClassOfServiceTlv::reply_wire_tos` /
-    /// `crate::receiver::cos_unable_fallback_tos`.
-    ///
-    /// Updates bytes in-place to avoid allocation overhead. The CoS TLV
-    /// layout (`| DSCP1 | DSCP2 |EC2|RPD|EC1|RPE| Reserved |`):
-    /// - Byte 0: DSCP1 (6 bits, preserved) | DSCP2 bits 5:4 (updated)
-    /// - Byte 1: DSCP2 bits 3:0 | EC2 (2 bits) | RPD (2 bits) - updated
-    /// - Byte 2: EC1 (2 bits, preserved) | RPE (2 bits, updated) | Reserved
-    /// - Byte 3: Reserved - preserved
-    ///
-    /// # Arguments
-    /// * `received_dscp` - DSCP value received at reflector's ingress (6 bits, 0-63)
-    /// * `received_ecn` - ECN value received at reflector's ingress (2 bits, 0-3)
-    /// * `policy_rejected` - True if local policy rejected the requested DSCP1
-    /// * `reply_ecn_applied` - True if the reply packet's ECN field is set to
-    ///   EC1 (RPE = 0b11); false sets RPE = 0b10 ("unable")
+    /// `policy_rejected` sets RPD for DSCP1 rejection. `reply_ecn_applied` selects
+    /// RPE=0b11 (applied) or 0b10 (unable). For 0b10, the backend must also force
+    /// the reply IP header to Not-ECT via `reply_wire_tos` or `cos_unable_fallback_tos`.
     pub fn update_cos_tlvs(
         &mut self,
         received_dscp: u8,
@@ -153,19 +130,10 @@ impl TlvList {
         value[2] = (value[2] & 0xCF) | (rpe << 4);
     }
 
-    /// Updates Timestamp Information TLVs with the reflector's clock information.
-    ///
-    /// All four value octets of this TLV describe the **reflector's** clocks
-    /// (RFC 8972 §4.3): bytes 0-1 are Sync Src In / Timestamp In, characterizing
-    /// the ingress that obtained T2, and bytes 2-3 are Sync Src Out /
-    /// Timestamp Out, characterizing the egress that obtained T3. The
-    /// Session-Sender zeroes all four (§4.3, RFC8972-4.3-2), so each is filled
-    /// here rather than preserved from the request.
-    ///
-    /// `ingress_method` and `egress_method` are reported separately instead of
-    /// being merged into one conservative value: the two directions genuinely
-    /// can differ (kernel-software receive with hardware transmit, say), and
-    /// §4.3 defines a distinct field for each.
+    /// Fills all Timestamp Information fields with reflector clock metadata
+    /// (RFC 8972 §4.3). Ingress describes T2; egress describes T3.
+    /// Report the methods separately because they can differ. Sender values are
+    /// replaced, as requests must zero all four bytes (RFC8972-4.3-2).
     pub fn update_timestamp_info_tlvs(
         &mut self,
         sync_src: SyncSource,
@@ -238,29 +206,12 @@ impl TlvList {
         );
     }
 
-    /// Updates a Location TLV value with the observed address information, in
-    /// place, per RFC 8972 §4.2 / §4.2.2.
+    /// Updates Location ports and request sub-TLVs in place (RFC 8972 §4.2/§4.2.2).
+    /// Generic requests become specific responses: Source IP 7→8/9,
+    /// Destination IP 4→5/6, Source MAC 1→2/3. Each retains its original size.
     ///
-    /// The reflector fills the two-octet Destination Port and Source Port at
-    /// the front of the value (§4.2), then walks the sender's request
-    /// sub-TLVs and answers each *generic* request with its *specific*
-    /// counterpart (§4.2.2): Source IP (7) → Source IPv4 (8)/IPv6 (9),
-    /// Destination IP (4) → Destination IPv4 (5)/IPv6 (6), Source MAC (1) →
-    /// Source EUI-48 (2)/EUI-64 (3).
-    ///
-    /// Because every generic→specific answer has the same size as the request
-    /// (12 octets for the MAC family, 20 for the address family) and the
-    /// transform is done in place, the Location TLV's Length is never changed —
-    /// satisfying "the Session-Reflector ... MUST include in the reflected
-    /// packet the Location TLV with a length equal to the Location TLV length
-    /// in the received packet." Sub-TLVs the reflector does not recognize are
-    /// left byte-for-byte as received with the U flag set (RFC 8972 §4); a
-    /// sub-TLV whose Length is wrong for its type, or that runs past the end of
-    /// the value, is marked with the M flag and stops further sub-TLV
-    /// processing (§4). Any trailing octets that do not form a complete
-    /// sub-TLV are left in place (they remain within the preserved Length),
-    /// honouring "the Session-Reflector MAY leave some fields unreported by
-    /// filling them with zeroes."
+    /// Unknown sub-TLVs keep their bytes and get U set. Invalid lengths get M set
+    /// and stop sub-TLV processing. Preserve trailing bytes and the total TLV length.
     fn update_location_value_in_place(
         value: &mut [u8],
         info: &PacketAddressInfo,
@@ -366,12 +317,9 @@ impl TlvList {
         }
     }
 
-    /// Answers a request the disclosure policy withholds: the sub-TLV keeps the
-    /// generic request type it arrived with and its value is zeroed, which is
-    /// precisely RFC 8972 §4.2.2's "MAY leave some fields unreported by filling
-    /// them with zeroes". The type is deliberately *not* rewritten to the
-    /// specific IPv4/IPv6 variant — that choice would itself leak the observed
-    /// address family, which is part of what a policy may be withholding.
+    /// Zeroes a withheld field without changing its generic request type
+    /// (RFC 8972 §4.2.2). Choosing an IPv4/IPv6 response type would disclose
+    /// the address family even with a zeroed value.
     fn suppress_sub_tlv_answer(sub: &mut [u8]) {
         sub[TLV_HEADER_SIZE..].fill(0);
         set_sub_tlv_flag(sub, LocationSubFlag::Answered);
@@ -405,18 +353,11 @@ impl TlvList {
         set_sub_tlv_flag(sub, LocationSubFlag::Answered);
     }
 
-    /// Updates Follow-Up Telemetry TLVs (RFC 8972 §4.7).
-    ///
-    /// `reflection` is `Some((seq, ts))` in the **stateful** reflector mode —
-    /// the Session-Reflector fills in the Sequence Number and Follow-Up
-    /// Timestamp from its previous reflection (§4.7-10) — and `None` in the
-    /// **stateless** mode (RFC 8762 §4.2), where §4.7-7 mandates the Sequence
-    /// Number and Follow-Up Timestamp fields be **zeroed**.
-    ///
-    /// Invalid-length FUT TLVs are also handled here per §4.7-6 (erratum 8339
-    /// scope): a value whose length is not the mandated 16 octets has its
-    /// present Sequence Number / Follow-Up Timestamp octets zeroed rather than
-    /// left as received (the M flag is set separately by the length validator).
+    /// Updates Follow-Up Telemetry (RFC 8972 §4.7).
+    /// `Some` reports the previous stateful reflection (§4.7-10); `None` zeroes
+    /// sequence/timestamp for stateless mode (§4.7-7).
+    /// Invalid-length TLVs also zero any present sequence/timestamp bytes
+    /// (§4.7-6, erratum 8339); length validation sets M separately.
     pub fn update_follow_up_telemetry_tlvs(
         &mut self,
         reflection: Option<(u32, u64)>,
@@ -448,22 +389,10 @@ impl TlvList {
         );
     }
 
-    /// Discards Access Report TLVs (Type 6) whose Access ID is invalid, per
-    /// RFC 8972 §4.6: "The value is one of the following: 1: 3GPP Network, 2:
-    /// Non-3GPP Network. ... a TLV that contains values other than '1' or '2'
-    /// MUST be discarded."
-    ///
-    /// The object of "discarded" is the *TLV*, not the whole packet. The
-    /// reflector discards it by marking it unrecognized (U flag) — a
-    /// Session-Sender then "MUST skip the processing of the TLV" (§4-17) — so
-    /// the invalid report is never treated as valid, while the packet stays
-    /// symmetric in size (RFC 8762 §4.3/§4.6) and the Access ID / Return Code
-    /// bytes are still echoed unchanged (§4.6-8). This mirrors the U-flag
-    /// treatment already used for a recognized TLV carrying an inapplicable
-    /// value (see `process_destination_node_address`).
-    ///
-    /// Only well-formed (4-octet) Access Report TLVs are considered here; an
-    /// invalid *length* is handled separately by the M-flag length validator.
+    /// Marks well-formed Access Reports with IDs other than 1 or 2 unrecognized
+    /// (RFC 8972 §4.6). U makes the sender skip the report (§4-17) while preserving
+    /// the echoed bytes and symmetric packet size (RFC 8762 §4.3/§4.6).
+    /// Invalid lengths are handled separately by the M-flag validator.
     pub fn discard_invalid_access_report_tlvs(&mut self) {
         self.for_each_matching_tlv(
             |tlv| {
@@ -511,19 +440,9 @@ impl TlvList {
         outcome
     }
 
-    /// Processes Return Path TLVs per RFC 9503 §4.
-    ///
-    /// Finds the first Return Path TLV, parses its sub-TLVs, and determines
-    /// the appropriate action for the reflector.
-    ///
-    /// # Arguments
-    /// * `sender_port` - The sender's UDP port (used for alternate address replies)
-    /// * `allow_alternate` - Whether honouring a Return Address sub-TLV (replying
-    ///   to a peer-chosen address) is permitted. When `false` (the default), a
-    ///   Return Address sub-TLV is treated as unsupported: the U-flag is set and
-    ///   the reply goes to the packet source. This prevents an open reflector
-    ///   from being used as a traffic-redirection / reflection gadget aimed at
-    ///   third parties (RFC 9503 Return Address is meant for controlled domains).
+    /// Processes the first Return Path TLV (RFC 9503 §4).
+    /// Uses `sender_port` for alternate-address replies. When `allow_alternate`
+    /// is false, Return Address requests get U set and replies use the packet source.
     pub fn process_return_path(
         &mut self,
         sender_port: u16,
@@ -552,16 +471,9 @@ impl TlvList {
             return if cc & 1 == 0 {
                 ReturnPathAction::SuppressReply
             } else {
-                // Bit 0 = 1 requests a reply on the same incoming link.
-                // On single-homed or directly-connected setups, a normal
-                // sendto(src_addr) already egresses over the incoming link
-                // and therefore satisfies the request. We cannot tell from
-                // TLV-processing time whether that will be the case, so we
-                // do not pre-emptively set the U-flag here — doing so would
-                // falsely advertise "unsupported" for the common path. Per
-                // RFC 9503 §4.1.1 the U-flag should be raised only when the
-                // backend actually determines the request was not honoured;
-                // that decision belongs in the send path, not the parser.
+                // Bit 0 requests a reply on the incoming link (RFC 9503 §4.1.1).
+                // Defer U to the send path, which can determine whether the route
+                // honors the request.
                 ReturnPathAction::Normal
             };
         }
@@ -582,11 +494,8 @@ impl TlvList {
             return ReturnPathAction::Normal;
         }
 
-        // SRv6 return path (RFC 9503 §4): hand the segment list to the send
-        // path, which attempts best-effort SRH forwarding (RFC 8754) when
-        // enabled and kernel-supported, or sets the U-flag on fallback. We do
-        // NOT set the U-flag here — whether the request is honoured is decided
-        // at send time, mirroring the Control Code reply-request handling above.
+        // Pass SRv6 segments to the send path (RFC 9503 §4, RFC 8754).
+        // It attempts forwarding when enabled and sets U on fallback.
         if let Some(sids) = rp.get_srv6_sids() {
             return ReturnPathAction::Srv6Forward(sids);
         }
@@ -653,16 +562,10 @@ impl TlvList {
         None
     }
 
-    /// Marks the first Reflected Test Packet Control TLV with the U flag.
-    /// Called when the reflector cannot honour some aspect of the request
-    /// but still reflects the packet (e.g. the draft-ietf-ippm-
-    /// asymmetrical-pkts-14 §4.3 conflict between a Return Path "no reply
-    /// requested" control code and a non-zero Reflected Test Packet Control
-    /// TLV); the U flag signals "this request was not honoured" without
-    /// claiming success. The L2/L3 Address Group sub-TLV filters (§3.1.1/
-    /// §3.1.2) do NOT use this path — a mismatch there drops the packet
-    /// instead (see `l2_group_matches_any_local` / `l3_group_matches_any_local`
-    /// in `receiver::mod`).
+    /// Marks the first Reflected Test Packet Control TLV with U when its request
+    /// cannot be honored, including a conflicting no-reply Return Path control
+    /// (draft-ietf-ippm-asymmetrical-pkts-14 §4.3).
+    /// Address Group mismatches (§3.1.1/§3.1.2) instead drop the packet.
     pub fn set_reflected_control_u_flag(&mut self) {
         for tlv in self.non_hmac_tlvs_mut() {
             if tlv.tlv_type == TlvType::ReflectedControl {
@@ -837,42 +740,18 @@ impl TlvList {
         }
     }
 
-    /// Processes Reflected IPv6 Extension Header Data (Type 246) and
-    /// Reflected Fixed Header Data (Type 247) TLVs per
-    /// draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 3.3, 5.1, 5.2.
+    /// Reflects captured headers into Types 246/247
+    /// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 3.3, 5.1, 5.2).
     ///
-    /// Type 246 uses Requested(8) + Reflected(Length-8); Type 247 uses
-    /// Requested(4) + Reflected(Length-4). The Requested field is preserved
-    /// exactly. Only the corresponding header tail is copied.
+    /// Preserves Requested (8 bytes for Type 246, 4 for Type 247) and copies only
+    /// the matching header's tail. Match by length and, for nonzero Requested,
+    /// by the header's prefix. Consume each match so later TLVs cannot reuse it.
+    /// On missing capture or no match, set C and leave the value unchanged.
     ///
-    /// Matching (§5.1/§5.2): candidate headers are filtered by length
-    /// (`Length == header size`). A non-zero Requested field disambiguates
-    /// same-length candidates by exact Requested-field match against the header's
-    /// on-wire bytes; an all-zeros Requested field takes the first
-    /// length-matching header. For multiple Type 246 TLVs, selection is
-    /// **first-fit-with-consumption**: each matched captured header is consumed
-    /// so no later TLV re-uses it. This reconciles the draft's two rules —
-    /// §5.1's first-fit-by-length MUST and §3.1 rule 2's positional pairing —
-    /// which the draft leaves in implicit tension; consumption yields §3.1
-    /// ordering (successive same-length TLVs pair 1st↔1st, 2nd↔2nd) while still
-    /// honouring §5.1 first-fit-by-length for a lone or shorter-than-first TLV.
-    ///
-    /// On failure — length mismatch, no data-plane access (`captured` is
-    /// `None`), or no candidate matching the Requested field — the reflector
-    /// sets the **C flag** (Conformance) on that TLV and leaves the value as
-    /// received (§5.1/§5.2, per I-D.ietf-ippm-asymmetrical-pkts). The pre-11
-    /// U-flag failure signalling is gone.
-    ///
-    /// `captured_fixed` supplies the single IP fixed header (IPv4 20 bytes,
-    /// IPv6 40 bytes). This is the backward-compatible single-header entry
-    /// point: an empty slice means "the backend observed the IP layer but there
-    /// is no fixed-header candidate" (→ the C flag), and a non-empty slice is
-    /// exactly one fixed-header record. For IP-in-IP tunnels (multiple stacked
-    /// IP headers) use [`Self::process_reflected_headers_multi`].
-    /// `captured_ext_headers` supplies IPv6 Hop-by-Hop/Destination Options/
-    /// Routing/Fragment headers concatenated verbatim as on the wire: each
-    /// starts with its own Next Header octet (naming what follows), then
-    /// HdrExtLen, then the header body.
+    /// `captured_fixed` holds one IP header; an empty slice has no candidate.
+    /// Use [`Self::process_reflected_headers_multi`] for stacked IP headers.
+    /// `captured_ext_headers` concatenates captured IPv6 headers in wire order,
+    /// including each header's own Next Header byte.
     pub fn process_reflected_headers(
         &mut self,
         captured_fixed: Option<&[u8]>,
@@ -1152,18 +1031,10 @@ impl TlvList {
         sel.iter().any(|&b| b != 0).then_some(sel)
     }
 
-    /// Sets the C (Conformance) flag in the Sub-TLV Flags byte of every
-    /// 'IPv6 Extension Header Control' sub-TLV (Type
-    /// [`REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL`]) carried in the
-    /// reflected 'Reflected Test Packet Control' TLV (Type 12), per
-    /// draft-ietf-ippm-stamp-ext-hdr-13 §5.3.
-    ///
-    /// The caller uses this both for rule 4 (a single sub-TLV is present but
-    /// the reflector cannot add matching IPv6 extension headers to its own
-    /// reply — always the case here, since neither backend attaches reply
-    /// headers) and for the cardinality rule (more than one such sub-TLV is
-    /// present — the C flag is then set on *every* offending copy). Mutates the
-    /// raw sub-TLV flag bytes in the canonical owners.
+    /// Sets C on every IPv6 Extension Header Control sub-TLV in Type 12
+    /// (draft-ietf-ippm-stamp-ext-hdr-13 §5.3).
+    /// Used for unsupported reply-header attachment and duplicate requests;
+    /// the latter require C on every offending copy.
     pub fn set_ipv6_ext_hdr_control_c_flag(&mut self) {
         Self::mark_ipv6_ext_hdr_control_c(self.non_hmac_tlvs_mut());
     }
@@ -1796,15 +1667,9 @@ mod tests {
 
     #[test]
     fn test_update_location_tlvs_preserves_sender_length_no_shrink() {
-        // Cross-implementation testing observed a reflector answering a
-        // 36-octet Location TLV request with a 16-octet Location TLV
-        // reply. RFC 8972 §4.2.2: "The Session-Reflector that received an
-        // extended STAMP packet with the Location TLV MUST include in the
-        // reflected packet the Location TLV with a length equal to the
-        // Location TLV length in the received packet." A request carrying a
-        // generic Source IP (7, 20 octets) and Source MAC (1, 12 octets)
-        // sub-TLV is 4 + 20 + 12 = 36 octets; answering both in place must
-        // keep the Length at 36.
+        // Location replies must retain the request length (RFC 8972 §4.2.2).
+        // Ports (4) + Source IP request (20) + Source MAC request (12) = 36 bytes,
+        // even after generic requests become specific responses.
         use std::net::{IpAddr, Ipv4Addr};
 
         let mut req = vec![0u8; 4];
@@ -1979,12 +1844,8 @@ mod tests {
 
     #[test]
     fn test_process_return_path_same_link_does_not_preemptively_flag_u() {
-        // RFC 9503 §4.1.1: same-link request (bit 0 = 1). We cannot tell at
-        // TLV-processing time whether the backend's sendto() will actually
-        // egress over the incoming link — on single-homed hosts it trivially
-        // does. Pre-emptively setting U-flag here would falsely mark those
-        // responses "unsupported". The U-flag decision belongs in the send
-        // path once the backend knows what happened.
+        // Same-link support is decided at send time (RFC 9503 §4.1.1).
+        // Parsing must leave U clear because the normal route may satisfy it.
         let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0x1).to_raw());
 
         let action = list.process_return_path(1234, false);
@@ -3079,12 +2940,9 @@ mod tests {
 
     #[test]
     fn test_v13_ext_hdr_zero_selector_first_fit_skips_length_mismatch() {
-        // Reviewer's exact failing scenario: a single zero-selector Length-8 TLV
-        // against captured [16-byte HBH, 8-byte DestOpts]. Draft -11 §5.1
-        // requires matching the FIRST IPv6 extension header of the MATCHING
-        // LENGTH, so the 8-byte header must be reflected even though it is the
-        // second header on the wire. The old positional selection C-flagged it
-        // (the 16-byte header at position 0 failed the Length==8 filter).
+        // An 8-byte request must match the second captured header in
+        // [16-byte HBH, 8-byte DestOpts] (draft -11 §5.1).
+        // Selection uses matching length, not the TLV's position alone.
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
         // 16-byte HBH record: NextHeader=0x3C, HdrExtLen=1 → (1+1)*8 = 16 bytes.
         let mut rec16 = vec![0x3Cu8, 0x01];
@@ -3113,11 +2971,8 @@ mod tests {
 
     #[test]
     fn test_v13_ext_hdr_zero_selector_first_fit_two_tlvs_reorder() {
-        // Two zero-selector TLVs — Length 8 then Length 16 — against captured
-        // [16-byte hdr, 8-byte hdr]. Expected outcome: first-fit-by-length WITH
-        // CONSUMPTION pairs the Length-8 TLV to the 8-byte (2nd wire) header and
-        // the Length-16 TLV to the 16-byte (1st wire) header, so BOTH reflect
-        // even though the TLV order and the wire order disagree.
+        // Requests of lengths 8 then 16 match captured headers of lengths
+        // 16 then 8 in reverse order, consuming each match once.
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
         let mut rec16 = vec![0x3Cu8, 0x01];
         rec16.resize(16, 0xCC);
@@ -3187,11 +3042,8 @@ mod tests {
 
     #[test]
     fn test_v13_ext_hdr_duplicate_nonzero_selector_consumes_successively() {
-        // Two IDENTICAL non-zero Requested TLVs (same selector) against two
-        // headers that share the same on-wire first 8 octets but differ in body.
-        // With consumption, TLV[0] takes the 1st matching header and TLV[1]
-        // takes the 2nd — both reflect DIFFERENT headers. The old
-        // find()-without-consumption matched both TLVs to the first header.
+        // Identical selectors must consume distinct matching headers.
+        // The replies retain each header's different body.
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
         let sel = [0x3Cu8, 0x01, 0xAA, 0xBB, 0, 0, 0, 0];
         let rec0 = [

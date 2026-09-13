@@ -1,31 +1,8 @@
-//! Class-of-Service admission policy for the Session-Reflector.
+//! Reflector CoS admission policy (RFC 8972 §4.4/§6, cos-ecn-01 §3.2).
 //!
-//! RFC 8972 §4.4 requires that "the Session-Reflector MUST use the local policy
-//! to verify whether the CoS corresponding to the value of the DSCP1 field is
-//! permitted in the domain", §6 adds a SHOULD for "a local policy to confirm
-//! whether the value sent by the Session-Sender can be used as the value of the
-//! DSCP field", and draft-ietf-ippm-stamp-cos-ecn-01 §3.2 repeats the
-//! requirement for DSCP1 and extends it to EC1 ("if it is permitted and capable
-//! to do so").
-//!
-//! The distinction this module exists to draw is **permitted** versus
-//! **capable**. Attempting the `IP_TOS`/`IPV6_TCLASS` setsockopt and treating a
-//! failure as "not permitted" only ever answers *capable*: the kernel does not
-//! know the operator's domain policy, and it will happily apply a DSCP the
-//! network is not supposed to carry. This layer answers *permitted*, and the
-//! existing syscall path continues to answer *capable* — a request has to clear
-//! both.
-//!
-//! The draft names the shapes such a policy takes: "a system default policy, a
-//! global policy ..., or a policy ... configured for specific destination
-//! addresses or networks". Both forms are available here: a global set of
-//! admissible values, plus per-destination-prefix overrides resolved
-//! longest-prefix-first, matched against the address the reflected packet is
-//! being sent *to*.
-//!
-//! The default permits everything, which keeps a general-purpose measurement
-//! tool useful out of the box; the policy exists so an operator running a
-//! reflector inside a DiffServ domain can constrain it.
+//! Permission and socket support are separate checks; a reply needs both.
+//! DSCP uses the longest matching destination-prefix rule, falling back to the
+//! global set. ECN uses a global set. Defaults permit all codepoints.
 
 use std::net::IpAddr;
 
@@ -205,11 +182,7 @@ impl EcnSet {
     }
 }
 
-/// The shared permit-everything policy.
-///
-/// Returned as a `&'static` so a caller with no configured policy — a test, a
-/// bench, or a backend whose configuration parsed to the default — can borrow
-/// one without each site owning a copy.
+/// Shared permit-all policy for callers without a configured policy.
 #[must_use]
 pub fn permissive() -> &'static CosAdmissionPolicy {
     static PERMISSIVE: std::sync::OnceLock<CosAdmissionPolicy> = std::sync::OnceLock::new();
@@ -280,14 +253,9 @@ impl CosAdmissionPolicy {
         self.dscp == DscpSet::all() && self.ecn == EcnSet::all() && self.destinations.is_empty()
     }
 
-    /// Whether `dscp` may be used on a reply addressed to `destination`.
-    ///
-    /// The most specific matching destination rule decides; with no matching
-    /// rule the global set decides. `destination` is `None` when the backend
-    /// could not determine the reply's destination, in which case only the
-    /// global set applies — a destination rule cannot be evaluated against an
-    /// unknown address, and silently treating that as a match either way would
-    /// misreport the policy.
+    /// Whether `dscp` is permitted for `destination`.
+    /// The longest matching prefix wins. Use the global set when no rule matches
+    /// or the destination is unknown.
     #[must_use]
     pub fn permits_dscp(&self, destination: Option<IpAddr>, dscp: u8) -> bool {
         if let Some(dest) = destination {
@@ -300,12 +268,7 @@ impl CosAdmissionPolicy {
         self.dscp.contains(dscp)
     }
 
-    /// Whether `ecn` may be used on a reply.
-    ///
-    /// ECN is a global decision: the draft's destination-scoped examples are
-    /// about DiffServ codepoints, and a per-destination ECN policy would invite
-    /// an operator to disable congestion signalling for a subset of peers, which
-    /// is not a distinction worth making configurable.
+    /// Whether the global ECN policy permits `ecn`.
     #[must_use]
     pub fn permits_ecn(&self, ecn: u8) -> bool {
         self.ecn.contains(ecn)

@@ -17,52 +17,28 @@
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! ```
 //!
-//! -13 splits the value into two fields: a fixed 8-octet **Requested** field
-//! and a **Reflected** field of `Length - 8` octets, where `Length` equals the
-//! full target extension header's size (from its Next Header field onward).
+//! Length equals the target extension header size. Requested occupies eight
+//! bytes; Reflected receives `header[8..]`. The sender zeroes Reflected and
+//! sets Requested to zero or the target header's first eight wire bytes.
+//! The reflector preserves Requested. On missing capture or no match, it
+//! sets C and preserves the value.
 //!
-//! The sender sends the Requested field as either all zeros or a disambiguation
-//! selector (the target header's first 8 on-wire octets), with the Reflected
-//! field zero-initialised. The reflector leaves the Requested field exactly as
-//! received and copies the matched header's bytes **from offset 8 onward** into
-//! the Reflected field (`header[8..]`); the header's own first 8 octets are
-//! never written into the reply value. When the reflector cannot use the TLV
-//! (length mismatch, no data-plane access, or no header matches the Requested
-//! field) it sets the **C flag** (Conformance) and leaves the value as
-//! received — the pre-11 U-flag failure signalling is gone.
-//!
-//! # Selector / Requested field (-13 §5.1)
-//!
-//! A non-zero Requested field (see
-//! [`ReflectedIpv6ExtHdrTlv::request_with_selector`]) disambiguates multiple
-//! extension headers of the same length: the reflector matches it against the
-//! header's **on-wire first 8 octets** — byte 0 is the header's own Next Header
-//! field (naming what *follows* it), byte 1 is HdrExtLen, then the first 6
-//! option octets. An all-zeros Requested field matches the first
-//! length-matching header.
-//!
-//! With several Type 246 TLVs present, selection is
-//! **first-fit-with-consumption**: each matched captured header is consumed so
-//! no later TLV re-uses it. That reconciles §5.1's first-fit-by-length MUST
-//! with §3.2 rule 2's positional pairing (successive same-length TLVs end up
-//! pairing 1st↔1st, 2nd↔2nd) — see
-//! [`TlvList::process_reflected_headers`](crate::tlv::TlvList::process_reflected_headers)
-//! for the reconciliation this implements.
+//! Nonzero Requested matches the header's prefix, including its own Next
+//! Header byte (the following protocol, not this header's type). Zero selects
+//! the first length match. Each captured header is consumed once, so repeated
+//! requests select successive matches. See
+//! [`TlvList::process_reflected_headers`](crate::tlv::TlvList::process_reflected_headers).
 
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
 
-/// Default zero-fill capacity when the sender requests Type 246 without
-/// knowing the path's extension-header chain. Holds one standard 8-byte
-/// option (NextHeader + HdrLen + 6 body bytes); the reflector overwrites
-/// fewer / more bytes as the actual chain dictates.
+/// Default request length for one eight-byte IPv6 extension header.
 pub const DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY: usize = 8;
 
 /// Reflected IPv6 Extension Header Data TLV (Type 246).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReflectedIpv6ExtHdrTlv {
-    /// Concatenated extension-header bytes as received on the wire.
-    /// Zero-filled when sent by the sender as a request.
+    /// Eight-byte Requested selector followed by the reflected header tail.
     pub data: Vec<u8>,
 }
 
@@ -80,16 +56,10 @@ impl ReflectedIpv6ExtHdrTlv {
         }
     }
 
-    /// Creates a sender request TLV whose first 8 octets carry the Requested
-    /// selector (draft-ietf-ippm-stamp-ext-hdr-13 §5.1), followed by the
-    /// zero-initialised Reflected field the reflector fills. `capacity` is
-    /// at least eight bytes. Only the first eight prefix bytes are selector
-    /// data; CLI validation rejects longer selectors.
-    ///
-    /// The selector is the target header's **on-wire first 8 octets**: byte 0
-    /// is the header's own Next Header field (naming what follows it), byte 1
-    /// is HdrExtLen, then the first 6 option octets — NOT the header's own type
-    /// (which lives in the *preceding* Next Header pointer).
+    /// Creates a request with up to eight selector bytes and a zeroed tail
+    /// (draft-ietf-ippm-stamp-ext-hdr-13 §5.1). Allocates at least eight bytes.
+    /// The selector matches the target header's wire prefix, including its
+    /// Next Header byte. Longer prefixes are truncated; the CLI rejects them.
     #[must_use]
     pub fn request_with_selector(prefix: &[u8], capacity: usize) -> Self {
         let prefix = &prefix[..prefix.len().min(8)];

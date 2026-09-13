@@ -1088,12 +1088,8 @@ fn reflected_control_padding_uses_real_base_size_with_tlv_hmac() {
 
 #[test]
 fn reflected_control_length_padding_disabled_by_default() {
-    // Security (audit finding 1): with reflected_control_max_count = 0 (the
-    // production default) the reflector must NOT pad its reply up to a
-    // peer-requested length. Padding a tiny request into a large reply is
-    // amplification, and combined with a Return Address sub-TLV it becomes a
-    // reflection vector aimed at a third party. The request is refused (C flag)
-    // and the reply is left at its natural size.
+    // With reflected_control_max_count=0, refuse padding with C set.
+    // Disabled asymmetric reflection must not amplify small requests.
     let mut value = Vec::with_capacity(12);
     value.extend_from_slice(&1500u16.to_be_bytes()); // length: pad to 1500
     value.extend_from_slice(&1u16.to_be_bytes()); // count: 1 (single reply)
@@ -1298,12 +1294,9 @@ fn a1_reflected_control_length_padding_within_cap() {
     );
 }
 
-/// draft-ietf-ippm-asymmetrical-pkts-14 §3 length rule, keyed reflector: the
-/// reflector appends its own HMAC TLV to every reply when a TLV key is
-/// configured, whether or not the request carried one (the §4.8 per-role
-/// adjudication). That 20-octet TLV is part of the reflected packet, so the
-/// Extra Padding TLV must be sized to leave room for it — otherwise the reply
-/// overshoots the requested length by exactly 20 bytes.
+/// Reserve 20 bytes for the reflector's HMAC TLV when sizing padding
+/// (draft-ietf-ippm-asymmetrical-pkts-14 §3, RFC 8972 §4.8), including when
+/// the request has no HMAC TLV.
 #[test]
 fn a1_reflected_control_length_target_accounts_for_reflector_added_hmac() {
     let key = HmacKey::new(vec![0x5A; 32]).expect("key");

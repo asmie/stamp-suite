@@ -515,21 +515,9 @@ async fn test_loopback_ipv6() {
     assert!(reflector_handle.await.unwrap(), "Reflector should succeed");
 }
 
-/// RFC 8972 §4.2 Location TLV round trip over IPv4.
-///
-/// Mirrors `tests/loopback_ipv6_test.rs`'s
-/// `ipv6_location_tlv_populated_from_addr_info`, which exists but has no
-/// IPv4 counterpart. Regression coverage for a byte-reversed IPv4
-/// destination address found via cross-implementation testing (local):
-/// the nix backend's raw `IP_PKTINFO` extraction (`extract_dst_addr_from_cmsgs`
-/// in `src/receiver/nix.rs`) double-converted `ipi_addr.s_addr` (already
-/// network-order) through `to_be_bytes()`, turning 127.0.0.1 into
-/// 1.0.0.127. That specific code path is unit-tested directly in
-/// `src/receiver/nix.rs`'s test module (it needs a hand-built
-/// `libc::in_pktinfo`, unavailable from an integration test); this test
-/// instead drives `process_stamp_packet` directly and checks the
-/// Destination IPv4 sub-TLV octets end-to-end, guarding the higher layer
-/// that consumes the extracted address.
+/// Checks IPv4 Location TLV address bytes through `process_stamp_packet`
+/// (RFC 8972 §4.2). Complements the nix `IP_PKTINFO` byte-order unit test
+/// and IPv6 Location coverage.
 #[test]
 fn test_location_tlv_ipv4_round_trip() {
     use std::net::{IpAddr, Ipv4Addr};

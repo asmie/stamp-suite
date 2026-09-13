@@ -63,7 +63,7 @@ struct CaptureConfig {
     use_auth: bool,
     error_estimate_wire: u16,
     hmac_key: Option<HmacKey>,
-    /// Per-SSID key set (B6), shared with the control plane which may
+    /// Per-SSID key set, shared with the control plane which may
     /// mutate it at runtime. When populated it overrides `hmac_key` and the
     /// reflector resolves the per-packet key via the incoming SSID.
     hmac_keys: Arc<std::sync::RwLock<Option<crate::crypto::HmacKeySet>>>,
@@ -127,20 +127,9 @@ pub async fn run_receiver(
     conf: &Configuration,
     shared: &ReceiverSharedState,
 ) -> Result<(), crate::StartupError> {
-    // We need UDP sockets to send responses - one for each address family
-    // since pnet captures at the datalink layer and may see both IPv4 and IPv6 packets.
-    //
-    // These bind the STAMP port, not an ephemeral one. A Session-Sender
-    // `connect()`s its socket to the reflector's `IP:port`, so the kernel
-    // discards any datagram whose source is not exactly that — a reply from an
-    // ephemeral port is dropped before the sender ever sees it. This backend
-    // captures at the datalink layer and never binds a receive socket, so the
-    // STAMP port is free for it to send from.
-    //
-    // Measured before this bound the port: the reflector reported
-    // packets_received=4, packets_reflected=4 while the sender saw 100% loss,
-    // and the reply on the wire read `10.99.0.2.37745 > 10.99.0.1.50002`
-    // instead of coming from :50001.
+    // Bind one reply socket per address family to the STAMP port.
+    // Connected senders discard replies from other source ports. Raw capture
+    // does not bind a receive socket, so the STAMP port is available.
     let local_addr: SocketAddr = conf.local_socket_addr();
     let send_bind_v4: SocketAddr = match conf.local_addr {
         std::net::IpAddr::V4(v4) => (v4, conf.local_port).into(),
@@ -177,7 +166,7 @@ pub async fn run_receiver(
     // Check if authenticated mode is used
     let use_auth = is_auth(conf.auth_mode);
 
-    // Load HMAC keys (B6: prefer the multi-key set path; fall back to a
+    // Load HMAC keys (prefer the multi-key set path; fall back to a
     // single legacy key if --hmac-key-dir is not set).
     let keyset_configured = shared
         .hmac_keys
@@ -404,12 +393,8 @@ pub async fn run_receiver(
     shutdown_task.task.abort();
     let _ = (&mut shutdown_task.task).await;
 
-    // The capture thread should normally return cleanly on shutdown flag.
-    // A panic propagated through the JoinHandle (`result == Err`) means an
-    // unhandled invariant fired; surface it to logs and to the readiness flag
-    // so systemd / external monitors can react. We still return cleanly so
-    // the process exits with a normal status — systemd will restart us per
-    // unit configuration.
+    // Report capture-task panics and clear readiness so monitors can detect
+    // capture failure.
     if let Err(e) = result {
         log::error!("Capture thread terminated abnormally: {}", e);
         capture_alive_for_loop.store(false, AtomicOrdering::Relaxed);
@@ -704,28 +689,15 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
     None
 }
 
-/// Walks the IPv6 extension-header chain after the 40-byte fixed header,
-/// returning:
-/// - the extension-header bytes concatenated **verbatim as on the wire**: each
-///   record starts with its own Next Header octet (naming what follows), then
-///   HdrExtLen, then the header body — per draft-ietf-ippm-stamp-ext-hdr-13
-///   §3.1/§5.1 (the reflector's first-4-byte Requested selector matches these
-///   on-wire octets);
-/// - the final NextHeader protocol number (UDP if the chain leads to UDP);
-/// - the byte offset into the full IPv6 packet where the upper-layer payload
-///   (e.g. UDP) begins.
+/// Walks IPv6 extension headers after the 40-byte fixed header.
+/// Returns concatenated wire bytes, the final Next Header protocol, and the
+/// upper-layer payload offset (draft-ietf-ippm-stamp-ext-hdr-13 §3.1/§5.1).
 ///
-/// Recognised (and captured) headers, per RFC 8200 and §3.1's own examples
-/// ("Routing Header for IPv6 including Segment Routing Header"): Hop-by-Hop (0),
-/// Routing (43, incl. SRH type 4), Fragment (44), and Destination Options (60).
-/// Routing/HBH/DestOpts carry the generic `[Next Header][Hdr Ext Len]` container
-/// (length `(HdrExtLen + 1) * 8`); Fragment is a fixed 8-octet header whose
-/// second octet is Reserved, not a length. The walk **terminates** at the
-/// Authentication Header (51) and Encapsulating Security Payload (50): AH's
-/// length is expressed in a different unit and ESP's contents are encrypted, so
-/// neither can be reflected meaningfully — the reflector then finds no
-/// length-matching candidate and correctly signals the C flag (§5.1-E). It also
-/// terminates at any upper-layer protocol (e.g. UDP).
+/// Captures Hop-by-Hop (0), Routing (43, including SRH), Fragment (44), and
+/// Destination Options (60). HBH/Routing/DestOpts lengths are `(HdrExtLen + 1) * 8`;
+/// Fragment is always eight bytes. Each record retains its own Next Header byte.
+/// Stops at AH (51), ESP (50), or an upper-layer protocol; AH has a different
+/// length encoding and ESP is encrypted.
 fn extract_ipv6_ext_headers(
     header: &Ipv6Packet,
 ) -> (Vec<u8>, pnet::packet::ip::IpNextHeaderProtocol, usize) {

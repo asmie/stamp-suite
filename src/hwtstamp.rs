@@ -1,33 +1,15 @@
-//! Hardware-assisted timestamping support (F1).
+//! Kernel and hardware timestamping with per-packet provenance.
 //!
-//! Provides capability probes, mode selection, and per-packet timestamp
-//! extraction. Wire metadata uses actual timestamp provenance, not the
-//! capabilities advertised by a NIC or the requested socket tier.
+//! On Linux, `probe` queries `ETHTOOL_GET_TS_INFO` for the bound interface.
+//! The `hwtstamp` feature enables RX timestamps through `SO_TIMESTAMPING` and
+//! TX corrections through `MSG_ERRQUEUE` with `SOF_TIMESTAMPING_OPT_ID`.
+//! `--hwtstamp on` also attempts NIC configuration through `SIOCSHWTSTAMP`.
+//! Failures fall back to software timestamps; explicit hardware requests warn.
 //!
-//! **Defensive posture.** Per the project's hardware-dependent
-//! contract: this module never panics and never refuses to start the
-//! binary. Every capability step (probe, SO_TIMESTAMPING enablement,
-//! SIOCSHWTSTAMP filters, per-packet cmsg extraction) degrades to the
-//! next-best timestamp tier on failure, and `--hwtstamp on` warns when
-//! the operator's explicit hardware request cannot be honoured (see
-//! `startup_action`).
-//!
-//! **Current scope.** [`probe`](crate::hwtstamp::probe) performs a real
-//! `ETHTOOL_GET_TS_INFO` ioctl (Linux) against the interface owning
-//! `--local-addr` (resolved via
-//! [`interface_for_addr`](crate::hwtstamp::interface_for_addr)). With
-//! the `hwtstamp` cargo feature, the
-//! kernel read paths are active: RX timestamps via `SO_TIMESTAMPING` /
-//! `SCM_TIMESTAMPING` cmsgs (T2 on the reflector, T4 on the sender), TX
-//! timestamps via `MSG_ERRQUEUE` with `SOF_TIMESTAMPING_OPT_ID`
-//! correlation (correcting the sender's stored T1 and the reflector's
-//! Follow-Up Telemetry record), and an optional NIC-hardware tier under
-//! `--hwtstamp on` (`SIOCSHWTSTAMP`, falls back gracefully). macOS gets
-//! the kernel software RX tier via `SO_TIMESTAMP`; Windows compiles to a
-//! no-op (the pnet receiver has no socket to timestamp). NOTE the PHC
-//! clock-domain caveat for the hardware tier in `doc/architecture.md`:
-//! hardware timestamps are only comparable with the peer's CLOCK_REALTIME
-//! when the PHC is synchronized (ptp4l/phc2sys).
+//! macOS supports software RX timestamps through `SO_TIMESTAMP`; Windows has
+//! no timestamping backend. Hardware timestamps require a synchronized PHC to
+//! compare with peer CLOCK_REALTIME timestamps; see `doc/architecture.md`.
+//! Wire metadata reports the timestamp actually used, not probed capabilities.
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -57,12 +39,7 @@ pub enum HwTsMode {
     Off,
 }
 
-/// Result of the per-interface hardware-timestamping capability probe.
-///
-/// Constructed by [`probe`] from the NIC's ETHTOOL_GET_TS_INFO reply;
-/// consumed by `startup_action` reporting today and by the future
-/// recvmsg/sendmsg paths that will choose between HW and SW timestamping
-/// per packet.
+/// Per-interface timestamping capabilities returned by [`probe`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HwTsCapability {
     /// True when the kernel + NIC pair reports support for
@@ -78,8 +55,7 @@ pub struct HwTsCapability {
 }
 
 impl HwTsCapability {
-    /// True when at least one of rx_hw / tx_hw is supported. Reserved for
-    /// the future cmsg path's decision of whether to attempt HW timestamping.
+    /// Whether the NIC supports RX or TX hardware timestamping.
     #[must_use]
     pub fn any_hw_supported(&self) -> bool {
         self.rx_hw || self.tx_hw
@@ -163,13 +139,8 @@ fn ethtool_ts_info(interface: &str) -> Option<EthtoolTsInfo> {
     Some(info)
 }
 
-/// Probes timestamping capabilities of `interface` via the
-/// ETHTOOL_GET_TS_INFO ioctl.
-///
-/// Returns the all-false default when `interface` is `None` (e.g. a
-/// wildcard bind, where no single interface applies), when the interface
-/// is unknown or the driver rejects the query, and on non-Linux targets
-/// (SO_TIMESTAMPING is Linux-specific). Never fails and never panics.
+/// Queries `ETHTOOL_GET_TS_INFO` for `interface`.
+/// Returns the all-false default for `None`, query failures, or non-Linux targets.
 #[must_use]
 pub fn probe(interface: Option<&str>) -> HwTsCapability {
     #[cfg(target_os = "linux")]
@@ -246,12 +217,9 @@ impl TxTimestampReport {
     }
 }
 
-/// Enables kernel timestamping on `fd` with a single `SO_TIMESTAMPING`
-/// bitmask (a second setsockopt would overwrite the first, so RX and TX
-/// wishes are combined in one call). `want_hw` additionally requests the
-/// raw-hardware tier and silently retries without it when the kernel
-/// refuses. Never fails: on error the returned struct is all-false and
-/// the caller stays on userspace timestamps.
+/// Enables RX and TX timestamping in one `SO_TIMESTAMPING` call.
+/// `want_hw` requests hardware timestamps, retrying without them on failure.
+/// Returns all-false on failure so the caller can use userspace timestamps.
 #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
 pub fn enable_socket_timestamping(
     fd: std::os::fd::RawFd,
@@ -545,17 +513,9 @@ pub fn interface_for_addr(_addr: std::net::IpAddr) -> Option<String> {
     None
 }
 
-/// Describes the available `TimestampMethod` for the given mode and
-/// probe result. This is what the receiver writes into the Type 3
-/// TLV's `timestamp_in`/`timestamp_out` fields and what the sender
-/// reports about itself.
-///
-/// Per RFC 8972 §4.3 the field may legitimately differ per packet —
-/// e.g. when a NIC supports RX HW but not TX, the receiver advertises
-/// `HwAssist` for ingress and `SwLocal` for egress. The current
-/// implementation is conservative: it returns `HwAssist` only when
-/// the relevant capability bit is true AND the operator's mode allows
-/// HW. Anything else reports `SwLocal`.
+/// Selects a method from the requested mode and directional capability.
+/// Returns `HwAssist` when hardware is present and mode is `On` or `Auto`,
+/// otherwise `SwLocal`. This is capability policy, not per-packet provenance.
 #[must_use]
 // Capability policy only; not evidence of how a particular timestamp was acquired.
 pub fn effective_method(
@@ -587,32 +547,18 @@ pub enum Direction {
     Transmit,
 }
 
-/// What the binary should do at startup for a given `--hwtstamp` mode
-/// and probed capabilities.
-///
-/// The kernel timestamp *read path* is not wired into recvmsg/sendmsg
-/// yet, so no mode can actually deliver HW timestamps today. This type
-/// keeps the CLI honest: instead of `--hwtstamp on` aborting (which would
-/// falsely imply a working capability gate), the binary always continues
-/// with software timestamping and warns when the operator explicitly
-/// asked for HW.
+/// Startup action for the requested timestamping mode and NIC capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupAction {
-    /// Proceed with software timestamping, no message needed.
+    /// Continue without a capability warning.
     Continue,
-    /// Proceed with software timestamping, but first emit this
-    /// operator-facing warning (they requested HW and aren't getting it).
+    /// Continue after emitting this capability warning.
     ContinueWithWarning(String),
 }
 
-/// Decides the startup behaviour from the requested `--hwtstamp` mode and
-/// the [`probe`] result.
-///
-/// With the `hwtstamp` feature compiled in, `on` + a hardware-capable NIC
-/// proceeds silently — hardware timestamping is genuinely attempted at
-/// socket setup (failures are logged there). Without the feature, or
-/// without NIC support, `on` warns with the true reason. `auto`/`off`
-/// never warn.
+/// Warns for `on` when the build or NIC lacks hardware timestamping support.
+/// Socket setup attempts hardware configuration and reports its own failures.
+/// `auto` and `off` do not produce startup warnings.
 #[must_use]
 pub fn startup_action(mode: HwTsMode, cap: &HwTsCapability) -> StartupAction {
     match mode {

@@ -11,13 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// How an incoming Sequence Number compares with the ones already seen on a
-/// session (draft-ietf-ippm-asymmetrical-pkts-14 §5).
-///
-/// The draft's Security Considerations tell a reflector to "use the value of
-/// the Sequence Number field of the received STAMP test packet" to notice
-/// replayed or non-monotonic traffic, noting that the HMAC TLV alone does not
-/// help: a replayed packet carries a perfectly valid HMAC.
+/// Sequence-number classification for replay detection
+/// (draft-ietf-ippm-asymmetrical-pkts-14 §5). A valid HMAC does not rule out replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayVerdict {
     /// Ahead of every sequence number seen so far (the normal case), or the
@@ -107,23 +102,12 @@ impl Session {
         *self.active.write().unwrap_or_else(|e| e.into_inner()) = false;
     }
 
-    /// Classifies an incoming Sequence Number against the ones this session has
-    /// already seen, and records it (draft-ietf-ippm-asymmetrical-pkts-14 §5).
+    /// Classifies and records `seq` (draft-ietf-ippm-asymmetrical-pkts-14 §5).
+    /// The caller decides whether to drop it; reordering and sender restarts can
+    /// also produce non-New verdicts.
     ///
-    /// Detection only — the caller decides what to do with the verdict. That
-    /// split is deliberate: reordering is normal on a real path, and even a
-    /// genuine duplicate is not proof of an attack (a sender restarted mid-run
-    /// looks identical), so silently dropping traffic here would break honest
-    /// measurements. See `--drop-replayed` for the opt-in mitigation.
-    ///
-    /// Sequence numbers are compared with wrapping arithmetic: a difference
-    /// below 2^31 counts as ahead, at or above as behind, so a session that
-    /// runs past `u32::MAX` keeps working.
-    ///
-    /// Concurrency: the compare-and-swap retries on contention, so no update is
-    /// lost. Two packets racing on a session's *first* packet may both be
-    /// reported `New` with either one becoming the high-water mark — harmless,
-    /// since neither is a replay of the other.
+    /// Wrapping differences below 2^31 count as ahead; larger differences count
+    /// as behind. Compare-and-swap retries prevent lost concurrent updates.
     pub fn check_replay(&self, seq: u32) -> ReplayVerdict {
         loop {
             let packed = self.replay_state.load(Ordering::Relaxed);
@@ -141,12 +125,9 @@ impl Session {
         }
     }
 
-    /// Read-only half of [`Self::check_replay`]: classifies `seq` against the
-    /// current window without recording it. Backends use this *before* packet
-    /// verification (parse + HMAC), so a spoofed or corrupt packet can be
-    /// refused on the verdict but can never advance the window — otherwise an
-    /// unauthenticated packet carrying a predicted sequence number would
-    /// poison the anti-replay state and get the later genuine packet dropped.
+    /// Classifies `seq` without advancing the replay window.
+    /// The receive pipeline classifies verified packets before response assembly
+    /// and commits them afterward.
     pub fn classify_replay(&self, seq: u32) -> ReplayVerdict {
         Self::replay_step(self.replay_state.load(Ordering::Relaxed), seq).0
     }
@@ -339,11 +320,8 @@ pub struct SessionManager {
     /// When true, new identities are rejected; existing sessions continue.
     /// Changes are serialized with session creation by the table write lock.
     draining: AtomicBool,
-    /// True while the table is at its cap. Used to log the "cap reached"
-    /// warning exactly once per saturation episode instead of once per
-    /// rejected client — otherwise a flood would turn the log into its own
-    /// amplification DoS. Reset by `cleanup_stale_sessions` once the table
-    /// drops back below the cap.
+    /// Suppresses repeated capacity warnings while the table is full.
+    /// Cleared by `cleanup_stale_sessions` when capacity becomes available.
     saturated: AtomicBool,
 }
 

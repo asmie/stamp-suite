@@ -210,7 +210,7 @@ pub async fn run_receiver(
     // Check if authenticated mode is used
     let use_auth = is_auth(conf.auth_mode);
 
-    // B6: the per-SSID keyset lives in shared state (runtime-mutable via
+    // the per-SSID keyset lives in shared state (runtime-mutable via
     // the control plane); keep `hmac_key` as a legacy fallback when no
     // keyset was configured at startup.
     let keyset_configured = shared
@@ -225,7 +225,7 @@ pub async fn run_receiver(
     };
 
     // Validate: authenticated mode requires HMAC key (either single-key
-    // legacy path or B6 per-SSID key set).
+    // single key or per-SSID key set).
     if use_auth && hmac_key.is_none() && !keyset_configured {
         return Err(crate::StartupError::new(
             "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir",
@@ -587,13 +587,8 @@ pub async fn run_receiver(
                     dst_port: local_addr.port(),
                 });
 
-                // Panic-isolated: a panic in processing must not unwind out of
-                // the receive loop and kill the process (remote DoS). On panic
-                // the packet is dropped (None) and the loop continues.
-                //
-                // The keyset read guard is scoped to this block — it must
-                // never be held across an `.await` (std guard is not Send);
-                // the async sends below happen after it drops.
+                // Catch packet-processing panics so the receive loop survives.
+                // Drop the keyset read guard before any `.await`; it is not `Send`.
                 let response_opt = {
                     let keys_guard = shared.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
                     let ctx = ProcessingContext {
@@ -885,18 +880,9 @@ fn extract_dst_addr_from_cmsgs(
     None
 }
 
-/// Convert the destination address carried in an `IP_PKTINFO` control
-/// message into an [`Ipv4Addr`].
-///
-/// `libc::in_pktinfo::ipi_addr.s_addr` is filled in by the kernel and is
-/// already in network byte order (the raw in-memory bytes are the address
-/// octets in order, e.g. `[127, 0, 0, 1]`). It must NOT be round-tripped
-/// through [`u32::to_be_bytes`]: on a little-endian host that performs an
-/// extra, unwanted byte-order flip on top of the one the kernel already
-/// did, silently reversing the octets (127.0.0.1 becomes 1.0.0.127).
-/// [`u32::to_ne_bytes`] copies the underlying byte layout as-is and is
-/// correct on both little- and big-endian hosts — mirroring how the IPv6
-/// sibling path below reads `s6_addr` directly without any conversion.
+/// Extracts IPv4 octets from `IP_PKTINFO` without changing byte order.
+/// `s_addr` already stores network-order bytes. `to_ne_bytes()` preserves them;
+/// `to_be_bytes()` would reverse the address on little-endian hosts.
 fn ipv4_addr_from_pktinfo(pktinfo: &libc::in_pktinfo) -> Ipv4Addr {
     Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_ne_bytes())
 }
@@ -908,16 +894,8 @@ fn ipv4_addr_from_pktinfo(pktinfo: &libc::in_pktinfo) -> Ipv4Addr {
 mod tests {
     use super::*;
 
-    /// Cross-implementation testing (local) surfaced a byte-reversed IPv4
-    /// destination address in the Location TLV: a packet sent to
-    /// 127.0.0.1 was reported as 1.0.0.127. Root cause was an extra
-    /// `to_be_bytes()` round trip on a value (`ipi_addr.s_addr`) that the
-    /// kernel already delivers in network byte order.
-    ///
-    /// This hand-builds a `libc::in_pktinfo` the way the kernel would fill
-    /// it in for a packet destined to 127.0.0.1 — `s_addr`'s raw bytes are
-    /// the octets in wire order — and asserts extraction recovers
-    /// 127.0.0.1 unchanged.
+    /// Model kernel `in_pktinfo` bytes for 127.0.0.1 and verify extraction
+    /// preserves the address instead of reversing it to 1.0.0.127.
     #[test]
     fn ipv4_pktinfo_extraction_preserves_octet_order() {
         let s_addr = u32::from(Ipv4Addr::new(127, 0, 0, 1)).to_be();

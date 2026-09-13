@@ -102,12 +102,8 @@ impl SenderSnmpStats {
         }
     }
 
-    /// Computes loss percentage × 100 from current sent/lost counters.
-    ///
-    /// Computed on read rather than cached to avoid staleness when
-    /// `packets_sent` increases without corresponding loss events.
-    /// SNMP polls are infrequent so the cost (two atomic loads + one division)
-    /// is negligible.
+    /// Computes loss percentage × 100 from current counters on each read,
+    /// so sending new packets cannot leave a cached percentage stale.
     pub fn loss_pct_x100(&self) -> u32 {
         let sent = self.packets_sent.load(Ordering::Relaxed) as u64;
         let lost = self.packets_lost.load(Ordering::Relaxed) as u64;

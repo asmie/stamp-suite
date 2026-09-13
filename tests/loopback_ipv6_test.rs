@@ -1,14 +1,6 @@
-//! TLV-by-TLV IPv6 parity for the reflector pipeline.
-//!
-//! The existing `tests/loopback_test.rs::test_loopback_ipv6` covers the base
-//! unauth round-trip over `[::1]`. This file exercises the higher-value
-//! per-TLV code paths with an IPv6 source address driven directly through
-//! `process_stamp_packet`. We avoid real UDP loopback here so the tests
-//! stay deterministic and CI-fast; the focus is on the address-family
-//! branches inside the reflector logic (Location, Destination Node
-//! Address, Micro-session ID, authenticated-mode HMAC, BER) rather than
-//! the kernel socket plumbing — which is covered separately by the
-//! basic IPv6 loopback test.
+//! IPv6 TLV processing through `process_stamp_packet`: Location, Destination
+//! Node Address, Micro-session ID, HMAC, and BER. Socket-level IPv6 coverage
+//! lives in `loopback_test.rs`.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 

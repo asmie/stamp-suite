@@ -16,27 +16,15 @@
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! ```
 //!
-//! -11 splits the value into a fixed 4-octet **Requested** field and a
-//! **Reflected** field. Critically, `Length` stays 20 (IPv4) / 40 (IPv6) — it
-//! did NOT grow by 4 — so the Reflected field is only 16 / 36 octets and holds
-//! the IP header's bytes **from offset 4 onward**, never a full copy.
+//! Length equals the target IP header size: 20 bytes for IPv4, 40 for IPv6.
+//! Requested occupies the first four bytes; Reflected receives `header[4..]`.
+//! The sender zeroes Reflected and sets Requested to zero or a header-prefix
+//! selector. The reflector preserves Requested. A nonzero selector matches
+//! the header's first four bytes; zero selects the first length match.
 //!
-//! The Session-Sender transmits the TLV with the Requested field set to either
-//! all zeros or a disambiguation selector (the target IP header's first 4
-//! octets) and the Reflected field zero-initialised. The reflector leaves the
-//! Requested field exactly as received and copies `header[4..]` into the
-//! Reflected field. When it cannot use the TLV (length mismatch, no data-plane
-//! access, or no header matches the Requested field) it sets the **C flag**
-//! (Conformance) and leaves the value as received — the pre-11 U-flag failure
-//! signalling is gone.
-//!
-//! Receivers identify IPv4 vs IPv6 by the Version nibble in the first byte
-//! (present only when the sender's Requested selector carried it).
-//!
-//! Per -11 §5.2 a non-zero Requested field (see
-//! [`ReflectedFixedHdrTlv::request_with_selector`]) disambiguates multiple IP
-//! headers of the same length by matching the header's first 4 octets; an
-//! all-zeros Requested field matches the first length-matching IP header.
+//! On missing capture, length mismatch, or selector mismatch, set C and
+//! preserve the value. The Version nibble is available only if Requested
+//! includes it. See [`ReflectedFixedHdrTlv::request_with_selector`].
 
 use std::net::IpAddr;
 
@@ -51,8 +39,7 @@ pub const IPV6_FIXED_HEADER_SIZE: usize = 40;
 /// Reflected Fixed Header Data TLV (Type 247).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReflectedFixedHdrTlv {
-    /// Raw fixed-header bytes (IPv4: 20 octets; IPv6: 40 octets).
-    /// Filled with zeros when sent by the sender as a request.
+    /// Requested selector followed by reflected header bytes; total 20 or 40 octets.
     pub header: Vec<u8>,
 }
 
@@ -65,13 +52,8 @@ impl ReflectedFixedHdrTlv {
         }
     }
 
-    /// Creates a sender request TLV sized for the destination's IP family.
-    ///
-    /// Per draft-ietf-ippm-stamp-ext-hdr-13 §5.2 the sender sets Length to 20
-    /// (IPv4) or 40 (IPv6): the first 4 octets are the all-zeros Requested
-    /// field and the remaining 16 / 36 are the zero-initialised Reflected
-    /// field. Only the address family is consulted; the address bytes are
-    /// unused.
+    /// Creates a zeroed 20-byte (IPv4) or 40-byte (IPv6) request
+    /// from the destination family (draft-ietf-ippm-stamp-ext-hdr-13 §5.2).
     #[must_use]
     pub fn request_for(dest: IpAddr) -> Self {
         let bytes = match dest {

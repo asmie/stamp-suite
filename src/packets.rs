@@ -1,23 +1,13 @@
-//! STAMP packet structures as defined in RFC 8762 and RFC 8972.
-//!
-//! This module contains the packet formats for both authenticated and unauthenticated
-//! STAMP test packets, as well as their reflected counterparts.
-//!
-//! These are in-memory representations. Wire format serialization is handled
-//! explicitly by `to_bytes()` and `from_bytes()` methods with big-endian encoding.
+//! Sender and reflector packet layouts (RFC 8762 and RFC 8972).
+//! `to_bytes()` and `from_bytes()` explicitly encode/decode big-endian wire fields;
+//! the Rust structs are in-memory representations.
 
 use thiserror::Error;
 
 use crate::tlv::{TlvError, TlvList};
 
-/// Largest UDP payload a STAMP endpoint may need to receive in one datagram
-/// (the 16-bit UDP length ceiling; IPv4's practical limit is 65507).
-///
-/// Receive buffers are sized to this rather than a "typical" STAMP packet:
-/// `--extra-padding` legitimately grows test packets to MTU-probing sizes and
-/// reflectors echo them back, and a datagram truncated by a small `recv`
-/// buffer is then rejected as malformed — defeating exactly the measurement
-/// that flag exists for.
+/// Receive-buffer capacity for the 16-bit UDP length limit (IPv4 allows 65507
+/// payload bytes). Accommodates padded probes without datagram truncation.
 pub const MAX_UDP_PAYLOAD: usize = 65535;
 
 /// Errors that can occur during packet parsing or processing.
@@ -260,13 +250,8 @@ pub struct ReflectedPacketUnauthenticated {
     pub sess_sender_timestamp: u64,
     /// Original sender's error estimate (echoed back).
     pub sess_sender_err_estimate: u16,
-    /// Must Be Zero - reserved (2 bytes).
-    ///
-    /// RFC 8972 §3 Figure 2 places the SSID *once* in the reflected packet,
-    /// in the two octets after the reflector's own Error Estimate (`ssid`,
-    /// octets 14-15). The two octets here, following the Session-Sender Error
-    /// Estimate, stay MBZ. Echoing the SSID a second time makes a peer that
-    /// verifies MBZ (RFC 8762 §4.6) discard the whole reply.
+    /// Reserved bytes 38-39; must remain zero (RFC 8762 §4.6).
+    /// The reply SSID appears only at bytes 14-15 (RFC 8972 §3 Figure 2).
     pub mbz2: [u8; 2],
     /// TTL/Hop Limit of the received test packet.
     pub sess_sender_ttl: u8,

@@ -1,30 +1,15 @@
-//! Criterion benches for the reflector hot path.
+//! Reflector hot-path benchmarks through `process_stamp_packet`.
+//! Measures parsing, HMAC, TLV processing, and assembly without UDP/socket costs.
+//! Covers authenticated and unauthenticated packets with no TLVs, one CoS TLV,
+//! or a full measurement chain.
 //!
-//! Drives `process_stamp_packet` end-to-end through the in-process
-//! pipeline (no real UDP) so the benches measure parse + HMAC + TLV
-//! processing + response assembly without the kernel scheduler in the
-//! loop. That isolates the cost we control from socket-level noise; the
-//! integration tests under `tests/loopback*` cover kernel-level correctness.
-//! For live UDP throughput and process CPU measurements, see
+//! ```text
+//! cargo bench --bench reflector_hotpath
+//! cargo bench --bench reflector_hotpath -- unauth_full_chain
+//! ```
+//!
+//! Reports: `target/criterion/`. For live UDP measurements, see
 //! `examples/live_udp_bench.rs` and `doc/benchmarks.md`.
-//!
-//! Benches:
-//! - `unauth_no_tlvs` — baseline 44-byte unauth packet, no TLVs.
-//! - `unauth_one_tlv` — unauth + one CoS TLV (Type 4).
-//! - `unauth_full_chain` — unauth + CoS + Location + Direct Measurement
-//!   + Follow-Up Telemetry + Timestamp Info (typical sender chain).
-//! - `auth_no_tlvs` — baseline 112-byte auth packet with HMAC
-//!   verification.
-//! - `auth_full_chain` — auth + the same TLV chain as the unauth case,
-//!   plus an HMAC TLV at the tail.
-//!
-//! Run all benches:
-//!     cargo bench --bench reflector_hotpath
-//!
-//! Run one:
-//!     cargo bench --bench reflector_hotpath -- unauth_full_chain
-//!
-//! HTML reports land in `target/criterion/`.
 
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

@@ -1,14 +1,5 @@
-//! A role that cannot start must *report* it, so `main` can exit non-zero.
-//!
-//! `dist/systemd/stamp-suite.service` is `Type=simple` with
-//! `Restart=on-failure`: an exit status of 0 tells systemd the process stopped
-//! deliberately and must not be restarted. A reflector that failed to bind, or
-//! failed to load the key its authenticated mode requires, used to return
-//! normally and exit 0 — the unit then silently stayed down, and
-//! `stamp-suite … && echo ok` printed `ok` after a total failure.
-//!
-//! These tests pin the library-level contract that makes the exit status
-//! correct. The graceful-shutdown paths must keep returning `Ok`.
+//! Startup failures must return errors so `main` exits non-zero and supervisors
+//! can restart the process. Graceful shutdown must still return `Ok`.
 
 use clap::Parser;
 use stamp_suite::configuration::Configuration;

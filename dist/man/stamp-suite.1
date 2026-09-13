@@ -13,11 +13,11 @@ Simple Two\-Way Active Measurement Protocol (STAMP)
 Path to a TOML configuration file. Values loaded from the file are used as defaults; command\-line flags and environment variables always override them
 .TP
 \fB\-\-print\-config\-schema\fR
-Print the JSON Schema for the TOML configuration file to stdout and exit. The schema can be fed to validators like the `jsonschema` CLI or used by IDE plugins for autocomplete:
+Print the TOML configuration\*(Aqs JSON Schema to stdout and exit.
 
 `stamp\-suite \-\-print\-config\-schema > stamp\-suite\-config.schema.json`
 
-Then `jsonschema \-i my\-config.toml stamp\-suite\-config.schema.json` (after a TOML→JSON conversion via `taplo`/`yj`).
+Use the schema with an IDE or validator; JSON validators require converting TOML input to JSON first.
 .TP
 \fB\-r\fR, \fB\-\-remote\-addr\fR \fI<REMOTE_ADDR>\fR [default: 0.0.0.0]
 Remote address for Session Reflector
@@ -148,17 +148,15 @@ Error estimate multiplier (0\-255). Default: 1
 Assert the Error Estimate S bit; independent of wire format and Type 3 source
 .TP
 \fB\-\-hmac\-key\fR \fI<HMAC_KEY>\fR
-HMAC key as hex string; at least 32 hex chars (16 bytes) are required.
+HMAC key in hex; requires at least 32 hex chars (16 bytes). 64 hex chars (32 bytes) matches the HMAC\-SHA\-256 output length.
 
-A shorter key is rejected outright, not warned about. 64 hex chars (32 bytes, matching the HMAC\-SHA\-256 output length) is a good default.
-
-Note: a key passed on the command line is visible in `ps` / `/proc/<pid>/cmdline` to other local users, and an env\-var key is visible to anyone who can read the process environment. Prefer `\-\-hmac\-key\-file` in production. The value is held zeroize\-on\-drop and is redacted from debug output (see `SecretString`).
+CLI keys are visible in process arguments; environment keys are visible to users who can read the process environment. Prefer `\-\-hmac\-key\-file` in production. The stored value is zeroized on drop and redacted from `Debug`.
 .TP
 \fB\-\-hmac\-key\-file\fR \fI<HMAC_KEY_FILE>\fR
 Path to file containing HMAC key
 .TP
 \fB\-\-hmac\-key\-dir\fR \fI<HMAC_KEY_DIR>\fR
-Path to a directory of per\-SSID HMAC key files. Each file\*(Aqs name (minus extension) is interpreted as the SSID in hex; a file named `default.key` becomes the fallback for unknown SSIDs. Mutually exclusive with `\-\-hmac\-key` and `\-\-hmac\-key\-file`. Lets a single reflector serve multiple senders without sharing a key, and enables key rotation by re\-running with a new directory
+Directory of per\-SSID HMAC keys. File stems are hexadecimal SSIDs; `default.key` supplies the fallback. Conflicts with `\-\-hmac\-key` and `\-\-hmac\-key\-file`. Restart with updated files to rotate keys
 .TP
 \fB\-\-require\-hmac\fR
 Require HMAC key to be configured (error if missing in auth mode). Note: When an HMAC key is present, verification is always mandatory per RFC 8762 §4.4
@@ -189,11 +187,7 @@ Provision an exact session; repeat for each tuple/SSID/member. SSID 0 selects a 
 Session timeout in seconds for reflector runtime state. Sessions inactive for this duration may be cleaned up. Default: 300 (5 minutes). Set to 0 to disable
 .TP
 \fB\-\-allowed\-dscp\fR \fI<SPEC>\fR [default: all]
-DSCP codepoints the reflector may apply to a reply when a Class of Service TLV requests them (RFC 8972 §4.4/§6, cos\-ecn\-01 §3.2).
-
-`all` (default), `none`, or a comma\-separated list of values and inclusive ranges: `0,8,10\-14,46`. A refused DSCP1 is not applied; the reply keeps the received DSCP and the echoed TLV reports RPD=0b01.
-
-This is the *permitted* check the RFC asks for. Whether the value can actually be set — *capable* — remains a separate question answered by the socket, and a request must clear both.
+DSCP codepoints permitted on reflector replies (RFC 8972 §4.4/§6, cos\-ecn\-01 §3.2): `all` (default), `none`, or values and inclusive ranges such as `0,8,10\-14,46`. Rejected DSCP1 requests retain the received DSCP and report RPD=0b01. Permitted values still require socket support.
 
 Reflector\-side only.
 .TP
@@ -205,9 +199,7 @@ ECN codepoints the reflector may apply to a reply\*(Aqs IP header when a Class o
 Reflector\-side only.
 .TP
 \fB\-\-allowed\-dscp\-for\fR \fI<PREFIX/LEN=SPEC>\fR
-Destination\-scoped DSCP policy, overriding `\-\-allowed\-dscp` for replies addressed inside a prefix: `PREFIX/LEN=SPEC`, e.g. `\-\-allowed\-dscp\-for 192.0.2.0/24=0,46`.
-
-Repeatable. The most specific matching prefix wins regardless of the order given, and a matching rule *replaces* the global set rather than adding to it. cos\-ecn\-01 §3.2 names exactly this shape: "a policy ... configured for specific destination addresses or networks".
+Destination DSCP policy overriding `\-\-allowed\-dscp` (cos\-ecn\-01 §3.2). Repeatable `PREFIX/LEN=SPEC`, e.g. `\-\-allowed\-dscp\-for 192.0.2.0/24=0,46`. The longest matching prefix replaces the global set, regardless of order.
 
 Reflector\-side only.
 .TP
@@ -219,9 +211,7 @@ Non\-monotonic Type\-12 requests always receive a single U\-flagged reply after 
 Reflector\-side only.
 .TP
 \fB\-\-location\-disclose\fR \fI<FIELDS>\fR [default: all]
-Which Location TLV fields the reflector may report (RFC 8972 §4.2.2).
-
-§4.2.2 lets a reflector "leave some fields unreported by filling them with zeroes" under local policy, and requires an implementation to provide control over that policy. Comma\-separated: `all` (default), `none`, or any of `src\-port`, `dst\-port`, `ports`, `src\-ip`, `dst\-ip`, `ips`. A withheld field is answered as zeroes, so the reply\*(Aqs size and TLV structure are unchanged.
+Location TLV fields the reflector may report (RFC 8972 §4.2.2). Comma\-separated: `all` (default), `none`, or `src\-port`, `dst\-port`, `ports`, `src\-ip`, `dst\-ip`, `ips`. Withheld fields are zeroed without changing the TLV length or structure.
 
 Reflector\-side only; ignored by the sender.
 .TP
@@ -275,7 +265,7 @@ DSCP value to request for reflected packets (0\-63). Only used when \-\-cos is e
 ECN value to request for reflected packets (0\-3). Only used when \-\-cos is enabled. 0=Not\-ECT, 1=ECT(1), 2=ECT(0), 3=CE (Congestion Experienced)
 .TP
 \fB\-\-ecn\-backoff\-factor\fR \fI<ECN_BACKOFF_FACTOR>\fR [default: 2]
-Multiplicative backoff factor for the AIMD congestion\-response controller (draft\-ietf\-ippm\-stamp\-cos\-ecn\-01 §3.4): each time a CE\-marked reply is observed, the send interval is multiplied by this factor (capped at `\-\-ecn\-max\-delay`). Must be > 1.0. Active only when `\-\-cos` is set and `\-\-ecn` requests ECT0 (2) or ECT1 (1) — see `\-\-ecn\-max\-delay` / `\-\-ecn\-recovery\-step` for the other two AIMD parameters
+Multiply the send interval by this factor on each CE\-marked reply, capped at `\-\-ecn\-max\-delay` (draft\-ietf\-ippm\-stamp\-cos\-ecn\-01 §3.4). Must exceed 1.0. Active with `\-\-cos` and `\-\-ecn` ECT0 (2) or ECT1 (1). See `\-\-ecn\-recovery\-step` for recovery pacing
 .TP
 \fB\-\-ecn\-max\-delay\fR \fI<ECN_MAX_DELAY>\fR [default: 30000]
 Upper bound (milliseconds) on the AIMD\-controlled send interval — caps how far repeated CE observations can back the sender off (draft\-ietf\-ippm\-stamp\-cos\-ecn\-01 §3.4). Must be >= `\-\-send\-delay` when the controller is active
@@ -300,16 +290,16 @@ bad\-length: A TLV whose Length field far exceeds the bytes actually present, so
 .RE
 .TP
 \fB\-\-access\-report\fR \fI<ACCESS_REPORT>\fR
-Enable Access Report TLV (RFC 8972 §4.6) with the given Access ID (1\-15; the field is 4 bits wide). Only 1 (3GPP Network) and 2 (Non\-3GPP Network) are currently defined; 0 is never valid and is rejected. Values 3\-15 are accepted (the field may gain further definitions) but log a startup warning since they are not yet a recognized Access ID. The reflector echoes this TLV unchanged
+Enable Access Report TLV with Access ID 1\-15 (RFC 8972 §4.6). IDs 1 (3GPP Network) and 2 (Non\-3GPP Network) are defined; 3\-15 are accepted with a startup warning. Zero is rejected. The reflector echoes valid reports unchanged
 .TP
 \fB\-\-access\-return\-code\fR \fI<ACCESS_RETURN_CODE>\fR [default: 1]
 Return code for Access Report TLV (default: 1 = available). Only used when \-\-access\-report is enabled
 .TP
 \fB\-\-access\-report\-timeout\fR \fI<ACCESS_REPORT_TIMEOUT>\fR [default: 3]
-Access Report TLV retransmission timer, in seconds (RFC 8972 §4.6: "The default value of the retransmission timer for the Access Report TLV SHOULD be three seconds"). The sender arms this timer after sending a packet carrying the Access Report TLV and retransmits it in the next test packet(s) if the timer expires before the reflector\*(Aqs echo is received. Only used when \-\-access\-report is enabled
+Access Report retransmission timeout in seconds (RFC 8972 §4.6; default 3). Armed after sending the TLV and disarmed on its reflected echo. Expiry triggers retransmission. Requires `\-\-access\-report`
 .TP
 \fB\-\-access\-report\-retries\fR \fI<ACCESS_REPORT_RETRIES>\fR [default: 4]
-Maximum number of Access Report TLV retransmissions before the procedure is aborted (RFC 8972 §4.6: "This retransmission SHOULD be repeated up to four times before the procedure is aborted"). 0 disables retransmission: the procedure aborts on the first missed acknowledgment. Only used when \-\-access\-report is enabled
+Maximum Access Report retransmissions (RFC 8972 §4.6; default 4). Zero aborts on the first missed acknowledgment without retransmitting. Requires `\-\-access\-report`
 .TP
 \fB\-\-timestamp\-info\fR
 Enable Timestamp Information TLV (RFC 8972 §4.3). The sender requests the reflector\*(Aqs synchronization sources and timestamp methods using zeroed information fields; the reflector fills in its values
@@ -339,9 +329,7 @@ Address to bind the control\-plane HTTP server. Keep this on loopback unless net
 Path to a file containing a static bearer token. When set, every control\-plane request must carry `Authorization: Bearer <token>`
 .TP
 \fB\-\-control\-tls\-cert\fR \fI<PATH>\fR
-PEM certificate chain for the control\-plane API. Serves HTTPS instead of HTTP; requires `\-\-control\-tls\-key`.
-
-A bearer token is mandatory alongside TLS: TLS is what makes exposing this API beyond loopback plausible, and an unauthenticated key\-management and shutdown endpoint is not something to expose, encrypted or not.
+PEM certificate chain for the control API. Enables HTTPS and requires `\-\-control\-tls\-key` and a bearer token for session/key management and shutdown
 .TP
 \fB\-\-control\-tls\-key\fR \fI<PATH>\fR
 PEM private key matching `\-\-control\-tls\-cert`
@@ -375,7 +363,7 @@ json: Structured JSON, one event per line. Suitable for ingestion by log shipper
 .RE
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
-Increase log verbosity (\-v debug, \-vv trace); RUST_LOG overrides. Repeatable: absent keeps the current default (`RUST_LOG` if set, otherwise `info`), one `\-v` raises it to `debug`, two or more (`\-vv`, `\-vvv`, ...) raise it to `trace`. An explicit `RUST_LOG` environment variable always wins over `\-v`, at any count \-\- see `resolve_log_filter`
+Increase log verbosity: `\-v` for debug, `\-vv` or more for trace. Defaults to info. A non\-empty `RUST_LOG` overrides this flag
 .TP
 \fB\-\-hwtstamp\fR \fI<HWTSTAMP>\fR [default: auto]
 Kernel/hardware timestamp handling (requires the "hwtstamp" build feature for the read paths). `auto` (default): kernel software timestamps — precise T2/T4 and error\-queue TX correction on Linux, SO_TIMESTAMP receive timestamps on macOS; no privileges, no NIC changes. `on`: additionally attempt NIC hardware timestamping (SIOCSHWTSTAMP + raw\-hardware tier; needs CAP_NET_ADMIN and a synchronized PHC), warning + software fallback when unavailable. `off`: userspace timestamps only
@@ -441,14 +429,10 @@ Maximum number of tracked session identities (0 = unlimited). Sessions use both 
 Enable the BER TLVs (draft\-gandhi\-ippm\-stamp\-ber\-07): Bit Pattern in Padding (Type 240), Bit Error Count (Type 241), and Max Bit Error Burst Size (Type 242). Sender\-side only; the reflector computes the counts against the incoming Extra Padding
 .TP
 \fB\-\-extra\-padding\fR \fI<BYTES>\fR
-Append an Extra Padding TLV of this many value octets to every test packet (RFC 8972 §4.1), independent of `\-\-ber`.
-
-Filled with pseudorandom bytes as §4.2 recommends. Use this to grow test packets for MTU or fragmentation work without turning on BER measurement, which needs a known pattern instead and owns the padding TLV when it is enabled.
+Append an Extra Padding TLV with this many value octets (RFC 8972 §4.1). Uses pseudorandom bytes as §4.2 recommends, for MTU or fragmentation tests. With `\-\-ber`, BER measurement supplies the padding and its known pattern
 .TP
 \fB\-\-ber\-omit\-burst\fR
-Omit the Max Bit Error Burst Size TLV (Type 242) from `\-\-ber` packets.
-
-Type 242 sits in the Experimental Use range (RFC 8972 §5.1) and is used independently, with an incompatible wire format, by another STAMP implementation\*(Aqs "Heartbeat" TLV. Against such a peer that TLV is misparsed, so this omits it while keeping the rest of the BER exchange intact. Ignored unless `\-\-ber` is set.
+Omit Max Bit Error Burst Size TLV (Type 242) from `\-\-ber` packets. This experimental codepoint (RFC 8972 §5.1) conflicts with another implementation\*(Aqs incompatible Heartbeat TLV. Other BER TLVs are unchanged. Ignored unless `\-\-ber` is set
 .TP
 \fB\-\-tlv\-hmac\fR \fI<MODE>\fR [default: auto]
 Whether the sender originates an HMAC TLV (RFC 8972 §4.8): `auto` (default, originate when a key is configured), `on` (always; requires a key), `off` (never, even with a key)
@@ -493,9 +477,9 @@ Inter\-packet gap in nanoseconds for the Reflected Test Packet Control TLV. Igno
 Append the IPv6 Extension Header Control sub\-TLV (draft\-ietf\-ippm\-stamp\-ext\-hdr\-13 §5.3) to the Reflected Test Packet Control TLV. Under \-11 this sub\-TLV asks the reflector to add matching IPv6 extension headers to its own reply packets; a reflector that cannot do so returns the sub\-TLV with the C flag set in its Sub\-TLV Flags. Implies emitting the Reflected Control TLV even when `\-\-reflected\-control\-count` is 1
 .TP
 \fB\-\-reflected\-control\-max\-count\fR \fI<REFLECTED_CONTROL_MAX_COUNT>\fR [default: 0]
-Reflector\-side amplification cap (the per\-request *volume* limit of draft\-ietf\-ippm\-asymmetrical\-pkts\-14 §3): maximum number of reply packets the reflector will emit in response to a single Reflected Test Packet Control TLV request. When the sender requests more, the reflector sends a single reflected packet with the C flag set on the echoed TLV, as the draft requires.
+Maximum replies per Reflected Test Packet Control request (draft\-ietf\-ippm\-asymmetrical\-pkts\-14 §3). Requests above the cap receive one C\-flagged reply.
 
-Default 0, which **disables** asymmetric reflection — the reflector sends only the single normal reply and sets the C flag. This honours draft\-ietf\-ippm\-asymmetrical\-pkts\-14 §5, which requires the feature be administratively controllable and disabled by default. Set a positive value to opt in (e.g. 16); pair with `\-\-max\-pps` to bound amplification.
+Default 0 disables asymmetric reflection (§5): one normal reply with C set. Set a positive cap (e.g. 16) to enable it; pair with `\-\-max\-pps` to limit amplification.
 .TP
 \fB\-\-reflected\-control\-max\-size\fR \fI<REFLECTED_CONTROL_MAX_SIZE>\fR [default: 1500]
 Reflector\-side amplification cap for draft\-ietf\-ippm\-asymmetrical\-pkts\-14 §3: maximum reply packet size (in bytes) the reflector will pad up to when honouring a Reflected Test Packet Control TLV `length` request. When the requested length exceeds the effective cap, a single reflected packet padded to it is sent with the C flag set on the echoed TLV.

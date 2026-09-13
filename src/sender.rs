@@ -80,15 +80,9 @@ struct SenderRecvContext<'a> {
     /// must equal it — validating the reflector's behaviour; a mismatching reply
     /// is discarded. `None` means the reflector ID is not pre-known.
     expected_reflector_msid: Option<u16>,
-    /// Zero-config latch for the Reflector Micro-session ID (RFC 9534
-    /// §3.2-11, unconditional requirement). When `expected_reflector_msid` is
-    /// `None` (no pre-known value configured), the first validly-received
-    /// reply's Reflector Micro-session ID is latched here and becomes the
-    /// expected value for the remainder of the session — subsequent replies
-    /// with a different reflector ID are discarded via the same
-    /// `ReflectorMsidMismatch` path used for the pre-known case. Persists
-    /// across `process_response` calls for the life of the sender session
-    /// (mirrors `pending`/`rtt_collector` below, not reset per packet).
+    /// Reflector Micro-session ID learned from the first accepted reply when
+    /// no expected ID is configured (RFC 9534 §3.2-11). Later mismatches are
+    /// rejected. Retained for the sender session.
     latched_reflector_msid: &'a mut Option<u16>,
     /// Access Report TLV retransmission state (RFC 8972 §4.6). `Some` only
     /// when `--access-report` was set; `process_response` disarms its timer
@@ -132,26 +126,11 @@ pub(crate) const DEFAULT_ACCESS_REPORT_TIMEOUT: Duration = Duration::from_secs(3
 /// `--access-report-retries` CLI default (`configuration.rs`).
 pub(crate) const DEFAULT_ACCESS_REPORT_RETRIES: u32 = 4;
 
-/// Retransmission state machine for the Access Report TLV (RFC 8972 §4.6).
+/// Access Report retransmission state (RFC 8972 §4.6).
 ///
-/// Pure and socket-free: the sender's existing send/receive loop drives it
-/// with the `Instant` values it already has to hand via [`Self::tick`] (when
-/// deciding whether to attach the TLV to the packet about to be sent) and
-/// [`Self::acknowledge`] (when a reflected packet echoing the TLV is
-/// received). No timers, threads, or async machinery of its own — this is
-/// what makes it unit-testable without sockets or real waiting (`Instant`
-/// arithmetic is deterministic; tests advance time by adding a `Duration`
-/// rather than sleeping).
-///
-/// State machine, verbatim from RFC 8972 §4.6:
-/// > The Session-Sender MUST also arm a retransmission timer after sending
-/// > a test packet that includes the Access Report TLV. This timer MUST be
-/// > disarmed upon reception of the reflected STAMP test packet that
-/// > includes the Access Report TLV. In the event the timer expires before
-/// > such a packet is received, the Session-Sender MUST retransmit the
-/// > STAMP test packet that contains the Access Report TLV. This
-/// > retransmission SHOULD be repeated up to four times before the
-/// > procedure is aborted.
+/// The send loop supplies time to [`Self::tick`] and calls [`Self::acknowledge`]
+/// on a valid echo. Expiry requests a retransmission until the retry limit;
+/// acknowledgment disarms the timer. No separate task or timer is needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AccessReportRetransmitState {
     timeout: Duration,
@@ -192,16 +171,9 @@ impl AccessReportRetransmitState {
         }
     }
 
-    /// Drives the state machine forward by one send-loop iteration. Call
-    /// this once per iteration, before deciding whether to build that
-    /// iteration's outgoing packet with the Access Report TLV attached.
-    ///
-    /// Returns `true` exactly when the TLV should be attached to *this*
-    /// packet: either the very first send, or a retransmission because the
-    /// timer expired without an acknowledgment. Returns `false` while
-    /// waiting on an armed timer that has not yet expired, and once the
-    /// procedure has been `Acknowledged` or `Aborted` (nothing further is
-    /// ever sent again).
+    /// Advances retransmission state before each send-loop iteration.
+    /// Returns `true` for the initial send or an expired retry; `false` while
+    /// waiting or after acknowledgment/abort.
     fn tick(&mut self, now: Instant) -> bool {
         match self.phase {
             AccessReportPhase::NotStarted => {
@@ -230,11 +202,8 @@ impl AccessReportRetransmitState {
         }
     }
 
-    /// Disarms the retransmission timer on reception of a reflected packet
-    /// that echoes the Access Report TLV (RFC 8972 §4.6). A no-op unless
-    /// currently `Armed` — in particular, an ack cannot resurrect an already
-    /// `Aborted` procedure, and one arriving before anything was ever sent
-    /// (should not happen) is ignored rather than mis-recorded.
+    /// Disarms an armed timer on a reflected Access Report echo (RFC 8972 §4.6).
+    /// Other states are unchanged.
     fn acknowledge(&mut self) {
         if matches!(self.phase, AccessReportPhase::Armed { .. }) {
             self.phase = AccessReportPhase::Acknowledged;
@@ -260,20 +229,14 @@ impl AccessReportRetransmitState {
         self.retransmissions
     }
 
-    /// `true` once the original send has happened (the machine left
-    /// `NotStarted`). The sender's post-loop retransmission wait only
-    /// applies to a procedure the main loop actually started — with
-    /// `--count 0` nothing was ever sent, and the wait must not originate
-    /// packets on its own.
+    /// Whether the original report was sent. Prevents the post-loop wait from
+    /// starting an exchange when `--count 0` sent nothing.
     fn has_started(&self) -> bool {
         !matches!(self.phase, AccessReportPhase::NotStarted)
     }
 
-    /// `true` once the procedure has reached a terminal state
-    /// (`Acknowledged` or `Aborted`) — nothing further will ever be sent or
-    /// waited for. Used by the sender's post-loop wait phase to know when
-    /// it can stop keeping the session alive on this state machine's
-    /// account (RFC 8972 §4.6).
+    /// Whether the procedure is acknowledged or aborted, ending its wait
+    /// and retransmission work (RFC 8972 §4.6).
     fn is_terminal(&self) -> bool {
         matches!(
             self.phase,
@@ -303,19 +266,9 @@ impl AccessReportRetransmitState {
     }
 }
 
-/// Congestion-response state driven by CE observations on reflected
-/// packets, per draft-ietf-ippm-stamp-cos-ecn-01 §3.4. `Some` only when the
-/// sender requested ECN measurement (`--cos` with `--ecn` requesting ECT0
-/// or ECT1) — the contexts in which reflected/reply CE feedback is
-/// meaningful, per the draft §3.4 activation conditions quoted on
-/// [`AimdController`].
-///
-/// Whether the same controller also scales the Reflected Test Packet
-/// Control TLV's interval (§3.4-3) is tracked separately by the send
-/// loop's own `scale_reflected_control` local — it needs to be known
-/// before this state exists (to decide whether the static TLV push at
-/// startup should be skipped), so duplicating it as a field here would
-/// just be a second, easily-desynced copy of the same bit.
+/// CE-driven congestion state (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+/// Active with `--cos` and ECT0/ECT1. The send loop separately tracks
+/// `scale_reflected_control` because TLV construction needs it before this state.
 struct CongestionState {
     controller: AimdController,
 }
@@ -523,17 +476,11 @@ fn enforce_egress_mtu(extra_tlvs: &mut Vec<RawTlv>, mtu: usize, fixed_overhead: 
     }
 }
 
-/// Enables `IP_RECVTOS` / `IPV6_RECVTCLASS` on the sender socket so a
-/// reply's on-wire ECN bits can be read back via `recvmsg` control
-/// messages — the reverse-path (reflector→sender) half of the congestion
-/// detection required by draft-ietf-ippm-stamp-cos-ecn-01 §3.4. Mirrors the
-/// receiver's own `IP_RECVTOS`/`IPV6_RECVTCLASS` setup
-/// (`receiver::nix::run_receiver`).
+/// Enables `IP_RECVTOS` / `IPV6_RECVTCLASS` for reverse-path CE detection
+/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
 ///
-/// Best-effort: TOS reception is optional plumbing (see
-/// [`extract_reply_ecn_from_cmsgs`]), so a failure here only disables the
-/// reverse-path half of the congestion response — forward-path detection
-/// via the validated CoS TLV's EC2 field is unaffected either way.
+/// Failure disables reverse-path feedback; validated CoS EC2 feedback still works.
+/// See [`extract_reply_ecn_from_cmsgs`].
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn enable_reply_tos_reception(fd: std::os::fd::RawFd, is_ipv6: bool) -> std::io::Result<()> {
     use nix::libc;
@@ -563,14 +510,9 @@ fn enable_reply_tos_reception(fd: std::os::fd::RawFd, is_ipv6: bool) -> std::io:
     }
 }
 
-/// Extracts the on-wire TOS (IPv4) / Traffic Class (IPv6) byte from
-/// `recvmsg` control messages for a reply packet — the low 2 bits are the
-/// ECN codepoint a CE (0b11) value here signals reverse-path
-/// (reflector→sender) congestion, per draft-ietf-ippm-stamp-cos-ecn-01
-/// §3.4. Requires [`enable_reply_tos_reception`] to have been called on the
-/// socket first. Mirrors `receiver::nix::extract_tos_from_cmsgs` (Linux
-/// variant: `nix` exposes typed `ControlMessageOwned::Ipv4Tos`/`Ipv6TClass`
-/// cmsgs directly).
+/// Extracts reply ECN from `recvmsg` metadata. CE (0b11) indicates reverse-path
+/// congestion (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+/// Requires [`enable_reply_tos_reception`] on the socket.
 #[cfg(target_os = "linux")]
 fn extract_reply_ecn_from_cmsgs(
     msg: &nix::sys::socket::RecvMsg<nix::sys::socket::SockaddrStorage>,
@@ -681,13 +623,8 @@ pub async fn run_sender_with_output(
     let local_addr: SocketAddr = conf.local_socket_addr();
     let remote_addr: SocketAddr = conf.remote_socket_addr();
 
-    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: the AIMD congestion-response
-    // controller is active exactly when the sender requests ECN
-    // measurement — `--cos` with `--ecn` requesting ECT0 (2) or ECT1 (1).
-    // This single condition covers both directions the draft's MUSTs bind:
-    // the same `conf.ecn` value both marks the egress IP header (§3.4-1's
-    // "ECN field of the IP header") and becomes the CoS TLV's EC1 request
-    // field (§3.4-2/-3's "EC1 field").
+    // Enable AIMD for `--cos` with ECT0/ECT1 (cos-ecn-01 §3.4).
+    // `conf.ecn` sets both the egress ECN and the requested reply EC1.
     let ecn_response_active = conf.cos && matches!(conf.ecn, 1 | 2);
 
     let std_socket = match crate::net_policy::bind_sender(local_addr, remote_addr) {
@@ -966,28 +903,19 @@ pub async fn run_sender_with_output(
     // `--reflector-member-link-id` was not given; persists for the whole
     // session so later replies are checked for self-consistency.
     let mut latched_reflector_msid: Option<u16> = None;
-    // Sized for the largest possible UDP payload, not a "typical" STAMP
-    // packet: --extra-padding legitimately grows test packets to MTU-probing
-    // sizes (and reflectors echo them back), and a reply truncated by a
-    // too-small buffer would be rejected as malformed, defeating exactly the
-    // measurements that flag exists for. Heap-allocated once per run.
+    // Allow the maximum UDP payload so padded replies are not truncated.
+    // Allocate once per run.
     let mut recv_buf = vec![0u8; MAX_UDP_PAYLOAD];
     let timeout = Duration::from_secs(conf.timeout as u64);
 
-    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3: when the Reflected Test
-    // Packet Control TLV is also requested, its interval is scaled by the
-    // same AIMD controller — computed before the TLV-building section
-    // below so that section knows to skip its own (static) push and defer
-    // to the per-iteration scaled rebuild in the send loop instead.
+    // Scale Type-12 intervals with AIMD (cos-ecn-01 §3.4-3).
+    // Skip the static TLV when scaling is active; rebuild it on each send.
     let reflected_control_requested =
         conf.reflected_control_count > 1 || conf.reflected_control_no_ext_hdr;
     let scale_reflected_control = ecn_response_active && reflected_control_requested;
 
-    // draft-ietf-ippm-asymmetrical-pkts-14 §5: warn when the sender's own
-    // pacing would start the next Type-12 request before the reflector is
-    // expected to finish the previous burst. Advisory (SHOULD NOT), and
-    // eprintln! rather than log::warn! so it is visible regardless of the
-    // logging configuration — this fires once, at startup.
+    // Warn once about overlapping bursts (asymmetrical-pkts-14 §5).
+    // Use stderr so the advisory is visible regardless of log filtering.
     if let Some(warning) = conf.reflected_burst_pacing_warning() {
         eprintln!("Warning: {warning}");
     }
@@ -1032,12 +960,8 @@ pub async fn run_sender_with_output(
         );
     }
 
-    // RFC 8972 §4.6: the Access Report TLV is event-driven and carries its
-    // own retransmission procedure, so (unlike the other extra TLVs above)
-    // it is NOT attached unconditionally to every packet here. Instead
-    // `access_report_state` decides, per send-loop iteration, whether this
-    // iteration's packet is the original send or a timed-out retransmission
-    // (see `AccessReportRetransmitState::tick`, used in the loop below).
+    // Access Reports are event-driven (RFC 8972 §4.6).
+    // `tick` attaches the initial report and retries; omit it from static TLVs.
     let mut access_report_state = conf.access_report.map(|access_id| {
         log::info!(
             "Access Report TLV enabled (id={}, code={}); retransmission timer={}s, \
@@ -1380,12 +1304,8 @@ pub async fn run_sender_with_output(
         let send_time = Instant::now();
         let send_timestamp = generate_timestamp(conf.clock_source);
 
-        // RFC 8972 §4.6: decide, for *this* iteration only, whether the
-        // Access Report TLV should be attached — the original send, or a
-        // retransmission because the previous attempt's timer expired
-        // without an acknowledgment. `tick` also drives the retry bookkeeping
-        // forward (armed/retransmit/abort), piggybacking on this loop's
-        // existing send timing instead of a separate timer/task.
+        // Advance Access Report state and attach the initial report or an
+        // expired retry (RFC 8972 §4.6).
         let attach_access_report = access_report_state
             .as_mut()
             .map(|state| state.tick(send_time))
@@ -1521,12 +1441,8 @@ pub async fn run_sender_with_output(
             expiry_queue.push_back((send_time + timeout, seq_num));
         }
 
-        // Event-driven receive: process responses until send_delay expires.
-        // When the AIMD congestion-response controller is active
-        // (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) it — not the static
-        // `--send-delay` — dictates this iteration's wait, having grown
-        // (CE backoff) or shrunk-toward-base (clean recovery) from replies
-        // processed on prior iterations.
+        // Receive until the next send deadline. AIMD supplies the interval when
+        // active (cos-ecn-01 §3.4), including feedback from earlier iterations.
         let send_delay = congestion
             .as_ref()
             .map(|c| c.controller.current_interval())
@@ -1677,14 +1593,8 @@ pub async fn run_sender_with_output(
         m.idle();
     }
 
-    // Final wait phase for remaining responses. Ends as soon as the
-    // zeroed-SSID policy stops the session — there is nothing left to
-    // measure and the pending entries belong to the abandoned run. The
-    // check is a closure over the LIVE flag rather than a snapshot taken
-    // here: the first zeroed-SSID reply may arrive during these waits
-    // (`process_response` sets it via `SenderRecvContext`), and a stale
-    // boolean would keep waiting until timeout and keep retransmitting
-    // Access Reports despite `--on-zero-ssid=stop`.
+    // Wait for remaining replies, checking the live zeroed-SSID stop flag.
+    // A stop reply can arrive during this phase and must also end retries.
     let stopped_on_zero_ssid = |seen: bool| seen && conf.on_zero_ssid == ZeroSsidAction::Stop;
     let wait_start = Instant::now();
     while !stopped_on_zero_ssid(zero_ssid_seen)
@@ -1759,27 +1669,10 @@ pub async fn run_sender_with_output(
         }
     }
 
-    // RFC 8972 §4.6: the retransmission timer must keep firing even once
-    // the main send loop and the plain per-packet wait above have both
-    // finished — otherwise a run shorter than the full retry budget
-    // (`access_report_timeout * (1 + retries)`, up to 15s at the RFC
-    // defaults) reports `Pending` without ever retransmitting (the common
-    // `--count 1` case). Extend the wait here: `tick()` on schedule,
-    // retransmit a real STAMP test packet — carrying the same Access
-    // Report TLV bytes every attempt (see the wire-equality regression
-    // test) — when the timer fires, and keep servicing `process_response`
-    // so an ack arriving mid-wait still disarms the timer via the existing
-    // "AccessReport:ack" scan (no new consumption path). `tick()`'s own
-    // retry-budget bookkeeping bounds this loop to at most
-    // `access_report_timeout * (1 + max_retries)` from when the report was
-    // first armed, so a dead reflector cannot hang the sender past that.
-    // A no-op entirely when `--access-report` was not set
-    // (`access_report_state` is `None`), so the wait phase above is
-    // byte-identical to before in that case.
-    // Guarded on `has_started()`: with `--count 0` the main loop never sent
-    // anything and the state machine is still `NotStarted` — this wait must
-    // not originate an Access Report exchange the operator asked to have
-    // zero packets for.
+    // Continue Access Report retries after the main loop (RFC 8972 §4.6),
+    // including `--count 1` runs. Keep receiving so an echo disarms the timer.
+    // `tick` bounds retries; each retransmission carries identical report bytes.
+    // Only continue an exchange the main loop started (`--count 0` starts none).
     while !stopped_on_zero_ssid(zero_ssid_seen)
         && access_report_state
             .as_ref()
@@ -1796,11 +1689,8 @@ pub async fn run_sender_with_output(
 
         if attach {
             prepare_header_requests(&mut extra_tlvs)?;
-            // An ordinary test packet: the same extra-TLV set the main loop
-            // uses, optionally Direct Measurement, and (always, since
-            // `attach` is true) the Access Report TLV — built fresh from
-            // the same `access_id`/`access_return_code` every time, so its
-            // wire bytes are identical across every attempt.
+            // Rebuild the test packet with the same Access ID and Return Code
+            // so the report's wire bytes are identical on every retry.
             let seq_num = sess.generate_sequence_number();
             let send_time = Instant::now();
             let send_timestamp = generate_timestamp(conf.clock_source);
@@ -1817,11 +1707,8 @@ pub async fn run_sender_with_output(
             );
             tlvs.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
             if scale_reflected_control {
-                // A retransmission is one of §3.4-3's "future STAMP packets",
-                // and `extra_tlvs` omits the control TLV in this mode (the
-                // main loop rebuilds it per send). Rebuild it here too, with
-                // whatever AIMD factor the controller holds now, so the TLV
-                // does not vanish from every retry.
+                // Retries must also carry the scaled control TLV (§3.4-3).
+                // It is absent from `extra_tlvs`, so rebuild it with the current AIMD factor.
                 let scale = congestion
                     .as_ref()
                     .map(|c| c.controller.scale_factor())
@@ -2439,17 +2326,9 @@ fn process_response(
         }
     }
 
-    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: observe CE from either the
-    // reflected EC2 field (forward-path, sender→reflector, §3.4-1) or the
-    // reply packet's own on-wire ECN (reverse-path, reflector→sender,
-    // §3.4-2/-3), and drive the AIMD congestion-response controller.
-    // Independent of whether this reply matched a `pending` entry — like
-    // the Access Report ack above, this is about the congestion signal
-    // carried by the reply, not this particular RTT sample. The forward-path
-    // signal comes from the validated `forward_ce` field, so failed or
-    // unavailable TLV integrity cannot force a spurious backoff. The reverse
-    // signal is the reply's mutable IP header ECN, which has no TLV integrity,
-    // like the reflector's treatment of the incoming test packet's ECN.
+    // Apply CE feedback from validated forward EC2 or the reply's IP ECN
+    // (cos-ecn-01 §3.4). Reverse ECN is mutable IP metadata outside TLV integrity.
+    // Congestion feedback does not require a pending RTT sample.
     if let Some(state) = ctx.congestion.as_mut() {
         let forward_ce = telemetry.as_ref().is_some_and(|info| info.forward_ce);
         let reverse_ce = reply_ecn == Some(0b11);
@@ -2563,15 +2442,8 @@ enum TlvRejection {
     /// mismatch means the response belongs to a different session, a stale
     /// packet, or a spoofed reply.
     MsidMismatch { got: u16, expected: u16 },
-    /// Reflected Reflector Micro-session ID did not match the expected value
-    /// (RFC 9534 §3.2-11/-12, an unconditional requirement). `expected` is
-    /// either the pre-known reflector member-link identifier
-    /// (`--reflector-member-link-id`) or, when that is not configured, the
-    /// value latched from the first validly-received reply of the session
-    /// (zero-config self-consistency check). Validating the reflector's
-    /// behaviour: a changed value flags an anomaly (e.g. a mid-session LAG
-    /// rehash moving the flow to a different member link), and the reply
-    /// MUST be discarded.
+    /// Reflector ID differs from the configured or first accepted value
+    /// (RFC 9534 §3.2-11/-12). Discard the reply.
     ReflectorMsidMismatch { got: u16, expected: u16 },
     /// Reflected Micro-session ID TLV could not be parsed. Since the TLV
     /// carries the session binding, we cannot attribute the response to this
@@ -2605,13 +2477,8 @@ impl std::fmt::Display for TlvRejection {
     }
 }
 
-/// Builds the outgoing Micro-session ID TLV (RFC 9534 §3.1/§3.2).
-///
-/// The Sender Micro-session ID always carries the sender's own member-link
-/// identifier. Per RFC 9534 §3.2-3, "If the Session-Sender knows the Reflector
-/// member link identifier, the Reflector Micro-session ID field MUST be set" —
-/// so when `reflector_id` is `Some`, it is written into the Reflector
-/// Micro-session ID field; otherwise (§3.2-4) that field is left zero.
+/// Builds a Micro-session ID TLV with the sender's member-link ID.
+/// Writes the known `reflector_id`, or zero when unknown (RFC 9534 §3.2-3/-4).
 fn micro_session_request_tlv(sender_id: u16, reflector_id: Option<u16>) -> RawTlv {
     MicroSessionIdTlv::new(sender_id, reflector_id.unwrap_or(0)).to_raw()
 }
@@ -2704,13 +2571,8 @@ fn validate_reflected_tlvs(
                 continue; // §4-17: U flag skips this TLV.
             }
             if track_access_report && raw.tlv_type == crate::tlv::TlvType::AccessReport {
-                // RFC 8972 §4.6: "This timer MUST be disarmed upon reception
-                // of the reflected STAMP test packet that includes the
-                // Access Report TLV" — presence of a recognized,
-                // non-malformed, integrity-intact echo (U/M already excluded
-                // above; I-flagged/TLV-HMAC-failed replies are excluded by
-                // the surrounding `integrity_ok` gate) is the acknowledgment
-                // signal `process_response` looks for.
+                // A recognized, well-formed echo acknowledges the report (RFC 8972 §4.6).
+                // U/M checks above and the surrounding integrity check reject unusable TLVs.
                 match AccessReportTlv::from_raw(raw) {
                     Ok(report) => {
                         telemetry.access_report.get_or_insert(report);
@@ -2777,19 +2639,9 @@ fn validate_reflected_tlvs(
                         });
                     }
                 }
-                // RFC 9534 §3.2-11: "The micro Session-Sender MUST use the
-                // Reflector Micro-session ID to validate the Reflector's
-                // behavior" — unconditional, not gated on pre-known
-                // configuration. When the reflector's member-link ID is
-                // pre-known (`--reflector-member-link-id`), it takes
-                // precedence and the reflected value must equal it —
-                // discard on mismatch. Otherwise (zero-config path), the
-                // first validly-received reply's Reflector Micro-session ID
-                // is latched and becomes the expected value for the rest of
-                // the session; a later reply with a different reflector ID
-                // is rejected through the same path as the pre-known
-                // mismatch. Pre-known configuration always wins: it is never
-                // overridden by a first-seen value.
+                // Validate the reflector ID on every usable reply (RFC 9534 §3.2-11).
+                // A configured ID takes precedence; otherwise use the first accepted ID.
+                // Reject mismatches without replacing the expected value.
                 if let Some(expected_refl) = expected_reflector_msid {
                     if parsed.reflector_micro_session_id != expected_refl {
                         return Err(TlvRejection::ReflectorMsidMismatch {
@@ -2866,18 +2718,11 @@ fn build_reflected_control_tlv(
     }
 }
 
-/// Builds the per-send Reflected Test Packet Control TLV with its requested
-/// interval scaled by the current AIMD factor
-/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3: "adjust the Reflected Test Packet
-/// Control parameters in any future STAMP packet ... based on the observation
-/// of CE values").
+/// Builds the control TLV with the current AIMD-scaled interval
+/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3).
 ///
-/// Used by every path that emits a test packet while `scale_reflected_control`
-/// is active — the main send loop and the Access Report wait-phase
-/// retransmission. Those paths build their TLV set from a clone of
-/// `extra_tlvs`, which deliberately omits the static control TLV in that mode,
-/// so each of them must add the scaled one back or the TLV disappears from the
-/// packets they send.
+/// Both the main loop and Access Report retries must call this when
+/// `scale_reflected_control` is active, since `extra_tlvs` omits the static TLV.
 fn scaled_reflected_control_tlv(
     length: u16,
     count: u16,
@@ -3042,13 +2887,7 @@ pub fn assemble_auth_packet(error_estimate: u16) -> PacketAuthenticated {
 /// HMAC field offset in PacketAuthenticated (bytes before HMAC field).
 pub const AUTH_PACKET_HMAC_OFFSET: usize = 96;
 
-/// Computes and sets the HMAC for an authenticated packet.
-///
-/// This should be called after all other fields in the packet have been set.
-///
-/// # Arguments
-/// * `packet` - The packet to finalize
-/// * `key` - The HMAC key to use
+/// Computes and sets the base HMAC after all other packet fields are finalized.
 pub fn finalize_auth_packet(packet: &mut PacketAuthenticated, key: &HmacKey) {
     let bytes = packet.to_bytes();
     packet.hmac = compute_packet_hmac(key, &bytes, AUTH_PACKET_HMAC_OFFSET);
@@ -4468,11 +4307,8 @@ mod tests {
 
     #[test]
     fn test_forged_first_reply_does_not_latch_reflector_msid() {
-        // RFC 9534 §3.2-11 zero-config path, adversarial first reply: the
-        // latch must only ever record a value from a reply that passed the
-        // integrity gate. An I-flagged (or otherwise untrusted) FIRST reply
-        // must leave the latch empty, so a forged reflector ID cannot become
-        // the session's expected value and lock out the real reflector.
+        // An untrusted first reply must not set the expected reflector ID
+        // (RFC 9534 §3.2-11), or it could lock out valid replies.
         let mut latched: Option<u16> = None;
 
         let mut forged = MicroSessionIdTlv::new(7777, 0xDEAD).to_raw();
@@ -4530,11 +4366,8 @@ mod tests {
 
     #[test]
     fn test_forged_msid_with_i_flag_not_consumed() {
-        // RFC 8972 §4-19 / §4.8-16: "If the I flag is set, the STAMP system
-        // MUST discard all TLVs and MUST stop processing." A reflector (or an
-        // on-path attacker) that returns an I-flagged MSID TLV with a forged
-        // sender_micro_session_id MUST NOT have that value trusted for session
-        // binding — validation must not reject on the forged mismatch.
+        // I-flagged MSID values cannot affect session binding
+        // (RFC 8972 §4-19 / §4.8-16), including through a forged mismatch.
         let mut raw = MicroSessionIdTlv::new(0xBAD, 42).to_raw();
         raw.set_integrity_failed();
         let mut tlvs = TlvList::new();
@@ -5377,12 +5210,8 @@ mod tests {
 
     #[test]
     fn test_validate_reflected_tlvs_cos_ce_suppressed_by_tlv_hmac_failure() {
-        // RFC 8972 §4.8-17: "If HMAC verification by the Session-Sender
-        // fails, then the Session-Sender MUST stop processing TLVs." A
-        // forged/tampered CE signal MUST NOT reach the congestion
-        // controller when the TLV-HMAC cannot be verified — otherwise an
-        // on-path attacker who cannot forge the HMAC could still force the
-        // sender into a permanent backoff via a bare CoS TLV injection.
+        // Failed TLV-HMAC verification must prevent a forged CE signal from
+        // triggering backoff (RFC 8972 §4.8-17).
         let key = HmacKey::new(vec![0xAB; 32]).unwrap();
         let mut tlvs = TlvList::new();
         let mut cos = ClassOfServiceTlv {
@@ -5573,7 +5402,7 @@ mod tests {
     }
 
     // --- process_response: AIMD congestion-response wiring
-    // (draft-ietf-ippm-stamp-cos-ecn-01 §3.4, chunk F2) ---------------------
+    // (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) ---------------------
 
     fn congestion_test_params() -> AimdParams {
         AimdParams {
@@ -5877,13 +5706,8 @@ mod tests {
         assert_eq!(*ctx.packets_received, 1);
     }
 
-    // --- Full loopback: sender packet → reflector assembly → sender ack ---
-    //
-    // Exercises the real, socket-free assembly/parse code paths on both
-    // ends (no network): builds a sender packet carrying the Access Report
-    // TLV exactly as the send loop would, feeds it through the reflector's
-    // pure `assemble_unauth_answer_with_tlvs`, and confirms the resulting
-    // reply's bytes acknowledge the state machine via `process_response`.
+    // Access Report acknowledgment through sender serialization, reflector
+    // assembly, and sender parsing, without sockets.
 
     #[test]
     fn test_access_report_loopback_acked_on_first_reply() {
@@ -6044,24 +5868,12 @@ mod tests {
         assert_eq!(state.retransmissions(), 4);
     }
 
-    // --- Wait-phase extension (post-loop) — RFC 8972 §4.6 -------------------
-    //
-    // The tests above drive `AccessReportRetransmitState` directly and show
-    // the state machine itself is correct. The defect this section covers
-    // is in the *plumbing*: `run_sender`'s post-loop wait never called
-    // `tick` at all, so a run shorter than the retry budget
-    // (`access_report_timeout * (1 + retries)`) reported `Pending` forever
-    // without ever retransmitting — the common `--count 1` case. These
-    // drive the real `run_sender` end-to-end over loopback UDP so the
-    // plumbing itself is exercised, not just the state machine.
-    // `--access-report-timeout` is seconds-granular (CLI range 1..=3600),
-    // so these sleep for real, bounded, low single-digit seconds.
+    // Post-loop Access Report retries over loopback UDP (RFC 8972 §4.6).
+    // Short runs such as `--count 1` must retry until acknowledged or aborted.
+    // CLI timeouts use whole seconds, so these tests require real waits.
 
-    /// Builds a `Configuration` for the wait-phase tests: minimal flags,
-    /// talking to `remote_port` on loopback, Access Report enabled with a
-    /// short timeout/retry budget so the tests run quickly. `--timeout 1`
-    /// keeps the pre-existing plain wait phase (before the extension even
-    /// starts) short too.
+    /// Loopback configuration with Access Report enabled and short retry limits.
+    /// `--timeout 1` also bounds the initial response wait.
     fn access_report_test_config(
         remote_port: u16,
         access_report_timeout_secs: u32,
@@ -6094,9 +5906,7 @@ mod tests {
         Configuration::parse_from(args)
     }
 
-    /// Minimal one-packet sender config aimed at `port`, plus `extra` flags.
-    /// Used by the wire-level flag tests below: they assert what actually
-    /// reaches the socket, not merely what the config parsed to.
+    /// One-packet loopback configuration for wire-level flag tests.
     fn wire_test_config(port: u16, extra: &[&str]) -> Configuration {
         use clap::Parser;
         let mut args: Vec<String> = vec![
@@ -6217,11 +6027,8 @@ mod tests {
         );
     }
 
-    /// Like [`access_report_test_config`], but additionally turns on the
-    /// AIMD congestion-response path (`--cos --ecn 1`) and requests a
-    /// reflected burst, so `scale_reflected_control` is active and the
-    /// Reflected Control TLV is rebuilt per send instead of living in the
-    /// static `extra_tlvs` set.
+    /// Access Report test configuration with AIMD and a reflected burst.
+    /// This forces per-send control TLV rebuilding via `scale_reflected_control`.
     fn access_report_with_scaled_control_config(
         remote_port: u16,
         access_report_timeout_secs: u32,
@@ -6261,13 +6068,8 @@ mod tests {
         Configuration::parse_from(args)
     }
 
-    /// draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3 requires the Reflected Test
-    /// Packet Control parameters to be carried on "any future STAMP packet".
-    /// A wait-phase retransmission is such a packet, but it is built from the
-    /// static `extra_tlvs` set — which deliberately excludes the control TLV
-    /// when `scale_reflected_control` is on, because the main loop rebuilds it
-    /// per packet with the AIMD-scaled interval. The retransmit path must do
-    /// the same rebuild, or the TLV silently vanishes from every retry.
+    /// Wait-phase retries must rebuild the AIMD-scaled control TLV omitted from
+    /// `extra_tlvs` (draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3).
     #[tokio::test]
     async fn test_wait_phase_retransmit_still_carries_scaled_control_tlv() {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -6300,11 +6102,7 @@ mod tests {
         }
     }
 
-    /// A "dead" reflector: accepts packets on `socket` but never replies.
-    /// Collects raw datagrams until either `want` have arrived or `budget`
-    /// elapses, whichever comes first — bounding the test's runtime even if
-    /// the defect under test resurfaces (no retransmits ⇒ `want` is never
-    /// reached, so this just idles out after `budget`).
+    /// Collects up to `want` datagrams without replying, bounded by `budget`.
     async fn collect_silently(socket: UdpSocket, want: usize, budget: Duration) -> Vec<Vec<u8>> {
         let mut packets = Vec::new();
         let deadline = tokio::time::Instant::now() + budget;
@@ -6322,16 +6120,9 @@ mod tests {
         packets
     }
 
-    /// A reflector that ignores every packet until the `ack_after`-th
-    /// (1-indexed), which it acknowledges with a real, TLV-echoing reply
-    /// built via the reflector's own `assemble_unauth_answer_with_tlvs` —
-    /// then keeps listening (silently) for `extra_wait` to prove nothing
-    /// further arrives. Returns the total number of packets received.
-    ///
-    /// Bounded overall by `max_wait` for reaching the `ack_after`-th packet
-    /// so that if the sender never retransmits (e.g. the defect this test
-    /// guards against), the test fails cleanly instead of hanging forever
-    /// waiting for a packet that will never come.
+    /// Acknowledges packet `ack_after` (1-indexed) with a reflector-built reply,
+    /// then listens silently for `extra_wait` to detect further retransmissions.
+    /// Returns the total packet count. `max_wait` bounds the wait for acknowledgment.
     async fn ack_nth_then_watch_for_more(
         socket: UdpSocket,
         ack_after: usize,
@@ -6468,12 +6259,8 @@ mod tests {
             "sent count must reflect the retransmissions"
         );
 
-        // Reviewer-suggested cheap regression test: the Access Report TLV's
-        // wire bytes (flags/type/length/value) must be byte-identical
-        // across every attempt — nothing about the retry mechanism should
-        // perturb the TLV's content. In this minimal configuration the TLV
-        // is the only thing following the fixed unauthenticated base
-        // header (no HMAC TLV, since no key was configured).
+        // Access Report wire bytes must remain identical across attempts.
+        // It is the only TLV after the unauthenticated base in this configuration.
         let expected_tlv = AccessReportTlv::new(1, 1).to_raw().to_bytes();
         for (i, packet) in packets.iter().enumerate() {
             assert_eq!(
@@ -6489,12 +6276,8 @@ mod tests {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let port = socket.local_addr().unwrap().port();
 
-        // timeout=1s, retries=3 (budget 4s if never acked). Ignoring the
-        // original send and acking only the *second* packet received (the
-        // first retransmission, sent by the wait-phase extension after the
-        // main loop and its own plain wait have both already finished)
-        // specifically exercises the extension loop's own recv path, not
-        // the main loop's.
+        // Acknowledge the first retry to exercise the post-loop receive path.
+        // With timeout=1s and retries=3, an unacknowledged exchange has a 4s budget.
         let conf = access_report_test_config(port, 1, 3);
 
         let reflector = tokio::spawn(ack_nth_then_watch_for_more(
@@ -6556,10 +6339,7 @@ mod tests {
         let elapsed = start.elapsed();
         let packets = reflector.await.unwrap();
 
-        // Bounded by the plain `--timeout` (1s) alone — there is no Access
-        // Report retry budget to extend it, proving the new wait-phase loop
-        // is a true no-op (byte-identical prior behaviour) when
-        // `--access-report` was not set.
+        // Without `--access-report`, only the one-second `--timeout` applies.
         assert!(
             elapsed < Duration::from_millis(1500),
             "wait phase must not be extended when --access-report is unset (took {elapsed:?})"

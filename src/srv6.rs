@@ -1,22 +1,13 @@
-//! Best-effort SRv6 return-path forwarding (RFC 9503 §4 + RFC 8754).
+//! SRv6 return-path forwarding (RFC 9503 §4, RFC 8754).
 //!
-//! A userspace UDP Session-Reflector cannot forward over an arbitrary
-//! SR-MPLS label stack, but on Linux it *can* ask the kernel to insert an
-//! SRv6 Segment Routing Header (IPv6 routing header type 4) on its reply by
-//! setting the sticky `IPV6_RTHDR` socket option before `sendmsg`. Linux's
-//! ancillary parser rejects type 4 even when the sticky option is supported.
-//! The reflector's exclusive `DatagramSender` owns and clears that option.
+//! Linux inserts the SRH through the sticky `IPV6_RTHDR` socket option;
+//! its ancillary parser rejects routing type 4. The reflector's exclusive
+//! `DatagramSender` owns and clears the sticky option.
 //!
-//! **Defensive contract.** This is opt-in (`--srv6-return-forwarding`) and
-//! capability-gated: `srh_supported` probes the running kernel once, and the
-//! reflector silently falls back to the safe "reply normally + set the Return
-//! Path U-flag" behaviour when SRv6 is unavailable (non-Linux, IPv4 reply, no
-//! seg6 support, or any send error). It never requires SRv6 and never panics.
-//!
-//! **Verification boundary.** Unit tests pin SRH encoding against RFC 8754.
-//! The required namespace test captures successful forwarding through an
-//! intermediate Linux router, including authenticated replies and isolation
-//! of later ordinary replies. Physical SRv6 fabrics remain a separate testbed.
+//! Enabled by `--srv6-return-forwarding` and checked by `srh_supported`.
+//! Unsupported routes or failed SRv6 attempts can fall back to a normal reply
+//! with Return Path U set. Unit tests cover encoding; namespace tests cover
+//! forwarding, authenticated replies, and isolation of later ordinary replies.
 
 use std::net::Ipv6Addr;
 
@@ -27,18 +18,10 @@ pub const SRH_ROUTING_TYPE: u8 = 4;
 /// `2 * n` and must fit in a u8, bounding `n` to 127.
 pub const MAX_SEGMENTS: usize = 127;
 
-/// Builds an RFC 8754 Segment Routing Header from a return-path segment list.
-///
-/// `segments` is in path order (the first segment to traverse first), matching
-/// the on-wire order of the RFC 9503 SRv6 Segment List sub-TLV. The SRH stores
-/// the list in reverse, so `Segment List[0]` is the last segment (final
-/// destination) per RFC 8754 §2.
-///
-/// The `Next Header` octet is left zero: when the buffer is handed to the
-/// kernel via an `IPV6_RTHDR` ancillary message the kernel fills it in (the
-/// same convention as the RFC 3542 `inet6_rth_*` helpers).
-///
-/// Returns `None` if the list is empty or longer than [`MAX_SEGMENTS`].
+/// Builds an RFC 8754 SRH from segments in traversal order.
+/// Reverses the RFC 9503 segment list so `Segment List[0]` is the final
+/// destination (RFC 8754 §2). Leaves Next Header zero for the kernel to fill.
+/// Returns `None` for an empty list or more than [`MAX_SEGMENTS`] entries.
 #[must_use]
 pub fn build_srh(segments: &[Ipv6Addr]) -> Option<Vec<u8>> {
     let n = segments.len();

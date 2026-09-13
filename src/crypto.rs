@@ -1,6 +1,6 @@
 //! HMAC cryptographic operations for STAMP packet authentication.
 //!
-//! This module provides HMAC-SHA256 computation and verification for
+//! HMAC-SHA256 computation and verification for
 //! authenticated STAMP packets as defined in RFC 8762.
 
 use std::{collections::HashMap, fs, path::Path};
@@ -50,14 +50,10 @@ pub enum HmacError {
     },
 }
 
-/// Opens a secret file, rejecting group/other-accessible permissions.
+/// Opens a secret file and rejects group/other access on Unix.
 ///
-/// The mode is checked on the *opened file descriptor* (`fstat`), not via a
-/// second path lookup: this closes the TOCTOU window between check and read,
-/// and — because it inspects the exact inode the bytes come from — also
-/// rejects a symlink whose target is group- or other-accessible, while still
-/// allowing symlinked secret-injection setups (Kubernetes mounts, systemd
-/// credentials) whose targets are owner-only.
+/// Checks the opened descriptor to avoid a check/read race. Symlinks are allowed
+/// when their targets have owner-only permissions, supporting secret mounts.
 fn open_owner_only_file(path: &Path, detail: &'static str) -> Result<fs::File, HmacError> {
     let file = fs::File::open(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
 
@@ -83,11 +79,8 @@ fn open_owner_only_file(path: &Path, detail: &'static str) -> Result<fs::File, H
     Ok(file)
 }
 
-/// Reads the control-plane bearer-token file, applying the same
-/// descriptor-based permission validation as [`HmacKey::from_file`]: a token
-/// readable by group or other grants any local user key-management and
-/// shutdown access, so it is refused just like an exposed HMAC key
-/// (`doc/control-plane.md` §5 documents this mode check).
+/// Reads a bearer-token file with the same descriptor-based permission checks
+/// as [`HmacKey::from_file`] (see `doc/control-plane.md` §5).
 pub fn read_token_file(path: &Path) -> Result<String, HmacError> {
     use std::io::Read;
 
@@ -131,13 +124,10 @@ impl Drop for HmacKey {
 }
 
 impl HmacKey {
-    /// Creates a new HmacKey from raw bytes.
-    ///
-    /// # Arguments
-    /// * `key` - The raw key bytes (must be at least 16 bytes)
+    /// Creates a key from raw bytes.
     ///
     /// # Errors
-    /// Returns `HmacError::KeyTooShort` if key is less than 16 bytes.
+    /// Returns `HmacError::KeyTooShort` for fewer than 16 bytes.
     pub fn new(key: Vec<u8>) -> Result<Self, HmacError> {
         if key.len() < MIN_KEY_LENGTH {
             return Err(HmacError::KeyTooShort(key.len()));
@@ -145,46 +135,25 @@ impl HmacKey {
         Ok(Self(key))
     }
 
-    /// Creates a new HmacKey from a hexadecimal string.
-    ///
-    /// # Arguments
-    /// * `hex_str` - Hexadecimal string representing the key
+    /// Decodes a hexadecimal key.
     ///
     /// # Errors
-    /// Returns `HmacError::InvalidHex` if the string is not valid hex.
-    /// Returns `HmacError::KeyTooShort` if the decoded key is less than 16 bytes.
+    /// Returns `HmacError::InvalidHex` for invalid hex or `HmacError::KeyTooShort`
+    /// for fewer than 16 decoded bytes.
     pub fn from_hex(hex_str: &str) -> Result<Self, HmacError> {
         let key = hex::decode(hex_str).map_err(|e| HmacError::InvalidHex(e.to_string()))?;
         Self::new(key)
     }
 
-    /// Creates a new HmacKey by reading from a file.
+    /// Reads a key as hex text if decoding succeeds, otherwise as raw bytes.
     ///
-    /// The file should contain the key as raw bytes or hex-encoded text.
-    /// If the file content is valid UTF-8 and parses as hex, it's treated as hex.
-    /// Otherwise, it's treated as raw bytes.
-    ///
-    /// On Unix the key file's permissions are checked on the *opened file
-    /// descriptor* (`fstat`), not via a second path lookup. This closes the
-    /// TOCTOU window between the check and the read, and — because it inspects
-    /// the mode of the exact inode the bytes are read from — also rejects a key
-    /// whose (possibly symlinked) target is group- or other-accessible. Any
-    /// group/other access bit (`0o077`) is rejected, because a key readable by
-    /// anyone but the owner is an exposed secret.
-    ///
-    /// `O_NOFOLLOW` is deliberately *not* used: secret-injection setups
-    /// (Kubernetes secret mounts, systemd credentials) commonly expose the key
-    /// file as a symlink, and the `fstat`-on-fd check already validates the
-    /// real target's permissions.
-    ///
-    /// # Arguments
-    /// * `path` - Path to the key file
+    /// On Unix, checks the opened descriptor and rejects any group/other access
+    /// bits (`0o077`). Symlinks are allowed; the target's permissions are checked.
     ///
     /// # Errors
-    /// Returns `HmacError::FileReadError` if the file cannot be read.
-    /// Returns `HmacError::InsecurePermissions` if the file is group/other
-    /// accessible (Unix only).
-    /// Returns `HmacError::KeyTooShort` if the key is less than 16 bytes.
+    /// Returns `HmacError::FileReadError` on read failure,
+    /// `HmacError::InsecurePermissions` for group/other access (Unix), or
+    /// `HmacError::KeyTooShort` for fewer than 16 key bytes.
     pub fn from_file(path: &Path) -> Result<Self, HmacError> {
         use std::io::Read;
 
@@ -206,13 +175,7 @@ impl HmacKey {
         Self::new(raw_bytes)
     }
 
-    /// Computes HMAC-SHA256 truncated to 16 bytes.
-    ///
-    /// # Arguments
-    /// * `data` - The data to authenticate
-    ///
-    /// # Returns
-    /// A 16-byte array containing the truncated HMAC.
+    /// Computes HMAC-SHA256 over `data`, truncated to 16 bytes.
     #[must_use]
     pub fn compute(&self, data: &[u8]) -> [u8; HMAC_OUTPUT_LENGTH] {
         self.compute_parts([data])
@@ -241,14 +204,7 @@ impl HmacKey {
         constant_time_compare(&self.compute_parts(parts), expected)
     }
 
-    /// Verifies an HMAC using constant-time comparison.
-    ///
-    /// # Arguments
-    /// * `data` - The data that was authenticated
-    /// * `expected` - The expected 16-byte HMAC value
-    ///
-    /// # Returns
-    /// `true` if the HMAC is valid, `false` otherwise.
+    /// Checks `data` against `expected` using a constant-time HMAC comparison.
     #[must_use]
     pub fn verify(&self, data: &[u8], expected: &[u8; HMAC_OUTPUT_LENGTH]) -> bool {
         let computed = self.compute(data);
@@ -269,20 +225,10 @@ impl HmacKey {
     }
 }
 
-/// A set of HMAC keys, optionally keyed by SSID (RFC 8972 §4.1 Session
-/// Sender Identifier). Lets a single reflector serve multiple senders
-/// without sharing a single key across all of them — useful for
-/// multi-tenant deployments and key rotation.
+/// Per-SSID HMAC keys with an optional default (RFC 8972 §4.1).
 ///
-/// Lookup order in `for_ssid(s)`:
-/// 1. Per-SSID entry for `s` (if present).
-/// 2. The `default` key (if set).
-/// 3. `None`.
-///
-/// A receiver configured only with `--hmac-key` / `--hmac-key-file`
-/// produces a set with `default: Some(_)` and an empty per-SSID map,
-/// which preserves the existing single-key behaviour for SSID 0 and any
-/// other SSID.
+/// `for_ssid` checks the per-SSID entry, then the default, then returns `None`.
+/// Single-key configurations populate only the default, serving every SSID.
 #[derive(Default)]
 pub struct HmacKeySet {
     default: Option<HmacKey>,
@@ -354,22 +300,14 @@ impl HmacKeySet {
         self.per_ssid.get(&ssid).or(self.default.as_ref())
     }
 
-    /// Builds a key set by reading every regular file in `dir`. File
-    /// names are interpreted as the SSID (hex; trailing `.key` /
-    /// `.bin` extensions stripped). A file named `default.key` becomes
-    /// the fallback key for SSIDs without an explicit entry.
-    ///
-    /// File contents follow the same hex-or-bytes contract as
-    /// `HmacKey::from_file`.
+    /// Loads per-SSID keys from regular files in `dir`.
+    /// File stems are hexadecimal SSIDs after stripping `.key` or `.bin`;
+    /// `default.key` supplies the fallback. Contents follow [`HmacKey::from_file`].
+    /// Invalid key files are logged and skipped.
     ///
     /// # Errors
-    /// Returns `HmacError::FileReadError` if the directory cannot be
-    /// listed; per-file decode errors (including a key file with insecure
-    /// permissions) are logged and skipped so one bad file doesn't take down
-    /// the whole reflector.
-    /// Returns `HmacError::InsecurePermissions` if the directory itself is
-    /// writable by group or other (Unix only) — that would let another user
-    /// inject or replace key files.
+    /// Returns `HmacError::FileReadError` if the directory cannot be listed, or
+    /// `HmacError::InsecurePermissions` if group/other can write it (Unix).
     pub fn from_dir(dir: &Path) -> Result<Self, HmacError> {
         // The directory may be group-readable (the recommended layout is
         // `0750 root:stamp`), but it must not be group/other *writable*, or an
@@ -446,15 +384,7 @@ fn authenticated_data(packet_bytes: &[u8], hmac_offset: usize) -> &[u8] {
     }
 }
 
-/// Computes HMAC for packet data up to the HMAC field offset.
-///
-/// # Arguments
-/// * `key` - The HMAC key
-/// * `packet_bytes` - The full packet bytes
-/// * `hmac_offset` - The byte offset where the HMAC field begins
-///
-/// # Returns
-/// A 16-byte array containing the truncated HMAC.
+/// Computes a 16-byte HMAC over bytes before `hmac_offset`, capped at the buffer length.
 #[must_use]
 pub fn compute_packet_hmac(
     key: &HmacKey,
@@ -469,16 +399,7 @@ thread_local! {
     pub(crate) static PACKET_HMAC_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Verifies the HMAC of a packet.
-///
-/// # Arguments
-/// * `key` - The HMAC key
-/// * `packet_bytes` - The full packet bytes
-/// * `hmac_offset` - The byte offset where the HMAC field begins
-/// * `expected` - The expected HMAC value from the packet
-///
-/// # Returns
-/// `true` if the HMAC is valid, `false` otherwise.
+/// Verifies `expected` over bytes before `hmac_offset`, capped at the buffer length.
 #[must_use]
 pub fn verify_packet_hmac(
     key: &HmacKey,
@@ -658,7 +579,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // B6: HmacKeySet — per-SSID HMAC keys.
+    // HmacKeySet — per-SSID HMAC keys.
 
     #[test]
     fn test_keyset_empty_returns_none() {

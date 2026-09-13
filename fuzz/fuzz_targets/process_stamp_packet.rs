@@ -8,16 +8,8 @@ use stamp_suite::configuration::TlvHandlingMode;
 use stamp_suite::receiver::{process_stamp_packet, ProcessingContext};
 use stamp_suite::tlv::{PacketAddressInfo, TimestampMethod};
 
-// Exercises the full reflector processing pipeline end-to-end with
-// attacker-controlled bytes: parse -> reflector flag re-derive / HMAC ->
-// semantic TLV processing (CoS, timestamp, direct-measurement, location,
-// follow-up, dest-node-address, micro-session, return-path, BER, reflected
-// headers, reflected-control padding) -> response assembly. The existing fuzz
-// targets only cover the low-level parsers in isolation; this covers the
-// in-place TLV mutators and length math where any reachable panic would live.
-//
-// The RAW process_stamp_packet entry point is used on purpose (not the
-// panic-isolating wrapper) so libFuzzer surfaces any reachable panic.
+// Fuzzes parsing, HMAC checks, TLV mutation, and response assembly together.
+// Call the raw entry point so packet-processing panics reach libFuzzer.
 fuzz_target!(|data: &[u8]| {
     let local: [IpAddr; 1] = [IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))];
     let local_macs: [[u8; 6]; 1] = [[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]];

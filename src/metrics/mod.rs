@@ -1,17 +1,8 @@
-//! Prometheus metrics support for STAMP sender and reflector modes.
+//! Prometheus metrics endpoint for sender and reflector modes.
+//! Requires the `metrics` feature.
 //!
-//! This module provides observability through a Prometheus-compatible HTTP endpoint
-//! that exposes STAMP operational metrics. Enable with the `metrics` feature flag.
-//!
-//! # Usage
-//!
-//! Start the metrics server:
 //! ```bash
 //! stamp-suite --metrics --metrics-addr 127.0.0.1:9090
-//! ```
-//!
-//! Fetch metrics:
-//! ```bash
 //! curl http://127.0.0.1:9090/metrics
 //! ```
 
@@ -49,13 +40,8 @@ impl MetricsServer {
     }
 }
 
-/// Initializes the Prometheus metrics recorder and starts the HTTP server.
-///
-/// # Arguments
-/// * `addr` - The address to bind the HTTP server to
-///
-/// # Returns
-/// A handle that can be used to shut down the server.
+/// Installs the Prometheus recorder and starts the HTTP server at `addr`.
+/// Returns a shutdown handle.
 pub async fn init(addr: SocketAddr) -> Result<MetricsServer, MetricsError> {
     // Build the Prometheus recorder with sensible RTT histogram buckets
     // Network latency typically ranges from microseconds to milliseconds
@@ -141,13 +127,8 @@ mod tests {
         // If it fails due to recorder already installed, that's expected in test suites
     }
 
-    /// Operators expect `--metrics` to fail fast when the bind port is
-    /// already taken — silent disable would leave dashboards blind. This
-    /// test pre-binds a port, then asserts `init` returns
-    /// `MetricsError::BindError(AddrInUse)` so `main.rs` can surface the
-    /// specific error class. The recorder may also fail to install if a
-    /// prior test in the same process did so; treat that as an acceptable
-    /// alternative outcome rather than a flaky assertion.
+    /// An occupied port must return `BindError(AddrInUse)`.
+    /// Also allow recorder-install failure if another test already installed it.
     #[tokio::test]
     async fn test_metrics_bind_conflict_returns_bind_error() {
         let pre_bind = TcpListener::bind("127.0.0.1:0").await.expect("pre-bind");

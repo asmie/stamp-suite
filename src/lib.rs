@@ -1,7 +1,7 @@
 //! STAMP Suite - Simple Two-Way Active Measurement Protocol implementation.
 //!
-//! This crate provides a client-server application pair for measuring packet loss
-//! and network delays according to RFC 8762 and RFC 8972.
+//! Sender and reflector for measuring packet loss and network delay
+//! according to RFC 8762 and RFC 8972.
 //!
 //! # Usage
 //!
@@ -17,15 +17,9 @@
 //!
 //! # Stability
 //!
-//! This crate ships the `stamp-suite` binaries. The library modules
-//! (`clock_format`, `configuration`, `crypto`, `hwtstamp`, `packets`,
-//! `receiver`, `sender`, `session`, `srv6`, `stats`, `time`, `tlv`, and the
-//! optional `control`/`metrics`/`snmp` modules) are internal implementation
-//! detail: they are `pub` only so that this crate's own integration tests,
-//! benches, and fuzz targets can reach them, and they are exempt from semver
-//! — any of them may change, move, or disappear in any 1.x release without
-//! notice. The stable 1.x surface is the CLI flags, the config-file schema,
-//! and on-the-wire behavior. This crate has an MSRV of Rust 1.93.
+//! The stable 1.x interface is the CLI, configuration schema, and wire behavior.
+//! Library modules are public for integration tests, benchmarks, and fuzzing;
+//! they are internal and may change in any 1.x release. MSRV: Rust 1.85.
 
 #[doc(hidden)]
 pub mod ber;
@@ -48,20 +42,16 @@ pub mod crypto;
 /// Error estimate encoding/decoding for timestamps.
 #[doc(hidden)]
 pub mod error_estimate;
-/// Hardware-assisted timestamping support (F1). On Linux, kernel RX+TX
-/// timestamps via `SO_TIMESTAMPING` and `MSG_ERRQUEUE` (read via cmsg),
-/// with optional NIC hardware timestamping under `--hwtstamp on` via
-/// `SIOCSHWTSTAMP` (graceful fallback). macOS supports kernel RX timestamps
-/// only via `SO_TIMESTAMP`. Windows is not supported. The probe queries
-/// ETHTOOL_GET_TS_INFO on Linux. See `doc/architecture.md` for details.
+/// Kernel/hardware timestamping with software fallback.
+/// Linux supports RX/TX; macOS supports software RX. See [`hwtstamp`]
+/// and `doc/architecture.md` for platform support and PHC requirements.
 #[doc(hidden)]
 pub mod hwtstamp;
 /// STAMP packet structures and serialization.
 #[doc(hidden)]
 pub mod packets;
-/// AIMD congestion-response controller for CE-marked replies (F2,
-/// draft-ietf-ippm-stamp-cos-ecn-01 §3.4). Pure state machine; driven by
-/// `sender::run_sender`.
+/// AIMD response to CE-marked replies (draft-ietf-ippm-stamp-cos-ecn-01 §3.4),
+/// driven by `sender::run_sender`.
 #[doc(hidden)]
 pub mod rate_control;
 /// Session Reflector implementations.
@@ -106,20 +96,10 @@ pub mod metrics;
 #[doc(hidden)]
 pub mod snmp;
 
-/// A failure that prevented a role from starting at all: the socket would not
-/// bind, a required socket option was refused, or authenticated mode was asked
-/// for without a usable key.
+/// A startup failure, such as a bind error, refused socket option, or missing key.
 ///
-/// Kept distinct from a normal shutdown so the process can exit non-zero.
-/// Configuration errors already exit 1; the runtime startup path used to
-/// `return` and exit 0, which a supervisor reads as a clean, intentional exit —
-/// `dist/systemd/stamp-suite.service` is `Type=simple` with
-/// `Restart=on-failure`, so a reflector that could not bind was never
-/// restarted, and `stamp-suite … && echo ok` reported success on total
-/// failure.
-///
-/// The message is the operator-facing diagnostic and is printed once, by the
-/// caller in `main`, rather than at each failure site.
+/// Distinct from normal shutdown so `main` exits non-zero and supervisors can
+/// restart the process. `main` prints the diagnostic once.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct StartupError(pub String);

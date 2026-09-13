@@ -49,16 +49,9 @@ pub const RETURN_PATH_CONTROL_CODE_SIZE: usize = 4;
 /// Micro-session ID TLV value size (4 bytes: two u16 IDs).
 pub const MICRO_SESSION_ID_TLV_VALUE_SIZE: usize = 4;
 
-/// Reflected Test Packet Control TLV minimum value size
-/// (draft-ietf-ippm-asymmetrical-pkts §3: 2 + 2 + 4 = 8 fixed + sub-TLVs).
-///
-/// The fixed portion is 8 bytes (Length-of-Reflected-Packet u16,
-/// Number-of-Reflected-Packets u16, Interval u32). Sub-TLVs are optional.
-/// Reflected Test Packet Control TLV minimum value-field size, per
-/// draft-ietf-ippm-asymmetrical-pkts-14 §3: "The value is variable, and MUST
-/// NOT be smaller than 12 octets." The first 8 octets carry the fixed
-/// fields (length, count, interval); the remaining ≥ 4 octets carry at
-/// least one sub-TLV header (sub-TLV flags + type + length).
+/// Minimum Reflected Test Packet Control value length
+/// (draft-ietf-ippm-asymmetrical-pkts-14 §3): eight fixed bytes
+/// (length u16, count u16, interval u32) plus at least one four-byte sub-TLV header.
 pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 12;
 
 /// Number of fixed bytes at the head of the Reflected Test Packet Control
@@ -385,17 +378,10 @@ impl TlvType {
     }
 }
 
-/// A raw TLV with unparsed value bytes.
+/// A TLV with unparsed value bytes.
 ///
-/// This is the basic building block for TLV parsing and serialization.
-///
-/// # Equality
-///
-/// `PartialEq` is implemented manually and compares only the on-wire identity
-/// (flags, type, value, wire_length). The internal `parser_marked_malformed`
-/// marker is parse-time bookkeeping and intentionally excluded so a
-/// hand-built TLV compares equal to a parser-built TLV with identical
-/// bytes-on-the-wire.
+/// Equality compares flags, type, value, and wire length. Parser bookkeeping
+/// (`parser_marked_malformed`) is excluded, so identical wire values compare equal.
 #[derive(Debug, Clone, Eq)]
 pub struct RawTlv {
     /// TLV flags.

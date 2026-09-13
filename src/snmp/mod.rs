@@ -1,31 +1,15 @@
-//! SNMP AgentX sub-agent for STAMP-SUITE-MIB.
+//! SNMP AgentX sub-agent for STAMP-SUITE-MIB (RFC 2741).
 //!
-//! Connects to an existing net-snmpd master agent via Unix socket (AgentX protocol,
-//! RFC 2741) and exposes reflector/sender configuration, counters, and session state.
-//!
-//! # Usage
+//! Connects to a net-snmpd master over a Unix socket and exposes configuration,
+//! counters, and session state.
 //!
 //! ```bash
-//! # Start with default AgentX socket
 //! stamp-suite -i --snmp
-//!
-//! # Custom AgentX socket path
 //! stamp-suite -i --snmp --snmp-socket /var/agentx/master
 //! ```
 //!
-//! # Production-path panic audit
-//!
-//! All buffer indexing in the AgentX decoder (`agentx::decode_header`,
-//! `agentx::decode_oid`, `agentx::decode_search_range`,
-//! `agentx::AgentXSession::handle_get_bulk`) is preceded by an explicit length
-//! check that returns `AgentXError::Protocol`. The `MibHandler` dispatch
-//! (`handler::StampMibHandler::get`/`get_next`) bounds-checks OIDs via
-//! `Oid::starts_with` before any `oid.0[i]` indexing. There are no `unwrap()`,
-//! `expect()`, `panic!`, or `unreachable!()` reachable from the AgentX event
-//! loop in `agentx.rs`, `handler.rs`, or `state.rs` outside `#[cfg(test)]`.
-//!
-//! For belt-and-braces, the `spawn_blocking` join handle is observed by a
-//! supervisor task that logs panics rather than silently dropping them.
+//! Decoders check field lengths before indexing. A supervisor observes the
+//! blocking event loop's join handle and logs task panics.
 
 pub mod agentx;
 mod handler;
@@ -75,22 +59,9 @@ const RECONNECT_BACKOFF_START: Duration = Duration::from_secs(1);
 /// Maximum reconnect backoff (cap for the exponential growth).
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
-/// Initializes the SNMP AgentX sub-agent.
-///
-/// Connects to the master agent, registers the STAMP-SUITE-MIB subtree,
-/// and spawns a blocking task for the AgentX event loop. If the master later
-/// closes the session or the socket errors (e.g. net-snmpd restarts), the
-/// background task reconnects with capped exponential backoff until shutdown
-/// is requested — the sub-agent no longer stays down for the life of the
-/// process after a single master restart.
-///
-/// The initial connect/register is performed synchronously so a misconfigured
-/// socket path is reported to the caller (fail-fast) rather than retried
-/// silently forever.
-///
-/// # Arguments
-/// * `socket_path` - Path to the AgentX master agent Unix socket
-/// * `state` - Shared state for the MIB handler
+/// Connects to the AgentX master, registers STAMP-SUITE-MIB, and spawns
+/// a blocking event loop. Initial connection errors return to the caller.
+/// Later disconnects retry with capped exponential backoff until shutdown.
 pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServer, SnmpError> {
     let cancel = Arc::new(AtomicBool::new(false));
 

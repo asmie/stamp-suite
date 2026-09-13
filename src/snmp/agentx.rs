@@ -42,11 +42,8 @@ const AGENTX_VERSION: u8 = 1;
 // Maximum allowed PDU payload size (1 MB) to prevent unbounded allocation.
 const MAX_PDU_PAYLOAD: u32 = 1_048_576;
 
-// Maximum number of SearchRanges processed per GET/GETNEXT/GETBULK PDU.
-// A 1 MB PDU can pack ~131k SearchRanges (min 8 bytes each); combined with
-// GETBULK's per-range repetitions and the per-lookup OID-space scan, an
-// unbounded count is a CPU-amplification lever. Real master agents issue a
-// handful of ranges, so this ceiling is generous while bounding worst-case work.
+// Cap SearchRanges per GET/GETNEXT/GETBULK PDU to bound lookup work.
+// A 1 MB PDU can contain roughly 131k ranges before GETBULK repetitions.
 const MAX_SEARCH_RANGES_PER_PDU: usize = 256;
 
 /// Octets in an Object Identifier header before the sub-identifiers
@@ -211,18 +208,10 @@ pub fn decode_header(buf: &[u8]) -> Result<PduHeader, AgentXError> {
     })
 }
 
-/// Encodes an OID per RFC 2741 §5.1.
-///
-/// Format: n_subid(1) + prefix(1) + include(1) + reserved(1) + sub-identifiers
-/// (4 octets each) — a **4-octet** header, not 8. If the OID starts with
-/// 1.3.6.1 the prefix optimization is used, which drops those four
-/// sub-identifiers and carries the fifth in `prefix`.
-///
-/// The header width matters for interoperability, not just internally: a master
-/// agent reading an 8-octet header sees `n_subid = 0` (the null OID) in the
-/// first four octets and then resumes parsing mid-field, desynchronising the
-/// rest of the PDU. Encoder and decoder agreeing with each other is not enough,
-/// so [`OID_HEADER_SIZE`] is asserted against the wire layout in the tests.
+/// Encodes an OID with the RFC 2741 §5.1 four-byte header:
+/// `n_subid | prefix | include | reserved`, then four bytes per sub-identifier.
+/// For `1.3.6.1` OIDs, the prefix optimization stores the fifth sub-identifier
+/// in `prefix` and omits the first five from the body.
 pub fn encode_oid(oid: &Oid, include: bool) -> Vec<u8> {
     let subs = &oid.0;
 
@@ -450,12 +439,9 @@ pub trait MibHandler: Send + Sync {
     /// Handle a GETNEXT request. Return the next VarBind after the given OID.
     fn get_next(&self, oid: &Oid, end: &Oid) -> VarBind;
 
-    /// Returns a snapshot of the handler's OID space, computed **once** per
-    /// GETNEXT/GETBULK PDU and reused across every `get_next_snapshot` call in
-    /// that PDU. This avoids rebuilding and re-sorting a potentially large OID
-    /// list per repetition — which a single GETBULK could otherwise amplify
-    /// into heavy CPU and lock-contention work. The default is empty; handlers
-    /// with a costly OID space override this together with `get_next_snapshot`.
+    /// Snapshots the OID space once per GETNEXT/GETBULK PDU for reuse by
+    /// `get_next_snapshot`, avoiding repeated sorting and locking.
+    /// The default is empty; override both methods for costly OID spaces.
     fn oid_snapshot(&self) -> Vec<Oid> {
         Vec::new()
     }
@@ -1249,13 +1235,8 @@ mod tests {
         assert_eq!(encoded[1], 4);
     }
 
-    // ------------------------------------------------------------------
-    // B1 audit follow-up: malformed-input coverage.
-    //
-    // Each test below feeds the decoder a hostile or truncated buffer and
-    // asserts it returns Err(AgentXError) rather than panicking. Buffer
-    // indexing in agentx.rs production paths is preceded by explicit length
-    // checks; these tests lock that invariant in.
+    // Malformed-input tests: truncated or invalid fields must return
+    // `AgentXError` before buffer indexing can panic.
 
     #[test]
     fn test_decode_header_rejects_empty_buffer() {
@@ -1347,9 +1328,7 @@ mod tests {
 
     #[test]
     fn test_decoders_never_panic_on_random_short_buffers() {
-        // Black-box: feed a range of fixed bit patterns to every decoder.
-        // None must panic, even on adversarial input. This complements the
-        // libfuzzer target added later in C5.
+        // Fixed byte patterns must not panic in any decoder.
         let patterns: [&[u8]; 6] = [
             &[],
             &[0xff],

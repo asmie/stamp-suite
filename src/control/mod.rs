@@ -1,13 +1,8 @@
-//! Runtime control-plane REST API (feature "control", reflector only).
+//! Reflector control API for sessions, keys, limits, status, and shutdown.
 //!
-//! A localhost axum server for runtime session/key management, cap
-//! tuning, live status, and drain/shutdown. Mirrors the lifecycle
-//! pattern of `crate::metrics` (bind fail-fast, spawned task,
-//! CancellationToken) and the state threading of `crate::snmp`.
-//! `doc/control-plane.md` is the authoritative design.
-//!
-//! Security: bind to loopback (default) or set a bearer token; key
-//! material is write-only — never returned, never logged.
+//! Requires the `control` feature. See `doc/control-plane.md` for the design.
+//! Bind to loopback (default) or configure a bearer token.
+//! Key material is write-only: never returned or logged.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -350,10 +345,9 @@ impl ControlServer {
     }
 }
 
-/// A loaded server certificate chain and private key for the control plane.
+/// Parsed control-plane certificate chain and private key.
 ///
-/// Held as parsed DER rather than paths so a bad file fails at startup, next to
-/// the operator who wrote the flag, instead of on the first request.
+/// Loading DER at startup reports invalid files before serving requests.
 pub struct ControlTls {
     chain: Vec<rustls::pki_types::CertificateDer<'static>>,
     key: rustls::pki_types::PrivateKeyDer<'static>,
@@ -369,12 +363,11 @@ impl std::fmt::Debug for ControlTls {
 }
 
 impl ControlTls {
-    /// Loads a PEM certificate chain and private key from disk.
+    /// Loads a PEM certificate chain and private key.
     ///
     /// # Errors
-    /// Returns an `io::Error` describing which file failed and why: unreadable,
-    /// containing no certificate, or containing no supported private key. The
-    /// messages name the flag so the operator knows which path to fix.
+    /// Returns `io::Error` with the relevant flag and path if a file is unreadable
+    /// or lacks a certificate or supported private key.
     pub fn load(
         cert_path: &std::path::Path,
         key_path: &std::path::Path,
@@ -423,12 +416,8 @@ impl ControlTls {
         Ok(Self { chain, key })
     }
 
-    /// Builds the rustls server configuration.
-    ///
-    /// The crypto provider is passed explicitly rather than taken from rustls's
-    /// process-wide default. With the `metrics` feature also enabled this binary
-    /// links a second provider (aws-lc-rs, via hyper-rustls), and asking for
-    /// "the default" would then depend on which crate installed one first.
+    /// Builds the rustls server configuration with an explicit crypto provider.
+    /// The `metrics` feature also links aws-lc-rs, so the process default may vary.
     fn server_config(self) -> Result<rustls::ServerConfig, std::io::Error> {
         let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
         let mut config = rustls::ServerConfig::builder_with_provider(provider)
@@ -449,12 +438,8 @@ impl ControlTls {
     }
 }
 
-/// Binds and spawns the control server. Fail-fast on bind errors
-/// (`main.rs` exits when the operator asked for a control plane it
-/// cannot provide, matching the metrics server contract).
-///
-/// With `tls` set the listener speaks HTTPS; the scheme in the startup log
-/// reflects what is actually being served, so an operator can tell at a glance.
+/// Binds and spawns the control server, returning bind errors to the caller.
+/// Uses HTTPS when `tls` is set; the startup log includes the scheme.
 pub async fn init(
     addr: std::net::SocketAddr,
     state: ControlState,
@@ -553,21 +538,13 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    // -----------------------------------------------------------------------
-    // TLS. These use a real socket and a real handshake, unlike the
-    // tower-oneshot tests above — the point is that the transport works, which
-    // an in-process router call cannot show.
+    // TLS transport tests using real sockets and handshakes.
 
-    /// Generates a throwaway CA and a leaf certificate signed by it, using
-    /// `openssl`. Returns `(ca_cert, leaf_cert, leaf_key)`.
+    /// Generates `(ca_cert, leaf_cert, leaf_key)` with `openssl`.
     ///
-    /// A CA plus leaf rather than one self-signed certificate, because rustls
-    /// correctly refuses a certificate with `CA:TRUE` as a server's end-entity
-    /// cert (`CaUsedAsEndEntity`) — a self-signed cert cannot be both the trust
-    /// anchor and the leaf. Generated per run rather than committed: a private
-    /// key in the repository trips secret scanners and would eventually expire.
-    /// Returns `None` when `openssl` is unavailable, so the test skips instead
-    /// of failing on a machine that lacks the tool.
+    /// Use a separate leaf because rustls rejects CA certificates as server leaves.
+    /// Generate per run to avoid committed keys and expired fixtures.
+    /// Returns `None` when `openssl` is unavailable.
     fn generate_test_chain(
         dir: &std::path::Path,
     ) -> Option<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {

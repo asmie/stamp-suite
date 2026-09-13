@@ -1,15 +1,6 @@
-//! Per-SSID HMAC key set (B6) end-to-end integration through
-//! `process_stamp_packet`.
-//!
-//! Pins three invariants:
-//! 1. **Single-key path stays compatible** — when only `hmac_key` is set
-//!    (legacy `--hmac-key` / `--hmac-key-file`), the receiver behaves as
-//!    before regardless of the packet's SSID.
-//! 2. **Per-SSID happy path** — when `hmac_key_set` is set, the
-//!    reflector picks the per-SSID key for verification and produces a
-//!    valid response.
-//! 3. **Unknown SSID with no default** — drops the packet (returns
-//!    None) when no key resolves for the requested SSID.
+//! Per-SSID HMAC verification and signing through `process_stamp_packet`.
+//! Covers single-key fallback, per-SSID key selection, and rejection when
+//! an SSID has no key or default.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -205,16 +196,9 @@ fn per_ssid_key_set_unknown_ssid_falls_back_to_default() {
     assert!(response.data.len() >= AUTH_BASE_SIZE);
 }
 
-/// Regression for the bug Cursor's bugbot caught in PR #5: the
-/// non-TLV authenticated response path used to pass `ctx.hmac_key`
-/// instead of the per-SSID-resolved key, so when `--hmac-key-dir`
-/// was the key source (ctx.hmac_key = None), authenticated packets
-/// without TLVs got responses signed with no key at all.
-///
-/// This test sends a no-TLV authenticated packet, verifies via
-/// per-SSID lookup, and asserts the response's last 16 bytes are
-/// not all zero — they're the response HMAC, which is None-keyed
-/// in the buggy version and therefore left at the initial zeros.
+/// The non-TLV authenticated response must use the resolved per-SSID key.
+/// With a key directory, the legacy single key is `None`; using it would leave
+/// the response HMAC zeroed.
 #[test]
 fn per_ssid_key_set_signs_no_tlv_response() {
     let key = HmacKey::new(vec![0xCC; 16]).unwrap();

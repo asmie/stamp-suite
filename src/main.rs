@@ -6,17 +6,9 @@ extern crate log;
 use stamp_suite::configuration::*;
 use stamp_suite::{receiver, sender};
 
-/// Initialise diagnostic logging via `tracing-subscriber`. Bridges
-/// existing `log::*` call sites via `tracing-log` (enabled by the
-/// `tracing-log` feature in Cargo.toml) so the migration from
-/// `env_logger` is transparent to the rest of the codebase.
-///
-/// Verbosity is controlled by `RUST_LOG` when set, otherwise by the
-/// `-v`/`-vv` count (see `configuration::resolve_log_filter`); the
-/// `--log-format` flag selects between human-readable text (default,
-/// matches the historic `env_logger` output) and one-line JSON for
-/// structured log shippers. Diagnostics always go to stderr so stdout
-/// contains only the requested measurement format.
+/// Initializes stderr logging, including `log` calls via `tracing-log`.
+/// `RUST_LOG` overrides verbosity; `--log-format` selects text or JSON.
+/// Stdout is reserved for measurement output.
 fn init_logging(format: LogFormat, verbose: u8) {
     use tracing_subscriber::{fmt, EnvFilter};
 
@@ -70,11 +62,8 @@ async fn main() {
 
     init_logging(conf.log_format, conf.verbose);
 
-    // Probe the NIC's timestamping capabilities (ETHTOOL_GET_TS_INFO on the
-    // interface owning --local-addr) and report honestly. The kernel
-    // timestamp *read path* is still a follow-up, so every mode currently
-    // uses software timestamps; `--hwtstamp on` warns with the true reason
-    // (NIC limitation vs. unimplemented read path).
+    // Probe the bound interface's timestamping capabilities and report
+    // startup warnings. Socket setup configures the requested timestamp tier.
     let hw_iface = stamp_suite::hwtstamp::interface_for_addr(conf.local_addr);
     let hw_cap = stamp_suite::hwtstamp::probe(hw_iface.as_deref());
     log::info!(
@@ -100,13 +89,8 @@ async fn main() {
 
     info!("Configuration valid. Starting up...");
 
-    // Initialize metrics server if enabled.
-    //
-    // Metrics is fail-fast: if the operator passed --metrics they want
-    // observability, and silently disabling the endpoint would hide that
-    // their dashboards and alerts are running blind. Surface the underlying
-    // bind error (port in use vs. address not available vs. permission
-    // denied) so the cause is obvious in journalctl.
+    // Bind the requested metrics endpoint before starting the measurement role.
+    // Propagate bind failures so startup cannot silently omit metrics.
     #[cfg(feature = "metrics")]
     let _metrics_server = if conf.metrics {
         match stamp_suite::metrics::init(conf.metrics_addr).await {
@@ -240,14 +224,8 @@ async fn main() {
                     Some(server)
                 }
                 Err(e) => {
-                    // SNMP is graceful: if the AgentX master is absent
-                    // (e.g. net-snmpd not running yet during boot, or the
-                    // socket is unreachable), the reflector's primary duty
-                    // — forwarding STAMP packets — is unaffected. Log the
-                    // failure and continue without SNMP rather than killing
-                    // the daemon. Operators who want SNMP-required-to-start
-                    // semantics can wrap stamp-suite in a systemd unit
-                    // ordered after snmpd.service.
+                    // AgentX startup failure leaves STAMP processing available.
+                    // Log the error and continue without SNMP.
                     log::warn!("SNMP sub-agent disabled: {} (continuing without SNMP)", e);
                     None
                 }
@@ -313,14 +291,8 @@ async fn main() {
                     Some(server)
                 }
                 Err(e) => {
-                    // SNMP is graceful: if the AgentX master is absent
-                    // (e.g. net-snmpd not running yet during boot, or the
-                    // socket is unreachable), the reflector's primary duty
-                    // — forwarding STAMP packets — is unaffected. Log the
-                    // failure and continue without SNMP rather than killing
-                    // the daemon. Operators who want SNMP-required-to-start
-                    // semantics can wrap stamp-suite in a systemd unit
-                    // ordered after snmpd.service.
+                    // AgentX startup failure leaves STAMP processing available.
+                    // Log the error and continue without SNMP.
                     log::warn!("SNMP sub-agent disabled: {} (continuing without SNMP)", e);
                     None
                 }

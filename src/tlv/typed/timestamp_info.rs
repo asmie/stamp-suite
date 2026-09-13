@@ -135,13 +135,8 @@ impl TimestampInfoTlv {
         }
     }
 
-    /// Builds the Session-Sender's request form of the TLV.
-    ///
-    /// Per RFC 8972 §4.3, the Session-Sender "MUST NOT fill any information
-    /// fields except for STAMP TLV Flags, Type, and Length. All other fields
-    /// MUST be filled with zeroes." All four value octets describe the
-    /// reflector's clocks, so the sender leaves every one of them zero; the
-    /// reflector fills them in on reflection.
+    /// Builds a sender request with all four value bytes zeroed (RFC 8972 §4.3).
+    /// The reflector fills them with its ingress/egress clock metadata.
     #[must_use]
     pub fn request() -> Self {
         Self {
@@ -245,11 +240,7 @@ mod tests {
 
     #[test]
     fn test_request_tlv_all_fields_zeroed() {
-        // RFC 8972 §4.3: "The Session-Sender MUST NOT fill any information
-        // fields except for STAMP TLV Flags, Type, and Length. All other
-        // fields MUST be filled with zeroes." All four value octets describe
-        // the reflector's ingress/egress clocks; the sender has no field of
-        // its own to fill, so the request TLV value MUST be all zeroes.
+        // Requests must zero all reflector clock fields (RFC 8972 §4.3).
         let raw = TimestampInfoTlv::request().to_raw();
         assert_eq!(raw.tlv_type, TlvType::TimestampInfo);
         assert_eq!(raw.value, vec![0, 0, 0, 0]);

@@ -1,8 +1,4 @@
-//! End-to-end tests for `--config <PATH>` TOML loading.
-//!
-//! These tests drive `Configuration::command().get_matches_from(...)` via
-//! the public CLI surface (just like a real invocation would) and rely on
-//! `tempfile` to write throw-away TOML files.
+//! TOML configuration loading through the CLI parser, using temporary files.
 
 use clap::CommandFactory;
 use stamp_suite::configuration::Configuration;

@@ -41,16 +41,10 @@ pub enum ErrorEstimateError {
 }
 
 impl ErrorEstimate {
-    /// Creates a new ErrorEstimate with validation.
-    ///
-    /// # Arguments
-    /// * `synchronized` - Whether the clock is synchronized (S bit)
-    /// * `z_flag` - Timestamp format flag (Z bit): false = NTP, true = PTP
-    /// * `scale` - Scale factor (must be 0-63)
-    /// * `multiplier` - Multiplier value (0-255)
+    /// Creates an error estimate. `z_flag` selects NTP (`false`) or PTP (`true`).
     ///
     /// # Errors
-    /// Returns `ErrorEstimateError::ScaleOutOfRange` if scale > 63.
+    /// Returns `ErrorEstimateError::ScaleOutOfRange` if `scale > 63`.
     pub fn new(
         synchronized: bool,
         z_flag: bool,
@@ -68,16 +62,10 @@ impl ErrorEstimate {
         })
     }
 
-    /// Creates a new ErrorEstimate using a ClockFormat to determine the Z flag.
-    ///
-    /// # Arguments
-    /// * `synchronized` - Whether the clock is synchronized (S bit)
-    /// * `clock_format` - Clock format (NTP or PTP), determines the Z flag
-    /// * `scale` - Scale factor (must be 0-63)
-    /// * `multiplier` - Multiplier value (0-255)
+    /// Creates an error estimate with the Z bit selected by `clock_format`.
     ///
     /// # Errors
-    /// Returns `ErrorEstimateError::ScaleOutOfRange` if scale > 63.
+    /// Returns `ErrorEstimateError::ScaleOutOfRange` if `scale > 63`.
     pub fn with_clock_format(
         synchronized: bool,
         clock_format: ClockFormat,
@@ -125,13 +113,7 @@ impl ErrorEstimate {
         }
     }
 
-    /// Decodes an ErrorEstimate from its 16-bit wire format.
-    ///
-    /// Wire format (RFC 8762):
-    /// - Bit 15: S (synchronization) bit
-    /// - Bit 14: Z (timestamp format) bit - 0 = NTP, 1 = PTP
-    /// - Bits 13-8: Scale (6 bits)
-    /// - Bits 7-0: Multiplier (8 bits)
+    /// Decodes the 16-bit wire format described by [`ErrorEstimate`].
     #[must_use]
     pub fn from_wire(value: u16) -> Self {
         let synchronized = (value & 0x8000) != 0;
@@ -147,13 +129,7 @@ impl ErrorEstimate {
         }
     }
 
-    /// Encodes the ErrorEstimate to its 16-bit wire format.
-    ///
-    /// Wire format (RFC 8762):
-    /// - Bit 15: S (synchronization) bit
-    /// - Bit 14: Z (timestamp format) bit - 0 = NTP, 1 = PTP
-    /// - Bits 13-8: Scale (6 bits, masked to ensure validity)
-    /// - Bits 7-0: Multiplier (8 bits)
+    /// Encodes the 16-bit wire format, masking `scale` to six bits.
     #[must_use]
     pub fn to_wire(&self) -> u16 {
         let s_bit = if self.synchronized { 0x8000u16 } else { 0 };

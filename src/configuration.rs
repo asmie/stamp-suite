@@ -14,13 +14,7 @@ pub use crate::clock_format::ClockFormat;
 pub use crate::hwtstamp::HwTsMode;
 pub use crate::stats::OutputFormat;
 
-/// A secret string sourced from the CLI (`--hmac-key`) or the environment
-/// (`STAMP_HMAC_KEY`).
-///
-/// Wrapped so the plaintext key is (a) zeroized on drop — it cannot be
-/// recovered from a core dump or freed heap once the value is gone — and
-/// (b) redacted from `Debug`, so it never leaks through a `{:?}` of
-/// `Configuration`. A plain `String` would do neither.
+/// A CLI or environment secret, zeroized on drop and redacted from `Debug`.
 #[derive(Clone)]
 pub struct SecretString(zeroize::Zeroizing<String>);
 
@@ -162,13 +156,10 @@ impl fmt::Display for TlvHandlingMode {
     }
 }
 
-/// Whether the Session-Sender originates an HMAC TLV (RFC 8972 §4.8).
+/// Controls sender HMAC TLV origination (RFC 8972 §4.8).
 ///
-/// Origination is separate from *having* a key: a key may be configured purely
-/// to verify a reflector's replies, or for base-packet authentication in
-/// authenticated mode. Found during interop testing, where a peer's handling of
-/// an unsolicited HMAC TLV differed from ours and there was no way to turn
-/// origination off without also giving up the key.
+/// A configured key also serves reply verification and base authentication.
+/// Unauthenticated senders can disable TLV origination while retaining the key.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
 )]
@@ -195,15 +186,9 @@ impl fmt::Display for TlvHmacMode {
     }
 }
 
-/// What the Session-Sender does when a reflected packet comes back with a
-/// zeroed SSID field.
+/// Sender policy for a zeroed reply SSID (RFC 8972 §3).
 ///
-/// RFC 8972 §3 describes a reflector that returns a zeroed SSID (it does not
-/// support the field, or declines to echo it) and requires that "an
-/// implementation of a Session-Sender MUST support control of its behavior in
-/// such a scenario". This enum is that control. Only meaningful when the sender
-/// actually set a non-zero `--ssid`: without one, a zeroed reply field carries
-/// no information.
+/// Applies only when the sender requested a non-zero `--ssid`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
 )]
@@ -254,14 +239,12 @@ pub struct Configuration {
     #[clap(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Print the JSON Schema for the TOML configuration file to stdout
-    /// and exit. The schema can be fed to validators like the
-    /// `jsonschema` CLI or used by IDE plugins for autocomplete:
+    /// Print the TOML configuration's JSON Schema to stdout and exit.
     ///
     /// `stamp-suite --print-config-schema > stamp-suite-config.schema.json`
     ///
-    /// Then `jsonschema -i my-config.toml stamp-suite-config.schema.json`
-    /// (after a TOML→JSON conversion via `taplo`/`yj`).
+    /// Use the schema with an IDE or validator; JSON validators require converting
+    /// TOML input to JSON first.
     #[clap(long, exclusive = true)]
     pub print_config_schema: bool,
     /// Remote address for Session Reflector
@@ -339,16 +322,12 @@ pub struct Configuration {
     #[clap(long)]
     pub clock_synchronized: bool,
 
-    /// HMAC key as hex string; at least 32 hex chars (16 bytes) are required.
+    /// HMAC key in hex; requires at least 32 hex chars (16 bytes).
+    /// 64 hex chars (32 bytes) matches the HMAC-SHA-256 output length.
     ///
-    /// A shorter key is rejected outright, not warned about. 64 hex chars
-    /// (32 bytes, matching the HMAC-SHA-256 output length) is a good default.
-    ///
-    /// Note: a key passed on the command line is visible in `ps` /
-    /// `/proc/<pid>/cmdline` to other local users, and an env-var key is
-    /// visible to anyone who can read the process environment. Prefer
-    /// `--hmac-key-file` in production. The value is held zeroize-on-drop and
-    /// is redacted from debug output (see `SecretString`).
+    /// CLI keys are visible in process arguments; environment keys are visible to
+    /// users who can read the process environment. Prefer `--hmac-key-file` in
+    /// production. The stored value is zeroized on drop and redacted from `Debug`.
     #[clap(long, env = "STAMP_HMAC_KEY")]
     pub hmac_key: Option<SecretString>,
 
@@ -356,12 +335,9 @@ pub struct Configuration {
     #[clap(long, conflicts_with = "hmac_key")]
     pub hmac_key_file: Option<PathBuf>,
 
-    /// Path to a directory of per-SSID HMAC key files. Each file's name
-    /// (minus extension) is interpreted as the SSID in hex; a file named
-    /// `default.key` becomes the fallback for unknown SSIDs. Mutually
-    /// exclusive with `--hmac-key` and `--hmac-key-file`. Lets a single
-    /// reflector serve multiple senders without sharing a key, and
-    /// enables key rotation by re-running with a new directory.
+    /// Directory of per-SSID HMAC keys. File stems are hexadecimal SSIDs;
+    /// `default.key` supplies the fallback. Conflicts with `--hmac-key` and
+    /// `--hmac-key-file`. Restart with updated files to rotate keys.
     #[clap(long, conflicts_with_all = ["hmac_key", "hmac_key_file"])]
     pub hmac_key_dir: Option<PathBuf>,
 
@@ -399,16 +375,10 @@ pub struct Configuration {
     #[clap(long, default_value_t = 300)]
     pub session_timeout: u64,
 
-    /// DSCP codepoints the reflector may apply to a reply when a Class of
-    /// Service TLV requests them (RFC 8972 §4.4/§6, cos-ecn-01 §3.2).
-    ///
-    /// `all` (default), `none`, or a comma-separated list of values and
-    /// inclusive ranges: `0,8,10-14,46`. A refused DSCP1 is not applied; the
-    /// reply keeps the received DSCP and the echoed TLV reports RPD=0b01.
-    ///
-    /// This is the *permitted* check the RFC asks for. Whether the value can
-    /// actually be set — *capable* — remains a separate question answered by
-    /// the socket, and a request must clear both.
+    /// DSCP codepoints permitted on reflector replies (RFC 8972 §4.4/§6,
+    /// cos-ecn-01 §3.2): `all` (default), `none`, or values and inclusive ranges
+    /// such as `0,8,10-14,46`. Rejected DSCP1 requests retain the received DSCP
+    /// and report RPD=0b01. Permitted values still require socket support.
     ///
     /// Reflector-side only.
     #[clap(long, default_value = "all", value_name = "SPEC")]
@@ -425,14 +395,9 @@ pub struct Configuration {
     #[clap(long, default_value = "all", value_name = "SPEC")]
     pub allowed_ecn: String,
 
-    /// Destination-scoped DSCP policy, overriding `--allowed-dscp` for replies
-    /// addressed inside a prefix: `PREFIX/LEN=SPEC`, e.g.
-    /// `--allowed-dscp-for 192.0.2.0/24=0,46`.
-    ///
-    /// Repeatable. The most specific matching prefix wins regardless of the
-    /// order given, and a matching rule *replaces* the global set rather than
-    /// adding to it. cos-ecn-01 §3.2 names exactly this shape: "a policy ...
-    /// configured for specific destination addresses or networks".
+    /// Destination DSCP policy overriding `--allowed-dscp` (cos-ecn-01 §3.2).
+    /// Repeatable `PREFIX/LEN=SPEC`, e.g. `--allowed-dscp-for 192.0.2.0/24=0,46`.
+    /// The longest matching prefix replaces the global set, regardless of order.
     ///
     /// Reflector-side only.
     #[clap(long, value_name = "PREFIX/LEN=SPEC")]
@@ -449,14 +414,10 @@ pub struct Configuration {
     #[clap(long)]
     pub drop_replayed: bool,
 
-    /// Which Location TLV fields the reflector may report (RFC 8972 §4.2.2).
-    ///
-    /// §4.2.2 lets a reflector "leave some fields unreported by filling them
-    /// with zeroes" under local policy, and requires an implementation to
-    /// provide control over that policy. Comma-separated: `all` (default),
-    /// `none`, or any of `src-port`, `dst-port`, `ports`, `src-ip`, `dst-ip`,
-    /// `ips`. A withheld field is answered as zeroes, so the reply's size and
-    /// TLV structure are unchanged.
+    /// Location TLV fields the reflector may report (RFC 8972 §4.2.2).
+    /// Comma-separated: `all` (default), `none`, or `src-port`, `dst-port`,
+    /// `ports`, `src-ip`, `dst-ip`, `ips`. Withheld fields are zeroed without
+    /// changing the TLV length or structure.
     ///
     /// Reflector-side only; ignored by the sender.
     #[clap(long, default_value = "all", value_name = "FIELDS")]
@@ -513,13 +474,10 @@ pub struct Configuration {
     #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..4))]
     pub ecn: u8,
 
-    /// Multiplicative backoff factor for the AIMD congestion-response
-    /// controller (draft-ietf-ippm-stamp-cos-ecn-01 §3.4): each time a
-    /// CE-marked reply is observed, the send interval is multiplied by this
-    /// factor (capped at `--ecn-max-delay`). Must be > 1.0. Active only
-    /// when `--cos` is set and `--ecn` requests ECT0 (2) or ECT1 (1) —
-    /// see `--ecn-max-delay` / `--ecn-recovery-step` for the other two
-    /// AIMD parameters.
+    /// Multiply the send interval by this factor on each CE-marked reply,
+    /// capped at `--ecn-max-delay` (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+    /// Must exceed 1.0. Active with `--cos` and `--ecn` ECT0 (2) or ECT1 (1).
+    /// See `--ecn-recovery-step` for recovery pacing.
     #[clap(long, default_value_t = 2.0)]
     pub ecn_backoff_factor: f64,
 
@@ -548,13 +506,10 @@ pub struct Configuration {
     #[clap(long, value_enum)]
     pub malformed: Option<MalformedMode>,
 
-    /// Enable Access Report TLV (RFC 8972 §4.6) with the given Access ID
-    /// (1-15; the field is 4 bits wide). Only 1 (3GPP Network) and 2
-    /// (Non-3GPP Network) are currently defined; 0 is never valid and is
-    /// rejected. Values 3-15 are accepted (the field may gain further
-    /// definitions) but log a startup warning since they are not yet a
-    /// recognized Access ID.
-    /// The reflector echoes this TLV unchanged.
+    /// Enable Access Report TLV with Access ID 1-15 (RFC 8972 §4.6).
+    /// IDs 1 (3GPP Network) and 2 (Non-3GPP Network) are defined; 3-15 are
+    /// accepted with a startup warning. Zero is rejected.
+    /// The reflector echoes valid reports unchanged.
     #[clap(long, value_parser = clap::value_parser!(u8).range(1..=15))]
     pub access_report: Option<u8>,
 
@@ -563,21 +518,15 @@ pub struct Configuration {
     #[clap(long, default_value_t = 1)]
     pub access_return_code: u8,
 
-    /// Access Report TLV retransmission timer, in seconds (RFC 8972 §4.6:
-    /// "The default value of the retransmission timer for the Access
-    /// Report TLV SHOULD be three seconds"). The sender arms this timer
-    /// after sending a packet carrying the Access Report TLV and
-    /// retransmits it in the next test packet(s) if the timer expires
-    /// before the reflector's echo is received. Only used when
-    /// --access-report is enabled.
+    /// Access Report retransmission timeout in seconds (RFC 8972 §4.6;
+    /// default 3). Armed after sending the TLV and disarmed on its reflected
+    /// echo. Expiry triggers retransmission. Requires `--access-report`.
     #[clap(long, default_value_t = crate::sender::DEFAULT_ACCESS_REPORT_TIMEOUT.as_secs() as u32, value_parser = clap::value_parser!(u32).range(1..=3600))]
     pub access_report_timeout: u32,
 
-    /// Maximum number of Access Report TLV retransmissions before the
-    /// procedure is aborted (RFC 8972 §4.6: "This retransmission SHOULD be
-    /// repeated up to four times before the procedure is aborted"). 0
-    /// disables retransmission: the procedure aborts on the first missed
-    /// acknowledgment. Only used when --access-report is enabled.
+    /// Maximum Access Report retransmissions (RFC 8972 §4.6; default 4).
+    /// Zero aborts on the first missed acknowledgment without retransmitting.
+    /// Requires `--access-report`.
     #[clap(long, default_value_t = crate::sender::DEFAULT_ACCESS_REPORT_RETRIES, value_parser = clap::value_parser!(u32).range(0..=255))]
     pub access_report_retries: u32,
 
@@ -627,13 +576,8 @@ pub struct Configuration {
     #[clap(long, value_name = "PATH")]
     pub control_token_file: Option<PathBuf>,
 
-    /// PEM certificate chain for the control-plane API. Serves HTTPS instead of
-    /// HTTP; requires `--control-tls-key`.
-    ///
-    /// A bearer token is mandatory alongside TLS: TLS is what makes exposing
-    /// this API beyond loopback plausible, and an unauthenticated
-    /// key-management and shutdown endpoint is not something to expose,
-    /// encrypted or not.
+    /// PEM certificate chain for the control API. Enables HTTPS and requires
+    /// `--control-tls-key` and a bearer token for session/key management and shutdown.
     #[clap(long, value_name = "PATH", requires = "control_tls_key")]
     pub control_tls_cert: Option<PathBuf>,
 
@@ -652,12 +596,8 @@ pub struct Configuration {
     #[clap(long, value_enum, default_value_t = LogFormat::Text)]
     pub log_format: LogFormat,
 
-    /// Increase log verbosity (-v debug, -vv trace); RUST_LOG overrides.
-    /// Repeatable: absent keeps the current default (`RUST_LOG` if set,
-    /// otherwise `info`), one `-v` raises it to `debug`, two or more
-    /// (`-vv`, `-vvv`, ...) raise it to `trace`. An explicit `RUST_LOG`
-    /// environment variable always wins over `-v`, at any count -- see
-    /// `resolve_log_filter`.
+    /// Increase log verbosity: `-v` for debug, `-vv` or more for trace.
+    /// Defaults to info. A non-empty `RUST_LOG` overrides this flag.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
@@ -781,23 +721,16 @@ pub struct Configuration {
     #[clap(long)]
     pub ber: bool,
 
-    /// Append an Extra Padding TLV of this many value octets to every test
-    /// packet (RFC 8972 §4.1), independent of `--ber`.
-    ///
-    /// Filled with pseudorandom bytes as §4.2 recommends. Use this to grow test
-    /// packets for MTU or fragmentation work without turning on BER
-    /// measurement, which needs a known pattern instead and owns the padding
-    /// TLV when it is enabled.
+    /// Append an Extra Padding TLV with this many value octets (RFC 8972 §4.1).
+    /// Uses pseudorandom bytes as §4.2 recommends, for MTU or fragmentation tests.
+    /// With `--ber`, BER measurement supplies the padding and its known pattern.
     #[clap(long, value_name = "BYTES", conflicts_with = "ber")]
     pub extra_padding: Option<usize>,
 
-    /// Omit the Max Bit Error Burst Size TLV (Type 242) from `--ber` packets.
-    ///
-    /// Type 242 sits in the Experimental Use range (RFC 8972 §5.1) and is used
-    /// independently, with an incompatible wire format, by another STAMP
-    /// implementation's "Heartbeat" TLV. Against such a peer that TLV is
-    /// misparsed, so this omits it while keeping the rest of the BER exchange
-    /// intact. Ignored unless `--ber` is set.
+    /// Omit Max Bit Error Burst Size TLV (Type 242) from `--ber` packets.
+    /// This experimental codepoint (RFC 8972 §5.1) conflicts with another
+    /// implementation's incompatible Heartbeat TLV. Other BER TLVs are unchanged.
+    /// Ignored unless `--ber` is set.
     #[clap(long)]
     pub ber_omit_burst: bool,
 
@@ -862,18 +795,13 @@ pub struct Configuration {
     #[clap(long)]
     pub reflected_control_no_ext_hdr: bool,
 
-    /// Reflector-side amplification cap (the per-request *volume* limit of
-    /// draft-ietf-ippm-asymmetrical-pkts-14 §3): maximum number of reply
-    /// packets the reflector will emit in response to a single Reflected
-    /// Test Packet Control TLV request. When the sender requests more, the
-    /// reflector sends a single reflected packet with the C flag set on the
-    /// echoed TLV, as the draft requires.
+    /// Maximum replies per Reflected Test Packet Control request
+    /// (draft-ietf-ippm-asymmetrical-pkts-14 §3). Requests above the cap receive
+    /// one C-flagged reply.
     ///
-    /// Default 0, which **disables** asymmetric reflection — the reflector
-    /// sends only the single normal reply and sets the C flag. This honours
-    /// draft-ietf-ippm-asymmetrical-pkts-14 §5, which requires the feature be
-    /// administratively controllable and disabled by default. Set a positive
-    /// value to opt in (e.g. 16); pair with `--max-pps` to bound amplification.
+    /// Default 0 disables asymmetric reflection (§5): one normal reply with C set.
+    /// Set a positive cap (e.g. 16) to enable it; pair with `--max-pps` to limit
+    /// amplification.
     #[clap(long, default_value_t = 0)]
     pub reflected_control_max_count: u16,
 
@@ -955,25 +883,11 @@ pub struct Configuration {
 }
 
 impl Configuration {
-    /// Validates the configuration parameters.
+    /// Returns a warning if `--send-delay` would overlap reflected bursts
+    /// (draft-ietf-ippm-asymmetrical-pkts-14 §5), otherwise `None`.
     ///
-    /// Returns an error if any configuration value is invalid.
-    /// Checks the sender's own pacing against the reflected burst it requests
-    /// (draft-ietf-ippm-asymmetrical-pkts-14 §5): "A Session-Sender SHOULD NOT
-    /// send the next STAMP test packet with the Reflected Test Packet Control
-    /// TLV before the Session-Reflector is expected to complete transmitting
-    /// all reflected packets in response to the ... TLV in the previous test
-    /// packet."
-    ///
-    /// Returns the operator-facing warning when `--send-delay` is shorter than
-    /// the requested burst's expected duration, `None` when the pacing is fine
-    /// or no burst was requested. This is advisory (a SHOULD NOT governing the
-    /// sender's own self-inflicted overlap, not a wire violation), so it warns
-    /// rather than refusing to start — an operator deliberately measuring
-    /// under overlap keeps that option.
-    ///
-    /// The reflector sends `count` packets separated by `interval_ns`, so the
-    /// last one leaves at `(count - 1) * interval_ns`.
+    /// A burst lasts `(count - 1) * interval_ns`. Overlap is advisory and does
+    /// not prevent startup.
     #[must_use]
     pub fn reflected_burst_pacing_warning(&self) -> Option<String> {
         if self.reflected_control_count <= 1 {
@@ -1220,11 +1134,8 @@ impl Configuration {
             ));
         }
 
-        // Control-plane TLS: both halves or neither (clap's `requires` covers
-        // the CLI, but a config file can set one alone), and never without a
-        // bearer token — TLS is what makes non-loopback exposure plausible, and
-        // an unauthenticated key-management endpoint should not be reachable
-        // whether or not the transport is encrypted.
+        // Validate TLS certificate/key pairing after TOML merging, which bypasses
+        // clap's `requires` checks. TLS also requires a bearer token.
         match (&self.control_tls_cert, &self.control_tls_key) {
             (Some(_), None) => {
                 return Err(ConfigurationError::InvalidConfiguration(
@@ -1327,11 +1238,8 @@ impl Configuration {
                 self.ecn
             )));
         }
-        // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: the AIMD congestion-response
-        // controller's own parameters must describe an actual backoff/
-        // recovery cycle, regardless of whether the controller ends up
-        // active this run (mirrors dscp/ecn above, which are validated
-        // unconditionally too).
+        // Validate AIMD backoff and recovery parameters even when ECN measurement
+        // is disabled (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
         if !self.ecn_backoff_factor.is_finite() || self.ecn_backoff_factor <= 1.0 {
             return Err(ConfigurationError::InvalidConfiguration(format!(
                 "ecn_backoff_factor value {} must be a finite number greater than 1.0 \
@@ -1370,12 +1278,8 @@ impl Configuration {
             ));
         }
         if let Some(id) = self.access_report {
-            // RFC 8972 §4.6: the Access ID is a 4-bit field; 0 has no
-            // defined meaning and is never valid. Only 1 (3GPP Network)
-            // and 2 (Non-3GPP Network) are currently defined, but values
-            // up to the 4-bit maximum (15) are accepted so a future
-            // registry allocation is not blocked by this CLI — they just
-            // get a startup warning since they're not (yet) recognized.
+            // RFC 8972 §4.6: Access ID is four bits; zero is invalid.
+            // Accept unassigned IDs 3-15 with a startup warning.
             if id == 0 {
                 return Err(ConfigurationError::InvalidConfiguration(
                     "access_report value 0 is invalid: RFC 8972 §4.6 defines no Access ID 0 \
@@ -1445,11 +1349,8 @@ impl Configuration {
             ));
         }
 
-        // Mutual-exclusion checks duplicated here so combinations coming
-        // from the TOML file are rejected. clap's `conflicts_with` /
-        // `conflicts_with_all` only fire when both values are supplied on
-        // the command line; merging a conflicting value from a file after
-        // parse time bypasses them.
+        // Repeat clap's conflict checks after TOML merging: file values can
+        // introduce conflicts that were absent during CLI parsing.
         if self.hmac_key.is_some() && self.hmac_key_file.is_some() {
             return Err(ConfigurationError::InvalidConfiguration(
                 "hmac_key and hmac_key_file are mutually exclusive".to_string(),
@@ -1478,11 +1379,7 @@ impl Configuration {
                 ));
             }
         }
-        // `--hmac-key-dir` builds a per-SSID keyset, which only a reflector
-        // demultiplexes; a Session-Sender has one session and one key. Without
-        // this rule a sender silently ignored the flag — including a typo'd
-        // path — and `-A A --hmac-key-dir <valid dir>` passed validation only to
-        // die later with the less helpful "requires HMAC key".
+        // Per-SSID key directories are reflector-only; a sender uses one key.
         if self.hmac_key_dir.is_some() && !self.is_reflector {
             return Err(ConfigurationError::InvalidConfiguration(
                 "hmac_key_dir is reflector-only (it is a per-SSID keyset); a \
@@ -1536,12 +1433,9 @@ impl Configuration {
         Ok(())
     }
 
-    /// Validates the draft-ietf-ippm-stamp-ext-hdr-13 header-reflection flags:
-    /// the repeatable `--reflected-ipv6-ext-hdr` / `--reflected-fixed-hdr`
-    /// request specs, the `--attach-ext-hdr` attachment specs, and the
-    /// backward-compatible standalone selector flags. Each occurrence is parsed
-    /// with the same helpers the sender uses to build the wire TLVs, so a parse
-    /// failure here is reported before any packet is sent.
+    /// Validates header-reflection requests and attachments before sending
+    /// (draft-ietf-ippm-stamp-ext-hdr-13). Uses the sender's wire-TLV parsers,
+    /// including those for standalone selector flags.
     fn validate_ext_hdr_flags(&self) -> Result<(), ConfigurationError> {
         let cfg_err = ConfigurationError::InvalidConfiguration;
 
@@ -2036,15 +1930,10 @@ pub struct FileConfiguration {
     pub reflected_fixed_hdr_selector: Option<String>,
 }
 
-/// JSON Schema (draft 2020-12) for the TOML config file accepted by
-/// `--config`. Returned by the `--print-config-schema` CLI flag so
-/// external tooling (taplo, `jsonschema` CLI, IDE auto-completion) can
-/// validate config files before deployment.
+/// JSON Schema (draft 2020-12) for `--config`, emitted by `--print-config-schema`.
 ///
-/// Maintained by hand alongside [`FileConfiguration`]; adding a field
-/// there requires adding a property here. The schema deliberately
-/// matches `#[serde(deny_unknown_fields)]` on `FileConfiguration` so
-/// extra keys fail validation in the same way they fail at runtime.
+/// Keep properties in sync with [`FileConfiguration`]. Unknown keys are rejected
+/// to match its `#[serde(deny_unknown_fields)]` behavior.
 pub const CONFIG_JSON_SCHEMA: &str = r##"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/asmie/stamp-suite/schema/stamp-suite-config.json",
@@ -2163,22 +2052,10 @@ pub fn is_auth(mode: AuthMode) -> bool {
     mode.is_authenticated()
 }
 
-/// Resolves the effective `tracing-subscriber` env-filter directive from
-/// the `-v`/`-vv` repeat count and the current `RUST_LOG` value (or lack
-/// thereof).
+/// Resolves the log filter: a non-empty `env` wins, otherwise verbosity maps
+/// 0 to `info`, 1 to `debug`, and 2 or more to `trace`.
 ///
-/// Precedence (highest first):
-/// 1. `env`, when `Some` and non-empty: an operator who has already set
-///    `RUST_LOG` (possibly with per-module directives like
-///    `stamp_suite=trace,tower=warn`) is assumed to know what they want,
-///    and `-v` must not silently override it.
-/// 2. The verbosity count: `0` keeps the historic default (`"info"`),
-///    `1` (`-v`) raises it to `"debug"`, `2` or more (`-vv`, `-vvv`, ...)
-///    raises it to `"trace"`.
-///
-/// Pure and free of any global/subscriber/process-environment state, so
-/// it is unit-testable on its own; callers are expected to pass
-/// `std::env::var("RUST_LOG").ok()` for `env`.
+/// Pass `std::env::var("RUST_LOG").ok()` as `env`.
 #[must_use]
 pub fn resolve_log_filter(verbose: u8, env: Option<&str>) -> String {
     if let Some(value) = env {
@@ -2194,15 +2071,11 @@ pub fn resolve_log_filter(verbose: u8, env: Option<&str>) -> String {
     .to_string()
 }
 
-/// Upper bound for `--extra-padding` / `--ber-padding-size` value octets.
+/// Maximum padding value size for `--extra-padding` and `--ber-padding-size`.
 ///
-/// Derivation: the largest IPv4 UDP payload is 65507 bytes; subtract the
-/// authenticated base packet (112), the padding TLV's own header (4), and
-/// the worst-case per-packet TLVs the sender may add alongside it (HMAC 20,
-/// Direct Measurement 16, Access Report 8). Anything larger either cannot be
-/// represented by the TLV's 16-bit Length field or cannot leave the host in
-/// one datagram — and the unchecked value is allocated up front, so an
-/// absurd one must fail validation, not panic or OOM at send time.
+/// From the IPv4 UDP payload limit (65507), reserve the authenticated base (112),
+/// padding header (4), HMAC (20), Direct Measurement (16), and Access Report (8).
+/// Validate before allocation to reject oversized input.
 pub const MAX_PADDING_BYTES: usize = 65_507 - 112 - 4 - 20 - 16 - 8;
 
 /// Type 246 Requested field width (draft-ietf-ippm-stamp-ext-hdr-13 §5.1).
@@ -3331,11 +3204,8 @@ mod tests {
         );
     }
 
-    /// The schema's properties block and FileConfiguration's fields match
-    /// 1:1 — both directions. The field list is derived from the struct
-    /// itself (every field is an `Option`, so a default serializes each one
-    /// as an explicit null), not hand-maintained: a hand-kept copy of the
-    /// list went stale once and let six accepted keys ship un-schematized.
+    /// Schema properties must match every `FileConfiguration` field.
+    /// Derive the field list by serializing the default: each `Option` becomes null.
     #[test]
     fn test_config_schema_matches_file_config_fields_exactly() {
         let v: serde_json::Value = serde_json::from_str(CONFIG_JSON_SCHEMA).unwrap();
@@ -3380,7 +3250,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // F1: --hwtstamp.
+    // --hwtstamp.
 
     #[test]
     fn test_hwtstamp_default_auto() {
@@ -3917,7 +3787,7 @@ mod tests {
         assert!(err.to_string().contains("ecn"));
     }
 
-    // ===== AIMD congestion-response (F2, draft-ietf-ippm-stamp-cos-ecn-01 §3.4) =====
+    // ===== AIMD congestion-response (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) =====
 
     #[test]
     fn test_validate_rejects_ecn_backoff_factor_not_greater_than_one() {
@@ -4016,15 +3886,8 @@ mod tests {
         assert!(err.to_string().contains("access_report"));
     }
 
-    /// RFC 8972 §4.6: the Access ID field has no defined value of 0 — only
-    /// 1 (3GPP) and 2 (Non-3GPP) are defined. 0 must always be rejected,
-    /// whether supplied on the CLI (clap's `range` parser) or via the TOML
-    /// file (the duplicated `validate()` check).
-    ///
-    /// Uses `try_get_matches_from` rather than the `load_from_args` helper:
-    /// `Configuration::command().get_matches_from` calls `process::exit` on
-    /// a parse error instead of returning a `Result`, which would abort the
-    /// whole test binary.
+    /// Reject Access ID 0 through both CLI parsing and TOML validation (RFC 8972 §4.6).
+    /// Use `try_get_matches_from` so parse errors cannot exit the test process.
     #[test]
     fn test_access_report_cli_rejects_zero() {
         let result =
@@ -4056,11 +3919,8 @@ mod tests {
         }
     }
 
-    /// Values 3-15 are not currently defined by RFC 8972 §4.6, but the
-    /// field is a 4-bit wire value and a future registry allocation must
-    /// not be blocked by the CLI. They are accepted (with a startup
-    /// warning logged, not asserted here — no log-capture harness in this
-    /// crate) rather than rejected outright.
+    /// Accept unassigned Access IDs 3-15 within the four-bit field (RFC 8972 §4.6).
+    /// The startup warning is not asserted here.
     #[test]
     fn test_access_report_accepts_undefined_registry_values_within_4_bits() {
         for value in ["3", "15"] {
@@ -4625,11 +4485,8 @@ mod tests {
         assert!(load_from_args(&["test", "--is-reflector", "--hmac-key-dir", path]).is_ok());
     }
 
-    /// RFC 8972 §4.6 makes the Access Report Return Code a full octet (Table 11
-    /// defines 0, 1, 2 and 255), and `access_report.rs` puts the whole octet on
-    /// the wire. The published schema capped it at 15, so the validation
-    /// workflow that `--print-config-schema` documents rejected values the
-    /// binary accepts.
+    /// The schema must accept the full Return Code octet, including 255,
+    /// as the CLI and wire encoder do (RFC 8972 §4.6, Table 11).
     #[test]
     fn test_schema_access_return_code_spans_a_full_octet() {
         let schema: serde_json::Value =

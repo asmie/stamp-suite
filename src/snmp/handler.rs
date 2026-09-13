@@ -590,7 +590,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // B1 audit follow-up: OID boundary coverage.
+    // OID boundary coverage.
 
     /// Empty OID must produce NoSuchObject, not a panic from `oid.0[0]`.
     #[test]

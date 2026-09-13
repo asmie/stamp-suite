@@ -1,18 +1,9 @@
-//! Malformed-input fuzz-equivalent test suite.
+//! Malformed packet and TLV regression tests through the reflector pipeline.
 //!
-//! Hand-crafts adversarial byte sequences along each parser boundary called
-//! out in the audit (RFC 8762 §4.1.x base-packet sizes; RFC 8972 §4.2.1 TLV
-//! layout; HMAC TLV ordering per §4.8; sub-TLV chains per RFC 9503 §4) and
-//! asserts the reflector:
-//!
-//! - never panics,
-//! - produces a response (or `SuppressReply`) with the spec-mandated flag
-//!   set on the offending TLV, and
-//! - keeps the rest of the chain intact for sender-side analysis.
-//!
-//! Companion to the libfuzzer harness in C5 — these are seed corpus values
-//! that proved a real failure mode at some point or that exercise a hand-
-//! identified boundary.
+//! Covers base sizes (RFC 8762 §4.1.x), TLV layouts and HMAC ordering
+//! (RFC 8972 §4.2.1/§4.8), and Return Path sub-TLVs (RFC 9503 §4).
+//! Checks rejection/response flags and preservation of echoed chains.
+//! The fuzz harnesses in `fuzz/` cover broader input sequences.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -328,8 +319,7 @@ fn group_d_return_path_sub_tlv_overflows_parent() {
 // ===========================================================================
 // Group E: random bytes (high-entropy spot checks)
 
-/// Random-ish high-entropy byte buffers must not panic. Not a fuzz test
-/// (that's C5) but a smoke test for the obvious wins.
+/// Fixed byte patterns must not panic in packet processing.
 #[test]
 fn group_e_high_entropy_buffers_no_panic() {
     let patterns: [&[u8]; 5] = [

@@ -202,12 +202,9 @@ fn ns_i64_to_ms(ns: i64) -> f64 {
     ns as f64 / 1_000_000.0
 }
 
-/// A single one-way-delay measurement derived from the four STAMP timestamps.
-///
-/// Both directions are **signed**: when the sender and reflector clocks are
-/// not synchronised the constant clock offset adds to one direction and
-/// subtracts from the other, which can make a value negative. We preserve the
-/// sign so the asymmetry remains visible rather than masking a clock problem.
+/// Signed one-way delays derived from the four STAMP timestamps.
+/// Clock offset adds to one direction and subtracts from the other;
+/// negative values are preserved to expose unsynchronized clocks.
 pub struct OwdSample {
     /// Sequence number of the measured packet.
     pub seq: u32,
@@ -1172,7 +1169,7 @@ mod tests {
         snap.print(OutputFormat::Csv);
     }
 
-    // ===== Congestion response (F2, draft-ietf-ippm-stamp-cos-ecn-01 §3.4) =====
+    // ===== Congestion response (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) =====
 
     fn sample_congestion() -> CongestionSummary {
         CongestionSummary {

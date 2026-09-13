@@ -11,22 +11,11 @@ const LOCATION_IP_SUBTLV_LEN: usize = 16;
 /// RFC-mandated Length field value for Source MAC / EUI-48 / EUI-64.
 const LOCATION_MAC_SUBTLV_LEN: usize = 8;
 
-/// Which Location TLV fields the Session-Reflector is permitted to report.
+/// Location fields the reflector may disclose (RFC 8972 §4.2.2).
+/// Withheld fields are zeroed, preserving length and flags. Defaults to all fields.
 ///
-/// RFC 8972 §4.2.2 pairs a permission with an obligation: "Based on the local
-/// policy, the Session-Reflector MAY leave some fields unreported by filling
-/// them with zeroes. An implementation of the stateful Session-Reflector MUST
-/// provide control for managing such policies." This type is that control; a
-/// suppressed field is answered as zeroes, exactly as the MAY describes, rather
-/// than being dropped or flagged (dropping it would change the reply's size and
-/// flagging it would misreport a well-formed request as unrecognized).
-///
-/// The default discloses everything, which is what a measurement tool is for —
-/// the policy exists so an operator on an untrusted path can narrow it.
-///
-/// The Source MAC answer is not represented here: both backends already answer
-/// it with a zeroed EUI-64 (they have no L2 visibility), so there is nothing to
-/// suppress.
+/// Source MAC is excluded from this policy: both backends already return a
+/// zeroed EUI-64 response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocationDisclosure {
     /// Report the observed source port (value octets 2-3).

@@ -1,42 +1,19 @@
-//! AIMD congestion-response controller for the Session-Sender, per
-//! draft-ietf-ippm-stamp-cos-ecn-01 §3.4 ("Congestion Response").
+//! Sender congestion response (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
 //!
-//! §3.4 requires the Session-Sender to reduce its sending rate when it
-//! observes a CE (Congestion Experienced) codepoint reflected back to it —
-//! either in the CoS TLV's EC2 field (forward-path congestion, sender to
-//! reflector) or in the IP header of the reply packet itself (reverse-path
-//! congestion, reflector to sender). This module implements the *response*
-//! half of that requirement: a pure, deterministic AIMD (Additive Increase
-//! / Multiplicative Decrease, expressed here in delay-space rather than
-//! window-space — see `AimdController`) state machine that turns a stream
-//! of "CE observed" / "clean reply" events into an inter-packet send
-//! interval.
-//!
-//! Deliberately free of sockets, timers, and wall-clock sleeps: the
-//! Session-Sender's existing send loop (`sender::run_sender`) drives it by
-//! calling `AimdController::on_ce_observed` or
-//! `AimdController::on_clean_reply` once per processed reply, and reads
-//! back `AimdController::current_interval` to decide how long to wait
-//! before the next send. This is what makes the controller's AIMD sequence
-//! properties unit-testable without any real waiting.
+//! The send loop reports CE from the CoS EC2 field or reply IP header to
+//! `AimdController::on_ce_observed`, and clean replies to
+//! `AimdController::on_clean_reply`. The controller supplies the next send
+//! interval through `AimdController::current_interval`; it owns no timers.
 
 use std::time::Duration;
 
-/// Floor used when backing off from a zero (or otherwise degenerate)
-/// current interval — e.g. `--send-delay 0` ("send as fast as possible").
-/// Multiplying zero by any finite factor stays zero, which would make a CE
-/// observation a permanent no-op; bumping to this floor first guarantees a
-/// CE always has a real, growing effect once it is observed.
+/// Minimum interval before multiplicative backoff from `--send-delay 0`.
+/// Without this floor, multiplying zero would leave CE feedback ineffective.
 const MIN_BACKOFF_FLOOR: Duration = Duration::from_millis(1);
 
-/// Configuration for an `AimdController`, derived 1:1 from the
-/// `--send-delay`, `--ecn-backoff-factor`, `--ecn-max-delay`, and
-/// `--ecn-recovery-step` CLI flags.
-///
-/// Range validation (`backoff_factor > 1.0`, `recovery_step > 0`,
-/// `max_interval >= base_interval`) is the caller's responsibility
-/// (`configuration::Configuration::validate`) — this struct is plain data
-/// so the controller itself stays trivially constructible in tests.
+/// AIMD parameters from the send-delay and ECN pacing flags.
+/// The caller validates `backoff_factor > 1.0`, `recovery_step > 0`, and
+/// `max_interval >= base_interval` in `Configuration::validate`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AimdParams {
     /// The operator-configured steady-state send interval (`--send-delay`).
@@ -78,15 +55,9 @@ pub struct AimdStats {
     pub base_interval: Duration,
 }
 
-/// AIMD (in delay-space) congestion-response controller.
-///
-/// "Multiplicative decrease" here means the *rate* decreases
-/// multiplicatively on congestion — expressed as the *interval* growing
-/// multiplicatively (`current *= backoff_factor`, capped at
-/// `max_interval`). "Additive increase" mirrors it: the rate recovers
-/// gently, expressed as the interval shrinking by a fixed step per clean
-/// reply, floored at `base_interval` — the sender never goes faster than
-/// what the operator configured, even during recovery.
+/// AIMD controller expressed in send intervals.
+/// CE multiplies the interval up to `max_interval`; each clean reply subtracts
+/// `recovery_step` down to `base_interval`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AimdController {
     params: AimdParams,
@@ -115,18 +86,10 @@ impl AimdController {
         self.current
     }
 
-    /// Ratio of the current interval to the configured base interval — 1.0
-    /// at rest, growing under backoff. Used to scale other interval-like
-    /// parameters that should track the same congestion signal (e.g. the
-    /// Reflected Test Packet Control TLV's inter-packet gap, §3.4-3).
-    ///
-    /// When `base_interval` is zero (`--send-delay 0`), the ratio is taken
-    /// against [`MIN_BACKOFF_FLOOR`] instead, so the scale factor stays a
-    /// finite, meaningful multiplier rather than dividing by zero. In that
-    /// configuration the current interval also rests at zero, so the ratio
-    /// is floored at 1.0 — the documented at-rest value — rather than
-    /// reporting 0 and zeroing every scaled parameter (e.g. the Type 12
-    /// inter-packet interval, which reflectors check against their minimum).
+    /// Current/base interval ratio, floored at 1.0, for scaling reflected
+    /// burst gaps (cos-ecn-01 §3.4-3).
+    /// Uses [`MIN_BACKOFF_FLOOR`] as the denominator when the base is zero,
+    /// avoiding division by zero or a zero multiplier.
     #[must_use]
     pub fn scale_factor(&self) -> f64 {
         let base = self.params.base_interval;

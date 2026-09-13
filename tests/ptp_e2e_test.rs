@@ -177,13 +177,9 @@ fn ntp_reflector_fills_sync_src_out_ntp() {
     assert_eq!(tinfo.timestamp_out, TimestampMethod::SwLocal);
 }
 
-// ---------------------------------------------------------------------------
-// Mixed mode: sender NTP, reflector PTP — and vice versa.
-//
-// RFC 8762 §4.1.1 makes the timestamp format implementation-specific (the Z
-// bit in Error Estimate signals it). Type 3 TLV §4.3 simply reports each
-// side's source independently; the reflector must NOT overwrite the
-// sender's declared input source.
+// Mixed NTP/PTP clocks: base timestamps retain each endpoint's format
+// (RFC 8762 §4.1.1). Type 3 reports the reflector's ingress/egress clocks
+// (RFC 8972 §4.3).
 
 #[test]
 fn mixed_mode_reflector_reports_own_clock_in_both_field_pairs() {

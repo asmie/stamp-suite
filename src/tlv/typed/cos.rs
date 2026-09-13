@@ -118,17 +118,9 @@ impl ClassOfServiceTlv {
         }
     }
 
-    /// Computes the TOS (IPv4) / Traffic Class (IPv6) byte the reflector
-    /// should apply to the reply packet's IP header, derived from this
-    /// TLV's own RPD/RPE fields.
-    ///
-    /// Per draft-ietf-ippm-stamp-cos-ecn-01 §3.2, when RPE = 0b10 (the
-    /// reflector was unable to set the reply's ECN to EC1) the reply's
-    /// on-wire ECN bits MUST be forced to 0b00 (Not-ECT) rather than left
-    /// at whatever value the packet previously carried — this is the one
-    /// normative delta over -00, which only required the RPE signal
-    /// itself. The DSCP half of the byte is unaffected by this rule and
-    /// still follows RPD / [`ClassOfServiceTlv::effective_dscp`].
+    /// Returns the reply TOS/Traffic Class from RPD/RPE.
+    /// RPE=0b10 forces Not-ECT (draft-ietf-ippm-stamp-cos-ecn-01 §3.2).
+    /// DSCP follows RPD via [`ClassOfServiceTlv::effective_dscp`].
     #[must_use]
     pub fn reply_wire_tos(&self) -> u8 {
         let dscp = self.effective_dscp(self.policy_rejected());
