@@ -1,16 +1,9 @@
 # Privileged network-namespace conformance tests
 
-`tests/netns_conformance.rs` is a privileged integration-test tier that
-exercises the on-wire STAMP behaviours that unit and loopback tests cannot
-reach: real IP TOS/ECN bytes, TTL / Hop-Limit marking, IPv6 extension headers,
-SRv6 SRH routing, Layer-2 / Layer-3 Address Group filtering, and Type-12
-multi-reply pacing/count/length.
-
-Each test spins up a pair of Linux network namespaces joined by a `veth` link,
-runs the real `stamp-suite` reflector in one namespace, drives a sender from the
-other, and observes the wire with `tcpdump`. It therefore needs privileges and
-extra tooling, so **every test is `#[ignore]`d and additionally gated** — a
-normal `cargo test` run never touches the network.
+`tests/netns_conformance.rs` checks STAMP over Linux namespaces and veth links,
+using real reflectors, senders, and tcpdump captures. It covers CoS, hop counts,
+SRv6, header reflection, address groups, BER, and burst replies. Tests use two
+namespaces, or three for SRv6 transit. Ordinary Cargo runs leave them ignored.
 
 ## Running
 
@@ -22,23 +15,18 @@ by Cargo's `ok` does not mean the scenario ran. The CI workflow also verifies
 that the selected binaries contain exactly nine namespace, three raw pnet and
 one MTU test, preventing `--all-features` from silently selecting an empty pnet suite.
 
+Build without root, then run the selected artifact with namespace/network
+privileges. Build the pnet binary below first; scenario 4b needs it.
 
-The tier is opted in with the `STAMP_NETNS_TESTS=1` environment variable and
-must run as effective root (host root or mapped root in a user namespace)
-with the namespace/network capabilities the operations require. The canonical invocation:
-
-```bash
-sudo -E STAMP_REQUIRE_PRIVILEGED=1 STAMP_NETNS_TESTS=1 \
-    cargo test --test netns_conformance -- --ignored --test-threads=1 --nocapture
+```sh
+cargo test --locked --test netns_conformance --no-run --message-format=json > /tmp/netns-artifacts.json
+python3 scripts/run_privileged_test.py /tmp/netns-artifacts.json netns_conformance 9 \
+  sudo env STAMP_NETNS_TESTS=1 STAMP_NETNS_PNET_BIN="$PWD/target/pnet/debug/stamp-suite"
 ```
 
-* `-E` preserves your environment so `STAMP_NETNS_TESTS` and `CARGO_*` survive
-  the `sudo`.
-* `--ignored` runs the otherwise-skipped tests.
-* `--test-threads=1` serialises them. The fixture already uses unique namespace,
-  interface, address and port names per test, so parallel runs are safe, but
-  serial output is easier to read and lighter on the box.
-* `--nocapture` surfaces the `[netns] PASS …` / `[privileged] SKIP …` lines.
+The runner verifies the ignored-test count, enables required mode, and runs
+serially with uncaptured output. Effective root may be host root or mapped root
+with the capabilities needed by the namespace operations.
 
 ### Running without a usable `sudo` (rootless via user namespaces)
 
@@ -72,6 +60,7 @@ Common (all scenarios), enforced by the gate — missing any of these **fails in
 | effective root with namespace/network capabilities | create namespaces + veth, bind, capture |
 | `ip` (iproute2) | namespace/veth/address setup |
 | `tcpdump` | on-wire capture |
+| `ethtool` | disable checksum offload on private veth devices |
 | `ss` (iproute2) *(recommended)* | reflector readiness probe (falls back to a timed wait if absent) |
 
 Per-scenario prerequisites:
@@ -88,12 +77,12 @@ Per-scenario prerequisites:
 | 1 | `scenario_1_roundtrip_unauth_and_auth` | Base RFC 8762 §4.2–4.5 sender/reflector round-trip on a real link, unauthenticated and HMAC-authenticated. |
 | 2 | `scenario_2_cos_dscp_ecn_onwire` | RFC 8972 §4.4 CoS reply-TOS + erratum 8199 DSCP/ECN reflection + draft-ietf-ippm-stamp-cos-ecn-01 §3.2 (reply DSCP=DSCP1, ECN=EC1, RPE=0b11) observed on the wire. |
 | 3 | `scenario_3_srv6_return_path` | RFC 9503 §4 / RFC 8754: three namespaces with a transit router; requires actual SRH forwarding (fallback fails). Checks both SID-only and explicit-final-SID requests, open/auth, independent HMACs, CoS, Segments Left 1→0 and Hop Limit 255→254. Ordinary replies interleaved on the same reflector must carry no stale SRH. |
-| 4a | `scenario_4a_ext_hdr_nix_c_flag` | draft-ietf-ippm-stamp-ext-hdr-13 §5.1: the nix (UDP-socket) backend has no data-plane access, so a Type-246 request comes back with the **C** (Conformance) flag set — not the pre-11 U-flag. |
+| 4a | `scenario_4a_ext_hdr_nix_c_flag` | draft-ietf-ippm-stamp-ext-hdr-13 §5.1: the nix (UDP-socket) backend has no data-plane access, so a Type-246 request comes back with the **C** (Conformance) flag set. |
 | 4b | `scenario_4b_ext_hdr_pnet_capture` | draft-ietf-ippm-stamp-ext-hdr-13 §§3.2/5.1: the `ttl-pnet` backend captures an injected IPv6 Destination Options header and echoes its bytes-from-offset-8 into the Type-246 Reflected field with the C flag **clear**. |
 | 5 | `scenario_5_address_group_filters` | draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1/§3.1.2: a matching L2 (own-MAC) or L3 (own-prefix) Address Group sub-TLV yields a reply; a non-matching one drops the packet (no reply). |
 | 6 | `scenario_6_type12_multi_reply` | draft-ietf-ippm-asymmetrical-pkts-14 §3: multiple reply copies on the wire (count within the requested/cap bound), inter-packet pacing ≈ the requested interval, replies padded beyond the base length. |
 | 7 | `scenario_7_ber_onwire` | draft-gandhi-ippm-stamp-ber-07 §4: the Bit Pattern (0xFF00) fills the Extra Padding TLV on the wire; the reflector's Bit Error Count reads 0 on a clean channel. |
-| 8 | `scenario_8_ttl_egress_marking` | Sender `--ttl` egress marking: the requested IP TTL / Hop Limit appears on the outgoing test packets. |
+| 8 | `scenario_8_ttl_egress_marking` | Outgoing IP TTL / Hop Limit is 255, as required by the revision-13 profile. |
 
 ## Building the pnet reflector for scenario 4b
 
@@ -123,18 +112,16 @@ fails in required mode, or skips in optional local mode.
   (`sysctl net.ipv6.conf.all.seg6_enabled`), common on WSL2. Enable it
   (`sysctl -w net.ipv6.conf.all.seg6_enabled=1`, needs a kernel with `seg6`)
   or run on a host with SRv6 to exercise the live SRH path.
-* **A scenario FAILs (not skips)** — that is a genuine conformance failure:
-  packets flowed but the on-wire bytes or reflector behaviour did not match the
-  cited clause. Capture with the same fixture parameters and inspect.
+* **A scenario FAILs (not skips)** — inspect the assertion and captured traffic. A failed prerequisite, timeout,
+  or byte mismatch needs diagnosis before attributing it to the implementation.
 * **Leftover namespaces** after a hard kill (`SIGKILL` skips `Drop`): list with
   `ip netns list` and remove `stnsr*` / `stnss*` with `ip netns del <name>`.
 * **`no packets captured`** — fails in required mode. The fixture waits for
   tcpdump's actual readiness notice, checks its exit status and retains startup
   diagnostics. It uses immediate capture and an IP/IPv6 filter so extension-header
   traffic is not excluded by a plain UDP filter. Check interface state and traffic.
-* **SRv6 fallback** — a passing scenario may verify a captured reply with the
-  Return Path U flag instead of an SRH. Its PASS message distinguishes these
-  outcomes; only observed SRH traffic is forwarding evidence.
+* **SRv6 fallback** — U-flag fallback fails scenario 3. That scenario requires
+  captured SRH traffic through its transit router.
 
 ## Reply-route MTU regression
 
@@ -143,7 +130,7 @@ and `nsenter`, but no tcpdump or host root. Run it inside an isolated user/netwo
 namespace (Linux with unprivileged user namespaces enabled):
 
 ```sh
-STAMP_MTU_NETNS_TESTS=1 unshare --user --map-root-user --net \
+STAMP_REQUIRE_PRIVILEGED=1 STAMP_MTU_NETNS_TESTS=1 unshare --user --map-root-user --net \
   cargo test --locked --test route_mtu_test -- --ignored --nocapture
 ```
 
@@ -165,6 +152,6 @@ Private veth fixtures disable TX checksum offload with `ethtool` so raw capture 
 Set `STAMP_NETNS_CAPTURE_DIR` to an output directory to retain each completed
 pcap. CI uploads these pcaps and `netns.log`, in addition to Cargo executable
 manifests. Scenario 3 captures both sides of a real transit router: 12 SRH replies
-and 12 interleaved ordinary replies across open/authenticated modes. A U-flag
-fallback cannot satisfy this scenario. The September 12 run and limitations are
-recorded in [SRv6 verification](verification/2026-09-12-srv6/README.md).
+and 12 interleaved ordinary replies across open/authenticated modes. Save the test log, executable manifest, commit, build features, and capture
+hashes with the pcaps. These fixtures verify virtual Linux routing, not a
+physical SRv6 fabric.

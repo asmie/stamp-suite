@@ -1,11 +1,9 @@
 # Hardware timestamp verification on a two-host testbed
 
-This procedure verifies actual NIC timestamp delivery, not just advertised
-capability or a successful `--hwtstamp on` startup. It requires Linux, two
-timestamp-capable NICs, an approved clock-synchronization setup and privileges
-to configure the test NIC. Ordinary loopback and virtual NICs cannot substitute.
-See Linux's [timestamping interfaces](https://docs.kernel.org/networking/timestamping.html)
-for the distinction between software, transformed and raw hardware timestamps.
+Use two Linux hosts with timestamp-capable NICs and an established clock setup.
+Verify delivered timestamps as well as capability reports; loopback and virtual
+NICs do not establish physical-NIC delivery. See the Linux
+[timestamping interfaces](https://docs.kernel.org/networking/timestamping.html).
 
 1. Record the commit, `rustc -Vv`, build features, kernel, NIC model/firmware,
    driver, interface addresses/MTU and route on both hosts. Save `ethtool -i
@@ -70,8 +68,7 @@ for the distinction between software, transformed and raw hardware timestamps.
    record containing requested versus observed RX/TX methods, sample counts,
    failures/fallbacks, synchronization evidence, raw artifacts and their hashes.
 
-O11 local availability result (2026-09-11): WSL2 `eth0` advertised only
+Local availability check, 11 September 2026: WSL2 `eth0` advertised only
 software-transmit, software-receive and software-system-clock; PHC and hardware
-filter/transmit modes were absent. This is **hardware unavailable**, not a pass
-or an internally skipped hardware test. The ordinary kernel timestamp and
-Follow-Up regressions remain separate software evidence.
+filter/transmit modes were absent. Hardware was unavailable; kernel timestamp and Follow-Up regressions provide
+software evidence only.

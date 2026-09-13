@@ -41,22 +41,16 @@ Options (`--help` lists limits and defaults):
 | `--drain-ms N` | Extra response collection time, 1–10,000 ms. |
 | `--workers N` | Reflector Tokio workers, 1–256; default 2. |
 
-Packets are paced in 1 ms batches using a monotonic clock. Missed batches are
-skipped instead of generating a catch-up burst. A separate blocking receive
-thread drains the socket while the main thread sends. Bookkeeping is bounded
-by `rate * seconds + 1` sequence slots (at most about 60 MB). Receive/send waits
-are bounded; startup and post-idle probes must succeed within five seconds.
-Child exit, socket errors, invalid accounting or zero valid load replies fail
-the invocation. Loss or invalid replies are recorded, not hidden by a successful
-process exit. Child processes are killed and reaped when a trial ends or fails.
-Reflector diagnostics and progress go to stderr; only the final JSON goes to
-stdout. Preserve stderr alongside the JSON when collecting evidence.
+The generator sends 1 ms batches, skips missed pacing slots, and drains replies
+on a separate thread. Bookkeeping is bounded by `rate × seconds + 1` slots
+(about 60 MB at the maximum). Startup and post-idle probes have five-second
+limits. Child exit, socket errors, invalid accounting, or zero valid replies
+fail the run; all child processes are reaped.
 
-The connected UDP socket filters the response source. The generator checks
-exact packet length, echoed SSID/timestamp/error estimate, sender sequence
-range, and authenticated response HMAC. Unique replies, duplicates, invalid
-replies and unique out-of-order replies are counted separately. This validates
-benchmark accounting; it is not an independent protocol-conformance test.
+Replies must match the connected source, packet length, echoed fields, sequence
+range, and HMAC. Duplicates and invalid replies are counted separately. Loss is
+reported even if the process exits successfully. Save stderr diagnostics with
+the JSON on stdout. These checks validate benchmark accounting, not conformance.
 
 ### Reading the results
 
@@ -100,7 +94,9 @@ performance or an optimization's before/after gain. Shared-host results can be
 limited by either process and by loopback/kernel scheduling.
 
 For pnet, build with `--no-default-features --features ttl-pnet` and run with
-CAP_NET_RAW in an isolated network namespace. For example, where unprivileged
+CAP_NET_RAW in an isolated network namespace. Raw capture requires complete UDP
+checksums; offloaded loopback frames can fail validation. Use a controlled veth
+capture setup if the loopback profile cannot provide complete checksums. For example, where unprivileged
 user namespaces are supported:
 
 ```bash
@@ -130,6 +126,6 @@ validation and loss/duplicate/reordering accounting without requiring sockets.
 Linux CI runs these accounting tests; it does not enforce throughput thresholds
 on shared runners.
 
-The [2026-09-10 baseline](performance/2026-09-10-live-udp.md) records the first
+The [2026-09-10 baseline](performance/2026-09-10-live-udp.md) records
 54 live trials on both Linux backends, including the duplicate replies observed
 with pnet loopback. Use its environment and workload limits when comparing results.

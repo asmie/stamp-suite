@@ -3,10 +3,7 @@
 Revision frozen: draft-ietf-ippm-stamp-ext-hdr-**13**, 9 September 2026
 Source: https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-13.txt
 
-This is an **Internet-Draft, not a published RFC**. This matrix supersedes the
-revision-11 matrix in git history. The audit uses the complete revision-13 text
-retained with the September review, including the eight-octet Type 246 change
-missed by the initial delta summary. It does not relabel the old clause scores.
+This Internet-Draft replaces the revision-11 wire profile.
 
 Summary: 60 clauses — 54 Compliant / 0 Partial / 0 Gap / 6 N-A / 0 Excluded
 

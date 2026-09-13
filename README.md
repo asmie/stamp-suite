@@ -1,326 +1,204 @@
 # stamp-suite
 
-Simple Two-Way Active Measurement Protocol (STAMP) implementation in Rust — RFC 8762, RFC 8972, RFC 9503, RFC 9534, plus experimental support for draft-ietf-ippm-asymmetrical-pkts and draft-gandhi-ippm-stamp-ber.
+A Rust sender and reflector for the Simple Two-Way Active Measurement Protocol
+(STAMP). Measures round-trip time, packet loss, one-way delay, and residual bit
+errors in delivered test packets.
 
 [![CI](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml/badge.svg)](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml)
-[![Dependency status](https://deps.rs/repo/github/asmie/stamp-suite/status.svg)](https://deps.rs/repo/github/asmie/stamp-suite)
-[![License](https://img.shields.io/crates/l/stamp-suite.svg)](https://opensource.org/licenses/MIT)
 [![Latest version](https://img.shields.io/crates/v/stamp-suite.svg)](https://crates.io/crates/stamp-suite)
+[![License](https://img.shields.io/crates/l/stamp-suite.svg)](LICENSE)
 
-## About
+## Quick start
 
-A single binary that runs as either a Session-Sender (client) or a Session-Reflector (server) for measuring round-trip time, packet loss, and one-way delay. Using all four STAMP timestamps, the sender aggregates forward (sender→reflector) and reverse (reflector→sender) one-way delay alongside RTT; OWD requires synchronized clocks on compatible timescales. Sender and reflector
-may use different wire formats: remote timestamps are decoded using their Z bit,
-with NTP era unfolding and epoch conversion. For a peer clock ahead of UTC,
-configure its known offset with `--reflector-utc-offset <SECONDS>` (default 0;
-see [clock settings](doc/usage.md#timestamp--clock)). The per-packet reflector timestamps remain available in `-R` mode for external analysis.
+Run a reflector on a trusted network:
 
-### Residual BER measurement
-
-```bash
-stamp-suite --remote-addr 192.0.2.1 --ber --ber-pattern ff00 \
-  --ber-padding-size 128 --send-delay 100 --ber-interval 10
+```sh
+stamp-suite --is-reflector
 ```
 
-This computes one-second windows with directional packet/bit totals, error ratios,
-and maximum/average error bursts. Padding must be positive and divisible by the
-pattern length. Optional `--ber-bit-threshold` and `--ber-packet-threshold` values
-are per million; threshold crossings appear in logs and the summary. The sender
-stops BER requests when a peer returns a BER U flag and continues ordinary STAMP.
-Use `--ber-omit-burst` with peers whose Type 242 has another meaning. See
-[measurement semantics and platform limits](doc/architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber)
-and the [BER-07 conformance matrix](doc/conformance/draft-stamp-ber.md).
+Send 100 probes, 100 ms apart:
 
-### Key features
+```sh
+stamp-suite --remote-addr 192.0.2.20 --count 100 --send-delay 100 -R
+```
 
-- Full RFC 8762 compliance — open and authenticated modes
-- RFC 8972 TLV extensions, RFC 9503 (Segment Routing), RFC 9534 Micro-session ID encoding and numeric validation (physical LAG steering/validation unsupported)
-- HMAC packet authentication and TLV integrity
-- Stateful reflector mode with full session identity tracking
-- NTP and PTP timestamp formats; real TTL/Hop Limit capture on all platforms
-- Optional Prometheus metrics endpoint and SNMP AgentX sub-agent (Unix)
-- Backward compatible with non-TLV implementations
-- Cross-platform (Linux, macOS, Windows), async I/O via Tokio
+The reflector listens on UDP/862 by default. Senders use randomized dynamic
+source ports. Both endpoints send with TTL/Hop Limit 255.
 
-### How STAMP works
+Open mode accepts unsigned traffic. For untrusted networks, restrict access
+and configure [authenticated mode](doc/security.md#enabling-authenticated-mode-on-the-packaged-unit).
 
-The Session-Sender transmits test packets to the Session-Reflector, which timestamps and reflects them back. Comparing timestamps yields:
+## Measurements and protocol support
 
-- Round-trip time (RTT) — cumulative min/max/avg and bounded-memory median/p95/p99 over the run ([precision and retention](doc/statistics.md))
-- One-way delay (OWD) — forward/reverse min/avg/median/max with endpoint synchronization declarations and advertised clock-error metadata
-- Packet loss rate
-- Per-packet reflector receive/send timestamps in `-R` mode — usable for external one-way-delay analysis when both endpoints share an NTP/PTP-synced clock
+- RTT and probe loss, with cumulative statistics and bounded-memory quantiles.
+- Signed forward/reverse one-way delay. This requires synchronized clocks on
+  compatible timescales; NTP and truncated PTP wire encodings can differ between
+  endpoints. See [clock settings](doc/usage.md#timestamp--clock).
+- RFC 8762 base packets and HMAC authentication; RFC 8972 optional TLVs.
+- RFC 9503 return-path controls, including optional Linux SRv6 forwarding.
+- RFC 9534 numeric Micro-session IDs. Physical LAG member selection is unsupported.
+- Draft extensions for asymmetric replies, header reflection, CoS/ECN response,
+  and residual BER. Experimental codepoints require peer agreement.
+- Text, JSON lines, and CSV output; optional Prometheus, AgentX, and control API.
+
+See the [conformance matrices](doc/conformance/README.md) for supported profiles
+and gaps, and [measurement semantics](doc/measurements.md) for burst-copy,
+directional-loss, and clock-quality limits.
 
 ## Installation
 
-### From a release (DEB / RPM)
+### Release packages
 
-Pre-built `.deb` and `.rpm` packages for x86_64 and aarch64 are attached to each tagged release on [GitHub Releases](https://github.com/asmie/stamp-suite/releases). The packages install to `/usr/bin/stamp-suite`, ship a hardened systemd unit, and create a dedicated `stamp` system user.
+DEB and RPM packages for x86_64 and aarch64 are published with
+[GitHub releases](https://github.com/asmie/stamp-suite/releases).
+They install `/usr/bin/stamp-suite`, the man page, a systemd service, and the
+`stamp` service account.
 
-```bash
-# Debian / Ubuntu (filename embeds the version, e.g. stamp-suite_<version>-1_amd64.deb)
-sudo apt install ./stamp-suite_*_amd64.deb
-
-# Fedora / RHEL
-sudo dnf install ./stamp-suite-*.x86_64.rpm
-
-# Start the reflector
+```sh
+sudo apt install ./stamp-suite_*_amd64.deb  # Debian/Ubuntu
+sudo dnf install ./stamp-suite-*.x86_64.rpm # Fedora/RHEL
 sudo systemctl enable --now stamp-suite
 ```
 
-The packaged unit starts an **open-mode** reflector by default (`ExecStart=/usr/bin/stamp-suite --is-reflector`). Before exposing UDP/862 to the internet or any untrusted network, switch to authenticated mode — see [doc/security.md#enabling-authenticated-mode-on-the-packaged-unit](doc/security.md#enabling-authenticated-mode-on-the-packaged-unit).
+The packaged service starts in open mode. Configure authentication before
+exposing it to an untrusted network.
 
-### From source (Cargo)
+### Source
 
-```bash
+```sh
 cargo build --release
-# or
+# Or install into Cargo's binary directory:
 cargo install --path .
 ```
 
-### Using Nix
+Rust 1.85 or newer is required. Build optional features with, for example,
+`cargo build --release --features metrics,control,hwtstamp`.
 
-```bash
+### Nix and Gentoo
+
+```sh
 nix build
 nix run . -- --is-reflector
-nix develop      # dev shell with cargo, rustc, rustfmt, clippy
+nix develop
 ```
 
-### Gentoo (overlay)
+The [Gentoo overlay](dist/gentoo/README.md) includes service-account packages,
+systemd/OpenRC integration, and Cargo feature mappings.
 
-`dist/gentoo/` is a ready-to-copy overlay tree: `net-analyzer/stamp-suite` (USE flags `control`, `hwtstamp`, `metrics`, `snmp` map to the Cargo features; ships the systemd unit, an OpenRC script and the man page) plus the `acct-user/stamp` and `acct-group/stamp` service-account packages. See [dist/gentoo/README.md](dist/gentoo/README.md) for regenerating `CRATES=` after a lockfile change and for submitting to GURU.
+### Platforms and features
 
-### Platform support
+| Platform | Default receiver | Requirements |
+| --- | --- | --- |
+| Linux | nix UDP socket | No raw-socket privilege; low ports may need bind permission |
+| macOS | nix UDP socket | No raw-socket privilege |
+| Windows | pnet capture | Npcap; capture tests require a driver-backed environment |
 
-| Platform | Default backend | TTL capture |
-|----------|-----------------|-------------|
-| Linux    | nix (`IP_RECVTTL`) | Real TTL, no special privileges |
-| macOS    | nix (`IP_RECVTTL`) | Real TTL, no special privileges |
-| Windows  | pnet (raw packets) | Real TTL, requires Npcap |
+Both backends capture received TTL/Hop Limit. See
+[backend limits](doc/architecture.md#receiver-backends).
 
-### Feature flags
+| Cargo feature | Purpose |
+| --- | --- |
+| `ttl-nix` | Select the nix receiver |
+| `ttl-pnet` | Select raw packet capture; Linux requires `CAP_NET_RAW` |
+| `metrics` | Prometheus HTTP endpoint |
+| `control` | Reflector session/key/limit API with optional HTTPS |
+| `snmp` | Read-only AgentX sub-agent, Unix only |
+| `hwtstamp` | Kernel timestamps and optional Linux NIC hardware timestamps |
 
-| Feature | Description |
-|---------|-------------|
-| `ttl-nix` | Force the nix backend (Linux/macOS/BSD) |
-| `ttl-pnet` | Force the pnet raw-socket backend (requires `CAP_NET_RAW`) |
-| `metrics` | Enable Prometheus metrics endpoint |
-| `control` | Runtime control-plane REST API for reflector session/key management |
-| `snmp` | Enable SNMP AgentX sub-agent (Unix only) |
-| `hwtstamp` | Kernel and hardware-assisted timestamping support |
+## Configuration
 
-The receiver backend choice is consequential — privileges, runtime deps, kernel filtering, observability all differ. See [doc/architecture.md#receiver-backends](doc/architecture.md#receiver-backends) for the full comparison.
-
-### Versioning & MSRV
-
-stamp-suite follows [Semantic Versioning](http://semver.org/) starting at 1.0. For the 1.x series, the semver contract covers:
-
-- CLI flags and their observable behavior
-- the `--config` TOML file schema
-- default wire behavior (packet formats, TLV handling, reflector defaults)
-
-A breaking change to any of the above requires a major version bump. The Rust **library API is not covered** by this contract — stamp-suite is a binary-first crate; its modules are `pub` only so the crate's own tests, benches, and fuzz targets can reach them, and are marked `#[doc(hidden)]` and exempt from semver (see the crate-level rustdoc). They may change, move, or disappear in any 1.x release without notice. Depending on `stamp-suite` as a library is unsupported.
-
-**Exception — experimental TLV codepoints.** TLV Types 240–242 and 246–247 are experimental/pending-IANA allocations (see [doc/architecture.md](doc/architecture.md) for the per-TLV status table). Renumbering any of these on IANA assignment is treated as a release-noted **minor** version change, not a major one, even though it changes wire behavior.
-
-**MSRV.** The minimum supported Rust version is **1.85** (the rustc shipped by Debian trixie), enforced in CI (`msrv` job in [rust.yml](.github/workflows/rust.yml)). MSRV may be raised in a minor release; any bump is called out in [CHANGELOG.md](CHANGELOG.md).
-
-## Usage
-
-### Reflector
-
-```bash
-# Listen on all interfaces, default port 862
-stamp-suite -i
-
-# Bind a specific address/port; print per-packet stats
-stamp-suite -i --local-addr 192.168.1.100 --local-port 8620 -R
-
-# Stateful reflector with independent session sequences (RFC 8762 §4.2)
-stamp-suite -i --stateful-reflector --session-timeout 600
-
-# Provisioned reflector: only this source/destination/SSID may use the session
-stamp-suite --is-reflector --local-addr 192.0.2.20 --local-port 862 \
-  --stateful-reflector --session-admission provisioned \
-  --reflector-session '42,192.0.2.10:4862,192.0.2.20:862'
-
-```
-
-### Sender
-
-```bash
-# Send 1000 packets to a remote reflector (defaults: 1 packet/sec)
-stamp-suite --remote-addr 192.168.1.100
-
-# Custom count and rate
-stamp-suite --remote-addr 192.168.1.100 --count 100 --send-delay 100 -R
-
-# With multiple TLV extensions
-stamp-suite --remote-addr 192.168.1.100 \
-    --cos --dscp 46 \
-    --direct-measurement \
-    --location \
-    --timestamp-info
-```
-
-For the full TLV menu and CLI flag reference, see [doc/usage.md](doc/usage.md).
-
-### Configuration file
-
-Any CLI option can be supplied via a TOML file passed with `--config <PATH>`. Values in the file are defaults; CLI flags and the `STAMP_HMAC_KEY` environment variable still override them. Note: `STAMP_HMAC_KEY` (which fills `--hmac-key`) and a `hmac_key_file` line in the TOML file are mutually exclusive — supplying both is rejected by validation. Pick one source for the key.
+Use `--config PATH` for TOML settings. Explicit CLI values override file values.
+`STAMP_HMAC_KEY` supplies the CLI key field; it conflicts with a configured key
+file or directory. Plaintext `hmac_key` is not a TOML field.
 
 ```toml
-# /etc/stamp/reflector.toml
-is_reflector       = true
-local_addr         = "192.0.2.10"
-auth_mode          = "O"           # "A" for authenticated
-clock_source       = "NTP"         # wire encoding only
-clock_sync_source  = "local"       # declared system-clock discipline
+is_reflector = true
+local_addr = "192.0.2.20"
+auth_mode = "A"
+hmac_key_file = "/etc/stamp/hmac.key"
+verify_tlv_hmac = true
 stateful_reflector = true
-hmac_key_file      = "/etc/stamp/hmac.key"
+session_timeout = 300
 ```
 
-```bash
-stamp-suite --config /etc/stamp/reflector.toml
+Protect key files with owner-only permissions. See [key setup](doc/security.md)
+and the [configuration reference](doc/usage.md#configuration-file).
+
+Sessions are separated by both UDP endpoints, SSID, and optional sender
+Micro-session ID. The default `permissive` policy learns sessions from traffic.
+For RFC 8972 provisioned admission:
+
+```sh
+stamp-suite -i --local-addr 192.0.2.20 --session-admission provisioned \
+  --reflector-session '42,192.0.2.10:4862,192.0.2.20:862'
 ```
 
-The plaintext `hmac_key` field is **deliberately rejected** in the config file — pass the raw key via `--hmac-key`, the `STAMP_HMAC_KEY` environment variable, or `--hmac-key-file <PATH>`. Set `chmod 600` on both the config file and the key file. See [doc/security.md](doc/security.md) for the full key-management story.
+See [session provisioning](doc/usage.md#session-provisioning) and
+[IPv6 interface zones](doc/usage.md#link-local-ipv6-interface-zones).
 
-Reflectors declare clock discipline with `--clock-sync-source` and, for NIC
-receive timestamps, `--hardware-clock-sync-source` (both default to `local`).
-These settings do not synchronize clocks or infer their state from
-`--clock-source NTP|PTP` or `--clock-synchronized`. See
-[clock metadata](doc/usage.md#clock-synchronization-metadata) for wire values and
-hardware fallback behavior.
+## Examples
 
-For the complete list of supported keys, validation behavior, and error message examples, see [doc/usage.md#configuration-file](doc/usage.md#configuration-file).
+Request CoS and reflector metadata:
 
-### Example output
-
-Sender with per-packet statistics (`-R`):
-
-```
-seq=0 rtt=0.523ms ttl=64 reflector_recv_ts=16890123456789 reflector_send_ts=16890123456790
-seq=1 rtt=0.498ms ttl=64 reflector_recv_ts=16890123556789 reflector_send_ts=16890123556790
-...
-
---- STAMP Statistics ---
-Packets sent: 100
-Packets received: 100
-Packets lost: 0 (0.0%)
-Min RTT: 0.412 ms
-Max RTT: 1.203 ms
-Avg RTT: 0.521 ms
+```sh
+stamp-suite --remote-addr 192.0.2.20 --cos --dscp 46 \
+  --direct-measurement --location --timestamp-info
 ```
 
-Use `--output-format json` for JSON lines or `--output-format csv` for one header
-and successive snapshot rows on stdout. Diagnostics go to stderr; `-R` packet
-details also go to stderr in these modes. See [output streams](doc/usage.md#output-streams)
-for periodic reports and redirection examples.
+Record measurements separately from diagnostics:
 
-### Runtime control plane
-
-Build with `--features control` and start the reflector with `--control`
-to get a localhost REST API (default `127.0.0.1:9091`) for runtime
-management — no restarts needed:
-
-```bash
-curl -s 127.0.0.1:9091/v1/status                       # uptime, counters, drain state
-curl -s 127.0.0.1:9091/v1/sessions                     # live session table
-curl -s -X PUT 127.0.0.1:9091/v1/keys/42 \
-     -H 'content-type: application/json' \
-     -d '{"key_hex":"<64 hex chars>"}'                 # add a per-SSID HMAC key
-curl -s -X PATCH 127.0.0.1:9091/v1/caps \
-     -H 'content-type: application/json' \
-     -d '{"max_pps":500}'                              # tune rate limits live
-curl -s -X POST 127.0.0.1:9091/v1/drain \
-     -H 'content-type: application/json' \
-     -d '{"draining":true}'                            # stop accepting new sessions
-curl -s -X POST 127.0.0.1:9091/v1/shutdown             # graceful shutdown
+```sh
+stamp-suite --remote-addr 192.0.2.20 --output-format json \
+  > measurements.jsonl 2> diagnostics.log
 ```
 
-Reflectors bound pending work with `--reflector-queue-capacity` (default 1024).
-`--reflector-shutdown-grace-ms` optionally finishes queued replies before exit
-(default 0 cancels immediately). See [burst scheduling and shutdown](doc/usage.md)
-for overflow behavior, cancellation counters and TOML equivalents.
+Measure residual BER with one-second windows:
 
-Key material is write-only (never returned or logged). Set
-`--control-token-file` to require a bearer token; keep the bind on
-loopback unless network-level access control is in place. Full API
-contract and security model: [doc/control-plane.md](doc/control-plane.md).
+```sh
+stamp-suite --remote-addr 192.0.2.20 --ber --ber-pattern ff00 \
+  --ber-padding-size 128 --send-delay 100 --ber-interval 10
+```
+
+BER measures delivered padding, not raw link errors. Use `--ber-omit-burst` if
+Type 242 means Heartbeat to the peer. See [BER limits](doc/architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber).
+
+With the `control` feature, `--control` enables a reflector API at
+`127.0.0.1:9091`. It manages keys, sessions, limits, drain, and shutdown. Set a
+bearer token on shared hosts; use HTTPS or a secure tunnel for remote access.
+See the [API reference](doc/control-plane.md).
 
 ## Documentation
 
-- **[doc/usage.md](doc/usage.md)** — configuration file format, supported TOML keys, validation messages, full CLI flag reference.
-- **[doc/architecture.md](doc/architecture.md)** — module layout, receiver backends, packet processing pipeline, full TLV reference, Prometheus and SNMP subsystems.
-- **[doc/measurements.md](doc/measurements.md)** — reply-copy accounting, directional counter windows, Follow-Up delay, clock quality and output semantics.
-- **[doc/benchmarks.md](doc/benchmarks.md)** — reproducible live UDP throughput/CPU measurements and in-process regression benchmarks.
-- **[doc/release-evidence.md](doc/release-evidence.md)** — authenticated control and Net-SNMP fixtures, Windows runtime gate, hardware procedure and standards revision monitoring.
-- **[doc/control-plane.md](doc/control-plane.md)** — runtime control-plane REST API: endpoints, concurrency model, security model.
-- **[doc/security.md](doc/security.md)** — threat model, HMAC and TLV integrity, key sourcing, file permissions, the `stamp` system user, systemd hardening, capability model, vulnerability reporting.
-
-## Status
-
-The project is functional for STAMP measurements. RFC 8762 / 8972 / 9503 features and RFC 9534 Micro-session ID TLV handling, HMAC authentication on both base packets and TLVs, stateful reflector mode, real TTL capture, optional Prometheus + SNMP. Backward compatible with non-TLV peers. See [doc/architecture.md](doc/architecture.md) for the per-TLV implementation status table.
-
-### Roadmap
-
-- [x] Bounded statistics, directional loss and BER, Follow-Up delays, clock quality,
-  and JSON/CSV measurement reporting; see [measurement semantics](doc/measurements.md).
-
-## Contributing
-
-Pull requests are welcome. For major changes, please open an issue first.
-
-Before submitting:
-
-- `cargo fmt --all` — formatting
-- `cargo clippy --all --all-features --tests -- -D warnings` — linting (CI is strict)
-- `cargo test --all-features` — tests
-
-The [independent wire fixtures](doc/testing-interop.md) run a Python peer against
-the real reflector and record protocol combinations, raw UDP bytes and IP
-metadata. They run separately from Cargo and are required by conformance CI.
+- [Usage](doc/usage.md): configuration, options, and migration notes.
+- [Architecture](doc/architecture.md): packet processing, backends, and TLVs.
+- [Measurements](doc/measurements.md) and [statistics](doc/statistics.md): definitions and retention.
+- [Security](doc/security.md) and [vulnerability reporting](SECURITY.md).
+- [Benchmarks](doc/benchmarks.md): reproducible throughput and CPU measurements.
+- [Release verification](doc/release-evidence.md): platform and integration gates.
+- [Conformance](doc/conformance/README.md): protocol sources, evidence, and exclusions.
 
 ## Versioning
 
-Semantic versioning ([SemVer](http://semver.org/)). See [tags](https://github.com/asmie/stamp-suite/tags) for releases.
+The 1.x compatibility contract covers CLI behavior, TOML schema, and default wire
+behavior. The internal Rust library API is unsupported and may change in any
+release. Experimental codepoint renumbering and MSRV increases may occur in minor
+releases and are recorded in [CHANGELOG.md](CHANGELOG.md).
 
-## Authors
+## Contributing
 
-* **Piotr Olszewski** — [asmie](https://github.com/asmie)
+Open an issue before a major change. Before submitting, run:
 
-See the list of [contributors](https://github.com/asmie/stamp-suite/contributors).
+```sh
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
 
-## License
+[Independent wire fixtures](doc/testing-interop.md) run separately from Cargo
+and are required by conformance CI.
 
-MIT — see [LICENSE](LICENSE).
+## Authors and license
 
-## References
-
-- [RFC 8762 — Simple Two-Way Active Measurement Protocol](https://datatracker.ietf.org/doc/html/rfc8762)
-- [RFC 8972 — Optional Extensions](https://datatracker.ietf.org/doc/html/rfc8972)
-- [RFC 9503 — Extensions for Segment Routing Networks](https://datatracker.ietf.org/doc/html/rfc9503)
-- [RFC 9534 — Extensions for Performance Measurement on a Link Aggregation Group](https://datatracker.ietf.org/doc/html/rfc9534)
-- [draft-ietf-ippm-asymmetrical-pkts-14](https://datatracker.ietf.org/doc/draft-ietf-ippm-asymmetrical-pkts/) — Asymmetrical Traffic (IETF IPPM WG, RFC Editor queue)
-- [draft-ietf-ippm-stamp-ext-hdr-13](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-13.txt) — Reflected IP header / IPv6 extension headers, basis for TLV Types 246/247 (Internet-Draft)
-- [draft-gandhi-ippm-stamp-ber-07](https://datatracker.ietf.org/doc/draft-gandhi-ippm-stamp-ber/) — Residual Bit Error Rate Measurement (individual draft)
-
-Session state is separated by both UDP endpoints, SSID, and (when present)
-the sender micro-session ID. `--session-admission permissive` is the legacy
-default: it learns sessions from traffic and does **not** enforce RFC 8972 §3
-pre-provisioning. Use `--session-admission provisioned` and repeat
-`--reflector-session 'SSID,SOURCE,DESTINATION[,SENDER_MICRO_ID]'` for RFC 8972
-session admission; unmatched packets are discarded in both stateless and
-stateful modes. See [session provisioning](doc/usage.md#session-provisioning).
-
-For IPv6 link-local endpoints, use `--local-scope-id` and `--remote-scope-id`
-with the relevant numeric interface index. See [interface zones](doc/usage.md#link-local-ipv6-interface-zones)
-for reflector binds, config files and scoped session provisioning.
-
-
-Header reflection follows **draft-ietf-ippm-stamp-ext-hdr-13** (an Internet-Draft).
-Revision-11 Type 246 peers require a coordinated upgrade. Sender ports now default
-to randomized dynamic ports; outgoing TTL/Hop Limit is 255 on both endpoints.
-See [migration and configuration](doc/usage.md#draft-revision-13-migration) and the
-[conformance matrix](doc/conformance/draft-stamp-ext-hdr.md).
+Maintained by [Piotr Olszewski](https://github.com/asmie), with
+[contributors](https://github.com/asmie/stamp-suite/contributors).
+Licensed under [MIT](LICENSE).

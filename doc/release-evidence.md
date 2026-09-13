@@ -1,10 +1,8 @@
 # Release verification
 
-Release claims should name the tested revision, build features, platform and
-wire profile. The [conformance matrices](conformance/README.md) cover frozen
-specifications; successful compilation or an ignored test is not runtime proof.
-The [remediation record](reviews/2026-09-08/progress.md) contains checkpoint
-commands, raw results and limitations. O11 adds the following release checks.
+Record the tested revision, features, platform, and wire profile with each result.
+The [matrices](conformance/README.md) cover frozen specifications. Compilation
+and ignored tests do not establish runtime behavior.
 
 ## Authenticated control and a reference SNMP master
 
@@ -61,20 +59,16 @@ it does not certify every SNMP version, context, byte order or writable MIB.
 Net-SNMP packages/dependencies into `/tmp`, with no package installation or
 system-service startup. Locally installed tools also work. The September 11
 local run used Ubuntu packages `5.9.4+dfsg-2ubuntu3`; the daemon itself reports
-`5.9.4.pre2`. Both identities belong in the evidence, rather than silently
-normalizing the version string. All five cases passed on Linux/WSL2.
+`5.9.4.pre2`. Record both version strings. All five cases passed on Linux/WSL2.
 
 ## macOS runtime gate
 
 `rust.yml` runs separate native macOS jobs for the default and all-features
 profiles. Each calls `scripts/run_native_tests.py --expected-platform darwin`
 and uploads its JSON report plus raw Cargo log even after a test failure.
-The report records the actual OS/architecture, macOS version, Rust toolchain,
-commit, tracked changes, patch hash, command, exit status and executed/ignored
-counts. `--no-fail-fast` collects failures across test targets. A platform
-mismatch, missing runtime summaries, zero executed tests, filtered tests or
-failed Cargo command cannot produce a successful report. Ignored privileged
-checks are reported separately, never counted as executed.
+Reports retain platform/toolchain identity, commit and patch hash, command,
+exit status, logs, and executed/ignored counts. Platform mismatch, missing or
+empty summaries, filtered tests, and Cargo failure reject the result.
 
 For a native local Mac, use either profile explicitly:
 
@@ -91,14 +85,9 @@ filtered tests in either profile. Both ran on macOS 26.6.2 arm64 with Rust 1.98.
 clean checkouts, 35 suite summaries and Cargo exit zero. The retained reports'
 identities, runner/log hashes and counts were checked against their raw logs.
 
-This rerun verifies the source-pinning assertion correction, Darwin hop policy,
-received-hop decoding and platform-aware keyset tests, including the new mapped
-IPv4 and reflector hop-limit wire checks. See the
-[macOS checkpoint](verification/2026-09-12-macos/README.md) for reports and earlier
-failure history. The result covers the default/all-features socket backend on
-native arm64; pnet capture, Intel Mac runtime and physical NIC/hardware timestamp
-capabilities require separate evidence. Platform-excluded tests are not counted
-as executed. The workflow also supports manual dispatch.
+This result covers native arm64 default/all-feature socket builds. Pnet capture,
+Intel Mac runtime, and physical NIC timestamps require separate evidence.
+Platform-excluded tests are not counted as executed.
 
 ## Windows runtime gate
 
@@ -126,41 +115,16 @@ cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet \
   --test startup_failure_test
 ```
 
-At commit `3d56c62`, native Windows Server 2025 x64 passed the library and
-all eight required integration targets: **1034 passed, 0 failed, 0 ignored,
-0 filtered**, across nine summaries. The scheduler, authentication-startup and
-exact wildcard bind-conflict regressions all passed.
-
-The informational full attempt did not pass: **1029 passed, 1 failed** across
-16 summaries, then Cargo exited 101. `ptp_sender_ntp_peer_ipv6_auth_offset` timed
-out waiting five seconds for the first sender packet, despite passing in the
-required gate earlier in the same job. The cause is undetermined because the
-timeout path did not retain child process output. Later targets did not run.
-All required CI jobs passed; `continue-on-error` masks this optional failure in
-the overall success conclusion. See the
-[Windows checkpoint](verification/2026-09-12-windows/README.md) for retained
-native logs, final CI status, exact counts and earlier failure history.
-
-The subsequent diagnostic run at `7145178` passed 1036 core tests, then failed
-on repetition 17 with 100 passed and 2 failed tests across 17 repeated suites.
-Both failed children exited before transmitting: automatically selected IPv4
-and IPv6 source ports were rejected with Winsock WSAEACCES (10013). The original
-full-suite timeout lacked these diagnostics; its exact cause cannot be proven
-retroactively, but this rerun establishes an actual sender startup defect.
-
-Automatic source-port selection now retries that Windows error within its
-existing 128-candidate bound and preserves the final bind error on exhaustion.
-Explicit ports and unrelated failures still return immediately. Regression tests
-cover both address families, peer-port avoidance, exhaustion, fixed ports and
-random-source failure. Native Windows verified the correction at `2548231` in
+Automatic source-port selection retries Windows WSAEACCES (10013) within its
+128-candidate limit. Explicit ports and unrelated errors fail immediately.
+Tests cover both address families, exhaustion, and peer-port avoidance.
+Native Windows Server 2025 x64 verified this behavior at `2548231` in
 [run 34717692891](https://github.com/asmie/stamp-suite/actions/runs/34717692891):
 **1041 core tests, 120 checks across all 20 repetitions, and 1140 informational
 full-suite tests passed**, with zero failures, ignored or filtered tests in each
 log (9, 20 and 35 suite summaries respectively). The informational step itself
 succeeded; these counts do not rely on its `continue-on-error` setting.
-All 24 CI jobs passed, including Nix, both native macOS profiles and every
-Clippy profile. The conformance and push workflows also succeeded.
-The five-second packet deadline and failure diagnostics remain enabled.
+The five-second packet deadline and child-process failure diagnostics remain enabled.
 
 A release claiming Windows runtime coverage should retain the successful
 required-gate artifact and native job log for its exact commit. The raw logs
@@ -171,15 +135,10 @@ workflow definitions.
 
 ## Hardware timestamps
 
-Physical-link verification remains pending an external testbed. The
-[September 12 availability check](verification/2026-09-12-physical-preflight/README.md)
-confirmed a local WSL2 `hv_netvsc` interface with software timestamps only and
-no NIC PHC. No physical traffic tests ran. The separate virtual `ptp0` device
-does not establish NIC timestamp delivery.
-
-Use the [two-host hardware procedure](testing-hardware-timestamps.md) on a
-controlled testbed with capable NICs. The O11 host's `ethtool -T eth0` reports
-software timestamps only and no PHC, so no hardware success is recorded here.
+Physical NIC timestamp tests have not run. The September WSL2 availability checks
+found software timestamp support and no NIC PHC; a virtual `ptp0` device does not
+establish NIC delivery. Use the [two-host procedure](testing-hardware-timestamps.md)
+on capable hardware and retain actual RX/TX method counts.
 
 ## Standards revision monitor
 
@@ -206,24 +165,15 @@ implementation/matrix changes should update the frozen draft revision. The
 monitor does not automatically audit normative text, IANA code points or errata;
 release review should check each RFC's linked errata page and retain the result.
 
-The September 11 run detected ext-hdr -13 while the implementation followed -11.
-The subsequent [revision-13 implementation review](conformance/ext-hdr-13-review.md)
-updates the code, matrix and pin; an offline replay of the saved metadata now
-checks against that reviewed baseline. This replay does not establish current
-live metadata. RFC 8545 and RFC 2741 retain their verified RFC Editor statuses,
-Proposed Standard and Draft Standard respectively.
-
-STAMP YANG management and full TWAMP-Control remain explicit product scope
-choices. This release-evidence work does not add either feature or turn them
-into automatic implementation backlog. A future draft revision likewise needs
-an explicit adoption review; it does not retroactively change what the frozen
-matrix claims to have checked.
+The September 11 check found ext-hdr -13 while the implementation used -11.
+The [revision-13 review](conformance/ext-hdr-13-review.md) updated implementation,
+matrix, and pin. Offline replay checks that baseline, not current live metadata.
+STAMP YANG and TWAMP-Control remain outside the product scope.
 
 ## Successful SRv6 transit gate
 
-The required namespace scenario now demands successful forwarding through an
-intermediate Linux router. Its two captures verify actual SRH traversal, open
-and authenticated replies, CoS and isolation from subsequent ordinary replies;
-U-flag fallback fails this success gate. See the [September 12 evidence](verification/2026-09-12-srv6/README.md)
-and [remaining verification work](verification/README.md). This closes the local
-Linux/nix SRv6 success gap, without claiming a physical fabric or hardware test.
+`scenario_3_srv6_return_path` requires successful forwarding through an
+intermediate Linux router. Captures check SRH traversal, open/authenticated
+replies, CoS, and ordinary-reply isolation. U fallback fails this gate. See
+[namespace procedures](testing-netns.md). The result covers virtual Linux/nix
+routing; it does not establish physical-fabric or hardware behavior.

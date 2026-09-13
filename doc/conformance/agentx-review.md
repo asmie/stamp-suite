@@ -1,4 +1,4 @@
-# AgentX targeted review — finding 14
+# AgentX review
 
 Reviewed 9 September 2026 against [RFC 2741](https://www.rfc-editor.org/rfc/rfc2741.html).
 This is a targeted repair record, not a complete AgentX/SNMP conformance matrix;
@@ -19,23 +19,14 @@ following request verifies synchronization. Coalesced PDUs and cancellation duri
 an incomplete frame have separate checks. Unit tests cover every split offset with
 WouldBlock, TimedOut and Interrupted, plus truncated frames and oversized headers.
 
-The fixtures reproduced five failures before the fix; the sixth original case
-(zero repetitions/non-repeaters) already passed. Later tests add stream and limit
-coverage. Final commands/results are in the [repair tracker](../reviews/2026-09-08/progress.md).
+Limits: 1 MiB incoming payloads, 256 search ranges and 100 bulk iterations. SET operations are read-only. Network-byte-order/default-context operation is the
+supported subset; byte order is a per-PDU flag, not negotiated by Open. Little-endian payloads and named contexts are unsupported.
 
-Limits: 1 MiB incoming payloads, 256 search ranges and 100 bulk iterations. Read-only
-SET handling is unchanged. Network-byte-order/default-context operation is the
-supported subset; byte order is a per-PDU flag, not negotiated by Open. This repair
-does not add little-endian payload or named-context support. Net-SNMP tools were
-not installed for that original repair; its results are historical.
-
-O11 (11 September 2026) adds and passes a separate real Net-SNMP master/client
-fixture on Linux. `scripts/release_checks.py::snmp_case` starts an isolated
+A separate Net-SNMP master/client fixture passed on Linux on 11 September 2026. `scripts/release_checks.py::snmp_case` starts an isolated
 master and the actual stamp-suite subagent, then verifies authenticated live
 packet counters, two session rows, GET/GETNEXT/walk/GETBULK ordering and the
 end-of-MIB boundary. STAMP continues reflecting while the master is restarted;
 the subagent reconnects with counters and session state preserved. The tools
 are Ubuntu package `5.9.4+dfsg-2ubuntu3`; the daemon reports `5.9.4.pre2`.
-See [release evidence](../release-evidence.md) for commands, captured queries and
-limits. This is reference-master interoperability evidence for the exercised
+See [release evidence](../release-evidence.md) for commands and limits. This is reference-master interoperability evidence for the exercised
 subset; no macOS execution or full SNMP certification is claimed.

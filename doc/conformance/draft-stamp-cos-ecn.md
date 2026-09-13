@@ -1,40 +1,13 @@
-# draft-ietf-ippm-stamp-cos-ecn conformance — stamp-suite
+# CoS/ECN draft conformance
 
-Revision frozen: draft-ietf-ippm-stamp-cos-ecn-**01**, 20 July 2026 (verified 2026-07-22)
-Source: https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-01.txt
+Revision frozen: draft-ietf-ippm-stamp-cos-ecn-01, 20 July 2026.
+[Source](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-01.txt).
+This is an Internet-Draft.
+
+The profile includes DSCP/ECN admission policy and sender AIMD response. Reverse
+ECN feedback is available on Linux/macOS; other platforms use forward feedback.
 
 Summary: 16 clauses — 16 Compliant / 0 Partial / 0 Gap / 0 N-A / 0 Excluded
-
-> **Adversarial re-check (2026-07-22).** All 5 rows previously marked
-> PROVISIONAL (2 Partial + 3 Gap) were re-adjudicated against the source
-> draft text and the code as it stood that day. All 5 were CONFIRMED as
-> genuine findings at the time — no refutation or reclassification was
-> found. In particular, the §3.4 Congestion Response rows were
-> double-checked against the audit's own hint that they "may warrant
-> Partial-with-rationale... not Gap": the source text is unambiguously
-> **MUST**, not SHOULD, and binds the **Sender** (correctly graded), and
-> `sender.rs` at that time implemented zero congestion-response/
-> rate-adaptation logic of any kind, so Gap was the accurate, honest
-> verdict for cos-ecn-3.4-1/-2/-3.
->
-> **Chunk F2 (2026-07-23) closed that gap**: `sender.rs` now runs an AIMD
-> congestion-response controller (`src/rate_control.rs`) driven by CE
-> observations from both directions the §3.4 MUSTs cover, and scales the
-> Reflected Test Packet Control TLV's interval for §3.4-3. All three rows
-> are reclassified Gap → Compliant below with file:line evidence; the two
-> §3.2 Partial rows (DSCP1/EC1 admission-policy layer, unrelated to F2)
-> are unchanged and still genuine.
-
-> This draft updates RFC 8972 §4.4 by repurposing the CoS TLV's previously
-> Reserved bits as EC1 (reflector's target reply ECN) and RPE (reverse-path
-> ECN report), backward-compatible in both directions per its §3.3. The wire
-> layout (`| DSCP1 | DSCP2 |EC2|RPD|EC1|RPE| Reserved |`, Type=4, Length=4)
-> is unchanged from -00; this tree's `ClassOfServiceTlv` has carried it since
-> before -01 (RFC 8972 erratum 8199 + `-00` EC1/RPE), so all rows below
-> reflect the current, already--01-aligned implementation, not a fresh
-> feature.
-
-Role legend: Sender / Reflector / Both / N-A.
 
 | ID | Clause (trimmed quote) | Level | Role | Status | Evidence |
 |----|------------------------|-------|------|--------|----------|
@@ -52,11 +25,10 @@ Role legend: Sender / Reflector / Both / N-A.
 | cos-ecn-3.2-7 | "If the Session-Reflector is able to set the ECN value ... to the EC1 value, it MUST then set the RPE field ... to the value 0b11" | MUST | Reflector | Compliant | `Transmission::send_next` (`src/receiver/transmit.rs`) carries the admitted CoS value on every copy. Linux `send_datagram` uses per-message IP_TOS/IPV6_TCLASS; other supported platforms set CoS immediately before their single send owner transmits. `tests/burst_transmission_test.rs` checks unchanged on-wire CoS across an interleaved request with different CoS. |
 | cos-ecn-3.2-8 | "If the Session-Reflector is unable to set the ECN value ... it MUST instead set the ECN value in the IP header to 0b00 and set the RPE field ... to the value 0b10" | MUST | Reflector | Compliant | `Transmission::send_next` (`src/receiver/transmit.rs`) retries CoS failure with `cos_unable_fallback_tos(received_dscp)`: received DSCP and zero ECN. `set_cos_policy_rejected` sets RPD=0b01 and RPE=0b10 before final signing. `cos_failure_uses_zero_ecn_fallback_and_resigns` verifies the metadata, flags, and both HMACs using an injected send failure; this is not a live kernel failure-path test. |
 | cos-ecn-3.4-1 | "If a Session-Sender sends multiple STAMP packets with the CoS TLV to a Session-Reflector within an RTT with either the ECT0 or ECT1 value in the ECN field ..., it MUST observe the reflected EC2 field and reduce its sending rate upon observation of a CE value" | MUST | Sender | Compliant | `validate_reflected_tlvs` (`src/sender.rs::validate_reflected_tlvs`) sets `TlvTelemetry::forward_ce` only for usable reflected CoS values under the U/M/I/HMAC integrity checks. `process_response` (`src/sender.rs::process_response`) applies `on_ce_observed` after the required Micro-session ID and configured SSID admission checks. `run_sender_with_output` activates AIMD when CoS is requested with ECT0/ECT1 and uses its interval for pacing. Tests: `test_process_response_forward_path_ce_backs_off_congestion_controller` and `mismatched_ssid_preserves_measurement_and_control_state` (`src/sender.rs`); deterministic controller behavior is tested in `src/rate_control.rs`. |
-| cos-ecn-3.4-2 | "If a Session-Sender sends multiple STAMP packets with the CoS TLV ... with either ECT0 or ECT1 ... in the EC1 field, it MUST observe the ECN value in the IP header of the reflected packets and reduce its sending rate upon observation of a CE value" | MUST | Sender | Compliant | **Chunk F2.** Reverse-path (reflector→sender) detection: `enable_reply_tos_reception` (`src/sender.rs::enable_reply_tos_reception`) enables `IP_RECVTOS`/`IPV6_RECVTCLASS` on the sender socket at startup whenever `ecn_response_active`; `recv_packet` (`src/sender.rs::recv_packet`) uses `recvmsg` and `extract_reply_ecn_from_cmsgs` (`src/sender.rs::run_sender_with_output` Linux, `433-467` macOS) to read the reply's on-wire ECN back into `reply_ecn: Option<u8>`, threaded through to `process_response`, which computes `reverse_ce = reply_ecn == Some(0b11)` (`src/sender.rs::process_response`) and drives the same `on_ce_observed`/`on_clean_reply` AIMD cycle as cos-ecn-3.4-1 (shared controller — a reply CE-marked in both directions at once still applies exactly one backoff step, `rate_control.rs:141-161`). Unlike the forward-path TLV value, this signal is deliberately *not* integrity-gated: DSCP/ECN are mutable-in-transit IP header fields by design (routers rewrite them), so there is no meaningful TLV-HMAC-style check to apply — the same trust model the reflector itself uses for the *incoming* test packet's ECN. **Platform coverage**: Linux and macOS only, via `nix` (a mandatory dependency on those targets regardless of build features, matching the receiver's own `IP_RECVTOS`/`IPV6_RECVTCLASS` pattern in `receiver/nix.rs`); other platforms log a startup warning and fall back to forward-path-only detection (`sender.rs` non-Linux/macOS branch of the egress-options block) — honestly disclosed, not silently degraded. Unit-tested in `test_process_response_reverse_path_ce_backs_off_congestion_controller` and `test_process_response_clean_reply_recovers_congestion_controller`. |
-| cos-ecn-3.4-3 | "If a Session-Sender sends a STAMP packet containing both the CoS TLV and the Reflected Test Packet Control TLV ..., and specifies ... EC1 ..., it MUST observe the ECN value ... and adjust the Reflected Test Packet Control parameters in any future STAMP packet ... based on the observation of CE values" | MUST | Sender | Compliant | **Chunk F2.** Uses the same CE observation as cos-ecn-3.4-1/-2 (this clause's own condition — EC1 requesting ECT0/ECT1 — is the identical activation gate). When a Reflected Test Packet Control TLV is also requested (`--reflected-control-count` > 1 or `--reflected-control-no-ext-hdr`), `scale_reflected_control` (`src/sender.rs::run_sender_with_output`) is set, and the send loop rebuilds the TLV each iteration with `interval_nanoseconds` scaled by `AimdController::scale_factor()` (`rate_control.rs:127-135`, `src/sender.rs::scaled_reflected_control_tlv`) — i.e. future STAMP packets' Reflected Test Packet Control parameters are adjusted based on CE observations, satisfying the clause's "adjust ... in any future STAMP packet". `AimdController::scale_factor` is unit-tested (`scale_factor_is_one_at_rest`, `scale_factor_doubles_with_one_backoff`, `scale_factor_with_zero_base_uses_floor_reference`, `rate_control.rs`); the live wiring was additionally exercised manually via loopback (`--cos --ecn 1 --reflected-control-count 2`, confirmed the TLV's advertised interval and the "AIMD-scaled per §3.4-3" log line both appear). |
+| cos-ecn-3.4-2 | "If a Session-Sender sends multiple STAMP packets with the CoS TLV ... with either ECT0 or ECT1 ... in the EC1 field, it MUST observe the ECN value in the IP header of the reflected packets and reduce its sending rate upon observation of a CE value" | MUST | Sender | Compliant | `AimdController` (`src/rate_control.rs`) backs off once per accepted CE reply. Linux/macOS read reverse ECN from IP metadata; other platforms have forward-only feedback. Reverse IP ECN is outside STAMP HMAC coverage. Tests: `test_process_response_forward_path_ce_backs_off_congestion_controller` and `test_process_response_reverse_path_ce_backs_off_congestion_controller` (`src/sender.rs`). |
+| cos-ecn-3.4-3 | "If a Session-Sender sends a STAMP packet containing both the CoS TLV and the Reflected Test Packet Control TLV ..., and specifies ... EC1 ..., it MUST observe the ECN value ... and adjust the Reflected Test Packet Control parameters in any future STAMP packet ... based on the observation of CE values" | MUST | Sender | Compliant | Normal sends and Access Report retries scale the Type-12 interval with the current AIMD factor. Test: `test_wait_phase_retransmit_still_carries_scaled_control_tlv` (`src/sender.rs`). The reply count stays unchanged. |
 
-## Report notes
+## Scope
 
-* §2 (Acronyms/Requirements Language boilerplate), §3.3 (Interoperability with RFC 8972 — entirely descriptive "will"/"would" prose, zero RFC 2119 keywords), §4 (IANA Considerations — "This document includes no request to IANA"), and §5 (Security Considerations — inherits RFC 8762/8972/3168/9330's considerations by reference, no independent keyword-bearing sentence) contributed no clauses and are excluded from the row count.
-* **Adversarial re-check completed (2026-07-22).** Both **Partial** rows (cos-ecn-3.2-3, cos-ecn-3.2-6) share one root cause — the implementation has a capability-based fallback (syscall success/failure) but no independent, operator-configurable admission-policy layer for DSCP1/EC1 — and are CONFIRMED as genuine, accurately-graded findings; the level/role check the audit brief specifically requested for these rows (SHOULD-vs-MUST, sender-vs-reflector) was performed against the source text and found the existing MUST/Sender/Reflector grading to already be correct, so no rows were reclassified for level/role reasons. At that time, the three §3.4 rows were likewise CONFIRMED as genuine **Gap** findings by direct code inspection of `sender.rs`, which implemented zero congestion-response logic.
-* **Chunk F2 (2026-07-23).** Implemented the AIMD congestion-response controller (`src/rate_control.rs`) and wired it into `sender.rs` (CE detection from both the reflected CoS TLV's EC2 field and the reply packet's own on-wire ECN via new `recvmsg`/`IP_RECVTOS`/`IPV6_RECVTCLASS` plumbing on the sender socket, Linux/macOS), plus interval scaling for the Reflected Test Packet Control TLV. All three previously-Gap §3.4 rows are reclassified **Compliant** above with file:line evidence and deterministic unit/proptest coverage; the two §3.2 Partial rows are untouched by this chunk and remain accurate.
+The introductory, example, and registry sections add no endpoint requirements.
+The matrix assesses the frozen -01 profile, not later draft revisions.

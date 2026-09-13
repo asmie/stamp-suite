@@ -1,12 +1,13 @@
 # Usage
 
-Reference manual for running `stamp-suite`: configuration file format, every supported TOML key, and the complete CLI flag list. The top-level [README](../README.md) has quick-start examples for the reflector and sender; this document is the deep reference for every option they can take.
+Configuration and behavior reference. Start with the [README](../README.md);
+use `stamp-suite --help` or the [man page](../dist/man/stamp-suite.1) for the complete
+option list.
 
 ## Configuration File
 
-Any option accepted on the command line can also be supplied through a TOML
-configuration file via `--config <PATH>`. Values in the file are used as
-defaults; any key not present in the file keeps its built-in default.
+Use `--config <PATH>` to load TOML settings. Explicit CLI values override file
+values; omitted settings keep their built-in defaults.
 
 ```bash
 stamp-suite --config /etc/stamp/reflector.toml
@@ -14,37 +15,18 @@ stamp-suite --config /etc/stamp/reflector.toml
 
 ### Precedence
 
-From highest to lowest priority:
-
-1. Command-line flag (e.g. `--remote-port 1234`)
-2. `STAMP_HMAC_KEY` environment variable (for the HMAC key only)
-3. Value from the `--config` TOML file
-4. Hardcoded default
-
-In other words: the file provides new defaults; CLI flags and env vars still
-override them field-by-field.
-
-#### Caveat for the HMAC key
-
-Precedence works field-by-field, but `--hmac-key` (also fed by `STAMP_HMAC_KEY`)
-and `--hmac-key-file` are **mutually exclusive** — both `Configuration::validate()`
-and clap's `conflicts_with` enforce that. As a consequence, supplying
-`STAMP_HMAC_KEY` in the environment **and** `hmac_key_file = "..."` in the TOML
-file fails startup with `Invalid configuration: hmac_key and hmac_key_file are
-mutually exclusive`. Pick exactly one source for the key:
-
-- environment / CLI: `STAMP_HMAC_KEY=...` or `--hmac-key <HEX>`
-- on-disk path: `--hmac-key-file <PATH>` or `hmac_key_file = "..."` in the TOML
+CLI values override TOML values, which override built-in defaults.
+`STAMP_HMAC_KEY` supplies the inline HMAC key when `--hmac-key` is absent.
+Key sources are mutually exclusive: an environment key combined with a file
+or directory key source fails startup. See [key sourcing](security.md#key-sourcing--precedence).
 
 ### Example `reflector.toml`
 
 ```toml
-# Reflector bound on a specific address/port
 is_reflector = true
 local_addr = "192.0.2.10"
 local_port = 862
 
-# Protocol behaviour
 auth_mode = "O"              # "A" for authenticated, "O" for open
 clock_source = "NTP"         # timestamp encoding: "NTP" or "PTP"
 clock_sync_source = "local"  # declared system-clock discipline
@@ -53,21 +35,18 @@ tlv_mode = "echo"            # "echo" or "ignore"
 stateful_reflector = true
 session_timeout = 300
 
-# Optional features
 metrics = true
 metrics_addr = "127.0.0.1:9090"
 
-# HMAC key – only a PATH can be set from the config file.
-# The plaintext `hmac_key` field is deliberately rejected; pass the raw
-# key via --hmac-key or the STAMP_HMAC_KEY environment variable instead.
+# TOML accepts key paths, not inline keys.
 hmac_key_file = "/etc/stamp/hmac.key"
 ```
 
 ### Supported keys
 
-Every long-form CLI flag is available in the file using its snake_case
-name (e.g. `--remote-addr` becomes `remote_addr`, `--ber-padding-size`
-becomes `ber_padding_size`). Examples of non-trivial types:
+File keys generally use the CLI name in snake_case: `--remote-addr` becomes
+`remote_addr`. Repeated `--reflector-session` entries use `reflector_sessions`.
+The parser rejects unsupported or misspelled keys. Common value types:
 
 | Field | TOML type | Example |
 |-------|-----------|---------|
@@ -83,90 +62,25 @@ becomes `ber_padding_size`). Examples of non-trivial types:
 | `return_srv6_sids` | string array (IPv6) | `["2001:db8::1", "2001:db8::2"]` |
 | `hmac_key_file` | string (path) | `"/etc/stamp/hmac.key"` |
 
-The `hmac_key` and `config` fields are intentionally **not** accepted
-from the file — the former to keep plaintext secrets out of config files,
-the latter because it would be recursive. See [security.md](security.md) for
+`hmac_key` and `config` are not accepted in TOML. See [security.md](security.md) for
 key-management details.
 
-### Validation and error messages
+### Validation
 
-Failures are reported with actionable messages:
+Unknown keys, invalid TOML, and wrong value types report a parse error with a
+line and column. Merged values then undergo range and combination checks,
+including settings supplied only by the file.
 
-- **Unknown key** (typo): the parse error lists every valid field name.
-  ```text
-  Configuration file error: parse error in /etc/stamp.toml:
-  TOML parse error at line 1, column 1
-    |
-  1 | remote_portt = 1234
-    | ^^^^^^^^^^^^
-  unknown field `remote_portt`, expected one of `remote_addr`, `local_addr`, ...
-  ```
-- **Wrong type / bad enum variant / malformed TOML**: reported with the
-  exact line/column and caret marker from the `toml` crate.
-- **Out-of-range values** (e.g. `dscp = 200`, `error_scale = 100`, or
-  `auth_mode = "A"` without an HMAC key): caught by
-  `Configuration::validate()` after the merge, with a message naming the
-  offending field.
+## CLI and behavior
 
-## Full CLI reference
-
-The canonical reference is `stamp-suite --help` (this list is generated from the same `clap` definitions). The flags below match `stamp-suite 1.0.0`.
-
-### General
-
-```
-      --config <PATH>              TOML configuration file (see "Configuration File" above)
-  -r, --remote-addr <ADDR>         Remote address for Session Reflector [default: 0.0.0.0]
-  -S, --local-addr <ADDR>          Local address to bind for [default: 0.0.0.0]
-  -p, --remote-port <PORT>         UDP port for outgoing packets [default: 862]
-  -o, --local-port <PORT>          Local UDP port [sender: randomized dynamic port; reflector: 862]
-  -K, --clock-source <NTP|PTP>     Timestamp wire encoding [default: NTP]
-      --clock-sync-source <SOURCE> Declared system-clock discipline [default: local]
-      --hardware-clock-sync-source <SOURCE> Declared NIC PHC discipline [default: local]
-  -d, --send-delay <MS>            Delay between packets in milliseconds [default: 1000]
-  -c, --count <N>                  Number of packets to send [default: 1000]
-  -L, --timeout <SEC>              Timeout for lost packets in seconds [default: 5]
-  -A, --auth-mode <A|O>            A=authenticated, O=open [default: O]
-  -R                               Print per-packet statistics (stderr for JSON/CSV)
-  -i, --is-reflector               Run as Session-Reflector instead of Session-Sender
-      --output-format <text|json|csv>  Statistics output format [default: text]
-      --log-format <text|json>     Diagnostic log format on stderr [default: text]
-  -v, --verbose...                 Increase log verbosity (-v debug, -vv trace);
-                                   RUST_LOG overrides
-      --hwtstamp <auto|on|off>     Kernel/hardware timestamp handling [default: auto]
-                                   (build with --features hwtstamp; `auto` = kernel
-                                   software timestamps, `on` = attempt NIC hardware
-                                   with graceful fallback, `off` = userspace only)
-      --print-config-schema        Print JSON Schema for the TOML config and exit
-      --report-interval <SEC>      Periodic reporting interval, sender only (0 = disabled) [default: 0]
-      --max-pps <PPS>              Reflector rate limit per source (0 = unlimited) [default: 0]
-  -h, --help                       Print help
-  -V, --version                    Print version
-```
+Run `stamp-suite --help` for options and defaults supported by your build.
 
 ### Statistics precision and retention
 
-RTT and both one-way-delay directions keep exact quantiles through 4,096
-samples per series. Longer runs use bounded histograms covering **all** samples,
-with less than **0.78125% error in magnitude** relative to the selected exact
-order statistic. Zero and extrema stay exact. Counts, minima/maxima, means,
-RTT successive variation and population standard deviation remain cumulative.
-The sample counters are 64-bit; neither reporting nor histogram conversion
-resets them. See [statistics methodology](statistics.md) for rank selection,
-rounding, memory bounds and the distinction from timestamp measurement error.
-
-JSON includes `quantile_precision` (`exact_sample_limit: 4096`,
-`relative_error_bound: 0.0078125`), also in a standalone OWD summary. Text
-summaries explain the policy. Sender CSV inserts `quantile_exact_sample_limit`
-and `quantile_relative_error_bound` immediately before the final `ber` cell.
-These are conservative bounds; short series remain exact.
-
-BER retains the latest 1,024 completed nonempty intervals and 1,024 alarms,
-plus the current partial interval in snapshots. `intervals_omitted` and
-`alarms_omitted` disclose older records evicted from the summary; lifetime
-BER totals and threshold-crossing logs remain cumulative. Save periodic output
-and alarm logs externally if you need longer history. `-R` can stream RTT packet
-details without retaining them in memory.
+RTT/OWD quantiles are exact through 4,096 samples per series, then use a bounded
+histogram with less than 0.78125% value error. Counts, moments, and extrema remain
+cumulative. BER keeps 1,024 completed intervals and 1,024 alarms, with eviction
+counters. See [statistics](statistics.md) for precision, output fields, and retention.
 
 ### Output streams
 
@@ -209,62 +123,16 @@ total. Ordinary RTT/OWD and probe-loss fields retain their first-reply semantics
 
 ### Reflector mode
 
-```
-      --stateful-reflector         Per-client sequence numbering (RFC 8972 §4)
-      --session-admission <MODE>   permissive (legacy default) or provisioned
-      --reflector-session <SPEC>   SSID,SOURCE,DESTINATION[,SENDER_MICRO_ID]; repeatable
-      --session-timeout <SEC>      Idle runtime session reaping [default: 300]
-      --tlv-mode <ignore|echo>     How to treat incoming TLVs [default: echo]
-      --reflector-member-link-id <ID>  Configured reflector Micro-session ID (decimal or 0x-hex)
-      --srv6-return-forwarding     Best-effort SRv6 Return Path SRH forwarding
-                                   (RFC 9503 §4; Linux+IPv6; off by default,
-                                   graceful U-flag fallback when unsupported)
-      --allowed-dscp <SPEC>        DSCP codepoints the reflector may apply to a
-                                   reply (RFC 8972 §4.4/§6, cos-ecn-01 §3.2):
-                                   all (default) | none | list of values and
-                                   ranges, e.g. 0,8,10-14,46. A refused DSCP1
-                                   is not applied; the reply keeps the received
-                                   DSCP and the echoed TLV reports RPD=0b01
-      --allowed-ecn <SPEC>         ECN codepoints the reflector may apply:
-                                   all (default) | none | list of 0-3. A refused
-                                   EC1 forces the reply's ECN to Not-ECT and the
-                                   echoed TLV reports RPE=0b10
-      --allowed-dscp-for <RULE>    Destination-scoped DSCP policy overriding
-                                   --allowed-dscp for replies inside a prefix:
-                                   PREFIX/LEN=SPEC, e.g. 192.0.2.0/24=0,46.
-                                   REPEATABLE; the most specific matching prefix
-                                   wins regardless of order, and a matching rule
-                                   replaces the global set rather than adding
-                                   to it
-      --location-disclose <FIELDS>  Which Location TLV fields the reflector may
-                                   report (RFC 8972 §4.2.2 policy control):
-                                   all (default) | none | any of src-port,
-                                   dst-port, ports, src-ip, dst-ip, ips.
-                                   Withheld fields are answered as zeroes, so
-                                   the reply's size and TLV layout do not change
-      --drop-replayed              Suppress ordinary duplicated packets.
-                                   Handled Type-12 requests instead receive one
-                                   U-flagged reply on non-monotonic ordering,
-                                   even with this flag set (draft §5).
-                                   Off by default; detection/counting always on
-      --strict-packets             Reject short packets instead of zero-filling (RFC 8762 §4.6)
-      --require-hmac               Error out at startup if no HMAC key is configured
-      --verify-tlv-hmac            Verify HMAC TLV (RFC 8972) on incoming packets
-```
+**CoS policy.** `--allowed-dscp`, `--allowed-ecn`, and destination-specific
+`--allowed-dscp-for PREFIX/LEN=SPEC` control which requested values the reflector
+may apply. Defaults permit all values. The most specific destination prefix
+replaces the global DSCP policy. Kernel capability is checked separately.
 
-**CoS admission policy — permitted vs capable (RFC 8972 §4.4/§6,
-draft-ietf-ippm-stamp-cos-ecn-01 §3.2).** The RFC requires the reflector to "use
-the local policy to verify whether the CoS corresponding to the value of the
-DSCP1 field is permitted in the domain". Attempting the setsockopt and treating
-failure as refusal only answers a different question — whether the host is
-*capable* — because the kernel knows nothing about the operator's domain policy
-and will happily apply a codepoint the network is not meant to carry.
-`--allowed-dscp`, `--allowed-ecn` and `--allowed-dscp-for` supply the *permitted*
-answer; the socket still supplies the *capable* one, and a request must clear
-both. A refused DSCP1 is reported with RPD=0b01 and the reply keeps the received
-DSCP; a refused EC1 is reported with RPE=0b10 and the reply's ECN is forced to
-Not-ECT. Nothing is dropped and no TLV is flagged malformed — refusal is a
-reported outcome, not an error. Defaults permit everything.
+A refused DSCP keeps the received DSCP and reports RPD=0b01. A refused ECN uses
+Not-ECT and reports RPE=0b10. `--location-disclose` controls reported Location
+fields: `all`, `none`, or a list of `src-port`, `dst-port`, `ports`, `src-ip`,
+`dst-ip`, and `ips`. Withheld fields are zeroed; withheld IPs retain the generic
+sub-TLV type to avoid disclosing the address family.
 
 **Burst replies.** When Type-12 reflection is enabled, every copy gets its own
 T3 and, in stateful mode, a sequence number assigned in transmission order.
@@ -358,14 +226,6 @@ failures do not prove an attack. Restarting a sender on the same session identit
 may produce these verdicts until numbering advances or the session expires.
 Per-event logging remains at debug level.
 
-RFC 8972 §4.2.2 lets a reflector "leave some fields unreported by filling them
-with zeroes" under local policy and requires an implementation to provide
-control over that policy; `--location-disclose` is that control. It only
-affects what the reflector *answers* — a request for a withheld field is still
-echoed as Answered (not flagged unrecognized), and a withheld IP request keeps
-its generic sub-TLV type rather than being rewritten to the IPv4/IPv6 variant,
-since the variant would itself disclose the observed address family.
-
 ### Micro-session ID validation
 
 `--micro-session-id` enables numeric ID validation. The sender requires one usable
@@ -403,11 +263,6 @@ entry still permits that SSID through a configured default key; remove the defau
 as well when access must be revoked. Open-mode TLV integrity does not authenticate
 the base packet and does not provide authenticated-mode admission semantics.
 
-```
-      --hmac-key <HEX>             HMAC key, hex string (also via STAMP_HMAC_KEY env)
-      --hmac-key-file <PATH>       Path to file containing HMAC key
-```
-
 ### Timestamp / clock
 
 The sender decodes its own T1/T4 using `--clock-source` and the reflector's
@@ -442,107 +297,7 @@ or more is invalid and omits that reply's OWD sample while preserving valid RTT
 and receive accounting. Leap-second/smear transitions and unsynchronized NIC
 hardware clocks still require deployment-specific clock handling.
 
-```
-      --error-scale <0..63>        Error estimate scale [default: 0]
-      --error-multiplier <0..255>  Error estimate multiplier [default: 1]
-      --reflector-utc-offset <SECONDS>  Sender: remote clock offset from UTC [default: 0]
-      --clock-synchronized         Mark clock as synchronized in error estimate
-```
-
 ### TLV-driven sender features
-
-```
-      --ssid <ID>                  Session-Sender Identifier (RFC 8972 §3)
-      --on-zero-ssid <ACTION>      What to do when a reply comes back with a
-                                   zeroed SSID field, i.e. the reflector is not
-                                   demultiplexing on SSID (RFC 8972 §3):
-                                   continue (default, logs once) | stop (ends
-                                   the session on the first such reply).
-                                   Inert unless a non-zero --ssid was set
-      --cos                        Class of Service TLV (RFC 8972 §4.4).
-                                   Also marks the egress IP header (TOS /
-                                   IPv6 Traffic Class) to match DSCP/ECN
-                                   (Linux/macOS).
-      --dscp <0..63>               DSCP requested via CoS TLV [default: 0]
-      --ecn <0..3>                 ECN requested via CoS TLV [default: 0]
-      --ecn-backoff-factor <F>     AIMD congestion-response backoff factor
-                                   (draft-ietf-ippm-stamp-cos-ecn-01 §3.4);
-                                   must be > 1.0 [default: 2.0]
-      --ecn-max-delay <MS>         AIMD send-interval cap, milliseconds
-                                   (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)
-                                   [default: 30000]
-      --ecn-recovery-step <MS>     AIMD recovery step per clean reply,
-                                   milliseconds; interval never goes below
-                                   --send-delay
-                                   (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)
-                                   [default: 50]
-      --ttl <TTL>  TTL/Hop Limit for outgoing packets: 255 only, on both endpoints (draft ext-hdr-13 §3.1).
-                                   packets [default: OS default] (Linux/macOS)
-      --location                   Location TLV (RFC 8972 §4.2)
-      --timestamp-info             Timestamp Information TLV (RFC 8972 §4.3)
-      --direct-measurement         Direct Measurement TLV (RFC 8972 §4.5)
-      --follow-up-telemetry        Follow-Up Telemetry TLV (RFC 8972 §4.7)
-      --access-report <1..15>      Access Report TLV with Access ID (RFC 8972 §4.6;
-                                   1=3GPP, 2=Non-3GPP are the only currently
-                                   defined values; 3-15 warn at startup)
-      --access-return-code <CODE>  Return code for Access Report TLV [default: 1]
-      --access-report-timeout <SECS>  Access Report TLV retransmission timer,
-                                   in seconds (RFC 8972 §4.6) [default: 3]
-      --access-report-retries <N>  Max Access Report TLV retransmissions before
-                                   the procedure is aborted (RFC 8972 §4.6);
-                                   0 disables retransmission [default: 4]
-      --dest-node-addr <IP>        Destination Node Address TLV (RFC 9503 §3, requires --ssid)
-      --return-path-cc <0|1>       Return Path control code (RFC 9503 §4)
-      --return-address <IP>        Return Path alternate reply address (RFC 9503 §4)
-      --return-sr-mpls-labels <L>  Comma-separated SR-MPLS label stack (RFC 9503 §4)
-      --return-srv6-sids <S>       Comma-separated SRv6 segment list (RFC 9503 §4)
-      --micro-session-id <ID>      Sender numeric Micro-session ID (no physical-link selection)
-      --reflected-control-count <N>     Asymmetrical reply count (draft-ietf-ippm-asymmetrical-pkts) [default: 1]
-      --reflected-control-length <LEN>  Requested reply packet length, 0 = don't pad [default: 0]
-      --reflected-control-interval-ns <NS>  Inter-packet gap [default: 1_000_000]
-                                            NOTE: if --send-delay is shorter
-                                            than (count - 1) x interval, the
-                                            next request would start while the
-                                            reflector is still replying to the
-                                            previous one; the sender warns at
-                                            startup and names the minimum
-                                            (draft-ietf-ippm-asymmetrical-pkts
-                                            §5 SHOULD NOT)
-      --reflected-fixed-hdr [SELECTORHEX]  Request the one originated fixed header (Type 247, draft ext-hdr-13 §3.3); optional four-octet selector.
-      --reflected-fixed-hdr-selector <HEX>  §5.2 selector (single-header form only): first bytes must match the received IP header, else the reflector sets the C flag (requires exactly one --reflected-fixed-hdr with no inline selector)
-      --reflected-ipv6-ext-hdr [LEN[:SELECTORHEX]]  Select an attached IPv6 header (Type 246, draft ext-hdr-13 §3.2). Repeatable, in wire order; replaces automatic attachment requests. LEN=8..2048 in multiples of eight; selector up to eight octets.
-      --reflected-ipv6-ext-hdr-selector <HEX>  Eight-octet selector for one explicit Type 246 request; starts with the target header’s Next Header byte, not its type. Short selectors are zero-padded.
-      --attach-ext-hdr <KIND[:HEX]>  Linux/IPv6 only: attach at most one hbh then one dest header and request reflection. HEX length must match Hdr Ext Len. Default eight-byte PadN. Failure aborts startup.
-      --ber                        Enable BER-07 measurement (experimental Types 240/241/242)
-      --ber-pattern <HEX>          Padding bit pattern (default: ff00)
-      --ber-padding-size <BYTES>   Positive multiple of pattern length [default: 64]
-      --ber-interval <N>           Computation window = N × send-delay [default: 10]
-      --ber-bit-threshold <PPM>    Optional bit-error threshold, both directions (0..1000000)
-      --ber-packet-threshold <PPM> Optional errored-packet threshold, both directions (0..1000000)
-      --ber-omit-burst             Omit the Max Bit Error Burst Size TLV
-                                   (Type 242) from --ber packets. Type 242 is in
-                                   the Experimental Use range (RFC 8972 §5.1) and
-                                   is used independently, with an incompatible
-                                   wire format, by another implementation's
-                                   "Heartbeat" TLV; this keeps the rest of the
-                                   BER exchange usable against such a peer
-      --extra-padding <BYTES>      Append an Extra Padding TLV of this many value
-                                   octets to every packet (RFC 8972 §4.1),
-                                   independent of --ber. Pseudorandom fill per
-                                   §4.2. Conflicts with --ber, which fills the
-                                   padding TLV with its own known pattern
-      --tlv-hmac <auto|on|off>     Whether the sender originates an HMAC TLV
-                                   (RFC 8972 §4.8) [default: auto].
-                                   auto = originate when a key is configured,
-                                   on = always (requires a key),
-                                   off = never, even with a key — the key is
-                                   then used only for base-packet auth and for
-                                   verifying reflected TLV HMACs
-      --malformed <bad-flags|bad-length>
-                                   Diagnostic: append a deliberately malformed
-                                   TLV to test a reflector's RFC 8972 §4.2
-                                   handling (conformance testing only)
-```
 
 With a nonzero `--ssid`, the sender rejects replies carrying a different nonzero
 SSID before recording RTT/OWD, consuming pending probes, learning a reflector
@@ -563,37 +318,36 @@ stricter requirements.
 
 With `-R`, diagnostic TLV tokens appear in fixed order (HMAC, Access Report, CE,
 Micro-session ID, U/M/I counts), with each decision shown once even if repeated
-TLVs support it. Text details use stdout; JSON/CSV details use stderr. Summary
-schemas are unchanged. `HMAC:unverified` distinguishes a present HMAC that could
+TLVs support it. Text details use stdout; JSON/CSV details use stderr. `HMAC:unverified` distinguishes a present HMAC that could
 not be verified from `HMAC:fail` and the absent-HMAC `no-hmac` diagnostic.
 
-**Note:** `--access-report`'s retransmission procedure (RFC 8972 §4.6) can extend the sender's total run time past what `--count`/`--send-delay` alone would predict. If the reflector never echoes the Access Report TLV back, the sender keeps retransmitting and waiting — independently of the main send loop — until the retry budget (`access-report-timeout * (1 + access-report-retries)`, up to 15 seconds at the defaults of 3s/4 retries) is exhausted, at which point the procedure aborts and the run ends (the measurement itself is unaffected either way). A run using `--count 1` with `--access-report` set will therefore take at least as long as that retry budget whenever the reflector doesn't support (or drops) the TLV.
+**Access Report retries.** `--access-report-timeout` (default 3 seconds) and
+`--access-report-retries` (default 4) bound the delivery procedure. It continues
+after the main send loop until acknowledgment or exhaustion. A silent peer can
+therefore extend a short run to the 15-second default retry budget.
 
-**Note (AIMD congestion response, draft-ietf-ippm-stamp-cos-ecn-01 §3.4):** whenever `--cos` is combined with `--ecn 1` (ECT1) or `--ecn 2` (ECT0), the sender activates an AIMD controller that dictates the inter-packet send interval instead of a fixed `--send-delay`. On each CE (Congestion Experienced) observation the interval is multiplied by `--ecn-backoff-factor` (capped at `--ecn-max-delay`); after each reply that was *not* CE-marked, the interval shrinks by `--ecn-recovery-step` back toward `--send-delay` (never faster). CE is detected from either direction the draft's §3.4 MUSTs cover: the reflected CoS TLV's EC2 field (forward path, sender→reflector) and the reply packet's own on-wire ECN (reverse path, reflector→sender). Reading the reply's on-wire ECN requires `IP_RECVTOS`/`IPV6_RECVTCLASS` support and is available on **Linux and macOS only**; on other platforms only the forward-path (EC2) direction is detected — a startup warning is logged. When a Reflected Test Packet Control TLV is also requested (`--reflected-control-count` > 1 or `--reflected-control-no-ext-hdr`), its `interval_nanoseconds` field is scaled by the same controller for future packets (§3.4-3). There is no flag to disable this response while ECN measurement is requested — the draft's MUST is unconditional in that case. Congestion-response counters (CE replies seen, backoffs applied, current/peak interval) appear in the stats output; see `--print-stats`/`--output-format`.
+**ECN response.** `--cos` with `--ecn 1` or `2` enables AIMD pacing. A CE reply
+multiplies the send interval by `--ecn-backoff-factor`, capped at
+`--ecn-max-delay`. Clean replies reduce it by `--ecn-recovery-step` toward
+`--send-delay`. Forward feedback comes from CoS EC2; reverse IP ECN is available
+on Linux/macOS only. Other platforms warn and use forward feedback alone.
+The same factor scales Type-12 intervals on future requests, including Access
+Report retries. Reply counts stay unchanged. Summaries report CE observations,
+backoffs, and current/peak intervals.
 
 ### Observability
 
-All flags in this group are compiled out unless the matching Cargo feature is built in. Pre-built DEB/RPM packages from GitHub Releases include both `metrics` and `snmp` (Unix). For source builds, pass `--features metrics,snmp` to `cargo build` / `cargo install`. Without the feature, the flag is silently absent from `--help` and supplying it in a config file is rejected as an unknown key.
-
-```
-      --metrics                    Enable Prometheus endpoint (requires `metrics` feature)
-      --metrics-addr <ADDR>        Metrics bind address [default: 127.0.0.1:9090]
-      --snmp                       Enable SNMP AgentX sub-agent (requires `snmp` feature, Unix only)
-      --snmp-socket <PATH>         AgentX master socket [default: /var/agentx/master]
-```
+`--metrics`, `--snmp`, and `--control` require their corresponding build features.
+The flags and TOML keys remain parseable without those features; enabling an
+unavailable service fails startup. See the [architecture](architecture.md) for
+platform limits and the [control API](control-plane.md) for runtime management.
 
 #### Failure semantics
 
-The two observability subsystems handle initialization failure differently, by design:
-
-- **`--metrics` fails fast.** If the operator explicitly requested a Prometheus endpoint and the bind fails (`AddrInUse`, `AddrNotAvailable`, `PermissionDenied`, …), `stamp-suite` exits non-zero with a specific error message. The reasoning: silently disabling the endpoint would leave dashboards and alerts running blind without any signal that they are.
-- **`--snmp` degrades gracefully.** If the AgentX master socket is absent or unreachable (e.g. `net-snmpd` hasn't started yet during boot), `stamp-suite` logs a warning and continues. The reflector's primary duty — forwarding STAMP packets — is unaffected. Operators who want SNMP-required-to-start semantics can wrap `stamp-suite.service` with a systemd ordering directive (`After=snmpd.service`, `Requires=snmpd.service`).
-
-## See Also
-
-- [README](../README.md) — install and quick-start.
-- [architecture.md](architecture.md) — module layout, receiver backends, TLV reference, Prometheus and SNMP subsystems.
-- [security.md](security.md) — HMAC, key management, systemd hardening.
+A requested metrics or control endpoint that cannot bind stops startup. An
+initial AgentX connection failure logs a warning and leaves STAMP running.
+After an established connection drops, the sub-agent attempts reconnection.
+Systemd ordering can start `snmpd` first; it does not verify AgentX readiness.
 
 ## Session provisioning
 
@@ -647,7 +401,6 @@ aggregate receive/drop counters. A valid base packet with a failed TLV HMAC
 retains RFC 8972's I-flag reply behavior. Session caps and drain behavior remain
 separate from authentication admission.
 
-
 ### Clock synchronization metadata
 
 `--clock-source NTP|PTP` selects the timestamp encoding. It does not establish
@@ -691,12 +444,6 @@ even round-trip calculations can be biased when T2 is hardware and T3 is softwar
 The live regression covers software fallback on loopback; NIC hardware provenance
 and separate clock disciplines use deterministic fixtures, not a physical PTP testbed.
 
-Library callers now supply `ProcessingContext::clock_sync_source`,
-`hardware_clock_sync_source`, and `last_reflection_method` (replacing `tx_method`).
-`SyncSource::from_byte(4)` returns `External`: the wire cannot distinguish the
-individual sources in that class. Named source aliases encode to 4; 6–9 are no
-longer assigned the incorrect legacy meanings.
-
 ### Session capacity, drain, and restart
 
 `--max-sessions` bounds runtime entries keyed by both UDP endpoints, SSID, and
@@ -724,15 +471,6 @@ them. A subsequent admitted packet for the same identity starts a new internal
 session with sequence zero and fresh measurement/replay state; provisioning
 remains intact. Outgoing burst copies do not refresh the receive-idle timeout.
 A sender restart alone does not reset a still-active reflector session.
-
-BER output includes directional packet and padding-bit totals, error ratios,
-maximum/average error bursts, and nonempty computation windows. `ber_interval`,
-`ber_bit_threshold` and `ber_packet_threshold` are also TOML keys. See
-[BER behavior and limits](architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber).
-
-AgentX query ordering, partial-frame handling, resource limits and verification scope
-are documented in the [AgentX review](conformance/agentx-review.md).
-
 
 ### Link-local IPv6 interface zones
 
@@ -778,15 +516,14 @@ The [clock-quality fields](measurements.md#clock-quality-accompanying-delay)
 expose synchronization declarations and error estimates without claiming to verify
 clock-service or hardware synchronization.
 
-
 ### Draft revision 13 migration
 
-Header reflection now follows revision 13, which remains an Internet-Draft.
+Header reflection follows revision 13, which remains an Internet-Draft.
 Upgrade both endpoints together: Type 246's Requested selector grew from four
 bytes to eight. Type 247 stays at four. Selectors are preserved in replies; an
 all-zero eight-byte Type 246 request has no reflected data tail.
 
-The default sender local port is now 0, selecting a randomized port in
+The default sender local port is 0, selecting a randomized port in
 49152–65535. Automatic selection tries another candidate when a port is busy
 or Windows rejects it with WSAEACCES (10013), up to 128 candidate selections.
 Other errors are reported immediately; explicitly requested ports are not retried.
@@ -817,3 +554,9 @@ case. The 127-entry SRH capacity includes that slot. Unsupported paths retain
 the U-flag fallback, including pnet. The sole send owner clears a previous SRH
 before sending ordinary replies. The [required namespace test](testing-netns.md)
 verifies successful transit routing and prevents fallback from masking failures.
+
+## See also
+
+- [Architecture](architecture.md)
+- [Measurement semantics](measurements.md) and [statistics precision](statistics.md)
+- [Security](security.md) and [runtime control API](control-plane.md)

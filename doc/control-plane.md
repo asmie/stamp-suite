@@ -1,71 +1,19 @@
-# Runtime Control Plane — Design
+# Runtime control API
 
-Status: **implemented** (cargo feature `control`, module `src/control/`).
-This document is the authoritative API contract.
+The `control` build feature provides a reflector-only HTTP API for keys,
+sessions, rate and burst limits, drain, and shutdown.
 
-## 1. Goals and non-goals
-
-**Goals**
-
-- Manage the reflector at runtime without restarts: per-SSID HMAC keys,
-  rate/amplification caps, session table, drain and shutdown.
-- Live operational visibility richer than Prometheus gauges (full session
-  table, effective caps, key inventory — names only).
-- Close the operational gap with teaparty's meta API while staying honest
-  to stamp-suite's model (keys are SSID-scoped, sessions are lazily
-  created per full tuple/SSID/micro-session identity after admission).
-- Localhost-safe by default, with optional TLS for the cases where loopback
-  is not enough.
-
-**Non-goals (v1)**
-
-- Sender-mode control (the control plane is reflector-only).
-- mTLS / client-certificate authentication. Server-side TLS is supported
-  (see §5); client identity is a bearer token, not a certificate.
-- Runtime changes to session provisioning. Static CLI/TOML admission rules
-  are configured with `--session-admission provisioned` and
-  `--reflector-session` (see [usage](usage.md#session-provisioning)).
-  `PUT /v1/keys/{ssid}` installs a key independently of those rules;
-  it does not grant endpoint admission.
-- Config-file persistence of runtime changes. Changes live until process
-  exit; persistent settings belong in the TOML config.
-- Runtime change of `--session-timeout` (its cleanup tick interval is
-  baked into both backends at startup).
-
-## 2. Architecture
-
-```
-                 ┌──────────────────────────────────────────────┐
-                 │ main.rs (reflector startup)                  │
-                 │  create_shared_state() ──► ReceiverSharedState│
-                 │       │                ┌─────────┴─────────┐ │
-                 │       ├── snmp::init   │ counters  (Arc)   │ │
-                 │       ├── metrics::init│ session_manager   │ │
-                 │       └── control::init│ rate_limiter      │ │
-                 │             │          │ hmac_keys RwLock  │ │
-                 │             ▼          │ caps (atomics)    │ │
-                 │   axum Router (tokio   │ shutdown_requested│ │
-                 │   task, CancellationToken) └───────┬───────┘ │
-                 │                                    │         │
-                 │   run_receiver(conf, &shared) ◄────┘         │
-                 │     nix.rs / pnet.rs packet loops            │
-                 └──────────────────────────────────────────────┘
+```sh
+stamp-suite --is-reflector --control --control-token-file /etc/stamp/control.token
 ```
 
-- A new `src/control/` module (cargo feature `control`, reusing the
-  already-optional `axum` + `tokio-util` from the `metrics` feature)
-  copies the metrics server's lifecycle pattern: bind → fail-fast,
-  `tokio::spawn(axum::serve)`, `CancellationToken` shutdown, non-loopback
-  bind warning.
-- State threading copies the SNMP pattern: `main.rs` clones `Arc`s out of
-  `ReceiverSharedState` into a `ControlState` handed to the router. The
-  control plane never reaches into a backend directly; everything it
-  touches is shared state both backends already consult.
-- Three pieces of state move/are added to `ReceiverSharedState` to become
-  runtime-mutable (see §4): the HMAC keyset, a `RuntimeCaps` atomics
-  struct, and a `shutdown_requested` flag.
+The default listener is `127.0.0.1:9091`. Send the token as
+`Authorization: Bearer <token>`. Runtime changes last until process exit;
+put persistent settings in TOML. Session provisioning, idle timeout, and queue
+settings cannot be changed through the API. Installing a key does not provision
+an endpoint; see [session provisioning](usage.md#session-provisioning).
 
-## 3. API specification
+## Endpoints
 
 All endpoints live under the **`/v1`** prefix. Requests and responses are
 `application/json`. Errors return `{"error": "<message>"}` with the
@@ -88,13 +36,10 @@ status code. Request bodies are validated strictly
 | POST | `/v1/drain` | `{"draining":bool}` | 200 | Stop/resume accepting **new** sessions |
 | POST | `/v1/shutdown` | — | 202 | Request graceful process shutdown |
 
-`POST` for `sessions/expire` (instead of `DELETE /v1/sessions/{client}`)
-is deliberate: IPv6 literals like `[::1]:5000` are hostile to path
-segments; a JSON body parses as a plain `SocketAddr`. The optional
-`session_id` selects the internal runtime ID returned by `/v1/sessions` (it is
-not the wire SSID). A client-only request succeeds if exactly one entry matches;
-multiple matches return 409 without removing anything. Expiry does not revoke
-static provisioning, so a subsequent admitted packet can recreate runtime state.
+The optional `session_id` in an expiry request is the internal ID returned by
+`/v1/sessions`, not the wire SSID. A client-only request requires exactly one
+match; multiple matches return 409 without removing anything. Expiry preserves
+provisioning, so later traffic can recreate the runtime session.
 
 Session receive counts and idle timestamps are updated only after base parsing
 and configured authentication succeed. Invalid base HMACs and unknown/revoked
@@ -133,7 +78,7 @@ the key used for their validation and assembly. Key changes do not cancel them.
 }
 ```
 
-`GET /v1/sessions` (note `idle_seconds`, not a raw `Instant`):
+`GET /v1/sessions`:
 
 ```json
 [
@@ -152,7 +97,7 @@ the key used for their validation and assembly. Key changes do not cancel them.
 ```
 
 `GET /v1/caps` / `PATCH /v1/caps` (PATCH body: any subset of the same
-fields; `0` consistently means "unlimited/disabled", mirroring the CLI):
+fields):
 
 ```json
 {
@@ -165,7 +110,12 @@ fields; `0` consistently means "unlimited/disabled", mirroring the CLI):
 }
 ```
 
-### Semantics worth pinning
+Zero disables rate limiting (`max_pps`) or the session cap (`max_sessions`).
+A zero `reflected_control_max_count` disables requested burst/size control;
+it does not permit unlimited copies. `rate_burst = 0` uses the current rate as the bucket capacity. Size and interval
+fields are unsigned limits; PATCH does not validate cross-field combinations.
+
+### Runtime behavior
 
 - **Keys are write-only.** No endpoint ever returns key material; logs
   never contain it; request strings are zeroized after parsing. `key_hex`
@@ -202,106 +152,43 @@ fields; `0` consistently means "unlimited/disabled", mirroring the CLI):
   cannot bypass that check. Queued requests retain the administrative cap
   captured during request processing.
 
-## 4. Concurrency and state model
+## Shared state
 
-| State | Type | Readers | Writer | Notes |
-|---|---|---|---|---|
-| HMAC keyset | `Arc<RwLock<Option<HmacKeySet>>>` | packet loops (read guard per packet) | control plane | The guard never crosses an `.await` in the nix backend: acquire → build `ProcessingContext` → validate/assemble and snapshot the selected key → drop guard → enqueue/send. Both backends pass the owned snapshot from shared processing directly into `Transmission`; they do not look up the key again. The snapshot zeroizes on drop through `HmacKey`. |
-| Runtime caps | `RuntimeCaps` (AtomicU16/U32/Usize) | packet loops, per packet | control plane | pnet receives the `Arc` via `CaptureConfig` (moves into `spawn_blocking`). |
-| Rate limiter | always-constructed `RateLimiter` with atomic rate/burst | packet loops | control plane | `rate == 0` short-circuits to allow; enables turning limiting *on* at runtime even when started unlimited. |
-| Draining / max-sessions | atomics inside `SessionManager` | packet loops | control plane | Updates take the table write lock, matching admission. |
-| Session table | existing `RwLock<HashMap<SessionKey, …>>` | both | both | `expire_session` takes the write lock; `GET /v1/sessions` uses the existing `session_summaries_extended()`. |
-| Session lifetime | per-session `RwLock<bool>` | send owner | expiry/cleanup | A read guard covers a send and its state updates; retirement waits for that guard and excludes later queued sends. |
-| Shutdown flag | `Arc<AtomicBool>` | backends (poll) | control plane | |
-| Legacy single `--hmac-key` | unchanged, startup-immutable | packet loops | — | Deliberate boundary: the control plane manages the *keyset* (per-SSID + default); the CLI single key stays fixed. |
+Both receiver backends read the same state. Keyset reads cover validation,
+assembly, and a copy of the selected key; the lock is released before queuing or
+sending. Each accepted request retains that key until its replies finish.
 
-Lock-poisoning follows the codebase convention:
-`unwrap_or_else(|e| e.into_inner())`.
+Cap fields update independently. Session cap and drain changes hold the
+session-table write lock to serialize with admission. A per-session lifetime
+lock covers each send and its counter updates, so expiry waits for an in-flight
+send and prevents later sends from that session instance.
 
-## 5. Security model
+The API manages the per-SSID/default keyset. The legacy single CLI key remains
+fixed at startup; an installed keyset takes precedence.
 
-- **Bind:** `127.0.0.1:9091` by default (`--control-addr` to change); a
-  non-loopback bind logs the same loud warning the metrics server uses.
-- **Authentication:** optional static bearer token from
-  `--control-token-file` (mode-checked like key files). Comparison is
-  constant-time (`subtle`, same as HMAC verification). With no token and
-  a loopback bind, local-user access equals control — same trust model as
-  the AgentX socket.
-- **Why a token matters even on loopback:** `PUT /v1/keys` grants
-  measurement access and `POST /v1/shutdown` is a kill switch; multi-user
-  hosts should set the token.
-- **Transport security:** `--control-tls-cert` and `--control-tls-key` (PEM)
-  switch the listener from HTTP to HTTPS. Both flags are required together —
-  clap enforces that on the command line and `validate()` enforces it for a
-  config file, which can otherwise set one alone.
-- **TLS implies a token.** Enabling TLS without `--control-token-file` is a
-  startup error. TLS is what makes exposing this API beyond loopback
-  plausible, and an unauthenticated key-management and shutdown endpoint
-  should not be reachable whether or not the transport is encrypted. The
-  reverse is still allowed: a token without TLS is the loopback case, where
-  the token guards against other local users.
-- **Certificate and key are loaded before the socket binds,** so a wrong path
-  or a non-PEM file fails at startup next to the operator who typed it,
-  naming the offending flag — not on the first request. `ControlTls`'s `Debug`
-  is written by hand so key material cannot reach a log.
-- **Crypto provider is passed explicitly** (`ring`) rather than taken from
-  rustls's process-wide default. With the `metrics` feature also enabled the
-  binary links a second provider (aws-lc-rs, via hyper-rustls), and asking
-  for "the default" would depend on which crate installed one first.
-- **The API still never carries key material *out*, only *in*** — TLS
-  protects the token and the inbound key, and `GET /v1/keys` remains a
-  metadata-only inventory.
-- **A non-loopback bind without TLS** logs a loud warning naming both the
-  TLS flags and the tunnel alternative; a non-loopback bind *with* TLS does
-  not warn.
-- **Abuse surface:** all mutating endpoints are constant-time-cheap and
-  rate-limited implicitly by being a localhost HTTP server; no endpoint
-  allocates unbounded memory (session list is bounded by `max_sessions`,
-  key inventory by u16 SSID space).
+## Security and failures
 
-## 6. Failure modes
+- `--control-token-file` enables bearer authentication. Without it, any client
+  that can reach the listener can change keys and limits or stop the reflector.
+- `--control-tls-cert` and `--control-tls-key` take PEM files and enable HTTPS.
+  Both require `--control-token-file`. Client certificates (mTLS) are unsupported.
+- Certificate, key, token, and bind failures stop startup. Enabling `--control`
+  without the build feature also fails startup.
+- Non-loopback HTTP binds produce a warning. Use TLS or an SSH tunnel for remote
+  access. Loopback binding does not authenticate local users or rate-limit calls.
+- Key inventory responses contain identifiers only. Key and token files use the
+  [secret-file permission checks](security.md#configuration-file-and-key-file-permissions).
 
-- **Bind failure → process exit** (matches metrics: if the operator asked
-  for the control plane, silently running without it would hide an
-  outage).
-- **Keyset lock contention:** writes are rare (operator actions); packet
-  loops hold read guards for microseconds. No fairness concern at STAMP
-  packet rates.
-- **Shutdown while draining:** independent flags; shutdown wins.
-- **Feature off / flag on:** `--control` without the `control` build
-  feature is a startup error (exit 1), mirroring `--snmp`/`--metrics`
-  behaviour.
+Mutating calls log an `info` event without key material. There is no separate
+audit log.
 
-## 7. Observability of the control plane itself
+## Verification
 
-Every mutating call logs one structured line at `info` (`control: key
-added ssid=42`, `control: caps updated max_pps=500`, `control: drain
-enabled`, `control: shutdown requested`) — never key material. These
-lines are the audit trail; v1 has no separate audit log.
+`tests/keyset_fallback_test.rs` checks directory/default keys, revocation,
+fallback signing, and rotation during queued bursts. Shared transmission tests
+inject CoS failures and also run in pnet-only builds.
 
-## 8. Future extensions (explicitly out of v1)
-
-- `GET /v1/status` gaining a `timestamping` object (the `hwtstamp`
-  feature's `EnabledTimestamping` is currently backend-local; exposing it
-  requires threading it into `ReceiverSharedState`).
-- Per-request shutdown-grace overrides; v1 uses startup `--reflector-shutdown-grace-ms`.
-- Runtime updates to static session provisioning, if needed.
-- OpenAPI document generation; Prometheus counters for control actions.
-- Windows/`SIO_TIMESTAMPING`, mTLS client certificates, SNMP SET parity — tracked elsewhere.
-
-## 9. Fallback signing verification
-
-Review finding 06 is closed: shared processing carries its selected per-SSID
-or default key into `Transmission`, which signs final bytes after fallback
-mutations. `tests/keyset_fallback_test.rs` covers normal and unsupported-SRv6
-replies, directory/default selection, and rotation during queued bursts in
-open/authenticated mode over IPv4/IPv6. It also verifies authenticated revocation.
-The shared `selected_key_survives_rotation_and_cos_fallback` test injects a CoS
-send failure after key replacement and runs in pnet-only library builds.
-Those Rust rotation tests mutate the shared keyset directly. O11 adds
-`scripts/release_checks.py`: a real CLI reflector controlled through bearer-
-authenticated HTTP and certificate-verified HTTPS, over IPv4/IPv6. It verifies
-rejected tokens, rotation during queued bursts, old/new key admission, deletion,
-default-key fallback, inventory redaction and shutdown using independently
-signed UDP packets. See [release fixtures](release-evidence.md) for commands,
-recorded results and the separate scope of TLS versus mTLS.
+`scripts/release_checks.py` drives a real reflector over bearer-authenticated
+HTTP and certificate-verified HTTPS, using independently signed UDP packets.
+It checks rejected tokens, queued-burst rotation, deletion, default-key fallback,
+inventory redaction, and shutdown. See [release verification](release-evidence.md).

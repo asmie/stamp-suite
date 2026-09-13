@@ -1,245 +1,174 @@
 # Security
 
-This document describes the security mechanisms in `stamp-suite`: the threat model, HMAC-based packet authentication, how HMAC keys are sourced and handled, recommended configuration-file and key-file permissions, the `stamp` system user created by the DEB and RPM packages, and the systemd unit's hardening directives.
+## Threat model
 
-## Threat Model
+The host filesystem, kernel, and clock are trusted. Network traffic is untrusted;
+routers and peers can drop, delay, reorder, duplicate, or remark packets.
+A peer holding a shared HMAC key can forge messages authenticated with that key.
 
-`stamp-suite` is a network-measurement tool, not a security boundary. It assumes:
-
-- **Trusted**: the local filesystem (the user running it can read its config and key files), the kernel network stack, the local clock source.
-- **Semi-trusted**: peers in HMAC-authenticated mode — they hold the shared key, so they can forge packets. HMAC proves *which key* signed the packet, not *which person*.
-- **Untrusted**: arbitrary network peers in open mode (`auth_mode = "O"`), the network path itself (any router can drop, delay, reorder, duplicate, or remark packets — that's exactly what stamp-suite measures).
-
-What HMAC defends against: tampering with sequence numbers, timestamps, or TLV payloads in flight; off-path injection of forged STAMP packets without the shared key. What it does *not* defend against: replay of intact, previously-valid authenticated packets (HMAC authenticates bytes; it does not provide freshness — the sender's pending-sequence bookkeeping rejects some stale *replies*, but a captured authenticated *request* still verifies if replayed at the reflector); a compromised peer with the shared key; traffic-analysis side channels; DoS via flooding (UDP/862 is open by design).
-
-If you're running stamp-suite on a host shared with untrusted users, the configuration file and HMAC key file are the assets to protect — see [Configuration File and Key-File Permissions](#configuration-file-and-key-file-permissions).
+HMAC detects changes to covered bytes and rejects injections without the key.
+It does not encrypt traffic, establish freshness, prevent flooding, or protect
+against a compromised key holder. IP headers are outside STAMP HMAC coverage.
 
 ### Reflection and amplification (open mode)
 
-An open-mode reflector replies to whoever sends it a STAMP packet, so — like any
-UDP responder — it can in principle be abused to bounce traffic off the reflector
-at a third party (the attacker names a victim and the reflector's reply is sourced
-from the reflector's own address). stamp-suite is hardened against the worst of
-this **by default**:
+An open reflector can reply to spoofed source addresses. Limit access with
+network policy and use authenticated mode on untrusted networks.
 
-- **No reply redirection by default.** A Return Path TLV "Return Address" sub-TLV
-  (RFC 9503 §4) asks the reflector to send its reply to an address *other than the
-  packet source*. That is a traffic-redirection primitive, so it is **off by
-  default**: the reflector echoes the sub-TLV with the U-flag set and replies to
-  the packet source. Enable it only inside a controlled (and preferably
-  HMAC-authenticated) measurement domain with `--return-path-allow-alternate`.
-  SRv6 return-path forwarding is similarly gated behind `--srv6-return-forwarding`.
-- **No reply-size amplification by default.** A Reflected Test Packet Control TLV
-  (Type 12) can ask the reflector to pad its reply to a larger size or emit
-  multiple copies. Both are amplification, so both are disabled unless the operator
-  opts in with `--reflected-control-max-count > 0` (default `0`). When disabled the
-  reflector refuses the request and sets the C flag; it never pads or duplicates.
+Defaults restrict additional amplification:
 
-Because these amplifying behaviours are only honoured after a successful HMAC check
-(semantic TLV processing runs only when HMAC verification passes), running the
-reflector in **authenticated mode** removes them entirely for unauthenticated
-peers. Open mode remains appropriate only for a closed lab network or behind a
-firewall, as noted below.
+- `--return-path-allow-alternate` is off. Return Address requests get U set and
+  replies go to the packet source.
+- `--srv6-return-forwarding` is off. Unsupported requests get U set.
+- `--reflected-control-max-count` defaults to 0. Type-12 requests receive one
+  normal C-flagged reply, without requested padding or extra copies.
+
+Enable these features only for a controlled measurement domain. Authenticated
+mode rejects invalid base HMACs before session mutation or reply generation.
+Open-mode TLV integrity does not authenticate the base packet.
 
 ### Bounded session state
 
-The reflector keeps a small per-client session entry (keyed by source
-`IP:port`) to hold Direct Measurement / Follow-Up Telemetry counters. Left
-unbounded, a peer spraying packets from many source ports — or spoofed source
-addresses — could grow that table until the process is OOM-killed. The table is
-therefore capped by `--max-sessions` (default `65536`): once full, new clients
-are still answered but not individually tracked, and the periodic cleanup
-reclaims idle entries. Pair this with `--max-pps` (per-source token-bucket rate
-limiting, off by default) to bound both the creation rate and the table size.
-Set `--max-sessions 0` only if you have another mechanism bounding the client
-population.
+`--max-sessions` limits runtime identities (default 65536; 0 means unlimited).
+The key includes source and destination UDP endpoints, SSID, and optional sender
+Micro-session ID. At capacity, new identities are dropped; existing sessions
+continue. Idle expiry or explicit expiry frees capacity.
 
-## HMAC Authentication
+`--max-pps` limits traffic per source IP and SSID; it defaults to unlimited.
+`--reflector-queue-capacity` separately bounds accepted pending requests
+(default 1024), including bursts. It is a request limit, not a byte quota.
+See [capacity and drain](usage.md#session-capacity-drain-and-restart).
 
-stamp-suite supports two independent HMAC mechanisms:
+Replay detection tracks a 31-entry window per session. Handled Type-12 requests
+with non-new sequences get one U-flagged reply; `--drop-replayed` additionally
+suppresses ordinary duplicates. Reordering or sender restarts can also produce
+non-new verdicts. See [reflector behavior](usage.md#reflector-mode).
 
-1. **RFC 8762 authenticated-mode packets** (`--auth-mode A`). The base STAMP packet carries an HMAC over its fixed fields. The reflector verifies this on receive (`crypto::verify_packet_hmac`) and computes a new HMAC for the reply (`crypto::compute_packet_hmac`). Open mode (`-A O`, the default) skips this entirely.
+## HMAC authentication
 
-2. **TLV HMAC (RFC 8972 Type 8)** (`--verify-tlv-hmac`). An optional TLV that, when present, must be the last TLV in the chain and authenticates the entire TLV block. The flag enables verification on the reflector side; senders include it automatically when an HMAC key is configured.
+Both mechanisms use HMAC-SHA256 truncated to 16 bytes:
 
-Both mechanisms use the same `HmacKey`. `auth_mode = "A"` without an `hmac_key`, `hmac_key_file`, or `STAMP_HMAC_KEY` produces a validation error at startup (caught by `Configuration::validate()`) — the daemon will not start.
+| Mechanism | Coverage and behavior |
+| --- | --- |
+| Base authentication (`--auth-mode A`) | Authenticates fixed packet fields. Missing keys prevent startup; invalid packet HMACs cause drops. |
+| TLV HMAC (RFC 8972 Type 8) | Covers the sequence number and TLVs before HMAC. Only Extra Padding may follow it, outside coverage. `--verify-tlv-hmac` enables reflector verification. Failed TLV integrity produces I-flagged echoes under RFC 8972. |
 
-## Key Sourcing & Precedence
+The sender's `--tlv-hmac auto` includes an HMAC TLV when a key is configured.
+`on` requires a key; `off` disables origination in open mode while retaining
+reply verification. Authenticated mode rejects `off`.
 
-An HMAC key can be supplied through any of these inputs. From highest to lowest priority:
+## Key sourcing & precedence
 
-1. **`--hmac-key <HEX>`** — passed on the command line. Useful for ad-hoc testing; visible in `ps` output.
-2. **`STAMP_HMAC_KEY`** — environment variable. Higher priority than the config file; lower than CLI. Useful for systemd `Environment=` or container secret-injection.
-3. **`--hmac-key-file <PATH>`** — path to a file whose contents are the hex-encoded key. Recommended for production: the key never appears on the command line or in a process listing.
-4. **`hmac_key_file = "..."`** in the TOML config file. Same semantics as `--hmac-key-file` but configured declaratively.
+Choose one source: `--hmac-key HEX` (also supplied by `STAMP_HMAC_KEY`),
+`--hmac-key-file PATH`, or reflector-only `--hmac-key-dir DIR`. These sources
+conflict; a CLI/environment key does not override a file source.
+CLI fields override matching TOML fields. TOML accepts key paths, not plaintext
+`hmac_key` or recursive `config` entries.
 
-The plaintext **`hmac_key` field is deliberately rejected** when it appears in the TOML config file — that would put a long-lived secret on disk in clear text. The `config` field is also rejected from the file (it would be recursive).
+CLI keys are visible in process arguments; environment keys are visible to users
+who can read the process environment. Prefer a file for service deployments.
+Files accept hex text or raw key bytes, with at least 16 decoded bytes.
+Use 32 random bytes for new keys.
 
-If `hmac_key_file` is used, treat its file permissions exactly like the config file (see next section): owner-only, `chmod 600`. The HMAC key file is checked at load time (`HmacKey::from_file` in `src/crypto.rs`): any bit in `0o077` — i.e. *any* group or other permission, including read — is **rejected**, not merely warned. The key is not loaded, and in authenticated mode the daemon then refuses to start (fail-closed) rather than silently running unauthenticated. The check is performed on the opened file descriptor (`fstat`), so it closes the time-of-check/time-of-use gap and validates the real permissions of the file actually read — including when `hmac_key_file` is a symlink (`O_NOFOLLOW` is intentionally not used, so Kubernetes/systemd-credential secret mounts that expose the key as a symlink keep working). The `--hmac-key-dir` directory itself is also checked: it may be group-readable (the recommended `0750 root:stamp` layout) but is rejected if writable by group or other, which would allow key injection. The config file uses a looser mask (`0o022`, write-only).
+Key directories map hexadecimal filename stems to SSIDs; `default.key` supplies
+a fallback. Removing a per-SSID entry does not revoke access while a default key
+still applies. Invalid key files are logged and skipped; an empty or unusable
+configured keyset prevents startup. Keys are redacted from debug output and
+zeroized when their owned storage is dropped.
 
-## Configuration File and Key-File Permissions
+## Configuration file and key-file permissions
 
-Because the config file can set `hmac_key_file` and every other setting, treat it as trusted: an attacker who can overwrite it can change any STAMP parameter. On Unix, `stamp-suite` logs a warning if the file is writable by group or other (any bit in `0o022`).
+On Unix:
 
-```bash
-# Recommended on the config file
-chmod 600 /etc/stamp/reflector.toml
-chown root:root /etc/stamp/reflector.toml
+| File | Check |
+| --- | --- |
+| TOML config | Warns if group/other can write (`0o022`) |
+| HMAC key or control token | Rejects any group/other permission (`0o077`) |
+| Key directory | Rejects group/other write access |
 
-# Recommended on the HMAC key file
-chmod 600 /etc/stamp/hmac.key
-chown root:root /etc/stamp/hmac.key
-```
+Secret-file checks use the opened descriptor, avoiding a separate path lookup.
+Symlinks are allowed when their targets pass the permission check.
 
-If you run stamp-suite as the `stamp` system user (created by the DEB/RPM packages — see below), make the key file owned by `stamp` so the daemon can read it without granting access to anyone else. The `0o077` check on the key file means even `chmod 640` (group read) is **rejected** — the recommended setup is owner-only `0400`:
-
-```bash
-chown stamp:stamp /etc/stamp/hmac.key
-chmod 400 /etc/stamp/hmac.key
-```
-
-The config file uses the looser `0o022` writability check, so `chmod 640 root:stamp` on the config file is fine — only group/other *write* triggers the warning.
-
-## System User & Group (`stamp`)
-
-The DEB and RPM packages create a dedicated `stamp` system user and group at install time. The user has no shell, no home directory, and no privileges beyond what the systemd unit grants.
-
-**On DEB** (created by `dist/debian/postinst`):
-
-```sh
-addgroup --system stamp
-adduser --system --ingroup stamp --no-create-home \
-    --home /nonexistent --shell /usr/sbin/nologin stamp
-```
-
-**On RPM** (created by the `pre_install_script` in `[package.metadata.generate-rpm]` in `Cargo.toml`):
+For the packaged `stamp` service:
 
 ```sh
-getent group stamp >/dev/null || groupadd -r stamp
-getent passwd stamp >/dev/null || useradd -r -g stamp -s /sbin/nologin \
-    -d /nonexistent -c "STAMP Suite service account" stamp
+sudo install -d -m 0750 -o root -g stamp /etc/stamp
+sudo chown root:stamp /etc/stamp/reflector.toml
+sudo chmod 0640 /etc/stamp/reflector.toml
+sudo chown stamp:stamp /etc/stamp/hmac.key
+sudo chmod 0400 /etc/stamp/hmac.key
 ```
 
-The user is removed on full DEB purge (`dist/debian/postrm`); on RPM uninstall the user is intentionally retained (consistent with Fedora/RHEL packaging policy — file ownership of leftover logs would otherwise become orphaned UIDs).
+A mode-0640 key is rejected even if its group is `stamp`. The config can use that
+mode because its check concerns write access.
 
-The systemd unit runs the daemon as this user. That means: any process compromise gets `stamp:stamp` privileges, not root. The user cannot log in, cannot read `/root` or other users' homes (the unit additionally locks down filesystem access — see next section), and cannot escalate via setuid binaries (`NoNewPrivileges=yes`).
+## System user & group (`stamp`)
 
-## Systemd Unit Hardening
+DEB/RPM packages create a non-login `stamp` account without a home directory.
+The service runs as `stamp:stamp`. DEB purge removes the account; RPM uninstall
+retains it. The account needs read access to configured keys and certificates.
 
-The shipped unit at `dist/systemd/stamp-suite.service` applies the following hardening. Each setting is annotated with what it blocks.
+## Systemd unit hardening
 
-```ini
-[Service]
-User=stamp
-Group=stamp
-ExecStart=/usr/bin/stamp-suite --is-reflector
+The [packaged unit](../dist/systemd/stamp-suite.service) grants
+`CAP_NET_BIND_SERVICE`, restarts on failure, makes the filesystem read-only,
+hides home directories, and restricts devices, namespaces, privilege changes,
+and kernel settings. Its allowed socket families are `AF_INET`, `AF_INET6`,
+and `AF_UNIX`.
 
-# Capability model (see next section)
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+Read access still follows Unix ownership and permissions. For pnet capture,
+add the required raw-socket capability and address family. The packaged family
+restriction also excludes `AF_NETLINK`, which Linux route-MTU queries and
+interface discovery may need; configure a suitable override before relying on
+those features. Hardware timestamping needs additional device/capability access.
+Review the resulting unit with `systemd-analyze security stamp-suite.service`.
 
-Restart=on-failure
-RestartSec=5
+## Enabling authenticated mode on the packaged unit
 
-# Filesystem
-ProtectSystem=strict      # Whole filesystem is read-only except /tmp, /var/tmp, runtime dirs
-ProtectHome=yes           # /home, /root, /run/user are inaccessible
-PrivateTmp=yes            # Private /tmp not visible to other services
-PrivateDevices=yes        # No access to physical devices in /dev (only ptys, null/zero/random)
+The packaged service starts in open mode. To enable authentication:
 
-# Privilege escalation
-NoNewPrivileges=yes       # Setuid/setgid bits ignored on exec
-RestrictSUIDSGID=yes      # Cannot create files with setuid/setgid
-LockPersonality=yes       # personality(2) is locked at startup
+1. Generate an owner-only key:
 
-# Kernel surface
-ProtectKernelTunables=yes # /proc/sys, /sys, /proc/sysrq-trigger are read-only or hidden
-ProtectKernelModules=yes  # Cannot load or unload modules
-ProtectControlGroups=yes  # /sys/fs/cgroup is read-only
-ProtectClock=yes          # Cannot change wall-clock time (settimeofday, adjtime, RTC)
-
-# Process / memory
-RestrictRealtime=yes      # Cannot acquire SCHED_FIFO/SCHED_RR
-MemoryDenyWriteExecute=yes  # No mprotect/mmap with PROT_WRITE+PROT_EXEC; blocks JIT-style payloads
-RestrictNamespaces=yes    # No CLONE_NEW* — cannot create user/network/mount namespaces
-
-# Network
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-                          # Anything else (AF_PACKET, AF_NETLINK, AF_BLUETOOTH...) returns EAFNOSUPPORT
-```
-
-The relevant takeaways:
-
-- **`ProtectSystem=strict`** makes the entire filesystem read-only for the unit (except `/dev`, `/proc`, `/sys`, and the unit's own `RuntimeDirectory`/`StateDirectory`/`CacheDirectory`/`LogsDirectory`). It does *not* grant or revoke read access — read access is governed by the usual Unix permissions for the `stamp` user. So `/etc/shadow` (mode 0640 root:shadow) is unreadable here because the daemon runs as `User=stamp`, not because of `ProtectSystem`. **`ProtectHome=yes`** additionally hides `/home`, `/root`, and `/run/user`. Together they shrink the writable-and-reachable filesystem to a small whitelist.
-- **`RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`** is what makes the SNMP feature work (AgentX uses `AF_UNIX`) without granting `AF_PACKET` to the nix backend. The pnet backend, if used, requires `AF_PACKET` and the operator must edit the unit accordingly.
-- **`MemoryDenyWriteExecute=yes`** is harmless for Rust code (we don't JIT) and significantly raises the cost of a hypothetical RCE.
-
-If you customize the unit, run `systemd-analyze security stamp-suite.service` to score the result. The shipped unit scores in the low single digits (lower is better).
-
-## Enabling Authenticated Mode on the Packaged Unit
-
-The DEB and RPM packages ship a unit with `ExecStart=/usr/bin/stamp-suite --is-reflector` — that is **open mode** (`-A O` is the default). Open mode accepts unsigned packets from any peer, which is fine on a closed lab network or behind a firewall but not appropriate for the public internet. Before exposing UDP/862, switch the service to authenticated mode.
-
-1. **Generate a key** (32+ random bytes recommended; the file should be hex):
-
-   ```bash
+   ```sh
    sudo install -d -m 0750 -o root -g stamp /etc/stamp
+   sudo install -m 0400 -o stamp -g stamp /dev/null /etc/stamp/hmac.key
    openssl rand -hex 32 | sudo tee /etc/stamp/hmac.key >/dev/null
-   sudo chown stamp:stamp /etc/stamp/hmac.key
-   sudo chmod 0400 /etc/stamp/hmac.key
    ```
 
-2. **Override the unit's ExecStart** with `systemctl edit stamp-suite`. systemd will create a drop-in at `/etc/systemd/system/stamp-suite.service.d/override.conf`:
+2. Run `sudo systemctl edit stamp-suite` and add:
 
    ```ini
    [Service]
    ExecStart=
-   ExecStart=/usr/bin/stamp-suite --is-reflector \
-       --auth-mode A \
-       --hmac-key-file /etc/stamp/hmac.key \
-       --verify-tlv-hmac \
-       --require-hmac
+   ExecStart=/usr/bin/stamp-suite --is-reflector --auth-mode A --hmac-key-file /etc/stamp/hmac.key --verify-tlv-hmac --require-hmac
    ```
 
-   The empty `ExecStart=` line clears the default before defining the new one. `--require-hmac` makes the daemon refuse to start if the key is missing — important so a misconfiguration does not silently revert to open mode.
+   The empty `ExecStart=` assignment clears the packaged command. Authenticated mode requires
+   a usable key; `--require-hmac` also requires one at startup.
 
-3. **Reload and restart**:
+3. Restart and inspect startup errors:
 
-   ```bash
+   ```sh
    sudo systemctl daemon-reload
    sudo systemctl restart stamp-suite
    sudo journalctl -u stamp-suite -n 50
    ```
 
-   The journal should show the reflector starting in authenticated mode and the key file being loaded. If the key file has group/other permissions the daemon **refuses to start** and logs an `insecure permissions` error instead — recheck `chmod 0400` and ownership.
+4. Give authorized senders the same key and use `--auth-mode A` on them.
 
-4. **Distribute the same key** to legitimate senders (the only entities that should be able to reach this reflector). Any peer that does not present a packet HMAC computed with this key is rejected.
+Rotate a file-backed key by replacing the file and restarting, or use the
+[control API](control-plane.md) to update the runtime keyset. Runtime changes do
+not persist. Queued replies retain the key selected when their request was
+accepted; allow for those replies during rotation.
 
-If you need to roll the key, generate a new one, replace the file, and `systemctl restart stamp-suite` — there is no in-place rotation; senders need to switch to the new key in lockstep.
+## Capability model
 
-## Capability Model
+On Linux, binding below the configured unprivileged-port threshold may require
+`CAP_NET_BIND_SERVICE`. A high local port avoids that requirement.
+The nix receiver needs no raw-socket capability; pnet needs `CAP_NET_RAW`.
+NIC configuration for `--hwtstamp on` needs `CAP_NET_ADMIN` and compatible hardware.
+These capabilities must also be allowed by the service/container policy.
 
-stamp-suite needs to bind UDP/862, which is below the privileged-port threshold (1024 on Linux). The unit grants exactly one capability — `CAP_NET_BIND_SERVICE` — through `AmbientCapabilities` (so it survives the `setuid` to the `stamp` user) and bounds the set with `CapabilityBoundingSet` so no further capabilities can ever be acquired.
+## Reporting vulnerabilities
 
-| Backend | Capabilities required (beyond the usual) |
-|---------|------------------------------------------|
-| `nix` (default on Linux/macOS) | `CAP_NET_BIND_SERVICE` only — granted by the unit. |
-| `pnet` (Windows default; opt-in on Unix via `--features ttl-pnet`) | `CAP_NET_RAW` *in addition*, or `setcap cap_net_raw=eip` on the binary, or running as root. The shipped unit does **not** grant this — operators using the pnet backend must add it explicitly. |
-
-If you need to bind the standard port without granting any capability at all (e.g. for very paranoid deployments), pass `--local-port <high-port>` and use a load balancer or DNAT rule to redirect 862 — then the daemon needs no capabilities and can drop `CAP_NET_BIND_SERVICE` from the bounding set.
-
-See [architecture.md#receiver-backends](architecture.md#receiver-backends) for the full discussion of why `nix` is the default and what `pnet` buys you.
-
-## Reporting Vulnerabilities
-
-There is no formal embargo / coordinated-disclosure process today. For now:
-
-- For obvious bugs that don't involve sensitive details: open a regular GitHub issue at <https://github.com/asmie/stamp-suite/issues>.
-- For anything involving exploitation of a deployed system (key disclosure, RCE on a hardened reflector, etc.): email the maintainer directly at the address listed in `Cargo.toml` (`authors`). Please include a minimal reproduction.
-
-A formal `SECURITY.md` with a PGP key and a 90-day disclosure window may be added once the project has more downstream users.
-
-## See Also
-
-- [README](../README.md) — install and basic usage.
-- [architecture.md](architecture.md) — receiver backends, packet pipeline, configuration reference.
+Follow [SECURITY.md](../SECURITY.md). For setup options, see [usage](usage.md).

@@ -41,17 +41,10 @@ class, TLV order/flags/values, and HMAC coverage. Later copies must retain T2,
 advance T3, retain the requested CoS/source, and report the intervening send in
 the DM/Follow-Up fields. An extra reply during the final 150 ms guard fails.
 
-SRv6 forwarding is **disabled deliberately**. Type 10 must return U=1, with a
-valid HMAC after that final mutation. This tests composition with the fallback;
-it does not prove that an SRH was transmitted. Destination Node Address matches
-the loopback interface on a wildcard bind. Its accepted flag and actual source
-are checked, but that address also matches the kernel's usual route choice, so
-this profile alone cannot prove source overriding on a multihomed host. Existing
-source syscall tests, scoped-IPv6 fixtures and namespace scenarios provide the
-separate coverage described below. No physical LAG, hardware timestamp, external
-vendor certification, accurate OWD or exact nanosecond scheduling claim is made.
-The 120 ms requested gap permits interleaving under ordinary test-host load;
-this is a correctness regression, not a throughput benchmark.
+SRv6 forwarding is disabled: Type 10 must return U=1 with a valid final HMAC.
+Source matching uses loopback, so this fixture cannot establish multihomed source
+override. The 120 ms burst gap allows interleaving; it is not a timing benchmark.
+Physical LAG, NIC timestamps, and successful SRH transit need separate tests.
 
 ## Reusable bytes and oracle checks
 
@@ -74,7 +67,7 @@ python3 -m unittest discover -s scripts/tests -v
 ```
 
 [`replies.json`](../tests/fixtures/interop/replies.json) holds four observed
-exchanges from the pre-O10 binary, with its SHA-256 and platform provenance.
+exchanges from the recorded baseline binary, with its SHA-256 and platform provenance.
 These are frozen regression inputs for the checker, not normative timestamp
 values or independent certification. Unit tests replay them and then deliberately
 corrupt sequences, timestamps, clocks, counters, flags, CoS, endpoints and
@@ -96,7 +89,7 @@ verbatim.
 ## Protocol sources and complementary coverage
 
 The encoder/checker uses the following frozen sources, not generated Rust
-layouts. Draft support remains explicitly work in progress.
+layouts. Draft rows apply to the pinned revision.
 
 | Source | Fields used by the independent profile |
 | --- | --- |
@@ -105,11 +98,9 @@ layouts. Draft support remains explicitly work in progress.
 | [RFC 9503 §§3–4](https://www.rfc-editor.org/rfc/rfc9503.html#section-3) | Destination Node Address (Type 9), Return Path (Type 10), SRv6 segment-list sub-TLV (Type 4), fallback flag |
 | [asymmetrical-pkts-14 §§3, 4.3](https://datatracker.ietf.org/doc/html/draft-ietf-ippm-asymmetrical-pkts-14#section-3) | Type-12 project code point, count/interval/minimum size and composition; no claim of a final IANA allocation |
 
-O10 also removes production HMAC helpers from the five existing wire suites
-below. They assemble base/TLV bytes manually and now pass their independently
-selected coverage bytes to [`common/wire_hmac.rs`](../tests/common/wire_hmac.rs),
-which uses `hmac`/`sha2` directly. Key/admission tests still invoke the receiver
-and mutate its state in process; that is the system under test, not their codec.
+The wire suites below assemble bytes manually and use
+[`common/wire_hmac.rs`](../tests/common/wire_hmac.rs), which calls `hmac`/`sha2`
+directly. Tests may still invoke the production receiver as the system under test.
 
 | Combination | Reproducible coverage and limits |
 | --- | --- |
@@ -121,6 +112,5 @@ and mutate its state in process; that is the system under test, not their codec.
 | Source/SRH fallback failures | `cargo test --locked --lib receiver::transmit`; shared finalizer tests inject combined transport failures and verify final signatures; syscall source tests are Linux-specific |
 | Scoped IPv6, real routing/MTU and SRH | `scoped_ipv6_test`, `route_mtu_test`, `netns_conformance`; separate ignored privileged tiers, see [test inventory](../tests/README.md) and [namespace guide](testing-netns.md). Inspect SRH capture versus reported fallback; neither a skip nor fallback is successful SRH evidence. These suites still use some production packet/TLV helpers. |
 
-This is a bounded combination suite, not the Cartesian product of every TLV,
-policy, platform and packet shape. Existing malformed-input properties, fuzzing,
-sender telemetry and session-identity tests retain their separate scope.
+Malformed-input properties, fuzzing, telemetry, and session-identity tests
+cover additional cases; this fixture does not cover every combination.

@@ -1,14 +1,9 @@
 # Sender reply and directional measurements
 
-The sender includes a `measurements` object in interim and final JSON reports,
-prints a text summary, and appends a quoted JSON `measurements` column to CSV.
-CSV now has 29 columns: its first 26 scalar columns, column 27 (`ber`) and
-column 28 (`measurements`) retain their positions. Column 29 is the quoted JSON
-`owd_clock_quality` object, empty when no OWD samples exist. Use a CSV parser
-because these JSON columns contain commas.
-Library users constructing `stats::StatsSnapshot` directly must supply the new
-optional field; `with_measurements` attaches a summary. The summary types are
-exported from `stats`.
+JSON reports include `measurements` and `ber` objects; text reports print their
+summaries. CSV embeds JSON in the `ber`, `measurements`, and `owd_clock_quality`
+columns. Read columns by name and use a CSV parser to handle quoted commas.
+`owd_clock_quality` is empty when no OWD samples exist.
 
 ```bash
 stamp-suite --remote-addr 192.0.2.10 --count 100 --direct-measurement \
@@ -17,17 +12,17 @@ stamp-suite --remote-addr 192.0.2.10 --count 100 --direct-measurement \
 
 The reflector must support the requested extensions. Follow-Up requires a
 stateful reflector. Reflected Packet Control is an experimental draft extension;
-the reflector can limit or decline the requested burst. Existing `--ber` options
+the reflector can limit or decline the requested burst. `--ber` options
 add directional bit/packet error totals under the separate `ber` object.
 
 ## Probes, reply copies, and duplicates
 
-Existing `packets_received`, RTT and OWD fields count the first accepted reply
-for each pending probe. Existing timeout-based `packets_lost` and loss percentage
-retain their meaning. A late first reply does not undo an expired probe's loss.
+`packets_received`, RTT and OWD fields count the first accepted reply
+for each pending probe. Timeout-based `packets_lost` and loss percentage
+count expired probes. A late first reply does not undo an expired probe's loss.
 Prometheus/SNMP counters and `-R` details retain this probe-based behavior.
 
-The new collector runs after base authentication, TLV validation and session
+The reply collector runs after base authentication, TLV validation and session
 admission. Its counters distinguish individual reflected packets:
 
 | Field | Meaning |
@@ -53,9 +48,9 @@ Requested-but-unobserved replies include policy caps, unsupported requests,
 validation rejection, timeout and network loss. **They are not a network-loss
 estimate.** Extra replies to one probe cannot satisfy another probe's request.
 For bursts, the final receive phase continues after the first response, until
-all requested copies have been observed or the existing final `--timeout` expires.
+all requested copies have been observed or the final `--timeout` expires.
 Zero-SSID stop policy still terminates reception. Ordinary single-reply runs
-retain their existing finish condition; packets arriving after exit are unobserved.
+finish after their first accepted reply; packets arriving after exit are unobserved.
 
 The recent probe and reply identity histories each retain at most **4096**
 entries. `history_limit`, `probes_evicted` and `replies_evicted` disclose this
@@ -141,7 +136,7 @@ metadata contributes no directional sample; authenticated base reply accounting
 can still proceed. Unsigned, unkeyed measurements remain unauthenticated.
 
 BER remains one accepted pending-probe observation per probe, so burst copies do
-not repeat the forward bit denominator or inflate its existing residual BER
+not repeat the forward bit denominator or inflate the residual BER
 aggregate. Its directional totals, intervals, alarms and omission counts remain
 in `ber`; they do not represent a per-burst-copy BER metric. See
 [statistics retention](statistics.md) and [BER behavior](architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber).
@@ -187,11 +182,9 @@ uses the error interpretation from
 same error units apply to NTP and PTP timestamp encodings. A synchronized S bit
 indicates an external UTC synchronization assertion, independent of the Z bit.
 
-No clock-service polling, PHC discipline, UTC offset discovery, leap-second/smear
-compensation or synchronization certification is introduced. Use the existing
-`--clock-synchronized`, `--error-scale`, `--error-multiplier` and
-`--reflector-utc-offset` settings based on the endpoints' clock configuration.
-
+Configure `--clock-synchronized`, `--error-scale`, `--error-multiplier`, and
+`--reflector-utc-offset` from the endpoints' clock setup. The sender does not
+detect clock discipline or discover timescale offsets.
 
 ### Session-state notifications (draft ext-hdr-13 §7.1)
 
@@ -210,8 +203,6 @@ and report idle when a transition is needed.
 Notifications count probes, not requested burst copies. Duplicate, invalid-session
 and unauthenticated replies do not reset failure detection. A newer successful
 probe ends the preceding loss run; older unanswered probes still count as packet
-loss but cannot trigger a fresh failure after recovery. Lookup is constant-time,
-and queued deadlines are drained in send order. Notification counters remain
-cumulative; no unbounded event history is retained. Configure enough endpoint
+loss but cannot trigger a fresh failure after recovery. Notification counters are cumulative; event history is not retained. Configure enough endpoint
 capacity for offered traffic and correlate queue/cap/policing counters with failed
 state: local overload and path loss are indistinguishable from missing replies.

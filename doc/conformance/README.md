@@ -1,29 +1,9 @@
-# stamp-suite conformance — compliance statement
+# Conformance inventory
 
-Evidence refresh: **2026-09-11**. Historical audit: **2026-08-05**. Branch: **1.0-line**.
-
-**September remediation:** the status and clause scores below are
-historical, not a current conformance sign-off. The [September review](../reviews/2026-09-08/review.md)
-identified 16 findings, including behavior previously scored Compliant.
-The [repair tracker](../reviews/2026-09-08/progress.md) records fixes and their
-verification one item at a time. Finding 02 updates the three session-admission rows for provisioned mode only.
-Finding 07 narrows RFC 9534 support to numeric ID handling and reopens physical-member requirements as Partial/Gap. Finding 09 repairs the Type-12 ordering response and reclassifies its stale N-A row as Compliant. Finding 11 implements Linux route-aware sizing and reopens three MTU rows as Partial across the broader platform/route scope. Finding 12 separates synchronization-source declarations from encoding, corrects source code points and records actual TX provenance. Finding 13 adds the BER-07 matrix, repair and directional interval reporting. Other clause scores remain historical; citation maintenance alone does not
-establish semantic compliance. Finding 14 repairs AgentX request ordering/framing and Close acknowledgments; its [targeted record](agentx-review.md) is separate from the STAMP clause totals. Finding 15 separates machine-readable output; finding 16 checks evidence consistency and requires privileged CI scenarios to execute. All sixteen findings, eleven optimization checkpoints and the final Clippy cleanup are implemented; the tracker records verification and remaining scope limits.
-
-This document rolls up the nine clause-level conformance matrices in this
-directory into an evidence inventory for the stamp-suite 1.0 line.
-Counts below include findings 02 (RFC 8972), 07 (RFC 9534), 09 (Type-12 ordering), 11 (route MTU scope), and 13 (BER-07); they are not a new
-full-project audit.
-Where this document goes further than the matrices is in stating, as a
-maintainer decision, which of the residual non-Compliant rows are accepted
-design trade-offs (**Documented exclusions**), and in disclosing the
-experimental/pending-IANA codepoints this implementation stands in for.
-
-The August audit treated three SSID-admission Gaps as an accepted design
-exclusion. Finding 02 replaces that decision with explicit provisioned
-admission. The legacy default remains permissive and does not enforce the
-RFC 8972 §3 provisioning/discard MUSTs. Remaining September findings are
-tracked independently of these historical clause totals.
+These nine matrices record implementation evidence against frozen RFC/draft
+revisions. Scores were maintained through September 2026; they are not an
+independent certification or a fresh audit of every Compliant row. A code
+citation or passing fixture supports only the behavior it checks.
 
 ## Per-document summary
 
@@ -40,95 +20,29 @@ tracked independently of these historical clause totals.
 | [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md) — Residual BER (Types 240–242) | -07, 30 June 2026 | 30 | 27 | 2 | 0 | 1 | 0 |
 | **Total** | | **418** | **360** | **9** | **1** | **45** | **3** |
 
-The eight pre-existing matrices were independently re-verified against a freshly fetched copy of
-its source text on 2026-07-22 (see each file's own "Revision frozen" line and
-adversarial re-verification log). No clause was re-read against its source text
-in the 2026-08-05 pass: that pass changed *implementation*, and each row it
-touched was re-scored against the same frozen clause text, with the code and
-test evidence for the closure appended to the row. The matrices remain the
-source of truth; the table above and their `Summary:` lines are checked against individual clause rows by `scripts/check_conformance_counts.py`. The BER matrix was added and verified on 2026-09-09.
+Compliant means supported within the row's stated profile. Partial means some
+behavior or platform support is missing; Gap means an unmet requirement. N/A
+means inapplicable. Excluded marks an explicit scope boundary.
 
-## Documented exclusions
+## Scope and remaining gaps
 
-These are accepted scope boundaries, distinct from the open Partial/Gap rows.
-Physical LAG association and steering remain incomplete (six Partial and one
-Gap in RFC 9534). Route-MTU coverage remains platform-limited (five Partial
-rows across Type 12, reflected headers and BER). Those twelve rows have not
-been closed by the exclusions below.
+- RFC 8972 session-admission scores require `--session-admission provisioned`.
+  The permissive default does not enforce its provisioning/discard requirements.
+- RFC 9534 has six Partial rows and one Gap: numeric IDs work, but physical LAG
+  association, steering, and ingress-member verification are unsupported.
+- Type-12 exact sizing and BER route enforcement retain platform limits.
+  Linux uses route/interface MTU lookup; this is not active path-MTU probing.
+- SR-MPLS return forwarding is excluded and replies with U. YANG management
+  is unsupported. AgentX is read-only; its [review](agentx-review.md) is separate
+  from STAMP clause totals.
+- NIC timestamp discipline and physical LAG behavior have no physical-testbed
+  evidence here. macOS has software RX timestamps only. Windows capture and
+  hardware limits are covered in [release verification](../release-evidence.md).
 
-| Exclusion | Rationale | Pointer |
-|---|---|---|
-| **SR-MPLS return-path forwarding** | A userspace UDP-socket reflector cannot push an MPLS label stack onto its own IP reply. By design, any Return Path TLV carrying an SR-MPLS segment list is echoed with the U-flag (`ReturnPathAction::UnsupportedSr`) rather than attempted. | `9503-4.1.3.1-1` (Excluded in the matrix); `src/tlv/list/processing.rs` `has_sr_mpls()` / `process_return_path` |
-| **SNMP SET** | The AgentX sub-agent is a read-only monitoring surface by design (GET/GETNEXT/GETBULK only). A TestSet is answered `notWritable` (Commit/UndoSet get the matching failure code; CleanupSet is a no-op) rather than the PDU being silently dropped, so a manager gets a clean, immediate failure instead of a timeout — that response *is* the compliant behavior for a sub-agent that has chosen not to expose writable OIDs, not a gap in one. | `src/snmp/`; `doc/control-plane.md` ("SNMP SET parity — tracked elsewhere"); `doc/architecture.md` ("`--snmp` requires a Unix platform") |
-| **STAMP YANG** | YANG management is an explicit product scope choice; it is not implemented. RFC 9534 §3.2 leaves the detailed micro-session mapping augmentation outside that document. This scope decision does not depend on a claim that no newer YANG draft exists. | `rfc9534.md` note under §3.2; [release scope](../release-evidence.md) |
-| **Windows backend limits** | Windows uses pnet/Npcap capture. CI now gates seven portable runtime/UDP-sender targets using staged x64 runtime DLLs; missing DLLs or failed core tests fail the job. The full capture-dependent suite remains informational until a driver-backed fixture is available. Windows hardware/kernel timestamp limits remain explicit. | [Windows gate and release claims](../release-evidence.md#windows-runtime-gate); `.github/workflows/rust.yml` |
-| **macOS TX timestamping** | The kernel/hardware timestamping feature has a real, tested RX path on macOS (`SO_TIMESTAMP`/`SCM_TIMESTAMP`, software-tier, µs resolution) but no TX path and no NIC-hardware path — Darwin exposes no equivalent of Linux's `MSG_ERRQUEUE`/`SIOCSHWTSTAMP`. This is a platform capability boundary, disclosed in code and docs, not an oversight. | `src/hwtstamp.rs` (module doc + macOS branch); `doc/architecture.md` hwtstamp section |
-| **NIC-hardware timestamp paths** | The `SIOCSHWTSTAMP` hardware-timestamp tier (Linux, `--hwtstamp on`, needs `CAP_NET_ADMIN` and a NIC that actually supports it) is code-cited and unit-tested for its request/fallback logic, but the live hardware path itself cannot be exercised in ordinary CI (no privileged, hardware-timestamp-capable NIC available there). Verification for this tier is the code citation plus a manual procedure an operator with the right hardware can run; `startup_action()`'s graceful fallback means the binary never *requires* the hardware to start. | `src/hwtstamp.rs`; `doc/architecture.md` ("NIC hardware tier") |
-| **Legacy permissive session admission** | `--session-admission permissive` remains the compatibility default and does not enforce RFC 8972 §3 provisioning/discard. Select `provisioned` and configure exact `--reflector-session` entries for those requirements. The three formerly excluded Gaps were repaired under finding 02 on 2026-09-08; sequence/counter/replay/Follow-Up state uses full identity in both modes. | `RFC8972-3-6`, `RFC8972-3-7`, `RFC8972-3-8`; [configuration](../usage.md#session-provisioning); `tests/session_identity_test.rs` |
+## Experimental codepoints
 
-## Closed since the 1.0 audit
-
-The 2026-07-23 statement listed eleven open items covering fifteen matrix rows —
-ten scored Partial and five scored Gap. **The August pass recorded all fifteen as closed. September checks reopened
-some scope claims; the current row scores and rollup take precedence.** They are recorded here rather than deleted,
-so the statement remains readable against its predecessor: each matrix row keeps
-its original finding with the closure appended beneath it, naming the code and
-the tests.
-
-| Item (as listed on 2026-07-23) | Was | Rows | Closed by |
-|---|---|---|---|
-| Control-plane transport security trade-off | Partial | `RFC8762-7-1` | TLS for the control plane: `--control-tls-cert`/`--control-tls-key` (rustls, explicit `ring` provider), both flags required together, and TLS additionally requires a bearer token. Verified with a real handshake asserting 200 with the token and 401 without. |
-| Reply source-address pinning (SHOULD) | Partial | `9503-3-1` | The matched Destination Node Address now reaches the send path (`StampResponse::reply_source`) and both backends pin it via an `IP_PKTINFO`/`IPV6_PKTINFO` ancillary message. Verified by asserting the *receiver* observes the pinned source. |
-| DSCP/ECN admission-policy layer | Partial | `RFC8972-4.4-8`, `RFC8972-6-3`, `cos-ecn-3.2-3`, `cos-ecn-3.2-6` | `src/cos_policy.rs` separates *permitted* from *capable*: `--allowed-dscp`, `--allowed-ecn`, and destination-scoped `--allowed-dscp-for`. A refused DSCP1 reports RPD=0b01; a refused EC1 forces Not-ECT and reports RPE=0b10. |
-| Extra-Padding-after-HMAC leniency | Partial | `RFC8972-4.8-2` | Both parsers now accept trailing Extra Padding. Required fixing HMAC coverage first: the covered prefix had been derived from the sum of non-HMAC TLV sizes, which is only the true prefix while the HMAC TLV is last. |
-| Live egress-MTU query (reflector side) | Partial | `asym-3-08`, `ext-hdr-3.2-9`, `ext-hdr-3.2-10`, `ext-hdr-3.3-8`, `ext-hdr-3.3-9` | Finding 11 replaces the startup interface stand-in with Linux per-route sizing, bounded notification-invalidated caching and fragmentation prevention. Live veth tests cover both IP families, wildcard/bound sources, link/route changes and alternate targets. Unknown budgets fail closed; revision-13 MTU requirements are Compliant within the supported profile. Asymmetrical exact-size and platform limits remain explicit in the current rows. |
-| Reflector clock metadata | Partial | `RFC8972-4.3-5`–`RFC8972-4.3-8`, `RFC8972-5.4-1` | Finding 12 replaces format/capability inference with explicit system/PHC discipline, correct registry values and actual timestamp methods. Sources remain operator declarations; physical clock synchronization is not verified. The current packet's software T3 and the previous reply's corrected Follow-Up timestamp are distinguished. |
-| Replay detection (SHOULD) | Gap | `asym-5-07` | `Session::check_replay` with a 31-entry per-session window in a single `AtomicU64`; counters on `/v1/status`; opt-in `--drop-replayed` for the action. |
-| Send-delay / reflected-burst cross-check | Gap | `asym-5-09` | `reflected_burst_pacing_warning()` warns at startup when `--send-delay` is shorter than the requested burst, naming the minimum. |
-| Zeroed-SSID reply control (sender) | Gap | `RFC8972-3-11` | `--on-zero-ssid continue\|stop`, checking both reflected SSID fields and inert without a configured `--ssid`. |
-| Location field-disclosure policy | Gap | `RFC8972-4.2.2-2` | `--location-disclose`; a withheld field is answered as zeroes, and a withheld IP request keeps its generic sub-TLV type so the address family is not disclosed either. |
-| Misplaced-HMAC severity | Gap | `RFC8972-4.8-3` | A misplaced HMAC now runs the §4.8 verification-failure procedure (I flag on every TLV), not only the parser's M flag. |
-
-Two further defects were fixed in the same pass that no matrix row had scored,
-because both sat inside behaviour the matrices recorded as Compliant:
-
-- A Type-12 `length` request from a peer that sends no HMAC TLV produced a reply
-  exactly 20 octets over the requested length, because the keyed reflector
-  appends its own HMAC TLV after the length-padding decision. The pre-existing
-  test asserted the reply was *at least* the requested length, so the overshoot
-  passed; it now asserts equality.
-- With the AIMD congestion response active, an Access Report wait-phase
-  retransmission carried no Reflected Test Packet Control TLV at all, because
-  that path rebuilt its TLV set from the static list the main loop deliberately
-  omits it from.
-
-## Citation verification
-
-The current checker reports **381 numeric citations: 88 matched to a named
-source construct, 293 mechanically unverifiable, 0 detected stale references**.
-This is a bookkeeping result, not a semantic sign-off. An anchor overlap does
-not prove a requirement is met; unverifiable and path-only references still
-need human review when their associated behavior changes. Earlier totals
-(540/542) describe historical revisions and are superseded here.
-
-```bash
-python3 scripts/check_conformance_citations.py --json --details
-python3 scripts/check_conformance_counts.py --json
-```
-
-The first command checks both range endpoints, file resolution and heuristic
-identifier overlap, and includes the full unverified inventory with `--details`.
-The second compares clause statuses, unique IDs, matrix summaries/Counts footers
-and the rollup, failing on missing matrices or mismatches. Both run in
-`.github/workflows/conformance.yml`; regression fixtures prove drift is rejected.
-Neither checker rereads RFCs or upgrades historical clause scores automatically.
-
-## Experimental-codepoint disclosure
-
-This implementation stands in for six codepoints across three drafts that
-have not (yet) received a final IANA allocation. All six are now collected
-in one place in the source tree — `src/tlv/experimental.rs` — which each
-const's doc comment cites as its own single edit point.
+These local allocations are defined in `src/tlv/experimental.rs`. Peers must
+agree on their meaning; they are not final IANA assignments.
 
 | Codepoint | Registry | Const | Draft | What it needs |
 |---|---|---|---|---|
@@ -139,80 +53,36 @@ const's doc comment cites as its own single edit point.
 | Type 247 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_FIXED_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-13 §§3.3/5.2 | IANA allocation of TBA2 |
 | Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-13 §5.3 | IANA allocation of TBA3 |
 
-Of the three `draft-gandhi-ippm-stamp-ber` TLVs, only Types 240/241 (Bit
-Pattern, Bit Error Count) are cited by the draft's own Implementation Status
-section as having a known implementation at those numbers; Type 242 (Max Bit
-Error Burst Size) is this project's own extension into the shared
-Experimental range, not a number the draft itself reports as already taken.
+Type 242 conflicts with another implementation's experimental Heartbeat TLV.
+The formats are incompatible. Types 240/241 follow the BER draft's reported
+experimental use; 242 is this project's choice.
 
-**Known collision (disclosed, not a bug).** Type 242 is also used,
-independently, by another STAMP implementation for an unrelated,
-incompatible experimental "Heartbeat" TLV. Both uses are legitimate under
-RFC 8972 §5.1 — the Experimental range exists precisely so implementations
-don't need to coordinate before picking a number — but the two TLVs are
-wire-format-incompatible with each other. A stamp-suite reflector talking to
-that other implementation's Heartbeat sender (or vice versa) at Type 242
-will misparse the value. See `doc/architecture.md` for the original note.
+When a final allocation changes a wire identifier, update its constant, record
+the change in `CHANGELOG.md`, and bump the minor version under the project's
+draft-feature policy. There is no runtime codepoint override.
 
-**Renumbering policy.** When any of these drafts receives a real IANA
-allocation, the fix is: update the single named constant in
-`src/tlv/experimental.rs`, bump the crate's **minor** version (these are
-on-wire-visible identifiers, but they are pre-standard stand-ins by
-definition — a minor bump is this project's chosen severity for that), and
-call it out under `CHANGELOG.md`'s `[Unreleased]` → next release, consistent
-with the Semantic Versioning policy stated at the top of that file. There is
-deliberately no runtime or config-file override for these values (YAGNI —
-see the module doc comment in `src/tlv/experimental.rs`).
+## Verification
 
-## Verification tiers
+```sh
+python3 scripts/check_conformance_counts.py --json
+python3 scripts/check_conformance_citations.py --json --details
+```
 
-- **Unit and ordinary integration suites:** run separately for default,
-  all-features and pnet-only builds. All-features selects nix and cannot verify
-  pnet execution. Results are recorded by checkpoint rather than keeping a
-  timeless unit-test count here. See [test inventory](../../tests/README.md).
-- **Independent protocol combinations:** the Python standard-library peer runs
-  against default and all-feature binaries in conformance CI, recording exact
-  UDP bytes, traffic class and source metadata. Frozen requests and corrupted
-  reply checks keep its encoder/verifier independent of production codecs.
-  The SRv6 profile verifies U-flag fallback, not successful SRH transmission;
-  see [fixture contract and coverage map](../testing-interop.md).
-- **Properties and fuzzing:** deterministic/property suites run through Cargo;
-  eight fuzz targets are compiled from the separate locked fuzz manifest and
-  exercised by the scheduled fuzz workflow. Compilation is not fuzz execution.
-- **Privileged wire tests:** three raw pnet tests, nine namespace scenarios and
-  one reply-route MTU regression. The conformance workflow builds without root,
-  selects exact Cargo artifacts, verifies nonempty expected test counts and runs
-  with `STAMP_REQUIRE_PRIVILEGED=1`. A missing privilege/tool, unsupported kernel
-  prerequisite or internal skip fails that job. Local exploratory runs may omit
-  strict mode, but an internal skip is not wire evidence. See
-  [namespace procedures](../testing-netns.md).
-- **Platform and hardware limits:** local September results are Linux evidence.
-  macOS CI and the bounded Windows runtime gate retain their separate scopes;
-  the full Windows capture-dependent suite remains informational. No physical
-  NIC timestamp or LAG-member test is claimed. Earlier informal interoperability
-  runs are not reproducible certification; AgentX has its separate targeted record.
+The count checker compares unique clause IDs, statuses, matrix summaries, and
+this rollup. The citation checker checks file/range resolution and heuristic
+identifier overlap. Neither verifies protocol semantics; unresolved citations
+still need manual review when code changes.
 
-- **Release integrations and standards:** authenticated HTTP/HTTPS control is
-  verified with live packets, and a real Net-SNMP master fixture verifies MIB
-  reads and reconnect. Hardware validation has a two-host procedure with
-  explicit unavailable/fallback outcomes. The scheduled standards monitor
-  detected ext-hdr -13; its implementation and matrix have now been updated. See
-  [release evidence](../release-evidence.md) and the
-  [revision-13 implementation review](ext-hdr-13-review.md).
-
-## Current residual and evidence limits
-
-The clause inventory is **418 rows: 360 Compliant, 9 Partial, 1 Gap,
-45 N/A and 3 Excluded**. The three session-admission rows are Compliant only
-under their documented provisioned-mode conditions. The remaining LAG and
-platform-MTU rows are open scope limits, not accepted exclusions or finished
-optimizations. The ext-hdr matrix was separately re-audited against revision 13; other
-historical Compliant rows have not all received a fresh
-semantic audit in this evidence checkpoint.
-
-The [repair tracker](../reviews/2026-09-08/progress.md) records findings and
-completed optimization work. Finding 16's [test results](../reviews/2026-09-08/logs/finding-16/results.json)
-state what actually ran, including expected negative checks and environment
-limits. The [final verification record](../reviews/2026-09-08/logs/final-clippy/README.md)
-covers warnings-denied Clippy across four feature configurations and the final
-local checks. This statement does not claim a green remote CI run or release sign-off.
+- Run default, all-feature, and pnet-only Cargo suites separately. All-features
+  selects nix. See the [test inventory](../../tests/README.md).
+- The [independent UDP fixtures](../testing-interop.md) use frozen bytes and
+  separate encoders/verifiers. Their SRv6 case checks U fallback.
+- [Privileged namespace tests](../testing-netns.md) check wire behavior,
+  successful SRv6 transit, and route MTU changes. CI requires prerequisites and
+  nonempty test execution with `STAMP_REQUIRE_PRIVILEGED=1`; skips are not evidence.
+- Property tests run through Cargo. The separate fuzz workflow builds and runs
+  eight targets; compilation alone is not fuzz execution.
+- [Release fixtures](../release-evidence.md) cover live authenticated HTTP/HTTPS,
+  a Net-SNMP master, platform tests, and standards revision checks.
+- The [revision-13 review](ext-hdr-13-review.md) describes its incompatible
+  Type-246 selector change and supported header-reflection profile.
