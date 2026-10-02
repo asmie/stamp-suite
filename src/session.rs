@@ -12,7 +12,7 @@ use std::{
 };
 
 /// Sequence-number classification for replay detection
-/// (draft-ietf-ippm-asymmetrical-pkts-14 §5). A valid HMAC does not rule out replay.
+/// (RFC 10052 §5). A valid HMAC does not rule out replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayVerdict {
     /// Ahead of every sequence number seen so far (the normal case), or the
@@ -59,7 +59,7 @@ pub struct Session {
     /// Coherent sequence/timestamp/provenance record for Follow-Up Telemetry.
     last_reflection: RwLock<(u32, u64, TimestampMethod)>,
     /// Replay-detection window for *received* sequence numbers
-    /// (draft-ietf-ippm-asymmetrical-pkts-14 §5). Distinct from `curr_seq`,
+    /// (RFC 10052 §5). Distinct from `curr_seq`,
     /// which is this reflector's own outgoing generator.
     ///
     /// Packed so the whole update is one compare-and-swap:
@@ -102,7 +102,7 @@ impl Session {
         *self.active.write().unwrap_or_else(|e| e.into_inner()) = false;
     }
 
-    /// Classifies and records `seq` (draft-ietf-ippm-asymmetrical-pkts-14 §5).
+    /// Classifies and records `seq` (RFC 10052 §5).
     /// The caller decides whether to drop it; reordering and sender restarts can
     /// also produce non-New verdicts.
     ///
@@ -821,7 +821,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Replay detection (draft-ietf-ippm-asymmetrical-pkts-14 §5)
+    // Replay detection (RFC 10052 §5)
 
     #[test]
     fn test_replay_first_packet_is_new() {

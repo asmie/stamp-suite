@@ -69,12 +69,12 @@ pub use typed::HmacTlv;
 pub use typed::DestinationNodeAddressTlv;
 
 // Type 10 — Return Path (RFC 9503)
-pub use typed::{ReturnPathAction, ReturnPathSubType, ReturnPathTlv};
+pub use typed::{ReturnPathAction, ReturnPathSubType, ReturnPathTlv, SegmentList};
 
 // Type 11 — Micro-session ID (RFC 9534)
 pub use typed::MicroSessionIdTlv;
 
-// Type 12 — Reflected Test Packet Control (draft-ietf-ippm-asymmetrical-pkts)
+// Type 12 — Reflected Test Packet Control (RFC 10052)
 pub use typed::ReflectedControlTlv;
 
 // Type 240 — BER Bit Pattern in Padding (draft-gandhi-ippm-stamp-ber)

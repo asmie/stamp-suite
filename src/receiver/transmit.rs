@@ -18,6 +18,8 @@ use std::{
 pub(super) struct SendOptions {
     pub tos: u8,
     pub source: Option<IpAddr>,
+    /// Egress interface for RFC 9503 same-link replies (Linux only).
+    pub egress_ifindex: Option<u32>,
     pub srh: Option<Arc<[u8]>>,
     pub dont_fragment: bool,
 }
@@ -33,7 +35,11 @@ struct TransportPlan {
 impl TransportPlan {
     fn new(response: &StampResponse, source: SocketAddr, base: usize, srv6: bool) -> Self {
         let target = match response.return_path_action {
-            ReturnPathAction::AlternateAddress(addr) => match (addr, source) {
+            ReturnPathAction::AlternateAddress(addr)
+            | ReturnPathAction::Srv6Forward {
+                destination: Some(addr),
+                ..
+            } => match (addr, source) {
                 (SocketAddr::V6(target), SocketAddr::V6(source))
                     if target.ip().is_unicast_link_local() && target.scope_id() == 0 =>
                 {
@@ -49,13 +55,17 @@ impl TransportPlan {
             source: response
                 .reply_source
                 .filter(|s| crate::reply_source::supported() && s.is_ipv4() == target.is_ipv4()),
+            egress_ifindex: match response.return_path_action {
+                ReturnPathAction::SameLink(index) => Some(index),
+                _ => None,
+            },
             srh: None,
             dont_fragment: response.reflected_control.is_some()
                 || has_reflected_headers(&response.data, base)
                 || (cfg!(target_os = "linux") && has_ber(&response.data, base)),
         };
         let mut unsupported_srh = false;
-        if let ReturnPathAction::Srv6Forward(sids) = &response.return_path_action {
+        if let ReturnPathAction::Srv6Forward { sids, .. } = &response.return_path_action {
             if srv6 && target.is_ipv6() && !sids.is_empty() {
                 // Linux replaces Segment List[0] with the UDP destination.
                 // Preserve every requested SID by reserving that final slot.
@@ -275,7 +285,10 @@ impl Transmission {
                 }
                 Err(e) => {
                     refresh_mtu = false;
-                    if options.srh.take().is_some() {
+                    if options.egress_ifindex.take().is_some() {
+                        // The arrival link cannot carry the reply (RFC 9503 §4).
+                        super::set_return_path_u_flag_in_response(&mut data, base);
+                    } else if options.srh.take().is_some() {
                         super::set_return_path_u_flag_in_response(&mut data, base);
                     } else if options.source.take().is_some() {
                         // RFC 9503 source pinning is best-effort.
@@ -859,39 +872,52 @@ fn send_datagram(
             },
             &tos.to_ne_bytes(),
         );
-        if let Some(source) = options.source {
-            if source.is_ipv4() != dst.is_ipv4() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "source/destination family mismatch",
-                ));
-            }
-            match source {
-                IpAddr::V4(ip) => {
-                    let mut info: libc::in_pktinfo = unsafe { std::mem::zeroed() };
+        if options
+            .source
+            .is_some_and(|source| source.is_ipv4() != dst.is_ipv4())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "source/destination family mismatch",
+            ));
+        }
+        // One PKTINFO carries the pinned source address and the egress
+        // interface; either may be unset (zero).
+        if options.source.is_some() || options.egress_ifindex.is_some() {
+            let ifindex = options.egress_ifindex.unwrap_or(0);
+            if dst.is_ipv4() {
+                // SAFETY: in_pktinfo is plain old data; all-zero is valid.
+                let mut info: libc::in_pktinfo = unsafe { std::mem::zeroed() };
+                if let Some(IpAddr::V4(ip)) = options.source {
                     info.ipi_spec_dst.s_addr = u32::from_ne_bytes(ip.octets());
-                    append(&mut control, libc::IPPROTO_IP, libc::IP_PKTINFO, unsafe {
+                }
+                info.ipi_ifindex = ifindex as _;
+                // SAFETY: the slice covers exactly `info`, which outlives it.
+                append(&mut control, libc::IPPROTO_IP, libc::IP_PKTINFO, unsafe {
+                    std::slice::from_raw_parts(
+                        std::ptr::addr_of!(info).cast(),
+                        std::mem::size_of_val(&info),
+                    )
+                });
+            } else {
+                // SAFETY: in6_pktinfo is plain old data; all-zero is valid.
+                let mut info: libc::in6_pktinfo = unsafe { std::mem::zeroed() };
+                if let Some(IpAddr::V6(ip)) = options.source {
+                    info.ipi6_addr.s6_addr = ip.octets();
+                }
+                info.ipi6_ifindex = ifindex as _;
+                // SAFETY: the slice covers exactly `info`, which outlives it.
+                append(
+                    &mut control,
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_PKTINFO,
+                    unsafe {
                         std::slice::from_raw_parts(
                             std::ptr::addr_of!(info).cast(),
                             std::mem::size_of_val(&info),
                         )
-                    });
-                }
-                IpAddr::V6(ip) => {
-                    let mut info: libc::in6_pktinfo = unsafe { std::mem::zeroed() };
-                    info.ipi6_addr.s6_addr = ip.octets();
-                    append(
-                        &mut control,
-                        libc::IPPROTO_IPV6,
-                        libc::IPV6_PKTINFO,
-                        unsafe {
-                            std::slice::from_raw_parts(
-                                std::ptr::addr_of!(info).cast(),
-                                std::mem::size_of_val(&info),
-                            )
-                        },
-                    );
-                }
+                    },
+                );
             }
         }
         if *srh_setting != options.srh {
@@ -1280,6 +1306,7 @@ mod tests {
                 let options = SendOptions {
                     tos,
                     source,
+                    egress_ifindex: None,
                     srh: None,
                     dont_fragment: controlled,
                 };
@@ -1421,7 +1448,10 @@ mod tests {
     fn srv6_failure_keeps_cos_and_marks_every_copy() {
         let mut transmission = sample(
             true,
-            ReturnPathAction::Srv6Forward(vec!["::1".parse().unwrap()]),
+            ReturnPathAction::Srv6Forward {
+                sids: vec!["::1".parse().unwrap()],
+                destination: None,
+            },
         );
         transmission.source = "[::1]:4000".parse().unwrap();
         transmission.response.reply_source = Some("::1".parse().unwrap());
@@ -1664,7 +1694,10 @@ mod tests {
     fn mtu_race_refreshes_budget_without_routing_downgrade() {
         let mut t = sized_sample(true, 1500);
         t.source = "[::1]:4000".parse().unwrap();
-        t.response.return_path_action = ReturnPathAction::Srv6Forward(vec!["::1".parse().unwrap()]);
+        t.response.return_path_action = ReturnPathAction::Srv6Forward {
+            sids: vec!["::1".parse().unwrap()],
+            destination: None,
+        };
         t.response.reply_source = Some("::1".parse().unwrap());
         t.response.cos_request = Some((46, 0));
         // Our macOS backend does not implement source pinning. Preserve its

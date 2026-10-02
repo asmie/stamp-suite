@@ -11,7 +11,7 @@ use crate::tlv::core::{
 use crate::tlv::{
     ClassOfServiceTlv, DestinationNodeAddressTlv, LocationDisclosure, LocationSubType,
     MicroSessionIdTlv, PacketAddressInfo, ReflectedControlTlv, ReturnPathAction, ReturnPathTlv,
-    SyncSource, TimestampMethod, TypedTlv, BER_DEFAULT_PATTERN,
+    SegmentList, SyncSource, TimestampMethod, TypedTlv, BER_DEFAULT_PATTERN,
 };
 
 use super::TlvList;
@@ -78,7 +78,8 @@ impl TlvList {
 
     /// Updates CoS DSCP2/EC2 from ingress metadata and RPD/RPE from the reply
     /// policy (RFC 8972 §4.4, erratum 8199; cos-ecn-01 §3.2).
-    /// Preserves requested DSCP1/EC1 and reserved bits; mutates without allocation.
+    /// Preserves requested DSCP1/EC1, zeroes the Reserved bits, and mutates
+    /// without allocation.
     ///
     /// `policy_rejected` sets RPD for DSCP1 rejection. `reply_ecn_applied` selects
     /// RPE=0b11 (applied) or 0b10 (unable). For 0b10, the backend must also force
@@ -124,9 +125,12 @@ impl TlvList {
         let rpd = if policy_rejected { 0b01 } else { 0b00 };
         value[1] = ((received_dscp & 0x0F) << 4) | ((received_ecn & 0x03) << 2) | rpd;
 
-        // Byte 2: keep EC1 (bits 7:6) and reserved bits 3:0, write RPE.
+        // Byte 2: keep EC1 (bits 7:6), write RPE, zero Reserved (bits 3:0).
+        // Byte 3 is Reserved; reserved bits MUST be zeroed on transmission
+        // (RFC 8972 §4.4, cos-ecn-01 §3.1).
         let rpe = if reply_ecn_applied { 0b11 } else { 0b10 };
-        value[2] = (value[2] & 0xCF) | (rpe << 4);
+        value[2] = (value[2] & 0xC0) | (rpe << 4);
+        value[3] = 0;
     }
 
     /// Fills all Timestamp Information fields with reflector clock metadata
@@ -461,10 +465,13 @@ impl TlvList {
     /// Processes the first Return Path TLV (RFC 9503 §4).
     /// Uses `sender_port` for alternate-address replies. When `allow_alternate`
     /// is false, Return Address requests get U set and replies use the packet source.
+    /// `ingress_ifindex` is the arrival interface when the reply can be pinned
+    /// to it; without it a same-link request gets U.
     pub fn process_return_path(
         &mut self,
         sender_port: u16,
         allow_alternate: bool,
+        ingress_ifindex: Option<u32>,
     ) -> ReturnPathAction {
         // Find the first Return Path TLV
         let rp_idx = self
@@ -486,54 +493,62 @@ impl TlvList {
         // Check for Control Code sub-TLV
         // RFC 9503: only bit 0 (reply-request) is meaningful; remaining bits are reserved and ignored.
         if let Some(cc) = rp.get_control_code() {
-            return if cc & 1 == 0 {
-                ReturnPathAction::SuppressReply
-            } else {
-                // Bit 0 requests a reply on the incoming link (RFC 9503 §4.1.1).
-                // Defer U to the send path, which can determine whether the route
-                // honors the request.
-                ReturnPathAction::Normal
+            if cc & 1 == 0 {
+                return ReturnPathAction::SuppressReply;
+            }
+            // Bit 0 requests a reply on the incoming link (RFC 9503 §4.1.1).
+            // The send path sets U if pinning the interface fails.
+            return match ingress_ifindex {
+                Some(index) => ReturnPathAction::SameLink(index),
+                None => {
+                    self.set_return_path_u_flag();
+                    ReturnPathAction::Normal
+                }
             };
         }
 
-        // Check for Return Address sub-TLV
-        if let Some(addr) = rp.get_return_address() {
-            if allow_alternate {
-                return ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(
-                    addr,
-                    sender_port,
-                ));
+        // A Return Address and a segment list may be combined (RFC 9503 §4.1).
+        let destination = match rp.get_return_address() {
+            Some(addr) if allow_alternate => Some(std::net::SocketAddr::new(addr, sender_port)),
+            Some(_) => {
+                // Redirection not permitted (default): signal "unsupported"
+                // with U and reply to the packet source. Otherwise an
+                // unauthenticated peer could aim replies, and any Type-12
+                // amplification, at an arbitrary victim.
+                self.set_return_path_u_flag();
+                return ReturnPathAction::Normal;
             }
-            // Redirection not permitted (default): signal "unsupported" via the
-            // U-flag and reply normally to the packet source. Without this gate
-            // an unauthenticated peer could direct the reply (and any Type-12
-            // padding amplification) at an arbitrary victim.
-            self.set_return_path_u_flag();
-            return ReturnPathAction::Normal;
-        }
+            None => None,
+        };
 
-        // Pass SRv6 segments to the send path (RFC 9503 §4, RFC 8754).
-        // It attempts forwarding when enabled and sets U on fallback.
-        if let Some(sids) = rp.get_srv6_sids() {
-            return ReturnPathAction::Srv6Forward(sids);
+        match rp.first_segment_list() {
+            // The send path attempts SRH forwarding and sets U on fallback
+            // (RFC 9503 §4, RFC 8754).
+            Some(SegmentList::Srv6(sids)) => ReturnPathAction::Srv6Forward { sids, destination },
+            // SR-MPLS cannot be sent from a userspace UDP socket.
+            Some(SegmentList::SrMpls) => {
+                self.set_return_path_u_flag();
+                ReturnPathAction::UnsupportedSr
+            }
+            Some(SegmentList::Invalid) => {
+                self.set_return_path_u_flag();
+                ReturnPathAction::Normal
+            }
+            None => match destination {
+                Some(destination) => ReturnPathAction::AlternateAddress(destination),
+                None => {
+                    // No usable sub-TLV.
+                    self.set_return_path_u_flag();
+                    ReturnPathAction::Normal
+                }
+            },
         }
-
-        // SR-MPLS cannot be forwarded from a userspace UDP socket: echo with
-        // the U-flag set and reply normally.
-        if rp.has_sr_mpls() {
-            self.set_return_path_u_flag();
-            return ReturnPathAction::UnsupportedSr;
-        }
-
-        // Empty or unrecognized sub-TLVs — set U-flag, return Normal
-        self.set_return_path_u_flag();
-        ReturnPathAction::Normal
     }
 
     /// Sets the U-flag on the first Return Path owner.
     ///
     /// Public so the receiver can flag the Return Path TLV in the
-    /// draft-ietf-ippm-asymmetrical-pkts-14 §4.3 conflict case (no-reply
+    /// RFC 10052 §4.3 conflict case (no-reply
     /// control code combined with a non-zero Reflected Test Packet Control
     /// TLV).
     pub fn set_return_path_u_flag(&mut self) {
@@ -566,7 +581,7 @@ impl TlvList {
 
     /// Returns the first Reflected Test Packet Control TLV request, if present.
     ///
-    /// Per draft-ietf-ippm-asymmetrical-pkts §3, only the first occurrence is
+    /// Per RFC 10052 §3, only the first occurrence is
     /// honoured; duplicates are ignored.
     #[must_use]
     pub fn get_reflected_control_request(&self) -> Option<ReflectedControlTlv> {
@@ -580,7 +595,7 @@ impl TlvList {
 
     /// Marks the first Reflected Test Packet Control TLV with U when its request
     /// cannot be honored, including a conflicting no-reply Return Path control
-    /// (draft-ietf-ippm-asymmetrical-pkts-14 §4.3).
+    /// (RFC 10052 §4.3).
     /// Address Group mismatches (§3.1.1/§3.1.2) instead drop the packet.
     pub fn set_reflected_control_u_flag(&mut self) {
         for tlv in self.non_hmac_tlvs_mut() {
@@ -592,7 +607,7 @@ impl TlvList {
     }
 
     /// Marks the first Reflected Test Packet Control TLV with the C flag
-    /// (Conformant Reflected Packet, draft-ietf-ippm-asymmetrical-pkts §3).
+    /// (Conformant Reflected Packet, RFC 10052 §3).
     /// Call this when the reflector cannot fully honour the request
     /// (MTU exceeded, rate/volume cap, or local policy).
     ///
@@ -760,7 +775,7 @@ impl TlvList {
     }
 
     /// Reflects captured headers into Types 246/247
-    /// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 3.3, 5.1, 5.2).
+    /// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 6.2, 4.1, 6.1).
     ///
     /// Preserves Requested (8 bytes for Type 246, 4 for Type 247) and copies only
     /// the matching header's tail. Match by length and, for nonzero Requested,
@@ -786,7 +801,7 @@ impl TlvList {
         self.process_reflected_headers_multi(fixed_list.as_deref(), captured_ext_headers);
     }
 
-    /// Multi-header entry point (draft-ietf-ippm-stamp-ext-hdr-13 §3.3 rule 2):
+    /// Multi-header entry point (draft-ietf-ippm-stamp-ext-hdr-15 §6.2 rule 2):
     /// `captured_fixed` is the ordered list of IP fixed headers (outer→inner)
     /// captured from an IP-in-IP tunnel, one record per stacked IP header.
     /// `None` means the backend cannot observe the IP layer. Multiple Type-247
@@ -809,7 +824,7 @@ impl TlvList {
 
     /// Removes Reflected Fixed/IPv6 Extension Header TLVs (Types 247/246) from
     /// the reply until `base_len + self.wire_size() <= max_reply_bytes`, per
-    /// draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3 ("one or more ... TLVs MUST be
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 ("one or more ... TLVs MUST be
     /// removed to avoid violating the ... MTU limit"). Type-246 TLVs are removed
     /// before Type-247 (they sit last in §3.4 wire order, so trimming from the
     /// tail keeps survivors ordered); only these two types are removed. Applied
@@ -850,7 +865,7 @@ impl TlvList {
         captured_fixed: Option<&[Vec<u8>]>,
         captured_ext_headers: Option<&[u8]>,
     ) {
-        // draft-ietf-ippm-stamp-ext-hdr-13 §3.4: the Reflected Fixed Header
+        // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: the Reflected Fixed Header
         // Data (247) TLVs MUST precede the Reflected IPv6 Extension Header Data
         // (246) TLVs. "If ... TLVs are not received in this order, the Session-
         // Reflector MUST return these TLVs with the C flag ... set to 1 ...
@@ -907,8 +922,8 @@ impl TlvList {
         }
     }
 
-    /// Reflects a single Reflected Fixed Header Data TLV (Type 247) per -13
-    /// §3.3/§5.2, using **first-fit-with-consumption** across the captured
+    /// Reflects a single Reflected Fixed Header Data TLV (Type 247) per ext-hdr-15
+    /// §6.2/§6.1, using **first-fit-with-consumption** across the captured
     /// IP fixed-header list (outer→inner) — mirroring [`Self::apply_reflected_ext`]
     /// so multiple Type-247 TLVs from an IP-in-IP tunnel pair positionally
     /// (§3.3 rule 2) while a non-zero Requested field still selects a specific
@@ -970,7 +985,7 @@ impl TlvList {
     }
 
     /// Reflects a single Reflected IPv6 Extension Header Data TLV (Type 246)
-    /// per -13 §3.2/§5.1, using **first-fit-with-consumption** to reconcile the
+    /// per ext-hdr-15 §4.2/§4.1, using **first-fit-with-consumption** to reconcile the
     /// draft's two selection rules: §5.1 mandates ("MUST") matching the *first*
     /// length-matching extension header for an all-zeros Requested field, while
     /// §3.2 rule 2 requires *positional* pairing of successive Type 246 TLVs.
@@ -1035,7 +1050,7 @@ impl TlvList {
     }
 
     /// Preserve the N-octet Requested selector and copy only the header tail.
-    /// N is eight for Type 246 and four for Type 247 (draft -13 §§5.1/5.2).
+    /// N is eight for Type 246 and four for Type 247 (ext-hdr-15 §§4.1/6.1).
     fn copy_reflected<const N: usize>(value: &mut [u8], header: &[u8]) {
         debug_assert_eq!(value.len(), header.len());
         if value.len() >= N {
@@ -1051,7 +1066,7 @@ impl TlvList {
     }
 
     /// Sets C on every IPv6 Extension Header Control sub-TLV in Type 12
-    /// (draft-ietf-ippm-stamp-ext-hdr-13 §5.3).
+    /// (draft-ietf-ippm-stamp-ext-hdr-15 §5.1).
     /// Used for unsupported reply-header attachment and duplicate requests;
     /// the latter require C on every offending copy.
     pub fn set_ipv6_ext_hdr_control_c_flag(&mut self) {
@@ -1207,7 +1222,7 @@ fn log_reflected_hdr_unsupported_once() {
         log::warn!(
             "Reflected Fixed/IPv6 Ext Header TLV (Types 247/246) requested but \
              this backend cannot observe raw IP headers — echoing with the C flag \
-             (Conformance) per draft-ietf-ippm-stamp-ext-hdr-13 §5.1/§5.2. \
+             (Conformance) per draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1. \
              Rebuild with --features ttl-pnet to enable header reflection."
         );
     }
@@ -1216,7 +1231,7 @@ fn log_reflected_hdr_unsupported_once() {
 /// Emits a one-time warning when a Reflected Fixed Header Data TLV (Type 247)
 /// arrives with a requested Length that doesn't match the captured IP
 /// header size (e.g. 20 bytes requested for an IPv6 packet). Per
-/// draft-ietf-ippm-stamp-ext-hdr-13 §5.2 the reflector sets the C flag in that
+/// draft-ietf-ippm-stamp-ext-hdr-15 §6.1 the reflector sets the C flag in that
 /// case rather than reflecting a mismatched header.
 fn log_reflected_hdr_length_mismatch_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1225,14 +1240,14 @@ fn log_reflected_hdr_length_mismatch_once() {
         log::warn!(
             "Reflected Fixed Header Data TLV (Type 247) length does not match the \
              captured IP header (sender requested wrong address family?); echoing \
-             with the C flag (Conformance) per draft-ietf-ippm-stamp-ext-hdr-13 §5.2."
+             with the C flag (Conformance) per draft-ietf-ippm-stamp-ext-hdr-15 §6.1."
         );
     }
 }
 
 /// Emits a one-time warning when a Reflected Fixed/IPv6 Ext Header Data TLV
 /// (Type 246/247) carries a non-zero Requested field that matches none of the
-/// captured header(s). Per draft-ietf-ippm-stamp-ext-hdr-13 §5.1/§5.2 the
+/// captured header(s). Per draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1 the
 /// reflector then returns the TLV with the C flag (Conformance) set.
 fn log_reflected_hdr_selector_no_match_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1241,7 +1256,7 @@ fn log_reflected_hdr_selector_no_match_once() {
         log::warn!(
             "Reflected Fixed/IPv6 Ext Header TLV (Type 246/247) Requested field matched \
              no captured header — echoing with the C flag (Conformance) per \
-             draft-ietf-ippm-stamp-ext-hdr-13 §5.1/§5.2."
+             draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1."
         );
     }
 }
@@ -1923,28 +1938,26 @@ mod tests {
         list.push(rp.to_raw()).unwrap();
 
         list.clear_reflector_flags();
-        let action = list.process_return_path(1234, false);
+        let action = list.process_return_path(1234, false, None);
         assert_eq!(action, ReturnPathAction::SuppressReply);
     }
 
     #[test]
-    fn test_process_return_path_same_link_does_not_preemptively_flag_u() {
-        // Same-link support is decided at send time (RFC 9503 §4.1.1).
-        // Parsing must leave U clear because the normal route may satisfy it.
+    fn test_process_return_path_same_link_pins_ingress_interface() {
+        // RFC 9503 §4.1.1: reply over the link the request arrived on.
         let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0x1).to_raw());
+        let action = list.process_return_path(1234, false, Some(7));
+        assert_eq!(action, ReturnPathAction::SameLink(7));
+        assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
+    }
 
-        let action = list.process_return_path(1234, false);
+    #[test]
+    fn test_process_return_path_same_link_without_interface_sets_u() {
+        // RFC 9503 §4: U when the reflector cannot use the requested path.
+        let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0x1).to_raw());
+        let action = list.process_return_path(1234, false, None);
         assert_eq!(action, ReturnPathAction::Normal);
-
-        let echoed = list
-            .non_hmac_tlvs()
-            .iter()
-            .find(|t| t.tlv_type == TlvType::ReturnPath)
-            .expect("return path TLV kept in response");
-        assert!(
-            !echoed.is_unrecognized(),
-            "same-link request must not pre-emptively set U-flag"
-        );
+        assert!(list.non_hmac_tlvs()[0].is_unrecognized());
     }
 
     #[test]
@@ -1956,26 +1969,47 @@ mod tests {
         list.push(rp.to_raw()).unwrap();
 
         list.clear_reflector_flags();
-        let action = list.process_return_path(1234, false);
+        let action = list.process_return_path(1234, false, None);
         assert_eq!(action, ReturnPathAction::SuppressReply);
     }
 
     #[test]
     fn test_process_return_path_cc_reserved_bits_normal() {
         // RFC 9503: only bit 0 matters; reserved bits are ignored.
-        // 0xFF has bit 0 set → same-link request; U-flag is not pre-set
-        // since on single-homed paths the backend already satisfies it.
+        // 0xFF has bit 0 set, so it is a same-link request.
         let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0xFF).to_raw());
+        let action = list.process_return_path(1234, false, Some(3));
+        assert_eq!(action, ReturnPathAction::SameLink(3));
+    }
 
-        let action = list.process_return_path(1234, false);
-        assert_eq!(action, ReturnPathAction::Normal);
+    #[test]
+    fn test_process_return_path_address_and_srv6_combined() {
+        // RFC 9503 §4.1: Return Address and a segment list may be combined.
+        let sid: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let mut rp = ReturnPathTlv::with_srv6_sids(&[sid]);
+        rp.add_return_address("2001:db8::9".parse().unwrap());
+        let mut list = list_with_cleared(rp.to_raw());
+        assert_eq!(
+            list.process_return_path(862, true, None),
+            ReturnPathAction::Srv6Forward {
+                sids: vec![sid],
+                destination: Some("[2001:db8::9]:862".parse().unwrap()),
+            }
+        );
+    }
 
-        let echoed = list
-            .non_hmac_tlvs()
-            .iter()
-            .find(|t| t.tlv_type == TlvType::ReturnPath)
-            .expect("return path TLV kept in response");
-        assert!(!echoed.is_unrecognized());
+    #[test]
+    fn test_process_return_path_first_segment_list_wins() {
+        // RFC 9503 §4.1.3: SR-MPLS first means the SRv6 list is ignored.
+        let mut rp = ReturnPathTlv::with_sr_mpls_labels(&[100]);
+        rp.sub_tlvs
+            .extend(ReturnPathTlv::with_srv6_sids(&["::1".parse().unwrap()]).sub_tlvs);
+        let mut list = list_with_cleared(rp.to_raw());
+        assert_eq!(
+            list.process_return_path(862, true, None),
+            ReturnPathAction::UnsupportedSr
+        );
+        assert!(list.non_hmac_tlvs()[0].is_unrecognized());
     }
 
     #[test]
@@ -1988,7 +2022,7 @@ mod tests {
         // allow_alternate = true: the operator opted in, so the reply is
         // directed to the requested address.
         list.clear_reflector_flags();
-        let action = list.process_return_path(862, true);
+        let action = list.process_return_path(862, true, None);
         assert_eq!(
             action,
             ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(addr, 862))
@@ -2004,7 +2038,7 @@ mod tests {
         let addr: std::net::IpAddr = "10.0.0.5".parse().unwrap();
         let mut list = list_with_cleared(ReturnPathTlv::with_return_address(addr).to_raw());
 
-        let action = list.process_return_path(862, false);
+        let action = list.process_return_path(862, false, None);
         assert_eq!(action, ReturnPathAction::Normal);
 
         let echoed = list
@@ -2025,7 +2059,7 @@ mod tests {
         list.push(rp.to_raw()).unwrap();
 
         list.clear_reflector_flags();
-        let action = list.process_return_path(862, false);
+        let action = list.process_return_path(862, false, None);
         assert_eq!(action, ReturnPathAction::UnsupportedSr);
         assert!(list.non_hmac_tlvs()[0].is_unrecognized());
     }
@@ -2043,10 +2077,13 @@ mod tests {
         // before semantic TLV processing runs.
         list.clear_reflector_flags();
 
-        let action = list.process_return_path(862, false);
+        let action = list.process_return_path(862, false, None);
         assert_eq!(
             action,
-            ReturnPathAction::Srv6Forward(vec![sids[0], sids[1]]),
+            ReturnPathAction::Srv6Forward {
+                sids: vec![sids[0], sids[1]],
+                destination: None,
+            },
             "SRv6 return path must surface the segment list for the send path"
         );
         // The U-flag decision is deferred to the send path (it depends on
@@ -2316,7 +2353,7 @@ mod tests {
         assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
     }
 
-    // --- Reflected Test Packet Control (draft-ietf-ippm-asymmetrical-pkts) tests ---
+    // --- Reflected Test Packet Control (RFC 10052) tests ---
 
     #[test]
     fn test_get_reflected_control_request_returns_parsed_tlv() {
@@ -2339,9 +2376,9 @@ mod tests {
         assert!(list.get_reflected_control_request().is_none());
     }
 
-    // --- Reflected Fixed/IPv6 Ext Header Data (draft-ietf-ippm-stamp-ext-hdr-13) tests ---
+    // --- Reflected Fixed/IPv6 Ext Header Data (draft-ietf-ippm-stamp-ext-hdr-15) tests ---
 
-    /// draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3 reflector MTU rule: reflected
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 reflector MTU rule: reflected
     /// header TLVs are removed (246 before 247) until the reply fits the size
     /// limit; only Types 246/247 are removed, other TLVs stay.
     #[test]
@@ -2385,7 +2422,7 @@ mod tests {
         assert_eq!(list.non_hmac_tlvs().len(), 1);
     }
 
-    /// draft-ietf-ippm-stamp-ext-hdr-13 §3.3 rule 2: with an IP-in-IP tunnel's
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §6.2 rule 2: with an IP-in-IP tunnel's
     /// two captured fixed headers (outer→inner), two same-length Type-247 TLVs
     /// pair positionally — 1st↔outer, 2nd↔inner — via first-fit-with-consumption.
     #[test]
@@ -2473,7 +2510,7 @@ mod tests {
 
     #[test]
     fn test_reflected_fixed_hdr_populated_when_captured() {
-        // -13 §5.2: Requested(4) preserved, Reflected = captured[4..].
+        // ext-hdr-15 §6.1: Requested(4) preserved, Reflected = captured[4..].
         use crate::tlv::ReflectedFixedHdrTlv;
         let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
 
@@ -2494,7 +2531,7 @@ mod tests {
 
     #[test]
     fn test_reflected_fixed_hdr_c_flag_when_backend_cant_capture() {
-        // -11 §5.2 case (b): backend cannot observe IP layer → C flag, not U.
+        // ext-hdr-15 §6.1 case (b): backend cannot observe IP layer → C flag, not U.
         use crate::tlv::ReflectedFixedHdrTlv;
         let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
 
@@ -2504,13 +2541,13 @@ mod tests {
         let tlv = &list.non_hmac_tlvs()[0];
         assert_eq!(tlv.value.len(), 20, "sender-advertised length is preserved");
         assert!(tlv.value.iter().all(|&b| b == 0), "value left as received");
-        assert!(tlv.flags.conformant_reflected, "C flag set (-13)");
-        assert!(!tlv.is_unrecognized(), "U flag must NOT be set under -13");
+        assert!(tlv.flags.conformant_reflected, "C flag set");
+        assert!(!tlv.is_unrecognized(), "U flag must NOT be set");
     }
 
     #[test]
     fn test_reflected_fixed_hdr_length_mismatch_sets_c_flag() {
-        // -11 §5.2 case (a): the sender-advertised Length does not match the
+        // ext-hdr-15 §6.1 case (a): the sender-advertised Length does not match the
         // captured header size (20-byte request but the packet is IPv6 with a
         // 40-byte fixed header) → C flag, value left as received.
         use crate::tlv::ReflectedFixedHdrTlv;
@@ -2543,7 +2580,7 @@ mod tests {
 
     #[test]
     fn test_reflected_fixed_hdr_selector_match_populates() {
-        // -13 §5.2: a non-zero Requested field that matches the captured IP
+        // ext-hdr-15 §6.1: a non-zero Requested field that matches the captured IP
         // header's first 4 octets → copy Reflected = captured[4..]. Here the
         // selector equals captured[..4], so the whole header is conveyed.
         use crate::tlv::ReflectedFixedHdrTlv;
@@ -2572,7 +2609,7 @@ mod tests {
 
     #[test]
     fn test_reflected_fixed_hdr_selector_mismatch_sets_c_flag() {
-        // -11 §5.2 case (c): length matches but the Requested field does NOT
+        // ext-hdr-15 §6.1 case (c): length matches but the Requested field does NOT
         // match the captured header → C flag, value (incl. Requested) preserved.
         use crate::tlv::ReflectedFixedHdrTlv;
         let mut captured = vec![0u8; 40];
@@ -2603,7 +2640,7 @@ mod tests {
 
     #[test]
     fn test_reflected_headers_out_of_order_sets_c_flag_no_copy() {
-        // draft-ietf-ippm-stamp-ext-hdr-13 §3.4: Reflected Fixed Header Data
+        // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: Reflected Fixed Header Data
         // (247) TLVs MUST precede Reflected IPv6 Extension Header Data (246)
         // TLVs. "If ... TLVs are not received in this order, the Session-
         // Reflector MUST return these TLVs with the C flag ... set to 1 ...
@@ -2667,7 +2704,7 @@ mod tests {
 
     #[test]
     fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
-        // -13 §5.1: Requested(8) preserved, Reflected = captured[8..].
+        // ext-hdr-15 §4.1: Requested(8) preserved, Reflected = captured[8..].
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
         let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
 
@@ -2687,7 +2724,7 @@ mod tests {
 
     #[test]
     fn test_reflected_ipv6_ext_hdr_empty_capture_sets_c_flag() {
-        // -11 §5.1: IPv4 path or IPv6 without ext headers — no header to
+        // ext-hdr-15 §4.1: IPv4 path or IPv6 without ext headers — no header to
         // reflect, so the reflector "could not use it for reflecting any IPv6
         // extension header received" → C flag.
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
@@ -2697,11 +2734,8 @@ mod tests {
 
         let tlv = &list.non_hmac_tlvs()[0];
         assert_eq!(tlv.value.len(), 8, "advertised capacity preserved");
-        assert!(
-            tlv.flags.conformant_reflected,
-            "no ext headers → C flag (-13)"
-        );
-        assert!(!tlv.is_unrecognized(), "U flag must NOT be set under -13");
+        assert!(tlv.flags.conformant_reflected, "no ext headers → C flag");
+        assert!(!tlv.is_unrecognized(), "U flag must NOT be set");
     }
 
     #[test]
@@ -2713,10 +2747,7 @@ mod tests {
 
         let tlv = &list.non_hmac_tlvs()[0];
         assert_eq!(tlv.value.len(), 8, "advertised capacity preserved");
-        assert!(
-            tlv.flags.conformant_reflected,
-            "None capture → C flag (-13)"
-        );
+        assert!(tlv.flags.conformant_reflected, "None capture → C flag");
         assert!(!tlv.is_unrecognized());
     }
 
@@ -2739,7 +2770,7 @@ mod tests {
     #[test]
     fn test_reflected_ipv6_ext_hdr_length_smaller_than_record_sets_c_flag() {
         // A request Length (4) smaller than the minimum ext-header record
-        // (8 octets) can never length-match → C flag. (No truncation under -13.)
+        // (8 octets) can never length-match → C flag. (Values are never truncated.)
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
         let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(4).to_raw());
 
@@ -2753,7 +2784,7 @@ mod tests {
 
     #[test]
     fn test_reflected_ipv6_ext_hdr_selector_matches_specific_header() {
-        // -11 §5.1 disambiguation: two extension headers of the SAME length
+        // ext-hdr-15 §4.1 disambiguation: two extension headers of the SAME length
         // (both 8 bytes), differing only in body. A non-zero Requested field
         // must pick the matching one. Here the selector equals rec_b's first 8
         // on-wire octets, so the whole rec_b (Requested + Reflected) is conveyed.
@@ -2814,7 +2845,7 @@ mod tests {
             tlv.flags.conformant_reflected,
             "no Requested match → C flag"
         );
-        assert!(!tlv.is_unrecognized(), "U flag must NOT be set under -13");
+        assert!(!tlv.is_unrecognized(), "U flag must NOT be set");
     }
 
     #[test]
@@ -2866,7 +2897,7 @@ mod tests {
         assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
     }
 
-    // --- draft-ietf-ippm-stamp-ext-hdr-13 semantics ---
+    // --- draft-ietf-ippm-stamp-ext-hdr-15 semantics ---
     // Type 246 has Requested(8); Type 247 retains Requested(4). The selector
     // is preserved, and only the corresponding header tail is reflected. Failure is
     // signalled with the C flag (Conformance), NOT the U flag, and the value
@@ -2904,11 +2935,8 @@ mod tests {
         list.process_reflected_headers(None, None);
 
         let tlv = &list.non_hmac_tlvs()[0];
-        assert!(
-            tlv.flags.conformant_reflected,
-            "None capture → C flag (-13)"
-        );
-        assert!(!tlv.is_unrecognized(), "must NOT set the U flag under -13");
+        assert!(tlv.flags.conformant_reflected, "None capture → C flag");
+        assert!(!tlv.is_unrecognized(), "must NOT set the U flag");
         assert!(tlv.value.iter().all(|&b| b == 0), "value left as received");
     }
 
@@ -2921,10 +2949,7 @@ mod tests {
         list.process_reflected_headers(Some(&ipv6_header), Some(&[]));
 
         let tlv = &list.non_hmac_tlvs()[0];
-        assert!(
-            tlv.flags.conformant_reflected,
-            "length mismatch → C flag (-13)"
-        );
+        assert!(tlv.flags.conformant_reflected, "length mismatch → C flag");
         assert!(!tlv.is_unrecognized());
         assert_eq!(tlv.value.len(), 20, "advertised length preserved");
         assert!(tlv.value.iter().all(|&b| b == 0), "value left as received");
@@ -2991,7 +3016,7 @@ mod tests {
             tlv.flags.conformant_reflected,
             "no Requested match → C flag"
         );
-        assert!(!tlv.is_unrecognized(), "must NOT set U flag under -13");
+        assert!(!tlv.is_unrecognized(), "must NOT set U flag");
         assert_eq!(
             &tlv.value[..8],
             &[0x3C, 0x00, 0xFF, 0xFF, 0, 0, 0, 0],
@@ -3007,10 +3032,7 @@ mod tests {
         list.process_reflected_headers(None, None);
 
         let tlv = &list.non_hmac_tlvs()[0];
-        assert!(
-            tlv.flags.conformant_reflected,
-            "None capture → C flag (-13)"
-        );
+        assert!(tlv.flags.conformant_reflected, "None capture → C flag");
         assert!(!tlv.is_unrecognized());
     }
 
@@ -3018,24 +3040,21 @@ mod tests {
     fn test_v13_ext_hdr_empty_capture_sets_c_flag() {
         // A Reflected IPv6 Ext Hdr TLV but no ext headers received (IPv4 path or
         // IPv6 without options): the reflector "could not use it for reflecting
-        // any IPv6 extension header received" → C flag (-11 §5.1).
+        // any IPv6 extension header received" → C flag (ext-hdr-15 §4.1).
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
         let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
 
         list.process_reflected_headers(Some(&[0x45]), Some(&[]));
 
         let tlv = &list.non_hmac_tlvs()[0];
-        assert!(
-            tlv.flags.conformant_reflected,
-            "no ext headers → C flag (-13)"
-        );
+        assert!(tlv.flags.conformant_reflected, "no ext headers → C flag");
         assert!(!tlv.is_unrecognized());
     }
 
     #[test]
     fn test_v13_ext_hdr_zero_selector_first_fit_skips_length_mismatch() {
         // An 8-byte request must match the second captured header in
-        // [16-byte HBH, 8-byte DestOpts] (draft -11 §5.1).
+        // [16-byte HBH, 8-byte DestOpts] (draft ext-hdr-15 §4.1).
         // Selection uses matching length, not the TLV's position alone.
         use crate::tlv::ReflectedIpv6ExtHdrTlv;
         // 16-byte HBH record: NextHeader=0x3C, HdrExtLen=1 → (1+1)*8 = 16 bytes.

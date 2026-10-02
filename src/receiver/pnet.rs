@@ -90,7 +90,7 @@ struct CaptureConfig {
     cos_policy: crate::cos_policy::CosAdmissionPolicy,
     local_addresses: Vec<IpAddr>,
     /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
-    /// Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
+    /// Address Group sub-TLV matching (RFC 10052
     /// §3.1.1).
     local_macs: Vec<[u8; 6]>,
     /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
@@ -102,7 +102,7 @@ struct CaptureConfig {
     /// runtime-adjustable via the control plane).
     rate_limiter: Arc<super::RateLimiter>,
     /// Runtime-adjustable reflector caps (Reflected Test Packet Control
-    /// TLV limits, draft-ietf-ippm-asymmetrical-pkts-14 §3).
+    /// TLV limits, RFC 10052 §3).
     caps: Arc<super::RuntimeCaps>,
 }
 
@@ -306,7 +306,7 @@ pub async fn run_receiver(
     let local_addresses = super::build_local_addresses(conf.local_addr);
 
     // Build local MAC addresses for the Reflected Test Packet Control TLV's
-    // L2 Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
+    // L2 Address Group sub-TLV matching (RFC 10052
     // §3.1.1). Unlike `local_addresses`, this always enumerates every
     // interface's hardware address regardless of the bind address.
     let local_macs = super::build_local_macs();
@@ -722,7 +722,7 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
 
 /// Walks IPv6 extension headers after the 40-byte fixed header.
 /// Returns concatenated wire bytes, the final Next Header protocol, and the
-/// upper-layer payload offset (draft-ietf-ippm-stamp-ext-hdr-13 §3.1/§5.1).
+/// upper-layer payload offset (draft-ietf-ippm-stamp-ext-hdr-15 §3.1/§4.1).
 ///
 /// Captures Hop-by-Hop (0), Routing (43, including SRH), Fragment (44), and
 /// Destination Options (60). HBH/Routing/DestOpts lengths are `(HdrExtLen + 1) * 8`;
@@ -873,6 +873,9 @@ fn handle_stamp_packet(
     let response_opt = {
         let keys_guard = config.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
         let ctx = ProcessingContext {
+            // Capture runs on one interface; only Linux can pin replies to it.
+            ingress_ifindex: (cfg!(target_os = "linux") && config.interface_index != 0)
+                .then_some(config.interface_index),
             packet_local_addr: Some(crate::net_scope::received_endpoint(
                 pkt.dst_addr,
                 config.local_port,
@@ -918,6 +921,14 @@ fn handle_stamp_packet(
             reflected_control_min_interval_ns: config
                 .caps
                 .reflected_control_min_interval_ns
+                .load(AtomicOrdering::Relaxed),
+            reflected_control_max_rate: config
+                .caps
+                .reflected_control_max_rate
+                .load(AtomicOrdering::Relaxed),
+            reflected_control_max_volume: config
+                .caps
+                .reflected_control_max_volume
                 .load(AtomicOrdering::Relaxed),
             rx_timestamp: None,
             rx_method: crate::tlv::TimestampMethod::SwLocal,
@@ -1343,7 +1354,7 @@ mod tests {
 
     use clap::Parser;
 
-    /// draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§5.1: captured extension headers
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§4.1: captured extension headers
     /// must be stored verbatim as on the wire — byte 0 is the header's OWN Next
     /// Header field (naming what follows), NOT the header's own type (which is
     /// carried in the preceding Next Header pointer). This is what the
@@ -1375,7 +1386,7 @@ mod tests {
         assert_eq!(payload_offset, 48, "40-byte fixed + 8-byte HBH");
     }
 
-    /// draft-ietf-ippm-stamp-ext-hdr-13 §3.2 rule 2 / §3.2's example list:
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2 rule 2 / §4.2's example list:
     /// the walk must traverse and capture a Routing Header (type 43, incl. the
     /// Segment Routing Header / routing type 4) in the chain, in order, and
     /// continue to the upper layer.

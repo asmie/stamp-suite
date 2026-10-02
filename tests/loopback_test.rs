@@ -546,6 +546,7 @@ fn test_location_tlv_ipv4_round_trip() {
     };
 
     let ctx = ProcessingContext {
+        ingress_ifindex: None,
         packet_local_addr: None,
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
@@ -579,6 +580,8 @@ fn test_location_tlv_ipv4_round_trip() {
         reflected_control_max_count: 16,
         reflected_control_max_size: 1500,
         reflected_control_min_interval_ns: 1_000,
+        reflected_control_max_rate: stamp_suite::receiver::REFLECTED_CONTROL_MAX_RATE,
+        reflected_control_max_volume: stamp_suite::receiver::REFLECTED_CONTROL_MAX_VOLUME,
         rx_timestamp: None,
         rx_method: TimestampMethod::SwLocal,
         last_reflection_method: TimestampMethod::SwLocal,

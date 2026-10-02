@@ -106,13 +106,16 @@ fields):
   "max_sessions": 65536,
   "reflected_control_max_count": 0,
   "reflected_control_max_size": 1500,
-  "reflected_control_min_interval_ns": 1000
+  "reflected_control_min_interval_ns": 1000,
+  "reflected_control_max_rate": 12500000,
+  "reflected_control_max_volume": 1500000
 }
 ```
 
 Zero disables rate limiting (`max_pps`) or the session cap (`max_sessions`).
-A zero `reflected_control_max_count` disables requested burst/size control;
-it does not permit unlimited copies. `rate_burst = 0` uses the current rate as the bucket capacity. Size and interval
+A zero `reflected_control_max_count` disables Type 12; it does not permit
+unlimited copies. `reflected_control_max_rate` (bytes per second) and
+`reflected_control_max_volume` (bytes) limit what one request can generate. `rate_burst = 0` uses the current rate as the bucket capacity. Size and interval
 fields are unsigned limits; PATCH does not validate cross-field combinations.
 
 ### Runtime behavior

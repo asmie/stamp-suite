@@ -1,7 +1,7 @@
 //! Reflected IPv6 Extension Header Data TLV (Type 246) per
-//! draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 5.1.
+//! draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 4.1.
 //!
-//! # Wire Format (-13 Figure 6)
+//! # Wire Format (ext-hdr-15 Figure 2)
 //!
 //! ```text
 //!  0                   1                   2                   3
@@ -45,7 +45,7 @@ pub struct ReflectedIpv6ExtHdrTlv {
 impl ReflectedIpv6ExtHdrTlv {
     /// Creates a sender request TLV with `bytes` zero octets of Value.
     ///
-    /// Per draft-ietf-ippm-stamp-ext-hdr-13 §5.1 the sender sets the Length to
+    /// Per draft-ietf-ippm-stamp-ext-hdr-15 §4.1 the sender sets the Length to
     /// the target IPv6 extension-header size (from its Next Header field
     /// onward). The first 8 octets are the all-zeros Requested field and the
     /// remaining `bytes - 8` octets are the zero-initialised Reflected field.
@@ -57,7 +57,7 @@ impl ReflectedIpv6ExtHdrTlv {
     }
 
     /// Creates a request with up to eight selector bytes and a zeroed tail
-    /// (draft-ietf-ippm-stamp-ext-hdr-13 §5.1). Allocates at least eight bytes.
+    /// (draft-ietf-ippm-stamp-ext-hdr-15 §4.1). Allocates at least eight bytes.
     /// The selector matches the target header's wire prefix, including its
     /// Next Header byte. Longer prefixes are truncated; the CLI rejects them.
     #[must_use]

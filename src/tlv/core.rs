@@ -50,7 +50,7 @@ pub const RETURN_PATH_CONTROL_CODE_SIZE: usize = 4;
 pub const MICRO_SESSION_ID_TLV_VALUE_SIZE: usize = 4;
 
 /// Minimum Reflected Test Packet Control value length
-/// (draft-ietf-ippm-asymmetrical-pkts-14 §3): eight fixed bytes
+/// (RFC 10052 §3): eight fixed bytes
 /// (length u16, count u16, interval u32) plus at least one four-byte sub-TLV header.
 pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 12;
 
@@ -163,7 +163,7 @@ pub enum TlvError {
 /// +-+-+-+-+-+-+-+-+
 /// ```
 ///
-/// Bit 3 (C) is defined by draft-ietf-ippm-asymmetrical-pkts §3 as the
+/// Bit 3 (C) is defined by RFC 10052 §3 as the
 /// Conformant-Reflected-Packet flag used with the Reflected Test Packet
 /// Control TLV (Type 12). It MUST be 0 in all other contexts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -174,7 +174,7 @@ pub struct TlvFlags {
     pub malformed: bool,
     /// Integrity check failed (bit 2, set when HMAC verification fails).
     pub integrity_failed: bool,
-    /// Conformant Reflected Packet (bit 3, draft-ietf-ippm-asymmetrical-pkts §3):
+    /// Conformant Reflected Packet (bit 3, RFC 10052 §3):
     /// reflector sets to 1 if it could not honour a Reflected Test Packet
     /// Control TLV's request (MTU, rate/volume cap, or other local policy).
     pub conformant_reflected: bool,
@@ -279,7 +279,7 @@ pub enum TlvType {
     ReturnPath = 10,
     /// Micro-session ID TLV (11) - RFC 9534 §3.1.
     MicroSessionId = 11,
-    /// Reflected Test Packet Control TLV (12) - draft-ietf-ippm-asymmetrical-pkts §3.
+    /// Reflected Test Packet Control TLV (12) - RFC 10052 §3.
     ReflectedControl = 12,
     /// BER Bit Pattern in Padding TLV (240) - draft-gandhi-ippm-stamp-ber-07 §5.1.
     /// Experimental-range codepoint stand-in; see `experimental::BER_PATTERN_TLV_TYPE`
@@ -295,14 +295,14 @@ pub enum TlvType {
     /// `experimental::BER_MAX_BURST_TLV_TYPE` — single edit point for renumbering.
     BerBurst = BER_MAX_BURST_TLV_TYPE,
     /// Reflected IPv6 Extension Header Data TLV (246) -
-    /// draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 5.1. Reflects received
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 4.1. Reflects received
     /// Hop-by-Hop and Destination Options extension headers; requires
     /// raw-capture backend. Experimental-range codepoint stand-in (IANA
     /// TBA1); see `experimental::REFLECTED_IPV6_EXT_HDR_TLV_TYPE` — single
     /// edit point for renumbering.
     ReflectedIpv6ExtHdr = REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
     /// Reflected Fixed Header Data TLV (247) -
-    /// draft-ietf-ippm-stamp-ext-hdr-13 §§3.3, 5.2. Reflects the raw IPv4/IPv6
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §§6.2, 6.1. Reflects the raw IPv4/IPv6
     /// fixed header (20/40 bytes); requires raw-capture backend.
     /// Experimental-range codepoint stand-in (IANA TBA2); see
     /// `experimental::REFLECTED_FIXED_HDR_TLV_TYPE` — single edit point for
@@ -619,7 +619,7 @@ impl RawTlv {
     }
 
     /// Sets the conformant_reflected flag (C-flag) per
-    /// draft-ietf-ippm-asymmetrical-pkts §3. Only meaningful on the
+    /// RFC 10052 §3. Only meaningful on the
     /// Reflected Test Packet Control TLV (Type 12).
     pub fn set_conformant_reflected(&mut self) {
         self.flags.conformant_reflected = true;
@@ -628,7 +628,7 @@ impl RawTlv {
     /// Clears the U, M, and I flags so the reflector can re-derive them
     /// per RFC 8972 §4, and drops the C flag — the Session-Reflector
     /// MUST ignore the received C value and derive its own
-    /// (draft-ietf-ippm-asymmetrical-pkts-14 §3). Reserved bits and the
+    /// (RFC 10052 §3). Reserved bits and the
     /// `parser_marked_malformed` marker (used to re-set M for parser-detected
     /// structural errors) are preserved.
     pub fn clear_reflector_flags(&mut self) {
@@ -692,7 +692,7 @@ mod tests {
         };
         assert_eq!(flags.to_byte(), 0xE0);
 
-        // C flag alone (draft-ietf-ippm-asymmetrical-pkts §3)
+        // C flag alone (RFC 10052 §3)
         let flags = TlvFlags {
             conformant_reflected: true,
             ..Default::default()
@@ -873,7 +873,7 @@ mod tests {
             RawTlv::with_flags(TlvFlags::from_byte(0xF0), TlvType::ReflectedControl, vec![]);
         tlv.clear_reflector_flags();
         // U/M/I cleared. C is reflector-owned output: draft-ietf-ippm-
-        // asymmetrical-pkts-14 §3 says the incoming value MUST be ignored,
+        // RFC 10052 §3 says the incoming value MUST be ignored,
         // so the clear pass drops it and processing re-derives it.
         assert_eq!(tlv.flags.to_byte(), 0x00);
     }

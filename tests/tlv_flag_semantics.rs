@@ -41,6 +41,7 @@ fn src() -> SocketAddr {
 
 fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
     ProcessingContext {
+        ingress_ifindex: None,
         packet_local_addr: None,
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
@@ -74,6 +75,8 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         reflected_control_max_count: 16,
         reflected_control_max_size: 1500,
         reflected_control_min_interval_ns: 1_000,
+        reflected_control_max_rate: stamp_suite::receiver::REFLECTED_CONTROL_MAX_RATE,
+        reflected_control_max_volume: stamp_suite::receiver::REFLECTED_CONTROL_MAX_VOLUME,
         rx_timestamp: None,
         rx_method: stamp_suite::tlv::TimestampMethod::SwLocal,
         last_reflection_method: stamp_suite::tlv::TimestampMethod::SwLocal,
@@ -115,7 +118,7 @@ fn tlv_to_chain(tlv: &RawTlv) -> Vec<u8> {
 
 #[test]
 fn tlv_flags_wire_bit_positions() {
-    // RFC 8972 §3 + draft-ietf-ippm-asymmetrical-pkts §3.
+    // RFC 8972 §3 + RFC 10052 §3.
     // U=bit0=0x80, M=bit1=0x40, I=bit2=0x20, C=bit3=0x10.
     assert_eq!(
         TlvFlags {
@@ -695,7 +698,7 @@ fn reflected_control_disabled_by_default_emits_no_extra_copies() {
         "disabled reflector must emit no extra reply packets"
     );
 
-    // C flag set on the echoed Type 12 TLV (request not honoured).
+    // A disabled reflector acts as one without Type 12 support: U, not C.
     let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..])
         .expect("response TLV chain must be parseable");
     let echoed = parsed
@@ -704,14 +707,14 @@ fn reflected_control_disabled_by_default_emits_no_extra_copies() {
         .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
         .expect("Reflected Control TLV must be echoed");
     assert_eq!(
-        echoed.flags.to_byte() & 0x10,
-        0x10,
-        "C flag must be set when the reflector cannot honour the request"
+        echoed.flags.to_byte() & 0x90,
+        0x80,
+        "disabled Type 12 must be flagged U, not C"
     );
 }
 
 // ---------------------------------------------------------------------------
-// draft-ietf-ippm-asymmetrical-pkts-14 §3 processing rules.
+// RFC 10052 §3 processing rules.
 
 /// Builds the 12-octet Type 12 value: length | count | interval plus the
 /// 4-byte placeholder sub-TLV header that pads to the mandatory 12-octet
@@ -726,7 +729,7 @@ fn reflected_control_value(length: u16, count: u16, interval_ns: u32) -> Vec<u8>
 }
 
 /// Builds a Type 12 value with `n` IPv6 Extension Header Control sub-TLVs
-/// (draft-ietf-ippm-stamp-ext-hdr-13 §5.3) appended after the fixed fields:
+/// (draft-ietf-ippm-stamp-ext-hdr-15 §5.1) appended after the fixed fields:
 /// each is flags=0, type=240 (experimental stand-in for TBA3), length=0.
 fn reflected_control_value_with_ext_hdr_controls(
     length: u16,
@@ -758,7 +761,7 @@ fn echoed_reflected_control_value(response_data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn reflected_control_single_ext_hdr_control_sets_c_on_subtlv() {
-    // draft-ietf-ippm-stamp-ext-hdr-13 §5.3 rule 4: a single IPv6 Extension
+    // draft-ietf-ippm-stamp-ext-hdr-15 §5.1 rule 4: a single IPv6 Extension
     // Header Control sub-TLV asks the reflector to ADD matching IPv6 extension
     // headers to its OWN reply. Neither backend can, so the C flag MUST be set
     // in the sub-TLV's Sub-TLV Flags (not on the parent Type 12 TLV flags).
@@ -806,7 +809,7 @@ fn reflected_control_single_ext_hdr_control_sets_c_on_subtlv() {
 
 #[test]
 fn reflected_control_duplicate_ext_hdr_control_sets_c_on_all_copies() {
-    // draft-ietf-ippm-stamp-ext-hdr-13 §5.3 cardinality rule: more than one
+    // draft-ietf-ippm-stamp-ext-hdr-15 §5.1 cardinality rule: more than one
     // IPv6 Extension Header Control sub-TLV is a violation; the C flag MUST be
     // set in the Sub-TLV Flags of EVERY offending copy.
     let raw = RawTlv::new(
@@ -1114,7 +1117,7 @@ fn reflected_control_length_padding_disabled_by_default() {
         response.data.len()
     );
 
-    // C flag set on the echoed Type 12 TLV (length request not honoured).
+    // A disabled reflector acts as one without Type 12 support: U, not C.
     let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..])
         .expect("response TLV chain must be parseable");
     let echoed = parsed
@@ -1123,9 +1126,9 @@ fn reflected_control_length_padding_disabled_by_default() {
         .find(|t| matches!(t.tlv_type, TlvType::ReflectedControl))
         .expect("Reflected Control TLV must be echoed");
     assert_eq!(
-        echoed.flags.to_byte() & 0x10,
-        0x10,
-        "C flag must be set when length padding is refused"
+        echoed.flags.to_byte() & 0x90,
+        0x80,
+        "disabled Type 12 must be flagged U, not C"
     );
 }
 
@@ -1154,6 +1157,56 @@ fn reflected_control_length_padding_honoured_when_enabled() {
         512,
         "reply must be padded up to the requested length when enabled"
     );
+}
+
+/// RFC 10052 §3: a request whose bytes per second or total bytes exceed the
+/// reflector's limits gets one reply, padded as requested, with C set.
+#[test]
+fn reflected_control_rate_and_volume_limits_set_c() {
+    let request = |count: u16, interval_ns: u32| {
+        let mut value = Vec::with_capacity(12);
+        value.extend_from_slice(&500u16.to_be_bytes());
+        value.extend_from_slice(&count.to_be_bytes());
+        value.extend_from_slice(&interval_ns.to_be_bytes());
+        value.extend_from_slice(&[0u8; 4]);
+        build_unauth_packet(&tlv_to_chain(&RawTlv::new(
+            TlvType::ReflectedControl,
+            value,
+        )))
+    };
+    let c_flag = |response: &stamp_suite::receiver::StampResponse| {
+        let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).unwrap();
+        let echoed = parsed
+            .non_hmac_tlvs()
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ReflectedControl)
+            .unwrap();
+        echoed.flags.to_byte() & 0x10 != 0
+    };
+    let mut ctx = make_ctx(None);
+    ctx.reflected_control_max_count = 16;
+    ctx.reflected_control_max_rate = 1_000_000; // 1 MB/s
+    ctx.reflected_control_max_volume = 4_000; // 8 replies of 500 bytes
+
+    // 4 x 500 bytes every 1 ms: 500 kB/s and 2000 bytes, within both limits.
+    let ok = process_stamp_packet(&request(4, 1_000_000), src(), 64, false, &ctx).unwrap();
+    assert!(!c_flag(&ok));
+    assert_eq!(ok.reflected_control.unwrap().extra_copies, 3);
+
+    // Every 100 µs: 5 MB/s exceeds the rate limit.
+    let fast = process_stamp_packet(&request(4, 100_000), src(), 64, false, &ctx).unwrap();
+    assert!(c_flag(&fast));
+    assert_eq!(fast.reflected_control.unwrap().extra_copies, 0);
+    assert_eq!(
+        fast.data.len(),
+        500,
+        "the single reply keeps the requested length"
+    );
+
+    // 9 x 500 bytes exceeds the volume limit.
+    let big = process_stamp_packet(&request(9, 1_000_000), src(), 64, false, &ctx).unwrap();
+    assert!(c_flag(&big));
+    assert_eq!(big.reflected_control.unwrap().extra_copies, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1297,7 +1350,7 @@ fn a1_reflected_control_length_padding_within_cap() {
 }
 
 /// Reserve 20 bytes for the reflector's HMAC TLV when sizing padding
-/// (draft-ietf-ippm-asymmetrical-pkts-14 §3, RFC 8972 §4.8), including when
+/// (RFC 10052 §3, RFC 8972 §4.8), including when
 /// the request has no HMAC TLV.
 #[test]
 fn a1_reflected_control_length_target_accounts_for_reflector_added_hmac() {
@@ -1414,7 +1467,7 @@ fn a1_reflected_control_l3_mismatch_suppresses_reply() {
     assert!(
         matches!(response.return_path_action, ReturnPathAction::SuppressReply),
         "L3 sub-TLV mismatch must cause the reflector to suppress the reply \
-         per draft-ietf-ippm-asymmetrical-pkts §3"
+         per RFC 10052 §3"
     );
 }
 
@@ -1441,7 +1494,7 @@ fn reflected_control_value_with_sub_tlv(sub_tlv: &[u8]) -> Vec<u8> {
 }
 
 /// L2 Address Group sub-TLV present but no local MAC matches → packet
-/// processing stops per draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1 ("MUST
+/// processing stops per RFC 10052 §3.1.1 ("MUST
 /// stop processing the received packet"). `make_ctx`'s `local_macs` is
 /// empty, so no match is possible.
 #[test]
@@ -1470,7 +1523,7 @@ fn a1_reflected_control_l2_mismatch_suppresses_reply() {
     assert!(
         matches!(response.return_path_action, ReturnPathAction::SuppressReply),
         "L2 sub-TLV mismatch must cause the reflector to suppress the reply \
-         per draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1"
+         per RFC 10052 §3.1.1"
     );
 }
 
@@ -1699,7 +1752,7 @@ fn a1_reflected_control_l2_matches_l3_fails_still_suppresses() {
 }
 
 // ---------------------------------------------------------------------------
-// draft-ietf-ippm-stamp-ext-hdr-13 §5.1 Requested-field selector — end to end
+// draft-ietf-ippm-stamp-ext-hdr-15 §4.1 Requested-field selector — end to end
 // (sender-built request TLV → reflector match against captured headers).
 
 #[test]
@@ -1774,7 +1827,7 @@ fn reflected_ipv6_ext_hdr_selector_no_match_sets_c_flag_end_to_end() {
     assert_eq!(
         echoed.flags.to_byte() & 0x10,
         0x10,
-        "Requested field matching no captured header → C flag per -11 §5.1"
+        "Requested field matching no captured header → C flag per ext-hdr-15 §4.1"
     );
     assert_eq!(
         echoed.flags.to_byte() & 0x80,

@@ -96,7 +96,7 @@ layouts. Draft rows apply to the pinned revision.
 | [RFC 8762 §§4.2–4.4](https://www.rfc-editor.org/rfc/rfc8762.html#section-4.2) | 44/112-byte bases, sequence/echo, timestamp Z bit, truncated base HMAC over the first 96 authenticated bytes |
 | [RFC 8972 §§4.4–4.8](https://www.rfc-editor.org/rfc/rfc8972.html#section-4.4) | CoS, DM, Follow-Up and HMAC TLV; digest covers the reflected sequence followed by preceding TLVs |
 | [RFC 9503 §§3–4](https://www.rfc-editor.org/rfc/rfc9503.html#section-3) | Destination Node Address (Type 9), Return Path (Type 10), SRv6 segment-list sub-TLV (Type 4), fallback flag |
-| [asymmetrical-pkts-14 §§3, 4.3](https://datatracker.ietf.org/doc/html/draft-ietf-ippm-asymmetrical-pkts-14#section-3) | Type-12 project code point, count/interval/minimum size and composition; no claim of a final IANA allocation |
+| [RFC 10052 §§3, 4.3](https://datatracker.ietf.org/doc/html/RFC 10052#section-3) | Type-12 project code point, count/interval/minimum size and composition; no claim of a final IANA allocation |
 
 The wire suites below assemble bytes manually and use
 [`common/wire_hmac.rs`](../tests/common/wire_hmac.rs), which calls `hmac`/`sha2`

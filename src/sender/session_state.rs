@@ -1,4 +1,4 @@
-//! Draft ext-hdr-13 §7.1 sender state notifications.
+//! Draft ext-hdr-15 §9.2 sender state notifications.
 use std::{
     collections::{HashSet, VecDeque},
     time::{Duration, Instant},

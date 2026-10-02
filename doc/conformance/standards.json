@@ -2,10 +2,13 @@
   "schema_version": 1,
   "documents": [
     {
-      "kind": "draft",
-      "name": "draft-ietf-ippm-asymmetrical-pkts",
-      "revision": "14",
-      "matrix": "doc/conformance/draft-asymmetrical-pkts.md"
+      "kind": "rfc",
+      "name": "rfc10052",
+      "expected": {
+        "status": "PROPOSED STANDARD",
+        "updated_by": [],
+        "obsoleted_by": []
+      }
     },
     {
       "kind": "draft",
@@ -16,7 +19,7 @@
     {
       "kind": "draft",
       "name": "draft-ietf-ippm-stamp-ext-hdr",
-      "revision": "13",
+      "revision": "15",
       "matrix": "doc/conformance/draft-stamp-ext-hdr.md"
     },
     {

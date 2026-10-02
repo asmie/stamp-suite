@@ -1,5 +1,5 @@
 //! Reflected Test Packet Control TLV (Type 12)
-//! per draft-ietf-ippm-asymmetrical-pkts-14 §3.
+//! per RFC 10052 §3.
 //!
 //! Lets the Session-Sender request asymmetrical reply traffic: the
 //! Session-Reflector produces `count` copies of the reply, each padded to

@@ -1,4 +1,4 @@
-//! Independent loopback peer for draft ext-hdr-13 header and state policy.
+//! Independent loopback peer for draft ext-hdr-15 header and state policy.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 use nix::libc;
 use std::{

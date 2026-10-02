@@ -112,7 +112,7 @@ impl TlvList {
     /// Removes every Extra Padding TLV and repairs any wire-order indices.
     ///
     /// Used by Reflected Test Packet Control processing: rule (a) of
-    /// draft-ietf-ippm-asymmetrical-pkts-14 §3 computes the reflected length
+    /// RFC 10052 §3 computes the reflected length
     /// "excluding any Extra Padding TLVs" so a Session-Sender can request
     /// replies *shorter* than its test packet.
     pub fn remove_extra_padding_tlvs(&mut self) {
@@ -737,7 +737,7 @@ impl TlvList {
     ///
     /// C is cleared rather than preserved because the Session-Reflector MUST
     /// ignore the received C value and derive its own
-    /// (draft-ietf-ippm-asymmetrical-pkts-14 §3) — see
+    /// (RFC 10052 §3) — see
     /// [`RawTlv::clear_reflector_flags`], which this delegates to.
     pub fn clear_reflector_flags(&mut self) {
         for tlv in &mut self.entries {
@@ -1189,7 +1189,7 @@ mod tests {
 
     #[test]
     fn test_apply_reflector_flags_drops_incoming_c_flag() {
-        // draft-ietf-ippm-asymmetrical-pkts-14 §3: the Session-Sender MUST
+        // RFC 10052 §3: the Session-Sender MUST
         // zero the C flag on transmission and the Session-Reflector MUST
         // ignore its received value — C is reflector-owned output, re-derived
         // by Reflected Test Packet Control processing after this clear pass.

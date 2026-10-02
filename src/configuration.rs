@@ -406,7 +406,7 @@ pub struct Configuration {
     /// Suppress duplicated packets without a handled Type-12 request.
     ///
     /// Non-monotonic Type-12 requests always receive a single U-flagged reply
-    /// after validation (draft-ietf-ippm-asymmetrical-pkts-14 §5), even with this
+    /// after validation (RFC 10052 §5), even with this
     /// flag set. Detection and counting are always active. Off by default:
     /// restarting a sender can repeat sequence numbers without an attack.
     ///
@@ -496,7 +496,7 @@ pub struct Configuration {
     #[clap(long, default_value_t = 50)]
     pub ecn_recovery_step: u32,
 
-    /// Outgoing TTL / Hop Limit. Draft ext-hdr-13 requires 255 (the default).
+    /// Outgoing TTL / Hop Limit. Draft ext-hdr-15 requires 255 (the default).
     #[clap(long, value_parser = clap::value_parser!(u8).range(255..=255))]
     pub ttl: Option<u8>,
 
@@ -760,7 +760,7 @@ pub struct Configuration {
     #[clap(long)]
     pub ber_packet_threshold: Option<f64>,
 
-    /// Request asymmetrical reply traffic (draft-ietf-ippm-asymmetrical-pkts §3).
+    /// Request asymmetrical reply traffic (RFC 10052 §3).
     /// The sender includes a Reflected Test Packet Control TLV (Type 12) asking
     /// the reflector to emit N copies of the reply. Setting this to a value
     /// greater than 1 activates the TLV.
@@ -783,7 +783,7 @@ pub struct Configuration {
     pub reflected_control_interval_ns: u32,
 
     /// Append the IPv6 Extension Header Control sub-TLV
-    /// (draft-ietf-ippm-stamp-ext-hdr-13 §5.3) to the Reflected Test Packet
+    /// (draft-ietf-ippm-stamp-ext-hdr-15 §5.1) to the Reflected Test Packet
     /// Control TLV. Under -11 this sub-TLV asks the reflector to add matching
     /// IPv6 extension headers to its own reply packets; a reflector that cannot
     /// do so returns the sub-TLV with the C flag set in its Sub-TLV Flags.
@@ -793,17 +793,18 @@ pub struct Configuration {
     pub reflected_control_no_ext_hdr: bool,
 
     /// Maximum replies per Reflected Test Packet Control request
-    /// (draft-ietf-ippm-asymmetrical-pkts-14 §3). Requests above the cap receive
+    /// (RFC 10052 §3). Requests above the cap receive
     /// one C-flagged reply.
     ///
-    /// Default 0 disables asymmetric reflection (§5): one normal reply with C set.
+    /// Default 0 disables Type 12 (RFC 10052 §5): the TLV is treated as
+    /// unsupported and gets U in a single normal reply.
     /// Set a positive cap (e.g. 16) to enable it; pair with `--max-pps` to limit
     /// amplification.
     #[clap(long, default_value_t = 0)]
     pub reflected_control_max_count: u16,
 
     /// Reflector-side amplification cap for
-    /// draft-ietf-ippm-asymmetrical-pkts-14 §3: maximum reply packet size (in
+    /// RFC 10052 §3: maximum reply packet size (in
     /// bytes) the reflector will pad up to when honouring a Reflected Test
     /// Packet Control TLV `length` request. When the requested length exceeds
     /// the effective cap, a single reflected packet padded to it is sent with
@@ -820,14 +821,26 @@ pub struct Configuration {
     pub reflected_control_max_size: u16,
 
     /// Reflector-side amplification cap (the per-request *rate* limit of
-    /// draft-ietf-ippm-asymmetrical-pkts-14 §3): minimum inter-packet
+    /// RFC 10052 §3): minimum inter-packet
     /// interval in nanoseconds. A multi-packet request with a shorter
     /// interval gets a single reflected packet with the C flag set on the
     /// echoed TLV. Default 1000 (1 µs).
     #[clap(long, default_value_t = 1_000)]
     pub reflected_control_min_interval_ns: u32,
 
-    /// Request the received IP fixed header in Type 247 (draft ext-hdr-13 §§3.3, 5.2).
+    /// Type 12 data-rate limit per request, in bytes per second (RFC 10052 §3):
+    /// reply size × 10⁹ / interval. A request above it gets one C-flagged reply.
+    #[clap(long, default_value_t = crate::receiver::REFLECTED_CONTROL_MAX_RATE,
+           value_parser = clap::value_parser!(u64).range(1..))]
+    pub reflected_control_max_rate: u64,
+
+    /// Type 12 data-volume limit per request, in bytes (RFC 10052 §3):
+    /// reply size × count. A request above it gets one C-flagged reply.
+    #[clap(long, default_value_t = crate::receiver::REFLECTED_CONTROL_MAX_VOLUME,
+           value_parser = clap::value_parser!(u32).range(1..))]
+    pub reflected_control_max_volume: u32,
+
+    /// Request the received IP fixed header in Type 247 (draft ext-hdr-15 §§6.2, 6.1).
     /// The sender originates one IP header and permits one request. The optional hex
     /// selector is at most four bytes, zero-padded to the four-octet Requested field.
     /// Nix reflectors return C when raw headers are unavailable. Header requests
@@ -841,7 +854,7 @@ pub struct Configuration {
     )]
     pub reflected_fixed_hdr: Vec<String>,
 
-    /// Select attached IPv6 headers for Type 246 reflection (draft ext-hdr-13 §§3.2, 5.1).
+    /// Select attached IPv6 headers for Type 246 reflection (draft ext-hdr-15 §§4.2, 4.1).
     /// Repeatable `LEN[:SELECTORHEX]` values replace the automatic --attach-ext-hdr
     /// requests. LEN is a multiple of eight (8..2048); the selector is at most eight
     /// bytes, zero-padded to the eight-octet Requested field. Requests must match
@@ -857,7 +870,7 @@ pub struct Configuration {
     pub reflected_ipv6_ext_hdr: Vec<String>,
 
     /// Attach an IPv6 Hop-by-Hop (hbh) or Destination Options (dest) header and
-    /// request its reflection (draft ext-hdr-13 §3.2). Linux/IPv6 only. At most one
+    /// request its reflection (draft ext-hdr-15 §4.2). Linux/IPv6 only. At most one
     /// of each kind, in hbh then dest order. Optional HEX supplies the entire header
     /// whose size must match Hdr Ext Len; byte 0 (Next Header) is kernel-assigned.
     /// Default: an eight-byte PadN header. Attachment failure aborts startup.
@@ -865,14 +878,14 @@ pub struct Configuration {
     #[clap(long, value_name = "KIND[:HEX]", action = clap::ArgAction::Append)]
     pub attach_ext_hdr: Vec<String>,
 
-    /// Type 246 eight-octet Requested selector (draft ext-hdr-13 §5.1), e.g.
+    /// Type 246 eight-octet Requested selector (draft ext-hdr-15 §4.1), e.g.
     /// 1100010400000000. The header's Next Header byte comes first; up to eight
     /// hex-decoded bytes are zero-padded. Requires one --reflected-ipv6-ext-hdr
     /// and a matching attached header. At least one byte must be nonzero.
     #[clap(long, value_name = "HEX")]
     pub reflected_ipv6_ext_hdr_selector: Option<String>,
 
-    /// Type 247 four-octet Requested selector (draft ext-hdr-13 §5.2). Up to four
+    /// Type 247 four-octet Requested selector (draft ext-hdr-15 §6.1). Up to four
     /// hex-decoded bytes, zero-padded; at least one must be nonzero. Requires one
     /// --reflected-fixed-hdr without an inline selector.
     #[clap(long, value_name = "HEX")]
@@ -881,7 +894,7 @@ pub struct Configuration {
 
 impl Configuration {
     /// Returns a warning if `--send-delay` would overlap reflected bursts
-    /// (draft-ietf-ippm-asymmetrical-pkts-14 §5), otherwise `None`.
+    /// (RFC 10052 §5), otherwise `None`.
     ///
     /// A burst lasts `(count - 1) * interval_ns`. Overlap is advisory and does
     /// not prevent startup.
@@ -901,7 +914,7 @@ impl Configuration {
              is expected to take (--reflected-control-count {} x \
              --reflected-control-interval-ns {}); the next test packet will be \
              sent while the reflector is still replying to the previous one \
-             (draft-ietf-ippm-asymmetrical-pkts-14 §5 SHOULD NOT). Raise \
+             (RFC 10052 §5 SHOULD NOT). Raise \
              --send-delay to at least {} ms, or lower the count/interval.",
             self.send_delay,
             burst_ns as f64 / 1_000_000.0,
@@ -1276,7 +1289,7 @@ impl Configuration {
         }
         if self.ttl.is_some_and(|ttl| ttl != 255) {
             return Err(ConfigurationError::InvalidConfiguration(
-                "ttl must be 255 for draft ext-hdr-13".to_string(),
+                "ttl must be 255 for draft ext-hdr-15".to_string(),
             ));
         }
         if let Some(id) = self.access_report {
@@ -1378,7 +1391,7 @@ impl Configuration {
                 "--control is only available in reflector mode".to_string(),
             ));
         }
-        // draft-ietf-ippm-asymmetrical-pkts-14 §4.3: a Session-Sender MUST NOT
+        // RFC 10052 §4.3: a Session-Sender MUST NOT
         // combine a "no reply requested" Return Path control code with a
         // non-zero Reflected Test Packet Control TLV. The TLV is emitted when
         // reflected_control_count > 1 or when the ext-hdr-control sub-TLV is
@@ -1389,7 +1402,7 @@ impl Configuration {
             return Err(ConfigurationError::InvalidConfiguration(
                 "return_path_cc 0 (no reply requested) cannot be combined with a \
                  Reflected Test Packet Control TLV (reflected_control_count > 1 or \
-                 reflected_control_no_ext_hdr; draft-ietf-ippm-asymmetrical-pkts-14 §4.3)"
+                 reflected_control_no_ext_hdr; RFC 10052 §4.3)"
                     .to_string(),
             ));
         }
@@ -1399,7 +1412,7 @@ impl Configuration {
             ));
         }
 
-        // draft-ietf-ippm-stamp-ext-hdr-13 §§3.2/3.3/5.1/5.2 header-reflection
+        // draft-ietf-ippm-stamp-ext-hdr-15 §§4.2/6.2/4.1/6.1 header-reflection
         // request flags (repeatable) plus the §3.1 real-header attachment flag.
         if self.session_loss_threshold == 0 {
             return Err(ConfigurationError::InvalidConfiguration(
@@ -1418,7 +1431,7 @@ impl Configuration {
     }
 
     /// Validates header-reflection requests and attachments before sending
-    /// (draft-ietf-ippm-stamp-ext-hdr-13). Uses the sender's wire-TLV parsers,
+    /// (draft-ietf-ippm-stamp-ext-hdr-15). Uses the sender's wire-TLV parsers,
     /// including those for standalone selector flags.
     fn validate_ext_hdr_flags(&self) -> Result<(), ConfigurationError> {
         let cfg_err = ConfigurationError::InvalidConfiguration;
@@ -1781,6 +1794,8 @@ impl Configuration {
         merge!(reflected_control_max_count);
         merge!(reflected_control_max_size);
         merge!(reflected_control_min_interval_ns);
+        merge!(reflected_control_max_rate);
+        merge!(reflected_control_max_volume);
         merge!(reflected_fixed_hdr);
         merge!(reflected_ipv6_ext_hdr);
         merge!(attach_ext_hdr);
@@ -1907,6 +1922,8 @@ pub struct FileConfiguration {
     pub reflected_control_max_count: Option<u16>,
     pub reflected_control_max_size: Option<u16>,
     pub reflected_control_min_interval_ns: Option<u32>,
+    pub reflected_control_max_rate: Option<u64>,
+    pub reflected_control_max_volume: Option<u32>,
     pub reflected_fixed_hdr: Option<Vec<String>>,
     pub reflected_ipv6_ext_hdr: Option<Vec<String>>,
     pub attach_ext_hdr: Option<Vec<String>>,
@@ -2022,6 +2039,8 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "reflected_control_max_count": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "reflected_control_max_size":  { "type": "integer", "minimum": 0, "maximum": 65535 },
     "reflected_control_min_interval_ns": { "type": "integer", "minimum": 0 },
+    "reflected_control_max_rate": { "type": "integer", "minimum": 1 },
+    "reflected_control_max_volume": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
     "reflected_fixed_hdr":    { "type": "array", "items": { "type": "string" } },
     "reflected_ipv6_ext_hdr": { "type": "array", "items": { "type": "string" } },
     "attach_ext_hdr":         { "type": "array", "items": { "type": "string" } },
@@ -2062,11 +2081,11 @@ pub fn resolve_log_filter(verbose: u8, env: Option<&str>) -> String {
 /// Validate before allocation to reject oversized input.
 pub const MAX_PADDING_BYTES: usize = 65_507 - 112 - 4 - 20 - 16 - 8;
 
-/// Type 246 Requested field width (draft-ietf-ippm-stamp-ext-hdr-13 §5.1).
+/// Type 246 Requested field width (draft-ietf-ippm-stamp-ext-hdr-15 §4.1).
 pub(crate) const MAX_IPV6_EXT_HDR_SELECTOR_BYTES: usize = 8;
 
 /// Decodes a hex selector string (optional `0x` prefix) into bytes for the
-/// draft-ietf-ippm-stamp-ext-hdr-13 §5.1/§5.2 Requested-field request TLVs.
+/// draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1 Requested-field request TLVs.
 /// Requires non-empty input with at least one non-zero byte — an all-zero
 /// Requested field would be indistinguishable from "no selector requested".
 pub(crate) fn decode_selector(s: &str) -> Result<Vec<u8>, String> {
@@ -2085,7 +2104,7 @@ pub(crate) fn decode_selector(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// A parsed `--reflected-ipv6-ext-hdr` occurrence
-/// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 5.1). Each occurrence becomes one
+/// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 4.1). Each occurrence becomes one
 /// Type-246 request TLV of Length `length`, with an optional inline §5.1
 /// selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2098,7 +2117,7 @@ pub struct ExtHdrRequestSpec {
 }
 
 /// A parsed `--reflected-fixed-hdr` occurrence
-/// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.3, 5.2). Each occurrence becomes one
+/// (draft-ietf-ippm-stamp-ext-hdr-15 §§6.2, 6.1). Each occurrence becomes one
 /// Type-247 request TLV (Length is the destination family's IP fixed-header
 /// size), with an optional inline §5.2 selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2117,7 +2136,7 @@ pub enum AttachExtHdrKind {
 }
 
 /// A parsed `--attach-ext-hdr` occurrence: a real IPv6 extension header the
-/// sender attaches to its own egress packets (draft-ietf-ippm-stamp-ext-hdr-13
+/// sender attaches to its own egress packets (draft-ietf-ippm-stamp-ext-hdr-15
 /// §3.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachExtHdrSpec {
@@ -2788,7 +2807,7 @@ mod tests {
 
     #[test]
     fn test_return_path_no_reply_conflicts_with_reflected_control() {
-        // draft-ietf-ippm-asymmetrical-pkts-14 §4.3: a sender MUST NOT
+        // RFC 10052 §4.3: a sender MUST NOT
         // combine a Return Path "no reply requested" control code with a
         // non-zero Reflected Test Packet Control TLV.
         let args = vec![
@@ -3253,7 +3272,7 @@ mod tests {
 
     #[test]
     fn test_reflected_control_max_count_defaults_to_zero() {
-        // draft-ietf-ippm-asymmetrical-pkts: the reflected-packet feature MUST
+        // RFC 10052: the reflected-packet feature MUST
         // be disabled by default. A zero cap means no amplification unless the
         // operator opts in via --reflected-control-max-count.
         let conf = Configuration::parse_from(["test"]);

@@ -280,11 +280,13 @@ The reflector validates and fills configured numeric IDs. Neither endpoint maps
 these IDs to physical LAG members, selects egress members, or verifies ingress
 members. See [RFC 9534 gaps](conformance/rfc9534.md).
 
-### Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts)
+### Reflected Test Packet Control TLV (RFC 10052)
 
 Type 12 requests reply count, length and interval. It is disabled by default:
-`--reflected-control-max-count 0` returns one C-flagged reply without requested
-padding. Requests exceeding count/rate limits also get one C-flagged reply,
+with `--reflected-control-max-count 0` the reflector treats the TLV as
+unsupported and sends one reply with U set. When enabled, a request that
+exceeds the count, interval, byte-rate (`--reflected-control-max-rate`) or
+byte-volume (`--reflected-control-max-volume`) limit gets one C-flagged reply
 rather than a reduced burst. L2/L3 Address Groups each require a local match;
 either mismatch drops the packet. Malformed groups are skipped.
 

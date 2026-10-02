@@ -199,6 +199,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reply without the HMAC TLV as an integrity failure.
 - Consume a stateful reflector sequence number only when the reply is sent,
   so failed sends leave no gap (RFC 8762 §4.3.1).
+- Honour RFC 9503 Control Code 0x1 (reply on the same link). On Linux the
+  reply is pinned to the arrival interface with `IP_PKTINFO`/`IPV6_PKTINFO`;
+  elsewhere, or when pinning fails, the Return Path TLV gets U. It was
+  previously treated as a normal reply.
+- Use a Return Address and an SRv6 Segment List together (RFC 9503 §4.1),
+  and act on the first segment-list sub-TLV in wire order (§4.1.3).
+- Enforce RFC 10052 per-request byte-rate and byte-volume limits on Type 12
+  bursts with `--reflected-control-max-rate` (default 12.5 MB/s) and
+  `--reflected-control-max-volume` (default 1.5 MB), also adjustable through
+  the control API. Exceeding either gives one C-flagged reply.
+- With Type 12 disabled (`--reflected-control-max-count 0`), treat the TLV as
+  unsupported and set U instead of C.
+- Zero the CoS TLV Reserved bits in replies, and mark every processed CoS TLV
+  when the requested DSCP/ECN cannot be applied (RFC 8972 §4.4,
+  cos-ecn-01 §3.1/§3.2).
+
+### Changed (standards)
+
+- draft-ietf-ippm-asymmetrical-pkts is now RFC 10052. Codepoints are
+  unchanged; citations, the conformance matrix and the standards monitor now
+  refer to the RFC.
+- Track draft-ietf-ippm-stamp-ext-hdr-15. The wire format and procedures are
+  unchanged from -13; citations use the -15 section numbers, and the matrix
+  adds the new data-plane and measurement-type provisioning requirements as
+  Partial rows.
 
 - Validate pnet startup binds/keys before privileged capture, preserve interface
   errors, and repair startup tests. Require valid authenticated pnet replies and

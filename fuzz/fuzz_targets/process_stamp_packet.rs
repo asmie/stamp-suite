@@ -18,6 +18,7 @@ fuzz_target!(|data: &[u8]| {
     // Build a context with the optional/amplifying features turned on so those
     // code paths are fuzzed too (the production defaults gate them off).
     let ctx = ProcessingContext {
+        ingress_ifindex: None,
         packet_local_addr: None,
         replay_verdict: stamp_suite::session::ReplayVerdict::New,
         clock_source: ClockFormat::NTP,
@@ -58,6 +59,8 @@ fuzz_target!(|data: &[u8]| {
         reflected_control_max_count: 16,
         reflected_control_max_size: 1500,
         reflected_control_min_interval_ns: 1_000,
+        reflected_control_max_rate: stamp_suite::receiver::REFLECTED_CONTROL_MAX_RATE,
+        reflected_control_max_volume: stamp_suite::receiver::REFLECTED_CONTROL_MAX_VOLUME,
     };
 
     // Run both the unauthenticated and authenticated assembly paths.

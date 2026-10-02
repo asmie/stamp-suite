@@ -173,7 +173,7 @@ reflector_queue_capacity = 1024
 reflector_shutdown_grace_ms = 500
 ```
 
-**Reply-size cap and the actual reply route (draft-ietf-ippm-asymmetrical-pkts-14
+**Reply-size cap and the actual reply route (RFC 10052
 §3).** `--reflected-control-max-size` is an administrative STAMP payload limit.
 On Linux, both reflector backends also query the reply's UDP route with
 `RTM_GETROUTE`, including source/destination addresses, UDP ports, DSCP and IPv6
@@ -203,7 +203,7 @@ This performs kernel route/interface lookup, not active path MTU probing; NIC
 offload, arbitrary policy rewriting and encapsulation not visible in the route
 require separate deployment validation.
 
-**Replay detection (draft-ietf-ippm-asymmetrical-pkts-14 §5).** After base
+**Replay detection (RFC 10052 §5).** After base
 validation and configured authentication, the reflector classifies each sender
 Sequence Number against its session's high-water mark and 31-entry replay
 bitmap: new, reordered, duplicated, or older than the window. Serial arithmetic

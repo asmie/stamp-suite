@@ -1,4 +1,4 @@
-//! Draft ext-hdr-13 §3.1 endpoint and outgoing-hop policy.
+//! Draft ext-hdr-15 §3.1 endpoint and outgoing-hop policy.
 use std::{
     io,
     net::{SocketAddr, UdpSocket},

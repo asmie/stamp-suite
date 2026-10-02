@@ -368,7 +368,7 @@ fn apply_egress_ip_options(
 }
 
 /// Attaches the real IPv6 extension headers requested via `--attach-ext-hdr`
-/// (draft-ietf-ippm-stamp-ext-hdr-13 §3.2) to the sender's egress socket via
+/// (draft-ietf-ippm-stamp-ext-hdr-15 §4.2) to the sender's egress socket via
 /// the sticky `IPV6_HOPOPTS` / `IPV6_DSTOPTS` socket options, so the headers
 /// ride on every subsequent test packet the kernel emits. Byte 0 (Next Header)
 /// of each buffer is assigned by the kernel; the rest is passed verbatim.
@@ -406,7 +406,7 @@ fn apply_attach_ext_hdrs(
         } else {
             log::info!(
                 "Attached {label} IPv6 extension header ({} bytes) to egress packets \
-                 (draft-ietf-ippm-stamp-ext-hdr-13 §3.2)",
+                 (draft-ietf-ippm-stamp-ext-hdr-15 §4.2)",
                 spec.bytes.len()
             );
         }
@@ -454,11 +454,11 @@ fn egress_mtu(_socket: &UdpSocket) -> Option<u32> {
 
 /// Removes Reflected Fixed/IPv6 Extension Header TLVs (Types 247/246) from
 /// `extra_tlvs` until the assembled packet fits within `mtu`
-/// (draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3: "one or more ... TLVs MUST be
+/// (draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2: "one or more ... TLVs MUST be
 /// removed to avoid violating the ... MTU limit"). `fixed_overhead` is every
 /// on-wire byte outside `extra_tlvs` (IP + attached ext headers + UDP + STAMP
 /// base + the per-packet HMAC/DM/Access TLVs). Type-246 TLVs are removed before
-/// Type-247 (they sit last in §3.4 wire order, so trimming from the tail keeps
+/// Type-247 (they sit last in ext-hdr-15 §6.3 wire order, so trimming from the tail keeps
 /// the survivors ordered). Only these two TLV types are ever removed.
 ///
 /// Returns how many TLVs were removed.
@@ -489,7 +489,7 @@ fn log_header_trim(removed: usize, mtu: usize) {
     if removed > 0 {
         log::warn!(
             "Removed {removed} Reflected Fixed/IPv6 Ext Header TLV(s) (Type 246/247) to keep the \
-             test packet within the {mtu}-byte MTU (draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3)"
+             test packet within the {mtu}-byte MTU (draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2)"
         );
     }
 }
@@ -747,7 +747,7 @@ pub async fn run_sender_with_output(
         }
     }
 
-    // draft-ietf-ippm-stamp-ext-hdr-13 §3.2: attach the real IPv6 extension
+    // draft-ietf-ippm-stamp-ext-hdr-15 §4.2: attach the real IPv6 extension
     // headers requested via --attach-ext-hdr. IPv6 destinations only, and
     // Linux only (see `apply_attach_ext_hdrs` — the sticky IPV6_HOPOPTS /
     // IPV6_DSTOPTS options are not exposed by `libc` on Darwin).
@@ -777,7 +777,7 @@ pub async fn run_sender_with_output(
             log::warn!(
                 "--attach-ext-hdr (real IPv6 extension header attachment) requires Linux; \
                  the header(s) are not attached on this platform, but the matching Type-246 \
-                 request TLV(s) are still sent (draft-ietf-ippm-stamp-ext-hdr-13 §3.2)"
+                 request TLV(s) are still sent (draft-ietf-ippm-stamp-ext-hdr-15 §4.2)"
             );
         }
     }
@@ -932,7 +932,7 @@ pub async fn run_sender_with_output(
         conf.reflected_control_count > 1 || conf.reflected_control_no_ext_hdr;
     let scale_reflected_control = ecn_response_active && reflected_control_requested;
 
-    // Warn once about overlapping bursts (asymmetrical-pkts-14 §5).
+    // Warn once about overlapping bursts (RFC 10052 §5).
     // Use stderr so the advisory is visible regardless of log filtering.
     if let Some(warning) = conf.reflected_burst_pacing_warning() {
         eprintln!("Warning: {warning}");
@@ -1060,7 +1060,7 @@ pub async fn run_sender_with_output(
         );
     }
 
-    // Build Reflected Test Packet Control TLV (draft-ietf-ippm-asymmetrical-pkts-14 §3).
+    // Build Reflected Test Packet Control TLV (RFC 10052 §3).
     // When `scale_reflected_control` is set, the TLV is instead rebuilt
     // fresh every send-loop iteration with an AIMD-scaled interval
     // (§3.4-3) — skip the static push here so it isn't emitted twice.
@@ -1145,7 +1145,7 @@ pub async fn run_sender_with_output(
     }
 
     // Reflected Fixed / IPv6 Extension Header Data TLVs
-    // (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 3.3). The value is
+    // (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 6.2). The value is
     // Requested(4) + Reflected(Length-4): sent with a zero (or selector)
     // Requested field and a zero-initialised Reflected field; the reflector
     // fills the Reflected field when it has raw-capture access to IP headers,
@@ -1162,7 +1162,7 @@ pub async fn run_sender_with_output(
         TlvHmacMode::Off => false,
     };
 
-    // draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3 MTU rule (sender half): the
+    // draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 MTU rule (sender half): the
     // resulting test packets MUST NOT exceed the IP/IPv6 MTU after adding the
     // Reflected Fixed/IPv6 Extension Header TLVs; if necessary, one or more of
     // those TLVs MUST be removed. Compare the worst-case assembled packet size
@@ -2730,9 +2730,9 @@ fn validate_reflected_tlvs(
 }
 
 /// Builds the Reflected Test Packet Control TLV
-/// (draft-ietf-ippm-asymmetrical-pkts-14 §3) when the configuration requests
+/// (RFC 10052 §3) when the configuration requests
 /// asymmetric replies (count > 1) and/or attaches an IPv6 Extension Header
-/// Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-13 §5.3). Returns `None` for
+/// Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-15 §5.1). Returns `None` for
 /// plain symmetric measurements so trivial sessions are not amplified.
 fn build_reflected_control_tlv(
     length: u16,
@@ -2787,14 +2787,14 @@ fn parse_hex_pattern(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Builds the Reflected Fixed / IPv6 Extension Header request TLVs
-/// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 3.3) for the outgoing packet,
+/// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 6.2) for the outgoing packet,
 /// honoring the optional §5.1/§5.2 Requested-field selectors. Assumes `conf`
 /// has passed `validate()` (so any selector decodes and fits); a stray decode
 /// error degrades to the zero-filled request rather than panicking.
 fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
     let mut out = Vec::new();
 
-    // draft-ietf-ippm-stamp-ext-hdr-13 §3.4: the Reflected Fixed Header Data
+    // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: the Reflected Fixed Header Data
     // (Type 247) TLVs MUST be added before the Reflected IPv6 Extension Header
     // Data (Type 246) TLVs, so emit every 247 first.
     let fixed_family_len = if conf.remote_addr.is_ipv4() {
@@ -2828,7 +2828,7 @@ fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
         );
     }
 
-    // draft-ietf-ippm-stamp-ext-hdr-13 §3.2: for every real IPv6 extension
+    // draft-ietf-ippm-stamp-ext-hdr-15 §4.2: for every real IPv6 extension
     // header the sender attaches (`--attach-ext-hdr`), emit a matching Type-246
     // request TLV so the reflector copies it back. The attached headers appear
     // on the wire before any externally-supplied ones, and each carries an
@@ -2850,7 +2850,7 @@ fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
     if !attach_specs.is_empty() {
         log::info!(
             "Attaching {} real IPv6 extension header(s) with matching Type-246 request TLV(s) \
-             (draft-ietf-ippm-stamp-ext-hdr-13 §3.2)",
+             (draft-ietf-ippm-stamp-ext-hdr-15 §4.2)",
             attach_specs.len()
         );
     }
@@ -3093,7 +3093,7 @@ pub fn create_extended_auth_packet(
 mod tests {
     use super::*;
 
-    // --- draft-ietf-ippm-stamp-ext-hdr-13 header-reflection request TLVs ----
+    // --- draft-ietf-ippm-stamp-ext-hdr-15 header-reflection request TLVs ----
 
     #[cfg(target_os = "linux")]
     fn ext_hdr_conf(extra: &[&str]) -> crate::configuration::Configuration {
@@ -3217,7 +3217,7 @@ mod tests {
         assert_eq!(ext[0].value.len(), 16);
     }
 
-    // --- Sender MTU enforcement (draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3) --
+    // --- Sender MTU enforcement (draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2) --
 
     #[test]
     fn enforce_egress_mtu_trims_header_tlvs_to_fit() {
@@ -3560,7 +3560,7 @@ mod tests {
 
         // Ext-hdr control requested → TLV emitted even at count 1, carrying the
         // presence-only IPv6 Extension Header Control sub-TLV
-        // (draft-ietf-ippm-stamp-ext-hdr-13 §5.3; experimental type 240).
+        // (draft-ietf-ippm-stamp-ext-hdr-15 §5.1; experimental type 240).
         let tlv = build_reflected_control_tlv(0, 1, 1_000_000, true).expect("TLV for one-way mode");
         assert_eq!(tlv.sub_tlvs, vec![0x00, 240, 0x00, 0x00]);
     }
@@ -5812,6 +5812,7 @@ mod tests {
         // --- Reflector side: pure, socket-free assembly ---
         let packet = PacketUnauthenticated::from_bytes(&request_bytes).unwrap();
         let ctx = ProcessingContext {
+            ingress_ifindex: None,
             packet_local_addr: None,
             replay_verdict: crate::session::ReplayVerdict::New,
             clock_source: ClockFormat::NTP,
@@ -5845,6 +5846,8 @@ mod tests {
             reflected_control_max_count: crate::receiver::REFLECTED_CONTROL_MAX_COUNT,
             reflected_control_max_size: crate::receiver::REFLECTED_CONTROL_MAX_SIZE,
             reflected_control_min_interval_ns: crate::receiver::REFLECTED_CONTROL_MIN_INTERVAL_NS,
+            reflected_control_max_rate: crate::receiver::REFLECTED_CONTROL_MAX_RATE,
+            reflected_control_max_volume: crate::receiver::REFLECTED_CONTROL_MAX_VOLUME,
             rx_timestamp: None,
             rx_method: crate::tlv::TimestampMethod::SwLocal,
             last_reflection_method: crate::tlv::TimestampMethod::SwLocal,
@@ -6231,6 +6234,7 @@ mod tests {
             if received == ack_after {
                 let packet = PacketUnauthenticated::from_bytes(&buf[..len]).unwrap();
                 let ctx = ProcessingContext {
+                    ingress_ifindex: None,
                     packet_local_addr: None,
                     replay_verdict: crate::session::ReplayVerdict::New,
                     clock_source: ClockFormat::NTP,
@@ -6265,6 +6269,8 @@ mod tests {
                     reflected_control_max_size: crate::receiver::REFLECTED_CONTROL_MAX_SIZE,
                     reflected_control_min_interval_ns:
                         crate::receiver::REFLECTED_CONTROL_MIN_INTERVAL_NS,
+                    reflected_control_max_rate: crate::receiver::REFLECTED_CONTROL_MAX_RATE,
+                    reflected_control_max_volume: crate::receiver::REFLECTED_CONTROL_MAX_VOLUME,
                     rx_timestamp: None,
                     rx_method: crate::tlv::TimestampMethod::SwLocal,
                     last_reflection_method: crate::tlv::TimestampMethod::SwLocal,

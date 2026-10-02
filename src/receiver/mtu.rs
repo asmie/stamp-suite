@@ -19,6 +19,8 @@ struct RouteKey {
     local: SocketAddr,
     target: SocketAddr,
     tos: u8,
+    /// Pinned egress interface, 0 when the route chooses.
+    oif: u32,
 }
 
 #[derive(Default)]
@@ -156,6 +158,7 @@ fn route_key(
             local,
             target,
             tos: options.tos,
+            oif: options.egress_ifindex.unwrap_or(0),
         },
         overhead,
     ))
@@ -271,15 +274,19 @@ fn route_request(key: &RouteKey) -> Vec<u8> {
         request[18] = request[17];
         attr(&mut request, 2, &ip_bytes(key.local.ip())); // RTA_SRC
     }
-    if let SocketAddr::V6(v) = key.target {
-        if v.scope_id() != 0 {
-            attr(&mut request, 4, &v.scope_id().to_ne_bytes());
-        }
+    let oif = match key.target {
+        _ if key.oif != 0 => key.oif,
+        SocketAddr::V6(v) => v.scope_id(),
+        SocketAddr::V4(_) => 0,
+    };
+    if oif != 0 {
+        attr(&mut request, 4, &oif.to_ne_bytes()); // RTA_OIF
     }
+    // SAFETY: geteuid(2) cannot fail and has no preconditions.
     attr(&mut request, 25, &unsafe { libc::geteuid() }.to_ne_bytes()); // RTA_UID
-    attr(&mut request, 27, &[libc::IPPROTO_UDP as u8]);
-    attr(&mut request, 28, &key.local.port().to_be_bytes());
-    attr(&mut request, 29, &key.target.port().to_be_bytes());
+    attr(&mut request, 27, &[libc::IPPROTO_UDP as u8]); // RTA_IP_PROTO
+    attr(&mut request, 28, &key.local.port().to_be_bytes()); // RTA_SPORT
+    attr(&mut request, 29, &key.target.port().to_be_bytes()); // RTA_DPORT
     let len = request.len() as u32;
     request[..4].copy_from_slice(&len.to_ne_bytes());
     request
@@ -410,6 +417,7 @@ mod tests {
             local: "0.0.0.0:862".parse().unwrap(),
             target: SocketAddr::from(([127, 0, 0, 1], port)),
             tos: 184,
+            oif: 0,
         }
     }
 
@@ -474,6 +482,7 @@ mod tests {
             local: "[fe80::2]:862".parse().unwrap(),
             target: "[fe80::3%7]:5000".parse().unwrap(),
             tos: 187,
+            oif: 0,
         };
         let request = route_request(&key);
         assert_eq!(request[16..20], [10, 128, 128, 184]);
@@ -529,6 +538,7 @@ mod tests {
                 local: local.parse().unwrap(),
                 target: target.parse().unwrap(),
                 tos: 184,
+                oif: 0,
             };
             assert!(route_mtu(&key).unwrap() >= 1280, "{key:?}");
         }
@@ -539,6 +549,7 @@ mod tests {
         let local = "[::]:862".parse().unwrap();
         let target = "[2001:db8::9]:5000".parse().unwrap();
         let options = SendOptions {
+            egress_ifindex: None,
             tos: 0,
             source: Some("2001:db8::2".parse().unwrap()),
             srh: crate::srv6::build_srh(&[

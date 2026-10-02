@@ -5,7 +5,7 @@
 //! headers, SRv6 SRH routing, Address Group (MAC/IP) filtering, and Type-12
 //! multi-reply pacing. Each is mapped to the conformance-matrix clauses it
 //! evidences (RFC 8762 §4.x + erratum 8199, RFC 8972 §4.4, RFC 9503 §4,
-//! draft-ietf-ippm-asymmetrical-pkts-14, draft-ietf-ippm-stamp-ext-hdr-13,
+//! RFC 10052, draft-ietf-ippm-stamp-ext-hdr-15,
 //! draft-ietf-ippm-stamp-cos-ecn-01, draft-gandhi-ippm-stamp-ber).
 //!
 //! # Running
@@ -393,7 +393,7 @@ fn verify_srv6_reply(payload: &[u8], auth: bool, expect_path: bool) {
 // ==========================================================================
 // Scenario 4a — ext-hdr on the nix backend: a Type-246 request the backend
 // cannot satisfy comes back with the C flag (Conformance) set
-// (draft-ietf-ippm-stamp-ext-hdr-13 §5.1, revision-13 semantics).
+// (draft-ietf-ippm-stamp-ext-hdr-15 §4.1).
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]
@@ -440,7 +440,7 @@ fn scenario_4a_ext_hdr_nix_c_flag() {
     let tlvs = reply_tlvs(&reply.payload).expect("parse reflected TLVs");
     let ext = find_tlv(&tlvs, TlvType::ReflectedIpv6ExtHdr)
         .expect("reflected Type-246 TLV present in reply");
-    // The nix (UDP-socket) backend has no data-plane access, so revision-13 §5.1
+    // The nix (UDP-socket) backend has no data-plane access, so ext-hdr-15 §4.1
     // requires it to echo the TLV with the Conformance flag set — NOT the
     // pre-11 U-flag.
     assert!(
@@ -457,7 +457,7 @@ fn scenario_4a_ext_hdr_nix_c_flag() {
 
 // ==========================================================================
 // Scenario 4b — real ext-hdr capture + reflection on the pnet backend
-// (draft-ietf-ippm-stamp-ext-hdr-13 §§3.2, 5.1). Requires a pnet-feature
+// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 4.1). Requires a pnet-feature
 // reflector binary (STAMP_NETNS_PNET_BIN) and kernel IPV6_DSTOPTS injection.
 // ==========================================================================
 #[test]
@@ -559,7 +559,7 @@ fn scenario_4b_ext_hdr_pnet_capture() {
 
 // ==========================================================================
 // Scenario 5 — L2 + L3 Address Group filters
-// (draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1 / §3.1.2): a matching filter
+// (RFC 10052 §3.1.1 / §3.1.2): a matching filter
 // yields a reply, a non-matching filter drops the packet (no reply).
 // ==========================================================================
 #[test]
@@ -633,7 +633,7 @@ fn scenario_5_address_group_filters() {
 
 // ==========================================================================
 // Scenario 6 — Type-12 multi-reply: count, pacing, and length padding on the
-// wire (draft-ietf-ippm-asymmetrical-pkts-14 §3).
+// wire (RFC 10052 §3).
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]

@@ -20,8 +20,10 @@ Defaults restrict additional amplification:
 - `--return-path-allow-alternate` is off. Return Address requests get U set and
   replies go to the packet source.
 - `--srv6-return-forwarding` is off. Unsupported requests get U set.
-- `--reflected-control-max-count` defaults to 0. Type-12 requests receive one
-  normal C-flagged reply, without requested padding or extra copies.
+- `--reflected-control-max-count` defaults to 0, which disables Type 12.
+  Requests get one normal reply with U set, without requested padding or
+  extra copies. When enabled, `--reflected-control-max-rate` and
+  `--reflected-control-max-volume` bound the bytes each request can generate.
 
 Enable these features only for a controlled measurement domain. Authenticated
 mode rejects invalid base HMACs before session mutation or reply generation.

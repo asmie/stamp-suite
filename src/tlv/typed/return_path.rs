@@ -194,35 +194,22 @@ impl ReturnPathTlv {
         None
     }
 
-    /// Returns true if an SR-MPLS Label Stack sub-TLV is present.
+    /// The first segment-list sub-TLV in wire order. RFC 9503 §4.1.3: only
+    /// the first Return Path Segment List sub-TLV is processed.
     #[must_use]
-    pub fn has_sr_mpls(&self) -> bool {
-        self.sub_tlvs
-            .iter()
-            .any(|sub| sub.tlv_type.to_byte() == ReturnPathSubType::SrMplsLabelStack.to_byte())
-    }
-
-    /// Returns true if an SRv6 Segment List sub-TLV is present.
-    #[must_use]
-    pub fn has_srv6(&self) -> bool {
-        self.sub_tlvs
-            .iter()
-            .any(|sub| sub.tlv_type.to_byte() == ReturnPathSubType::Srv6SegmentList.to_byte())
-    }
-
-    /// Parses the SRv6 segment list into IPv6 SIDs, in the order they appear on
-    /// the wire (first hop first). Returns `None` when no SRv6 sub-TLV is
-    /// present or its length is not a positive multiple of 16 octets.
-    #[must_use]
-    pub fn get_srv6_sids(&self) -> Option<Vec<Ipv6Addr>> {
-        let sub = self
-            .sub_tlvs
-            .iter()
-            .find(|s| s.tlv_type.to_byte() == ReturnPathSubType::Srv6SegmentList.to_byte())?;
-        if sub.value.is_empty() || sub.value.len() % 16 != 0 {
-            return None;
+    pub fn first_segment_list(&self) -> Option<SegmentList> {
+        let sub = self.sub_tlvs.iter().find(|s| {
+            let kind = s.tlv_type.to_byte();
+            kind == ReturnPathSubType::Srv6SegmentList.to_byte()
+                || kind == ReturnPathSubType::SrMplsLabelStack.to_byte()
+        })?;
+        if sub.tlv_type.to_byte() == ReturnPathSubType::SrMplsLabelStack.to_byte() {
+            return Some(SegmentList::SrMpls);
         }
-        Some(
+        if sub.value.is_empty() || sub.value.len() % 16 != 0 {
+            return Some(SegmentList::Invalid);
+        }
+        Some(SegmentList::Srv6(
             sub.value
                 .chunks_exact(16)
                 .map(|segment| {
@@ -231,8 +218,19 @@ impl ReturnPathTlv {
                     Ipv6Addr::from(octets)
                 })
                 .collect(),
-        )
+        ))
     }
+}
+
+/// A Return Path segment list (RFC 9503 §4.1.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SegmentList {
+    /// SRv6 SIDs in wire order (first hop first).
+    Srv6(Vec<Ipv6Addr>),
+    /// An SR-MPLS label stack; not forwarded by this implementation.
+    SrMpls,
+    /// An SRv6 list whose length is not a positive multiple of 16 octets.
+    Invalid,
 }
 
 impl TypedTlv for ReturnPathTlv {
@@ -273,17 +271,23 @@ impl Default for ReturnPathTlv {
 /// Action determined by processing a Return Path TLV (RFC 9503 §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReturnPathAction {
-    /// Normal reply (no Return Path TLV, or Control Code 0x1 same-link).
+    /// Normal reply.
     Normal,
+    /// Control Code 0x1: reply over the interface with this index, the one
+    /// the request arrived on (RFC 9503 §4.1.1).
+    SameLink(u32),
     /// Suppress reply entirely (Control Code 0x0).
     SuppressReply,
     /// Reply to an alternate address (Return Address sub-TLV).
     AlternateAddress(SocketAddr),
-    /// SRv6 return path requested (RFC 9503 §4): carries the segment list in
-    /// path order. The send path attempts best-effort SRH forwarding when it
-    /// is enabled and the kernel supports it, otherwise it falls back to a
-    /// normal reply with the Return Path U-flag set.
-    Srv6Forward(Vec<Ipv6Addr>),
+    /// SRv6 return path (RFC 9503 §4) with the segment list in path order,
+    /// optionally ending at a Return Address. The send path attempts SRH
+    /// forwarding when enabled and supported; otherwise it replies normally
+    /// with the Return Path U flag set.
+    Srv6Forward {
+        sids: Vec<Ipv6Addr>,
+        destination: Option<SocketAddr>,
+    },
     /// SR forwarding requested but unsupported (e.g. SR-MPLS) — echo with the
     /// U-flag set and reply normally.
     UnsupportedSr,
@@ -360,8 +364,7 @@ mod tests {
         let rp = ReturnPathTlv::with_sr_mpls_labels(&labels);
         let raw = rp.to_raw();
         let parsed = ReturnPathTlv::from_raw(&raw).unwrap();
-        assert!(parsed.has_sr_mpls());
-        assert!(!parsed.has_srv6());
+        assert_eq!(parsed.first_segment_list(), Some(SegmentList::SrMpls));
 
         // Verify LSE encoding: label(20) | TC(3)=0 | S(1) | TTL(8)=255
         let sub = &parsed.sub_tlvs[0];
@@ -400,8 +403,10 @@ mod tests {
         let rp = ReturnPathTlv::with_srv6_sids(&sids);
         let raw = rp.to_raw();
         let parsed = ReturnPathTlv::from_raw(&raw).unwrap();
-        assert!(parsed.has_srv6());
-        assert!(!parsed.has_sr_mpls());
+        assert!(matches!(
+            parsed.first_segment_list(),
+            Some(SegmentList::Srv6(_))
+        ));
 
         let sub = &parsed.sub_tlvs[0];
         assert_eq!(
@@ -413,25 +418,28 @@ mod tests {
     }
 
     #[test]
-    fn test_get_srv6_sids_parses_list() {
+    fn test_first_segment_list_parses_srv6() {
         let sids = [
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2),
         ];
         let parsed =
             ReturnPathTlv::from_raw(&ReturnPathTlv::with_srv6_sids(&sids).to_raw()).unwrap();
-        assert_eq!(parsed.get_srv6_sids(), Some(vec![sids[0], sids[1]]));
+        assert_eq!(
+            parsed.first_segment_list(),
+            Some(SegmentList::Srv6(vec![sids[0], sids[1]]))
+        );
     }
 
     #[test]
-    fn test_get_srv6_sids_none_when_absent() {
+    fn test_first_segment_list_none_when_absent() {
         let parsed =
             ReturnPathTlv::from_raw(&ReturnPathTlv::with_control_code(1).to_raw()).unwrap();
-        assert_eq!(parsed.get_srv6_sids(), None);
+        assert_eq!(parsed.first_segment_list(), None);
     }
 
     #[test]
-    fn test_get_srv6_sids_rejects_non_multiple_of_16() {
+    fn test_first_segment_list_rejects_non_multiple_of_16() {
         // A 20-byte value is not a clean list of 16-byte SIDs.
         let rp = ReturnPathTlv {
             sub_tlvs: vec![RawTlv::new(
@@ -440,7 +448,16 @@ mod tests {
             )],
         };
         let parsed = ReturnPathTlv::from_raw(&rp.to_raw()).unwrap();
-        assert_eq!(parsed.get_srv6_sids(), None);
+        assert_eq!(parsed.first_segment_list(), Some(SegmentList::Invalid));
+    }
+
+    #[test]
+    fn test_first_segment_list_follows_wire_order() {
+        // RFC 9503 §4.1.3: only the first segment list counts.
+        let mut rp = ReturnPathTlv::with_sr_mpls_labels(&[100]);
+        rp.sub_tlvs
+            .extend(ReturnPathTlv::with_srv6_sids(&[Ipv6Addr::LOCALHOST]).sub_tlvs);
+        assert_eq!(rp.first_segment_list(), Some(SegmentList::SrMpls));
     }
 
     #[test]

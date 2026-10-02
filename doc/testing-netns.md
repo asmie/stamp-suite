@@ -79,8 +79,8 @@ Per-scenario prerequisites:
 | 3 | `scenario_3_srv6_return_path` | RFC 9503 §4 / RFC 8754: three namespaces with a transit router; requires actual SRH forwarding (fallback fails). Checks both SID-only and explicit-final-SID requests, open/auth, independent HMACs, CoS, Segments Left 1→0 and Hop Limit 255→254. Ordinary replies interleaved on the same reflector must carry no stale SRH. |
 | 4a | `scenario_4a_ext_hdr_nix_c_flag` | draft-ietf-ippm-stamp-ext-hdr-13 §5.1: the nix (UDP-socket) backend has no data-plane access, so a Type-246 request comes back with the **C** (Conformance) flag set. |
 | 4b | `scenario_4b_ext_hdr_pnet_capture` | draft-ietf-ippm-stamp-ext-hdr-13 §§3.2/5.1: the `ttl-pnet` backend captures an injected IPv6 Destination Options header and echoes its bytes-from-offset-8 into the Type-246 Reflected field with the C flag **clear**. |
-| 5 | `scenario_5_address_group_filters` | draft-ietf-ippm-asymmetrical-pkts-14 §3.1.1/§3.1.2: a matching L2 (own-MAC) or L3 (own-prefix) Address Group sub-TLV yields a reply; a non-matching one drops the packet (no reply). |
-| 6 | `scenario_6_type12_multi_reply` | draft-ietf-ippm-asymmetrical-pkts-14 §3: multiple reply copies on the wire (count within the requested/cap bound), inter-packet pacing ≈ the requested interval, replies padded beyond the base length. |
+| 5 | `scenario_5_address_group_filters` | RFC 10052 §3.1.1/§3.1.2: a matching L2 (own-MAC) or L3 (own-prefix) Address Group sub-TLV yields a reply; a non-matching one drops the packet (no reply). |
+| 6 | `scenario_6_type12_multi_reply` | RFC 10052 §3: multiple reply copies on the wire (count within the requested/cap bound), inter-packet pacing ≈ the requested interval, replies padded beyond the base length. |
 | 7 | `scenario_7_ber_onwire` | draft-gandhi-ippm-stamp-ber-07 §4: the Bit Pattern (0xFF00) fills the Extra Padding TLV on the wire; the reflector's Bit Error Count reads 0 on a clean channel. |
 | 8 | `scenario_8_ttl_egress_marking` | Outgoing IP TTL / Hop Limit is 255, as required by the revision-13 profile. |
 

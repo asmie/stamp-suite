@@ -295,7 +295,7 @@ pub async fn run_receiver(
     }
 
     // Build local MAC addresses for the Reflected Test Packet Control TLV's
-    // L2 Address Group sub-TLV matching (draft-ietf-ippm-asymmetrical-pkts-14
+    // L2 Address Group sub-TLV matching (RFC 10052
     // §3.1.1). Unlike `local_addresses`, this always enumerates every
     // interface's hardware address regardless of the bind address.
     let local_macs = super::build_local_macs();
@@ -490,8 +490,13 @@ pub async fn run_receiver(
 
                 // Extract actual destination address from packet info (for Location TLV).
                 // Falls back to configured bind address if pktinfo is unavailable.
-                let (dst_addr, ingress_interface) = extract_dst_addr_from_cmsgs(&msg)
-                    .unwrap_or((conf.local_addr, conf.local_scope_id));
+                let pktinfo = extract_dst_addr_from_cmsgs(&msg);
+                let (dst_addr, ingress_interface) =
+                    pktinfo.unwrap_or((conf.local_addr, conf.local_scope_id));
+                // Only Linux can pin a reply to this interface (RFC 9503 §4.1.1).
+                let ingress_ifindex = pktinfo
+                    .map(|(_, index)| index)
+                    .filter(|&index| cfg!(target_os = "linux") && index != 0);
                 let packet_local_addr = crate::net_scope::received_endpoint(
                     dst_addr,
                     local_addr.port(),
@@ -592,6 +597,7 @@ pub async fn run_receiver(
                 let response_opt = {
                     let keys_guard = shared.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
                     let ctx = ProcessingContext {
+                        ingress_ifindex,
                         packet_local_addr: Some(packet_local_addr),
                         replay_verdict: crate::session::ReplayVerdict::New,
                         clock_source: conf.clock_source,
@@ -622,7 +628,7 @@ pub async fn run_receiver(
                         return_path_allow_alternate: conf.return_path_allow_alternate,
                         reflector_member_link_id: conf.reflector_member_link_id,
                         // nix UDP-socket backend cannot observe raw IP headers.
-                        // draft-ietf-ippm-stamp-ext-hdr-13 TLV 246/247 requests are
+                        // draft-ietf-ippm-stamp-ext-hdr-15 TLV 246/247 requests are
                         // echoed with the C flag (Conformance) set — case (b),
                         // done in apply_semantic_tlv_processing.
                         captured_headers: None,
@@ -637,6 +643,14 @@ pub async fn run_receiver(
                         reflected_control_min_interval_ns: shared
                             .caps
                             .reflected_control_min_interval_ns
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        reflected_control_max_rate: shared
+                            .caps
+                            .reflected_control_max_rate
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        reflected_control_max_volume: shared
+                            .caps
+                            .reflected_control_max_volume
                             .load(std::sync::atomic::Ordering::Relaxed),
                         #[cfg(feature = "hwtstamp")]
                         rx_timestamp,
@@ -849,7 +863,7 @@ fn extract_tos_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> O
     None
 }
 
-/// Extract destination IP address and IPv6 interface index from recvmsg metadata.
+/// Extract destination IP address and ingress interface index from recvmsg metadata.
 ///
 /// Uses IP_PKTINFO (IPv4) or IPV6_PKTINFO (IPv6) to determine the actual
 /// destination address of the received packet. This is needed when the reflector
@@ -865,7 +879,10 @@ fn extract_dst_addr_from_cmsgs(
     for cmsg in cmsgs {
         match cmsg {
             ControlMessageOwned::Ipv4PacketInfo(pktinfo) => {
-                return Some((IpAddr::V4(ipv4_addr_from_pktinfo(&pktinfo)), 0));
+                return Some((
+                    IpAddr::V4(ipv4_addr_from_pktinfo(&pktinfo)),
+                    u32::try_from(pktinfo.ipi_ifindex).unwrap_or(0),
+                ));
             }
             ControlMessageOwned::Ipv6PacketInfo(pktinfo) => {
                 return Some((

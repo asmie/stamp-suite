@@ -14,11 +14,11 @@ citation or passing fixture supports only the behavior it checks.
 | [RFC 9503](rfc9503.md) — Destination Node Address / Return Path | RFC 9503, October 2023 | 26 | 22 | 0 | 0 | 3 | 1 |
 | [RFC 9534](rfc9534.md) — Micro-session ID (LAG) | RFC 9534, January 2024 | 18 | 9 | 6 | 1 | 2 | 0 |
 | [RFC 8545](rfc8545.md) — TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
-| [draft-ietf-ippm-asymmetrical-pkts](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | -14, 16 March 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
+| [RFC 10052](draft-asymmetrical-pkts.md) — Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md) — CoS/ECN congestion signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
-| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -13, 9 September 2026 | 60 | 54 | 0 | 0 | 6 | 0 |
+| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md) — Reflected header data (Types 246/247) | -15, 30 September 2026 | 63 | 54 | 2 | 0 | 7 | 0 |
 | [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md) — Residual BER (Types 240–242) | -07, 30 June 2026 | 30 | 27 | 2 | 0 | 1 | 0 |
-| **Total** | | **418** | **360** | **9** | **1** | **45** | **3** |
+| **Total** | | **421** | **360** | **11** | **1** | **46** | **3** |
 
 Compliant means supported within the row's stated profile. Partial means some
 behavior or platform support is missing; Gap means an unmet requirement. N/A
@@ -49,9 +49,9 @@ agree on their meaning; they are not final IANA assignments.
 | Type 240 | STAMP TLV Types (Experimental, 240-251) | `BER_PATTERN_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.1 | Draft-side Type allocation |
 | Type 241 | STAMP TLV Types (Experimental, 240-251) | `BER_COUNT_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.2 | Draft-side Type allocation |
 | Type 242 | STAMP TLV Types (Experimental, 240-251) | `BER_MAX_BURST_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.3 | Draft-side Type allocation; **known collision**, see below |
-| Type 246 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_IPV6_EXT_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-13 §§3.2/5.1 | IANA allocation of TBA1 |
-| Type 247 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_FIXED_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-13 §§3.3/5.2 | IANA allocation of TBA2 |
-| Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-13 §5.3 | IANA allocation of TBA3 |
+| Type 246 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_IPV6_EXT_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-15 §§4.1/4.2 | IANA allocation of TBA1 |
+| Type 247 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_FIXED_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-15 §§6.1/6.2 | IANA allocation of TBA2 |
+| Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-15 §5.1 | IANA allocation of TBA3 |
 
 Type 242 conflicts with another implementation's experimental Heartbeat TLV.
 The formats are incompatible. Types 240/241 follow the BER draft's reported

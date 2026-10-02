@@ -97,7 +97,7 @@ async fn get_status(State(s): State<ControlState>) -> Json<serde_json::Value> {
             "reply_queue_rejected": s.counters.reply_queue_rejected.load(Ordering::Relaxed),
             "queued_replies_cancelled": s.counters.queued_replies_cancelled.load(Ordering::Relaxed),
             "packets_rate_limited": s.counters.packets_rate_limited.load(Ordering::Relaxed),
-            // draft-ietf-ippm-asymmetrical-pkts-14 §5 replay detection.
+            // RFC 10052 §5 replay detection.
             "packets_replayed": s.counters.packets_replayed.load(Ordering::Relaxed),
             "packets_reordered": s.counters.packets_reordered.load(Ordering::Relaxed),
         },
@@ -252,6 +252,10 @@ fn caps_json(s: &ControlState) -> serde_json::Value {
             s.caps.reflected_control_max_size.load(Ordering::Relaxed),
         "reflected_control_min_interval_ns":
             s.caps.reflected_control_min_interval_ns.load(Ordering::Relaxed),
+        "reflected_control_max_rate":
+            s.caps.reflected_control_max_rate.load(Ordering::Relaxed),
+        "reflected_control_max_volume":
+            s.caps.reflected_control_max_volume.load(Ordering::Relaxed),
     })
 }
 
@@ -268,6 +272,8 @@ struct CapsPatch {
     reflected_control_max_count: Option<u16>,
     reflected_control_max_size: Option<u16>,
     reflected_control_min_interval_ns: Option<u32>,
+    reflected_control_max_rate: Option<u64>,
+    reflected_control_max_volume: Option<u32>,
 }
 
 async fn patch_caps(State(s): State<ControlState>, Json(p): Json<CapsPatch>) -> Response {
@@ -293,6 +299,16 @@ async fn patch_caps(State(s): State<ControlState>, Json(p): Json<CapsPatch>) -> 
     if let Some(v) = p.reflected_control_min_interval_ns {
         s.caps
             .reflected_control_min_interval_ns
+            .store(v, Ordering::Relaxed);
+    }
+    if let Some(v) = p.reflected_control_max_rate {
+        s.caps
+            .reflected_control_max_rate
+            .store(v, Ordering::Relaxed);
+    }
+    if let Some(v) = p.reflected_control_max_volume {
+        s.caps
+            .reflected_control_max_volume
             .store(v, Ordering::Relaxed);
     }
     let effective = caps_json(&s);

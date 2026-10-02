@@ -37,8 +37,9 @@ and configure [authenticated mode](doc/security.md#enabling-authenticated-mode-o
 - RFC 8762 base packets and HMAC authentication; RFC 8972 optional TLVs.
 - RFC 9503 return-path controls, including optional Linux SRv6 forwarding.
 - RFC 9534 numeric Micro-session IDs. Physical LAG member selection is unsupported.
-- Draft extensions for asymmetric replies, header reflection, CoS/ECN response,
-  and residual BER. Experimental codepoints require peer agreement.
+- RFC 10052 asymmetric replies (Reflected Test Packet Control, Type 12).
+- Draft extensions for header reflection, CoS/ECN response, and residual BER.
+  Experimental codepoints require peer agreement.
 - Text, JSON lines, and CSV output; optional Prometheus, AgentX, and control API.
 
 See the [conformance matrices](doc/conformance/README.md) for supported profiles
