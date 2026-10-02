@@ -309,15 +309,18 @@ pub struct ProcessingContext<'a> {
 /// sender via TLV Types 246 and 247 (draft-ietf-ippm-stamp-ext-hdr-15).
 ///
 /// Populated only by backends that capture at the datalink layer (pnet).
-/// UDP-socket backends (nix) cannot observe these bytes and leave the
-/// struct unset; the reflector sets the C flag on any 246/247 request.
+/// The nix backend on Linux fills only the IPv6 extension headers, from
+/// ancillary data; it cannot observe fixed headers, so Type 247 requests get
+/// the C flag there. Other UDP-socket backends leave the struct unset.
 #[derive(Debug, Clone, Default)]
 pub struct CapturedHeaders {
     /// Raw IP fixed headers (20 bytes for IPv4, 40 bytes for IPv6), ordered
     /// outer→inner. In the common (non-tunneled) case this holds exactly one
     /// header; an IP-in-IP tunnel (IP protocol 4 / next-header 41) contributes
     /// one record per stacked IP header for draft-ietf-ippm-stamp-ext-hdr-15
-    /// §3.2 rule 2 positional pairing of multiple Type-247 TLVs.
+    /// §3.2 rule 2 positional pairing of multiple Type-247 TLVs. Empty when
+    /// the backend cannot observe fixed headers; a captured IP packet always
+    /// has at least one.
     pub fixed_headers: Vec<Vec<u8>>,
     /// IPv6 Hop-by-Hop, Destination Options, Routing (incl. SRH) and Fragment
     /// extension headers concatenated verbatim as on the wire: each record
@@ -928,12 +931,12 @@ fn apply_semantic_tlv_processing(
     // (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 6.2). If the backend captured
     // raw IP bytes, copy the matched header's [4..] into the TLV's Reflected
     // field; otherwise set the C flag (Conformance) per ext-hdr-15 §4.1/§6.1. A nix
-    // UDP-socket backend hands us `captured_headers = None`, so this correctly
-    // signals "could not reflect" to senders that requested header reflection.
+    // UDP-socket backend has no fixed headers, so those requests get C; on
+    // Linux it does supply IPv6 extension headers from ancillary data.
     let (captured_fixed, captured_ext): (Option<&[Vec<u8>]>, Option<&[u8]>) =
         match ctx.captured_headers {
             Some(h) => (
-                Some(h.fixed_headers.as_slice()),
+                Some(h.fixed_headers.as_slice()).filter(|fixed| !fixed.is_empty()),
                 Some(h.ipv6_ext_headers.as_slice()),
             ),
             None => (None, None),

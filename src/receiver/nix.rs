@@ -137,6 +137,36 @@ pub async fn run_receiver(
         );
     }
 
+    // IPv6 extension headers arrive as ancillary data, in wire order, for
+    // Type 246 reflection (draft-ietf-ippm-stamp-ext-hdr-15 §4.2). Without
+    // them those requests get the C flag.
+    #[cfg(target_os = "linux")]
+    if is_ipv6 {
+        for option in [
+            libc::IPV6_RECVHOPOPTS,
+            libc::IPV6_RECVDSTOPTS,
+            libc::IPV6_RECVRTHDR,
+        ] {
+            // SAFETY: live socket and correctly sized c_int option.
+            let result = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IPV6,
+                    option,
+                    &enable as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if result < 0 {
+                log::warn!(
+                    "Cannot receive IPv6 extension headers: {} (Type 246 requests get C)",
+                    std::io::Error::last_os_error()
+                );
+                break;
+            }
+        }
+    }
+
     // Enable packet info reception for destination address (for Location TLV).
     // Without this, a wildcard bind (0.0.0.0/::) reports the bind address as dst_addr.
     let pktinfo_result = if is_ipv6 {
@@ -245,8 +275,9 @@ pub async fn run_receiver(
     // for the life of the loop.
     let mut buf = vec![0u8; crate::packets::MAX_UDP_PAYLOAD];
     // 512 bytes: TTL + TOS + PKTINFO plus the 64-byte SCM_TIMESTAMPING
-    // cmsg (feature "hwtstamp") with headroom.
-    let mut cmsg_buf = vec![0u8; 512];
+    // cmsg (feature "hwtstamp") with headroom. IPv6 adds room for Hop-by-Hop,
+    // Destination Options and Routing headers of up to 2048 bytes each.
+    let mut cmsg_buf = vec![0u8; if is_ipv6 { 512 + 3 * (2048 + 16) } else { 512 }];
 
     // One loop owns every send and its OPT_ID assignment, including burst copies.
     let mut replies = ReplyQueue::default();
@@ -502,6 +533,12 @@ pub async fn run_receiver(
                         }
                     };
 
+                    #[cfg(target_os = "linux")]
+                    let captured = super::CapturedHeaders {
+                        fixed_headers: Vec::new(),
+                        ipv6_ext_headers: extract_ipv6_ext_headers(&msg),
+                    };
+
                     let packet = ReceivedPacket {
                         data: &buf[..len],
                         src: src_addr,
@@ -512,8 +549,11 @@ pub async fn run_receiver(
                         ecn: received_ecn,
                         ingress_ifindex,
                         src_mac: None, // a UDP socket does not see the link layer
-                        // A UDP socket cannot read raw IP headers, so Type 246/247
-                        // requests get C (draft-ietf-ippm-stamp-ext-hdr-15 §4.3).
+                        // A UDP socket cannot read fixed IP headers, so Type 247
+                        // requests get C (draft-ietf-ippm-stamp-ext-hdr-15 §6.1).
+                        #[cfg(target_os = "linux")]
+                        captured_headers: Some(&captured),
+                        #[cfg(not(target_os = "linux"))]
                         captured_headers: None,
                         #[cfg(feature = "hwtstamp")]
                         rx_timestamp,
@@ -643,6 +683,38 @@ fn darwin_hop_metadata_rejects_unrelated_or_malformed_controls() {
             None
         );
     }
+}
+
+/// IPv6 Hop-by-Hop, Destination Options and Routing headers from ancillary
+/// data, concatenated in the order Linux reports them, which is wire order.
+/// Each record keeps its Next Header and Hdr Ext Len octets. Truncated
+/// ancillary data yields nothing, so requests get the C flag.
+#[cfg(target_os = "linux")]
+fn extract_ipv6_ext_headers(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> Vec<u8> {
+    let mut headers = Vec::new();
+    if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
+        return headers;
+    }
+    let Ok(cmsgs) = msg.cmsgs() else {
+        return headers;
+    };
+    for cmsg in cmsgs {
+        let ControlMessageOwned::Unknown(unknown) = cmsg else {
+            continue;
+        };
+        let header = &unknown.cmsg_header;
+        let is_ext = header.cmsg_level == libc::IPPROTO_IPV6
+            && matches!(
+                header.cmsg_type,
+                libc::IPV6_HOPOPTS | libc::IPV6_DSTOPTS | libc::IPV6_RTHDR
+            );
+        let bytes = &unknown.data_bytes;
+        // Hdr Ext Len counts 8-octet units after the first eight.
+        if is_ext && bytes.len() >= 2 && bytes.len() == (usize::from(bytes[1]) + 1) * 8 {
+            headers.extend_from_slice(bytes);
+        }
+    }
+    headers
 }
 
 /// Extract TOS (Type of Service) from control messages received via recvmsg.

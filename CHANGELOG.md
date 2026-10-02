@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Measure several reflectors from one sender: repeat `--remote-addr` or give a
+  comma-separated list (a string or an array in TOML). Each target runs its
+  own session concurrently, and reports carry a `target` label.
+- The nix reflector on Linux reflects IPv6 extension headers (Type 246) from
+  ancillary data (`IPV6_RECVHOPOPTS`, `IPV6_RECVDSTOPTS`, `IPV6_RECVRTHDR`),
+  without raw capture. Fixed headers (Type 247) still need the pnet backend.
+- SIGHUP reloads the reflector's HMAC keys from the configured key file or
+  directory. It used to terminate the process.
+
 - `--count 0` sends until `--duration` ends or the sender is interrupted, and
   `--count` now goes up to 2^32 - 1. `--duration SECONDS` limits a run by time.
   Before, `--count 0` sent nothing and reported success.
@@ -332,6 +341,10 @@ median of three trials, reflector CPU as a share of one core:
   destructures the file configuration, so an unmerged key fails to compile,
   and a test checks that every CLI option has a config file key.
 - DSCP/ECN packing and unpacking go through `tos::Tos`.
+- `Configuration::remote_addr` is a list; `remote_ip()` and `per_target()`
+  give the single-target view. `sender::run_senders` runs every target,
+  `StatsOutput` clones share one stream, and `StatsSnapshot` has a `target`
+  field. `receiver::reload_keys` backs SIGHUP.
 
 ### Changed (standards)
 

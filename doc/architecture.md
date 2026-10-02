@@ -183,7 +183,7 @@ a new internal ID. Acquisition APIs return `None` on rejection or retirement.
 | 11 | Micro-session ID | Numeric validation; physical LAG association unsupported |
 | 12 | Reflected Test Packet Control | Opt-in asymmetric replies and address-group filters |
 | 240–242 | BER pattern/count/burst | Experimental; Type 242 conflicts with some Heartbeat implementations |
-| 246/247 | Reflected extension/fixed headers | Experimental; requires pnet capture, nix returns C |
+| 246/247 | Reflected extension/fixed headers | Experimental; pnet reflects both. On Linux nix reflects IPv6 extension headers (246) from ancillary data and returns C for fixed headers (247) |
 
 See [codepoint disclosure](conformance/README.md#experimental-codepoints)
 for allocation and renumbering policy.

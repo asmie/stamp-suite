@@ -65,7 +65,7 @@ impl SnmpConfig {
             is_reflector: conf.is_reflector,
             listen_addr: conf.local_addr,
             listen_port: conf.local_port,
-            remote_addr: conf.remote_addr,
+            remote_addr: conf.remote_ip(),
             remote_port: conf.remote_port,
             auth_mode: conf.auth_mode.to_string(),
             tlv_mode: conf.tlv_mode,

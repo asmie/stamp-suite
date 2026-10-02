@@ -329,7 +329,7 @@ pub enum MalformedMode {
 ///
 /// This struct defines all configurable parameters for both sender and reflector modes,
 /// parsed from command-line arguments using clap.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[clap(author = "Piotr Olszewski", version, about, long_about = None)]
 pub struct Configuration {
     /// Path to a TOML configuration file. Values loaded from the file are used
@@ -346,9 +346,16 @@ pub struct Configuration {
     /// TOML input to JSON first.
     #[clap(long, exclusive = true)]
     pub print_config_schema: bool,
-    /// Remote address for Session Reflector
-    #[clap(short, long, default_value = "0.0.0.0", help_heading = "Endpoints")]
-    pub remote_addr: std::net::IpAddr,
+    /// Session-Reflector address. Repeat the option or separate addresses with
+    /// commas to measure several reflectors at once, each in its own session.
+    #[clap(
+        short,
+        long,
+        default_value = "0.0.0.0",
+        value_delimiter = ',',
+        help_heading = "Endpoints"
+    )]
+    pub remote_addr: Vec<std::net::IpAddr>,
     /// Local address to bind for
     #[clap(
         short = 'S',
@@ -1235,7 +1242,28 @@ impl Configuration {
         Self::socket_addr(self.local_addr, self.local_port, self.local_scope_id)
     }
     pub fn remote_socket_addr(&self) -> std::net::SocketAddr {
-        Self::socket_addr(self.remote_addr, self.remote_port, self.remote_scope_id)
+        Self::socket_addr(self.remote_ip(), self.remote_port, self.remote_scope_id)
+    }
+
+    /// The first (for a single-target run, the only) reflector address.
+    #[must_use]
+    pub fn remote_ip(&self) -> std::net::IpAddr {
+        self.remote_addr
+            .first()
+            .copied()
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+    }
+
+    /// One configuration per `--remote-addr`, each naming a single target.
+    #[must_use]
+    pub fn per_target(&self) -> Vec<Configuration> {
+        self.remote_addr
+            .iter()
+            .map(|addr| Configuration {
+                remote_addr: vec![*addr],
+                ..self.clone()
+            })
+            .collect()
     }
     fn socket_addr(ip: std::net::IpAddr, port: u16, scope: u32) -> std::net::SocketAddr {
         match ip {
@@ -1333,18 +1361,30 @@ impl Configuration {
                 )));
             }
         }
-        for (name, addr, scope, active) in [
-            ("local", self.local_addr, self.local_scope_id, true),
-            (
-                "remote",
-                self.remote_addr,
-                self.remote_scope_id,
-                !self.is_reflector,
-            ),
-        ] {
-            if !active {
-                continue;
+        if self.remote_addr.is_empty() {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "remote_addr must name at least one address".into(),
+            ));
+        }
+        if !self.is_reflector && self.remote_addr.len() > 1 {
+            let mut seen = std::collections::HashSet::new();
+            if let Some(dup) = self.remote_addr.iter().find(|a| !seen.insert(**a)) {
+                return Err(ConfigurationError::InvalidConfiguration(format!(
+                    "remote_addr {dup} is listed twice"
+                )));
             }
+            if self.local_port != 0 {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "several remote addresses need --local-port 0, so each \
+                     session gets its own port"
+                        .into(),
+                ));
+            }
+        }
+        let remotes = self.remote_addr.iter().filter(|_| !self.is_reflector);
+        let addresses = std::iter::once(("local", self.local_addr, self.local_scope_id))
+            .chain(remotes.map(|addr| ("remote", *addr, self.remote_scope_id)));
+        for (name, addr, scope) in addresses {
             if addr.is_ipv4() && scope != 0 {
                 return Err(ConfigurationError::InvalidConfiguration(format!(
                     "{name}_scope_id requires an IPv6 address"
@@ -1811,7 +1851,7 @@ impl Configuration {
             }
             let attached = self.attach_ext_hdrs();
             if !attached.is_empty() {
-                if !self.remote_addr.is_ipv6() {
+                if !self.remote_addr.iter().all(std::net::IpAddr::is_ipv6) {
                     return Err(cfg_err(
                         "--attach-ext-hdr requires an IPv6 destination".into(),
                     ));
@@ -2273,6 +2313,25 @@ pub enum ConfigurationError {
     ConfigFileError(String),
 }
 
+/// Accepts a single value or an array of values.
+fn one_or_many<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany<T> {
+        One(T),
+        Many(Vec<T>),
+    }
+    let value: OneOrMany<T> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(Some(match value {
+        OneOrMany::One(value) => vec![value],
+        OneOrMany::Many(values) => values,
+    }))
+}
+
 /// Deserializable mirror of [`Configuration`] used to load defaults from a
 /// TOML file. Every field is optional; missing keys fall through to the
 /// hardcoded clap defaults.
@@ -2284,7 +2343,8 @@ pub enum ConfigurationError {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfiguration {
-    pub remote_addr: Option<std::net::IpAddr>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub remote_addr: Option<Vec<std::net::IpAddr>>,
     pub local_addr: Option<std::net::IpAddr>,
     pub local_scope_id: Option<u32>,
     pub remote_scope_id: Option<u32>,
@@ -2404,7 +2464,10 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "remote_addr": { "type": "string", "format": "ipvanyaddress" },
+    "remote_addr": { "anyOf": [
+      { "type": "string", "format": "ipvanyaddress" },
+      { "type": "array", "minItems": 1, "items": { "type": "string", "format": "ipvanyaddress" } }
+    ] },
     "local_addr":  { "type": "string", "format": "ipvanyaddress" },
     "local_scope_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "remote_scope_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },

@@ -144,6 +144,24 @@ stamp-suite --remote-addr 192.0.2.10 --send-delay 250us --count 0 --duration 600
   --report-interval 10
 ```
 
+### Several reflectors
+
+Repeat `--remote-addr`, or separate addresses with commas, to measure several
+reflectors from one process. Each address gets its own session, socket and
+statistics, and all share the other options, including `--remote-port`.
+Several addresses need `--local-port 0` so each session gets its own port.
+Every session is set up before any probe is sent; a startup error in one
+stops the run.
+
+Reports name their target: a `Target:` line in text, a `target` field in
+JSON, and a leading `target` column in CSV. Prometheus and SNMP counters add
+up all sessions; the SNMP configuration objects describe the first target.
+
+```bash
+stamp-suite --remote-addr 192.0.2.10,192.0.2.11 --remote-addr 2001:db8::20 \
+  --local-addr :: --count 0 --report-interval 60 --output-format json
+```
+
 ### Interface binding
 
 `--interface NAME` binds the sender or reflector socket to a network interface
@@ -181,6 +199,11 @@ request is discarded. At capacity, new requests are dropped before authenticatio
 or session mutation; already accepted work keeps its slots. This is a request
 count limit, not a byte quota; retained payload sizes vary. Session expiry still
 retires queued work, whose slot is released when it is serviced or discarded.
+
+On Unix, SIGHUP reloads the HMAC keys from `--hmac-key-file` or
+`--hmac-key-dir` and replaces the reflector's keyset, including keys added
+through the control API. If the reload fails, the current keys stay in use
+and a warning is logged. Provisioned sessions still require a restart.
 
 Ctrl-C, SIGTERM on Unix, and `POST /v1/shutdown` stop new packet intake.
 `--reflector-shutdown-grace-ms` allows already queued replies to finish for up

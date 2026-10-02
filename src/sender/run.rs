@@ -1,6 +1,8 @@
 //! One sender run: setup, the probe schedule, the final reply drain, and
 //! Access Report retransmissions (RFC 8972 §4.6).
 
+use std::sync::Arc;
+
 use super::schedule::Schedule;
 use super::*;
 use crate::shutdown::CancellationToken;
@@ -36,8 +38,10 @@ enum Wait {
 }
 
 /// State of one sender run.
-pub(super) struct SenderRun<'a> {
-    conf: &'a Configuration,
+pub(super) struct SenderRun {
+    conf: Arc<Configuration>,
+    /// Labels reports when several targets run at once.
+    label: Option<String>,
     socket: UdpSocket,
     use_auth: bool,
     use_tlvs: bool,
@@ -91,13 +95,14 @@ pub(super) struct SenderRun<'a> {
     schedule: Schedule,
 }
 
-impl<'a> SenderRun<'a> {
+impl SenderRun {
     /// Opens and configures the socket and builds the static probe TLVs.
     pub(super) async fn open(
-        conf: &'a Configuration,
+        shared_conf: Arc<Configuration>,
         observers: SenderObservers,
         shutdown: CancellationToken,
     ) -> Result<Self, crate::StartupError> {
+        let conf = &*shared_conf;
         // Load the key before touching the network. It also signs the TLV
         // HMAC in open mode, so a configured key that fails to load is an
         // error in either mode. The key directory is reflector-only.
@@ -153,7 +158,7 @@ impl<'a> SenderRun<'a> {
             {
                 use std::os::fd::AsRawFd;
                 let value: nix::libc::c_int = nix::libc::IP_PMTUDISC_DO;
-                let (level, option) = if conf.remote_addr.is_ipv6() {
+                let (level, option) = if conf.remote_ip().is_ipv6() {
                     (nix::libc::IPPROTO_IPV6, nix::libc::IPV6_MTU_DISCOVER)
                 } else {
                     (nix::libc::IPPROTO_IP, nix::libc::IP_MTU_DISCOVER)
@@ -237,7 +242,7 @@ impl<'a> SenderRun<'a> {
 
             let attach_specs = conf.attach_ext_hdrs();
             if !attach_specs.is_empty() {
-                if conf.remote_addr.is_ipv6() {
+                if conf.remote_ip().is_ipv6() {
                     apply_attach_ext_hdrs(socket.as_raw_fd(), &attach_specs).map_err(|e| {
                         crate::StartupError::io("Cannot attach requested IPv6 header", e)
                     })?;
@@ -641,19 +646,19 @@ impl<'a> SenderRun<'a> {
                     "Header reflection requires a known egress route MTU",
                 ));
             }
-            let mtu = route_mtu.unwrap_or(if conf.remote_addr.is_ipv6() {
+            let mtu = route_mtu.unwrap_or(if conf.remote_ip().is_ipv6() {
                 1280
             } else {
                 1500
             }) as usize;
-            let ip_hdr = if conf.remote_addr.is_ipv6() {
+            let ip_hdr = if conf.remote_ip().is_ipv6() {
                 IPV6_FIXED_HEADER_SIZE
             } else {
                 IPV4_FIXED_HEADER_SIZE
             };
             // Attached IPv6 extension headers ride between the fixed header and UDP,
             // so they count toward the on-wire IP packet size.
-            let attached_ext: usize = if conf.remote_addr.is_ipv6() {
+            let attached_ext: usize = if conf.remote_ip().is_ipv6() {
                 conf.attach_ext_hdrs().iter().map(|a| a.bytes.len()).sum()
             } else {
                 0
@@ -739,7 +744,8 @@ impl<'a> SenderRun<'a> {
         });
 
         Ok(Self {
-            conf,
+            conf: Arc::clone(&shared_conf),
+            label: None,
             socket,
             use_auth,
             use_tlvs,
@@ -1051,7 +1057,7 @@ impl<'a> SenderRun<'a> {
     /// AIMD-scaled Reflected Test Packet Control TLV (cos-ecn-01 §3.4-3)
     /// change per probe; everything else comes from `extra_tlvs`.
     fn build_probe(&self, seq: u32, timestamp: u64, attach_access_report: bool) -> Vec<u8> {
-        let conf = self.conf;
+        let conf = Arc::clone(&self.conf);
         let per_probe =
             conf.direct_measurement || attach_access_report || self.scale_reflected_control;
         let owned;
@@ -1167,7 +1173,7 @@ impl<'a> SenderRun<'a> {
     }
 
     fn on_reply(&mut self, len: usize, kernel_t4: Option<u64>, reply_ecn: Option<u8>) {
-        let conf = self.conf;
+        let conf = Arc::clone(&self.conf);
         let mut ctx = SenderRecvContext {
             local_error_estimate: Some(self.error_estimate),
             measurements: Some(&mut self.measurements),
@@ -1257,6 +1263,12 @@ impl<'a> SenderRun<'a> {
                     .map(|state| state.summary()),
             )
             .with_congestion(self.congestion.as_ref().map(|state| state.summary()))
+            .with_target(self.label.clone())
+    }
+
+    /// Labels this run's reports with its target.
+    pub(super) fn set_label(&mut self, label: String) {
+        self.label = Some(label);
     }
 }
 

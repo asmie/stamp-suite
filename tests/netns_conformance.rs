@@ -391,13 +391,13 @@ fn verify_srv6_reply(payload: &[u8], auth: bool, expect_path: bool) {
 }
 
 // ==========================================================================
-// Scenario 4a — ext-hdr on the nix backend: a Type-246 request the backend
-// cannot satisfy comes back with the C flag (Conformance) set
-// (draft-ietf-ippm-stamp-ext-hdr-15 §4.1).
+// Scenario 4a — ext-hdr on the nix backend: the Destination Options header
+// arrives as ancillary data and is reflected (draft-ietf-ippm-stamp-ext-hdr-15
+// §4.2). A UDP socket cannot see fixed headers, so Type 247 would get C.
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]
-fn scenario_4a_ext_hdr_nix_c_flag() {
+fn scenario_4a_ext_hdr_nix_ancillary() {
     let scen = "4a_ext_hdr_nix";
     if let Err(r) = netns::require_env() {
         return netns::emit_skip(scen, &r);
@@ -430,29 +430,33 @@ fn scenario_4a_ext_hdr_nix_c_flag() {
         "ext-hdr round-trip received 0 replies (sender stderr: {})",
         run.stderr
     );
+    let req_ext = requests(&pkts, port)
+        .iter()
+        .find_map(|p| {
+            p.ext_headers
+                .iter()
+                .find(|(t, _)| *t == 60)
+                .map(|(_, b)| b.clone())
+        })
+        .expect("the request carries a Destination Options header");
     let reply = *replies(&pkts, port)
         .first()
         .expect("a reflected reply on the wire");
-    assert!(
-        reply.is_v6,
-        "scenario runs over IPv6; reply must be an IPv6 packet"
-    );
+    assert!(reply.is_v6, "scenario runs over IPv6");
     let tlvs = reply_tlvs(&reply.payload).expect("parse reflected TLVs");
     let ext = find_tlv(&tlvs, TlvType::ReflectedIpv6ExtHdr)
         .expect("reflected Type-246 TLV present in reply");
-    // The nix (UDP-socket) backend has no data-plane access, so ext-hdr-15 §4.1
-    // requires it to echo the TLV with the Conformance flag set — NOT the
-    // pre-11 U-flag.
     assert!(
-        ext.flags.conformant_reflected,
-        "nix backend must set the C flag on the unsatisfiable Type-246 request"
+        !ext.flags.conformant_reflected,
+        "nix backend reads the header from ancillary data, so C must be clear"
     );
-    assert!(
-        !ext.flags.unrecognized,
-        "Revision 13 uses the C flag, not the U flag, for ext-hdr failure"
+    assert_eq!(
+        ext.value.get(8..),
+        req_ext.get(8..ext.value.len()),
+        "Reflected field must echo the on-wire header from offset 8"
     );
 
-    netns::emit_pass(scen, "Type-246 returned with C flag set by the nix backend");
+    netns::emit_pass(scen, "nix backend reflected the Destination Options header");
 }
 
 // ==========================================================================

@@ -40,7 +40,7 @@ fn config_file_sets_defaults_but_cli_wins() {
     assert_eq!(conf.remote_port, 9999);
     assert_eq!(
         conf.remote_addr,
-        "10.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        ["10.0.0.1".parse::<std::net::IpAddr>().unwrap()]
     );
     assert_eq!(conf.count, 7);
     assert!(conf.ber);

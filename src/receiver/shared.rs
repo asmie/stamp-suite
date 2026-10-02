@@ -29,6 +29,29 @@ pub struct ReceiverSharedState {
     pub shutdown: crate::shutdown::CancellationToken,
 }
 
+/// Reloads the HMAC keys from the configured key file or directory and
+/// replaces the reflector's keyset, including keys added through the control
+/// API. On error the current keyset stays in place. Returns the number of
+/// per-SSID keys loaded.
+///
+/// # Errors
+/// Fails when no key source is configured or the source cannot be loaded.
+pub fn reload_keys(
+    conf: &Configuration,
+    shared: &ReceiverSharedState,
+) -> Result<usize, crate::StartupError> {
+    let source = conf.key_source();
+    if !source.is_configured() {
+        return Err(crate::StartupError::config(
+            "no HMAC key source is configured",
+        ));
+    }
+    let set = source.load_key_set()?;
+    let count = set.as_ref().map_or(0, |set| set.ssids().len());
+    *shared.hmac_keys.write().unwrap_or_else(|e| e.into_inner()) = set;
+    Ok(count)
+}
+
 /// Creates the shared state for the receiver, using configuration values.
 pub fn create_shared_state(
     conf: &Configuration,

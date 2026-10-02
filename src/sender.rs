@@ -164,10 +164,51 @@ pub async fn run_sender_with_output(
     observers: SenderObservers,
     shutdown: crate::shutdown::CancellationToken,
 ) -> Result<StatsSnapshot, crate::StartupError> {
-    run::SenderRun::open(conf, observers, shutdown)
+    run::SenderRun::open(std::sync::Arc::new(conf.clone()), observers, shutdown)
         .await?
         .run(output)
         .await
+}
+
+/// Runs one session per `--remote-addr` at the same time and returns their
+/// final snapshots in address order. With several targets each report names
+/// its target. Every session is opened before any probe is sent, so a
+/// startup error in one stops them all.
+pub async fn run_senders(
+    conf: &Configuration,
+    output: &crate::stats::StatsOutput,
+    observers: SenderObservers,
+    shutdown: crate::shutdown::CancellationToken,
+) -> Result<Vec<StatsSnapshot>, crate::StartupError> {
+    let targets = conf.per_target();
+    let labelled = targets.len() > 1;
+    let mut runs = Vec::with_capacity(targets.len());
+    for target in targets {
+        let label = target.remote_ip().to_string();
+        let mut run = run::SenderRun::open(
+            std::sync::Arc::new(target),
+            observers.clone(),
+            shutdown.clone(),
+        )
+        .await?;
+        if labelled {
+            run.set_label(label);
+        }
+        runs.push(run);
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, run) in runs.into_iter().enumerate() {
+        let mut output = output.clone();
+        tasks.spawn(async move { (index, run.run(&mut output).await) });
+    }
+    let mut results: Vec<Option<StatsSnapshot>> = Vec::new();
+    results.resize_with(tasks.len(), || None);
+    while let Some(joined) = tasks.join_next().await {
+        let (index, result) =
+            joined.map_err(|e| crate::StartupError::config(format!("sender task failed: {e}")))?;
+        results[index] = Some(result?);
+    }
+    Ok(results.into_iter().flatten().collect())
 }
 
 fn process_response(

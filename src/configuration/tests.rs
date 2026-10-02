@@ -148,7 +148,7 @@ fn test_valid_configuration_parsing() {
         "0123456789abcdef0123456789abcdef",
     ];
     let conf = Configuration::parse_from(args);
-    assert_eq!(conf.remote_addr, "127.0.0.1".parse::<IpAddr>().unwrap());
+    assert_eq!(conf.remote_addr, ["127.0.0.1".parse::<IpAddr>().unwrap()]);
     assert_eq!(conf.local_addr, "0.0.0.0".parse::<IpAddr>().unwrap());
     assert_eq!(conf.remote_port, 862);
     assert_eq!(conf.local_port, 862);
@@ -556,7 +556,7 @@ fn test_default_configuration() {
     let args = vec!["test"];
     let conf = Configuration::parse_from(args);
 
-    assert_eq!(conf.remote_addr, "0.0.0.0".parse::<IpAddr>().unwrap());
+    assert_eq!(conf.remote_addr, ["0.0.0.0".parse::<IpAddr>().unwrap()]);
     assert_eq!(conf.local_addr, "0.0.0.0".parse::<IpAddr>().unwrap());
     assert_eq!(conf.remote_port, 862);
     assert_eq!(conf.local_port, 0);
@@ -579,7 +579,7 @@ fn test_default_configuration() {
 fn test_ipv6_address_parsing() {
     let args = vec!["test", "--remote-addr", "::1", "--local-addr", "fe80::1"];
     let conf = Configuration::parse_from(args);
-    assert_eq!(conf.remote_addr, "::1".parse::<IpAddr>().unwrap());
+    assert_eq!(conf.remote_addr, ["::1".parse::<IpAddr>().unwrap()]);
     assert_eq!(conf.local_addr, "fe80::1".parse::<IpAddr>().unwrap());
 }
 
@@ -1291,7 +1291,7 @@ fn test_file_config_parses_all_common_fields() {
             tlv_mode = "ignore"
         "#;
     let file: FileConfiguration = toml::from_str(toml_str).expect("parses");
-    assert_eq!(file.remote_addr, Some("127.0.0.1".parse().unwrap()));
+    assert_eq!(file.remote_addr, Some(vec!["127.0.0.1".parse().unwrap()]));
     assert_eq!(file.remote_port, Some(10862));
     assert_eq!(file.clock_source, Some(ClockFormat::PTP));
     assert_eq!(file.auth_mode, Some(AuthMode::Authenticated));
@@ -2694,4 +2694,37 @@ fn every_cli_option_has_a_config_file_key() {
         .filter(|id| !CLI_ONLY.contains(&id.as_str()) && !file.contains_key(id))
         .collect();
     assert!(missing.is_empty(), "no config file key for {missing:?}");
+}
+
+#[test]
+fn several_remote_addresses() {
+    let conf = Configuration::parse_from([
+        "test",
+        "-r",
+        "192.0.2.1",
+        "--remote-addr",
+        "192.0.2.2,192.0.2.3",
+    ]);
+    assert_eq!(conf.remote_addr.len(), 3);
+    conf.validate().unwrap();
+    let targets = conf.per_target();
+    assert_eq!(targets.len(), 3);
+    assert_eq!(
+        targets[2].remote_addr,
+        ["192.0.2.3".parse::<IpAddr>().unwrap()]
+    );
+
+    let conf = Configuration::parse_from(["test", "-r", "192.0.2.1,192.0.2.1"]);
+    assert!(conf.validate().is_err(), "duplicate target accepted");
+    let conf = Configuration::parse_from(["test", "-r", "192.0.2.1,192.0.2.2", "-o", "5000"]);
+    assert!(conf.validate().is_err(), "shared local port accepted");
+
+    for (toml, count) in [
+        ("remote_addr = \"192.0.2.1\"", 1),
+        ("remote_addr = [\"192.0.2.1\", \"2001:db8::1\"]", 2),
+    ] {
+        let file: FileConfiguration = toml::from_str(toml).unwrap();
+        assert_eq!(file.remote_addr.unwrap().len(), count);
+    }
+    assert!(toml::from_str::<FileConfiguration>("remote_addr = 5").is_err());
 }

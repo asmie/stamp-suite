@@ -3,7 +3,6 @@
 #[macro_use]
 extern crate log;
 
-#[cfg(any(feature = "metrics", feature = "control", all(unix, feature = "snmp")))]
 use std::sync::Arc;
 
 use stamp_suite::{
@@ -131,8 +130,10 @@ async fn run(conf: &Configuration) -> Result<(), StartupError> {
 }
 
 async fn run_reflector(conf: &Configuration) -> Result<(), StartupError> {
-    let shared = receiver::create_shared_state(conf)?;
+    let shared = Arc::new(receiver::create_shared_state(conf)?);
     cancel_on_signal(shared.shutdown.clone());
+    #[cfg(unix)]
+    reload_keys_on_hangup(conf, &shared)?;
 
     // An operator who asked for the control API must not get a reflector
     // that silently runs without it. Design: doc/control-plane.md.
@@ -161,6 +162,29 @@ async fn run_reflector(conf: &Configuration) -> Result<(), StartupError> {
     };
 
     receiver::run_receiver(conf, &shared).await
+}
+
+/// SIGHUP reloads the HMAC keys from their configured file or directory.
+#[cfg(unix)]
+fn reload_keys_on_hangup(
+    conf: &Configuration,
+    shared: &Arc<receiver::ReceiverSharedState>,
+) -> Result<(), StartupError> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut hangup = signal(SignalKind::hangup())
+        .map_err(|e| StartupError::io("Cannot install the SIGHUP handler", e))?;
+    let conf = conf.clone();
+    let shared = Arc::clone(shared);
+    tokio::spawn(async move {
+        while hangup.recv().await.is_some() {
+            match receiver::reload_keys(&conf, &shared) {
+                Ok(count) => info!("SIGHUP: reloaded HMAC keys ({count} per-SSID)"),
+                Err(e) => log::warn!("SIGHUP: keeping the current HMAC keys: {e}"),
+            }
+        }
+    });
+    Ok(())
 }
 
 async fn run_sender(conf: &Configuration) -> Result<(), StartupError> {
@@ -196,8 +220,9 @@ async fn run_sender(conf: &Configuration) -> Result<(), StartupError> {
     };
 
     let mut output = stamp_suite::stats::StatsOutput::new(conf.output_format);
-    let stats = sender::run_sender_with_output(conf, &mut output, observers, shutdown).await?;
-    output.print(&stats, false);
+    for stats in sender::run_senders(conf, &output, observers, shutdown).await? {
+        output.print(&stats, false);
+    }
     Ok(())
 }
 

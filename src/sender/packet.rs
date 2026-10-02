@@ -135,7 +135,7 @@ pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv>
     // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: the Reflected Fixed Header Data
     // (Type 247) TLVs MUST be added before the Reflected IPv6 Extension Header
     // Data (Type 246) TLVs, so emit every 247 first.
-    let fixed_family_len = if conf.remote_addr.is_ipv4() {
+    let fixed_family_len = if conf.remote_ip().is_ipv4() {
         IPV4_FIXED_HEADER_SIZE
     } else {
         IPV6_FIXED_HEADER_SIZE
@@ -175,7 +175,7 @@ pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv>
     // pairing (§3.1 rule 2), not a selector, disambiguates them.
     // IPv6 extension headers do not exist for IPv4, so attach-derived request
     // TLVs are emitted only for IPv6 destinations (matching the send-path gate).
-    let attach_specs = if conf.remote_addr.is_ipv6() {
+    let attach_specs = if conf.remote_ip().is_ipv6() {
         conf.attach_ext_hdrs()
     } else {
         Vec::new()

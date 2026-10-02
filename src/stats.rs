@@ -41,27 +41,36 @@ pub enum OutputFormat {
 
 /// Output state for one sender reporting stream. Reuse it for interim and final
 /// snapshots so CSV has one header, even when a run produces no interim report.
+///
+/// Clones share the CSV header state and print one report at a time, so
+/// concurrent sender runs can report into one stream.
+#[derive(Clone)]
 pub struct StatsOutput {
     format: OutputFormat,
-    csv_header_printed: bool,
+    /// Whether the CSV header was printed; the lock also serializes reports.
+    csv_header_printed: std::sync::Arc<std::sync::Mutex<bool>>,
 }
 
 impl StatsOutput {
     pub fn new(format: OutputFormat) -> Self {
         Self {
             format,
-            csv_header_printed: false,
+            csv_header_printed: Default::default(),
         }
     }
 
     /// Prints one snapshot; `interim` selects the JSON type and text prefix.
     pub fn print(&mut self, stats: &StatsSnapshot, interim: bool) {
+        let mut header_printed = self
+            .csv_header_printed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match self.format {
             OutputFormat::Text => stats.print_text(if interim { "[INTERIM] " } else { "" }),
             OutputFormat::Json => stats.print_json(interim),
             OutputFormat::Csv => {
-                stats.print_csv(!self.csv_header_printed);
-                self.csv_header_printed = true;
+                stats.print_csv(!*header_printed);
+                *header_printed = true;
             }
         }
     }
@@ -162,6 +171,7 @@ impl RttCollector {
         let total = packets_sent.max(1) as f64;
 
         StatsSnapshot {
+            target: None,
             quantile_precision: QuantilePrecision::default(),
             measurements: None,
             packets_sent,
@@ -421,6 +431,9 @@ impl Default for QuantilePrecision {
 /// Serializable sender statistics snapshot.
 #[derive(serde::Serialize)]
 pub struct StatsSnapshot {
+    /// The reflector this report is for, when one sender runs several.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub measurements: Option<MeasurementSummary>,
     /// Quantile accuracy policy for RTT and both OWD directions.
@@ -490,6 +503,11 @@ impl StatsSnapshot {
         self
     }
 
+    pub fn with_target(mut self, target: Option<String>) -> Self {
+        self.target = target;
+        self
+    }
+
     /// Prints a standalone final summary in the given format, including a CSV header.
     /// Use [`StatsOutput`] to combine interim and final reports in one stream.
     pub fn print(&self, format: OutputFormat) {
@@ -502,6 +520,9 @@ impl StatsSnapshot {
 
     fn print_text(&self, prefix: &str) {
         println!("\n{}--- STAMP Statistics ---", prefix);
+        if let Some(target) = &self.target {
+            println!("{prefix}Target: {target}");
+        }
         println!("{}Packets sent: {}", prefix, self.packets_sent);
         println!("{}Packets received: {}", prefix, self.packets_received);
         println!(
@@ -652,20 +673,24 @@ impl StatsSnapshot {
         // Optional header + data row. OWD, Access Report, and Congestion columns
         // are always present but left empty when no samples were
         // collected / the feature was not enabled.
+        // The target column appears only when one sender runs several.
+        let target = self.target.as_deref().map(|t| format!("{t},"));
         if header {
             println!(
-                "packets_sent,packets_received,packets_lost,loss_percent,\
+                "{}packets_sent,packets_received,packets_lost,loss_percent,\
              min_rtt_ms,max_rtt_ms,avg_rtt_ms,median_rtt_ms,\
              p95_rtt_ms,p99_rtt_ms,jitter_ms,std_dev_ms,\
              owd_fwd_min_ms,owd_fwd_avg_ms,owd_fwd_max_ms,\
              owd_rev_min_ms,owd_rev_avg_ms,owd_rev_max_ms,\
              access_report_outcome,access_report_retransmissions,\
              congestion_ce_replies,congestion_backoffs_applied,\
-             congestion_current_interval_ms,congestion_max_interval_reached_ms,quantile_exact_sample_limit,quantile_relative_error_bound,ber,measurements,owd_clock_quality"
+             congestion_current_interval_ms,congestion_max_interval_reached_ms,quantile_exact_sample_limit,quantile_relative_error_bound,ber,measurements,owd_clock_quality",
+                if target.is_some() { "target," } else { "" }
             );
         }
         println!(
-            "{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{}{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            target.unwrap_or_default(),
             self.packets_sent,
             self.packets_received,
             self.packets_lost,

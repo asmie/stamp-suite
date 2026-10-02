@@ -150,6 +150,7 @@ fn test_snapshot_loss_percent() {
 #[test]
 fn test_stats_text_format() {
     let snap = StatsSnapshot {
+        target: None,
         quantile_precision: QuantilePrecision::default(),
         measurements: None,
         packets_sent: 10,
@@ -176,6 +177,7 @@ fn test_stats_text_format() {
 #[test]
 fn test_stats_json_format() {
     let snap = StatsSnapshot {
+        target: None,
         quantile_precision: QuantilePrecision::default(),
         measurements: None,
         packets_sent: 10,
@@ -202,6 +204,7 @@ fn test_stats_json_format() {
 #[test]
 fn test_stats_csv_format() {
     let snap = StatsSnapshot {
+        target: None,
         quantile_precision: QuantilePrecision::default(),
         measurements: None,
         packets_sent: 10,
@@ -227,6 +230,7 @@ fn test_stats_csv_format() {
 
 fn base_snapshot() -> StatsSnapshot {
     StatsSnapshot {
+        target: None,
         quantile_precision: QuantilePrecision::default(),
         measurements: None,
         packets_sent: 10,
@@ -390,6 +394,7 @@ fn test_stats_csv_includes_congestion_columns() {
 #[test]
 fn test_stats_json_none_fields() {
     let snap = StatsSnapshot {
+        target: None,
         quantile_precision: QuantilePrecision::default(),
         measurements: None,
         packets_sent: 5,
