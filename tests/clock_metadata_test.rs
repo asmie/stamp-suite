@@ -45,6 +45,43 @@ fn request(auth: bool, seq: u32, extensions: bool) -> Vec<u8> {
     }
     data
 }
+/// Starts the reflector on a free port and waits until it answers. Another
+/// test can take the port between reservation and bind, so a reflector that
+/// exits early is restarted on a new port.
+fn start_reflector(
+    args: &[&str],
+    ip: &str,
+    socket: &UdpSocket,
+    auth: bool,
+) -> (Reflector, std::net::SocketAddr) {
+    socket
+        .set_read_timeout(Some(Duration::from_millis(40)))
+        .unwrap();
+    for _ in 0..5 {
+        let reserved = UdpSocket::bind((ip, 0)).unwrap();
+        let target = reserved.local_addr().unwrap();
+        drop(reserved);
+        let mut reflector = Reflector(
+            Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
+                .args(args)
+                .args(["--local-port", &target.port().to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let started = Instant::now();
+        while reflector.0.try_wait().unwrap().is_none() {
+            socket.send_to(&request(auth, 0, false), target).unwrap();
+            if socket.recv_from(&mut [0; 256]).is_ok() {
+                return (reflector, target);
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+    }
+    panic!("the reflector could not bind a free port");
+}
+
 fn exercise(ipv6: bool, auth: bool, stateful: bool) {
     let ip = if ipv6 { "::1" } else { "127.0.0.1" };
     for (format, source, code, synchronized) in [
@@ -53,16 +90,10 @@ fn exercise(ipv6: bool, auth: bool, stateful: bool) {
         ("PTP", Some("ntp"), 1, true),
         ("NTP", Some("ptp"), 2, false),
     ] {
-        let reserved = UdpSocket::bind((ip, 0)).unwrap();
-        let target = reserved.local_addr().unwrap();
-        drop(reserved);
-        let mut command = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
-        command.args([
+        let mut args = vec![
             "--is-reflector",
             "--local-addr",
             ip,
-            "--local-port",
-            &target.port().to_string(),
             "--clock-source",
             format,
             "--hardware-clock-sync-source",
@@ -75,53 +106,43 @@ fn exercise(ipv6: bool, auth: bool, stateful: bool) {
             },
             "--reflected-control-max-count",
             "3",
-        ]);
+        ];
         if let Some(source) = source {
-            command.args(["--clock-sync-source", source]);
+            args.extend(["--clock-sync-source", source]);
         }
         if synchronized {
-            command.arg("--clock-synchronized");
+            args.push("--clock-synchronized");
         }
         if stateful {
-            command.arg("--stateful-reflector");
+            args.push("--stateful-reflector");
         }
         if auth {
-            command.args([
+            args.extend([
                 "--auth-mode",
                 "A",
                 "--hmac-key",
                 "abababababababababababababababab",
             ]);
         }
-        let mut reflector = Reflector(
-            command
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
         let socket = UdpSocket::bind((ip, 0)).unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_millis(40)))
-            .unwrap();
-        let started = Instant::now();
-        loop {
-            assert!(reflector.0.try_wait().unwrap().is_none());
-            socket.send_to(&request(auth, 0, false), target).unwrap();
-            if socket.recv_from(&mut [0; 256]).is_ok() {
-                break;
-            }
-            assert!(started.elapsed() < Duration::from_secs(5));
-        }
+        let (_reflector, target) = start_reflector(&args, ip, &socket, auth);
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         socket.send_to(&request(auth, 1, true), target).unwrap();
         let mut previous = None;
-        for copy in 0..3 {
+        let mut copy = 0;
+        while copy < 3 {
             let mut data = [0; 2048];
             let (len, _) = socket.recv_from(&mut data).unwrap();
             let data = &data[..len];
+            // A late reply to a warm-up probe (sender sequence 0) can still
+            // be queued; only replies to the measured request count.
+            let echoed = if auth { 48 } else { 24 };
+            if data[echoed..echoed + 4] != 1u32.to_be_bytes() {
+                continue;
+            }
+            copy += 1;
             let base = if auth { 112 } else { 44 };
             let error = if auth { 24 } else { 12 };
             let estimate = u16::from_be_bytes(data[error..error + 2].try_into().unwrap());

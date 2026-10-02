@@ -213,7 +213,8 @@ impl TlvList {
             .map(|order| order.iter().map(|&i| &self.entries[i]).collect())
     }
 
-    /// Parses a TLV list from a buffer.
+    /// Parses a TLV list from a buffer. A trailing fragment shorter than a
+    /// TLV header is not a TLV and is ignored.
     ///
     /// # Errors
     /// Returns an error if parsing fails or a non-padding TLV follows HMAC.
@@ -255,7 +256,10 @@ impl TlvList {
             offset += consumed;
         }
 
-        if let Some(at) = list.hmac_wire_offset.filter(|at| at + 20 < offset) {
+        // Keep the received order when serialization would change it: an HMAC
+        // followed by Extra Padding, or (with BER, whose padding is written
+        // after the HMAC) Extra Padding received before the HMAC.
+        if let Some(at) = list.hmac_wire_offset {
             let mut prefix_bytes = 0;
             let before_hmac = list
                 .non_hmac_tlvs()
@@ -269,12 +273,19 @@ impl TlvList {
                     }
                 })
                 .count();
-            list.wire_order = Some(
-                (0..before_hmac)
-                    .chain(std::iter::once(list.non_hmac_len))
-                    .chain(before_hmac..list.non_hmac_len)
-                    .collect(),
-            );
+            let hmac_not_last = at + TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE < offset;
+            let padding_moves = list.ber_padding_after_hmac()
+                && list.non_hmac_tlvs()[..before_hmac]
+                    .iter()
+                    .any(|tlv| tlv.tlv_type == TlvType::ExtraPadding);
+            if hmac_not_last || padding_moves {
+                list.wire_order = Some(
+                    (0..before_hmac)
+                        .chain(std::iter::once(list.non_hmac_len))
+                        .chain(before_hmac..list.non_hmac_len)
+                        .collect(),
+                );
+            }
         }
         Ok(list)
     }
@@ -354,10 +365,19 @@ impl TlvList {
         }
 
         let malformed_echo = any_malformed || has_multiple_hmac;
+        let has_ber = parsed_tlvs.iter().any(|t| crate::ber::is_ber(t.tlv_type));
+        // With BER, serialization writes Extra Padding after the HMAC; keep
+        // the received order if padding arrived before it.
+        let padding_moves = has_ber
+            && parsed_tlvs
+                .iter()
+                .take_while(|t| !t.tlv_type.is_hmac())
+                .any(|t| t.tlv_type == TlvType::ExtraPadding)
+            && found_hmac;
         let need_wire_order = malformed_echo
+            || padding_moves
             || (found_hmac && parsed_tlvs.last().is_some_and(|t| !t.tlv_type.is_hmac()));
         let non_hmac_len = parsed_tlvs.iter().filter(|t| !t.tlv_type.is_hmac()).count();
-        let has_ber = parsed_tlvs.iter().any(|t| crate::ber::is_ber(t.tlv_type));
         let wire_order: Option<Vec<usize>> = need_wire_order.then(|| {
             let mut next_non_hmac = 0;
             let mut next_hmac = non_hmac_len;

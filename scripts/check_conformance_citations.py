@@ -1,35 +1,25 @@
 #!/usr/bin/env python3
-"""Check the file:line citations in doc/conformance/*.md against the tree.
+"""Check the source citations in doc/conformance/*.md against the tree.
 
 Run from the repository root:
 
     python3 scripts/check_conformance_citations.py          # report + exit code
     python3 scripts/check_conformance_citations.py --json    # machine-readable
 
-Exits non-zero when a citation has drifted, so this can gate CI. Citation drift
-was a recurring finding in the 1.0 audit — the matrices are the compliance
-evidence, and a citation pointing at the wrong construct quietly devalues it.
+Exits non-zero when a citation has drifted, so this can gate CI. Three forms
+are checked:
 
-Verdict rule: a citation is OK when the cited line range intersects the *extent*
-(definition line .. closing brace) of any identifier named beside it in the same
-row. That tolerates a citation pointing into a function body rather than at its
-signature, and rows whose several named items share a citation group.
+- `path.rs::item` must name an item defined in that file or in its child
+  modules (`path/` or the directory of a `mod.rs`). `Type::method` checks the
+  method; a derived trait method such as `Type::default` checks the type.
+- `ident` (`path.rs`) attributes an identifier to a file: it must be defined
+  there, or, for a path-qualified name, appear there as a use.
+- Any other `path.rs` must exist. A bare file name must match exactly one file.
 
-"unverifiable" is not a failure: many citations follow prose that names no
-backticked identifier, or name an item defined in a different file (a call site).
-Those are reported for transparency but cannot be machine-checked. Where a
-citation could not be pinned during the 2026-08-05 refresh, its line number was
-deliberately removed and only the path kept — a coarse citation that is correct
-beats a precise one that is confidently wrong.
-
-
-Verdict rule: a citation is OK when the cited line range intersects the *extent*
-(definition line .. closing brace) of ANY plausible identifier named next to it.
-That tolerates citations pointing at a body line rather than the signature, and
-citations shared by a row that names several items.
-
-STALE requires: at least one adjacent identifier is defined in the cited file,
-and NONE of the adjacent identifiers' extents intersect the cited range.
+Line citations (`path.rs:N` or `path.rs:N-M`) are still accepted. One is OK
+when its range intersects the extent of an identifier named before it; it is
+STALE when such identifiers are defined in the file but none of them overlap,
+and unverifiable when none are defined there.
 """
 import argparse
 import glob
@@ -50,7 +40,7 @@ BACKTICK = re.compile(r'`([^`]+)`')
 GOOD = re.compile(r'^(?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*$')
 
 paths = []
-for base in ("src", "tests", "benches", "fuzz"):
+for base in ("src", "tests", "benches", "fuzz", "examples"):
     for dp, _d, fs in os.walk(os.path.join(ROOT, base)):
         if "target" in dp:
             continue
@@ -72,6 +62,32 @@ def resolve(c):
     return m[0] if len(m) == 1 else None
 
 
+def scope(p):
+    """The file plus its child-module files."""
+    if p.endswith("/mod.rs"):
+        prefix = p[: -len("mod.rs")]
+    elif os.path.isdir(os.path.join(ROOT, p[:-3])):
+        prefix = p[:-3] + "/"
+    else:
+        return [p]
+    return [p] + [q for q in paths if q.startswith(prefix) and q != p]
+
+
+DERIVED = {"default", "clone", "fmt", "eq", "ne", "cmp", "partial_cmp", "hash", "from_str", "to_string"}
+
+
+def target_name(ident):
+    """The name to look up: the last segment, or the type for a derived method."""
+    parts = ident.split("::")
+    if len(parts) > 1 and parts[-1] in DERIVED:
+        return parts[-2]
+    return parts[-1]
+
+
+def defined_in(ident, files):
+    return any(defs(f, target_name(ident)) for f in files)
+
+
 def is_item(n):
     if not GOOD.match(n):
         return False
@@ -84,7 +100,10 @@ DEFPATS = [
     r'\b(?:struct|enum|trait|union)\s+{0}\b',
     r'\b(?:const|static)\s+{0}\s*:',
     r'\btype\s+{0}\s*=',
-    r'^\s*(?:pub\s+)?{0}\s*:\s',
+    r'^\s*(?:pub(?:\([^)]*\))?\s+)?{0}\s*:\s',
+    r'\bmod\s+{0}\b',
+    r'macro_rules!\s*{0}\b',
+    r'^\s*{0}\s*(?:=|,|\(|\{{|$)',
 ]
 
 
@@ -118,9 +137,51 @@ def extent(path, start):
     return start, start
 
 
+PATH_ITEM = re.compile(r'`([A-Za-z0-9_./-]+\.rs)::([A-Za-z_][A-Za-z0-9_:]*)`')
+PLAIN = re.compile(r'`([A-Za-z0-9_./-]+\.rs)`')
+# `a`, `b` and `c` (`x.rs`, `y.rs`)
+ATTRIBUTED = re.compile(
+    r'((?:`[^`]+`(?:\s*,\s*|\s+and\s+|\s+or\s+|\s*/\s*)?)+)\s*'
+    r'\(((?:`[A-Za-z0-9_./-]+\.rs`(?:\s*,\s*|\s+and\s+)?)+)\)')
+
 rows = []
+
+
+def check_named_citations(md, lineno, row):
+    base = {"md": os.path.relpath(md, ROOT), "md_line": lineno}
+    for m in PATH_ITEM.finditer(row):
+        path = resolve(m.group(1))
+        rec = dict(base, cite=m.group(0).strip("`"), path=path)
+        if path is None:
+            rec["status"] = "unresolved"
+        elif defined_in(m.group(2), scope(path)):
+            rec["status"] = "ok"
+        else:
+            rec["status"] = "missing-item"
+        rows.append(rec)
+    for m in PLAIN.finditer(row):
+        rows.append(dict(base, cite=m.group(1), path=resolve(m.group(1)),
+                         status="ok" if resolve(m.group(1)) else "unresolved"))
+    for m in ATTRIBUTED.finditer(row):
+        cited = [resolve(f) for f in BACKTICK.findall(m.group(2))]
+        files = [f for p in cited if p for f in scope(p)]
+        if not files:
+            continue  # the unresolved path is already reported above
+        for ident in BACKTICK.findall(m.group(1)):
+            if not is_item(ident):
+                continue
+            used = "::" in ident and any(ident in "\n".join(lines_of(f)) for f in files)
+            ok = used or defined_in(ident, files)
+            rec = dict(base, cite=f"{ident} ({', '.join(p for p in cited if p)})",
+                       status="ok" if ok else "misattributed")
+            if not ok:
+                rec["defined_in"] = [p for p in paths if defs(p, target_name(ident))][:3]
+            rows.append(rec)
+
+
 for md in sorted(glob.glob(os.path.join(ROOT, "doc/conformance/*.md"))):
     for lineno, row in enumerate(open(md, encoding="utf-8").read().splitlines(), 1):
+        check_named_citations(md, lineno, row)
         cites = list(CITE.finditer(row))
         if not cites:
             continue
@@ -175,7 +236,8 @@ for md in sorted(glob.glob(os.path.join(ROOT, "doc/conformance/*.md"))):
             rows.append(rec)
 
 c = Counter(r["status"] for r in rows)
-stale = [r for r in rows if r["status"] in ("STALE", "OUT-OF-RANGE", "unresolved")]
+FAILING = ("STALE", "OUT-OF-RANGE", "unresolved", "missing-item", "misattributed")
+stale = [r for r in rows if r["status"] in FAILING]
 
 if args.json:
     report = {"counts": dict(c), "problems": stale}
@@ -184,12 +246,14 @@ if args.json:
     print(json.dumps(report, indent=1))
 else:
     print(f"citations examined: {len(rows)}")
-    for k in ("ok", "unverifiable", "STALE", "OUT-OF-RANGE", "unresolved"):
+    for k in ("ok", "unverifiable") + FAILING:
         if c.get(k):
             print(f"  {c[k]:4d}  {k}")
     for r in stale:
         detail = f" (anchor `{r['anchor']}` is at {r.get('anchor_def')})" if r.get("anchor") else ""
-        print(f"\nDRIFTED {r['md']}:{r['md_line']}  {r['cite']}{detail}")
+        if r.get("defined_in") is not None:
+            detail = f" (defined in {', '.join(r['defined_in']) or 'no source file'})"
+        print(f"\n{r['status'].upper()} {r['md']}:{r['md_line']}  {r['cite']}{detail}")
         if r.get("suggest"):
             print(f"        suggested: {r['cite'].split(':')[0]}:"
                   f"{r['suggest'][0]}-{r['suggest'][1]}")

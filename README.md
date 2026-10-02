@@ -99,7 +99,7 @@ Both backends capture received TTL/Hop Limit. See
 
 | Cargo feature | Purpose |
 | --- | --- |
-| `ttl-nix` | Select the nix receiver |
+| `ttl-nix` | Keep the nix receiver when `ttl-pnet` is also enabled; it is already the default on Linux and macOS |
 | `ttl-pnet` | Select raw packet capture; Linux requires `CAP_NET_RAW` |
 | `metrics` | Prometheus HTTP endpoint |
 | `control` | Reflector session/key/limit API with optional HTTPS |

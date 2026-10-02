@@ -211,6 +211,84 @@ pub async fn run_senders(
     Ok(results.into_iter().flatten().collect())
 }
 
+/// Feeds one reflected packet through reply processing, with measurements,
+/// BER, an Access Report exchange and congestion response active and four
+/// probes awaiting replies. `expect_msid` requires a Micro-session ID. For the
+/// fuzz targets; not a stable API.
+#[doc(hidden)]
+pub fn fuzz_reply(
+    data: &[u8],
+    use_auth: bool,
+    use_tlvs: bool,
+    key: Option<&HmacKey>,
+    expect_msid: bool,
+) {
+    let now = Instant::now();
+    let mut pending = HashMap::new();
+    let mut measurements = Measurements::new(3);
+    for seq in 0..4u32 {
+        let probe = PendingPacket {
+            send_time: now,
+            send_timestamp: generate_timestamp(ClockFormat::NTP),
+        };
+        pending.insert(seq, probe);
+        measurements.sent(seq, probe, seq + 1);
+    }
+    let mut ber = BerCollector::new(
+        vec![0xff, 0],
+        64,
+        true,
+        Duration::from_secs(1),
+        now,
+        [Some(1.0), Some(1.0)],
+    );
+    let mut access_report = AccessReportRetransmitState::new(Duration::from_secs(1), 3);
+    access_report.tick(now);
+    let mut congestion = CongestionState::new(AimdParams {
+        base_interval: Duration::from_millis(10),
+        backoff_factor: 2.0,
+        max_interval: Duration::from_secs(1),
+        recovery_step: Duration::from_millis(1),
+    });
+    let mut rtt_collector = RttCollector::new();
+    let mut owd_collector = OwdCollector::default();
+    let mut packets_received = 0;
+    let mut latched_reflector_msid = None;
+    let mut zero_ssid_seen = false;
+    let observers = SenderObservers::new();
+    let mut ctx = SenderRecvContext {
+        local_error_estimate: None,
+        measurements: Some(&mut measurements),
+        ber: Some(&mut ber),
+        reflector_utc_offset: 0,
+        pending: &mut pending,
+        rtt_collector: &mut rtt_collector,
+        owd_collector: &mut owd_collector,
+        packets_received: &mut packets_received,
+        print_stats: false,
+        output_format: crate::stats::OutputFormat::Json,
+        hmac_key: key,
+        expected_sender_msid: expect_msid.then_some(1),
+        expected_reflector_msid: None,
+        latched_reflector_msid: &mut latched_reflector_msid,
+        access_report_state: Some(&mut access_report),
+        congestion: Some(&mut congestion),
+        expected_ssid: None,
+        on_zero_ssid: ZeroSsidAction::Continue,
+        zero_ssid_seen: &mut zero_ssid_seen,
+        observers: &observers,
+    };
+    process_response(
+        data,
+        use_auth,
+        use_tlvs,
+        ClockFormat::NTP,
+        None,
+        Some(0),
+        &mut ctx,
+    );
+}
+
 fn process_response(
     data: &[u8],
     use_auth: bool,
@@ -476,7 +554,7 @@ fn process_response(
     }
 
     // Unix seconds used to resolve the NTP era of every timestamp in this reply.
-    let reference = chrono::Utc::now().timestamp();
+    let reference = crate::time::unix_now().0;
     let remote_error = ErrorEstimate::from_wire(reflector_error);
 
     if let Some(measurements) = ctx.measurements.as_mut() {

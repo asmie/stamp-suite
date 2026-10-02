@@ -1,5 +1,3 @@
-use chrono::{DateTime, Utc};
-
 use crate::configuration::ClockFormat;
 
 /// Offset in seconds between NTP epoch (1900-01-01) and Unix epoch (1970-01-01).
@@ -13,12 +11,21 @@ const NTP_UNIX_OFFSET: i64 = 2208988800;
 /// let timestamp = generate_timestamp(ClockFormat::NTP);
 /// ```
 pub fn generate_timestamp(cs: ClockFormat) -> u64 {
-    let now = Utc::now();
+    let (secs, nanos) = unix_now();
+    timestamp_from_parts(secs, nanos, cs)
+}
 
-    match cs {
-        ClockFormat::NTP => convert_dt_to_ntp(now),
-        ClockFormat::PTP => convert_dt_to_ptp(now),
-    }
+/// The system clock as Unix seconds and nanoseconds. A clock set before 1970
+/// reads as the epoch.
+#[must_use]
+pub fn unix_now() -> (i64, u32) {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (
+        i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX),
+        since_epoch.subsec_nanos(),
+    )
 }
 
 /// Converts a wire STAMP timestamp back to nanoseconds since its clock epoch
@@ -86,27 +93,9 @@ pub fn timestamp_from_parts(secs: i64, nanos: u32, cs: ClockFormat) -> u64 {
     }
 }
 
-fn convert_dt_to_ntp(date: DateTime<Utc>) -> u64 {
-    let secs = (date.timestamp() + NTP_UNIX_OFFSET) as u32;
-    // NTP fraction: nanoseconds * 2^32 / 10^9
-    // Use nanoseconds for better precision than microseconds
-    let fraction = ((date.timestamp_subsec_nanos() as u64) << 32) / 1_000_000_000;
-
-    ((secs as u64) << 32) | fraction
-}
-
-fn convert_dt_to_ptp(date: DateTime<Utc>) -> u64 {
-    // Cast to u64 first to avoid signed shift issues with pre-epoch timestamps
-    // For pre-epoch (negative) timestamps, the upper 32 bits will wrap correctly
-    let secs = date.timestamp() as u64;
-    let nanos = date.timestamp_subsec_nanos() as u64;
-    (secs << 32) | nanos
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::time::convert_dt_to_ntp;
 
     #[test]
     fn unix_decode_unfolds_both_formats_near_reference() {
@@ -145,14 +134,11 @@ mod tests {
     }
 
     #[test]
-    fn convert_dt_to_ntp_test() {
-        use chrono::{DateTime, Utc};
-
+    fn ntp_conversion() {
         const TEST_CASES: &[(i64, u32)] = &[(1_525_987, 0), (0, 0), (2_584_229, 151_000_000)];
 
         for &(secs, nanos) in TEST_CASES {
-            let sample = DateTime::<Utc>::from_timestamp(secs, nanos).expect("Invalid timestamp");
-            let test_val = convert_dt_to_ntp(sample);
+            let test_val = timestamp_from_parts(secs, nanos, ClockFormat::NTP);
 
             let expected_secs = secs + NTP_UNIX_OFFSET;
             let actual_secs = (test_val >> 32) as i64;
@@ -173,13 +159,9 @@ mod tests {
     }
 
     #[test]
-    fn convert_dt_to_ptp_test() {
-        use chrono::Utc;
-
+    fn ptp_conversion() {
         fn assert_conversion(secs: i64, nanos: u32) {
-            let datetime =
-                chrono::DateTime::<Utc>::from_timestamp(secs, nanos).expect("Invalid timestamp");
-            let ptp_val = convert_dt_to_ptp(datetime);
+            let ptp_val = timestamp_from_parts(secs, nanos, ClockFormat::PTP);
             assert_eq!(secs, (ptp_val >> 32) as i64);
             assert_eq!(nanos, ptp_val as u32);
         }
@@ -205,8 +187,7 @@ mod tests {
 
     #[test]
     fn timestamp_to_nanos_round_trips_ptp_generate() {
-        let dt = DateTime::<Utc>::from_timestamp(2_584_229, 25_003_600).unwrap();
-        let ptp = convert_dt_to_ptp(dt);
+        let ptp = timestamp_from_parts(2_584_229, 25_003_600, ClockFormat::PTP);
         assert_eq!(
             timestamp_to_nanos(ptp, ClockFormat::PTP),
             2_584_229_025_003_600
@@ -215,10 +196,9 @@ mod tests {
 
     #[test]
     fn timestamp_to_nanos_ntp_round_trips_within_tolerance() {
-        // A timestamp from convert_dt_to_ntp converts back to ns-since-NTP-epoch
-        // within the ~0.23 ns NTP fractional resolution.
-        let dt = DateTime::<Utc>::from_timestamp(2_584_229, 151_000_000).unwrap();
-        let ntp = convert_dt_to_ntp(dt);
+        // An NTP timestamp converts back to ns-since-NTP-epoch within the
+        // ~0.23 ns NTP fractional resolution.
+        let ntp = timestamp_from_parts(2_584_229, 151_000_000, ClockFormat::NTP);
         let expected = (2_584_229u128 + NTP_UNIX_OFFSET as u128) * 1_000_000_000 + 151_000_000;
         let got = timestamp_to_nanos(ntp, ClockFormat::NTP);
         assert!(
@@ -228,30 +208,18 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_from_parts_matches_chrono_converters() {
-        // A kernel timespec converted via timestamp_from_parts must yield
-        // exactly the same wire value as the chrono-based converters for
-        // the same instant — kernel and userspace timestamps stay
-        // subtractable on the wire.
-        for &(secs, nanos) in &[(0i64, 0u32), (1_525_987, 0), (2_584_229, 151_000_000)] {
-            let dt = DateTime::<Utc>::from_timestamp(secs, nanos).unwrap();
-            assert_eq!(
-                timestamp_from_parts(secs, nanos, ClockFormat::NTP),
-                convert_dt_to_ntp(dt),
-                "NTP mismatch at {secs}.{nanos}"
-            );
-            assert_eq!(
-                timestamp_from_parts(secs, nanos, ClockFormat::PTP),
-                convert_dt_to_ptp(dt),
-                "PTP mismatch at {secs}.{nanos}"
-            );
+    fn generated_timestamp_tracks_the_system_clock() {
+        let (secs, _) = unix_now();
+        for format in [ClockFormat::NTP, ClockFormat::PTP] {
+            let decoded =
+                timestamp_to_unix_nanos(generate_timestamp(format), format, secs).unwrap();
+            assert!((decoded / 1_000_000_000 - i128::from(secs)).abs() <= 1);
         }
     }
 
     #[test]
     fn test_ntp_timestamp_at_unix_epoch() {
-        let unix_epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-        let ntp_ts = convert_dt_to_ntp(unix_epoch);
+        let ntp_ts = timestamp_from_parts(0, 0, ClockFormat::NTP);
         let ntp_secs = ntp_ts >> 32;
         // At Unix epoch, NTP seconds should equal the offset
         assert_eq!(ntp_secs as i64, NTP_UNIX_OFFSET);
@@ -259,8 +227,7 @@ mod tests {
 
     #[test]
     fn test_ptp_timestamp_at_unix_epoch() {
-        let unix_epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-        let ptp_ts = convert_dt_to_ptp(unix_epoch);
+        let ptp_ts = timestamp_from_parts(0, 0, ClockFormat::PTP);
         // At Unix epoch, PTP timestamp should be 0
         assert_eq!(ptp_ts, 0);
     }

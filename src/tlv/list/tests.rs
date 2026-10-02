@@ -1343,3 +1343,21 @@ fn test_tlv_type_is_recognized_for_rfc9503_types() {
 fn test_micro_session_id_tlv_type_recognized() {
     assert!(TlvType::MicroSessionId.is_recognized());
 }
+
+/// Found by the round-trip fuzz oracle: with BER TLVs present, Extra Padding
+/// received before the HMAC TLV must not move after it when re-serialized.
+#[test]
+fn padding_before_hmac_keeps_received_order_with_ber() {
+    let mut wire = Vec::new();
+    for (kind, value) in [
+        (TlvType::BerPattern.to_byte(), vec![0xff, 0]),
+        (TlvType::ExtraPadding.to_byte(), vec![0xff, 0]),
+        (TlvType::Hmac.to_byte(), vec![7; 16]),
+    ] {
+        wire.extend_from_slice(&[0, kind]);
+        wire.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        wire.extend_from_slice(&value);
+    }
+    assert_eq!(TlvList::parse(&wire).unwrap().to_bytes(), wire);
+    assert_eq!(TlvList::parse_lenient(&wire).0.to_bytes(), wire);
+}

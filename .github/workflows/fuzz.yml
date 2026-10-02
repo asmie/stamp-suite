@@ -11,8 +11,7 @@ on:
         required: false
         default: "60"
   schedule:
-    # Sunday 03:30 UTC — once a week is enough for the parser surface
-    # we're covering; bump if/when we add more targets.
+    # Sunday 03:30 UTC.
     - cron: "30 3 * * 0"
 
 # Default to a read-only token. The job uploads artifacts on failure,
@@ -36,12 +35,27 @@ jobs:
           - agentx_decode_header
           - agentx_decode_oid
           - process_stamp_packet
+          - sender_reply
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
+      # A prebuilt binary; building cargo-fuzz took minutes on every leg.
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: fuzz-${{ matrix.target }}
+      # Each run starts from the corpus the previous run grew.
+      - name: Restore corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: Run fuzz target
         env:
           # Use env-var indirection per GitHub security guidance: matrix

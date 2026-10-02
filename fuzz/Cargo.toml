@@ -74,3 +74,10 @@ path = "fuzz_targets/process_stamp_packet.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sender_reply"
+path = "fuzz_targets/sender_reply.rs"
+test = false
+doc = false
+bench = false

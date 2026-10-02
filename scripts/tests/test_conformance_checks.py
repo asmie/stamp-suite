@@ -87,6 +87,37 @@ class EvidenceChecks(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertEqual(len(report['problems']), 1)
 
+    def named(self, row):
+        source = self.root / 'src'
+        (source / 'module').mkdir(parents=True, exist_ok=True)
+        (source / 'module.rs').write_text('pub struct Kind;\nmod child;\n')
+        (source / 'module' / 'child.rs').write_text('fn moved_test() {}\nconst LIMIT: u8 = 1;\n')
+        (source / 'other.rs').write_text('fn elsewhere_fn() {}\nfn uses() { Kind::new(); }\n')
+        (self.docs / 'fixture.md').write_text(row + '\n')
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'check_conformance_citations.py'),
+                                 '--root', str(self.root), '--json', '--details'],
+                                capture_output=True, text=True)
+        return result.returncode, json.loads(result.stdout)
+
+    def test_named_citations_accept_child_modules_derives_and_use_sites(self):
+        for row in ['`src/module.rs::moved_test`', '`src/module.rs::LIMIT`',
+                    '`src/module.rs::Kind::default`', '`moved_test` (`src/module.rs`)',
+                    '`Kind::new` (`src/other.rs`)', '`child.rs`']:
+            with self.subTest(row=row):
+                code, report = self.named(row)
+                self.assertEqual(code, 0, report)
+                self.assertEqual(report['problems'], [])
+
+    def test_named_citations_reject_missing_items_files_and_misattribution(self):
+        for row, status in [('`src/module.rs::absent`', 'missing-item'),
+                            ('`src/gone.rs::moved_test`', 'unresolved'),
+                            ('`gone.rs`', 'unresolved'),
+                            ('`elsewhere_fn` (`src/module.rs`)', 'misattributed')]:
+            with self.subTest(row=row):
+                code, report = self.named(row)
+                self.assertNotEqual(code, 0)
+                self.assertEqual([p['status'] for p in report['problems']], [status])
+
     def test_artifact_selection_rejects_missing_or_ambiguous_test(self):
         path = self.root / 'artifacts.json'
         event = {'reason': 'compiler-artifact', 'target': {'name': 'wire'},

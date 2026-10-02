@@ -1,12 +1,15 @@
 //! Property-based tests for the TLV and packet parsers.
 //!
-//! Two flavours:
+//! Three flavours:
 //!
 //! 1. **Round-trip properties** — for each typed TLV, generate arbitrary
 //!    valid values and assert `parse(serialize(t)) == Ok(t)`. Catches
 //!    encoder/decoder asymmetries that hand-written tests miss.
 //!
-//! 2. **No-panic properties** — feed `RawTlv::parse` /
+//! 2. **Wire round-trip properties** — bytes a parser accepts serialize back
+//!    to the same bytes, with reserved flag bits cleared.
+//!
+//! 3. **No-panic properties** — feed `RawTlv::parse` /
 //!    `TlvList::parse_lenient` / `PacketUnauthenticated::from_bytes_lenient`
 //!    / the AgentX decoder arbitrary byte buffers and assert no panic.
 //!    These complement the libfuzzer harnesses under `fuzz/` by exercising
@@ -17,7 +20,7 @@ use proptest::prelude::*;
 use stamp_suite::packets::{PacketAuthenticated, PacketUnauthenticated};
 use stamp_suite::tlv::{
     AccessReportTlv, BerBurstTlv, BerCountTlv, ClassOfServiceTlv, DirectMeasurementTlv,
-    ExtraPaddingTlv, MicroSessionIdTlv, RawTlv, TlvList, TypedTlv,
+    ExtraPaddingTlv, MicroSessionIdTlv, RawTlv, TlvFlags, TlvList, TypedTlv,
 };
 
 // ---------------------------------------------------------------------------
@@ -176,6 +179,75 @@ mod agentx_props {
         #[test]
         fn prop_agentx_decode_search_range_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
             let _ = agentx::decode_search_range(&bytes);
+        }
+    }
+}
+
+// Wire round-trip: whatever a parser accepts, serializing it again gives the
+// accepted bytes back, with reserved flag bits cleared (RFC 8972 §4.2).
+
+/// The input with every TLV's reserved flag bits cleared and without a
+/// trailing fragment shorter than a TLV header, which parsing ignores.
+fn without_reserved_flags(wire: &[u8]) -> Vec<u8> {
+    let known = TlvFlags::U | TlvFlags::M | TlvFlags::I | TlvFlags::C;
+    let mut out = wire.to_vec();
+    let mut at = 0;
+    while at + 4 <= out.len() {
+        out[at] &= known;
+        at += 4 + usize::from(u16::from_be_bytes([out[at + 2], out[at + 3]]));
+    }
+    out.truncate(at);
+    out
+}
+
+/// A plausible TLV sequence: random flags, types and values, then 0-3 stray
+/// trailing bytes.
+fn tlv_sequence() -> impl Strategy<Value = Vec<u8>> {
+    (
+        prop::collection::vec(
+            (
+                any::<u8>(),
+                any::<u8>(),
+                prop::collection::vec(any::<u8>(), 0..24),
+            ),
+            0..6,
+        ),
+        prop::collection::vec(any::<u8>(), 0..4),
+    )
+        .prop_map(|(tlvs, tail)| {
+            let mut wire = Vec::new();
+            for (flags, kind, value) in tlvs {
+                wire.extend_from_slice(&[flags, kind]);
+                wire.extend_from_slice(&(value.len() as u16).to_be_bytes());
+                wire.extend_from_slice(&value);
+            }
+            wire.extend_from_slice(&tail);
+            wire
+        })
+}
+
+proptest! {
+    #[test]
+    fn prop_raw_tlv_wire_round_trip(bytes in tlv_sequence()) {
+        if let Ok((tlv, used)) = RawTlv::parse(&bytes) {
+            prop_assert_eq!(tlv.to_bytes(), without_reserved_flags(&bytes[..used]));
+        }
+    }
+
+    #[test]
+    fn prop_tlv_list_wire_round_trip(bytes in tlv_sequence()) {
+        if let Ok(list) = TlvList::parse(&bytes) {
+            prop_assert_eq!(list.to_bytes(), without_reserved_flags(&bytes));
+        }
+    }
+
+    #[test]
+    fn prop_packet_wire_round_trip(bytes in prop::collection::vec(any::<u8>(), 112)) {
+        if let Ok(packet) = PacketUnauthenticated::from_bytes(&bytes) {
+            prop_assert_eq!(packet.to_bytes().to_vec(), bytes[..44].to_vec());
+        }
+        if let Ok(packet) = PacketAuthenticated::from_bytes(&bytes) {
+            prop_assert_eq!(packet.to_bytes().to_vec(), bytes.clone());
         }
     }
 }

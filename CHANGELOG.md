@@ -244,6 +244,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interval: 2000 probes at `--send-delay 1` took 4.2 s and now take 2.2 s.
   A probe up to 2 ms late is followed at once by the next; further behind,
   the schedule restarts from the current time rather than sending a burst.
+- Keep the received TLV order when Extra Padding precedes the HMAC TLV in a
+  packet that also carries BER TLVs. Serialization moved the padding after
+  the HMAC, so an echoed reply reordered the sender's TLVs. Found by the new
+  round-trip fuzz oracle.
+- Make `clock_metadata_test` robust: it restarts the reflector when another
+  test takes its port, and skips late replies to warm-up probes.
 - Count sender probes in 64 bits. A continuous run would overflow the 32-bit
   counters. The Direct Measurement counter on the wire stays 32 bits and wraps.
 - Print `--report-interval` reports while the sender waits for outstanding
@@ -341,6 +347,18 @@ median of three trials, reflector CPU as a share of one core:
   destructures the file configuration, so an unmerged key fails to compile,
   and a test checks that every CLI option has a config file key.
 - DSCP/ECN packing and unpacking go through `tos::Tos`.
+- Drop the `chrono` dependency; timestamps come from `SystemTime`. The
+  Prometheus exporter is built without its default HTTP listener and push
+  gateway, which removes hyper-rustls and aws-lc-rs from `metrics` builds.
+- CI runs on pull requests and on pushes to the release branches, with one
+  run per pull request (a newer push cancels the older run). The redundant
+  `ttl-nix` legs and one of the two packaging release builds are gone. The
+  fuzz job installs a prebuilt cargo-fuzz, caches each target's corpus and
+  adds a `sender_reply` target; `process_stamp_packet` now covers keys and
+  captured headers, and the parser targets check round trips.
+- The conformance citation checker verifies `path::item` citations and
+  identifiers attributed to a file; it had checked none since line numbers
+  were dropped. Six stale citations were fixed.
 - `Configuration::remote_addr` is a list; `remote_ip()` and `per_target()`
   give the single-target view. `sender::run_senders` runs every target,
   `StatsOutput` clones share one stream, and `StatsSnapshot` has a `target`
