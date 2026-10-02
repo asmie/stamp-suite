@@ -214,6 +214,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Zero the CoS TLV Reserved bits in replies, and mark every processed CoS TLV
   when the requested DSCP/ECN cannot be applied (RFC 8972 §4.4,
   cos-ecn-01 §3.1/§3.2).
+- Send probes on a fixed schedule. Each send deadline was measured from the
+  end of the previous send, so send time and timer rounding stretched every
+  interval: 2000 probes at `--send-delay 1` took 4.2 s and now take 2.2 s.
+  A sender that falls behind resumes from the current time rather than
+  sending a catch-up burst.
+- Print `--report-interval` reports while the sender waits for outstanding
+  replies and Access Report acknowledgements; they used to stop with the
+  last probe.
+- Fail startup when the local Error Estimate cannot be built, instead of
+  panicking.
 
 ### Performance
 
@@ -246,6 +256,11 @@ median of three trials, reflector CPU as a share of one core:
   with static labels and only when metrics are enabled.
 - `live_udp_bench` gains `--hwtstamp`; the Criterion suite gains a stateful
   case with a populated session table.
+- BER bit-error and burst counting handles a byte at a time with a lookup
+  table instead of a bit at a time, about 8× faster on 1400-byte padding.
+- The sender verifies a reply's TLV HMAC once; BER sampling reuses that
+  result. The receive control-message buffer is allocated once per run, and
+  the wall clock is read once per reply.
 
 ### Changed (internal)
 
@@ -273,6 +288,9 @@ median of three trials, reflector CPU as a share of one core:
   TLVs before a malformed TLV, matching the RFC 8972 §4 stop rule used during
   assembly.
 - Conformance matrix citations name files rather than line ranges.
+- The sender loop moved from one 1300-line function into `sender/run.rs`:
+  `SenderRun::open` does setup, and the send, drain and Access Report phases
+  share one receive helper.
 
 ### Changed (standards)
 

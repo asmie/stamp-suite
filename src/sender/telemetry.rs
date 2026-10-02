@@ -21,6 +21,12 @@ impl HmacStatus {
     pub(super) fn permits_optional_values(self) -> bool {
         matches!(self, Self::NotRequested | Self::Missing | Self::Verified)
     }
+
+    /// Measurement values (counters, timestamps, BER) need a verified HMAC
+    /// whenever a key is configured.
+    pub(crate) fn permits_measurements(self) -> bool {
+        matches!(self, Self::NotRequested | Self::Verified)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

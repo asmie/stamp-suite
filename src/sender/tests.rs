@@ -1,3 +1,6 @@
+#[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+use super::run::apply_tx_corrections;
+use super::run::recv_packet;
 use super::*;
 use crate::packets::{ExtendedPacketAuthenticated, ExtendedPacketUnauthenticated};
 
@@ -4266,8 +4269,15 @@ async fn check_recv_packet_readiness(ip: &str, kernel_rx: bool, want_ecn: bool) 
             loop {
                 peer.send(payload).await.unwrap();
                 let received = loop {
-                    match recv_packet(&receiver, &mut buf, kernel_rx, want_ecn, ClockFormat::NTP)
-                        .await
+                    match recv_packet(
+                        &receiver,
+                        &mut buf,
+                        &mut vec![0; 256],
+                        kernel_rx,
+                        want_ecn,
+                        ClockFormat::NTP,
+                    )
+                    .await
                     {
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                         result => break result.unwrap(),
@@ -4291,7 +4301,14 @@ async fn check_recv_packet_readiness(ip: &str, kernel_rx: bool, want_ecn: bool) 
         // raw EAGAIN must clear it, rather than waking every future read.
         match timeout(
             Duration::from_millis(30),
-            recv_packet(&receiver, &mut buf, kernel_rx, want_ecn, ClockFormat::NTP),
+            recv_packet(
+                &receiver,
+                &mut buf,
+                &mut vec![0; 256],
+                kernel_rx,
+                want_ecn,
+                ClockFormat::NTP,
+            ),
         )
         .await
         {

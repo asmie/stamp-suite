@@ -11,10 +11,7 @@ use std::{
 /// direction totals and live alarm logging are unaffected by history eviction.
 pub const BER_HISTORY_LIMIT: usize = 1024;
 
-use crate::{
-    crypto::HmacKey,
-    tlv::{BerBurstTlv, BerCountTlv, RawTlv, TlvList, TlvType, TypedTlv},
-};
+use crate::tlv::{BerBurstTlv, BerCountTlv, RawTlv, TlvList, TlvType, TypedTlv};
 
 pub(crate) fn is_ber(kind: TlvType) -> bool {
     matches!(
@@ -44,24 +41,16 @@ pub(crate) enum Observation {
     },
 }
 
+/// `integrity_ok` is the sender's verdict on the reply's TLV HMAC: true only
+/// when the HMAC verified or no key is configured and none was sent.
 pub(crate) fn observation(
     tlvs: &TlvList,
-    data: &[u8],
-    base: usize,
-    key: Option<&HmacKey>,
+    integrity_ok: bool,
     pattern: &[u8],
     padding_size: usize,
     want_burst: bool,
 ) -> Option<Observation> {
-    if tlvs.iter().any(|t| t.is_integrity_failed()) {
-        return None;
-    }
-    if tlvs.hmac_tlv().is_some() {
-        let key = key?;
-        if data.len() <= base || tlvs.verify_hmac(key, &data[..4], &data[base..]).is_err() {
-            return None;
-        }
-    } else if key.is_some() {
+    if !integrity_ok || tlvs.iter().any(|t| t.is_integrity_failed()) {
         return None;
     }
     let mut padding = None;
@@ -342,41 +331,56 @@ impl BerCollector {
         }
     }
 }
+const fn longest_run(mut byte: u8) -> u8 {
+    let mut run = 0;
+    while byte != 0 {
+        byte &= byte << 1;
+        run += 1;
+    }
+    run
+}
+
+/// Longest run of `1` bits inside each byte value.
+const LONGEST_RUN: [u8; 256] = {
+    let mut table = [0; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = longest_run(i as u8);
+        i += 1;
+    }
+    table
+};
+
 /// XORs `padding` against `pattern` repeated, counts total error bits and the
-/// longest consecutive run of `1` bits spanning byte boundaries. Runs are
-/// counted across the whole padding buffer as a continuous bit stream.
+/// longest consecutive run of `1` bits spanning byte boundaries. Bits are read
+/// MSB first, and the whole padding is treated as one bit stream.
 ///
 /// Returns `(error_count, max_consecutive_error_bits)`.
 pub(crate) fn xor_popcount_and_max_burst(padding: &[u8], pattern: &[u8]) -> (u32, u32) {
-    if pattern.is_empty() {
-        // Should never happen (caller filters empty pattern to default), but
-        // be defensive: without a pattern we cannot compare.
-        return (0, 0);
-    }
-
+    // A u32 overflows only past ~536 MB of padding, far above any datagram.
     let mut count: u32 = 0;
     let mut current_burst: u32 = 0;
     let mut max_burst: u32 = 0;
-
-    // Overflow is impossible for any realistic packet: a u32 counts up to 2^32
-    // error bits, which would require a ~536 MB padding TLV. Use plain arithmetic.
-    for (i, &byte) in padding.iter().enumerate() {
-        let expected = pattern[i % pattern.len()];
+    for (&byte, &expected) in padding.iter().zip(pattern.iter().cycle()) {
         let err = byte ^ expected;
-        count += err.count_ones();
-
-        for bit in (0..8).rev() {
-            if (err >> bit) & 1 == 1 {
-                current_burst += 1;
-                if current_burst > max_burst {
-                    max_burst = current_burst;
-                }
-            } else {
-                current_burst = 0;
+        match err {
+            0 => current_burst = 0,
+            0xff => {
+                count += 8;
+                current_burst += 8;
+                max_burst = max_burst.max(current_burst);
+            }
+            _ => {
+                count += err.count_ones();
+                // The leading ones extend the run from the previous byte;
+                // the trailing ones start the next one.
+                max_burst = max_burst
+                    .max(current_burst + err.leading_ones())
+                    .max(u32::from(LONGEST_RUN[usize::from(err)]));
+                current_burst = err.trailing_ones();
             }
         }
     }
-
     (count, max_burst)
 }
 
@@ -596,27 +600,12 @@ mod tests {
             (0, 1, 0, vec![0xff, 0]),
             (0, 0, 0, vec![0xff]),
         ] {
-            assert!(observation(
-                &reply(flags, count, burst, pad),
-                &[],
-                44,
-                None,
-                &[0xff, 0],
-                2,
-                true
-            )
-            .is_none());
+            assert!(
+                observation(&reply(flags, count, burst, pad), true, &[0xff, 0], 2, true).is_none()
+            );
         }
-        let sample = observation(
-            &reply(0, 4, 2, vec![0xfe, 0]),
-            &[],
-            44,
-            None,
-            &[0xff, 0],
-            2,
-            true,
-        )
-        .unwrap();
+        let sample =
+            observation(&reply(0, 4, 2, vec![0xfe, 0]), true, &[0xff, 0], 2, true).unwrap();
         assert!(matches!(
             sample,
             Observation::Sample {
@@ -629,28 +618,20 @@ mod tests {
         let mut t = BerCountTlv::default().to_raw();
         t.flags = TlvFlags::default();
         duplicate.push(t).unwrap();
-        assert!(observation(&duplicate, &[], 44, None, &[0xff, 0], 2, true).is_none());
+        assert!(observation(&duplicate, true, &[0xff, 0], 2, true).is_none());
     }
     #[test]
-    fn unsupported_and_hmac_integrity_gate() {
-        let key = HmacKey::new(vec![0xab; 16]).unwrap();
-        let mut list = reply(0x80, 0, 0, vec![0xff, 0]);
+    fn unsupported_and_integrity_gate() {
+        let list = reply(0x80, 0, 0, vec![0xff, 0]);
         assert!(matches!(
-            observation(&list, &[], 44, None, &[0xff, 0], 2, true),
+            observation(&list, true, &[0xff, 0], 2, true),
             Some(Observation::Unsupported)
         ));
-        assert!(observation(&list, &[], 44, Some(&key), &[0xff, 0], 2, true).is_none());
-        list.set_hmac(&key, &[0; 4]);
-        let mut data = vec![0; 44];
-        data.extend_from_slice(&list.to_bytes());
-        let parsed = TlvList::parse(&data[44..]).unwrap();
-        assert!(matches!(
-            observation(&parsed, &data, 44, Some(&key), &[0xff, 0], 2, true),
-            Some(Observation::Unsupported)
-        ));
-        data[48] ^= 1;
-        let parsed = TlvList::parse(&data[44..]).unwrap();
-        assert!(observation(&parsed, &data, 44, Some(&key), &[0xff, 0], 2, true).is_none());
+        assert!(observation(&list, false, &[0xff, 0], 2, true).is_none());
+        let mut flagged = reply(0, 4, 2, vec![0xfe, 0]);
+        assert!(observation(&flagged, true, &[0xff, 0], 2, true).is_some());
+        flagged.mark_all_integrity_failed();
+        assert!(observation(&flagged, true, &[0xff, 0], 2, true).is_none());
     }
     #[test]
     fn padding_budget_preserves_whole_pattern_and_mandatory_fields() {
@@ -665,5 +646,39 @@ mod tests {
         assert!(fit_padding(&mut tlvs, 80, 44).unwrap());
         assert_eq!(tlvs[2].value.len(), 15);
         assert!(fit_padding(&mut tlvs, 65, 44).is_err());
+    }
+
+    #[test]
+    fn popcount_and_burst_match_bit_by_bit_reference() {
+        fn reference(padding: &[u8], pattern: &[u8]) -> (u32, u32) {
+            let (mut count, mut run, mut max) = (0, 0, 0);
+            for (i, &byte) in padding.iter().enumerate() {
+                for bit in (0..8).rev() {
+                    if ((byte ^ pattern[i % pattern.len()]) >> bit) & 1 == 1 {
+                        count += 1;
+                        run += 1;
+                        max = u32::max(max, run);
+                    } else {
+                        run = 0;
+                    }
+                }
+            }
+            (count, max)
+        }
+        for a in 0..=255u8 {
+            for b in 0..=255u8 {
+                for c in [0, 0x0f, 0xf0, 0xff] {
+                    let padding = [a, b, c];
+                    for pattern in [&[0][..], &[0xa5, 0x5a]] {
+                        assert_eq!(
+                            super::xor_popcount_and_max_burst(&padding, pattern),
+                            reference(&padding, pattern),
+                            "{padding:?} against {pattern:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(super::xor_popcount_and_max_burst(&[1, 2], &[]), (0, 0));
     }
 }

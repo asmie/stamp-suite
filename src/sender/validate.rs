@@ -169,7 +169,7 @@ pub(super) fn validate_reflected_tlvs(
             }
             // Measurement counters/timestamps require a verified HMAC when a
             // key is configured; legacy control acknowledgements remain separate.
-            if matches!(hmac, HmacStatus::NotRequested | HmacStatus::Verified) {
+            if hmac.permits_measurements() {
                 if raw.tlv_type == TlvType::DirectMeasurement {
                     match DirectMeasurementTlv::from_raw(raw) {
                         Ok(value) => {

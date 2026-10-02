@@ -63,3 +63,49 @@ fn closed_reflector_port_does_not_speed_up_sending() {
     let error_lines = stderr.lines().filter(|l| l.contains("error")).count();
     assert!(error_lines <= 1, "unthrottled errors:\n{stderr}");
 }
+
+/// Interim reports continue while the sender waits for outstanding replies.
+#[test]
+fn interim_reports_continue_during_the_final_wait() {
+    let port = {
+        let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let output = Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
+        .args([
+            "--remote-addr",
+            "127.0.0.1",
+            "--remote-port",
+            &port.to_string(),
+            "--local-addr",
+            "127.0.0.1",
+            "--local-port",
+            "0",
+            "--count",
+            "1",
+            "--send-delay",
+            "10",
+            // One probe, then up to three seconds of waiting for its reply.
+            "--timeout",
+            "3",
+            "--report-interval",
+            "1",
+            "--hwtstamp",
+            "off",
+            "--output-format",
+            "json",
+        ])
+        .env_remove("STAMP_HMAC_KEY")
+        .env("RUST_LOG", "off")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let reports = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .count();
+    assert!(
+        reports >= 3,
+        "expected interim reports during the wait plus the final one, got {reports}"
+    );
+}
