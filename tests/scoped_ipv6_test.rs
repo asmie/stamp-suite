@@ -3,6 +3,7 @@
 #![cfg(target_os = "linux")]
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
+use stamp_suite::tlv::TypedTlv;
 use std::{
     net::{SocketAddr, UdpSocket},
     process::{Child, Command, Stdio},

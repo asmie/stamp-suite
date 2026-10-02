@@ -2,15 +2,16 @@
 //!
 //! Maps OID requests to reads from the shared SNMP state.
 
-use std::{net::IpAddr, sync::Arc};
+use std::{cell::OnceCell, collections::BTreeMap, net::IpAddr, sync::Arc};
 
 use std::sync::atomic::Ordering;
 
 use super::{
-    agentx::{MibHandler, Oid, VarBind, VarBindValue},
+    agentx::{MibHandler, MibView, Oid, VarBind, VarBindValue},
     oids,
     state::SnmpState,
 };
+use crate::session::SessionSummary;
 
 /// MIB handler that serves the STAMP-SUITE-MIB from shared runtime state.
 pub struct StampMibHandler {
@@ -201,23 +202,63 @@ impl StampMibHandler {
 
         None
     }
+}
 
-    /// Looks up a session table entry OID and returns its value.
-    fn get_session_entry(&self, oid: &Oid) -> Option<VarBindValue> {
+/// The MIB as seen by one PDU. Session rows are read once, on first use,
+/// and the sorted OID list is built only for GETNEXT/GETBULK.
+struct StampMibView<'a> {
+    handler: &'a StampMibHandler,
+    sessions: OnceCell<BTreeMap<u32, SessionSummary>>,
+    oids: OnceCell<Vec<Oid>>,
+}
+
+impl<'a> StampMibView<'a> {
+    fn new(handler: &'a StampMibHandler) -> Self {
+        Self {
+            handler,
+            sessions: OnceCell::new(),
+            oids: OnceCell::new(),
+        }
+    }
+
+    fn sessions(&self) -> &BTreeMap<u32, SessionSummary> {
+        self.sessions.get_or_init(|| {
+            self.handler
+                .state
+                .session_manager
+                .as_ref()
+                .map(|sm| {
+                    sm.session_summaries_extended()
+                        .into_iter()
+                        .map(|s| (s.session_id, s))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// All valid OIDs in ascending order, including session table cells.
+    fn oids(&self) -> &[Oid] {
+        self.oids.get_or_init(|| {
+            let mut list = oids::all_scalar_oids();
+            for col in 1..=oids::SESSION_TABLE_COLUMNS {
+                // BTreeMap keys are already in index order.
+                for &idx in self.sessions().keys() {
+                    list.push(oids::stamp_refl_session_entry(col, idx));
+                }
+            }
+            list.sort();
+            list
+        })
+    }
+
+    fn session_entry(&self, oid: &Oid) -> Option<VarBindValue> {
         let prefix = oids::stamp_refl_session_table_prefix();
         if !oid.starts_with(&prefix) || oid.len() != prefix.len() + 2 {
             return None;
         }
-
         let column = oid.0[prefix.len()];
-        let index = oid.0[prefix.len() + 1];
-
-        let sm = self.state.session_manager.as_ref()?;
-        let summaries = sm.session_summaries_extended();
-
-        // Find the session with matching index (session_id)
-        let session = summaries.iter().find(|s| s.session_id == index)?;
-
+        let session = self.sessions().get(&oid.0[prefix.len() + 1])?;
         match column {
             1 => Some(VarBindValue::Gauge32(session.session_id)),
             2 => Some(VarBindValue::OctetString(ip_to_octets(
@@ -235,86 +276,45 @@ impl StampMibHandler {
             _ => None,
         }
     }
+}
 
-    /// Builds the full sorted list of valid OIDs, including dynamic session table entries.
-    fn all_valid_oids(&self) -> Vec<Oid> {
-        let mut oids_list = oids::all_scalar_oids();
-
-        // Add session table entries (sorted by column, then index)
-        if let Some(ref sm) = self.state.session_manager {
-            let summaries = sm.session_summaries_extended();
-            let mut indices: Vec<u32> = summaries.iter().map(|s| s.session_id).collect();
-            indices.sort();
-
-            for col in 1..=oids::SESSION_TABLE_COLUMNS {
-                for &idx in &indices {
-                    oids_list.push(oids::stamp_refl_session_entry(col, idx));
-                }
-            }
+impl MibView for StampMibView<'_> {
+    fn get(&self, oid: &Oid) -> VarBind {
+        let value = self
+            .handler
+            .get_scalar(oid)
+            .or_else(|| self.session_entry(oid))
+            .unwrap_or(VarBindValue::NoSuchObject);
+        VarBind {
+            oid: oid.clone(),
+            value,
         }
+    }
 
-        // The list is already sorted because:
-        // - Scalar OIDs are pre-sorted
-        // - Session table OIDs come after reflector stats (numerically)
-        //   but BEFORE sender OIDs. We need to re-sort.
-        oids_list.sort();
-        oids_list
+    fn get_next(&self, oid: &Oid, end: &Oid) -> VarBind {
+        let oids = self.oids();
+        let next = oids.partition_point(|candidate| candidate <= oid);
+        match oids.get(next) {
+            Some(candidate) if end.is_empty() || candidate < end => self.get(candidate),
+            _ => VarBind {
+                oid: oid.clone(),
+                value: VarBindValue::EndOfMibView,
+            },
+        }
     }
 }
 
 impl MibHandler for StampMibHandler {
     fn get(&self, oid: &Oid) -> VarBind {
-        // Try scalar lookup
-        if let Some(value) = self.get_scalar(oid) {
-            return VarBind {
-                oid: oid.clone(),
-                value,
-            };
-        }
-
-        // Try session table lookup
-        if let Some(value) = self.get_session_entry(oid) {
-            return VarBind {
-                oid: oid.clone(),
-                value,
-            };
-        }
-
-        // Unknown OID
-        VarBind {
-            oid: oid.clone(),
-            value: VarBindValue::NoSuchObject,
-        }
+        StampMibView::new(self).get(oid)
     }
 
     fn get_next(&self, oid: &Oid, end: &Oid) -> VarBind {
-        // Single-lookup path: build the snapshot, then resolve against it. The
-        // batched GETNEXT/GETBULK path computes the snapshot once per PDU and
-        // calls get_next_snapshot directly (see AgentXSession).
-        let all = self.all_valid_oids();
-        self.get_next_snapshot(oid, end, &all)
+        StampMibView::new(self).get_next(oid, end)
     }
 
-    fn oid_snapshot(&self) -> Vec<Oid> {
-        self.all_valid_oids()
-    }
-
-    fn get_next_snapshot(&self, oid: &Oid, end: &Oid, snapshot: &[Oid]) -> VarBind {
-        // Find the first OID strictly greater than the requested one
-        for candidate in snapshot {
-            if candidate > oid {
-                // Check if within range (end OID is exclusive upper bound)
-                if !end.is_empty() && candidate >= end {
-                    break;
-                }
-                return self.get(candidate);
-            }
-        }
-
-        VarBind {
-            oid: oid.clone(),
-            value: VarBindValue::EndOfMibView,
-        }
+    fn view(&self) -> Box<dyn MibView + '_> {
+        Box::new(StampMibView::new(self))
     }
 }
 
@@ -385,26 +385,25 @@ mod tests {
     }
 
     #[test]
-    fn test_get_next_snapshot_matches_get_next() {
-        // The per-PDU snapshot path (get_next_snapshot over a precomputed
-        // oid_snapshot) must select exactly the same successors as the
-        // single-call get_next that rebuilds the list each time.
+    fn test_view_walk_matches_single_get_next() {
+        // One view per PDU must select the same successors as independent
+        // single lookups.
         let state = make_test_state(true);
+        let sm = state.session_manager.as_ref().unwrap();
+        for port in 0..3 {
+            let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5000 + port);
+            sm.get_or_create_session(client).unwrap();
+        }
         let handler = StampMibHandler::new(state);
-
-        let snapshot = handler.oid_snapshot();
-        assert!(!snapshot.is_empty(), "snapshot must contain scalar OIDs");
+        let view = handler.view();
 
         let empty = Oid(vec![]);
-        let mut cur = Oid(vec![1, 3, 6, 1]); // walk from below the enterprise tree
+        let mut cur = Oid(vec![1, 3, 6, 1]);
         let mut steps = 0;
         loop {
             let a = handler.get_next(&cur, &empty);
-            let b = handler.get_next_snapshot(&cur, &empty, &snapshot);
-            assert_eq!(
-                a.oid, b.oid,
-                "snapshot path diverged from get_next at {cur:?}"
-            );
+            let b = view.get_next(&cur, &empty);
+            assert_eq!(a.oid, b.oid, "view diverged from get_next at {cur:?}");
             if matches!(a.value, VarBindValue::EndOfMibView) {
                 break;
             }
@@ -412,7 +411,7 @@ mod tests {
             steps += 1;
             assert!(steps < 10_000, "walk did not terminate");
         }
-        assert!(steps > 0, "expected to traverse at least one OID");
+        assert!(steps > oids::SESSION_TABLE_COLUMNS as usize * 3);
     }
 
     #[test]
@@ -553,8 +552,6 @@ mod tests {
         let target = oids::stamp_refl_session_entry(1, 1004);
         let before = oids::stamp_refl_session_entry(1, 1003);
         let end = Oid(vec![]);
-
-        assert!(handler.all_valid_oids().contains(&target));
 
         let vb = handler.get_next(&before, &end);
         assert_eq!(vb.oid, target);

@@ -129,10 +129,12 @@ impl HmacKey {
     /// # Errors
     /// Returns `HmacError::KeyTooShort` for fewer than 16 bytes.
     pub fn new(key: Vec<u8>) -> Result<Self, HmacError> {
-        if key.len() < MIN_KEY_LENGTH {
-            return Err(HmacError::KeyTooShort(key.len()));
+        // Wrap first so a rejected key is wiped too.
+        let key = Self(key);
+        if key.0.len() < MIN_KEY_LENGTH {
+            return Err(HmacError::KeyTooShort(key.0.len()));
         }
-        Ok(Self(key))
+        Ok(key)
     }
 
     /// Decodes a hexadecimal key.
@@ -159,20 +161,22 @@ impl HmacKey {
 
         let mut file = open_owner_only_file(path, "key file is accessible by group or other")?;
 
-        let mut raw_bytes = Vec::new();
+        // Size the buffer up front so read_to_end does not reallocate and
+        // leave unwiped copies of the key in freed memory.
+        let capacity = file
+            .metadata()
+            .map_or(0, |m| usize::try_from(m.len()).unwrap_or(0))
+            .saturating_add(1);
+        let mut raw_bytes = zeroize::Zeroizing::new(Vec::with_capacity(capacity));
         file.read_to_end(&mut raw_bytes)
             .map_err(|e| HmacError::FileReadError(e.to_string()))?;
 
-        // Try to parse as hex if it's valid UTF-8
         if let Ok(content) = std::str::from_utf8(&raw_bytes) {
-            let trimmed = content.trim();
-            if let Ok(key) = Self::from_hex(trimmed) {
+            if let Ok(key) = Self::from_hex(content.trim()) {
                 return Ok(key);
             }
         }
-
-        // Fall back to raw bytes
-        Self::new(raw_bytes)
+        Self::new(std::mem::take(&mut *raw_bytes))
     }
 
     /// Computes HMAC-SHA256 over `data`, truncated to 16 bytes.

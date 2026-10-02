@@ -89,8 +89,8 @@ use crate::{
     time::generate_timestamp,
     tlv::{
         LocationDisclosure, PacketAddressInfo, ReturnPathAction, SyncSource, TimestampMethod,
-        TlvList, TlvType, HMAC_TLV_VALUE_SIZE, REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL,
-        TLV_HEADER_SIZE,
+        TlvList, TlvType, TypedTlv, HMAC_TLV_VALUE_SIZE,
+        REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, TLV_HEADER_SIZE,
     },
 };
 
@@ -1193,6 +1193,10 @@ pub struct StampResponse {
     /// selection to the OS, which is also the fallback when pinning is
     /// unsupported or fails.
     pub reply_source: Option<std::net::IpAddr>,
+    /// True when this reflector generated the TLV HMAC. Only a generated HMAC
+    /// is re-signed at send time; an echoed one (I-flag failure echo, or no
+    /// semantic processing) is copied unchanged per RFC 8972 §4.8.
+    pub tlv_hmac_generated: bool,
 }
 
 /// Context for processing STAMP packets, shared between backends.
@@ -1504,7 +1508,7 @@ fn process_stamp_packet_inner(
         && data[16..24].iter().any(|&octet| octet != 0)
         && data[24..26].iter().any(|&octet| octet != 0)
     {
-        log::warn!(
+        crate::warn_throttled!(
             "dropping {}-octet packet from {}: it has the shape of an \
              authenticated test packet but this reflector is in open mode \
              (-A O); reflecting it would emit a zero Error Estimate \
@@ -1620,6 +1624,7 @@ fn process_stamp_packet_inner(
                     // The symmetric no-TLV path never parses a Destination Node
                     // Address TLV, so there is nothing to pin.
                     reply_source: None,
+                    tlv_hmac_generated: false,
                 })
             }
         }
@@ -1654,6 +1659,7 @@ fn process_stamp_packet_inner(
                     reply_source: None,
                     return_path_action: ReturnPathAction::Normal,
                     reflected_control: None,
+                    tlv_hmac_generated: false,
                 })
             }
         }
@@ -1701,7 +1707,7 @@ fn process_auth_packet(
                 (p, buf)
             }
             Err(e) => {
-                log::warn!(
+                crate::warn_throttled!(
                     "Failed to deserialize authenticated packet from {}: {} (strict mode)",
                     src,
                     e
@@ -1723,7 +1729,7 @@ fn process_auth_packet(
     // Verify HMAC against canonical buffer - mandatory when key is present (RFC 8762 §4.4)
     if let Some(key) = resolved_hmac_key {
         if !verify_packet_hmac(key, &canonical_buf, AUTH_PACKET_HMAC_OFFSET, &hmac) {
-            log::warn!("HMAC verification failed for packet from {}", src);
+            crate::warn_throttled!("HMAC verification failed for packet from {}", src);
             #[cfg(feature = "metrics")]
             if ctx.metrics_enabled {
                 crate::metrics::reflector_metrics::record_hmac_failure();
@@ -1737,7 +1743,7 @@ fn process_auth_packet(
         // key was deleted at runtime. Refuse the packet: removing a key must
         // revoke access, never downgrade the reflector to answering
         // authenticated-layout packets without verification.
-        log::warn!(
+        crate::warn_throttled!(
             "no HMAC key for SSID {} (keyset configured); dropping packet from {}",
             packet.ssid,
             src
@@ -1748,7 +1754,7 @@ fn process_auth_packet(
         }
         return None;
     } else if ctx.require_hmac {
-        log::warn!(
+        crate::warn_throttled!(
             "HMAC key required but not configured; dropping packet from {}",
             src
         );
@@ -1776,7 +1782,7 @@ fn process_unauth_packet(
     match packet_result {
         Ok(packet) => Some(packet),
         Err(e) => {
-            log::warn!(
+            crate::warn_throttled!(
                 "Failed to deserialize unauthenticated packet from {}: {} (strict mode)",
                 src,
                 e
@@ -1929,6 +1935,7 @@ struct SemanticResult {
     /// RFC 9503 §3: the matched Destination Node Address, to be pinned as the
     /// reply's IP source address.
     reply_source: Option<std::net::IpAddr>,
+    tlv_hmac_generated: bool,
 }
 
 /// Applies semantic TLV processing on the reflector side (RFC 8972 §4.8).
@@ -1989,7 +1996,7 @@ fn apply_semantic_tlv_processing(
     // Process Micro-session ID TLV (RFC 9534 §3.2)
     if let Some(refl_id) = ctx.reflector_member_link_id {
         if !tlvs.update_micro_session_id_tlvs(refl_id) {
-            log::warn!("Micro-session ID validation failed, discarding packet");
+            crate::warn_throttled!("Micro-session ID validation failed, discarding packet");
             return None;
         }
     }
@@ -2104,7 +2111,7 @@ fn apply_semantic_tlv_processing(
             ctx.reflected_control_max_size as usize,
         );
         if removed > 0 {
-            log::warn!(
+            crate::warn_throttled!(
                 "Removed {removed} Reflected Fixed/IPv6 Ext Header TLV(s) (Type 246/247) from \
                  the reply to stay within the {}-byte reply-size limit \
                  (draft-ietf-ippm-stamp-ext-hdr-13 §3.2/§3.3)",
@@ -2176,7 +2183,7 @@ fn apply_semantic_tlv_processing(
                 // code with a non-zero Reflected Test Packet Control TLV is a
                 // sender error. The reflector MUST set U on both TLVs in the
                 // (single, normal) reflected packet and SHOULD log it.
-                log::warn!(
+                crate::warn_throttled!(
                     "STAMP packet combines Return Path 'no reply requested' with a \
                      non-zero Reflected Test Packet Control TLV; setting U on both \
                      per draft-ietf-ippm-asymmetrical-pkts-14 §4.3"
@@ -2302,6 +2309,7 @@ fn apply_semantic_tlv_processing(
         return_path_action,
         reflected_control,
         reply_source,
+        tlv_hmac_generated: tlv_hmac_key.is_some(),
     })
 }
 
@@ -2358,6 +2366,7 @@ pub fn assemble_unauth_answer_with_tlvs(
     let mut return_path_action = ReturnPathAction::Normal;
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
     let mut reply_source: Option<std::net::IpAddr> = None;
+    let mut tlv_hmac_generated = false;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -2417,6 +2426,7 @@ pub fn assemble_unauth_answer_with_tlvs(
                             return_path_action = result.return_path_action;
                             reflected_control = result.reflected_control;
                             reply_source = result.reply_source;
+                            tlv_hmac_generated = result.tlv_hmac_generated;
                         }
                         None => {
                             return StampResponse {
@@ -2425,6 +2435,7 @@ pub fn assemble_unauth_answer_with_tlvs(
                                 return_path_action: ReturnPathAction::SuppressReply,
                                 reflected_control: None,
                                 reply_source: None,
+                                tlv_hmac_generated: false,
                             };
                         }
                     }
@@ -2450,6 +2461,7 @@ pub fn assemble_unauth_answer_with_tlvs(
         return_path_action,
         reflected_control,
         reply_source,
+        tlv_hmac_generated,
     }
 }
 
@@ -2494,6 +2506,7 @@ pub fn assemble_auth_answer_with_tlvs(
     let mut return_path_action = ReturnPathAction::Normal;
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
     let mut reply_source: Option<std::net::IpAddr> = None;
+    let mut tlv_hmac_generated = false;
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -2558,6 +2571,7 @@ pub fn assemble_auth_answer_with_tlvs(
                             return_path_action = result.return_path_action;
                             reflected_control = result.reflected_control;
                             reply_source = result.reply_source;
+                            tlv_hmac_generated = result.tlv_hmac_generated;
                         }
                         None => {
                             return StampResponse {
@@ -2566,6 +2580,7 @@ pub fn assemble_auth_answer_with_tlvs(
                                 return_path_action: ReturnPathAction::SuppressReply,
                                 reflected_control: None,
                                 reply_source: None,
+                                tlv_hmac_generated: false,
                             };
                         }
                     }
@@ -2594,6 +2609,7 @@ pub fn assemble_auth_answer_with_tlvs(
         return_path_action,
         reflected_control,
         reply_source,
+        tlv_hmac_generated,
     }
 }
 
@@ -4577,6 +4593,10 @@ mod tests {
             &original_hmac[..],
             "HMAC should be preserved on verification failure, not regenerated"
         );
+        assert!(
+            !response.tlv_hmac_generated,
+            "an echoed HMAC must not be re-signed at send time"
+        );
     }
 
     #[test]
@@ -4648,6 +4668,7 @@ mod tests {
             &original_hmac[..],
             "HMAC should be regenerated on successful verification"
         );
+        assert!(response.tlv_hmac_generated);
     }
 
     #[test]

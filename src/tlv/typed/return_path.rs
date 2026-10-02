@@ -3,7 +3,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::tlv::core::{RawTlv, TlvError, TlvType, RETURN_PATH_CONTROL_CODE_SIZE, TLV_HEADER_SIZE};
-use crate::tlv::list::TlvList;
+use crate::tlv::traits::TypedTlv;
 
 /// Return Path sub-TLV type identifiers per RFC 9503 §4.
 ///
@@ -150,37 +150,6 @@ impl ReturnPathTlv {
         ));
     }
 
-    /// Parses a Return Path TLV from a RawTlv.
-    ///
-    /// The value is parsed as a sequence of sub-TLVs using the standard 4-byte header.
-    ///
-    /// # Errors
-    /// Returns an error if the value is too short to contain any sub-TLV.
-    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
-        if raw.value.len() < TLV_HEADER_SIZE {
-            return Err(TlvError::InvalidReturnPathLength(raw.value.len()));
-        }
-        let (sub_tlvs_list, _) = TlvList::parse_lenient(&raw.value);
-        let mut sub_tlvs = Vec::new();
-        for tlv in sub_tlvs_list.non_hmac_tlvs() {
-            sub_tlvs.push(tlv.clone());
-        }
-        if let Some(hmac) = sub_tlvs_list.hmac_tlv() {
-            sub_tlvs.push(hmac.clone());
-        }
-        Ok(Self { sub_tlvs })
-    }
-
-    /// Converts to a RawTlv.
-    #[must_use]
-    pub fn to_raw(&self) -> RawTlv {
-        let mut value = Vec::new();
-        for sub in &self.sub_tlvs {
-            sub.write_to(&mut value);
-        }
-        RawTlv::new(TlvType::ReturnPath, value)
-    }
-
     /// Returns the Control Code value if a Control Code sub-TLV is present.
     #[must_use]
     pub fn get_control_code(&self) -> Option<u32> {
@@ -266,6 +235,35 @@ impl ReturnPathTlv {
     }
 }
 
+impl TypedTlv for ReturnPathTlv {
+    const TYPE: TlvType = TlvType::ReturnPath;
+
+    /// Parses the value as sub-TLVs with the standard 4-byte header, in wire
+    /// order. Sub-TLV types are their own registry (RFC 9503 §7.2), so they
+    /// are kept as raw numbers and get none of the top-level TLV rules.
+    fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
+        if value.len() < TLV_HEADER_SIZE {
+            return Err(TlvError::InvalidReturnPathLength(value.len()));
+        }
+        let data_end = value.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+        let mut sub_tlvs = Vec::new();
+        let mut offset = 0;
+        while offset < data_end && value.len() - offset >= TLV_HEADER_SIZE {
+            let (mut sub, consumed, _) = RawTlv::parse_lenient(&value[offset..])?;
+            sub.tlv_type = TlvType::Unknown(sub.tlv_type.to_byte());
+            sub_tlvs.push(sub);
+            offset += consumed;
+        }
+        Ok(Self { sub_tlvs })
+    }
+
+    fn encode_value(&self, out: &mut Vec<u8>) {
+        for sub in &self.sub_tlvs {
+            sub.write_to(out);
+        }
+    }
+}
+
 impl Default for ReturnPathTlv {
     fn default() -> Self {
         Self::new()
@@ -294,6 +292,25 @@ pub enum ReturnPathAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_from_raw_roundtrip_is_equal() {
+        let mut rp = ReturnPathTlv::with_control_code(0);
+        rp.add_return_address("192.0.2.1".parse().unwrap());
+        assert_eq!(ReturnPathTlv::from_raw(&rp.to_raw()).unwrap(), rp);
+    }
+
+    #[test]
+    fn test_sub_tlvs_keep_wire_order_and_raw_types() {
+        // Sub-types 8 and 1 are not the top-level HMAC and Extra Padding
+        // TLVs; they must not be reordered or reinterpreted.
+        let mut value = vec![0, 8, 0, 4, 1, 2, 3, 4];
+        value.extend_from_slice(&[0, 1, 0, 4, 0, 0, 0, 0]);
+        let rp = ReturnPathTlv::decode_value(&value).unwrap();
+        let types: Vec<u8> = rp.sub_tlvs.iter().map(|t| t.tlv_type.to_byte()).collect();
+        assert_eq!(types, [8, 1]);
+        assert_eq!(rp.get_control_code(), Some(0));
+    }
 
     #[test]
     fn test_sub_type_roundtrip() {

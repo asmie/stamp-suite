@@ -65,9 +65,17 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServer, SnmpError> {
     let cancel = Arc::new(AtomicBool::new(false));
 
-    // Validate connectivity up front (fail-fast on a bad socket path).
-    let mut session = agentx::AgentXSession::connect(&socket_path, AGENTX_DESCRIPTION)?;
-    session.register(&oids::stamp_suite_root())?;
+    // Validate connectivity up front (fail-fast on a bad socket path). The
+    // handshake is blocking socket I/O with a read timeout, so it runs off
+    // the async worker threads.
+    let path = socket_path.clone();
+    let session = tokio::task::spawn_blocking(move || -> Result<_, SnmpError> {
+        let mut session = agentx::AgentXSession::connect(&path, AGENTX_DESCRIPTION)?;
+        session.register(&oids::stamp_suite_root())?;
+        Ok(session)
+    })
+    .await
+    .map_err(|e| SnmpError::IoError(std::io::Error::other(e)))??;
 
     log::info!("SNMP AgentX sub-agent connected to {}", socket_path);
 

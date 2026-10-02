@@ -220,7 +220,9 @@ impl Transmission {
                         let hmac = crate::crypto::compute_packet_hmac(key, &attempt, 96);
                         attempt[96..112].copy_from_slice(&hmac);
                     }
-                    sign_tlvs(&mut attempt, base, key);
+                    if self.response.tlv_hmac_generated {
+                        sign_tlvs(&mut attempt, base, key);
+                    }
                 }
                 send(&attempt, target, &options).and_then(|sent| {
                     if sent == attempt.len() {
@@ -467,8 +469,9 @@ fn refresh_telemetry(data: &mut [u8], base: usize, session: &Session, stateful: 
     }
 }
 
-/// Assembly puts its HMAC after all TLVs (including opaque malformed tails),
-/// possibly followed by symmetric zero padding. Only called on generated replies.
+/// Re-signs the TLV HMAC that assembly generated. Assembly puts it after all
+/// TLVs, possibly followed by symmetric zero padding. Callers check
+/// `StampResponse::tlv_hmac_generated`; echoed HMACs must stay unchanged.
 fn sign_tlvs(data: &mut [u8], base: usize, key: &HmacKey) {
     if data.len() < base + 20 {
         return;
@@ -1098,6 +1101,7 @@ mod tests {
                 suppress_reply_ext_headers: false,
             }),
             reply_source: Some("127.0.0.2".parse().unwrap()),
+            tlv_hmac_generated: auth,
         };
         Transmission::new(
             response,
@@ -1154,6 +1158,39 @@ mod tests {
         })
         .unwrap();
         assert_eq!(sets, 4);
+    }
+
+    #[test]
+    fn echoed_tlv_hmac_is_sent_unchanged() {
+        let mut transmission = sample(true, ReturnPathAction::Normal);
+        transmission.response.tlv_hmac_generated = false;
+        let digest_at = 128 + 4;
+        transmission.response.data[digest_at..digest_at + 16].copy_from_slice(&[0x5A; 16]);
+        let counters = ReflectorCounters::new();
+        let mut sent = Vec::new();
+        transmission.send_next(&counters, &RateLimiter::new(0), |bytes, _, _| {
+            sent = bytes.to_vec();
+            Ok(bytes.len())
+        });
+        assert_eq!(&sent[digest_at..digest_at + 16], &[0x5A; 16]);
+        // The base HMAC still covers the fresh T3.
+        let key = HmacKey::new(vec![0xCD; 16]).unwrap();
+        assert_eq!(
+            &sent[96..112],
+            &crate::crypto::compute_packet_hmac(&key, &sent, 96)
+        );
+    }
+
+    #[test]
+    fn generated_tlv_hmac_is_resigned_at_send_time() {
+        let mut transmission = sample(true, ReturnPathAction::Normal);
+        let counters = ReflectorCounters::new();
+        let mut sent = Vec::new();
+        transmission.send_next(&counters, &RateLimiter::new(0), |bytes, _, _| {
+            sent = bytes.to_vec();
+            Ok(bytes.len())
+        });
+        verify_signatures(&sent);
     }
 
     #[test]

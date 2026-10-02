@@ -175,10 +175,13 @@ fn route_mtu(key: &RouteKey) -> io::Result<u32> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     // No destination traffic is generated. RTM_GETROUTE asks the kernel for
     // the UDP flow's actual output route, including source, ports and DSCP.
+    // The kernel answers inside sendto(), so the reply is already queued when
+    // the nonblocking receive runs; this never stalls the reflector loop.
+    // SAFETY: plain socket(2) call; the result is checked before use.
     let raw = unsafe {
         libc::socket(
             libc::AF_NETLINK,
-            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
             libc::NETLINK_ROUTE,
         )
     };
@@ -187,22 +190,6 @@ fn route_mtu(key: &RouteKey) -> io::Result<u32> {
     }
     // SAFETY: successful socket() returned a fresh owned descriptor.
     let socket = unsafe { OwnedFd::from_raw_fd(raw) };
-    let timeout = libc::timeval {
-        tv_sec: 0,
-        tv_usec: 100_000,
-    };
-    if unsafe {
-        libc::setsockopt(
-            socket.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_RCVTIMEO,
-            std::ptr::addr_of!(timeout).cast(),
-            std::mem::size_of_val(&timeout) as _,
-        )
-    } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
     let request = route_request(key);
     let mut kernel: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
     kernel.nl_family = libc::AF_NETLINK as _;
@@ -227,7 +214,7 @@ fn route_mtu(key: &RouteKey) -> io::Result<u32> {
             socket.as_raw_fd(),
             reply.as_mut_ptr().cast(),
             reply.len(),
-            libc::MSG_TRUNC,
+            libc::MSG_TRUNC | libc::MSG_DONTWAIT,
             std::ptr::addr_of_mut!(sender).cast(),
             &mut sender_len,
         )

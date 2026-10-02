@@ -57,39 +57,6 @@ struct PendingPacket {
     send_timestamp: u64,
 }
 
-/// Prints a repeated I/O error on its 1st, 10th, 100th, ... occurrence.
-///
-/// Send and receive errors repeat once per probe while a path is down; this
-/// keeps stderr readable without hiding that the condition persists.
-struct ErrorThrottle {
-    count: u64,
-    next_report: u64,
-}
-
-impl Default for ErrorThrottle {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            next_report: 1,
-        }
-    }
-}
-
-impl ErrorThrottle {
-    fn report(&mut self, msg: std::fmt::Arguments<'_>) {
-        self.count += 1;
-        if self.count < self.next_report {
-            return;
-        }
-        self.next_report = self.next_report.saturating_mul(10);
-        if self.count == 1 {
-            eprintln!("{msg}");
-        } else {
-            eprintln!("{msg} ({} occurrences)", self.count);
-        }
-    }
-}
-
 /// Errors a connected UDP socket reports for ICMP feedback on an earlier
 /// datagram. The socket stays usable, so the run continues on its schedule.
 fn is_icmp_feedback(e: &std::io::Error) -> bool {
@@ -947,8 +914,6 @@ pub async fn run_sender_with_output(
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
     let mut packets_sent: u32 = 0;
-    let mut send_errors = ErrorThrottle::default();
-    let mut recv_errors = ErrorThrottle::default();
     let mut packets_received: u32 = 0;
     let mut packets_lost: u32 = 0;
     // Zero-config latch for the Reflector Micro-session ID (RFC 9534
@@ -1337,7 +1302,6 @@ pub async fn run_sender_with_output(
     // The route MTU can change during a run. Each probe trims from the
     // untrimmed startup set, so a temporary MTU drop does not remove header
     // requests for the rest of the run. A failed lookup keeps the last set.
-    let mut mtu_errors = ErrorThrottle::default();
     let mut prepare_header_requests = |extra_tlvs: &mut Vec<RawTlv>| {
         let Some(template) = &header_template else {
             return;
@@ -1351,9 +1315,9 @@ pub async fn run_sender_with_output(
                     header_trimmed = removed;
                 }
             }
-            None => mtu_errors.report(format_args!(
+            None => crate::eprintln_throttled!(
                 "Cannot read the route MTU; keeping the previous header-reflection requests"
-            )),
+            ),
         }
     };
     for _ in 0..conf.count {
@@ -1460,7 +1424,7 @@ pub async fn run_sender_with_output(
         // A failed send still waits out the send delay below; skipping the
         // wait would turn a persistent error into an unpaced loop.
         match socket.send(&buf).await {
-            Err(e) => send_errors.report(format_args!("Failed to send packet {seq_num}: {e}")),
+            Err(e) => crate::eprintln_throttled!("Failed to send packet {seq_num}: {e}"),
             Ok(_) => {
                 packets_sent += 1;
                 #[cfg(all(unix, feature = "snmp"))]
@@ -1580,7 +1544,7 @@ pub async fn run_sender_with_output(
                             }
                         }
                         Err(e) => {
-                            recv_errors.report(format_args!("Receive error: {e}"));
+                            crate::eprintln_throttled!("Receive error: {e}");
                             if !is_icmp_feedback(&e) {
                                 // Keep the send schedule even if the socket
                                 // keeps failing.
@@ -1729,7 +1693,7 @@ pub async fn run_sender_with_output(
                 continue;
             }
             Ok(Err(e)) => {
-                recv_errors.report(format_args!("Receive error during final wait: {e}"));
+                crate::eprintln_throttled!("Receive error during final wait: {e}");
                 if !is_icmp_feedback(&e) {
                     break;
                 }
@@ -1870,9 +1834,9 @@ pub async fn run_sender_with_output(
                         expiry_queue.push_back((send_time + timeout, seq_num));
                     }
                 }
-                Err(e) => send_errors.report(format_args!(
+                Err(e) => crate::eprintln_throttled!(
                     "Failed to send Access Report retransmission {seq_num}: {e}"
-                )),
+                ),
             }
 
             continue;
@@ -1954,9 +1918,9 @@ pub async fn run_sender_with_output(
                         }
                     }
                     Err(e) => {
-                        recv_errors.report(format_args!(
+                        crate::eprintln_throttled!(
                             "Receive error while awaiting Access Report ack: {e}"
-                        ));
+                        );
                         if !is_icmp_feedback(&e) {
                             break;
                         }
@@ -2134,7 +2098,7 @@ fn process_response(
                     REFLECTED_AUTH_PACKET_HMAC_OFFSET,
                     &hmac,
                 ) {
-                    eprintln!(
+                    crate::eprintln_throttled!(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num
                     );
@@ -2163,7 +2127,11 @@ fn process_response(
                 ) {
                     Ok(info) => Some(info),
                     Err(reason) => {
-                        eprintln!("Discarding reflected packet seq={}: {}", seq_num, reason);
+                        crate::eprintln_throttled!(
+                            "Discarding reflected packet seq={}: {}",
+                            seq_num,
+                            reason
+                        );
                         #[cfg(feature = "metrics")]
                         if ctx.metrics_enabled {
                             crate::metrics::sender_metrics::record_tlv_error("M");
@@ -2214,7 +2182,7 @@ fn process_response(
                     REFLECTED_AUTH_PACKET_HMAC_OFFSET,
                     &hmac,
                 ) {
-                    eprintln!(
+                    crate::eprintln_throttled!(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num
                     );
@@ -2258,9 +2226,10 @@ fn process_response(
             ) {
                 Ok(info) => Some(info),
                 Err(reason) => {
-                    eprintln!(
+                    crate::eprintln_throttled!(
                         "Discarding reflected packet seq={}: {}",
-                        base.sess_sender_seq_number, reason
+                        base.sess_sender_seq_number,
+                        reason
                     );
                     #[cfg(feature = "metrics")]
                     if ctx.metrics_enabled {

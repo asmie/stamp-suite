@@ -8,7 +8,7 @@
 use std::cell::Cell;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::tlv::core::{RawTlv, TlvError, TlvType};
+use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
 
 // Per RFC 8972 §4.2, the Extra Padding TLV Value SHOULD carry a pseudorandom
@@ -76,19 +76,6 @@ impl ExtraPaddingTlv {
             padding: vec![0u8; padding_size],
         }
     }
-
-    /// Parses an Extra Padding TLV from a RawTlv.
-    #[must_use]
-    pub fn from_raw(raw: &RawTlv) -> Self {
-        // decode_value is infallible for ExtraPadding
-        Self::decode_value(&raw.value).unwrap()
-    }
-
-    /// Converts to a RawTlv.
-    #[must_use]
-    pub fn to_raw(&self) -> RawTlv {
-        <Self as TypedTlv>::to_raw(self)
-    }
 }
 
 impl TypedTlv for ExtraPaddingTlv {
@@ -108,6 +95,7 @@ impl TypedTlv for ExtraPaddingTlv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tlv::RawTlv;
 
     #[test]
     fn test_extra_padding_tlv_new() {
@@ -118,7 +106,7 @@ mod tests {
     #[test]
     fn test_extra_padding_tlv_from_raw_round_trip() {
         let raw = RawTlv::new(TlvType::ExtraPadding, vec![0x00, 0x00, 0x11, 0x22]);
-        let tlv = ExtraPaddingTlv::from_raw(&raw);
+        let tlv = ExtraPaddingTlv::from_raw(&raw).unwrap();
         assert_eq!(tlv.padding, vec![0x00, 0x00, 0x11, 0x22]);
         assert_eq!(tlv.to_raw().value, raw.value);
     }

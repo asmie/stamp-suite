@@ -6,7 +6,7 @@
 ))]
 use stamp_suite::{
     crypto::{compute_packet_hmac, HmacKey},
-    tlv::ReturnPathTlv,
+    tlv::{ReturnPathTlv, TypedTlv},
 };
 use std::{
     net::{IpAddr, SocketAddr, UdpSocket},

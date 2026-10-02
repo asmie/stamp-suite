@@ -274,16 +274,15 @@ pub async fn run_receiver(
     // Build local addresses for Destination Node Address TLV matching (RFC 9503 §3).
     // Start with the configured bind address; if wildcard, enumerate interface addresses.
     let local_addresses = super::build_local_addresses(conf.local_addr);
-    // RFC 8972 §4.2.2 Location field-disclosure policy. `validate()` already
-    // rejected a bad list at startup; fall back to the permissive default
-    // rather than dropping traffic if that somehow did not run.
-    let location_disclosure = conf.location_disclosure().unwrap_or_default();
-    // RFC 8972 §4.4/§6 + cos-ecn-01 §3.2 admission policy, resolved once.
-    // `validate()` already rejected a bad spec at startup; the permissive
-    // default is the safe fallback if that somehow did not run.
+    // RFC 8972 §4.2.2 disclosure and §4.4 / cos-ecn-01 §3.2 admission
+    // policies, resolved once. `validate()` normally rejects bad specs
+    // first; if it did not run, refuse to start rather than run permissively.
+    let location_disclosure = conf
+        .location_disclosure()
+        .map_err(crate::StartupError::new)?;
     let cos_policy = conf
         .cos_admission_policy()
-        .unwrap_or_else(|_| crate::cos_policy::CosAdmissionPolicy::permit_all());
+        .map_err(crate::StartupError::new)?;
     if !cos_policy.is_permissive() {
         log::info!(
             "CoS admission policy active (--allowed-dscp {}, --allowed-ecn {}, {} \
@@ -418,7 +417,7 @@ pub async fn run_receiver(
             }
             result = tokio_socket.readable(), if drain.deadline().is_none() => {
                 if let Err(e) = result {
-                    eprintln!("Failed to wait for readable: {}", e);
+                    crate::warn_throttled!("Failed to wait for readable: {}", e);
                     continue;
                 }
             }
@@ -479,7 +478,7 @@ pub async fn run_receiver(
                 let ttl = match extract_ttl_from_cmsgs(&msg) {
                     Some(t) => t,
                     None => {
-                        log::warn!("Failed to extract TTL from packet, skipping");
+                        crate::warn_throttled!("Failed to extract TTL from packet, skipping");
                         continue;
                     }
                 };
@@ -542,12 +541,12 @@ pub async fn run_receiver(
                                 },
                             )
                         } else {
-                            eprintln!("Unknown source address type");
+                            crate::warn_throttled!("Unknown source address type");
                             continue;
                         }
                     }
                     None => {
-                        eprintln!("No source address available");
+                        crate::warn_throttled!("No source address available");
                         continue;
                     }
                 };
@@ -685,7 +684,7 @@ pub async fn run_receiver(
                 continue;
             }
             Err(e) => {
-                eprintln!("Receive error: {}", e);
+                crate::warn_throttled!("Receive error: {}", e);
             }
         }
     }

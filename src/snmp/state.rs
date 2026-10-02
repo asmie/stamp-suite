@@ -122,17 +122,21 @@ impl SenderSnmpStats {
     /// Call this after `inc_received()` so that `packets_received` is current
     /// for the average computation.
     pub fn record_rtt(&self, rtt_us: u32) {
-        // Update min (0 means no samples yet)
-        let current_min = self.rtt_min_us.load(Ordering::Relaxed);
-        if current_min == 0 || rtt_us < current_min {
-            self.rtt_min_us.store(rtt_us, Ordering::Relaxed);
+        // Min uses 0 for "no samples yet", so it needs a CAS loop rather
+        // than fetch_min.
+        let mut current_min = self.rtt_min_us.load(Ordering::Relaxed);
+        while current_min == 0 || rtt_us < current_min {
+            match self.rtt_min_us.compare_exchange_weak(
+                current_min,
+                rtt_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current_min = actual,
+            }
         }
-
-        // Update max
-        let current_max = self.rtt_max_us.load(Ordering::Relaxed);
-        if rtt_us > current_max {
-            self.rtt_max_us.store(rtt_us, Ordering::Relaxed);
-        }
+        self.rtt_max_us.fetch_max(rtt_us, Ordering::Relaxed);
 
         // Update running average
         let new_sum = self.rtt_sum_us.fetch_add(rtt_us as u64, Ordering::Relaxed) + rtt_us as u64;

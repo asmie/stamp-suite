@@ -47,6 +47,8 @@ pub mod error_estimate;
 /// and `doc/architecture.md` for platform support and PHC requirements.
 #[doc(hidden)]
 pub mod hwtstamp;
+#[doc(hidden)]
+pub mod log_throttle;
 /// STAMP packet structures and serialization.
 #[doc(hidden)]
 pub mod packets;

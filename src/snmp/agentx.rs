@@ -382,9 +382,9 @@ struct SearchRange {
 }
 
 impl SearchRange {
-    fn next(&self, handler: &dyn MibHandler, snapshot: &[Oid]) -> VarBind {
+    fn next(&self, view: &dyn MibView) -> VarBind {
         if self.include && (self.end.is_empty() || self.start < self.end) {
-            let value = handler.get(&self.start);
+            let value = view.get(&self.start);
             if !matches!(
                 value.value,
                 VarBindValue::NoSuchObject
@@ -394,7 +394,7 @@ impl SearchRange {
                 return value;
             }
         }
-        handler.get_next_snapshot(&self.start, &self.end, snapshot)
+        view.get_next(&self.start, &self.end)
     }
 }
 
@@ -439,19 +439,31 @@ pub trait MibHandler: Send + Sync {
     /// Handle a GETNEXT request. Return the next VarBind after the given OID.
     fn get_next(&self, oid: &Oid, end: &Oid) -> VarBind;
 
-    /// Snapshots the OID space once per GETNEXT/GETBULK PDU for reuse by
-    /// `get_next_snapshot`, avoiding repeated sorting and locking.
-    /// The default is empty; override both methods for costly OID spaces.
-    fn oid_snapshot(&self) -> Vec<Oid> {
-        Vec::new()
+    /// Returns the view used for every lookup in one PDU. Handlers with
+    /// costly dynamic state override this to read that state once, so a
+    /// GetBulk walk is consistent and does not repeat the work per varbind.
+    /// The default view forwards to `get` and `get_next`.
+    fn view(&self) -> Box<dyn MibView + '_> {
+        Box::new(ForwardingView(self))
     }
+}
 
-    /// Like [`get_next`](Self::get_next) but resolves against a precomputed
-    /// snapshot from [`oid_snapshot`](Self::oid_snapshot). The default ignores
-    /// the snapshot and delegates to `get_next`, so handlers that don't
-    /// override it keep working unchanged.
-    fn get_next_snapshot(&self, oid: &Oid, end: &Oid, _snapshot: &[Oid]) -> VarBind {
-        self.get_next(oid, end)
+/// A point-in-time view of the MIB for one PDU.
+pub trait MibView {
+    fn get(&self, oid: &Oid) -> VarBind;
+    /// The first object after `oid` and before `end` (empty = unbounded).
+    fn get_next(&self, oid: &Oid, end: &Oid) -> VarBind;
+}
+
+/// View that forwards each lookup to the handler.
+pub struct ForwardingView<'a, H: MibHandler + ?Sized>(pub &'a H);
+
+impl<H: MibHandler + ?Sized> MibView for ForwardingView<'_, H> {
+    fn get(&self, oid: &Oid) -> VarBind {
+        self.0.get(oid)
+    }
+    fn get_next(&self, oid: &Oid, end: &Oid) -> VarBind {
+        self.0.get_next(oid, end)
     }
 }
 
@@ -636,6 +648,11 @@ impl AgentXSession {
         let mut header_buf = [0u8; PDU_HEADER_SIZE];
         self.stream.read_exact(&mut header_buf)?;
         let header = decode_header(&header_buf)?;
+        if header.flags & AGENTX_FLAG_NETWORK_BYTE_ORDER == 0 {
+            return Err(AgentXError::Protocol(
+                "Little-endian AgentX payloads are unsupported".into(),
+            ));
+        }
 
         if header.payload_length > MAX_PDU_PAYLOAD {
             return Err(AgentXError::Protocol(format!(
@@ -751,8 +768,9 @@ impl AgentXSession {
     ) -> Result<Vec<u8>, AgentXError> {
         let mut varbinds_buf = Vec::new();
         let ranges = parse_search_ranges(payload, MAX_SEARCH_RANGES_PER_PDU)?;
+        let view = handler.view();
         for range in &ranges {
-            let vb = handler.get(&range.start);
+            let vb = view.get(&range.start);
             varbinds_buf.extend_from_slice(&encode_varbind(&vb));
         }
 
@@ -769,11 +787,9 @@ impl AgentXSession {
         let mut varbinds_buf = Vec::new();
         let ranges = parse_search_ranges(payload, MAX_SEARCH_RANGES_PER_PDU)?;
 
-        // Compute the OID-space snapshot once per PDU; reused for every range.
-        let snapshot = handler.oid_snapshot();
-
+        let view = handler.view();
         for range in &ranges {
-            let vb = range.next(handler, &snapshot);
+            let vb = range.next(&*view);
             varbinds_buf.extend_from_slice(&encode_varbind(&vb));
         }
 
@@ -801,14 +817,12 @@ impl AgentXSession {
         let mut ranges = parse_search_ranges(&payload[4..], MAX_SEARCH_RANGES_PER_PDU)?;
         let non_repeaters = non_repeaters.min(ranges.len());
 
-        // Compute the OID-space snapshot once for the whole PDU, instead of
-        // rebuilding it on every one of the (ranges × max_repetitions)
-        // get_next lookups below.
-        let snapshot = handler.oid_snapshot();
+        // One view for the whole PDU, not one per (range × repetition) lookup.
+        let view = handler.view();
 
         // Process non-repeaters (single GetNext each)
         for range in ranges.iter().take(non_repeaters) {
-            let vb = range.next(handler, &snapshot);
+            let vb = range.next(&*view);
             varbinds_buf.extend_from_slice(&encode_varbind(&vb));
         }
 
@@ -824,7 +838,7 @@ impl AgentXSession {
                         value: VarBindValue::EndOfMibView,
                     }
                 } else {
-                    range.next(handler, &snapshot)
+                    range.next(&*view)
                 };
                 *ended = matches!(vb.value, VarBindValue::EndOfMibView);
                 all_ended &= *ended;

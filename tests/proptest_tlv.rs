@@ -97,8 +97,7 @@ proptest! {
     fn prop_extra_padding_round_trip(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
         let original = ExtraPaddingTlv { padding: bytes };
         let raw = original.to_raw();
-        // ExtraPaddingTlv::from_raw is infallible (returns Self).
-        let parsed = ExtraPaddingTlv::from_raw(&raw);
+        let parsed = ExtraPaddingTlv::from_raw(&raw).unwrap();
         prop_assert_eq!(parsed, original);
     }
 }

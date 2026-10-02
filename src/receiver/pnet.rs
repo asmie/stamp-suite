@@ -14,14 +14,13 @@ use std::{
 use pnet::{
     datalink::{self, Channel::Ethernet, Config, DataLinkReceiver, NetworkInterface},
     packet::{
-        ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket},
+        ethernet::{EtherTypes, EthernetPacket},
         ip::IpNextHeaderProtocols,
         ipv4::Ipv4Packet,
         ipv6::Ipv6Packet,
         udp::UdpPacket,
         Packet,
     },
-    util::MacAddr,
 };
 
 use std::sync::Arc;
@@ -233,6 +232,8 @@ pub async fn run_receiver(
     let read_timeout = Some(Duration::from_millis(100));
     let config = Config {
         read_timeout,
+        #[cfg(target_os = "linux")]
+        socket_fd: incoming_only_capture_socket(),
         ..Default::default()
     };
 
@@ -339,13 +340,15 @@ pub async fn run_receiver(
         shutdown: Arc::clone(&shutdown),
         counters: Arc::clone(&counters),
         local_addresses,
-        // RFC 8972 §4.2.2 Location field-disclosure policy; `validate()`
-        // already rejected a bad list at startup.
-        location_disclosure: conf.location_disclosure().unwrap_or_default(),
+        // `validate()` normally rejects bad specs first; if it did not run,
+        // refuse to start rather than run permissively.
+        location_disclosure: conf
+            .location_disclosure()
+            .map_err(crate::StartupError::new)?,
         drop_replayed: conf.drop_replayed,
         cos_policy: conf
             .cos_admission_policy()
-            .unwrap_or_else(|_| crate::cos_policy::CosAdmissionPolicy::permit_all()),
+            .map_err(crate::StartupError::new)?,
         local_macs,
         reflector_member_link_id: conf.reflector_member_link_id,
         return_path_allow_alternate: conf.return_path_allow_alternate,
@@ -476,7 +479,6 @@ fn run_capture_loop(
         shutdown: Arc::clone(&config.shutdown),
     };
     let mut last_cleanup = Instant::now();
-    let mut buf = [0u8; 1600];
 
     loop {
         // Check shutdown flag
@@ -495,10 +497,10 @@ fn run_capture_loop(
             }
         }
 
-        let mut fake_ethernet_frame = MutableEthernetPacket::new(&mut buf[..]).unwrap();
         match rx.next() {
             Ok(packet) => {
-                let payload_offset;
+                // Loopback and point-to-point interfaces on Apple platforms
+                // deliver IP packets without an Ethernet header.
                 if cfg!(any(
                     target_os = "macos",
                     target_os = "ios",
@@ -507,37 +509,11 @@ fn run_capture_loop(
                     && !iface_props.is_broadcast
                     && (iface_props.is_loopback || iface_props.is_point_to_point)
                 {
-                    if iface_props.is_loopback {
-                        payload_offset = 14;
-                    } else {
-                        payload_offset = 0;
-                    }
-                    if packet.len() > payload_offset {
-                        let Some(ip_header) = Ipv4Packet::new(&packet[payload_offset..]) else {
-                            continue; // Malformed packet, skip
-                        };
-                        let version = ip_header.get_version();
-                        if version == 4 {
-                            fake_ethernet_frame.set_destination(MacAddr(0, 0, 0, 0, 0, 0));
-                            fake_ethernet_frame.set_source(MacAddr(0, 0, 0, 0, 0, 0));
-                            fake_ethernet_frame.set_ethertype(EtherTypes::Ipv4);
-                            fake_ethernet_frame.set_payload(&packet[payload_offset..]);
-                            handle_packet(
-                                &fake_ethernet_frame.to_immutable(),
-                                &config,
-                                &transmitter,
-                            );
-                            continue;
-                        } else if version == 6 {
-                            fake_ethernet_frame.set_destination(MacAddr(0, 0, 0, 0, 0, 0));
-                            fake_ethernet_frame.set_source(MacAddr(0, 0, 0, 0, 0, 0));
-                            fake_ethernet_frame.set_ethertype(EtherTypes::Ipv6);
-                            fake_ethernet_frame.set_payload(&packet[payload_offset..]);
-                            handle_packet(
-                                &fake_ethernet_frame.to_immutable(),
-                                &config,
-                                &transmitter,
-                            );
+                    let payload_offset = if iface_props.is_loopback { 14 } else { 0 };
+                    if let Some(ip) = packet.get(payload_offset..).filter(|ip| !ip.is_empty()) {
+                        let version = ip[0] >> 4;
+                        if version == 4 || version == 6 {
+                            handle_ip_packet(ip, version, &config, &transmitter);
                             continue;
                         }
                     }
@@ -552,13 +528,49 @@ fn run_capture_loop(
                 if e.kind() != std::io::ErrorKind::TimedOut
                     && e.kind() != std::io::ErrorKind::WouldBlock
                 {
-                    log::warn!("Capture receive failed: {}", e);
+                    crate::warn_throttled!("Capture receive failed: {}", e);
                 }
             }
         }
     }
     drop(transmitter);
     worker.join();
+}
+
+/// Opens the AF_PACKET socket for capture with outgoing frames ignored.
+///
+/// Linux shows a loopback datagram to packet sockets twice, once leaving and
+/// once arriving, so without this a request sent over `lo` is reflected
+/// twice. `PACKET_IGNORE_OUTGOING` needs Linux 4.20; on older kernels the
+/// duplicate remains. Returns `None` if the socket cannot be created, letting
+/// pnet open its own and report the error. pnet takes ownership of the fd.
+#[cfg(target_os = "linux")]
+fn incoming_only_capture_socket() -> Option<i32> {
+    use nix::libc;
+    let protocol = i32::from((libc::ETH_P_ALL as u16).to_be());
+    // SAFETY: socket(2) with constant arguments; the result is checked.
+    let fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, protocol) };
+    if fd < 0 {
+        return None;
+    }
+    let one: libc::c_int = 1;
+    // SAFETY: `fd` is a valid socket and `one` outlives the call.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_PACKET,
+            libc::PACKET_IGNORE_OUTGOING,
+            std::ptr::addr_of!(one).cast(),
+            std::mem::size_of_val(&one) as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        log::warn!(
+            "PACKET_IGNORE_OUTGOING unavailable ({}); loopback requests may be reflected twice",
+            std::io::Error::last_os_error()
+        );
+    }
+    Some(fd)
 }
 
 /// IP protocol numbers for the two IP-in-IP tunnel encapsulations.
@@ -577,7 +589,16 @@ fn handle_packet(
         EtherTypes::Ipv6 => 6,
         _ => return,
     };
-    let Some((udp, mut pkt)) = checked_udp(ethernet.payload(), version) else {
+    handle_ip_packet(ethernet.payload(), version, config, transmitter);
+}
+
+fn handle_ip_packet(
+    ip: &[u8],
+    version: u8,
+    config: &CaptureConfig,
+    transmitter: &std::sync::mpsc::SyncSender<QueuedTransmission>,
+) {
+    let Some((udp, mut pkt)) = checked_udp(ip, version) else {
         return;
     };
     if udp.get_destination() != config.local_port {
@@ -665,7 +686,7 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
                 static WARNED: std::sync::atomic::AtomicBool =
                     std::sync::atomic::AtomicBool::new(false);
                 if !WARNED.swap(true, AtomicOrdering::Relaxed) {
-                    log::warn!("Raw capture UDP checksum validation failed; corrupt and checksum-offload partial frames are rejected. Use a capture point with completed wire checksums.");
+                    crate::warn_throttled!("Raw capture UDP checksum validation failed; corrupt and checksum-offload partial frames are rejected. Use a capture point with completed wire checksums.");
                 }
                 return None;
             }
@@ -1076,6 +1097,7 @@ mod tests {
                 data: vec![0; 44],
                 cos_request: None,
                 reply_source: None,
+                tlv_hmac_generated: false,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: Some(super::super::ReflectedControlBehavior {
                     max_size: 1500,
@@ -1169,6 +1191,7 @@ mod tests {
                 data,
                 cos_request: None,
                 reply_source: None,
+                tlv_hmac_generated: false,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: Some(super::super::ReflectedControlBehavior {
                     max_size: 1500,
@@ -1234,6 +1257,7 @@ mod tests {
                 data,
                 cos_request: None,
                 reply_source: None,
+                tlv_hmac_generated: false,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: controlled.then_some(super::super::ReflectedControlBehavior {
                     max_size: 1500,

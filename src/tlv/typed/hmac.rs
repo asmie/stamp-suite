@@ -1,6 +1,6 @@
 //! HMAC TLV (Type 8) for TLV integrity verification.
 
-use crate::tlv::core::{RawTlv, TlvError, TlvType, HMAC_TLV_VALUE_SIZE};
+use crate::tlv::core::{TlvError, TlvType, HMAC_TLV_VALUE_SIZE};
 use crate::tlv::traits::TypedTlv;
 
 /// HMAC TLV (Type 8) for TLV integrity verification.
@@ -15,20 +15,6 @@ impl HmacTlv {
     #[must_use]
     pub fn new(hmac: [u8; 16]) -> Self {
         Self { hmac }
-    }
-
-    /// Parses an HMAC TLV from a RawTlv.
-    ///
-    /// # Errors
-    /// Returns an error if the value is not 16 bytes.
-    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
-        Self::decode_value(&raw.value)
-    }
-
-    /// Converts to a RawTlv.
-    #[must_use]
-    pub fn to_raw(&self) -> RawTlv {
-        <Self as TypedTlv>::to_raw(self)
     }
 }
 
@@ -52,6 +38,7 @@ impl TypedTlv for HmacTlv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tlv::RawTlv;
 
     #[test]
     fn test_hmac_tlv_new() {

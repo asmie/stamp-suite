@@ -154,6 +154,17 @@ async fn one_packet_round_trip(
     // Await a reply.
     let mut buf = [0u8; 2048];
     let recv = timeout(Duration::from_secs(3), sender.recv_from(&mut buf)).await;
+    // Linux shows loopback frames to packet sockets both leaving and
+    // arriving; only the arriving copy may be reflected.
+    if matches!(recv, Ok(Ok(_))) {
+        let mut extra = [0u8; 2048];
+        assert!(
+            timeout(Duration::from_millis(300), sender.recv_from(&mut extra))
+                .await
+                .is_err(),
+            "one request must produce exactly one reply"
+        );
+    }
 
     // A JoinHandle abort cannot stop spawn_blocking capture. Request shutdown
     // and wait for both capture and transmission workers to leave.

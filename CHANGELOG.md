@@ -155,6 +155,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforced. The unused per-SSID limiter API is removed.
 - Replace the deprecated `AtomicUsize::fetch_update` so clippy passes on
   current toolchains.
+- Stop the pnet backend from reflecting each loopback request twice. Linux
+  shows loopback frames to packet sockets both leaving and arriving; the
+  capture socket now sets `PACKET_IGNORE_OUTGOING`.
+- Remove a fixed 1600-byte buffer from Apple loopback capture that panicked
+  the capture thread on larger IP packets.
+- Leave an echoed TLV HMAC unchanged when sending. After a failed TLV HMAC
+  check the reflector re-signed the copied HMAC TLV at send time; RFC 8972
+  §4.8 requires it to be copied.
+- Make the route-MTU netlink query nonblocking so it cannot stall the reflector
+  receive loop.
+- Refuse to start when the CoS admission or Location disclosure policy cannot
+  be parsed, instead of falling back to permissive defaults.
+- Throttle warnings that a remote peer can trigger per packet (bad HMAC,
+  strict-mode parse failures, missing keys, capture checksum errors). Each
+  call site logs its 1st, 10th, 100th, ... occurrence at warn level.
+- Run the AgentX connect and registration handshake off the async runtime.
+  Read the session table once per SNMP request and find successors by binary
+  search; a table walk was quadratic in the number of sessions. Reject
+  little-endian AgentX responses as requests already were.
+- Parse Return Path sub-TLVs as raw sub-TLVs in wire order. They were parsed
+  as top-level TLVs, so sub-type 8 was moved last as if it were an HMAC TLV.
+- Remove `ExtraPaddingTlv::from_raw` and `HmacTlv::from_raw` inherent methods
+  that skipped the TLV type check; the `TypedTlv` versions check it.
+- Wipe key-file read buffers and rejected keys from memory.
 
 - Validate pnet startup binds/keys before privileged capture, preserve interface
   errors, and repair startup tests. Require valid authenticated pnet replies and
