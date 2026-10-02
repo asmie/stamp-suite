@@ -40,6 +40,7 @@ Options (`--help` lists limits and defaults):
 | `--repeats N` | Independent trials, 1–100. |
 | `--drain-ms N` | Extra response collection time, 1–10,000 ms. |
 | `--workers N` | Reflector Tokio workers, 1–256; default 2. |
+| `--hwtstamp MODE` | Reflector timestamping mode (`off` by default). `auto` matches the packaged service and adds TX-timestamp work when the binary is built with `hwtstamp`. |
 
 The generator sends 1 ms batches, skips missed pacing slots, and drains replies
 on a separate thread. Bookkeeping is bounded by `rate × seconds + 1` slots

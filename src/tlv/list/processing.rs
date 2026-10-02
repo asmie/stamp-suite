@@ -868,6 +868,16 @@ impl TlvList {
         captured_fixed: Option<&[Vec<u8>]>,
         captured_ext_headers: Option<&[u8]>,
     ) {
+        let is_header_tlv = |tlv: &RawTlv| {
+            matches!(
+                tlv.tlv_type,
+                TlvType::ReflectedFixedHdr | TlvType::ReflectedIpv6ExtHdr
+            )
+        };
+        // Most packets carry neither type; skip the record bookkeeping below.
+        if !tlvs.iter().any(is_header_tlv) {
+            return;
+        }
         // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: the Reflected Fixed Header
         // Data (247) TLVs MUST precede the Reflected IPv6 Extension Header Data
         // (246) TLVs. "If ... TLVs are not received in this order, the Session-

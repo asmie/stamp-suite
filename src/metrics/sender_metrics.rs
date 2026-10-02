@@ -40,12 +40,19 @@ pub fn record_hmac_failure() {
     counter!("stamp_sender_hmac_failures_total").increment(1);
 }
 
-/// Records a TLV error with the specified flag type.
-///
-/// # Arguments
-/// * `flag` - The type of TLV error: "U" (unrecognized), "M" (malformed), or "I" (integrity)
-pub fn record_tlv_error(flag: &str) {
-    counter!("stamp_sender_tlv_errors_total", "flag" => flag.to_string()).increment(1);
+/// Records TLV error flags by type: "U" (unrecognized), "M" (malformed) or
+/// "I" (integrity).
+pub fn record_tlv_error(flag: &'static str) {
+    counter!("stamp_sender_tlv_errors_total", "flag" => flag).increment(1);
+}
+
+/// Records the U, M and I flag counts of one packet's TLVs.
+pub fn record_tlv_errors(unrecognized: usize, malformed: usize, integrity: usize) {
+    for (flag, count) in [("U", unrecognized), ("M", malformed), ("I", integrity)] {
+        if count > 0 {
+            counter!("stamp_sender_tlv_errors_total", "flag" => flag).increment(count as u64);
+        }
+    }
 }
 
 #[cfg(test)]

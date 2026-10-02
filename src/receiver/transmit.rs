@@ -186,7 +186,12 @@ impl Transmission {
             return None;
         }
         self.first = false;
-        let mut data = self.response.data.clone();
+        // The last copy can take the buffer; earlier copies need it again.
+        let mut data = if self.remaining <= 1 {
+            std::mem::take(&mut self.response.data)
+        } else {
+            self.response.data.clone()
+        };
         let base = if self.auth {
             AUTH_BASE_SIZE
         } else {
@@ -777,6 +782,45 @@ fn update_socket_option(
     Ok(())
 }
 
+/// Ancillary data for one `sendmsg`, built in place on the stack.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct ControlBuffer {
+    /// `usize` elements keep every header `cmsghdr`-aligned.
+    words: [usize; 16],
+    /// Bytes in use.
+    used: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl ControlBuffer {
+    fn append(&mut self, level: i32, kind: i32, bytes: &[u8]) {
+        use nix::libc;
+        // SAFETY: CMSG_SPACE only computes a size.
+        let space = unsafe { libc::CMSG_SPACE(bytes.len() as _) } as usize;
+        assert!(
+            self.used + space <= std::mem::size_of_val(&self.words),
+            "control buffer overflow"
+        );
+        // SAFETY: the assertion keeps the header and data inside `words`,
+        // which starts zeroed, so padding stays zero. `used` is a multiple of
+        // CMSG_ALIGN, so the header is aligned.
+        unsafe {
+            let header = self
+                .words
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(self.used)
+                .cast::<libc::cmsghdr>();
+            (*header).cmsg_level = level;
+            (*header).cmsg_type = kind;
+            (*header).cmsg_len = libc::CMSG_LEN(bytes.len() as _) as _;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), libc::CMSG_DATA(header), bytes.len());
+        }
+        self.used += space;
+    }
+}
+
 /// CoS and source pinning accompany sendmsg; Linux SRH uses the sticky socket
 /// option because the ancillary IPV6_RTHDR parser rejects routing type 4.
 /// The exclusive send owner restores/clears SRH before a different reply.
@@ -831,7 +875,9 @@ fn send_datagram(
     msg.msg_iov = std::ptr::addr_of_mut!(iov);
     msg.msg_iovlen = 1;
     #[cfg(target_os = "linux")]
-    let mut control = Vec::<usize>::new();
+    // TOS plus one PKTINFO fit well within 128 bytes; usize elements give
+    // cmsghdr alignment without a heap allocation per send.
+    let mut control = ControlBuffer::default();
     #[cfg(target_os = "linux")]
     {
         // This socket has one send owner. Restore normal PMTU policy for
@@ -865,26 +911,8 @@ fn send_datagram(
                 Ok(())
             }
         })?;
-        // usize allocation guarantees cmsghdr alignment; zero initialize all padding.
-        fn append(control: &mut Vec<usize>, level: i32, kind: i32, bytes: &[u8]) {
-            let start = control.len() * std::mem::size_of::<usize>();
-            let space = unsafe { libc::CMSG_SPACE(bytes.len() as _) } as usize;
-            control.resize((start + space).div_ceil(std::mem::size_of::<usize>()), 0);
-            unsafe {
-                let header = control
-                    .as_mut_ptr()
-                    .cast::<u8>()
-                    .add(start)
-                    .cast::<libc::cmsghdr>();
-                (*header).cmsg_level = level;
-                (*header).cmsg_type = kind;
-                (*header).cmsg_len = libc::CMSG_LEN(bytes.len() as _) as _;
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), libc::CMSG_DATA(header), bytes.len());
-            }
-        }
         let tos = options.tos as libc::c_int;
-        append(
-            &mut control,
+        control.append(
             if dst.is_ipv4() {
                 libc::IPPROTO_IP
             } else {
@@ -918,7 +946,7 @@ fn send_datagram(
                 }
                 info.ipi_ifindex = ifindex as _;
                 // SAFETY: the slice covers exactly `info`, which outlives it.
-                append(&mut control, libc::IPPROTO_IP, libc::IP_PKTINFO, unsafe {
+                control.append(libc::IPPROTO_IP, libc::IP_PKTINFO, unsafe {
                     std::slice::from_raw_parts(
                         std::ptr::addr_of!(info).cast(),
                         std::mem::size_of_val(&info),
@@ -932,17 +960,12 @@ fn send_datagram(
                 }
                 info.ipi6_ifindex = ifindex as _;
                 // SAFETY: the slice covers exactly `info`, which outlives it.
-                append(
-                    &mut control,
-                    libc::IPPROTO_IPV6,
-                    libc::IPV6_PKTINFO,
-                    unsafe {
-                        std::slice::from_raw_parts(
-                            std::ptr::addr_of!(info).cast(),
-                            std::mem::size_of_val(&info),
-                        )
-                    },
-                );
+                control.append(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, unsafe {
+                    std::slice::from_raw_parts(
+                        std::ptr::addr_of!(info).cast(),
+                        std::mem::size_of_val(&info),
+                    )
+                });
             }
         }
         if *srh_setting != options.srh {
@@ -964,8 +987,8 @@ fn send_datagram(
             }
             *srh_setting = options.srh.clone();
         }
-        msg.msg_control = control.as_mut_ptr().cast();
-        msg.msg_controllen = (control.len() * std::mem::size_of::<usize>()) as _;
+        msg.msg_control = control.words.as_mut_ptr().cast();
+        msg.msg_controllen = control.used as _;
     }
     #[cfg(not(target_os = "linux"))]
     {

@@ -93,9 +93,33 @@ pub fn read_token_file(path: &Path) -> Result<String, HmacError> {
 
 /// HMAC key for STAMP authentication.
 ///
-/// Wraps a key and provides methods for computing and verifying
-/// HMAC-SHA256 truncated to 16 bytes.
-pub struct HmacKey(Vec<u8>);
+/// Holds the keyed HMAC-SHA256 state rather than the key bytes: the inner
+/// and outer key pads are absorbed once, and each message clones that state
+/// instead of recomputing them. Cloning an `HmacKey` shares the state; the
+/// last owner wipes it.
+#[derive(Clone)]
+pub struct HmacKey(std::sync::Arc<KeyState>);
+
+struct KeyState {
+    keyed: HmacSha256,
+    len: usize,
+}
+
+impl Drop for KeyState {
+    fn drop(&mut self) {
+        // hmac 0.13 does not wipe its state, so overwrite it in place.
+        let size = std::mem::size_of::<HmacSha256>();
+        let state = std::ptr::addr_of_mut!(self.keyed).cast::<u8>();
+        for offset in 0..size {
+            // SAFETY: `state` points to `size` bytes owned by `self.keyed`.
+            // HMAC-SHA256 state is plain integers and byte arrays, for which
+            // all-zero is a valid value, and it owns no heap memory, so the
+            // field's own drop after this is sound.
+            unsafe { std::ptr::write_volatile(state.add(offset), 0) };
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// Incremental STAMP HMAC without a concatenated input allocation.
 pub(crate) struct HmacSigner(HmacSha256);
@@ -111,30 +135,21 @@ impl HmacSigner {
     }
 }
 
-impl Clone for HmacKey {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl Drop for HmacKey {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
-
 impl HmacKey {
-    /// Creates a key from raw bytes.
+    /// Creates a key from raw bytes. The bytes are wiped once the keyed
+    /// state is built, or on rejection.
     ///
     /// # Errors
     /// Returns `HmacError::KeyTooShort` for fewer than 16 bytes.
     pub fn new(key: Vec<u8>) -> Result<Self, HmacError> {
-        // Wrap first so a rejected key is wiped too.
-        let key = Self(key);
-        if key.0.len() < MIN_KEY_LENGTH {
-            return Err(HmacError::KeyTooShort(key.0.len()));
+        let mut key = zeroize::Zeroizing::new(key);
+        if key.len() < MIN_KEY_LENGTH {
+            return Err(HmacError::KeyTooShort(key.len()));
         }
-        Ok(key)
+        let keyed = HmacSha256::new_from_slice(&key).expect("HMAC takes a key of any length");
+        let len = key.len();
+        key.zeroize();
+        Ok(Self(std::sync::Arc::new(KeyState { keyed, len })))
     }
 
     /// Decodes a hexadecimal key.
@@ -186,7 +201,7 @@ impl HmacKey {
     }
 
     pub(crate) fn signer(&self) -> HmacSigner {
-        HmacSigner(HmacSha256::new_from_slice(&self.0).expect("HMAC can take key of any size"))
+        HmacSigner(self.0.keyed.clone())
     }
 
     pub(crate) fn compute_parts<'a>(
@@ -219,13 +234,13 @@ impl HmacKey {
     /// Returns the key length in bytes.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.0.len
     }
 
     /// Returns true if the key is empty (should never happen after construction).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.len == 0
     }
 }
 

@@ -306,8 +306,9 @@ impl Session {
 struct SessionEntry {
     /// The session for this client.
     session: Arc<Session>,
-    /// Last time this session was used.
-    last_active: Instant,
+    /// Last use, in nanoseconds since the manager's `epoch`. Atomic so the
+    /// per-packet refresh needs only the table's read lock.
+    last_active: AtomicU64,
 }
 
 /// Maintains independent state for each complete STAMP session identity.
@@ -333,6 +334,8 @@ pub struct SessionManager {
     /// Suppresses repeated capacity warnings while the table is full.
     /// Cleared by `cleanup_stale_sessions` when capacity becomes available.
     saturated: AtomicBool,
+    /// Reference point for `SessionEntry::last_active`.
+    epoch: Instant,
 }
 
 /// One immutable provisioning decision, bound to its manager and full identity.
@@ -384,6 +387,7 @@ impl SessionManager {
             max_sessions: AtomicUsize::new(max_sessions.unwrap_or(0)),
             draining: AtomicBool::new(false),
             saturated: AtomicBool::new(false),
+            epoch: Instant::now(),
         }
     }
 
@@ -524,15 +528,32 @@ impl SessionManager {
         self.admit(client.into())?.acquire()
     }
 
+    fn now_ns(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    fn last_active(&self, entry: &SessionEntry) -> Instant {
+        self.epoch + Duration::from_nanos(entry.last_active.load(Ordering::Relaxed))
+    }
+
     fn get_or_create_admitted(&self, client: SessionKey) -> Option<Arc<Session>> {
         #[cfg(test)]
         self.acquisitions.fetch_add(1, Ordering::Relaxed);
+        // Known sessions need only the read lock.
+        {
+            let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = sessions.get(&client) {
+                entry.last_active.store(self.now_ns(), Ordering::Relaxed);
+                return Some(Arc::clone(&entry.session));
+            }
+        }
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let count = sessions.len();
         match sessions.entry(client) {
-            Entry::Occupied(mut occupied) => {
-                let entry = occupied.get_mut();
-                entry.last_active = Instant::now();
+            // Created by another thread between the two locks.
+            Entry::Occupied(occupied) => {
+                let entry = occupied.get();
+                entry.last_active.store(self.now_ns(), Ordering::Relaxed);
                 Some(Arc::clone(&entry.session))
             }
             Entry::Vacant(vacant) => {
@@ -543,7 +564,7 @@ impl SessionManager {
                 let session = Arc::new(Session::new(session_id));
                 vacant.insert(SessionEntry {
                     session: Arc::clone(&session),
-                    last_active: Instant::now(),
+                    last_active: AtomicU64::new(self.now_ns()),
                 });
                 log::debug!("Created new session {} for client {}", session_id, client);
 
@@ -602,7 +623,7 @@ impl SessionManager {
         let before_count = sessions.len();
 
         sessions.retain(|addr, entry| {
-            let keep = now.duration_since(entry.last_active) < timeout;
+            let keep = now.duration_since(self.last_active(entry)) < timeout;
             if !keep {
                 entry.session.retire();
                 log::debug!("Removing stale session for client {}", addr);
@@ -657,7 +678,7 @@ impl SessionManager {
                     packets_received: entry.session.get_received_count(),
                     packets_transmitted: entry.session.get_transmitted_count(),
                     last_reflected_seq: last_seq,
-                    last_active: entry.last_active,
+                    last_active: self.last_active(entry),
                 }
             })
             .collect()

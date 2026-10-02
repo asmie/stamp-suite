@@ -378,9 +378,10 @@ pub fn drain_tx_timestamps(
     use ::nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags, SockaddrStorage};
 
     let mut out = Vec::new();
+    // Reused for every message in this drain.
+    let mut cmsg_buf = vec![0u8; 512];
     loop {
         let mut buf = [0u8; 64];
-        let mut cmsg_buf = vec![0u8; 512];
         let mut iov = [IoSliceMut::new(&mut buf)];
         let msg = match recvmsg::<SockaddrStorage>(
             fd,

@@ -215,6 +215,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the requested DSCP/ECN cannot be applied (RFC 8972 §4.4,
   cos-ecn-01 §3.1/§3.2).
 
+### Performance
+
+Measured with `live_udp_bench` on loopback (Intel Core Ultra 9 275HX, WSL2),
+median of three trials, reflector CPU as a share of one core:
+
+| Load | Before | After |
+| --- | --- | --- |
+| 50 kpps open | 23.0% | 18.7% |
+| 50 kpps authenticated, stateful | 25.7% | 20.3% |
+| 200 kpps open | 84.7%, 1.6% loss | 62.0%, no loss |
+| 200 kpps authenticated, stateful | 95.0%, 1.3% loss | 73.7%, 0.005% loss |
+| 50 kpps open, `--hwtstamp auto` | 28.7% | 22.3% |
+
+- The nix reflector sends the first copy of each reply as soon as it is
+  built; only later burst copies wait in the deadline queue. It handles up to
+  32 datagrams per readiness wakeup.
+- The reflector socket requests a 4 MiB receive buffer (capped by
+  `net.core.rmem_max`). The default absorbed about a millisecond of traffic
+  at 200 kpps.
+- Kernel TX-timestamp error queues are read only while a send awaits its
+  timestamp, instead of on every loop iteration.
+- Known sessions are looked up under the session table's read lock.
+- `HmacKey` keeps the keyed HMAC state and shares it between clones, so the
+  key schedule is computed once and a reply's signing key is a reference
+  count, not a copy. The state is wiped when the last clone is dropped, and
+  the raw key bytes are no longer retained.
+- Ancillary data for each send is built on the stack; the last copy of a
+  reply reuses its buffer; TLV error metrics are recorded once per packet
+  with static labels and only when metrics are enabled.
+- `live_udp_bench` gains `--hwtstamp`; the Criterion suite gains a stateful
+  case with a populated session table.
+
 ### Changed (internal)
 
 - Split `src/receiver/mod.rs` and `src/sender.rs` into focused modules and

@@ -245,15 +245,11 @@ pub(super) fn validate_reflected_tlvs(
 
     #[cfg(feature = "metrics")]
     if metrics_enabled {
-        for (count, flag) in [
-            (telemetry.flags.unrecognized, "U"),
-            (telemetry.flags.malformed, "M"),
-            (telemetry.flags.integrity_failed, "I"),
-        ] {
-            for _ in 0..count {
-                crate::metrics::sender_metrics::record_tlv_error(flag);
-            }
-        }
+        crate::metrics::sender_metrics::record_tlv_errors(
+            telemetry.flags.unrecognized,
+            telemetry.flags.malformed,
+            telemetry.flags.integrity_failed,
+        );
     }
     Ok(telemetry)
 }

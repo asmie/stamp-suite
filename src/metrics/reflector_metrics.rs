@@ -19,8 +19,8 @@ pub fn record_packet_reflected() {
 ///
 /// # Arguments
 /// * `reason` - The reason for dropping: "parse_error", "hmac_failure", "short_packet", etc.
-pub fn record_packet_dropped(reason: &str) {
-    counter!("stamp_reflector_packets_dropped_total", "reason" => reason.to_string()).increment(1);
+pub fn record_packet_dropped(reason: &'static str) {
+    counter!("stamp_reflector_packets_dropped_total", "reason" => reason).increment(1);
 }
 
 /// Sets the current number of active sessions.
@@ -43,12 +43,19 @@ pub fn record_processing_time(seconds: f64) {
     histogram!("stamp_reflector_processing_seconds").record(seconds);
 }
 
-/// Records a TLV error with the specified flag type.
-///
-/// # Arguments
-/// * `flag` - The type of TLV error: "U" (unrecognized), "M" (malformed), or "I" (integrity)
-pub fn record_tlv_error(flag: &str) {
-    counter!("stamp_reflector_tlv_errors_total", "flag" => flag.to_string()).increment(1);
+/// Records TLV error flags by type: "U" (unrecognized), "M" (malformed) or
+/// "I" (integrity).
+pub fn record_tlv_error(flag: &'static str) {
+    counter!("stamp_reflector_tlv_errors_total", "flag" => flag).increment(1);
+}
+
+/// Records the U, M and I flag counts of one packet's TLVs.
+pub fn record_tlv_errors(unrecognized: usize, malformed: usize, integrity: usize) {
+    for (flag, count) in [("U", unrecognized), ("M", malformed), ("I", integrity)] {
+        if count > 0 {
+            counter!("stamp_reflector_tlv_errors_total", "flag" => flag).increment(count as u64);
+        }
+    }
 }
 
 #[cfg(test)]

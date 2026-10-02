@@ -210,6 +210,32 @@ fn bench_auth_full_chain(c: &mut Criterion) {
     });
 }
 
+/// Stateful processing through a populated session table, as the live
+/// reflector does: lookup, counters and the replay window are included.
+fn bench_unauth_stateful_sessions(c: &mut Criterion) {
+    let manager = std::sync::Arc::new(stamp_suite::session::SessionManager::new(None, None));
+    for port in 0..1000u16 {
+        let client = SocketAddr::new(src().ip(), 10_000 + port);
+        manager.get_or_create_session(client);
+    }
+    let mut packet = build_unauth_base();
+    packet.extend(typical_tlv_chain());
+    let mut ctx = make_ctx(None);
+    ctx.session_manager = Some(&manager);
+    ctx.stateful_reflector = true;
+    c.bench_function("unauth_stateful_sessions", |b| {
+        b.iter(|| {
+            let _ = process_stamp_packet(
+                black_box(&packet),
+                black_box(src()),
+                black_box(64),
+                black_box(false),
+                black_box(&ctx),
+            );
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_unauth_no_tlvs,
@@ -217,5 +243,6 @@ criterion_group!(
     bench_unauth_full_chain,
     bench_auth_no_tlvs,
     bench_auth_full_chain,
+    bench_unauth_stateful_sessions,
 );
 criterion_main!(benches);

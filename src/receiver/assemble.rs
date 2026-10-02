@@ -260,17 +260,9 @@ pub fn assemble_unauth_answer_with_tlvs(
 
                 // Record TLV error metrics
                 #[cfg(feature = "metrics")]
-                {
+                if ctx.metrics_enabled {
                     let (u_count, m_count, i_count) = tlvs.count_error_flags();
-                    for _ in 0..u_count {
-                        crate::metrics::reflector_metrics::record_tlv_error("U");
-                    }
-                    for _ in 0..m_count {
-                        crate::metrics::reflector_metrics::record_tlv_error("M");
-                    }
-                    for _ in 0..i_count {
-                        crate::metrics::reflector_metrics::record_tlv_error("I");
-                    }
+                    crate::metrics::reflector_metrics::record_tlv_errors(u_count, m_count, i_count);
                 }
 
                 // On HMAC failure only echo, with I set (RFC 8972 §4.8). With a
@@ -412,17 +404,9 @@ pub fn assemble_auth_answer_with_tlvs(
 
                 // Record TLV error metrics
                 #[cfg(feature = "metrics")]
-                {
+                if ctx.metrics_enabled {
                     let (u_count, m_count, i_count) = tlvs.count_error_flags();
-                    for _ in 0..u_count {
-                        crate::metrics::reflector_metrics::record_tlv_error("U");
-                    }
-                    for _ in 0..m_count {
-                        crate::metrics::reflector_metrics::record_tlv_error("M");
-                    }
-                    for _ in 0..i_count {
-                        crate::metrics::reflector_metrics::record_tlv_error("I");
-                    }
+                    crate::metrics::reflector_metrics::record_tlv_errors(u_count, m_count, i_count);
                 }
 
                 // On HMAC failure only echo, with I set (RFC 8972 §4.8). With a

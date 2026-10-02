@@ -25,6 +25,12 @@ use super::{
     ReceiverSharedState,
 };
 
+/// Datagrams handled per readiness wakeup.
+const RECV_BATCH: usize = 32;
+
+/// Requested socket receive buffer.
+const RECV_BUFFER_BYTES: usize = 4 << 20;
+
 /// Runs the STAMP Session Reflector using nix for real TTL capture.
 ///
 /// Uses IP_RECVTTL/IPV6_RECVHOPLIMIT socket options to capture the actual
@@ -53,6 +59,13 @@ pub async fn run_receiver(
     let local_addr = std_socket
         .local_addr()
         .map_err(|e| crate::StartupError::new(format!("Cannot get bound address: {e}")))?;
+
+    // The default buffer holds about a millisecond of traffic at high packet
+    // rates, so a short scheduling delay drops requests. The kernel caps the
+    // request at net.core.rmem_max.
+    if let Err(e) = socket2::SockRef::from(&std_socket).set_recv_buffer_size(RECV_BUFFER_BYTES) {
+        log::debug!("Cannot enlarge the receive buffer: {e}");
+    }
 
     // Enable TTL/hop limit and TOS/Traffic Class reception via setsockopt using libc directly
     // nix doesn't expose IP_RECVTTL/IP_RECVTOS, so we use libc
@@ -242,6 +255,8 @@ pub async fn run_receiver(
         u32,
         (std::sync::Weak<crate::session::Session>, u32),
     > = std::collections::HashMap::new();
+    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+    let mut errqueue_suspect = false;
 
     let mut datagram_sender = DatagramSender::new(&tokio_socket);
 
@@ -258,6 +273,35 @@ pub async fn run_receiver(
     let mut shutdown_tick = interval(Duration::from_millis(250));
     let signal = super::shutdown_signal();
     tokio::pin!(signal);
+
+    // Sends the next copy of a reply, records its TX-timestamp correlation,
+    // and requeues any later burst copies. This loop is the only sender, so
+    // OPT_ID numbering follows send order.
+    macro_rules! send_copy {
+        ($queued:expr) => {{
+            let mut queued = $queued;
+            let transmission = &mut queued.transmission;
+            let sent = transmission.send_next_with_mtu(
+                &counters,
+                &shared.rate_limiter,
+                |target, options, refresh| {
+                    mtu_cache.payload_cap(local_addr, target, options, refresh)
+                },
+                |bytes, target, options| datagram_sender.send(bytes, target, options),
+            );
+            #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+            if let (Some(sequence), true) = (sent, kernel_ts.tx_kernel) {
+                tx_id_map.insert(
+                    tx_counter,
+                    (Arc::downgrade(&transmission.session), sequence),
+                );
+                tx_counter = tx_counter.wrapping_add(1);
+            }
+            #[cfg(not(all(feature = "hwtstamp", target_os = "linux")))]
+            let _ = sent;
+            replies.schedule_next(queued);
+        }};
+    }
 
     loop {
         if shared
@@ -276,7 +320,11 @@ pub async fn run_receiver(
         // matching reflection (RFC 8972 §4.7 reports the *previous* reply's
         // TX time, so the one-iteration delay is inherent to the TLV).
         #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-        if kernel_ts.tx_kernel {
+        // The error queue only fills after sends, so skip the syscall when no
+        // send awaits a timestamp, unless an empty readable wakeup suggests
+        // leftover error-queue messages.
+        if kernel_ts.tx_kernel && (!tx_id_map.is_empty() || errqueue_suspect) {
+            errqueue_suspect = false;
             for report in
                 crate::hwtstamp::drain_tx_timestamps(tokio_socket.as_raw_fd(), conf.clock_source)
             {
@@ -314,16 +362,8 @@ pub async fn run_receiver(
                     std::future::pending::<()>().await;
                 }
             } => {
-                if let Some(mut queued) = replies.pop_due() {
-                    let transmission = &mut queued.transmission;
-                    if let Some(_sequence) = transmission.send_next_with_mtu(&counters, &shared.rate_limiter, |target, options, refresh| mtu_cache.payload_cap(local_addr, target, options, refresh), |bytes, target, options| datagram_sender.send(bytes, target, options)) {
-                        #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-                        if kernel_ts.tx_kernel {
-                            tx_id_map.insert(tx_counter, (Arc::downgrade(&transmission.session), _sequence));
-                            tx_counter = tx_counter.wrapping_add(1);
-                        }
-                    }
-                    replies.schedule_next(queued);
+                if let Some(queued) = replies.pop_due() {
+                    send_copy!(queued);
                 }
                 continue;
             }
@@ -368,139 +408,152 @@ pub async fn run_receiver(
             }
         }
 
-        // Keep ancillary metadata while letting Tokio clear cached readiness
-        // when recvmsg reaches EAGAIN. Calling the raw syscall alone leaves
-        // readable() ready forever after the first datagram is consumed.
-        let mut iov = [IoSliceMut::new(&mut buf)];
+        // Drain a bounded batch per wakeup; the bound keeps timers, shutdown
+        // and queued burst copies serviced under sustained load.
+        for received in 0..RECV_BATCH {
+            // Keep ancillary metadata while letting Tokio clear cached readiness
+            // when recvmsg reaches EAGAIN. Calling the raw syscall alone leaves
+            // readable() ready forever after the first datagram is consumed.
+            let mut iov = [IoSliceMut::new(&mut buf)];
 
-        match tokio_socket.try_io(tokio::io::Interest::READABLE, || {
-            recvmsg::<SockaddrStorage>(
-                tokio_socket.as_raw_fd(),
-                &mut iov,
-                Some(&mut cmsg_buf),
-                MsgFlags::MSG_DONTWAIT,
-            )
-            .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
-        }) {
-            Ok(msg) => {
-                let len = msg.bytes;
-                let src_storage = msg.address;
+            match tokio_socket.try_io(tokio::io::Interest::READABLE, || {
+                recvmsg::<SockaddrStorage>(
+                    tokio_socket.as_raw_fd(),
+                    &mut iov,
+                    Some(&mut cmsg_buf),
+                    MsgFlags::MSG_DONTWAIT,
+                )
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+            }) {
+                Ok(msg) => {
+                    let len = msg.bytes;
+                    let src_storage = msg.address;
 
-                // Extract TTL from control messages
-                let ttl = match extract_ttl_from_cmsgs(&msg) {
-                    Some(t) => t,
-                    None => {
-                        crate::warn_throttled!("Failed to extract TTL from packet, skipping");
-                        continue;
-                    }
-                };
-
-                // Extract TOS (DSCP/ECN) from control messages
-                let (received_dscp, received_ecn) = extract_tos_from_cmsgs(&msg)
-                    .map(|tos| ((tos >> 2) & 0x3F, tos & 0x03))
-                    .unwrap_or((0, 0));
-
-                // Extract actual destination address from packet info (for Location TLV).
-                // Falls back to configured bind address if pktinfo is unavailable.
-                let pktinfo = extract_dst_addr_from_cmsgs(&msg);
-                let (dst_addr, ingress_interface) =
-                    pktinfo.unwrap_or((conf.local_addr, conf.local_scope_id));
-                // Only Linux can pin a reply to this interface (RFC 9503 §4.1.1).
-                let ingress_ifindex = pktinfo
-                    .map(|(_, index)| index)
-                    .filter(|&index| cfg!(target_os = "linux") && index != 0);
-                let packet_local_addr = crate::net_scope::received_endpoint(
-                    dst_addr,
-                    local_addr.port(),
-                    ingress_interface,
-                );
-
-                // Extract the kernel receive timestamp (T2) when enabled.
-                // Must happen here while `msg` (and its cmsg buffer) is alive.
-                #[cfg(feature = "hwtstamp")]
-                let (rx_timestamp, rx_method) = if kernel_ts.rx_kernel {
-                    match msg
-                        .cmsgs()
-                        .ok()
-                        .and_then(crate::hwtstamp::extract_kernel_rx_timestamp)
-                    {
-                        Some(k) => (
-                            Some(crate::time::timestamp_from_parts(
-                                k.secs,
-                                k.nanos,
-                                conf.clock_source,
-                            )),
-                            if k.hardware {
-                                crate::tlv::TimestampMethod::HwAssist
-                            } else {
-                                crate::tlv::TimestampMethod::SwLocal
-                            },
-                        ),
-                        None => (None, crate::tlv::TimestampMethod::SwLocal),
-                    }
-                } else {
-                    (None, crate::tlv::TimestampMethod::SwLocal)
-                };
-
-                // Convert source address for session lookup and response
-                let src_addr: SocketAddr = match src_storage {
-                    Some(ref src) => {
-                        if let Some(v4) = src.as_sockaddr_in() {
-                            std::net::SocketAddrV4::new(v4.ip(), v4.port()).into()
-                        } else if let Some(v6) = src.as_sockaddr_in6() {
-                            crate::net_scope::received_endpoint(
-                                v6.ip().into(),
-                                v6.port(),
-                                if v6.scope_id() != 0 {
-                                    v6.scope_id()
-                                } else {
-                                    ingress_interface
-                                },
-                            )
-                        } else {
-                            crate::warn_throttled!("Unknown source address type");
+                    // Extract TTL from control messages
+                    let ttl = match extract_ttl_from_cmsgs(&msg) {
+                        Some(t) => t,
+                        None => {
+                            crate::warn_throttled!("Failed to extract TTL from packet, skipping");
                             continue;
                         }
-                    }
-                    None => {
-                        crate::warn_throttled!("No source address available");
-                        continue;
-                    }
-                };
+                    };
 
-                let packet = ReceivedPacket {
-                    data: &buf[..len],
-                    src: src_addr,
-                    dst_addr,
-                    local: packet_local_addr,
-                    ttl,
-                    dscp: received_dscp,
-                    ecn: received_ecn,
-                    ingress_ifindex,
-                    src_mac: None, // a UDP socket does not see the link layer
-                    // A UDP socket cannot read raw IP headers, so Type 246/247
-                    // requests get C (draft-ietf-ippm-stamp-ext-hdr-15 §4.3).
-                    captured_headers: None,
+                    // Extract TOS (DSCP/ECN) from control messages
+                    let (received_dscp, received_ecn) = extract_tos_from_cmsgs(&msg)
+                        .map(|tos| ((tos >> 2) & 0x3F, tos & 0x03))
+                        .unwrap_or((0, 0));
+
+                    // Extract actual destination address from packet info (for Location TLV).
+                    // Falls back to configured bind address if pktinfo is unavailable.
+                    let pktinfo = extract_dst_addr_from_cmsgs(&msg);
+                    let (dst_addr, ingress_interface) =
+                        pktinfo.unwrap_or((conf.local_addr, conf.local_scope_id));
+                    // Only Linux can pin a reply to this interface (RFC 9503 §4.1.1).
+                    let ingress_ifindex = pktinfo
+                        .map(|(_, index)| index)
+                        .filter(|&index| cfg!(target_os = "linux") && index != 0);
+                    let packet_local_addr = crate::net_scope::received_endpoint(
+                        dst_addr,
+                        local_addr.port(),
+                        ingress_interface,
+                    );
+
+                    // Extract the kernel receive timestamp (T2) when enabled.
+                    // Must happen here while `msg` (and its cmsg buffer) is alive.
                     #[cfg(feature = "hwtstamp")]
-                    rx_timestamp,
-                    #[cfg(not(feature = "hwtstamp"))]
-                    rx_timestamp: None,
-                    #[cfg(feature = "hwtstamp")]
-                    rx_method,
-                    #[cfg(not(feature = "hwtstamp"))]
-                    rx_method: crate::tlv::TimestampMethod::SwLocal,
-                };
-                if let Some(transmission) = core.ingest(&packet) {
-                    replies.push_at(transmission, std::time::Instant::now());
+                    let (rx_timestamp, rx_method) = if kernel_ts.rx_kernel {
+                        match msg
+                            .cmsgs()
+                            .ok()
+                            .and_then(crate::hwtstamp::extract_kernel_rx_timestamp)
+                        {
+                            Some(k) => (
+                                Some(crate::time::timestamp_from_parts(
+                                    k.secs,
+                                    k.nanos,
+                                    conf.clock_source,
+                                )),
+                                if k.hardware {
+                                    crate::tlv::TimestampMethod::HwAssist
+                                } else {
+                                    crate::tlv::TimestampMethod::SwLocal
+                                },
+                            ),
+                            None => (None, crate::tlv::TimestampMethod::SwLocal),
+                        }
+                    } else {
+                        (None, crate::tlv::TimestampMethod::SwLocal)
+                    };
+
+                    // Convert source address for session lookup and response
+                    let src_addr: SocketAddr = match src_storage {
+                        Some(ref src) => {
+                            if let Some(v4) = src.as_sockaddr_in() {
+                                std::net::SocketAddrV4::new(v4.ip(), v4.port()).into()
+                            } else if let Some(v6) = src.as_sockaddr_in6() {
+                                crate::net_scope::received_endpoint(
+                                    v6.ip().into(),
+                                    v6.port(),
+                                    if v6.scope_id() != 0 {
+                                        v6.scope_id()
+                                    } else {
+                                        ingress_interface
+                                    },
+                                )
+                            } else {
+                                crate::warn_throttled!("Unknown source address type");
+                                continue;
+                            }
+                        }
+                        None => {
+                            crate::warn_throttled!("No source address available");
+                            continue;
+                        }
+                    };
+
+                    let packet = ReceivedPacket {
+                        data: &buf[..len],
+                        src: src_addr,
+                        dst_addr,
+                        local: packet_local_addr,
+                        ttl,
+                        dscp: received_dscp,
+                        ecn: received_ecn,
+                        ingress_ifindex,
+                        src_mac: None, // a UDP socket does not see the link layer
+                        // A UDP socket cannot read raw IP headers, so Type 246/247
+                        // requests get C (draft-ietf-ippm-stamp-ext-hdr-15 §4.3).
+                        captured_headers: None,
+                        #[cfg(feature = "hwtstamp")]
+                        rx_timestamp,
+                        #[cfg(not(feature = "hwtstamp"))]
+                        rx_timestamp: None,
+                        #[cfg(feature = "hwtstamp")]
+                        rx_method,
+                        #[cfg(not(feature = "hwtstamp"))]
+                        rx_method: crate::tlv::TimestampMethod::SwLocal,
+                    };
+                    // The first copy goes out now; only later burst copies wait
+                    // in the deadline queue.
+                    if let Some(transmission) = core.ingest(&packet) {
+                        send_copy!(transmission);
+                    }
                 }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // try_io cleared stale readiness; the next iteration can
-                // sleep while still servicing cleanup/shutdown/error-queue work.
-                continue;
-            }
-            Err(e) => {
-                crate::warn_throttled!("Receive error: {}", e);
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // try_io cleared stale readiness; the next iteration can
+                    // sleep while still servicing cleanup/shutdown/error-queue work.
+                    #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                    {
+                        errqueue_suspect |= received == 0;
+                    }
+                    #[cfg(not(all(feature = "hwtstamp", target_os = "linux")))]
+                    let _ = received;
+                    break;
+                }
+                Err(e) => {
+                    crate::warn_throttled!("Receive error: {}", e);
+                    break;
+                }
             }
         }
     }

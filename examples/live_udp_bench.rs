@@ -58,6 +58,10 @@ mod linux {
         /// Explicit runtime size for reproducibility (also works with pnet).
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..=256))]
         workers: u32,
+        /// Reflector `--hwtstamp` mode. `auto` is the packaged default and adds
+        /// the TX-timestamp error-queue work when built with `hwtstamp`.
+        #[arg(long, default_value = "off", value_parser = ["off", "auto", "on"])]
+        hwtstamp: String,
     }
 
     struct Reflector(Child);
@@ -246,7 +250,7 @@ mod linux {
                 "--local-port",
                 &destination.port().to_string(),
                 "--hwtstamp",
-                "off",
+                &args.hwtstamp,
             ])
             .env_remove("STAMP_HMAC_KEY")
             .env("RUST_LOG", "error")
