@@ -48,7 +48,7 @@ const MAX_SEARCH_RANGES_PER_PDU: usize = 256;
 
 /// Octets in an Object Identifier header before the sub-identifiers
 /// (RFC 2741 §5.1): `n_subid`(1) `prefix`(1) `include`(1) `reserved`(1).
-pub const OID_HEADER_SIZE: usize = 4;
+pub(crate) const OID_HEADER_SIZE: usize = 4;
 
 /// Largest sub-identifier count the single-octet `n_subid` field can express.
 const MAX_OID_SUBIDS: usize = u8::MAX as usize;
@@ -153,12 +153,12 @@ pub struct PduHeader {
 }
 
 /// PDU header size in bytes.
-pub const PDU_HEADER_SIZE: usize = 20;
+pub(crate) const PDU_HEADER_SIZE: usize = 20;
 
 // --- Encoding functions ---
 
 /// Encodes a complete AgentX PDU (header + payload).
-pub fn encode_pdu(
+pub(crate) fn encode_pdu(
     pdu_type: u8,
     flags: u8,
     session_id: u32,
@@ -212,7 +212,7 @@ pub fn decode_header(buf: &[u8]) -> Result<PduHeader, AgentXError> {
 /// `n_subid | prefix | include | reserved`, then four bytes per sub-identifier.
 /// For `1.3.6.1` OIDs, the prefix optimization stores the fifth sub-identifier
 /// in `prefix` and omits the first five from the body.
-pub fn encode_oid(oid: &Oid, include: bool) -> Vec<u8> {
+pub(crate) fn encode_oid(oid: &Oid, include: bool) -> Vec<u8> {
     let subs = &oid.0;
 
     // Check for internet prefix optimization (1.3.6.1.x)
@@ -298,7 +298,7 @@ pub fn decode_oid(buf: &[u8]) -> Result<(Oid, bool, usize), AgentXError> {
 }
 
 /// Encodes a VarBind per RFC 2741 §5.4.
-pub fn encode_varbind(vb: &VarBind) -> Vec<u8> {
+pub(crate) fn encode_varbind(vb: &VarBind) -> Vec<u8> {
     let mut buf = Vec::new();
 
     match &vb.value {

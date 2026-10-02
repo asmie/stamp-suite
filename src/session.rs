@@ -32,7 +32,7 @@ pub enum ReplayVerdict {
 /// remembers. 31 rather than 32 so the window bitmap and an "initialized"
 /// marker share one `u64` with the high-water mark, keeping the whole check a
 /// single compare-and-swap.
-pub const REPLAY_WINDOW: u32 = 31;
+pub(crate) const REPLAY_WINDOW: u32 = 31;
 
 /// Bit 31 of the packed low half: set once the session has seen any packet.
 /// Without it, the all-zero state would be ambiguous between "nothing seen

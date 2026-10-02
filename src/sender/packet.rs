@@ -267,7 +267,7 @@ pub fn assemble_auth_packet(error_estimate: u16) -> PacketAuthenticated {
 }
 
 /// Computes and sets the base HMAC after all other packet fields are finalized.
-pub fn finalize_auth_packet(packet: &mut PacketAuthenticated, key: &HmacKey) {
+pub(crate) fn finalize_auth_packet(packet: &mut PacketAuthenticated, key: &HmacKey) {
     let bytes = packet.to_bytes();
     packet.hmac = compute_packet_hmac(key, &bytes, AUTH_HMAC_OFFSET);
 }

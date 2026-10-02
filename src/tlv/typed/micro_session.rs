@@ -31,7 +31,10 @@ impl TypedTlv for MicroSessionIdTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() != MICRO_SESSION_ID_TLV_VALUE_SIZE {
-            return Err(TlvError::InvalidMicroSessionIdLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::MicroSessionId,
+                length: value.len(),
+            });
         }
         let sender_id = u16::from_be_bytes([value[0], value[1]]);
         let reflector_id = u16::from_be_bytes([value[2], value[3]]);
@@ -68,7 +71,10 @@ mod tests {
         let result = MicroSessionIdTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidMicroSessionIdLength(6))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::MicroSessionId,
+                length: 6
+            })
         ));
     }
 

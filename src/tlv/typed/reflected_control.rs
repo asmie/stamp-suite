@@ -85,7 +85,10 @@ impl TypedTlv for ReflectedControlTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() < REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE {
-            return Err(TlvError::InvalidReflectedControlLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::ReflectedControl,
+                length: value.len(),
+            });
         }
         let length_of_reflected_packet = u16::from_be_bytes([value[0], value[1]]);
         let number_of_reflected_packets = u16::from_be_bytes([value[2], value[3]]);
@@ -167,7 +170,13 @@ mod tests {
             let raw = RawTlv::new(TlvType::ReflectedControl, vec![0; len]);
             let result = ReflectedControlTlv::from_raw(&raw);
             assert!(
-                matches!(result, Err(TlvError::InvalidReflectedControlLength(_))),
+                matches!(
+                    result,
+                    Err(TlvError::InvalidLength {
+                        kind: TlvType::ReflectedControl,
+                        ..
+                    })
+                ),
                 "value of {len} bytes must be rejected by draft-14 minimum"
             );
         }

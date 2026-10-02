@@ -241,7 +241,10 @@ impl TypedTlv for ReturnPathTlv {
     /// are kept as raw numbers and get none of the top-level TLV rules.
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() < TLV_HEADER_SIZE {
-            return Err(TlvError::InvalidReturnPathLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::ReturnPath,
+                length: value.len(),
+            });
         }
         let data_end = value.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
         let mut sub_tlvs = Vec::new();
@@ -464,7 +467,13 @@ mod tests {
     fn test_return_path_empty_value_error() {
         let raw = RawTlv::new(TlvType::ReturnPath, vec![]);
         let result = ReturnPathTlv::from_raw(&raw);
-        assert!(matches!(result, Err(TlvError::InvalidReturnPathLength(0))));
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidLength {
+                kind: TlvType::ReturnPath,
+                length: 0
+            })
+        ));
     }
 
     #[test]

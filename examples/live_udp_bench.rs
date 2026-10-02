@@ -62,6 +62,9 @@ mod linux {
         /// the TX-timestamp error-queue work when built with `hwtstamp`.
         #[arg(long, default_value = "off", value_parser = ["off", "auto", "on"])]
         hwtstamp: String,
+        /// Run the reflector with `--metrics` on an ephemeral loopback port.
+        #[arg(long)]
+        metrics: bool,
     }
 
     struct Reflector(Child);
@@ -262,6 +265,9 @@ mod linux {
         }
         if args.stateful {
             command.arg("--stateful-reflector");
+        }
+        if args.metrics {
+            command.args(["--metrics", "--metrics-addr", "127.0.0.1:0"]);
         }
         let command_line = format!("{command:?}");
         drop(reserve); // Bind race fails visibly via child status; never retry a different server.

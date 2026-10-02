@@ -234,14 +234,14 @@ pub const REFLECTED_CONTROL_MAX_COUNT: u16 = 16;
 /// RFC 10052 §3. A longer request gets a single
 /// C-flagged reply if its mandatory fields fit. Operators can override the
 /// administrative value via `--reflected-control-max-size` or the control API.
-pub const REFLECTED_CONTROL_MAX_SIZE: u16 = 1500;
+pub(crate) const REFLECTED_CONTROL_MAX_SIZE: u16 = 1500;
 
 /// Default minimum inter-packet gap (nanoseconds) — the per-request *rate*
 /// limit of RFC 10052 §3, and a floor that avoids
 /// tight busy-loops in the backends. A multi-packet request with a shorter
 /// interval collapses to a single reply with the C flag set. Operators can
 /// override at runtime via `--reflected-control-min-interval-ns`.
-pub const REFLECTED_CONTROL_MIN_INTERVAL_NS: u32 = 1_000;
+pub(crate) const REFLECTED_CONTROL_MIN_INTERVAL_NS: u32 = 1_000;
 
 /// Default Type 12 data-rate limit in bytes per second (100 Mbit/s).
 /// RFC 10052 §3 requires a rate and a volume limit per request.

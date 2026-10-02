@@ -14,10 +14,10 @@ use zeroize::Zeroize;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Minimum key length in bytes for HMAC operations.
-pub const MIN_KEY_LENGTH: usize = 16;
+pub(crate) const MIN_KEY_LENGTH: usize = 16;
 
 /// HMAC output length (truncated to 16 bytes per RFC 8762).
-pub const HMAC_OUTPUT_LENGTH: usize = 16;
+pub(crate) const HMAC_OUTPUT_LENGTH: usize = 16;
 
 /// Errors that can occur during HMAC operations.
 #[derive(Error, Debug)]
@@ -507,7 +507,7 @@ thread_local! {
 
 /// Verifies `expected` over bytes before `hmac_offset`, capped at the buffer length.
 #[must_use]
-pub fn verify_packet_hmac(
+pub(crate) fn verify_packet_hmac(
     key: &HmacKey,
     packet_bytes: &[u8],
     hmac_offset: usize,

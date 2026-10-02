@@ -820,7 +820,7 @@ impl ReflectorStats {
 }
 
 /// Builds a ReflectorStats from counters and session manager state.
-pub fn build_reflector_stats(
+pub(crate) fn build_reflector_stats(
     packets_received: u64,
     packets_reflected: u64,
     packets_dropped: u64,

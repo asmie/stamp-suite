@@ -9,7 +9,7 @@
 ///
 /// Interface enumeration uses the `nix` crate on Unix and `pnet::datalink` on
 /// Windows — both produce the same logical output.
-pub fn build_local_addresses(bind_addr: std::net::IpAddr) -> Vec<std::net::IpAddr> {
+pub(crate) fn build_local_addresses(bind_addr: std::net::IpAddr) -> Vec<std::net::IpAddr> {
     let is_wildcard = match bind_addr {
         std::net::IpAddr::V4(v4) => v4.is_unspecified(),
         std::net::IpAddr::V6(v6) => v6.is_unspecified(),
@@ -61,7 +61,7 @@ pub(super) fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
 /// Enumerates local MAC addresses for L2 Address Group matching
 /// (RFC 10052 §3.1.1), regardless of bind address.
 /// Returns an empty list on enumeration failure; L2 requests then cannot match.
-pub fn build_local_macs() -> Vec<[u8; 6]> {
+pub(crate) fn build_local_macs() -> Vec<[u8; 6]> {
     let macs = enumerate_interface_macs();
     if macs.is_empty() {
         log::warn!(

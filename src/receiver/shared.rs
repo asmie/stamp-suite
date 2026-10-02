@@ -100,7 +100,7 @@ pub fn create_shared_state(
 }
 
 /// Builds and prints the reflector shutdown statistics.
-pub fn print_reflector_stats(
+pub(crate) fn print_reflector_stats(
     counters: &ReflectorCounters,
     session_manager: &SessionManager,
     start_time: Instant,

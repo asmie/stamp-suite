@@ -43,7 +43,10 @@ impl TypedTlv for DestinationNodeAddressTlv {
                     address: IpAddr::V6(addr),
                 })
             }
-            other => Err(TlvError::InvalidDestinationNodeAddressLength(other)),
+            other => Err(TlvError::InvalidLength {
+                kind: TlvType::DestinationNodeAddress,
+                length: other,
+            }),
         }
     }
 
@@ -87,7 +90,10 @@ mod tests {
         let result = DestinationNodeAddressTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidDestinationNodeAddressLength(8))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::DestinationNodeAddress,
+                length: 8
+            })
         ));
     }
 }

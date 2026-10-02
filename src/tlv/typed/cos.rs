@@ -138,7 +138,10 @@ impl TypedTlv for ClassOfServiceTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() != COS_TLV_VALUE_SIZE {
-            return Err(TlvError::InvalidCosLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::ClassOfService,
+                length: value.len(),
+            });
         }
         let dscp1 = (value[0] >> 2) & 0x3F;
         let dscp2 = ((value[0] & 0x03) << 4) | ((value[1] >> 4) & 0x0F);
@@ -261,7 +264,13 @@ mod tests {
     fn test_cos_tlv_from_raw_invalid_length() {
         let raw = RawTlv::new(TlvType::ClassOfService, vec![0, 0]);
         let result = ClassOfServiceTlv::from_raw(&raw);
-        assert!(matches!(result, Err(TlvError::InvalidCosLength(2))));
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidLength {
+                kind: TlvType::ClassOfService,
+                length: 2
+            })
+        ));
     }
 
     #[test]

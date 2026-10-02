@@ -8,7 +8,7 @@ use crate::tlv::{TlvFlags, TlvSpan, COS_TLV_VALUE_SIZE};
 ///
 /// The caller must recompute the TLV HMAC and attempt the Not-ECT IP-header
 /// fallback from [`cos_unable_fallback_tos`]. This only updates TLV fields.
-pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> bool {
+pub(crate) fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> bool {
     let mut pos = base_packet_size;
     let mut updated = false;
     while let Some(tlv) = TlvSpan::at(response, pos) {
@@ -41,7 +41,7 @@ pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> 
 /// attempt this fallback; socket failure can still prevent clearing ECN.
 /// See [`crate::tlv::ClassOfServiceTlv::reply_wire_tos`].
 #[must_use]
-pub fn cos_unable_fallback_tos(received_dscp: u8) -> u8 {
+pub(crate) fn cos_unable_fallback_tos(received_dscp: u8) -> u8 {
     crate::tos::Tos::new(received_dscp, 0).0
 }
 
@@ -52,7 +52,10 @@ pub fn cos_unable_fallback_tos(received_dscp: u8) -> u8 {
 /// return path (e.g., alternate-address send failure) per RFC 9503 §4.
 ///
 /// Returns `true` if the Return Path TLV was found and updated.
-pub fn set_return_path_u_flag_in_response(response: &mut [u8], base_packet_size: usize) -> bool {
+pub(crate) fn set_return_path_u_flag_in_response(
+    response: &mut [u8],
+    base_packet_size: usize,
+) -> bool {
     let mut pos = base_packet_size;
     while let Some(tlv) = TlvSpan::at(response, pos) {
         if tlv.flags.malformed {

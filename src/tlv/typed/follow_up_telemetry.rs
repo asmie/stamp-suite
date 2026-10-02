@@ -56,7 +56,10 @@ impl TypedTlv for FollowUpTelemetryTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() != FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE {
-            return Err(TlvError::InvalidFollowUpTelemetryLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::FollowUpTelemetry,
+                length: value.len(),
+            });
         }
         let sequence_number = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
         let follow_up_timestamp = u64::from_be_bytes([
@@ -137,7 +140,10 @@ mod tests {
         let result = FollowUpTelemetryTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidFollowUpTelemetryLength(12))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::FollowUpTelemetry,
+                length: 12
+            })
         ));
     }
 
@@ -147,7 +153,10 @@ mod tests {
         let result = FollowUpTelemetryTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidFollowUpTelemetryLength(20))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::FollowUpTelemetry,
+                length: 20
+            })
         ));
     }
 

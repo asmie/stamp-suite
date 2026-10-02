@@ -9,7 +9,7 @@ use std::{
 
 /// Maximum retained completed intervals and alarms, independently. Lifetime
 /// direction totals and live alarm logging are unaffected by history eviction.
-pub const BER_HISTORY_LIMIT: usize = 1024;
+pub(crate) const BER_HISTORY_LIMIT: usize = 1024;
 
 use crate::tlv::{BerBurstTlv, BerCountTlv, RawTlv, TlvList, TlvType, TypedTlv};
 

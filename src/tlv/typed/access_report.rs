@@ -43,7 +43,10 @@ impl TypedTlv for AccessReportTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() != ACCESS_REPORT_TLV_VALUE_SIZE {
-            return Err(TlvError::InvalidAccessReportLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::AccessReport,
+                length: value.len(),
+            });
         }
         let access_id = (value[0] >> 4) & 0x0F;
         let return_code = value[1];
@@ -106,7 +109,10 @@ mod tests {
         let result = AccessReportTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidAccessReportLength(1))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::AccessReport,
+                length: 1
+            })
         ));
     }
 
@@ -116,7 +122,10 @@ mod tests {
         let result = AccessReportTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidAccessReportLength(3))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::AccessReport,
+                length: 3
+            })
         ));
     }
 
@@ -126,7 +135,10 @@ mod tests {
         let result = AccessReportTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidAccessReportLength(5))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::AccessReport,
+                length: 5
+            })
         ));
     }
 

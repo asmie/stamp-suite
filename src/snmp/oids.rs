@@ -8,7 +8,7 @@ use super::agentx::Oid;
 const BASE: &[u32] = &[1, 3, 6, 1, 4, 1, 65134];
 
 /// Root of the STAMP-SUITE-MIB subtree, used for AgentX registration.
-pub fn stamp_suite_root() -> Oid {
+pub(crate) fn stamp_suite_root() -> Oid {
     Oid::from_slice(BASE)
 }
 
@@ -20,25 +20,25 @@ fn refl_config(leaf: u32) -> Oid {
     Oid(v)
 }
 
-pub fn stamp_refl_admin_status() -> Oid {
+pub(crate) fn stamp_refl_admin_status() -> Oid {
     refl_config(1)
 }
-pub fn stamp_refl_listen_addr() -> Oid {
+pub(crate) fn stamp_refl_listen_addr() -> Oid {
     refl_config(2)
 }
-pub fn stamp_refl_listen_port() -> Oid {
+pub(crate) fn stamp_refl_listen_port() -> Oid {
     refl_config(3)
 }
-pub fn stamp_refl_auth_mode() -> Oid {
+pub(crate) fn stamp_refl_auth_mode() -> Oid {
     refl_config(4)
 }
-pub fn stamp_refl_tlv_mode() -> Oid {
+pub(crate) fn stamp_refl_tlv_mode() -> Oid {
     refl_config(5)
 }
-pub fn stamp_refl_stateful() -> Oid {
+pub(crate) fn stamp_refl_stateful() -> Oid {
     refl_config(6)
 }
-pub fn stamp_refl_session_timeout() -> Oid {
+pub(crate) fn stamp_refl_session_timeout() -> Oid {
     refl_config(7)
 }
 
@@ -50,40 +50,40 @@ fn refl_stats(leaf: u32) -> Oid {
     Oid(v)
 }
 
-pub fn stamp_refl_pkts_received() -> Oid {
+pub(crate) fn stamp_refl_pkts_received() -> Oid {
     refl_stats(1)
 }
-pub fn stamp_refl_pkts_reflected() -> Oid {
+pub(crate) fn stamp_refl_pkts_reflected() -> Oid {
     refl_stats(2)
 }
-pub fn stamp_refl_pkts_dropped() -> Oid {
+pub(crate) fn stamp_refl_pkts_dropped() -> Oid {
     refl_stats(3)
 }
-pub fn stamp_refl_active_sessions() -> Oid {
+pub(crate) fn stamp_refl_active_sessions() -> Oid {
     refl_stats(4)
 }
-pub fn stamp_refl_uptime() -> Oid {
+pub(crate) fn stamp_refl_uptime() -> Oid {
     refl_stats(5)
 }
 
 // -- Reflector Session Table (.1.1.3.1.*) --
 
 /// Build a session table entry OID: `.1.3.6.1.4.1.65134.1.1.3.1.{column}.{index}`
-pub fn stamp_refl_session_entry(column: u32, index: u32) -> Oid {
+pub(crate) fn stamp_refl_session_entry(column: u32, index: u32) -> Oid {
     let mut v = BASE.to_vec();
     v.extend_from_slice(&[1, 1, 3, 1, column, index]);
     Oid(v)
 }
 
 /// Session table entry prefix (for GetNext walking): .1.3.6.1.4.1.65134.1.1.3.1
-pub fn stamp_refl_session_table_prefix() -> Oid {
+pub(crate) fn stamp_refl_session_table_prefix() -> Oid {
     let mut v = BASE.to_vec();
     v.extend_from_slice(&[1, 1, 3, 1]);
     Oid(v)
 }
 
 /// Number of columns in the session table.
-pub const SESSION_TABLE_COLUMNS: u32 = 7;
+pub(crate) const SESSION_TABLE_COLUMNS: u32 = 7;
 
 // -- Sender Config (.1.2.1.*) --
 
@@ -93,22 +93,22 @@ fn sender_config(leaf: u32) -> Oid {
     Oid(v)
 }
 
-pub fn stamp_send_remote_addr() -> Oid {
+pub(crate) fn stamp_send_remote_addr() -> Oid {
     sender_config(1)
 }
-pub fn stamp_send_remote_port() -> Oid {
+pub(crate) fn stamp_send_remote_port() -> Oid {
     sender_config(2)
 }
-pub fn stamp_send_local_port() -> Oid {
+pub(crate) fn stamp_send_local_port() -> Oid {
     sender_config(3)
 }
-pub fn stamp_send_pkt_count() -> Oid {
+pub(crate) fn stamp_send_pkt_count() -> Oid {
     sender_config(4)
 }
-pub fn stamp_send_delay() -> Oid {
+pub(crate) fn stamp_send_delay() -> Oid {
     sender_config(5)
 }
-pub fn stamp_send_auth_mode() -> Oid {
+pub(crate) fn stamp_send_auth_mode() -> Oid {
     sender_config(6)
 }
 
@@ -120,28 +120,28 @@ fn sender_stats(leaf: u32) -> Oid {
     Oid(v)
 }
 
-pub fn stamp_send_pkts_sent() -> Oid {
+pub(crate) fn stamp_send_pkts_sent() -> Oid {
     sender_stats(1)
 }
-pub fn stamp_send_pkts_recv() -> Oid {
+pub(crate) fn stamp_send_pkts_recv() -> Oid {
     sender_stats(2)
 }
-pub fn stamp_send_pkts_lost() -> Oid {
+pub(crate) fn stamp_send_pkts_lost() -> Oid {
     sender_stats(3)
 }
-pub fn stamp_send_rtt_min() -> Oid {
+pub(crate) fn stamp_send_rtt_min() -> Oid {
     sender_stats(4)
 }
-pub fn stamp_send_rtt_max() -> Oid {
+pub(crate) fn stamp_send_rtt_max() -> Oid {
     sender_stats(5)
 }
-pub fn stamp_send_rtt_avg() -> Oid {
+pub(crate) fn stamp_send_rtt_avg() -> Oid {
     sender_stats(6)
 }
-pub fn stamp_send_jitter() -> Oid {
+pub(crate) fn stamp_send_jitter() -> Oid {
     sender_stats(7)
 }
-pub fn stamp_send_loss_pct() -> Oid {
+pub(crate) fn stamp_send_loss_pct() -> Oid {
     sender_stats(8)
 }
 
@@ -149,7 +149,7 @@ pub fn stamp_send_loss_pct() -> Oid {
 ///
 /// This includes all scalar objects from both reflector and sender subtrees.
 /// Session table OIDs are handled dynamically.
-pub fn all_scalar_oids() -> Vec<Oid> {
+pub(crate) fn all_scalar_oids() -> Vec<Oid> {
     vec![
         // Reflector Config
         stamp_refl_admin_status(),

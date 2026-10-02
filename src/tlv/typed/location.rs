@@ -326,24 +326,14 @@ impl LocationSubTlv {
     /// is too small to hold the 4-octet header plus the declared value length.
     #[must_use]
     pub fn parse(buf: &[u8]) -> Option<(Self, usize)> {
-        if buf.len() < TLV_HEADER_SIZE {
-            return None;
-        }
-        let flags = TlvFlags::from_byte(buf[0]);
-        let sub_type = LocationSubType::from_byte(buf[1]);
-        let length = u16::from_be_bytes([buf[2], buf[3]]) as usize;
-        let end = TLV_HEADER_SIZE.checked_add(length)?;
-        if buf.len() < end {
-            return None;
-        }
-        let value = buf[TLV_HEADER_SIZE..end].to_vec();
+        let span = crate::tlv::TlvSpan::at(buf, 0)?;
         Some((
             Self {
-                flags,
-                sub_type,
-                value,
+                flags: span.flags,
+                sub_type: LocationSubType::from_byte(buf[1]),
+                value: buf[span.value()].to_vec(),
             },
-            end,
+            span.end(),
         ))
     }
 }
@@ -418,7 +408,10 @@ impl TypedTlv for LocationTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() < LOCATION_TLV_MIN_VALUE_SIZE {
-            return Err(TlvError::InvalidLocationLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::Location,
+                length: value.len(),
+            });
         }
         let dest_port = u16::from_be_bytes([value[0], value[1]]);
         let src_port = u16::from_be_bytes([value[2], value[3]]);
@@ -741,7 +734,10 @@ mod tests {
         let raw = RawTlv::new(TlvType::Location, vec![0x00, 0x01]);
         assert!(matches!(
             LocationTlv::from_raw(&raw),
-            Err(TlvError::InvalidLocationLength(2))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::Location,
+                length: 2
+            })
         ));
     }
 
@@ -750,7 +746,10 @@ mod tests {
         let raw = RawTlv::new(TlvType::Location, vec![]);
         assert!(matches!(
             LocationTlv::from_raw(&raw),
-            Err(TlvError::InvalidLocationLength(0))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::Location,
+                length: 0
+            })
         ));
     }
 

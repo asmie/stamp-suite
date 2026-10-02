@@ -11,7 +11,7 @@ use super::*;
 /// after response assembly. Type-12 requests with a non-New verdict get one
 /// U-flagged reply; `--drop-replayed` can suppress other duplicates.
 /// Log individual events at debug level to avoid replay-driven log floods.
-pub fn evaluate_replay(
+pub(crate) fn evaluate_replay(
     session: &crate::session::Session,
     data: &[u8],
     counters: &ReflectorCounters,
@@ -54,7 +54,7 @@ pub fn evaluate_replay(
 /// pipeline calls this after response assembly. Base parsing and configured
 /// HMAC verification have already succeeded; rejected authenticated-mode
 /// packets cannot advance the anti-replay state.
-pub fn commit_replay(session: &crate::session::Session, data: &[u8]) {
+pub(crate) fn commit_replay(session: &crate::session::Session, data: &[u8]) {
     if data.len() < 4 {
         return;
     }

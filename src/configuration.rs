@@ -1164,16 +1164,15 @@ impl Configuration {
     /// Returns the parse error, naming the flag, for a bad value list, a
     /// malformed prefix rule, or an out-of-range codepoint.
     pub fn cos_admission_policy(&self) -> Result<CosAdmissionPolicy, ConfigurationError> {
-        let cfg_err = ConfigurationError::InvalidConfiguration;
         let dscp = DscpSet::parse(&self.allowed_dscp)
-            .map_err(|e| cfg_err(format!("invalid --allowed-dscp: {e}")))?;
+            .map_err(|e| invalid(format!("invalid --allowed-dscp: {e}")))?;
         let ecn = EcnSet::parse(&self.allowed_ecn)
-            .map_err(|e| cfg_err(format!("invalid --allowed-ecn: {e}")))?;
+            .map_err(|e| invalid(format!("invalid --allowed-ecn: {e}")))?;
         let mut destinations = Vec::with_capacity(self.allowed_dscp_for.len());
         for rule in &self.allowed_dscp_for {
             destinations.push(
                 parse_destination_rule(rule)
-                    .map_err(|e| cfg_err(format!("invalid --allowed-dscp-for `{rule}`: {e}")))?,
+                    .map_err(|e| invalid(format!("invalid --allowed-dscp-for `{rule}`: {e}")))?,
             );
         }
         Ok(CosAdmissionPolicy::new(dscp, ecn, destinations))
@@ -1195,28 +1194,24 @@ impl Configuration {
     /// # Errors
     /// Returns the parse error for an unknown or contradictory field list.
     pub fn location_disclosure(&self) -> Result<LocationDisclosure, ConfigurationError> {
-        LocationDisclosure::parse(&self.location_disclose).map_err(|e| {
-            ConfigurationError::InvalidConfiguration(format!("invalid --location-disclose: {e}"))
-        })
+        LocationDisclosure::parse(&self.location_disclose)
+            .map_err(|e| invalid(format!("invalid --location-disclose: {e}")))
     }
 
     pub fn provisioned_sessions(
         &self,
     ) -> Result<std::collections::HashSet<SessionKey>, ConfigurationError> {
-        let invalid = |msg: String| ConfigurationError::InvalidConfiguration(msg);
         if (!self.reflector_sessions.is_empty()
             || self.session_admission == SessionAdmission::Provisioned)
             && !self.is_reflector
         {
-            return Err(invalid(
-                "session admission options require --is-reflector".into(),
-            ));
+            return Err(invalid("session admission options require --is-reflector"));
         }
         if !self.reflector_sessions.is_empty()
             && self.session_admission != SessionAdmission::Provisioned
         {
             return Err(invalid(
-                "--reflector-session requires --session-admission provisioned".into(),
+                "--reflector-session requires --session-admission provisioned",
             ));
         }
         let mut keys = std::collections::HashSet::new();
@@ -1275,7 +1270,7 @@ impl Configuration {
     /// Rejects flags for features this binary was built without.
     fn validate_features(&self) -> Result<(), ConfigurationError> {
         let missing = |flag: &str, feature: &str| {
-            Err(ConfigurationError::InvalidConfiguration(format!(
+            Err(invalid(format!(
                 "{flag} requires a build with the \"{feature}\" feature"
             )))
         };
@@ -1286,8 +1281,8 @@ impl Configuration {
             return missing("--control", "control");
         }
         if self.snmp && !cfg!(unix) {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "--snmp requires a Unix platform (AgentX uses Unix domain sockets)".into(),
+            return Err(invalid(
+                "--snmp requires a Unix platform (AgentX uses Unix domain sockets)",
             ));
         }
         if self.snmp && !cfg!(feature = "snmp") {
@@ -1317,26 +1312,21 @@ impl Configuration {
     /// Sender-only run parameters.
     fn validate_sender_run(&self) -> Result<(), ConfigurationError> {
         if self.duration == Some(0) {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "--duration must be at least 1 second".into(),
-            ));
+            return Err(invalid("--duration must be at least 1 second"));
         }
         if self.send_delay.duration() > ProbeInterval::MAX {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "send_delay exceeds {} seconds",
                 ProbeInterval::MAX.as_secs()
             )));
         }
 
         if self.session_loss_threshold == 0 {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "session_loss_threshold must be positive".into(),
-            ));
+            return Err(invalid("session_loss_threshold must be positive"));
         }
         if !self.is_reflector && self.local_port != 0 && self.local_port == self.remote_port {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "sender local and remote ports must differ to distinguish reverse-direction probes"
-                    .into(),
+            return Err(invalid(
+                "sender local and remote ports must differ to distinguish reverse-direction probes",
             ));
         }
         Ok(())
@@ -1350,34 +1340,25 @@ impl Configuration {
                 target_os = "android",
                 target_os = "macos"
             )) {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "--interface is supported on Linux and macOS".into(),
-                ));
+                return Err(invalid("--interface is supported on Linux and macOS"));
             }
             // IFNAMSIZ is 16 bytes including the terminating NUL.
             if name.is_empty() || name.len() > 15 || name.contains('\0') {
-                return Err(ConfigurationError::InvalidConfiguration(format!(
-                    "invalid interface name {name:?}"
-                )));
+                return Err(invalid(format!("invalid interface name {name:?}")));
             }
         }
         if self.remote_addr.is_empty() {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "remote_addr must name at least one address".into(),
-            ));
+            return Err(invalid("remote_addr must name at least one address"));
         }
         if !self.is_reflector && self.remote_addr.len() > 1 {
             let mut seen = std::collections::HashSet::new();
             if let Some(dup) = self.remote_addr.iter().find(|a| !seen.insert(**a)) {
-                return Err(ConfigurationError::InvalidConfiguration(format!(
-                    "remote_addr {dup} is listed twice"
-                )));
+                return Err(invalid(format!("remote_addr {dup} is listed twice")));
             }
             if self.local_port != 0 {
-                return Err(ConfigurationError::InvalidConfiguration(
+                return Err(invalid(
                     "several remote addresses need --local-port 0, so each \
-                     session gets its own port"
-                        .into(),
+                     session gets its own port",
                 ));
             }
         }
@@ -1386,22 +1367,18 @@ impl Configuration {
             .chain(remotes.map(|addr| ("remote", *addr, self.remote_scope_id)));
         for (name, addr, scope) in addresses {
             if addr.is_ipv4() && scope != 0 {
-                return Err(ConfigurationError::InvalidConfiguration(format!(
-                    "{name}_scope_id requires an IPv6 address"
-                )));
+                return Err(invalid(format!("{name}_scope_id requires an IPv6 address")));
             }
             if matches!(addr, std::net::IpAddr::V6(ip) if ip.is_unicast_link_local()) && scope == 0
             {
-                return Err(ConfigurationError::InvalidConfiguration(format!(
+                return Err(invalid(format!(
                     "link-local {name}_addr requires a nonzero {name}_scope_id"
                 )));
             }
         }
 
         if self.ttl.is_some_and(|ttl| ttl != 255) {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "ttl must be 255 for draft ext-hdr-15".to_string(),
-            ));
+            return Err(invalid("ttl must be 255 for draft ext-hdr-15"));
         }
         Ok(())
     }
@@ -1411,14 +1388,12 @@ impl Configuration {
     /// default on every packet.
     fn validate_reflector_policies(&self) -> Result<(), ConfigurationError> {
         if self.reflector_queue_capacity == 0 {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "reflector_queue_capacity must be greater than zero".into(),
+            return Err(invalid(
+                "reflector_queue_capacity must be greater than zero",
             ));
         }
         if self.reflector_shutdown_grace_ms > 60_000 {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "reflector_shutdown_grace_ms must not exceed 60000".into(),
-            ));
+            return Err(invalid("reflector_shutdown_grace_ms must not exceed 60000"));
         }
         self.provisioned_sessions()?;
         // Surface a bad Location disclosure list at startup rather than
@@ -1438,10 +1413,9 @@ impl Configuration {
         // impossible without a key. Fail at startup rather than silently
         // sending unauthenticated packets.
         if self.tlv_hmac == TlvHmacMode::On && !self.key_source().is_configured() {
-            return Err(ConfigurationError::InvalidConfiguration(
+            return Err(invalid(
                 "tlv_hmac = on requires an HMAC key (--hmac-key, --hmac-key-file \
-                 or --hmac-key-dir)"
-                    .to_string(),
+                 or --hmac-key-dir)",
             ));
         }
 
@@ -1453,19 +1427,17 @@ impl Configuration {
             && self.auth_mode.is_authenticated()
             && self.tlv_hmac == TlvHmacMode::Off
         {
-            return Err(ConfigurationError::InvalidConfiguration(
+            return Err(invalid(
                 "tlv_hmac = off is not supported in authenticated mode (-A A): \
                  authenticated TLV-bearing packets always originate an HMAC TLV \
-                 (RFC 8972 §4.8); use open mode to suppress it"
-                    .to_string(),
+                 (RFC 8972 §4.8); use open mode to suppress it",
             ));
         }
 
         // Validate --verify-tlv-hmac requires HMAC key to be configured
         if self.verify_tlv_hmac && !self.key_source().is_configured() {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "--verify-tlv-hmac requires --hmac-key, --hmac-key-file, or --hmac-key-dir"
-                    .to_string(),
+            return Err(invalid(
+                "--verify-tlv-hmac requires --hmac-key, --hmac-key-file, or --hmac-key-dir",
             ));
         }
 
@@ -1476,7 +1448,7 @@ impl Configuration {
             } else {
                 "sender"
             };
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "Authenticated mode {} (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir",
                 mode_desc
             )));
@@ -1485,23 +1457,20 @@ impl Configuration {
         // Repeat clap's conflict checks after TOML merging: file values can
         // introduce conflicts that were absent during CLI parsing.
         if self.hmac_key.is_some() && self.hmac_key_file.is_some() {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "hmac_key and hmac_key_file are mutually exclusive".to_string(),
-            ));
+            return Err(invalid("hmac_key and hmac_key_file are mutually exclusive"));
         }
         if self.hmac_key_dir.is_some() && (self.hmac_key.is_some() || self.hmac_key_file.is_some())
         {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "hmac_key_dir cannot be combined with hmac_key or hmac_key_file".to_string(),
+            return Err(invalid(
+                "hmac_key_dir cannot be combined with hmac_key or hmac_key_file",
             ));
         }
 
         // Per-SSID key directories are reflector-only; a sender uses one key.
         if self.hmac_key_dir.is_some() && !self.is_reflector {
-            return Err(ConfigurationError::InvalidConfiguration(
+            return Err(invalid(
                 "hmac_key_dir is reflector-only (it is a per-SSID keyset); a \
-                 Session-Sender uses a single key — pass hmac_key_file instead"
-                    .to_string(),
+                 Session-Sender uses a single key — pass hmac_key_file instead",
             ));
         }
         Ok(())
@@ -1514,10 +1483,9 @@ impl Configuration {
         // reflector XOR-compares, so a second, pseudorandom padding TLV would
         // corrupt the measurement.
         if self.ber && self.extra_padding.is_some() {
-            return Err(ConfigurationError::InvalidConfiguration(
+            return Err(invalid(
                 "extra_padding conflicts with ber: BER fills the Extra Padding \
-                 TLV with its own known pattern (use ber_padding_size)"
-                    .to_string(),
+                 TLV with its own known pattern (use ber_padding_size)",
             ));
         }
 
@@ -1527,7 +1495,7 @@ impl Configuration {
         // 16-bit Length field would serialize with a truncated length.
         if let Some(bytes) = self.extra_padding {
             if bytes > MAX_PADDING_BYTES {
-                return Err(ConfigurationError::InvalidConfiguration(format!(
+                return Err(invalid(format!(
                     "extra_padding value {bytes} exceeds the maximum of \
                      {MAX_PADDING_BYTES} bytes (the largest padding TLV that fits \
                      a maximum-size UDP payload alongside the base packet and \
@@ -1536,7 +1504,7 @@ impl Configuration {
             }
         }
         if self.ber_padding_size > MAX_PADDING_BYTES {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "ber_padding_size value {} exceeds the maximum of \
                  {MAX_PADDING_BYTES} bytes",
                 self.ber_padding_size
@@ -1545,26 +1513,22 @@ impl Configuration {
 
         if self.ber {
             let pattern = crate::ber::parse_pattern(self.ber_pattern.as_deref().unwrap_or("ff00"))
-                .map_err(|e| {
-                    ConfigurationError::InvalidConfiguration(format!("Invalid --ber-pattern: {e}"))
-                })?;
+                .map_err(|e| invalid(format!("Invalid --ber-pattern: {e}")))?;
             if self.ber_padding_size == 0 || self.ber_padding_size % pattern.len() != 0 {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "ber_padding_size must be positive and a multiple of the pattern length".into(),
+                return Err(invalid(
+                    "ber_padding_size must be positive and a multiple of the pattern length",
                 ));
             }
             if self.ber_interval == 0 || self.send_delay.duration().is_zero() {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "BER requires positive ber_interval and send_delay".into(),
-                ));
+                return Err(invalid("BER requires positive ber_interval and send_delay"));
             }
             for threshold in [self.ber_bit_threshold, self.ber_packet_threshold]
                 .into_iter()
                 .flatten()
             {
                 if !threshold.is_finite() || !(0.0..=1_000_000.0).contains(&threshold) {
-                    return Err(ConfigurationError::InvalidConfiguration(
-                        "BER thresholds must be finite and between 0 and 1000000".into(),
+                    return Err(invalid(
+                        "BER thresholds must be finite and between 0 and 1000000",
                     ));
                 }
             }
@@ -1577,22 +1541,13 @@ impl Configuration {
         // Validate TLS certificate/key pairing after TOML merging, which bypasses
         // clap's `requires` checks. TLS also requires a bearer token.
         match (&self.control_tls_cert, &self.control_tls_key) {
-            (Some(_), None) => {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "control_tls_cert requires control_tls_key".to_string(),
-                ))
-            }
-            (None, Some(_)) => {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "control_tls_key requires control_tls_cert".to_string(),
-                ))
-            }
+            (Some(_), None) => return Err(invalid("control_tls_cert requires control_tls_key")),
+            (None, Some(_)) => return Err(invalid("control_tls_key requires control_tls_cert")),
             (Some(_), Some(_)) if self.control_token_file.is_none() => {
-                return Err(ConfigurationError::InvalidConfiguration(
+                return Err(invalid(
                     "control-plane TLS requires --control-token-file: an \
                      unauthenticated key-management and shutdown API should not \
-                     be exposed, encrypted or not"
-                        .to_string(),
+                     be exposed, encrypted or not",
                 ))
             }
             _ => {}
@@ -1600,9 +1555,7 @@ impl Configuration {
 
         // The control plane manages reflector state; sender mode has none.
         if self.control && !self.is_reflector {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "--control is only available in reflector mode".to_string(),
-            ));
+            return Err(invalid("--control is only available in reflector mode"));
         }
         Ok(())
     }
@@ -1610,14 +1563,14 @@ impl Configuration {
     /// Error Estimate fields (RFC 8762 §4.2.1).
     fn validate_error_estimate(&self) -> Result<(), ConfigurationError> {
         if self.error_scale > 63 {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "Error scale {} exceeds maximum of 63",
                 self.error_scale
             )));
         }
         if self.error_multiplier == 0 {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "Error multiplier must not be 0 (RFC 4656 §4.1.2, used by RFC 8762 §4.2.1)".into(),
+            return Err(invalid(
+                "Error multiplier must not be 0 (RFC 4656 §4.1.2, used by RFC 8762 §4.2.1)",
             ));
         }
         Ok(())
@@ -1627,15 +1580,15 @@ impl Configuration {
     fn validate_return_path(&self) -> Result<(), ConfigurationError> {
         // Validate --dest-node-addr requires --ssid (RFC 9503 mandates SSID)
         if self.dest_node_addr.is_some() && self.ssid.is_none() {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "--dest-node-addr requires --ssid to be specified (RFC 9503)".to_string(),
+            return Err(invalid(
+                "--dest-node-addr requires --ssid to be specified (RFC 9503)",
             ));
         }
 
         // Validate --return-path-cc value must be 0 or 1
         if let Some(cc) = self.return_path_cc {
             if cc > 1 {
-                return Err(ConfigurationError::InvalidConfiguration(format!(
+                return Err(invalid(format!(
                     "--return-path-cc value {} is invalid, must be 0 or 1",
                     cc
                 )));
@@ -1646,7 +1599,7 @@ impl Configuration {
         if let Some(ref labels) = self.return_sr_mpls_labels {
             for label in labels {
                 if *label > 0xFFFFF {
-                    return Err(ConfigurationError::InvalidConfiguration(format!(
+                    return Err(invalid(format!(
                         "--return-sr-mpls-labels value {} exceeds 20-bit maximum (0xFFFFF)",
                         label
                     )));
@@ -1656,19 +1609,15 @@ impl Configuration {
 
         if self.return_path_cc.is_some() {
             if self.return_address.is_some() {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "return_path_cc conflicts with return_address".to_string(),
-                ));
+                return Err(invalid("return_path_cc conflicts with return_address"));
             }
             if self.return_sr_mpls_labels.is_some() {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "return_path_cc conflicts with return_sr_mpls_labels".to_string(),
+                return Err(invalid(
+                    "return_path_cc conflicts with return_sr_mpls_labels",
                 ));
             }
             if self.return_srv6_sids.is_some() {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "return_path_cc conflicts with return_srv6_sids".to_string(),
-                ));
+                return Err(invalid("return_path_cc conflicts with return_srv6_sids"));
             }
         }
 
@@ -1680,16 +1629,15 @@ impl Configuration {
         if self.return_path_cc == Some(0)
             && (self.reflected_control_count > 1 || self.reflected_control_no_ext_hdr)
         {
-            return Err(ConfigurationError::InvalidConfiguration(
+            return Err(invalid(
                 "return_path_cc 0 (no reply requested) cannot be combined with a \
                  Reflected Test Packet Control TLV (reflected_control_count > 1 or \
-                 reflected_control_no_ext_hdr; RFC 10052 §4.3)"
-                    .to_string(),
+                 reflected_control_no_ext_hdr; RFC 10052 §4.3)",
             ));
         }
         if self.return_sr_mpls_labels.is_some() && self.return_srv6_sids.is_some() {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "return_sr_mpls_labels conflicts with return_srv6_sids".to_string(),
+            return Err(invalid(
+                "return_sr_mpls_labels conflicts with return_srv6_sids",
             ));
         }
         Ok(())
@@ -1702,13 +1650,13 @@ impl Configuration {
         // file are validated. clap's `value_parser!(_).range(...)` only
         // runs on CLI-parsed values.
         if self.dscp > 63 {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "dscp value {} exceeds maximum of 63",
                 self.dscp
             )));
         }
         if self.ecn > 3 {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "ecn value {} exceeds maximum of 3",
                 self.ecn
             )));
@@ -1716,23 +1664,20 @@ impl Configuration {
         // Validate AIMD backoff and recovery parameters even when ECN measurement
         // is disabled (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
         if !self.ecn_backoff_factor.is_finite() || self.ecn_backoff_factor <= 1.0 {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "ecn_backoff_factor value {} must be a finite number greater than 1.0 \
                  (a CE observation must actually increase the send interval)",
                 self.ecn_backoff_factor
             )));
         }
         if self.ecn_recovery_step == 0 {
-            return Err(ConfigurationError::InvalidConfiguration(
+            return Err(invalid(
                 "ecn_recovery_step must be >= 1 (millisecond); 0 would never recover \
-                 the send interval back toward --send-delay"
-                    .to_string(),
+                 the send interval back toward --send-delay",
             ));
         }
         if self.ecn_max_delay == 0 {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "ecn_max_delay must be >= 1 (millisecond)".to_string(),
-            ));
+            return Err(invalid("ecn_max_delay must be >= 1 (millisecond)"));
         }
         // Only checked when the controller is actually active: an
         // unrelated `--send-delay` bump should not spuriously break a run
@@ -1742,7 +1687,7 @@ impl Configuration {
             && std::time::Duration::from_millis(u64::from(self.ecn_max_delay))
                 < self.send_delay.duration()
         {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "ecn_max_delay ({} ms) must be >= send_delay ({:?}) when the AIMD \
                  congestion-response controller is active (--cos with --ecn 1 or 2)",
                 self.ecn_max_delay,
@@ -1757,7 +1702,7 @@ impl Configuration {
         if let Some(id) = self.access_report {
             // RFC 8972 §4.6: reflectors MUST discard Access IDs other than 1 and 2.
             if !matches!(id, 1 | 2) {
-                return Err(ConfigurationError::InvalidConfiguration(format!(
+                return Err(invalid(format!(
                     "access_report value {id} is invalid: RFC 8972 §4.6 defines Access ID 1 \
                      (3GPP Network) and 2 (Non-3GPP Network)"
                 )));
@@ -1768,18 +1713,16 @@ impl Configuration {
         // clap's `.range()` only runs on CLI-parsed values; duplicate the
         // bounds here so a TOML-sourced value is validated too.
         if self.access_report_timeout == 0 {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "access_report_timeout must be >= 1 (seconds)".to_string(),
-            ));
+            return Err(invalid("access_report_timeout must be >= 1 (seconds)"));
         }
         if self.access_report_timeout > 3600 {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "access_report_timeout value {} exceeds maximum of 3600 seconds",
                 self.access_report_timeout
             )));
         }
         if self.access_report_retries > 255 {
-            return Err(ConfigurationError::InvalidConfiguration(format!(
+            return Err(invalid(format!(
                 "access_report_retries value {} exceeds maximum of 255",
                 self.access_report_retries
             )));
@@ -1791,16 +1734,12 @@ impl Configuration {
     fn validate_micro_session(&self) -> Result<(), ConfigurationError> {
         if let Some(id) = self.micro_session_id {
             if id == 0 {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "micro_session_id must be >= 1".to_string(),
-                ));
+                return Err(invalid("micro_session_id must be >= 1"));
             }
         }
         if let Some(id) = self.reflector_member_link_id {
             if id == 0 {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "reflector_member_link_id must be >= 1".to_string(),
-                ));
+                return Err(invalid("reflector_member_link_id must be >= 1"));
             }
         }
 
@@ -1808,8 +1747,8 @@ impl Configuration {
             && self.reflector_member_link_id.is_some()
             && self.micro_session_id.is_none()
         {
-            return Err(ConfigurationError::InvalidConfiguration(
-                "sender reflector_member_link_id requires micro_session_id".to_string(),
+            return Err(invalid(
+                "sender reflector_member_link_id requires micro_session_id",
             ));
         }
         Ok(())
@@ -1819,20 +1758,18 @@ impl Configuration {
     /// (draft-ietf-ippm-stamp-ext-hdr-15). Uses the sender's wire-TLV parsers,
     /// including those for standalone selector flags.
     fn validate_ext_hdr_flags(&self) -> Result<(), ConfigurationError> {
-        let cfg_err = ConfigurationError::InvalidConfiguration;
-
         // Parse each repeatable occurrence (fails fast on bad hex/length).
         for spec in &self.reflected_ipv6_ext_hdr {
             parse_ext_hdr_request_spec(spec)
-                .map_err(|e| cfg_err(format!("invalid --reflected-ipv6-ext-hdr `{spec}`: {e}")))?;
+                .map_err(|e| invalid(format!("invalid --reflected-ipv6-ext-hdr `{spec}`: {e}")))?;
         }
         let fixed_max = 4;
         for spec in &self.reflected_fixed_hdr {
             let parsed = parse_fixed_hdr_request_spec(spec)
-                .map_err(|e| cfg_err(format!("invalid --reflected-fixed-hdr `{spec}`: {e}")))?;
+                .map_err(|e| invalid(format!("invalid --reflected-fixed-hdr `{spec}`: {e}")))?;
             if let Some(sel) = &parsed.selector {
                 if sel.len() > fixed_max {
-                    return Err(cfg_err(format!(
+                    return Err(invalid(format!(
                         "--reflected-fixed-hdr selector is {} bytes; the maximum for the \
                          Requested field is {fixed_max} octets",
                         sel.len()
@@ -1842,22 +1779,20 @@ impl Configuration {
         }
         for spec in &self.attach_ext_hdr {
             parse_attach_ext_hdr_spec(spec)
-                .map_err(|e| cfg_err(format!("invalid --attach-ext-hdr `{spec}`: {e}")))?;
+                .map_err(|e| invalid(format!("invalid --attach-ext-hdr `{spec}`: {e}")))?;
         }
 
         if !self.is_reflector {
             if self.reflected_fixed_hdr.len() > 1 {
-                return Err(cfg_err("only one fixed IP header is originated; at most one fixed-header request is allowed".into()));
+                return Err(invalid("only one fixed IP header is originated; at most one fixed-header request is allowed"));
             }
             let attached = self.attach_ext_hdrs();
             if !attached.is_empty() {
                 if !self.remote_addr.iter().all(std::net::IpAddr::is_ipv6) {
-                    return Err(cfg_err(
-                        "--attach-ext-hdr requires an IPv6 destination".into(),
-                    ));
+                    return Err(invalid("--attach-ext-hdr requires an IPv6 destination"));
                 }
                 #[cfg(not(target_os = "linux"))]
-                return Err(cfg_err("--attach-ext-hdr requires Linux".into()));
+                return Err(invalid("--attach-ext-hdr requires Linux"));
                 #[cfg(target_os = "linux")]
                 if attached.len() > 2
                     || attached.windows(2).any(|pair| {
@@ -1865,14 +1800,14 @@ impl Configuration {
                             || pair[1].kind != AttachExtHdrKind::DestOpts
                     })
                 {
-                    return Err(cfg_err(
-                        "attach at most one hbh and one dest header, in that order".into(),
+                    return Err(invalid(
+                        "attach at most one hbh and one dest header, in that order",
                     ));
                 }
             }
             let requests = self.ext_hdr_requests();
             if requests.len() > attached.len() {
-                return Err(cfg_err("each IPv6 header request requires a corresponding --attach-ext-hdr; explicit requests replace automatic requests".into()));
+                return Err(invalid("each IPv6 header request requires a corresponding --attach-ext-hdr; explicit requests replace automatic requests"));
             }
             let mut next = 0;
             for request in &requests {
@@ -1898,9 +1833,8 @@ impl Configuration {
                             && (selector.is_none() || first == requested)
                     });
                 let Some((index, _)) = matched else {
-                    return Err(cfg_err(
-                        "IPv6 header requests must match attached lengths/selectors in wire order"
-                            .into(),
+                    return Err(invalid(
+                        "IPv6 header requests must match attached lengths/selectors in wire order",
                     ));
                 };
                 if selector.is_none()
@@ -1911,7 +1845,7 @@ impl Configuration {
                         .count()
                         > 1
                 {
-                    return Err(cfg_err("selecting a subset of same-length headers requires an eight-octet selector".into()));
+                    return Err(invalid("selecting a subset of same-length headers requires an eight-octet selector"));
                 }
                 next = index + 1;
             }
@@ -1921,33 +1855,30 @@ impl Configuration {
         // single-header form (exactly one occurrence, no inline selector).
         if let Some(sel) = &self.reflected_ipv6_ext_hdr_selector {
             if self.reflected_ipv6_ext_hdr.is_empty() {
-                return Err(cfg_err(
-                    "--reflected-ipv6-ext-hdr-selector requires --reflected-ipv6-ext-hdr"
-                        .to_string(),
+                return Err(invalid(
+                    "--reflected-ipv6-ext-hdr-selector requires --reflected-ipv6-ext-hdr",
                 ));
             }
             if self.reflected_ipv6_ext_hdr.len() > 1 {
-                return Err(cfg_err(
+                return Err(invalid(
                     "--reflected-ipv6-ext-hdr-selector cannot be combined with multiple \
                      --reflected-ipv6-ext-hdr occurrences; use the inline `LEN:SELECTORHEX` \
-                     form per occurrence instead"
-                        .to_string(),
+                     form per occurrence instead",
                 ));
             }
             if parse_ext_hdr_request_spec(&self.reflected_ipv6_ext_hdr[0])
                 .map(|s| s.selector.is_some())
                 .unwrap_or(false)
             {
-                return Err(cfg_err(
+                return Err(invalid(
                     "--reflected-ipv6-ext-hdr-selector conflicts with an inline selector on \
-                     --reflected-ipv6-ext-hdr"
-                        .to_string(),
+                     --reflected-ipv6-ext-hdr",
                 ));
             }
             let bytes = decode_selector(sel)
-                .map_err(|e| cfg_err(format!("invalid --reflected-ipv6-ext-hdr-selector: {e}")))?;
+                .map_err(|e| invalid(format!("invalid --reflected-ipv6-ext-hdr-selector: {e}")))?;
             if bytes.len() > MAX_IPV6_EXT_HDR_SELECTOR_BYTES {
-                return Err(cfg_err(format!(
+                return Err(invalid(format!(
                     "--reflected-ipv6-ext-hdr-selector is {} bytes; the maximum is {} \
                      (the Requested field)",
                     bytes.len(),
@@ -1957,32 +1888,30 @@ impl Configuration {
         }
         if let Some(sel) = &self.reflected_fixed_hdr_selector {
             if self.reflected_fixed_hdr.is_empty() {
-                return Err(cfg_err(
-                    "--reflected-fixed-hdr-selector requires --reflected-fixed-hdr".to_string(),
+                return Err(invalid(
+                    "--reflected-fixed-hdr-selector requires --reflected-fixed-hdr",
                 ));
             }
             if self.reflected_fixed_hdr.len() > 1 {
-                return Err(cfg_err(
+                return Err(invalid(
                     "--reflected-fixed-hdr-selector cannot be combined with multiple \
                      --reflected-fixed-hdr occurrences; use the inline SELECTORHEX form per \
-                     occurrence instead"
-                        .to_string(),
+                     occurrence instead",
                 ));
             }
             if parse_fixed_hdr_request_spec(&self.reflected_fixed_hdr[0])
                 .map(|s| s.selector.is_some())
                 .unwrap_or(false)
             {
-                return Err(cfg_err(
+                return Err(invalid(
                     "--reflected-fixed-hdr-selector conflicts with an inline selector on \
-                     --reflected-fixed-hdr"
-                        .to_string(),
+                     --reflected-fixed-hdr",
                 ));
             }
             let bytes = decode_selector(sel)
-                .map_err(|e| cfg_err(format!("invalid --reflected-fixed-hdr-selector: {e}")))?;
+                .map_err(|e| invalid(format!("invalid --reflected-fixed-hdr-selector: {e}")))?;
             if bytes.len() > fixed_max {
-                return Err(cfg_err(format!(
+                return Err(invalid(format!(
                     "--reflected-fixed-hdr-selector is {} bytes; the maximum for the \
                      Requested field is {fixed_max} octets",
                     bytes.len()
@@ -2008,7 +1937,7 @@ impl Configuration {
     /// for testing.
     fn load_from_matches(matches: clap::ArgMatches) -> Result<Self, ConfigurationError> {
         let mut conf = <Self as clap::FromArgMatches>::from_arg_matches(&matches)
-            .map_err(|e| ConfigurationError::InvalidConfiguration(e.to_string()))?;
+            .map_err(|e| invalid(e.to_string()))?;
 
         let mut local_port_configured =
             matches.value_source("local_port") == Some(clap::parser::ValueSource::CommandLine);
@@ -2313,6 +2242,11 @@ pub enum ConfigurationError {
     ConfigFileError(String),
 }
 
+/// An [`ConfigurationError::InvalidConfiguration`] with `msg`.
+fn invalid(msg: impl Into<String>) -> ConfigurationError {
+    ConfigurationError::InvalidConfiguration(msg.into())
+}
+
 /// Accepts a single value or an array of values.
 fn one_or_many<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
 where
@@ -2581,7 +2515,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
 
 /// Checks if authenticated mode is enabled.
 #[inline]
-pub fn is_auth(mode: AuthMode) -> bool {
+pub(crate) fn is_auth(mode: AuthMode) -> bool {
     mode.is_authenticated()
 }
 
@@ -2609,7 +2543,7 @@ pub fn resolve_log_filter(verbose: u8, env: Option<&str>) -> String {
 /// From the IPv4 UDP payload limit (65507), reserve the authenticated base (112),
 /// padding header (4), HMAC (20), Direct Measurement (16), and Access Report (8).
 /// Validate before allocation to reject oversized input.
-pub const MAX_PADDING_BYTES: usize = 65_507 - 112 - 4 - 20 - 16 - 8;
+pub(crate) const MAX_PADDING_BYTES: usize = 65_507 - 112 - 4 - 20 - 16 - 8;
 
 /// Type 246 Requested field width (draft-ietf-ippm-stamp-ext-hdr-15 §4.1).
 pub(crate) const MAX_IPV6_EXT_HDR_SELECTOR_BYTES: usize = 8;

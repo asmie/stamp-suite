@@ -154,7 +154,10 @@ impl TypedTlv for TimestampInfoTlv {
     /// Optional sub-TLVs after the four fields (RFC 8972 §4.3) are ignored.
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() < TIMESTAMP_INFO_TLV_VALUE_SIZE {
-            return Err(TlvError::InvalidTimestampInfoLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::TimestampInfo,
+                length: value.len(),
+            });
         }
         Ok(Self {
             sync_src_in: SyncSource::from_byte(value[0]),
@@ -289,7 +292,10 @@ mod tests {
         let result = TimestampInfoTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidTimestampInfoLength(3))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::TimestampInfo,
+                length: 3
+            })
         ));
     }
 

@@ -50,7 +50,7 @@ pub fn assemble_unauth_answer(
 /// * `ttl` - TTL/Hop Limit value from the received packet's IP header
 /// * `reflector_error_estimate` - The reflector's own error estimate in wire format
 /// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
-pub fn assemble_unauth_answer_symmetric(
+pub(crate) fn assemble_unauth_answer_symmetric(
     packet: &PacketUnauthenticated,
     original_data: &[u8],
     cs: ClockFormat,
@@ -139,7 +139,7 @@ pub fn assemble_auth_answer(
 /// * `hmac_key` - Optional HMAC key for computing the response HMAC
 /// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_auth_answer_symmetric(
+pub(crate) fn assemble_auth_answer_symmetric(
     packet: &PacketAuthenticated,
     original_data: &[u8],
     cs: ClockFormat,
@@ -187,7 +187,7 @@ pub fn assemble_auth_answer_symmetric(
 /// * `received_dscp` - DSCP value received from IP header (for CoS TLV)
 /// * `received_ecn` - ECN value received from IP header (for CoS TLV)
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_unauth_answer_with_tlvs(
+pub(crate) fn assemble_unauth_answer_with_tlvs(
     packet: &PacketUnauthenticated,
     original_data: &[u8],
     cs: ClockFormat,
@@ -323,7 +323,7 @@ pub fn assemble_unauth_answer_with_tlvs(
 /// Per RFC 8972 §4.8, on HMAC verification failure, TLVs are echoed with I-flag
 /// set on ALL TLVs rather than dropping the packet.
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_auth_answer_with_tlvs(
+pub(crate) fn assemble_auth_answer_with_tlvs(
     packet: &PacketAuthenticated,
     original_data: &[u8],
     cs: ClockFormat,

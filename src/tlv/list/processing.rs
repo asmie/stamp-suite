@@ -925,140 +925,72 @@ impl TlvList {
         for tlv in tlvs.iter_mut().filter(|tlv| tlv.is_processable()) {
             match tlv.tlv_type {
                 TlvType::ReflectedFixedHdr => {
-                    Self::apply_reflected_fixed(tlv, fixed_records.as_deref(), &mut consumed_fixed);
+                    Self::apply_reflected_header::<4>(
+                        tlv,
+                        fixed_records.as_deref(),
+                        &mut consumed_fixed,
+                    );
+                }
+                // An extension header is a whole number of 8-octet units.
+                TlvType::ReflectedIpv6ExtHdr if tlv.value.len() < 8 || tlv.value.len() % 8 != 0 => {
+                    tlv.set_conformant_reflected();
                 }
                 TlvType::ReflectedIpv6ExtHdr => {
-                    Self::apply_reflected_ext(tlv, ext_records.as_deref(), &mut consumed_ext);
+                    Self::apply_reflected_header::<8>(
+                        tlv,
+                        ext_records.as_deref(),
+                        &mut consumed_ext,
+                    );
                 }
                 _ => {}
             }
         }
     }
 
-    /// Reflects a single Reflected Fixed Header Data TLV (Type 247) per ext-hdr-15
-    /// §6.2/§6.1, using **first-fit-with-consumption** across the captured
-    /// IP fixed-header list (outer→inner) — mirroring [`Self::apply_reflected_ext`]
-    /// so multiple Type-247 TLVs from an IP-in-IP tunnel pair positionally
-    /// (§3.3 rule 2) while a non-zero Requested field still selects a specific
-    /// header (§5.2). A TLV that fails to match consumes nothing.
-    fn apply_reflected_fixed(
-        tlv: &mut RawTlv,
-        fixed_records: Option<&[&[u8]]>,
-        consumed: &mut Vec<bool>,
-    ) {
-        let value_len = tlv.value.len();
-        let selected: Option<usize> = match fixed_records {
-            // (b) backend cannot observe the IP layer (nix UDP-socket backend).
-            None => {
-                log_reflected_hdr_unsupported_once();
-                None
-            }
-            Some(records) => {
-                if consumed.len() < records.len() {
-                    consumed.resize(records.len(), false);
-                }
-                if let Some(requested) = Self::reflected_hdr_selector::<4>(&tlv.value) {
-                    // (c) non-zero Requested: first not-yet-consumed length-
-                    // matching header whose first 4 on-wire octets equal the
-                    // selector (§5.2).
-                    let m = records.iter().enumerate().position(|(i, r)| {
-                        !consumed[i] && r.len() == value_len && r.get(..4) == Some(&requested[..])
-                    });
-                    if m.is_none() {
-                        if records.iter().any(|r| r.len() == value_len) {
-                            log_reflected_hdr_selector_no_match_once();
-                        } else {
-                            log_reflected_hdr_length_mismatch_once();
-                        }
-                    }
-                    m
-                } else {
-                    // All-zeros Requested: first not-yet-consumed length-matching
-                    // header (§5.2 first-fit-by-length; §3.2 rule 2 ordering
-                    // falls out of consumption for multiple such TLVs).
-                    let m = records
-                        .iter()
-                        .enumerate()
-                        .position(|(i, r)| !consumed[i] && r.len() == value_len);
-                    if m.is_none() {
-                        // (a) length mismatch (no same-length candidate remains).
-                        log_reflected_hdr_length_mismatch_once();
-                    }
-                    m
-                }
-            }
-        };
-        match (selected, fixed_records) {
-            (Some(idx), Some(records)) => {
-                consumed[idx] = true;
-                Self::copy_reflected::<4>(&mut tlv.value, records[idx]);
-            }
-            _ => tlv.set_conformant_reflected(),
-        }
-    }
-
-    /// Reflects a single Reflected IPv6 Extension Header Data TLV (Type 246)
-    /// per ext-hdr-15 §4.2/§4.1, using **first-fit-with-consumption** to reconcile the
-    /// draft's two selection rules: §5.1 mandates ("MUST") matching the *first*
-    /// length-matching extension header for an all-zeros Requested field, while
-    /// §3.2 rule 2 requires *positional* pairing of successive Type 246 TLVs.
-    /// The draft leaves this tension implicit; consuming each header as it is
-    /// matched satisfies both — first-fit-by-length honours §5.1, and marking
-    /// the header consumed makes a second TLV skip it, giving the §3.2 ordering.
+    /// Reflects one Reflected Fixed (Type 247, `N` = 4) or IPv6 Extension
+    /// (Type 246, `N` = 8) Header Data TLV by first-fit-with-consumption.
     ///
-    /// `consumed` is a shared per-packet set of already-reflected captured-header
-    /// indices, threaded across the canonical Type 246 entries in encounter
-    /// order. A TLV that fails to match consumes nothing.
-    fn apply_reflected_ext(
+    /// A nonzero N-octet Requested selector picks the first unconsumed
+    /// captured header of the TLV's length that starts with it; an all-zero
+    /// selector picks the first unconsumed header of that length
+    /// (ext-hdr-15 §§5.1/5.2). Marking headers consumed pairs successive TLVs
+    /// with successive headers, as §3.2 rule 2 requires, so an IP-in-IP
+    /// tunnel's stacked fixed headers or repeated extension headers each go
+    /// to one TLV. Without captured headers or a match the TLV gets C.
+    fn apply_reflected_header<const N: usize>(
         tlv: &mut RawTlv,
-        ext_records: Option<&[&[u8]]>,
+        records: Option<&[&[u8]]>,
         consumed: &mut Vec<bool>,
     ) {
-        let value_len = tlv.value.len();
-        if value_len < 8 || value_len % 8 != 0 {
+        let Some(records) = records else {
+            // The backend cannot observe these headers.
+            log_reflected_hdr_unsupported_once();
             tlv.set_conformant_reflected();
             return;
-        }
-        let selected: Option<usize> = match ext_records {
-            // (b) backend cannot observe the IP layer.
-            None => {
-                log_reflected_hdr_unsupported_once();
-                None
-            }
-            Some(records) => {
-                if consumed.len() < records.len() {
-                    consumed.resize(records.len(), false);
-                }
-                if let Some(requested) = Self::reflected_hdr_selector::<8>(&tlv.value) {
-                    // Non-zero Requested: first not-yet-consumed length-matching
-                    // header whose on-wire first 8 octets equal the selector
-                    // (§5.1). Consumption lets duplicate identical selectors pair
-                    // with successive duplicate headers instead of both matching
-                    // the first.
-                    let m = records.iter().enumerate().position(|(i, r)| {
-                        !consumed[i] && r.len() == value_len && r.get(..8) == Some(&requested[..])
-                    });
-                    if m.is_none() {
-                        log_reflected_hdr_selector_no_match_once();
-                    }
-                    m
-                } else {
-                    // All-zeros Requested: first not-yet-consumed length-matching
-                    // header (§5.1 first-fit-by-length; §3.1 rule 2 ordering
-                    // falls out of consumption for multiple such TLVs).
-                    records
-                        .iter()
-                        .enumerate()
-                        .position(|(i, r)| !consumed[i] && r.len() == value_len)
-                }
-            }
         };
-        match (selected, ext_records) {
-            (Some(idx), Some(records)) => {
-                consumed[idx] = true;
-                Self::copy_reflected::<8>(&mut tlv.value, records[idx]);
+        if consumed.len() < records.len() {
+            consumed.resize(records.len(), false);
+        }
+        let len = tlv.value.len();
+        let selector = Self::reflected_hdr_selector::<N>(&tlv.value);
+        let found = records.iter().enumerate().position(|(i, header)| {
+            !consumed[i]
+                && header.len() == len
+                && selector.is_none_or(|s| header.get(..N) == Some(&s[..]))
+        });
+        match found {
+            Some(i) => {
+                consumed[i] = true;
+                Self::copy_reflected::<N>(&mut tlv.value, records[i]);
             }
-            _ => tlv.set_conformant_reflected(),
+            None => {
+                if selector.is_some() && records.iter().any(|header| header.len() == len) {
+                    log_reflected_hdr_selector_no_match_once();
+                } else {
+                    log_reflected_hdr_length_mismatch_once();
+                }
+                tlv.set_conformant_reflected();
+            }
         }
     }
 

@@ -15,7 +15,7 @@ use transmit::{QueuedTransmission, ReplyBudget, Transmission};
 ///
 /// Policies that fail to parse stop startup here rather than falling back to
 /// permissive defaults.
-pub struct ReflectorSettings {
+pub(crate) struct ReflectorSettings {
     pub use_auth: bool,
     pub clock_source: ClockFormat,
     pub clock_sync_source: SyncSource,

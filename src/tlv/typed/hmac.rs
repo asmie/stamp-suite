@@ -23,7 +23,10 @@ impl TypedTlv for HmacTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() != HMAC_TLV_VALUE_SIZE {
-            return Err(TlvError::InvalidHmacLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::Hmac,
+                length: value.len(),
+            });
         }
         let mut hmac = [0u8; 16];
         hmac.copy_from_slice(value);
@@ -58,6 +61,12 @@ mod tests {
     fn test_hmac_tlv_from_raw_invalid_length() {
         let raw = RawTlv::new(TlvType::Hmac, vec![0xCD; 10]);
         let result = HmacTlv::from_raw(&raw);
-        assert!(matches!(result, Err(TlvError::InvalidHmacLength(10))));
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidLength {
+                kind: TlvType::Hmac,
+                length: 10
+            })
+        ));
     }
 }

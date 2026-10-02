@@ -38,7 +38,10 @@ impl TypedTlv for BerBurstTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() != BER_BURST_TLV_VALUE_SIZE {
-            return Err(TlvError::InvalidBerBurstLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::BerBurst,
+                length: value.len(),
+            });
         }
         let max_burst = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
         Ok(Self { max_burst })
@@ -81,6 +84,12 @@ mod tests {
     fn test_ber_burst_invalid_length() {
         let raw = RawTlv::new(TlvType::BerBurst, vec![0; 2]);
         let result = BerBurstTlv::from_raw(&raw);
-        assert!(matches!(result, Err(TlvError::InvalidBerBurstLength(2))));
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidLength {
+                kind: TlvType::BerBurst,
+                length: 2
+            })
+        ));
     }
 }

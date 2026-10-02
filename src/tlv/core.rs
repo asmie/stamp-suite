@@ -81,10 +81,6 @@ pub enum TlvError {
     #[error("Only Extra Padding may follow the HMAC TLV per RFC 8972 section 4.8")]
     HmacNotLast,
 
-    /// HMAC TLV has invalid length.
-    #[error("HMAC TLV has invalid length {0}, expected {HMAC_TLV_VALUE_SIZE}")]
-    InvalidHmacLength(usize),
-
     /// HMAC verification failed.
     #[error("HMAC verification failed")]
     HmacVerificationFailed,
@@ -93,55 +89,9 @@ pub enum TlvError {
     #[error("Multiple HMAC TLVs found, only one allowed")]
     MultipleHmacTlvs,
 
-    /// Class of Service TLV has invalid length.
-    #[error("CoS TLV has invalid length {0}, expected {COS_TLV_VALUE_SIZE}")]
-    InvalidCosLength(usize),
-
-    /// Access Report TLV has invalid length.
-    #[error("Access Report TLV has invalid length {0}, expected {ACCESS_REPORT_TLV_VALUE_SIZE}")]
-    InvalidAccessReportLength(usize),
-
-    /// Timestamp Information TLV has invalid length.
-    #[error("Timestamp Info TLV has invalid length {0}, expected at least {TIMESTAMP_INFO_TLV_VALUE_SIZE}")]
-    InvalidTimestampInfoLength(usize),
-
-    /// Direct Measurement TLV has invalid length.
-    #[error("Direct Measurement TLV has invalid length {0}, expected {DIRECT_MEASUREMENT_TLV_VALUE_SIZE}")]
-    InvalidDirectMeasurementLength(usize),
-
-    /// Location TLV has invalid length (too short for ports).
-    #[error("Location TLV has invalid length {0}, minimum {LOCATION_TLV_MIN_VALUE_SIZE}")]
-    InvalidLocationLength(usize),
-
-    /// Follow-Up Telemetry TLV has invalid length.
-    #[error("Follow-Up Telemetry TLV has invalid length {0}, expected {FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE}")]
-    InvalidFollowUpTelemetryLength(usize),
-
-    /// Destination Node Address TLV has invalid length.
-    #[error("Destination Node Address TLV has invalid length {0}, expected 4 (IPv4) or 16 (IPv6)")]
-    InvalidDestinationNodeAddressLength(usize),
-
-    /// Return Path TLV has invalid length.
-    #[error("Return Path TLV has invalid length {0}, minimum 4 (one sub-TLV header)")]
-    InvalidReturnPathLength(usize),
-
-    /// Micro-session ID TLV has invalid length.
-    #[error(
-        "Micro-session ID TLV has invalid length {0}, expected {MICRO_SESSION_ID_TLV_VALUE_SIZE}"
-    )]
-    InvalidMicroSessionIdLength(usize),
-
-    /// Reflected Test Packet Control TLV has invalid length.
-    #[error("Reflected Control TLV has invalid length {0}, minimum {REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE}")]
-    InvalidReflectedControlLength(usize),
-
-    /// BER Bit Error Count TLV has invalid length.
-    #[error("BER Bit Error Count TLV has invalid length {0}, expected {BER_COUNT_TLV_VALUE_SIZE}")]
-    InvalidBerCountLength(usize),
-
-    /// BER Max Bit Error Burst Size TLV has invalid length.
-    #[error("BER Max Burst TLV has invalid length {0}, expected {BER_BURST_TLV_VALUE_SIZE}")]
-    InvalidBerBurstLength(usize),
+    /// A TLV value whose length its type does not allow.
+    #[error("{kind:?} TLV has invalid length {length}, expected {}", expected_length(*kind))]
+    InvalidLength { kind: TlvType, length: usize },
 
     /// TLV type mismatch when parsing a typed TLV.
     #[error("TLV type mismatch: expected {expected:?}, got {actual:?}")]
@@ -151,6 +101,26 @@ pub enum TlvError {
         /// The actual TLV type found.
         actual: TlvType,
     },
+}
+
+/// The value length a TLV type accepts, for [`TlvError::InvalidLength`].
+fn expected_length(kind: TlvType) -> String {
+    match kind {
+        TlvType::Hmac => HMAC_TLV_VALUE_SIZE.to_string(),
+        TlvType::ClassOfService => COS_TLV_VALUE_SIZE.to_string(),
+        TlvType::AccessReport => ACCESS_REPORT_TLV_VALUE_SIZE.to_string(),
+        TlvType::TimestampInfo => format!("at least {TIMESTAMP_INFO_TLV_VALUE_SIZE}"),
+        TlvType::DirectMeasurement => DIRECT_MEASUREMENT_TLV_VALUE_SIZE.to_string(),
+        TlvType::Location => format!("at least {LOCATION_TLV_MIN_VALUE_SIZE}"),
+        TlvType::FollowUpTelemetry => FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE.to_string(),
+        TlvType::DestinationNodeAddress => "4 (IPv4) or 16 (IPv6)".to_string(),
+        TlvType::ReturnPath => "at least 4 (one sub-TLV header)".to_string(),
+        TlvType::MicroSessionId => MICRO_SESSION_ID_TLV_VALUE_SIZE.to_string(),
+        TlvType::ReflectedControl => format!("at least {REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE}"),
+        TlvType::BerCount => BER_COUNT_TLV_VALUE_SIZE.to_string(),
+        TlvType::BerBurst => BER_BURST_TLV_VALUE_SIZE.to_string(),
+        _ => "a different length".to_string(),
+    }
 }
 
 /// TLV flag bits as defined in RFC 8972 Section 4.2.

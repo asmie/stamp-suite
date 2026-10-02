@@ -50,7 +50,10 @@ impl TypedTlv for DirectMeasurementTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() != DIRECT_MEASUREMENT_TLV_VALUE_SIZE {
-            return Err(TlvError::InvalidDirectMeasurementLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::DirectMeasurement,
+                length: value.len(),
+            });
         }
         let sender_tx_count = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
         let reflector_rx_count = u32::from_be_bytes([value[4], value[5], value[6], value[7]]);
@@ -129,7 +132,10 @@ mod tests {
         let result = DirectMeasurementTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidDirectMeasurementLength(8))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::DirectMeasurement,
+                length: 8
+            })
         ));
     }
 
@@ -139,7 +145,10 @@ mod tests {
         let result = DirectMeasurementTlv::from_raw(&raw);
         assert!(matches!(
             result,
-            Err(TlvError::InvalidDirectMeasurementLength(16))
+            Err(TlvError::InvalidLength {
+                kind: TlvType::DirectMeasurement,
+                length: 16
+            })
         ));
     }
 }

@@ -22,14 +22,15 @@ mod transmit;
 
 pub use crate::packets::{AUTH_BASE_SIZE, AUTH_HMAC_OFFSET, UNAUTH_BASE_SIZE};
 pub use assemble::*;
-pub use ingest::*;
 use keys::*;
 pub use limits::*;
-pub use local_addrs::*;
-pub use mtu::{interface_mtu, mtu_payload_cap};
-pub use reflected_control::*;
-pub use replay::*;
-pub use reply_bytes::*;
+use local_addrs::*;
+#[cfg(test)]
+use mtu::{interface_mtu, mtu_payload_cap};
+pub use reflected_control::ReflectedControlBehavior;
+use reflected_control::*;
+use replay::*;
+use reply_bytes::*;
 pub use shared::*;
 
 // Explicit feature flags take priority
@@ -258,7 +259,7 @@ pub struct ProcessingContext<'a> {
     pub local_addresses: &'a [std::net::IpAddr],
     /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
     /// Address Group sub-TLV matching (RFC 10052
-    /// §3.1.1). Populated by [`build_local_macs`]; an empty slice means no
+    /// §3.1.1). Populated by `build_local_macs`; an empty slice means no
     /// L2 Address Group sub-TLV can ever match (the packet is dropped per
     /// spec, not treated as "unsupported").
     pub local_macs: &'a [[u8; 6]],

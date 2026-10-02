@@ -241,7 +241,10 @@ impl TlvList {
             if tlv.tlv_type.is_hmac() {
                 found_hmac = true;
                 if tlv.value.len() != HMAC_TLV_VALUE_SIZE {
-                    return Err(TlvError::InvalidHmacLength(tlv.value.len()));
+                    return Err(TlvError::InvalidLength {
+                        kind: TlvType::Hmac,
+                        length: tlv.value.len(),
+                    });
                 }
             }
 
@@ -526,7 +529,10 @@ impl TlvList {
             .value
             .as_slice()
             .try_into()
-            .map_err(|_| TlvError::InvalidHmacLength(hmac_tlv.value.len()))
+            .map_err(|_| TlvError::InvalidLength {
+                kind: TlvType::Hmac,
+                length: hmac_tlv.value.len(),
+            })
     }
 
     /// Verifies the HMAC TLV if present per RFC 8972 §4.8.

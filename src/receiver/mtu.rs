@@ -417,7 +417,7 @@ fn parse_route(bytes: &[u8]) -> io::Result<(u32, Option<u32>, u32)> {
 /// callers can reject a reply whose egress budget cannot be established.
 #[cfg(target_os = "linux")]
 #[must_use]
-pub fn interface_mtu(iface: &str) -> Option<u32> {
+pub(crate) fn interface_mtu(iface: &str) -> Option<u32> {
     use std::os::fd::AsRawFd;
 
     // `::nix` — inside this module, a bare `nix` would resolve to the sibling
@@ -449,7 +449,7 @@ pub fn interface_mtu(iface: &str) -> Option<u32> {
 
 #[cfg(not(target_os = "linux"))]
 #[must_use]
-pub fn interface_mtu(_iface: &str) -> Option<u32> {
+pub(crate) fn interface_mtu(_iface: &str) -> Option<u32> {
     None
 }
 
@@ -461,7 +461,7 @@ pub fn interface_mtu(_iface: &str) -> Option<u32> {
 ///
 /// No base-size floor: a reply whose mandatory fields cannot fit is dropped.
 #[must_use]
-pub fn mtu_payload_cap(mtu: u32, is_ipv6: bool) -> u16 {
+pub(crate) fn mtu_payload_cap(mtu: u32, is_ipv6: bool) -> u16 {
     use crate::tlv::{IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE};
     const UDP_HEADER: u32 = 8;
 

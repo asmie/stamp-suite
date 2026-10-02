@@ -356,6 +356,18 @@ median of three trials, reflector CPU as a share of one core:
   fuzz job installs a prebuilt cargo-fuzz, caches each target's corpus and
   adds a `sender_reply` target; `process_stamp_packet` now covers keys and
   captured headers, and the parser targets check round trips.
+- Thirteen per-TLV length errors are one `TlvError::InvalidLength { kind,
+  length }`; the expected length comes from one table. Fixed and IPv6
+  extension header reflection share one matching function, and Location
+  sub-TLVs use the shared `TlvSpan` header reader.
+- `receiver` exports only what the binary, tests and benchmarks use; other
+  helpers there and crate-internal functions elsewhere are `pub(crate)`. That
+  exposed two unused functions, now removed. Configuration errors go through
+  one `invalid()` helper.
+- Prometheus handles for per-packet metrics are looked up once. At 200 kpps
+  `--metrics` cost about 7% of a core in registry lookups; with cached
+  handles the reflector's CPU use is close to running without metrics.
+  `live_udp_bench --metrics` measures it.
 - The conformance citation checker verifies `path::item` citations and
   identifiers attributed to a file; it had checked none since line numbers
   were dropped. Six stale citations were fixed.

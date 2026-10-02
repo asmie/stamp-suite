@@ -8,7 +8,7 @@ use crate::tlv::{TlvError, TlvList};
 
 /// Receive-buffer capacity for the 16-bit UDP length limit (IPv4 allows 65507
 /// payload bytes). Accommodates padded probes without datagram truncation.
-pub const MAX_UDP_PAYLOAD: usize = 65535;
+pub(crate) const MAX_UDP_PAYLOAD: usize = 65535;
 
 /// Size of an unauthenticated base packet in both directions
 /// (RFC 8762 §4.2.1, §4.3.1).
@@ -23,10 +23,10 @@ pub const AUTH_BASE_SIZE: usize = 112;
 pub const AUTH_HMAC_OFFSET: usize = 96;
 
 /// Offset of the SSID field in unauthenticated packets (RFC 8972 §3).
-pub const UNAUTH_SSID_OFFSET: usize = 14;
+pub(crate) const UNAUTH_SSID_OFFSET: usize = 14;
 
 /// Offset of the SSID field in authenticated packets (RFC 8972 §3).
-pub const AUTH_SSID_OFFSET: usize = 26;
+pub(crate) const AUTH_SSID_OFFSET: usize = 26;
 
 /// Errors that can occur during packet parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]

@@ -10,7 +10,7 @@ use crate::{
     tlv::{DirectMeasurementTlv, FollowUpTelemetryTlv, TimestampMethod},
 };
 
-pub const HISTORY_LIMIT: usize = 4096;
+pub(crate) const HISTORY_LIMIT: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct DelaySummary {

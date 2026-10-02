@@ -41,7 +41,10 @@ impl TypedTlv for BerCountTlv {
 
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() != BER_COUNT_TLV_VALUE_SIZE {
-            return Err(TlvError::InvalidBerCountLength(value.len()));
+            return Err(TlvError::InvalidLength {
+                kind: TlvType::BerCount,
+                length: value.len(),
+            });
         }
         let count = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
         Ok(Self { count })
@@ -84,6 +87,12 @@ mod tests {
     fn test_ber_count_invalid_length() {
         let raw = RawTlv::new(TlvType::BerCount, vec![0, 0, 0]);
         let result = BerCountTlv::from_raw(&raw);
-        assert!(matches!(result, Err(TlvError::InvalidBerCountLength(3))));
+        assert!(matches!(
+            result,
+            Err(TlvError::InvalidLength {
+                kind: TlvType::BerCount,
+                length: 3
+            })
+        ));
     }
 }
