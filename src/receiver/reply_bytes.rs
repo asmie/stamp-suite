@@ -1,6 +1,7 @@
 //! In-place edits to an assembled reply, applied when the send path falls back.
 
 use super::*;
+use crate::tlv::{TlvFlags, TlvSpan, COS_TLV_VALUE_SIZE};
 
 /// Marks CoS application failure: RPD=0b01 (RFC 8972 §4.4) and RPE=0b10
 /// (draft-ietf-ippm-stamp-cos-ecn-01 §3.2). Returns whether a CoS TLV was updated.
@@ -8,32 +9,27 @@ use super::*;
 /// The caller must recompute the TLV HMAC and attempt the Not-ECT IP-header
 /// fallback from [`cos_unable_fallback_tos`]. This only updates TLV fields.
 pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> bool {
-    let Some(tlv_area) = response.get_mut(base_packet_size..) else {
-        return false;
-    };
-    // An all-zero remainder is padding; find where it starts once.
-    let data_end = tlv_area.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let mut offset = 0;
+    let mut pos = base_packet_size;
     let mut updated = false;
-    while offset < data_end && offset + TLV_HEADER_SIZE <= tlv_area.len() {
-        let flags = tlv_area[offset];
-        let tlv_type = TlvType::from_byte(tlv_area[offset + 1]);
-        let length = u16::from_be_bytes([tlv_area[offset + 2], tlv_area[offset + 3]]) as usize;
-        let value = offset + TLV_HEADER_SIZE;
-        if flags & 0x40 != 0 || value + length > tlv_area.len() {
+    while let Some(tlv) = TlvSpan::at(response, pos) {
+        if tlv.flags.malformed {
             break; // Processing stopped at a malformed TLV.
         }
-        // Only CoS TLVs the reflector processed (U, M, I clear) carry RPD/RPE.
-        if tlv_type == TlvType::ClassOfService && length == 4 && flags & 0xE0 == 0 {
+        // Only CoS TLVs the reflector processed carry RPD/RPE.
+        if tlv.tlv_type == TlvType::ClassOfService
+            && tlv.len == COS_TLV_VALUE_SIZE
+            && tlv.flags.processed()
+        {
             // The backend could not apply DSCP1 and EC1 to the reply:
             // RPD = 0b01 (DSCP1 not used, RFC 8972 §4.4) and RPE = 0b10
             // (EC1 not applied, cos-ecn-01 §3.2), replacing the 0b11 set
             // during TLV processing.
-            tlv_area[value + 1] = (tlv_area[value + 1] & 0xFC) | 0b01;
-            tlv_area[value + 2] = (tlv_area[value + 2] & 0xCF) | (0b10 << 4);
+            let value = tlv.value_start();
+            response[value + 1] = (response[value + 1] & 0xFC) | 0b01;
+            response[value + 2] = (response[value + 2] & 0xCF) | (0b10 << 4);
             updated = true;
         }
-        offset = value + length;
+        pos = tlv.end();
     }
     updated
 }
@@ -57,31 +53,16 @@ pub fn cos_unable_fallback_tos(received_dscp: u8) -> u8 {
 ///
 /// Returns `true` if the Return Path TLV was found and updated.
 pub fn set_return_path_u_flag_in_response(response: &mut [u8], base_packet_size: usize) -> bool {
-    if response.len() <= base_packet_size {
-        return false;
-    }
-
-    let tlv_area = &mut response[base_packet_size..];
-    let mut offset = 0;
-
-    while offset + TLV_HEADER_SIZE <= tlv_area.len() {
-        if tlv_area[offset..offset + TLV_HEADER_SIZE] == [0, 0, 0, 0]
-            && tlv_area[offset..].iter().all(|&b| b == 0)
-        {
-            break;
+    let mut pos = base_packet_size;
+    while let Some(tlv) = TlvSpan::at(response, pos) {
+        if tlv.flags.malformed {
+            break; // Processing stopped at a malformed TLV.
         }
-
-        let tlv_type = TlvType::from_byte(tlv_area[offset + 1]);
-        let length = u16::from_be_bytes([tlv_area[offset + 2], tlv_area[offset + 3]]) as usize;
-
-        if tlv_type == TlvType::ReturnPath {
-            // Set U-flag (bit 7) on the flags byte
-            tlv_area[offset] |= 0x80;
+        if tlv.tlv_type == TlvType::ReturnPath {
+            response[tlv.start] |= TlvFlags::U;
             return true;
         }
-
-        offset += TLV_HEADER_SIZE + length;
+        pos = tlv.end();
     }
-
     false
 }

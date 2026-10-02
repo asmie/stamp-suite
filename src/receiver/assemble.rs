@@ -2,9 +2,6 @@
 
 use super::*;
 
-/// HMAC field offset in ReflectedPacketAuthenticated (bytes before HMAC field).
-pub const REFLECTED_AUTH_PACKET_HMAC_OFFSET: usize = 96;
-
 /// Assembles an unauthenticated reflected packet from a received test packet.
 ///
 /// # Arguments
@@ -39,15 +36,6 @@ pub fn assemble_unauth_answer(
         mbz3: [0; 3],
     }
 }
-
-/// Base size of unauthenticated STAMP packets.
-pub const UNAUTH_BASE_SIZE: usize = 44;
-
-/// Base size of authenticated STAMP packets.
-pub const AUTH_BASE_SIZE: usize = 112;
-
-/// HMAC offset in authenticated sender packets (for verifying incoming packets).
-pub(super) const AUTH_PACKET_HMAC_OFFSET: usize = 96;
 
 /// Assembles an unauthenticated reflected packet with symmetric size (RFC 8762 Section 4.3).
 ///
@@ -130,7 +118,7 @@ pub fn assemble_auth_answer(
     // Compute HMAC if key is provided
     if let Some(key) = hmac_key {
         let bytes = response.to_bytes();
-        response.hmac = compute_packet_hmac(key, &bytes, REFLECTED_AUTH_PACKET_HMAC_OFFSET);
+        response.hmac = compute_packet_hmac(key, &bytes, AUTH_HMAC_OFFSET);
     }
 
     response

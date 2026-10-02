@@ -181,14 +181,23 @@ pub struct TlvFlags {
 }
 
 impl TlvFlags {
-    /// Creates flags from a full octet value.
+    /// U bit in the flags octet (RFC 8972 §5.2).
+    pub const U: u8 = 0x80;
+    /// M bit in the flags octet (RFC 8972 §5.2).
+    pub const M: u8 = 0x40;
+    /// I bit in the flags octet (RFC 8972 §5.2).
+    pub const I: u8 = 0x20;
+    /// C bit in the flags octet (RFC 10052 §6.2).
+    pub const C: u8 = 0x10;
+
+    /// Creates flags from a full octet value. Reserved bits are dropped.
     #[must_use]
     pub fn from_byte(byte: u8) -> Self {
         Self {
-            unrecognized: (byte & 0x80) != 0,         // Bit 0 (MSB)
-            malformed: (byte & 0x40) != 0,            // Bit 1
-            integrity_failed: (byte & 0x20) != 0,     // Bit 2
-            conformant_reflected: (byte & 0x10) != 0, // Bit 3
+            unrecognized: byte & Self::U != 0,
+            malformed: byte & Self::M != 0,
+            integrity_failed: byte & Self::I != 0,
+            conformant_reflected: byte & Self::C != 0,
         }
     }
 
@@ -197,18 +206,24 @@ impl TlvFlags {
     pub fn to_byte(self) -> u8 {
         let mut byte = 0u8;
         if self.unrecognized {
-            byte |= 0x80; // Bit 0 (MSB)
+            byte |= Self::U;
         }
         if self.malformed {
-            byte |= 0x40; // Bit 1
+            byte |= Self::M;
         }
         if self.integrity_failed {
-            byte |= 0x20; // Bit 2
+            byte |= Self::I;
         }
         if self.conformant_reflected {
-            byte |= 0x10; // Bit 3
+            byte |= Self::C;
         }
         byte
+    }
+
+    /// True when none of U, M or I is set: the reflector processed the TLV.
+    #[must_use]
+    pub fn processed(self) -> bool {
+        !(self.unrecognized || self.malformed || self.integrity_failed)
     }
 
     /// Creates flags with the unrecognized bit set.
@@ -375,6 +390,55 @@ impl TlvType {
     #[must_use]
     pub fn is_recognized(self) -> bool {
         !matches!(self, Self::Unknown(_) | Self::Reserved)
+    }
+}
+
+/// Location of one complete TLV inside a byte buffer.
+///
+/// Used where serialized replies are inspected or edited in place, so the
+/// header layout and codepoints live here rather than in each caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TlvSpan {
+    /// Offset of the 4-octet header within the buffer.
+    pub start: usize,
+    pub flags: TlvFlags,
+    pub tlv_type: TlvType,
+    /// Value length from the header.
+    pub len: usize,
+}
+
+impl TlvSpan {
+    /// Reads the TLV header at `start`. Returns `None` when fewer than four
+    /// octets remain or the value runs past the end of `buf`.
+    #[must_use]
+    pub fn at(buf: &[u8], start: usize) -> Option<Self> {
+        let header = buf.get(start..start.checked_add(TLV_HEADER_SIZE)?)?;
+        let len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+        let span = Self {
+            start,
+            flags: TlvFlags::from_byte(header[0]),
+            tlv_type: TlvType::from_byte(header[1]),
+            len,
+        };
+        (span.end() <= buf.len()).then_some(span)
+    }
+
+    /// Offset of the first value octet.
+    #[must_use]
+    pub fn value_start(&self) -> usize {
+        self.start + TLV_HEADER_SIZE
+    }
+
+    /// Offset just past the value.
+    #[must_use]
+    pub fn end(&self) -> usize {
+        self.value_start() + self.len
+    }
+
+    /// The value range within the buffer.
+    #[must_use]
+    pub fn value(&self) -> std::ops::Range<usize> {
+        self.value_start()..self.end()
     }
 }
 
@@ -642,6 +706,22 @@ impl RawTlv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tlv_span_reads_complete_tlvs_only() {
+        let buf = [0xC0, 4, 0, 4, 1, 2, 3, 4, 0, 1, 0, 9, 0];
+        let first = TlvSpan::at(&buf, 0).unwrap();
+        assert_eq!(first.tlv_type, TlvType::ClassOfService);
+        assert!(first.flags.unrecognized && first.flags.malformed);
+        assert!(!first.flags.processed());
+        assert_eq!(first.value(), 4..8);
+        assert_eq!(first.end(), 8);
+        // The second TLV declares 9 value octets but only 1 remains.
+        assert_eq!(TlvSpan::at(&buf, 8), None);
+        // Fewer than four octets cannot hold a header.
+        assert_eq!(TlvSpan::at(&buf, 10), None);
+        assert_eq!(TlvSpan::at(&buf, usize::MAX), None);
+    }
 
     #[test]
     fn test_tlv_flags_from_byte() {

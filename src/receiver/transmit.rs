@@ -1,7 +1,15 @@
 //! Finalize every datagram at its actual send attempt, including burst copies.
 
 use super::{RateLimiter, ReflectorCounters, StampResponse, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE};
-use crate::{clock_format::ClockFormat, crypto::HmacKey, session::Session, tlv::ReturnPathAction};
+use crate::{
+    clock_format::ClockFormat,
+    crypto::HmacKey,
+    session::Session,
+    tlv::{
+        ReturnPathAction, TlvFlags, TlvSpan, TlvType, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
+        FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE,
+    },
+};
 use std::{
     cmp::Ordering as CmpOrdering,
     collections::BinaryHeap,
@@ -333,32 +341,41 @@ fn is_message_too_large(error: &io::Error) -> bool {
     } // WSAEMSGSIZE
 }
 
+fn is_reflected_header(tlv: &TlvSpan) -> bool {
+    matches!(
+        tlv.tlv_type,
+        TlvType::ReflectedIpv6ExtHdr | TlvType::ReflectedFixedHdr
+    )
+}
+
+/// True when the reply is a complete, well-formed TLV chain that includes a
+/// processed Type 246/247 TLV.
 fn has_reflected_headers(data: &[u8], base: usize) -> bool {
     let mut pos = base;
     let mut found = false;
-    while pos + 4 <= data.len() {
-        let len = usize::from(u16::from_be_bytes([data[pos + 2], data[pos + 3]])) + 4;
-        if pos + len > data.len() || data[pos] & 0x40 != 0 {
+    while let Some(tlv) = TlvSpan::at(data, pos) {
+        if tlv.flags.malformed {
             return false;
         }
-        if matches!(data[pos + 1], 246 | 247) && data[pos] & 0xe0 == 0 {
-            found = true;
-        }
-        pos += len;
+        found |= is_reflected_header(&tlv) && tlv.flags.processed();
+        pos = tlv.end();
     }
     found && pos == data.len()
 }
 
+/// True when the reply is a complete TLV chain, without M or I flags, that
+/// carries a processed BER TLV.
 fn has_ber(data: &[u8], base: usize) -> bool {
-    crate::tlv::TlvList::parse(&data[base..]).is_ok_and(|list| {
-        !list
-            .iter()
-            .any(|t| t.is_integrity_failed() || t.is_malformed())
-            && list
-                .non_hmac_tlvs()
-                .iter()
-                .any(|t| crate::ber::is_ber(t.tlv_type) && !t.is_unrecognized())
-    })
+    let mut pos = base;
+    let mut found = false;
+    while let Some(tlv) = TlvSpan::at(data, pos) {
+        if tlv.flags.malformed || tlv.flags.integrity_failed {
+            return false;
+        }
+        found |= crate::ber::is_ber(tlv.tlv_type) && !tlv.flags.unrecognized;
+        pos = tlv.end();
+    }
+    found && pos == data.len()
 }
 
 /// Preserve complete mandatory TLVs and the final HMAC. Only padding and
@@ -393,102 +410,97 @@ fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> i
         data.extend_from_slice(&resized.to_bytes());
         return Ok(false);
     }
+    // Every byte after the base must belong to a well-formed TLV.
     let mut pos = base;
     let mut tlvs = Vec::new();
     while pos < data.len() {
-        if pos + 4 > data.len() {
+        let tlv = TlvSpan::at(data, pos).ok_or_else(cannot_fit)?;
+        if tlv.flags.malformed {
             return Err(cannot_fit());
         }
-        let len = usize::from(u16::from_be_bytes([data[pos + 2], data[pos + 3]])) + 4;
-        if pos + len > data.len() || data[pos] & 0x40 != 0 {
-            return Err(cannot_fit());
+        if !controlled || tlv.tlv_type != TlvType::ExtraPadding {
+            tlvs.push((tlv, data[tlv.start..tlv.end()].to_vec()));
         }
-        if !controlled || data[pos + 1] != 1 {
-            tlvs.push(data[pos..pos + len].to_vec());
-        }
-        pos += len;
+        pos = tlv.end();
     }
-    let mut size = base + tlvs.iter().map(Vec::len).sum::<usize>();
+    let mut size = base + tlvs.iter().map(|(_, bytes)| bytes.len()).sum::<usize>();
     while size > cap {
         let Some(index) = tlvs
             .iter()
-            .rposition(|t| matches!(t[1], 246 | 247) && t[0] & 0xe0 == 0)
+            .rposition(|(tlv, _)| is_reflected_header(tlv) && tlv.flags.processed())
         else {
             return Err(cannot_fit());
         };
-        size -= tlvs.remove(index).len();
+        size -= tlvs.remove(index).1.len();
     }
     if controlled {
-        if let Some(control) = tlvs.iter_mut().find(|t| t[1] == 12 && t[0] & 0xe0 == 0) {
-            control[0] |= 0x10;
+        // RFC 10052 §3: a reply clamped to the MTU carries C.
+        if let Some((_, control)) = tlvs
+            .iter_mut()
+            .find(|(tlv, _)| tlv.tlv_type == TlvType::ReflectedControl && tlv.flags.processed())
+        {
+            control[0] |= TlvFlags::C;
         }
         let padding = cap - size;
-        if padding >= 4 {
-            let mut pad = vec![0; padding];
-            pad[1] = 1;
-            pad[2..4].copy_from_slice(&((padding - 4) as u16).to_be_bytes());
-            let index = tlvs.iter().position(|t| t[1] == 8).unwrap_or(tlvs.len());
-            tlvs.insert(index, pad);
+        if padding >= TLV_HEADER_SIZE {
+            let pad = crate::tlv::ExtraPaddingTlv::new_zeros(padding - TLV_HEADER_SIZE);
+            let mut raw = crate::tlv::TypedTlv::to_raw(&pad);
+            raw.flags = TlvFlags::default();
+            let index = tlvs
+                .iter()
+                .position(|(tlv, _)| tlv.tlv_type.is_hmac())
+                .unwrap_or(tlvs.len());
+            let bytes = raw.to_bytes();
+            let span = TlvSpan::at(&bytes, 0).expect("serialized padding TLV");
+            tlvs.insert(index, (span, bytes));
         }
         // A 1..3-octet remainder cannot encode a TLV; send the shorter valid
         // packet with C=1, never a malformed tail or an over-MTU packet.
-    }
-    if controlled {
-        // A final MTU clamp can resize Type-12 padding again after semantic
-        // processing. Its BER denominator is no longer trustworthy.
-        for tlv in &mut tlvs {
-            if matches!(tlv[1], 240..=242) {
-                tlv[0] |= 0x10;
+
+        // The clamp resized the padding after semantic processing, so the
+        // BER forward count no longer describes it.
+        for (tlv, bytes) in &mut tlvs {
+            if crate::ber::is_ber(tlv.tlv_type) {
+                bytes[0] |= TlvFlags::C;
             }
         }
     }
     data.truncate(base);
-    for tlv in tlvs {
-        data.extend_from_slice(&tlv);
+    for (_, bytes) in tlvs {
+        data.extend_from_slice(&bytes);
     }
     Ok(controlled)
 }
 
+/// Refreshes send-time Direct Measurement counters and Follow-Up Telemetry
+/// in TLVs the reflector processed. Processing stopped at the first malformed
+/// TLV (RFC 8972 §4), so the walk stops there too.
 fn refresh_telemetry(data: &mut [u8], base: usize, session: &Session, stateful: bool) {
-    // Assembly deliberately skips semantic updates for an entire malformed
-    // chain, including otherwise valid TLVs preceding the malformed tail.
-    let mut scan = base;
-    while scan + 4 <= data.len() {
-        let len = u16::from_be_bytes([data[scan + 2], data[scan + 3]]) as usize;
-        if data[scan] & 0x40 != 0 || scan + 4 + len > data.len() {
-            return;
-        }
-        scan += 4 + len;
-    }
     let mut pos = base;
-    while pos + 4 <= data.len() {
-        let len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
-        if pos + 4 + len > data.len() {
+    while let Some(tlv) = TlvSpan::at(data, pos) {
+        if tlv.flags.malformed {
             break;
         }
-        let flags = data[pos];
-        let kind = data[pos + 1];
-        if flags & 0x40 != 0 {
-            break;
-        } // malformed tail must stay opaque
-        if flags & 0xA0 == 0 {
-            let value = &mut data[pos + 4..pos + 4 + len];
-            match (kind, len) {
-                (5, 12) => {
+        if tlv.flags.processed() {
+            let value = &mut data[tlv.value()];
+            match (tlv.tlv_type, tlv.len) {
+                (TlvType::DirectMeasurement, DIRECT_MEASUREMENT_TLV_VALUE_SIZE) => {
                     value[4..8].copy_from_slice(&session.get_received_count().to_be_bytes());
                     value[8..12].copy_from_slice(&session.get_transmitted_count().to_be_bytes());
                 }
-                (7, 16) if stateful => {
+                (TlvType::FollowUpTelemetry, FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE) if stateful => {
                     let (seq, ts, method) = session.get_last_reflection_with_method();
                     value[..4].copy_from_slice(&seq.to_be_bytes());
                     value[4..12].copy_from_slice(&ts.to_be_bytes());
                     value[12] = method.to_byte();
                 }
-                (7, 16) => value[..12].fill(0),
+                (TlvType::FollowUpTelemetry, FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE) => {
+                    value[..12].fill(0)
+                }
                 _ => {}
             }
         }
-        pos += 4 + len;
+        pos = tlv.end();
     }
 }
 
@@ -496,30 +508,36 @@ fn refresh_telemetry(data: &mut [u8], base: usize, session: &Session, stateful: 
 /// TLVs, possibly followed by symmetric zero padding. Callers check
 /// `StampResponse::tlv_hmac_generated`; echoed HMACs must stay unchanged.
 fn sign_tlvs(data: &mut [u8], base: usize, key: &HmacKey) {
-    if data.len() < base + 20 {
+    const HMAC_TLV_SIZE: usize = TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE;
+    if data.len() < base + HMAC_TLV_SIZE {
         return;
     }
-    let mut pos = if has_ber(data, base) {
-        base
-    } else {
-        data.len()
+    let sign = |data: &mut [u8], hmac_at: usize| {
+        let digest = key.compute_parts([&data[..4], &data[base..hmac_at]]);
+        data[hmac_at + TLV_HEADER_SIZE..hmac_at + HMAC_TLV_SIZE].copy_from_slice(&digest);
     };
-    while pos + 4 <= data.len() {
-        let length = usize::from(u16::from_be_bytes([data[pos + 2], data[pos + 3]]));
-        if pos + 4 + length > data.len() || data[pos] & 0x40 != 0 {
-            break;
+    // BER replies may carry Extra Padding after the HMAC, so walk the chain.
+    if has_ber(data, base) {
+        let mut pos = base;
+        while let Some(tlv) = TlvSpan::at(data, pos) {
+            if tlv.flags.malformed {
+                break;
+            }
+            if tlv.tlv_type.is_hmac() && tlv.len == HMAC_TLV_VALUE_SIZE {
+                sign(data, tlv.start);
+                return;
+            }
+            pos = tlv.end();
         }
-        if data[pos + 1] == 8 && length == 16 {
-            let digest = key.compute_parts([&data[..4], &data[base..pos]]);
-            data[pos + 4..pos + 20].copy_from_slice(&digest);
-            return;
-        }
-        pos += 4 + length;
     }
-    for pos in (base..=data.len() - 20).rev() {
-        if data[pos + 1..pos + 4] == [8, 0, 16] && data[pos + 20..].iter().all(|b| *b == 0) {
-            let digest = key.compute_parts([&data[..4], &data[base..pos]]);
-            data[pos + 4..pos + 20].copy_from_slice(&digest);
+    // Otherwise the HMAC is the last TLV, followed only by zero padding.
+    let hmac_type = TlvType::Hmac.to_byte();
+    let header_tail = [hmac_type, 0, HMAC_TLV_VALUE_SIZE as u8];
+    for pos in (base..=data.len() - HMAC_TLV_SIZE).rev() {
+        if data[pos + 1..pos + TLV_HEADER_SIZE] == header_tail
+            && data[pos + HMAC_TLV_SIZE..].iter().all(|b| *b == 0)
+        {
+            sign(data, pos);
             return;
         }
     }

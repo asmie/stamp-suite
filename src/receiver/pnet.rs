@@ -25,21 +25,13 @@ use pnet::{
 
 use std::sync::Arc;
 
-use crate::{
-    clock_format::ClockFormat,
-    configuration::{is_auth, Configuration, TlvHandlingMode},
-    crypto::HmacKey,
-    error_estimate::ErrorEstimate,
-    session::SessionManager,
-};
-
-use super::transmit::{
-    DatagramSender, QueuedTransmission, ReplyBudget, ReplyQueue, ShutdownDrain, Transmission,
-};
+use crate::configuration::Configuration;
 
 use super::{
-    hmac_key_source_configured, load_hmac_key, print_reflector_stats,
-    process_session_packet_isolated, ProcessingContext, ReceiverSharedState, ReflectorCounters,
+    ingest::{ReceivedPacket, ReflectorCore, ReflectorSettings},
+    print_reflector_stats,
+    transmit::{DatagramSender, QueuedTransmission, ReplyBudget, ReplyQueue, ShutdownDrain},
+    ReceiverSharedState, ReflectorCounters,
 };
 
 /// Context for sending STAMP responses in pnet mode.
@@ -48,62 +40,16 @@ struct PnetSendContext {
     send_socket_v6: Option<std::net::UdpSocket>,
 }
 
-/// Configuration extracted for the blocking capture loop.
-/// This allows us to move owned data into the spawn_blocking closure.
+/// Everything the blocking capture loop owns.
 struct CaptureConfig {
+    core: ReflectorCore,
     interface_index: u32,
-    queue_budget: Arc<ReplyBudget>,
     queue_capacity: usize,
     shutdown_grace: Duration,
     local_port: u16,
-    clock_source: ClockFormat,
-    clock_sync_source: crate::tlv::SyncSource,
-    hardware_clock_sync_source: crate::tlv::SyncSource,
-    use_auth: bool,
-    error_estimate_wire: u16,
-    hmac_key: Option<HmacKey>,
-    /// Per-SSID key set, shared with the control plane which may
-    /// mutate it at runtime. When populated it overrides `hmac_key` and the
-    /// reflector resolves the per-packet key via the incoming SSID.
-    hmac_keys: Arc<std::sync::RwLock<Option<crate::crypto::HmacKeySet>>>,
-    session_manager: Arc<SessionManager>,
-    /// Whether stateful per-client sequence numbering is enabled.
-    stateful_reflector: bool,
-    tlv_mode: TlvHandlingMode,
-    require_hmac: bool,
-    verify_tlv_hmac: bool,
-    strict_packets: bool,
     cleanup_interval: Option<Duration>,
-    #[cfg(feature = "metrics")]
-    metrics_enabled: bool,
-    /// Shutdown flag set by signal handler.
+    /// Set by the signal and control-plane watcher.
     shutdown: Arc<AtomicBool>,
-    /// Aggregate packet counters for reporting.
-    counters: Arc<ReflectorCounters>,
-    /// Local addresses for Destination Node Address TLV matching (RFC 9503 §3).
-    /// RFC 8972 §4.2.2 Location field-disclosure policy.
-    location_disclosure: crate::tlv::LocationDisclosure,
-    /// Suppress ordinary duplicates (`--drop-replayed`); handled Type-12
-    /// requests use the single U-flagged response required by draft §5.
-    drop_replayed: bool,
-    /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, cos-ecn-01 §3.2).
-    cos_policy: crate::cos_policy::CosAdmissionPolicy,
-    local_addresses: Vec<IpAddr>,
-    /// Local MAC addresses for the Reflected Test Packet Control TLV's L2
-    /// Address Group sub-TLV matching (RFC 10052
-    /// §3.1.1).
-    local_macs: Vec<[u8; 6]>,
-    /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
-    reflector_member_link_id: Option<u16>,
-    /// Whether to honour a Return Path "Return Address" sub-TLV (RFC 9503 §4).
-    /// Off by default to prevent third-party traffic redirection.
-    return_path_allow_alternate: bool,
-    /// Per-source rate limiter (always constructed; rate 0 = unlimited,
-    /// runtime-adjustable via the control plane).
-    rate_limiter: Arc<super::RateLimiter>,
-    /// Runtime-adjustable reflector caps (Reflected Test Packet Control
-    /// TLV limits, RFC 10052 §3).
-    caps: Arc<super::RuntimeCaps>,
 }
 
 /// Interface properties needed for macOS special handling.
@@ -162,40 +108,14 @@ pub async fn run_receiver(
         })?;
     }
 
-    // Check if authenticated mode is used
-    let use_auth = is_auth(conf.auth_mode);
-
-    // Load HMAC keys (prefer the multi-key set path; fall back to a
-    // single legacy key if --hmac-key-dir is not set).
-    let keyset_configured = shared
-        .hmac_keys
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_some();
-    let hmac_key = if !keyset_configured {
-        load_hmac_key(conf)
-    } else {
-        None
+    // Key and policy errors are reported before capture-driver discovery.
+    let settings = match ReflectorSettings::from_config(conf, shared, false) {
+        Ok(settings) => settings,
+        Err(e) => {
+            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
+            return Err(e);
+        }
     };
-
-    // Validate: authenticated mode requires some HMAC key (single or set).
-    if use_auth && hmac_key.is_none() && !keyset_configured {
-        shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-        return Err(crate::StartupError::new(
-            "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir",
-        ));
-    }
-
-    // See the matching check in the nix backend: a key source that failed to
-    // load must not degrade into running without one.
-    if hmac_key.is_none() && !keyset_configured && hmac_key_source_configured(conf) {
-        shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-        return Err(crate::StartupError::new(
-            "an HMAC key source was configured (--hmac-key, --hmac-key-file or \
-             --hmac-key-dir) but no usable key could be loaded; see the error above. \
-             Refusing to run without the key that was asked for",
-        ));
-    }
 
     // Interface discovery can itself depend on capture-driver availability.
     // Report ordinary socket and key failures before consulting that driver.
@@ -256,34 +176,12 @@ pub async fn run_receiver(
         }
     };
 
-    // Build error estimate from configuration with Z flag set based on clock source
-    let error_estimate = ErrorEstimate::with_clock_format(
-        conf.clock_synchronized,
-        conf.clock_source,
-        conf.error_scale,
-        conf.error_multiplier,
-    )
-    .unwrap_or_else(|_| ErrorEstimate::unsynchronized_with_format(conf.clock_source));
-    let error_estimate_wire = error_estimate.to_wire();
-
-    if hmac_key.is_some() {
-        log::info!("HMAC authentication enabled");
-    }
-
     let session_manager = Arc::clone(&shared.session_manager);
-
-    if conf.stateful_reflector {
-        log::info!("Stateful reflector mode enabled (RFC 8972)");
-    }
 
     let send_ctx = PnetSendContext {
         send_socket_v4,
         send_socket_v6,
     };
-
-    if conf.tlv_mode != TlvHandlingMode::Ignore {
-        log::info!("TLV handling mode: {:?}", conf.tlv_mode);
-    }
 
     log::info!(
         "STAMP Reflector listening on {} (pnet mode, real TTL)",
@@ -302,58 +200,14 @@ pub async fn run_receiver(
     let start_time = shared.start_time;
     let output_format = conf.output_format;
 
-    // Build local addresses for Destination Node Address TLV matching (RFC 9503 §3).
-    let local_addresses = super::build_local_addresses(conf.local_addr);
-
-    // Build local MAC addresses for the Reflected Test Packet Control TLV's
-    // L2 Address Group sub-TLV matching (RFC 10052
-    // §3.1.1). Unlike `local_addresses`, this always enumerates every
-    // interface's hardware address regardless of the bind address.
-    let local_macs = super::build_local_macs();
-
-    // Build capture config with all values needed by the blocking loop
     let capture_config = CaptureConfig {
+        core: ReflectorCore::new(settings, shared, conf.reflector_queue_capacity as usize),
         interface_index: interface.index,
-        queue_budget: ReplyBudget::new(
-            conf.reflector_queue_capacity as usize,
-            Arc::clone(&shared.counters),
-        ),
         queue_capacity: conf.reflector_queue_capacity as usize,
         shutdown_grace: Duration::from_millis(u64::from(conf.reflector_shutdown_grace_ms)),
         local_port: conf.local_port,
-        clock_source: conf.clock_source,
-        clock_sync_source: conf.clock_sync_source.into(),
-        hardware_clock_sync_source: conf.hardware_clock_sync_source.into(),
-        use_auth,
-        error_estimate_wire,
-        hmac_key,
-        hmac_keys: Arc::clone(&shared.hmac_keys),
-        session_manager: Arc::clone(&session_manager),
-        stateful_reflector: conf.stateful_reflector,
-        tlv_mode: conf.tlv_mode,
-        require_hmac: conf.require_hmac,
-        verify_tlv_hmac: conf.verify_tlv_hmac,
-        strict_packets: conf.strict_packets,
         cleanup_interval,
-        #[cfg(feature = "metrics")]
-        metrics_enabled: conf.metrics,
         shutdown: Arc::clone(&shutdown),
-        counters: Arc::clone(&counters),
-        local_addresses,
-        // `validate()` normally rejects bad specs first; if it did not run,
-        // refuse to start rather than run permissively.
-        location_disclosure: conf
-            .location_disclosure()
-            .map_err(crate::StartupError::new)?,
-        drop_replayed: conf.drop_replayed,
-        cos_policy: conf
-            .cos_admission_policy()
-            .map_err(crate::StartupError::new)?,
-        local_macs,
-        reflector_member_link_id: conf.reflector_member_link_id,
-        return_path_allow_alternate: conf.return_path_allow_alternate,
-        rate_limiter: Arc::clone(&shared.rate_limiter),
-        caps: Arc::clone(&shared.caps),
     };
 
     // Spawn async task that funnels both Ctrl+C and the control plane's
@@ -457,10 +311,10 @@ fn run_capture_loop(
     iface_props: InterfaceProps,
 ) {
     let (transmitter, receiver) = std::sync::mpsc::sync_channel(config.queue_capacity);
-    let tx_counters = Arc::clone(&config.counters);
-    let tx_limiter = Arc::clone(&config.rate_limiter);
+    let tx_counters = Arc::clone(&config.core.counters);
+    let tx_limiter = Arc::clone(&config.core.rate_limiter);
     let tx_shutdown = Arc::clone(&config.shutdown);
-    let tx_budget = Arc::clone(&config.queue_budget);
+    let tx_budget = Arc::clone(&config.core.budget);
     let grace = config.shutdown_grace;
     let worker = std::thread::spawn(move || {
         let _stop = StopCapture(Arc::clone(&tx_shutdown));
@@ -489,7 +343,7 @@ fn run_capture_loop(
         // Periodic session cleanup check
         if let Some(interval) = config.cleanup_interval {
             if last_cleanup.elapsed() >= interval {
-                let removed = config.session_manager.cleanup_stale_sessions();
+                let removed = config.core.session_manager.cleanup_stale_sessions();
                 if removed > 0 {
                     log::debug!("Session cleanup: removed {} stale sessions", removed);
                 }
@@ -827,145 +681,33 @@ fn handle_stamp_packet(
     config: &CaptureConfig,
     transmitter: &std::sync::mpsc::SyncSender<QueuedTransmission>,
 ) {
-    // Rate limit check: drop packet if source exceeds the per-client
-    // token bucket. Distinct counter so operators can tell rate-limit
-    // drops from parse/HMAC failures.
-    if !config.rate_limiter.allow(pkt.src.ip()) {
-        log::debug!("Rate-limited packet from {}", pkt.src);
-        config
-            .counters
-            .packets_rate_limited
-            .fetch_add(1, AtomicOrdering::Relaxed);
-        config
-            .counters
-            .packets_dropped
-            .fetch_add(1, AtomicOrdering::Relaxed);
-        return;
-    }
-
-    config
-        .counters
-        .packets_received
-        .fetch_add(1, AtomicOrdering::Relaxed);
-
     if config.shutdown.load(AtomicOrdering::Relaxed) {
         return;
     }
-    let Some(reservation) = config.queue_budget.reserve() else {
-        return;
-    };
-
-    // Build packet address info for Location TLV.
-    // dst_addr comes from the parsed IP header, so it's always the real
-    // destination even when bound to a wildcard address.
-    let packet_addr_info = Some(crate::tlv::PacketAddressInfo {
-        src_addr: pkt.src.ip(),
-        src_port: pkt.src.port(),
+    let packet = ReceivedPacket {
+        data,
+        src: pkt.src,
         dst_addr: pkt.dst_addr,
-        dst_port: config.local_port,
+        local: crate::net_scope::received_endpoint(
+            pkt.dst_addr,
+            config.local_port,
+            config.interface_index,
+        ),
+        ttl: pkt.ttl,
+        dscp: pkt.dscp,
+        ecn: pkt.ecn,
+        // Capture runs on one interface; only Linux can pin replies to it.
+        ingress_ifindex: (cfg!(target_os = "linux") && config.interface_index != 0)
+            .then_some(config.interface_index),
         src_mac: pkt.src_mac,
-    });
-
-    // Panic-isolated: a panic in processing must not unwind out of the capture
-    // task and stop the reflector. On panic the packet is dropped (None).
-    // The keyset read guard is scoped to this block (the capture loop is
-    // synchronous, but tight scoping keeps writer latency low).
-    let response_opt = {
-        let keys_guard = config.hmac_keys.read().unwrap_or_else(|e| e.into_inner());
-        let ctx = ProcessingContext {
-            // Capture runs on one interface; only Linux can pin replies to it.
-            ingress_ifindex: (cfg!(target_os = "linux") && config.interface_index != 0)
-                .then_some(config.interface_index),
-            packet_local_addr: Some(crate::net_scope::received_endpoint(
-                pkt.dst_addr,
-                config.local_port,
-                config.interface_index,
-            )),
-            replay_verdict: crate::session::ReplayVerdict::New,
-            clock_source: config.clock_source,
-            clock_sync_source: config.clock_sync_source,
-            hardware_clock_sync_source: config.hardware_clock_sync_source,
-            error_estimate_wire: config.error_estimate_wire,
-            hmac_key: config.hmac_key.as_ref(),
-            hmac_key_set: keys_guard.as_ref(),
-            require_hmac: config.require_hmac,
-            session_manager: Some(&config.session_manager),
-            stateful_reflector: config.stateful_reflector,
-            tlv_mode: config.tlv_mode,
-            verify_tlv_hmac: config.verify_tlv_hmac,
-            strict_packets: config.strict_packets,
-            #[cfg(feature = "metrics")]
-            metrics_enabled: config.metrics_enabled,
-            received_dscp: pkt.dscp,
-            received_ecn: pkt.ecn,
-            reflector_rx_count: None,
-            reflector_tx_count: None,
-            packet_addr_info,
-            last_reflection: None,
-            location_disclosure: config.location_disclosure,
-            cos_policy: &config.cos_policy,
-            local_addresses: &config.local_addresses,
-            local_macs: &config.local_macs,
-            sender_port: pkt.src.port(),
-            return_path_allow_alternate: config.return_path_allow_alternate,
-            reflector_member_link_id: config.reflector_member_link_id,
-            captured_headers: Some(&pkt.captured),
-            reflected_control_max_count: config
-                .caps
-                .reflected_control_max_count
-                .load(AtomicOrdering::Relaxed),
-            reflected_control_max_size: config
-                .caps
-                .reflected_control_max_size
-                .load(AtomicOrdering::Relaxed),
-            reflected_control_min_interval_ns: config
-                .caps
-                .reflected_control_min_interval_ns
-                .load(AtomicOrdering::Relaxed),
-            reflected_control_max_rate: config
-                .caps
-                .reflected_control_max_rate
-                .load(AtomicOrdering::Relaxed),
-            reflected_control_max_volume: config
-                .caps
-                .reflected_control_max_volume
-                .load(AtomicOrdering::Relaxed),
-            rx_timestamp: None,
-            rx_method: crate::tlv::TimestampMethod::SwLocal,
-            last_reflection_method: crate::tlv::TimestampMethod::SwLocal,
-        };
-        process_session_packet_isolated(
-            data,
-            pkt.src,
-            pkt.ttl,
-            config.use_auth,
-            &ctx,
-            &config.counters,
-            config.drop_replayed,
-        )
-        .map(|(response, session, signing_key)| {
-            reservation.attach(Transmission::new(
-                response,
-                session,
-                pkt.src,
-                config.clock_source,
-                config.use_auth,
-                config.stateful_reflector,
-                signing_key,
-                pkt.dscp,
-                false,
-            ))
-        })
+        captured_headers: Some(&pkt.captured),
+        rx_timestamp: None,
+        rx_method: crate::tlv::TimestampMethod::SwLocal,
     };
-    if let Some(transmission) = response_opt {
+    if let Some(transmission) = config.core.ingest(&packet) {
         // The shared reservation also bounds the handoff channel. Never block
         // capture; a closed/full handoff drops and accounts for the owned work.
         let _ = transmitter.try_send(transmission);
-    } else {
-        config
-            .counters
-            .packets_dropped
-            .fetch_add(1, AtomicOrdering::Relaxed);
     }
 }
 
@@ -1092,13 +834,11 @@ fn run_transmit_loop_with_mtu(
     }
 }
 
-// `build_local_addresses` now lives in `receiver::mod` and is shared between
-// backends (see [`super::build_local_addresses`]).
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::receiver::create_shared_state;
+    use crate::receiver::transmit::Transmission;
+    use crate::{clock_format::ClockFormat, receiver::create_shared_state};
 
     #[test]
     fn transmit_worker_shutdown_finishes_or_cancels_reserved_bursts() {

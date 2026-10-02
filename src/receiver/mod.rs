@@ -9,6 +9,7 @@
 //! - **`ttl-pnet`**: Force pnet backend
 
 mod assemble;
+mod ingest;
 mod keys;
 mod limits;
 mod local_addrs;
@@ -19,7 +20,9 @@ mod reply_bytes;
 mod shared;
 mod transmit;
 
+pub use crate::packets::{AUTH_BASE_SIZE, AUTH_HMAC_OFFSET, UNAUTH_BASE_SIZE};
 pub use assemble::*;
+pub use ingest::*;
 pub use keys::*;
 pub use limits::*;
 pub use local_addrs::*;
@@ -86,27 +89,22 @@ use crate::{
     time::generate_timestamp,
     tlv::{
         LocationDisclosure, PacketAddressInfo, ReturnPathAction, SyncSource, TimestampMethod,
-        TlvList, TlvType, TypedTlv, HMAC_TLV_VALUE_SIZE,
+        TlvList, TlvSpan, TlvType, TypedTlv, HMAC_TLV_VALUE_SIZE, MICRO_SESSION_ID_TLV_VALUE_SIZE,
         REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, TLV_HEADER_SIZE,
     },
 };
 
-/// Peeks the SSID (RFC 8972 §3) field out of an incoming packet without
-/// fully parsing the rest. Returns 0 if the buffer is too short — which
-/// matches the RFC 8972 §4.1 "SSID 0 = unused" convention and is the
-/// correct fallback for the per-SSID HMAC key lookup.
-///
-/// Offsets:
-/// - Unauthenticated: bytes 14..16 (after seq, timestamp, error_estimate).
-/// - Authenticated: bytes 26..28 (after seq, 12-byte MBZ, timestamp,
-///   error_estimate).
+/// Reads the SSID (RFC 8972 §3) without parsing the rest of the packet.
+/// Returns 0, the unassigned value, when the buffer is too short; the
+/// per-SSID key lookup then uses the default key.
 fn peek_ssid(data: &[u8], use_auth: bool) -> u16 {
-    let offset = if use_auth { 26 } else { 14 };
-    if data.len() >= offset + 2 {
-        u16::from_be_bytes([data[offset], data[offset + 1]])
+    let offset = if use_auth {
+        crate::packets::AUTH_SSID_OFFSET
     } else {
-        0
-    }
+        crate::packets::UNAUTH_SSID_OFFSET
+    };
+    data.get(offset..offset + 2)
+        .map_or(0, |ssid| u16::from_be_bytes([ssid[0], ssid[1]]))
 }
 
 /// Extract identity without allocating runtime state. Malformed TLVs supply no
@@ -129,26 +127,19 @@ fn packet_session_key(
     } else {
         UNAUTH_BASE_SIZE
     };
-    let mut offset = base;
-    while offset < data.len() {
-        let tail = &data[offset..];
-        if tail.len() < 4 {
-            break;
-        }
-        let len = u16::from_be_bytes([tail[2], tail[3]]) as usize;
-        if tail[1] == 11 {
+    let mut pos = base;
+    while let Some(tlv) = TlvSpan::at(data, pos) {
+        if tlv.tlv_type == TlvType::MicroSessionId {
             if key.sender_micro_session_id.is_some() {
                 return None;
             }
-            if len != 4 || tail.len() < 8 {
+            if tlv.len != MICRO_SESSION_ID_TLV_VALUE_SIZE {
                 break;
             }
-            key.sender_micro_session_id = Some(u16::from_be_bytes([tail[4], tail[5]]));
+            let value = tlv.value_start();
+            key.sender_micro_session_id = Some(u16::from_be_bytes([data[value], data[value + 1]]));
         }
-        if tail.len() < 4 + len {
-            break;
-        }
-        offset += 4 + len;
+        pos = tlv.end();
     }
     Some(key)
 }
@@ -535,10 +526,16 @@ fn process_stamp_packet_inner(
             // Inspect only this opt-in duplicate path; semantic processing
             // still performs normal TLV integrity and address-group checks.
             let handles_control = ctx.tlv_mode == TlvHandlingMode::Echo && has_tlvs && {
-                let (mut tlvs, _) = TlvList::parse_lenient(&data[base_size..]);
-                // Requests carry the sender's U=1; clear it to inspect them.
-                tlvs.clear_reflector_flags();
-                tlvs.get_reflected_control_request().is_some()
+                let mut pos = base_size;
+                let mut found = false;
+                while let Some(tlv) = TlvSpan::at(data, pos) {
+                    if tlv.tlv_type == TlvType::ReflectedControl {
+                        found = tlv.len >= crate::tlv::REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE;
+                        break;
+                    }
+                    pos = tlv.end();
+                }
+                found
             };
             if !handles_control {
                 return None;
@@ -709,7 +706,7 @@ fn process_auth_packet(
 
     // Verify HMAC against canonical buffer - mandatory when key is present (RFC 8762 §4.4)
     if let Some(key) = resolved_hmac_key {
-        if !verify_packet_hmac(key, &canonical_buf, AUTH_PACKET_HMAC_OFFSET, &hmac) {
+        if !verify_packet_hmac(key, &canonical_buf, AUTH_HMAC_OFFSET, &hmac) {
             crate::warn_throttled!("HMAC verification failed for packet from {}", src);
             #[cfg(feature = "metrics")]
             if ctx.metrics_enabled {

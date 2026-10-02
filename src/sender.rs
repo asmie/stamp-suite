@@ -36,12 +36,11 @@ use crate::{
     packets::{
         ExtendedReflectedPacketAuthenticated, ExtendedReflectedPacketUnauthenticated,
         PacketAuthenticated, PacketUnauthenticated, ReflectedPacketAuthenticated,
-        ReflectedPacketUnauthenticated, MAX_UDP_PAYLOAD,
+        ReflectedPacketUnauthenticated, AUTH_BASE_SIZE, AUTH_HMAC_OFFSET, MAX_UDP_PAYLOAD,
+        UNAUTH_BASE_SIZE,
     },
     rate_control::{AimdController, AimdParams, AimdStats},
-    receiver::{
-        load_hmac_key, AUTH_BASE_SIZE, REFLECTED_AUTH_PACKET_HMAC_OFFSET, UNAUTH_BASE_SIZE,
-    },
+    receiver::load_hmac_key,
     session::Session,
     stats::{
         AccessReportOutcome, AccessReportSummary, CongestionSummary, OwdCollector, OwdSample,
@@ -731,9 +730,9 @@ pub async fn run_sender_with_output(
             0
         };
         let base = if use_auth {
-            crate::receiver::AUTH_BASE_SIZE
+            AUTH_BASE_SIZE
         } else {
-            crate::receiver::UNAUTH_BASE_SIZE
+            UNAUTH_BASE_SIZE
         };
         // Worst-case per-packet extras: HMAC TLV (20), Direct Measurement (16),
         // Access Report (8) — included when they can appear. The HMAC TLV
@@ -1622,12 +1621,7 @@ fn process_response(
 
             // Verify base packet HMAC against canonical buffer (RFC 8762 §4.4, §4.6)
             if let Some(key) = ctx.hmac_key {
-                if !verify_packet_hmac(
-                    key,
-                    &canonical_buf,
-                    REFLECTED_AUTH_PACKET_HMAC_OFFSET,
-                    &hmac,
-                ) {
+                if !verify_packet_hmac(key, &canonical_buf, AUTH_HMAC_OFFSET, &hmac) {
                     crate::eprintln_throttled!(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num
@@ -1706,12 +1700,7 @@ fn process_response(
 
             // Verify HMAC against canonical buffer when key is present (RFC 8762 §4.4, §4.6)
             if let Some(key) = ctx.hmac_key {
-                if !verify_packet_hmac(
-                    key,
-                    &canonical_buf,
-                    REFLECTED_AUTH_PACKET_HMAC_OFFSET,
-                    &hmac,
-                ) {
+                if !verify_packet_hmac(key, &canonical_buf, AUTH_HMAC_OFFSET, &hmac) {
                     crate::eprintln_throttled!(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num

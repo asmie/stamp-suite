@@ -2,6 +2,7 @@
 //! sub-TLV parsing and Address Group matching.
 
 use super::*;
+use crate::tlv::TlvSpan;
 
 /// Behaviour requested by a Reflected Test Packet Control TLV
 /// (RFC 10052 §3).
@@ -62,17 +63,12 @@ pub(super) enum ReflectedControlSubTlv {
 pub(super) fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedControlSubTlv> {
     let mut out = Vec::new();
     let mut offset = 0;
-    while offset + TLV_HEADER_SIZE <= body.len() {
-        let _flags = body[offset];
-        let type_byte = body[offset + 1];
-        let length = u16::from_be_bytes([body[offset + 2], body[offset + 3]]) as usize;
-        let value_start = offset + TLV_HEADER_SIZE;
-        let value_end = value_start.saturating_add(length);
-        if value_end > body.len() {
-            // Truncated; stop parsing here.
-            break;
-        }
-        let value = &body[value_start..value_end];
+    // A truncated sub-TLV ends parsing.
+    while let Some(sub) = TlvSpan::at(body, offset) {
+        let type_byte = sub.tlv_type.to_byte();
+        let length = sub.len;
+        let value_end = sub.end();
+        let value = &body[sub.value()];
         match type_byte {
             REFLECTED_CONTROL_SUBTLV_L2_GROUP => {
                 // RFC 10052 §3.1.1: equal Mask/Group
@@ -87,7 +83,7 @@ pub(super) fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedCont
                 }
             }
             REFLECTED_CONTROL_SUBTLV_L3_GROUP => {
-                // Draft §3.1.2: prefix_len(1) + reserved(3) + prefix(4 or 16).
+                // RFC 10052 §3.1.2: prefix_len(1) + reserved(3) + prefix(4 or 16).
                 // Skip lengths other than 8 (IPv4) or 20 (IPv6).
                 let len = value.len();
                 if len == 4 + 4 || len == 4 + 16 {
@@ -96,12 +92,13 @@ pub(super) fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedCont
                     out.push(ReflectedControlSubTlv::L3Group { prefix_len, prefix });
                 }
             }
-            // Presence-only; the draft defines no value fields, so any
+            // Presence-only; ext-hdr-15 §5.1 defines no value fields, so any
             // length is accepted and the value ignored.
             REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL => {
                 out.push(ReflectedControlSubTlv::Ipv6ExtHdrControl);
             }
-            // The all-zeros 4-byte header is a draft-14 §3 placeholder.
+            // An all-zero 4-octet header pads the TLV to its 12-octet minimum
+            // (RFC 10052 §3).
             0 if length == 0 => {}
             other => out.push(ReflectedControlSubTlv::Unknown { type_byte: other }),
         }

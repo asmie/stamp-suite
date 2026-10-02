@@ -10,6 +10,24 @@ use crate::tlv::{TlvError, TlvList};
 /// payload bytes). Accommodates padded probes without datagram truncation.
 pub const MAX_UDP_PAYLOAD: usize = 65535;
 
+/// Size of an unauthenticated base packet in both directions
+/// (RFC 8762 §4.2.1, §4.3.1).
+pub const UNAUTH_BASE_SIZE: usize = 44;
+
+/// Size of an authenticated base packet in both directions
+/// (RFC 8762 §4.2.2, §4.3.2).
+pub const AUTH_BASE_SIZE: usize = 112;
+
+/// Offset of the HMAC field in authenticated packets of either direction.
+/// The HMAC covers the octets before it (RFC 8762 §4.4).
+pub const AUTH_HMAC_OFFSET: usize = 96;
+
+/// Offset of the SSID field in unauthenticated packets (RFC 8972 §3).
+pub const UNAUTH_SSID_OFFSET: usize = 14;
+
+/// Offset of the SSID field in authenticated packets (RFC 8972 §3).
+pub const AUTH_SSID_OFFSET: usize = 26;
+
 /// Errors that can occur during packet parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum PacketError {
@@ -558,7 +576,7 @@ pub struct ExtendedPacketUnauthenticated {
 
 impl ExtendedPacketUnauthenticated {
     /// Base packet size (44 bytes).
-    pub const BASE_SIZE: usize = 44;
+    pub const BASE_SIZE: usize = UNAUTH_BASE_SIZE;
 
     /// Creates a new extended packet with just the base packet.
     #[must_use]
@@ -638,7 +656,7 @@ pub struct ExtendedReflectedPacketUnauthenticated {
 
 impl ExtendedReflectedPacketUnauthenticated {
     /// Base packet size (44 bytes).
-    pub const BASE_SIZE: usize = 44;
+    pub const BASE_SIZE: usize = UNAUTH_BASE_SIZE;
 
     /// Creates a new extended packet with just the base packet.
     #[must_use]
@@ -727,7 +745,7 @@ pub struct ExtendedPacketAuthenticated {
 
 impl ExtendedPacketAuthenticated {
     /// Base packet size (112 bytes).
-    pub const BASE_SIZE: usize = 112;
+    pub const BASE_SIZE: usize = AUTH_BASE_SIZE;
 
     /// Creates a new extended packet with just the base packet.
     #[must_use]
@@ -807,7 +825,7 @@ pub struct ExtendedReflectedPacketAuthenticated {
 
 impl ExtendedReflectedPacketAuthenticated {
     /// Base packet size (112 bytes).
-    pub const BASE_SIZE: usize = 112;
+    pub const BASE_SIZE: usize = AUTH_BASE_SIZE;
 
     /// Creates a new extended packet with just the base packet.
     #[must_use]

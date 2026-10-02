@@ -513,12 +513,13 @@ fn unsuccessful_sends_do_not_advance_transmit_or_follow_up_counts() {
 }
 
 #[test]
-fn malformed_tail_stays_opaque_while_final_hmac_is_refreshed() {
+fn malformed_tail_stays_opaque_while_prefix_and_hmac_are_refreshed() {
     let key = HmacKey::new(vec![0xAB; 16]).unwrap();
     let mut data = vec![0; 44];
     data[3] = 42;
     data.extend_from_slice(&[0, 5, 0, 12]);
     data.extend_from_slice(&[99; 12]);
+    let malformed_offset = data.len();
     data.extend_from_slice(&[0x40, 1, 255, 255, 7]);
     let hmac_offset = data.len();
     data.extend_from_slice(&[0, 8, 0, 16]);
@@ -526,7 +527,11 @@ fn malformed_tail_stays_opaque_while_final_hmac_is_refreshed() {
     data.extend_from_slice(&[0; 13]);
     let before = data.clone();
     refresh_telemetry(&mut data, 44, &Session::new(0), true);
-    assert_eq!(data, before);
+    // The processed Direct Measurement TLV before the malformed one gets
+    // fresh counters (RFC 8972 §4); S_TxC and everything after stay as sent.
+    assert_eq!(&data[48..52], &[99; 4]);
+    assert_eq!(&data[52..60], &[0; 8]);
+    assert_eq!(&data[malformed_offset..], &before[malformed_offset..]);
     sign_tlvs(&mut data, 44, &key);
     let mut input = data[..4].to_vec();
     input.extend_from_slice(&data[44..hmac_offset]);

@@ -2,7 +2,7 @@
 
 use crate::ber::xor_popcount_and_max_burst;
 use crate::tlv::core::{
-    RawTlv, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE, BER_BURST_TLV_VALUE_SIZE,
+    RawTlv, TlvFlags, TlvSpan, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE, BER_BURST_TLV_VALUE_SIZE,
     BER_COUNT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
     FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE, LOCATION_TLV_MIN_VALUE_SIZE,
     REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE,
@@ -1088,21 +1088,12 @@ impl TlvList {
             // Sub-TLVs use the standard 4-byte STAMP header and begin after the
             // 8-octet fixed fields.
             let mut offset = REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE;
-            while offset + TLV_HEADER_SIZE <= value.len() {
-                let type_byte = value[offset + 1];
-                let sub_len = u16::from_be_bytes([value[offset + 2], value[offset + 3]]) as usize;
-                let Some(end) = (offset + TLV_HEADER_SIZE).checked_add(sub_len) else {
-                    break;
-                };
-                if end > value.len() {
-                    break;
+            while let Some(sub) = TlvSpan::at(value, offset) {
+                if sub.tlv_type.to_byte() == REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL {
+                    // Sub-TLV flags follow the STAMP TLV flag layout.
+                    value[offset] |= TlvFlags::C;
                 }
-                if type_byte == REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL {
-                    // C flag (bit 3, 0x10) in the Sub-TLV Flags byte, mirroring
-                    // the STAMP TLV Flags procedure (RFC 8972).
-                    value[offset] |= 0x10;
-                }
-                offset = end;
+                offset = sub.end();
             }
         }
     }
@@ -1188,8 +1179,8 @@ fn set_sub_tlv_flag(sub: &mut [u8], flag: LocationSubFlag) {
     if let Some(flags) = sub.first_mut() {
         *flags = match flag {
             LocationSubFlag::Answered => 0x00,
-            LocationSubFlag::Unrecognized => 0x80,
-            LocationSubFlag::Malformed => 0x40,
+            LocationSubFlag::Unrecognized => TlvFlags::U,
+            LocationSubFlag::Malformed => TlvFlags::M,
         };
     }
 }

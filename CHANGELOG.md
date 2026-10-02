@@ -227,6 +227,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   library API is internal and not covered by the 1.x contract.
 - The reflector skips the CoS fallback retry when the fallback TOS byte is
   the one that just failed to send.
+- Both reflector backends share one ingest path (`receiver/ingest.rs`):
+  settings are resolved once at startup and each datagram goes through the
+  same rate limit, queue reservation, processing and reply construction.
+  Replaces two hand-maintained ~70-line context literals per packet.
+- Serialized replies are inspected through `tlv::TlvSpan` instead of seven
+  hand-written byte walkers with literal type codes and flag masks, so
+  codepoint changes in `tlv` reach the send path. Two walkers no longer
+  allocate a parsed TLV list per reply.
+- Packet layout constants (base sizes, HMAC and SSID offsets) are defined
+  once in `packets.rs`.
+- Send-time Direct Measurement and Follow-Up Telemetry refresh now covers
+  TLVs before a malformed TLV, matching the RFC 8972 §4 stop rule used during
+  assembly.
+- Conformance matrix citations name files rather than line ranges.
 
 ### Changed (standards)
 

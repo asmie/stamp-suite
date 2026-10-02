@@ -53,17 +53,17 @@ pub(super) fn log_header_trim(removed: usize, mtu: usize) {
 /// RFC 8972 §4.2 handling. The TLV is appended after the packet's regular
 /// content; the sender does not otherwise rely on or parse it.
 pub(super) fn malformed_tlv_bytes(mode: MalformedMode) -> Vec<u8> {
-    // Flags, Type, Length(hi), Length(lo), then Value. Type 1 = Extra Padding.
-    const U_FLAG: u8 = 0x80;
-    const PADDING_TYPE: u8 = 1;
+    // Flags, Type, Length(hi), Length(lo), then Value.
+    const U_FLAG: u8 = crate::tlv::TlvFlags::U;
+    let padding_type = TlvType::ExtraPadding.to_byte();
     match mode {
         // Structurally valid (length matches the 4 value octets) but with
         // reserved flag bits set — `U_FLAG | 0x07` lights the three lowest
         // reserved bits while still asserting U as a sender must.
-        MalformedMode::BadFlags => vec![U_FLAG | 0x07, PADDING_TYPE, 0x00, 0x04, 0, 0, 0, 0],
+        MalformedMode::BadFlags => vec![U_FLAG | 0x07, padding_type, 0x00, 0x04, 0, 0, 0, 0],
         // Length field claims 0xFFFF octets but only four follow, so the
         // declared length overruns the packet (RFC 8972 §4.2 → M-flag).
-        MalformedMode::BadLength => vec![U_FLAG, PADDING_TYPE, 0xFF, 0xFF, 0, 0, 0, 0],
+        MalformedMode::BadLength => vec![U_FLAG, padding_type, 0xFF, 0xFF, 0, 0, 0, 0],
     }
 }
 
@@ -266,13 +266,10 @@ pub fn assemble_auth_packet(error_estimate: u16) -> PacketAuthenticated {
     }
 }
 
-/// HMAC field offset in PacketAuthenticated (bytes before HMAC field).
-pub const AUTH_PACKET_HMAC_OFFSET: usize = 96;
-
 /// Computes and sets the base HMAC after all other packet fields are finalized.
 pub fn finalize_auth_packet(packet: &mut PacketAuthenticated, key: &HmacKey) {
     let bytes = packet.to_bytes();
-    packet.hmac = compute_packet_hmac(key, &bytes, AUTH_PACKET_HMAC_OFFSET);
+    packet.hmac = compute_packet_hmac(key, &bytes, AUTH_HMAC_OFFSET);
 }
 
 /// Builds an unauthenticated STAMP packet with TLV extensions.

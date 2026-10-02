@@ -522,10 +522,10 @@ fn tracked_processing_validates_before_any_session_mutation() {
             let mut data = [0u8; AUTH_BASE_SIZE];
             data[3] = 100;
             data[25] = 1;
-            let mac = crate::crypto::compute_packet_hmac(&key, &data, AUTH_PACKET_HMAC_OFFSET);
-            data[AUTH_PACKET_HMAC_OFFSET..].copy_from_slice(&mac);
+            let mac = crate::crypto::compute_packet_hmac(&key, &data, AUTH_HMAC_OFFSET);
+            data[AUTH_HMAC_OFFSET..].copy_from_slice(&mac);
             let mut forged = data;
-            forged[AUTH_PACKET_HMAC_OFFSET] ^= 1;
+            forged[AUTH_HMAC_OFFSET] ^= 1;
             assert!(process_session_packet_isolated(
                 &forged,
                 loopback_src(),
@@ -1556,13 +1556,13 @@ fn test_zero_trailer_reply_preserves_symmetric_size_auth() {
     // [96..112]) still verifies against the reply's own first 112 octets.
     // The appended zero padding lies outside the HMAC's coverage, so it
     // cannot invalidate it.
-    let hmac_field: [u8; 16] = response.data[REFLECTED_AUTH_PACKET_HMAC_OFFSET..AUTH_BASE_SIZE]
+    let hmac_field: [u8; 16] = response.data[AUTH_HMAC_OFFSET..AUTH_BASE_SIZE]
         .try_into()
         .unwrap();
     assert!(crate::crypto::verify_packet_hmac(
         &key,
         &response.data[..AUTH_BASE_SIZE],
-        REFLECTED_AUTH_PACKET_HMAC_OFFSET,
+        AUTH_HMAC_OFFSET,
         &hmac_field,
     ));
 }
