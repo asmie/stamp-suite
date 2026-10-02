@@ -1,6 +1,7 @@
 mod access_report;
 mod congestion;
 pub(crate) mod measurements;
+mod observer;
 mod packet;
 mod run;
 pub(crate) mod session_state;
@@ -10,6 +11,7 @@ mod validate;
 
 pub(crate) use access_report::*;
 use congestion::*;
+pub use observer::{SenderObserver, SenderObservers};
 pub use packet::*;
 use socket::*;
 use validate::*;
@@ -41,7 +43,6 @@ use crate::{
         UNAUTH_BASE_SIZE,
     },
     rate_control::{AimdController, AimdParams, AimdStats},
-    receiver::load_hmac_key,
     session::Session,
     stats::{
         AccessReportOutcome, AccessReportSummary, CongestionSummary, OwdCollector, OwdSample,
@@ -78,10 +79,6 @@ fn is_icmp_feedback(e: &std::io::Error) -> bool {
             | std::io::ErrorKind::NetworkUnreachable
     )
 }
-
-/// SNMP counters shared with the AgentX sub-agent.
-#[cfg(all(unix, feature = "snmp"))]
-type SnmpStats = Option<std::sync::Arc<crate::snmp::state::SenderSnmpStats>>;
 
 /// Mutable context for processing received responses.
 struct SenderRecvContext<'a> {
@@ -134,10 +131,7 @@ struct SenderRecvContext<'a> {
     /// both stop once it is set. Also latches "already warned" for the
     /// `Continue` policy so a long run logs the condition once, not per packet.
     zero_ssid_seen: &'a mut bool,
-    #[cfg(feature = "metrics")]
-    metrics_enabled: bool,
-    #[cfg(all(unix, feature = "snmp"))]
-    snmp_stats: Option<&'a crate::snmp::state::SenderSnmpStats>,
+    observers: &'a SenderObservers,
 }
 
 /// Runs the STAMP sender, transmitting test packets and collecting statistics.
@@ -146,33 +140,33 @@ struct SenderRecvContext<'a> {
 /// Returns statistics about the measurement session including RTT and packet loss.
 /// For a continuous CSV stream including the final snapshot, use
 /// [`run_sender_with_output`] with a shared [`crate::stats::StatsOutput`].
-///
-/// When the `metrics` feature is enabled and `--metrics` flag is set, this function
-/// also records Prometheus metrics for packets sent, received, lost, and RTT values.
-pub async fn run_sender(
-    conf: &Configuration,
-    #[cfg(all(unix, feature = "snmp"))] snmp_stats: Option<
-        std::sync::Arc<crate::snmp::state::SenderSnmpStats>,
-    >,
-    #[cfg(not(all(unix, feature = "snmp")))] snmp_stats: Option<()>,
-) -> Result<StatsSnapshot, crate::StartupError> {
+pub async fn run_sender(conf: &Configuration) -> Result<StatsSnapshot, crate::StartupError> {
     let mut output = crate::stats::StatsOutput::new(conf.output_format);
-    run_sender_with_output(conf, snmp_stats, &mut output).await
+    run_sender_with_output(
+        conf,
+        &mut output,
+        SenderObservers::default(),
+        crate::shutdown::CancellationToken::new(),
+    )
+    .await
 }
 
 /// Runs a sender with shared reporting state. Use the same `StatsOutput` to print
 /// the returned final snapshot so periodic CSV reports do not repeat the header.
+///
+/// `observers` see each probe and reply as it happens. Cancelling `shutdown`
+/// stops sending and returns the statistics so far; probes still awaiting a
+/// reply count as lost.
 pub async fn run_sender_with_output(
     conf: &Configuration,
-    #[cfg(all(unix, feature = "snmp"))] snmp_stats: SnmpStats,
-    #[cfg(not(all(unix, feature = "snmp")))] _snmp_stats: Option<()>,
     output: &mut crate::stats::StatsOutput,
+    observers: SenderObservers,
+    shutdown: crate::shutdown::CancellationToken,
 ) -> Result<StatsSnapshot, crate::StartupError> {
-    #[cfg(all(unix, feature = "snmp"))]
-    let run = run::SenderRun::open(conf, snmp_stats).await?;
-    #[cfg(not(all(unix, feature = "snmp")))]
-    let run = run::SenderRun::open(conf).await?;
-    run.run(output).await
+    run::SenderRun::open(conf, observers, shutdown)
+        .await?
+        .run(output)
+        .await
 }
 
 fn process_response(
@@ -231,10 +225,7 @@ fn process_response(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num
                     );
-                    #[cfg(feature = "metrics")]
-                    if ctx.metrics_enabled {
-                        crate::metrics::sender_metrics::record_hmac_failure();
-                    }
+                    ctx.observers.hmac_failed();
                     return;
                 }
             }
@@ -251,20 +242,18 @@ fn process_response(
                     &mut next_reflector_msid,
                     ctx.access_report_state.is_some(),
                     ctx.congestion.is_some(),
-                    #[cfg(feature = "metrics")]
-                    ctx.metrics_enabled,
                 ) {
-                    Ok(info) => Some(info),
+                    Ok(info) => {
+                        ctx.observers.tlv_flags(&info.flags);
+                        Some(info)
+                    }
                     Err(reason) => {
                         crate::eprintln_throttled!(
                             "Discarding reflected packet seq={}: {}",
                             seq_num,
                             reason
                         );
-                        #[cfg(feature = "metrics")]
-                        if ctx.metrics_enabled {
-                            crate::metrics::sender_metrics::record_tlv_error("M");
-                        }
+                        ctx.observers.reply_rejected();
                         return;
                     }
                 }
@@ -310,10 +299,7 @@ fn process_response(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num
                     );
-                    #[cfg(feature = "metrics")]
-                    if ctx.metrics_enabled {
-                        crate::metrics::sender_metrics::record_hmac_failure();
-                    }
+                    ctx.observers.hmac_failed();
                     return;
                 }
             }
@@ -345,20 +331,18 @@ fn process_response(
                 &mut next_reflector_msid,
                 ctx.access_report_state.is_some(),
                 ctx.congestion.is_some(),
-                #[cfg(feature = "metrics")]
-                ctx.metrics_enabled,
             ) {
-                Ok(info) => Some(info),
+                Ok(info) => {
+                    ctx.observers.tlv_flags(&info.flags);
+                    Some(info)
+                }
                 Err(reason) => {
                     crate::eprintln_throttled!(
                         "Discarding reflected packet seq={}: {}",
                         base.sess_sender_seq_number,
                         reason
                     );
-                    #[cfg(feature = "metrics")]
-                    if ctx.metrics_enabled {
-                        crate::metrics::sender_metrics::record_tlv_error("M");
-                    }
+                    ctx.observers.reply_rejected();
                     return;
                 }
             }
@@ -553,18 +537,7 @@ fn process_response(
             log::debug!("Invalid PTP nanoseconds on seq={seq_num}; omitting one-way delay");
         }
 
-        #[cfg(all(unix, feature = "snmp"))]
-        if let Some(stats) = ctx.snmp_stats {
-            stats.inc_received();
-            stats.record_rtt((rtt_ns / 1000) as u32);
-        }
-
-        #[cfg(feature = "metrics")]
-        if ctx.metrics_enabled {
-            let rtt_seconds = rtt_ns as f64 / 1_000_000_000.0;
-            crate::metrics::sender_metrics::record_packet_received();
-            crate::metrics::sender_metrics::record_rtt(rtt_seconds);
-        }
+        ctx.observers.reply_received(rtt_ns);
 
         if ctx.print_stats {
             let tlv_status = telemetry

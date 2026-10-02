@@ -43,6 +43,39 @@ pub struct SnmpConfig {
     pub send_delay: u16,
 }
 
+impl crate::sender::SenderObserver for SenderSnmpStats {
+    fn probe_sent(&self) {
+        self.inc_sent();
+    }
+    fn reply_received(&self, rtt_ns: u64) {
+        self.inc_received();
+        self.record_rtt(u32::try_from(rtt_ns / 1000).unwrap_or(u32::MAX));
+    }
+    fn probes_lost(&self, count: u32) {
+        self.inc_lost_by(count);
+    }
+}
+
+impl SnmpConfig {
+    /// The configuration values the MIB exposes.
+    #[must_use]
+    pub fn from_conf(conf: &crate::configuration::Configuration) -> Self {
+        Self {
+            is_reflector: conf.is_reflector,
+            listen_addr: conf.local_addr,
+            listen_port: conf.local_port,
+            remote_addr: conf.remote_addr,
+            remote_port: conf.remote_port,
+            auth_mode: conf.auth_mode.to_string(),
+            tlv_mode: conf.tlv_mode,
+            stateful_reflector: conf.stateful_reflector,
+            session_timeout: conf.session_timeout,
+            packet_count: conf.count,
+            send_delay: conf.send_delay,
+        }
+    }
+}
+
 /// Sender statistics exposed via SNMP, updated atomically.
 ///
 /// All counters are updated live during the sender run so that SNMP polling

@@ -39,6 +39,7 @@ mod net_scope;
 
 #[doc(hidden)]
 pub mod crypto;
+
 /// Error estimate encoding/decoding for timestamps.
 #[doc(hidden)]
 pub mod error_estimate;
@@ -59,6 +60,11 @@ pub mod rate_control;
 /// Session Reflector implementations.
 #[doc(hidden)]
 pub mod receiver;
+/// Process shutdown on signals and control-API requests.
+pub mod shutdown;
+
+/// The TOS / Traffic Class octet.
+pub mod tos;
 
 #[doc(hidden)]
 pub mod reply_source;
@@ -102,14 +108,55 @@ pub mod snmp;
 ///
 /// Distinct from normal shutdown so `main` exits non-zero and supervisors can
 /// restart the process. `main` prints the diagnostic once.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct StartupError(pub String);
+#[derive(Debug, thiserror::Error)]
+pub enum StartupError {
+    /// The configuration cannot be used as given.
+    #[error("{0}")]
+    Config(String),
+    /// A socket or file operation failed.
+    #[error("{context}: {source}")]
+    Io {
+        context: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A configured HMAC key could not be loaded.
+    #[error(transparent)]
+    Key(#[from] crypto::KeyLoadError),
+    /// The metrics endpoint, control API or another service did not start.
+    #[error("{context}: {source}")]
+    Service {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
 
 impl StartupError {
-    /// Builds a startup error from anything displayable.
+    /// A configuration problem described by `msg`.
     #[must_use]
-    pub fn new(msg: impl std::fmt::Display) -> Self {
-        Self(msg.to_string())
+    pub fn config(msg: impl std::fmt::Display) -> Self {
+        Self::Config(msg.to_string())
+    }
+
+    /// A failed socket or file operation; `context` says what was attempted.
+    #[must_use]
+    pub fn io(context: impl Into<String>, source: std::io::Error) -> Self {
+        Self::Io {
+            context: context.into(),
+            source,
+        }
+    }
+
+    /// A service that failed to start; `context` says which and where.
+    #[must_use]
+    pub fn service(
+        context: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self::Service {
+            context: context.into(),
+            source: source.into(),
+        }
     }
 }

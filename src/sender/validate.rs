@@ -66,7 +66,6 @@ pub(super) fn validate_reflected_tlvs(
     // Decode these values only when their respective state machines are active.
     track_access_report: bool,
     track_congestion: bool,
-    #[cfg(feature = "metrics")] metrics_enabled: bool,
 ) -> Result<TlvTelemetry, TlvRejection> {
     let (unrecognized, malformed, integrity_failed) = tlvs.count_error_flags();
     let hmac = match (hmac_key, tlvs.hmac_tlv()) {
@@ -242,14 +241,5 @@ pub(super) fn validate_reflected_tlvs(
         return Err(TlvRejection::MsidUnavailable);
     }
     *latched_reflector_msid = next_reflector_msid;
-
-    #[cfg(feature = "metrics")]
-    if metrics_enabled {
-        crate::metrics::sender_metrics::record_tlv_errors(
-            telemetry.flags.unrecognized,
-            telemetry.flags.malformed,
-            telemetry.flags.integrity_failed,
-        );
-    }
     Ok(telemetry)
 }

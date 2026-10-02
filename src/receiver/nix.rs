@@ -46,19 +46,19 @@ pub async fn run_receiver(
     let std_socket = match std::net::UdpSocket::bind(local_addr) {
         Ok(s) => s,
         Err(e) => {
-            return Err(crate::StartupError::new(format!(
-                "Cannot bind to address {local_addr}: {e}"
-            )));
+            return Err(crate::StartupError::io(
+                format!("Cannot bind to address {local_addr}"),
+                e,
+            ));
         }
     };
 
-    crate::net_policy::set_hops(&std_socket).map_err(|e| {
-        crate::StartupError::new(format!("Cannot set reply TTL/Hop Limit 255: {e}"))
-    })?;
+    crate::net_policy::set_hops(&std_socket)
+        .map_err(|e| crate::StartupError::io("Cannot set reply TTL/Hop Limit 255", e))?;
 
     let local_addr = std_socket
         .local_addr()
-        .map_err(|e| crate::StartupError::new(format!("Cannot get bound address: {e}")))?;
+        .map_err(|e| crate::StartupError::io("Cannot get bound address", e))?;
 
     // The default buffer holds about a millisecond of traffic at high packet
     // rates, so a short scheduling delay drops requests. The kernel caps the
@@ -96,10 +96,10 @@ pub async fn run_receiver(
     };
 
     if result < 0 {
-        return Err(crate::StartupError::new(format!(
-            "Failed to set IP_RECVTTL/IPV6_RECVHOPLIMIT: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(crate::StartupError::io(
+            "Failed to set IP_RECVTTL/IPV6_RECVHOPLIMIT",
+            std::io::Error::last_os_error(),
+        ));
     }
 
     // Enable TOS/Traffic Class reception (for DSCP/ECN measurement)
@@ -200,9 +200,10 @@ pub async fn run_receiver(
     };
     // Set non-blocking for tokio
     if let Err(e) = std_socket.set_nonblocking(true) {
-        return Err(crate::StartupError::new(format!(
-            "Error: Failed to set socket non-blocking: {e}"
-        )));
+        return Err(crate::StartupError::io(
+            "Failed to set socket non-blocking",
+            e,
+        ));
     }
 
     // Wrap in Tokio for async readiness notifications. This loop owns the
@@ -211,9 +212,7 @@ pub async fn run_receiver(
     let tokio_socket = match UdpSocket::from_std(std_socket) {
         Ok(s) => s,
         Err(e) => {
-            return Err(crate::StartupError::new(format!(
-                "Error: Failed to create tokio socket: {e}"
-            )));
+            return Err(crate::StartupError::io("Failed to create tokio socket", e));
         }
     };
 
@@ -268,11 +267,7 @@ pub async fn run_receiver(
         .map(|t| Duration::from_secs(t.max(1)));
     let mut cleanup_timer = cleanup_interval.map(interval);
 
-    // Poll for control-plane shutdown requests (cheap 250 ms tick; the
-    // first immediate tick is harmless — the flag starts false).
-    let mut shutdown_tick = interval(Duration::from_millis(250));
-    let signal = super::shutdown_signal();
-    tokio::pin!(signal);
+    let shutdown = shared.shutdown.clone();
 
     // Sends the next copy of a reply, records its TX-timestamp correlation,
     // and requeues any later burst copies. This loop is the only sender, so
@@ -304,12 +299,6 @@ pub async fn run_receiver(
     }
 
     loop {
-        if shared
-            .shutdown_requested
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            drain.begin(std::time::Instant::now(), grace);
-        }
         if drain.finished(std::time::Instant::now(), budget.is_empty()) {
             drop(replies); // Account for every unsent copy before printing stats.
             print_reflector_stats(&counters, &session_manager, start_time, output_format);
@@ -389,7 +378,7 @@ pub async fn run_receiver(
                 continue;
             }
 
-            _ = &mut signal, if drain.deadline().is_none() => {
+            _ = shutdown.cancelled(), if drain.deadline().is_none() => {
                 drain.begin(std::time::Instant::now(), grace);
                 continue;
             }
@@ -401,11 +390,6 @@ pub async fn run_receiver(
                     std::future::pending::<()>().await;
                 }
             } => { continue; }
-
-            _ = shutdown_tick.tick() => {
-                // Poll the flag at the top even when no socket is readable.
-                continue;
-            }
         }
 
         // Drain a bounded batch per wakeup; the bound keeps timers, shutdown
@@ -440,7 +424,7 @@ pub async fn run_receiver(
 
                     // Extract TOS (DSCP/ECN) from control messages
                     let (received_dscp, received_ecn) = extract_tos_from_cmsgs(&msg)
-                        .map(|tos| ((tos >> 2) & 0x3F, tos & 0x03))
+                        .map(|tos| (crate::tos::Tos(tos).dscp(), crate::tos::Tos(tos).ecn()))
                         .unwrap_or((0, 0));
 
                     // Extract actual destination address from packet info (for Location TLV).

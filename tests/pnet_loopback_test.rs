@@ -100,16 +100,10 @@ async fn one_packet_round_trip(
     // re-parse the same args for the caller side by simply constructing
     // them locally where needed (sender doesn't read conf).
     let conf = reflector_conf(local_port, auth, hmac_key_hex);
-    let shared = receiver::create_shared_state(&conf);
+    let shared = receiver::create_shared_state(&conf).unwrap();
     let shared_capture_alive = shared.capture_alive.clone();
-    let shutdown = shared.shutdown_requested.clone();
-    struct ShutdownOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
-    impl Drop for ShutdownOnDrop {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Relaxed);
-        }
-    }
-    let _shutdown_guard = ShutdownOnDrop(shutdown.clone());
+    let shutdown = shared.shutdown.clone();
+    let _shutdown_guard = shutdown.clone().drop_guard();
 
     // Start the receiver in the background. Move conf+shared into the
     // task so they outlive run_receiver's borrow.
@@ -168,7 +162,7 @@ async fn one_packet_round_trip(
 
     // A JoinHandle abort cannot stop spawn_blocking capture. Request shutdown
     // and wait for both capture and transmission workers to leave.
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.cancel();
     timeout(Duration::from_secs(4), handle)
         .await
         .expect("pnet shutdown timed out")

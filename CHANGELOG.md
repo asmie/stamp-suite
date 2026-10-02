@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A sender stops on Ctrl-C or SIGTERM and prints the statistics collected so
+  far. It used to exit without a summary.
+- `--help` and the man page group options into sections (Endpoints, Sender,
+  Authentication, Reflector, and so on).
+
 - Add release fixtures for bearer-authenticated HTTP/HTTPS key rotation with
   live packets and a real Net-SNMP master, including bulk queries and reconnect.
   Require a bounded Windows runtime suite and publish a hardware timestamp
@@ -224,6 +229,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last probe.
 - Fail startup when the local Error Estimate cannot be built, instead of
   panicking.
+- Refuse to start when `--metrics` or `--snmp` is given to a binary built
+  without that feature, as `--control` already did. Both used to print a
+  warning and run without the service.
+- Reject `--count 0`. The sender sent nothing and reported success.
+- Report HMAC key load failures with the option, path and OS error, at the
+  point of failure. They were logged and followed by a generic "no usable key"
+  error. The sender loads its key before opening sockets.
 
 ### Performance
 
@@ -291,6 +303,23 @@ median of three trials, reflector CPU as a share of one core:
 - The sender loop moved from one 1300-line function into `sender/run.rs`:
   `SenderRun::open` does setup, and the send, drain and Access Report phases
   share one receive helper.
+- `StartupError` is an enum (`Config`, `Io`, `Key`, `Service`) that keeps the
+  underlying error, and `HmacError` keeps its `io::Error` and hex errors. Key
+  loading moved from `receiver` to `crypto::KeySource`, and
+  `create_shared_state` returns a `Result`.
+- One `CancellationToken` carries shutdown: signals and the control API cancel
+  it, and the reflector backends, the sender and the SNMP sub-agent observe
+  it. The nix reflector no longer polls a flag every 250 ms. `tokio-util` is
+  now a required dependency.
+- Sender metrics and SNMP counters are `SenderObserver` implementations instead
+  of feature-gated calls throughout the send and receive paths.
+  `run_sender(conf)` and `run_sender_with_output(conf, output, observers,
+  shutdown)` replace the feature-dependent signatures. The unused RTT min/max
+  gauge helpers are removed.
+- `Configuration::validate` is split into per-topic checks. `merge_file`
+  destructures the file configuration, so an unmerged key fails to compile,
+  and a test checks that every CLI option has a config file key.
+- DSCP/ECN packing and unpacking go through `tos::Tos`.
 
 ### Changed (standards)
 

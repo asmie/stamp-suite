@@ -7,7 +7,7 @@
 
 use std::{
     net::{IpAddr, SocketAddr},
-    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    sync::atomic::Ordering as AtomicOrdering,
     time::{Duration, Instant},
 };
 
@@ -25,7 +25,7 @@ use pnet::{
 
 use std::sync::Arc;
 
-use crate::configuration::Configuration;
+use crate::{configuration::Configuration, shutdown::CancellationToken};
 
 use super::{
     ingest::{ReceivedPacket, ReflectorCore, ReflectorSettings},
@@ -48,8 +48,9 @@ struct CaptureConfig {
     shutdown_grace: Duration,
     local_port: u16,
     cleanup_interval: Option<Duration>,
-    /// Set by the signal and control-plane watcher.
-    shutdown: Arc<AtomicBool>,
+    /// Child of the process shutdown token; also cancelled when the
+    /// capture or transmit side stops.
+    shutdown: CancellationToken,
 }
 
 /// Interface properties needed for macOS special handling.
@@ -86,9 +87,10 @@ pub async fn run_receiver(
         Ok(s) => s,
         Err(e) => {
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::new(format!(
-                "Cannot bind to address {send_bind_v4} (IPv4 send socket): {e}"
-            )));
+            return Err(crate::StartupError::io(
+                format!("Cannot bind to address {send_bind_v4} (IPv4 send socket)"),
+                e,
+            ));
         }
     };
     let send_bind_v6: SocketAddr = match conf.local_addr {
@@ -100,12 +102,11 @@ pub async fn run_receiver(
     // replies, which the v4 path cannot serve anyway.
     let send_socket_v6 = std::net::UdpSocket::bind(send_bind_v6).ok();
     for socket in std::iter::once(&send_socket_v4).chain(send_socket_v6.iter()) {
-        crate::net_policy::set_hops(socket).map_err(|e| {
-            crate::StartupError::new(format!("Cannot set reply TTL/Hop Limit 255: {e}"))
-        })?;
-        socket.set_nonblocking(true).map_err(|e| {
-            crate::StartupError::new(format!("Cannot make reply socket nonblocking: {e}"))
-        })?;
+        crate::net_policy::set_hops(socket)
+            .map_err(|e| crate::StartupError::io("Cannot set reply TTL/Hop Limit 255", e))?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|e| crate::StartupError::io("Cannot make reply socket nonblocking", e))?;
     }
 
     // Key and policy errors are reported before capture-driver discovery.
@@ -132,7 +133,7 @@ pub async fn run_receiver(
         Some(iface) => iface,
         None => {
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::new(format!(
+            return Err(crate::StartupError::config(format!(
                 "No interface found with IP address {}",
                 conf.local_addr
             )));
@@ -162,17 +163,17 @@ pub async fn run_receiver(
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => {
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::new(format!(
+            return Err(crate::StartupError::config(format!(
                 "Unhandled channel type for interface {}",
                 interface.name
             )));
         }
         Err(e) => {
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::new(format!(
-                "Unable to create capture channel on {}: {e}",
-                interface.name
-            )));
+            return Err(crate::StartupError::io(
+                format!("Unable to create capture channel on {}", interface.name),
+                e,
+            ));
         }
     };
 
@@ -195,7 +196,7 @@ pub async fn run_receiver(
         .checked_div(2)
         .map(|t| Duration::from_secs(t.max(1)));
 
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = shared.shutdown.child_token();
     let counters = Arc::clone(&shared.counters);
     let start_time = shared.start_time;
     let output_format = conf.output_format;
@@ -207,36 +208,11 @@ pub async fn run_receiver(
         shutdown_grace: Duration::from_millis(u64::from(conf.reflector_shutdown_grace_ms)),
         local_port: conf.local_port,
         cleanup_interval,
-        shutdown: Arc::clone(&shutdown),
+        shutdown: shutdown.clone(),
     };
 
-    // Spawn async task that funnels both Ctrl+C and the control plane's
-    // shutdown request (POST /v1/shutdown) into the capture loop's
-    // existing shutdown flag.
-    let shutdown_flag = Arc::clone(&shutdown);
-    let control_shutdown = Arc::clone(&shared.shutdown_requested);
-    let signal = super::shutdown_signal();
-    let task = tokio::spawn(async move {
-        tokio::pin!(signal);
-        let mut tick = tokio::time::interval(Duration::from_millis(250));
-        loop {
-            tokio::select! {
-                _ = &mut signal => break,
-                _ = tick.tick() => {
-                    if control_shutdown.load(AtomicOrdering::Relaxed) {
-                        log::info!("shutdown requested via control plane");
-                        break;
-                    }
-                }
-            }
-        }
-        shutdown_flag.store(true, AtomicOrdering::Relaxed);
-    });
-
-    let mut shutdown_task = CaptureShutdown {
-        task,
-        flag: Arc::clone(&shutdown),
-    };
+    // Dropping this future (an aborted task) also stops capture and sending.
+    let _stop_on_drop = shutdown.drop_guard();
 
     // Spawn the blocking packet capture loop on a dedicated thread.
     // This prevents starvation of the async runtime which may be running
@@ -246,9 +222,6 @@ pub async fn run_receiver(
         run_capture_loop(rx, capture_config, send_ctx, iface_props);
     })
     .await;
-
-    shutdown_task.task.abort();
-    let _ = (&mut shutdown_task.task).await;
 
     // Report capture-task panics and clear readiness so monitors can detect
     // capture failure.
@@ -264,26 +237,9 @@ pub async fn run_receiver(
     Ok(())
 }
 
-// Cancelling the async receiver also stops its blocking capture and send work.
-struct CaptureShutdown {
-    task: tokio::task::JoinHandle<()>,
-    flag: Arc<AtomicBool>,
-}
-impl Drop for CaptureShutdown {
-    fn drop(&mut self) {
-        self.flag.store(true, AtomicOrdering::Relaxed);
-        self.task.abort();
-    }
-}
-struct StopCapture(Arc<AtomicBool>);
-impl Drop for StopCapture {
-    fn drop(&mut self) {
-        self.0.store(true, AtomicOrdering::Relaxed);
-    }
-}
 struct TransmitWorker {
     handle: Option<std::thread::JoinHandle<()>>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: CancellationToken,
 }
 impl TransmitWorker {
     fn join(&mut self) {
@@ -298,7 +254,7 @@ impl TransmitWorker {
 }
 impl Drop for TransmitWorker {
     fn drop(&mut self) {
-        self.shutdown.store(true, AtomicOrdering::Relaxed);
+        self.shutdown.cancel();
         self.join();
     }
 }
@@ -313,11 +269,12 @@ fn run_capture_loop(
     let (transmitter, receiver) = std::sync::mpsc::sync_channel(config.queue_capacity);
     let tx_counters = Arc::clone(&config.core.counters);
     let tx_limiter = Arc::clone(&config.core.rate_limiter);
-    let tx_shutdown = Arc::clone(&config.shutdown);
+    let tx_shutdown = config.shutdown.clone();
     let tx_budget = Arc::clone(&config.core.budget);
     let grace = config.shutdown_grace;
     let worker = std::thread::spawn(move || {
-        let _stop = StopCapture(Arc::clone(&tx_shutdown));
+        // A transmit worker that exits for any reason also stops capture.
+        let _stop = tx_shutdown.clone().drop_guard();
         run_transmit_loop(
             receiver,
             send_ctx,
@@ -330,13 +287,12 @@ fn run_capture_loop(
     });
     let mut worker = TransmitWorker {
         handle: Some(worker),
-        shutdown: Arc::clone(&config.shutdown),
+        shutdown: config.shutdown.clone(),
     };
     let mut last_cleanup = Instant::now();
 
     loop {
-        // Check shutdown flag
-        if config.shutdown.load(AtomicOrdering::Relaxed) {
+        if config.shutdown.is_cancelled() {
             break;
         }
 
@@ -500,7 +456,7 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
                 IpAddr::V4(ip.get_source()),
                 IpAddr::V4(ip.get_destination()),
                 ip.get_ttl(),
-                (ip.get_dscp() << 2) | ip.get_ecn(),
+                crate::tos::Tos::new(ip.get_dscp(), ip.get_ecn()).0,
                 ip.get_next_level_protocol().0,
                 ihl,
                 end,
@@ -557,8 +513,8 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
                 src: SocketAddr::new(src, udp.get_source()),
                 dst_addr: dst,
                 ttl,
-                dscp: tos >> 2,
-                ecn: tos & 3,
+                dscp: crate::tos::Tos(tos).dscp(),
+                ecn: crate::tos::Tos(tos).ecn(),
                 captured,
                 src_mac: None,
             };
@@ -681,7 +637,7 @@ fn handle_stamp_packet(
     config: &CaptureConfig,
     transmitter: &std::sync::mpsc::SyncSender<QueuedTransmission>,
 ) {
-    if config.shutdown.load(AtomicOrdering::Relaxed) {
+    if config.shutdown.is_cancelled() {
         return;
     }
     let packet = ReceivedPacket {
@@ -717,7 +673,7 @@ fn run_transmit_loop(
     sockets: PnetSendContext,
     counters: &ReflectorCounters,
     limiter: &super::RateLimiter,
-    shutdown: &AtomicBool,
+    shutdown: &CancellationToken,
     budget: &Arc<ReplyBudget>,
     grace: Duration,
 ) {
@@ -742,7 +698,7 @@ fn run_transmit_loop_with_mtu(
     sockets: PnetSendContext,
     counters: &ReflectorCounters,
     limiter: &super::RateLimiter,
-    shutdown: &AtomicBool,
+    shutdown: &CancellationToken,
     budget: &Arc<ReplyBudget>,
     grace: Duration,
     mut payload_cap: impl FnMut(
@@ -763,7 +719,7 @@ fn run_transmit_loop_with_mtu(
     let mut drain = ShutdownDrain::default();
     let mut disconnected = false;
     loop {
-        if shutdown.load(AtomicOrdering::Relaxed) || disconnected {
+        if shutdown.is_cancelled() || disconnected {
             drain.begin(Instant::now(), grace);
         }
         if drain.finished(Instant::now(), budget.is_empty()) {
@@ -855,7 +811,7 @@ mod tests {
             };
             let counters = Arc::new(ReflectorCounters::new());
             let budget = ReplyBudget::new(1, Arc::clone(&counters));
-            let shutdown = Arc::new(AtomicBool::new(false));
+            let shutdown = CancellationToken::new();
             let session = Arc::new(crate::session::Session::new(0));
             let response = super::super::StampResponse {
                 data: vec![0; 44],
@@ -888,7 +844,7 @@ mod tests {
             let (done_sender, done_receiver) = std::sync::mpsc::channel();
             let worker_counters = Arc::clone(&counters);
             let worker_budget = Arc::clone(&budget);
-            let worker_shutdown = Arc::clone(&shutdown);
+            let worker_shutdown = shutdown.clone();
             let worker = std::thread::spawn(move || {
                 run_transmit_loop_with_mtu(
                     receiver,
@@ -903,7 +859,7 @@ mod tests {
                 done_sender.send(()).unwrap();
             });
             peer.recv_from(&mut [0; 128]).unwrap();
-            shutdown.store(true, AtomicOrdering::Relaxed);
+            shutdown.cancel();
             drop(sender); // Wake the worker without waiting for its periodic poll.
             assert!(done_receiver.recv_timeout(Duration::from_secs(2)).is_ok());
             worker.join().unwrap();
@@ -928,12 +884,12 @@ mod tests {
         };
         let counters = Arc::new(ReflectorCounters::new());
         let session = Arc::new(crate::session::Session::new(0));
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = CancellationToken::new();
         let budget = ReplyBudget::new(4, Arc::clone(&counters));
         let worker_budget = Arc::clone(&budget);
         let (sender, receiver) = std::sync::mpsc::sync_channel(4);
         let worker_counters = Arc::clone(&counters);
-        let worker_shutdown = Arc::clone(&shutdown);
+        let worker_shutdown = shutdown.clone();
         let worker = std::thread::spawn(move || {
             run_transmit_loop_with_mtu(
                 receiver,
@@ -1053,7 +1009,7 @@ mod tests {
             sockets,
             &counters,
             &super::super::RateLimiter::new(0),
-            &AtomicBool::new(false),
+            &CancellationToken::new(),
             &budget,
             Duration::from_secs(1),
             |local, target, options, refresh| {
@@ -1202,7 +1158,7 @@ mod tests {
         ]);
         // This library-level failure fixture does not need a fixed STAMP port.
         conf.local_port = 0;
-        let shared = create_shared_state(&conf);
+        let shared = create_shared_state(&conf).unwrap();
 
         assert!(shared.capture_alive.load(AtomicOrdering::Relaxed));
 

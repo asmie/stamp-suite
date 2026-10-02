@@ -162,6 +162,9 @@ idle shutdown at 100 ms intervals independently of `--session-timeout`, includin
 when session expiry is disabled. Its handoff is bounded and nonblocking; capture
 and send workers are joined before the final summary.
 
+A sender stops sending on Ctrl-C or SIGTERM and prints the statistics collected
+so far, then exits 0. Probes still awaiting a reply count as lost.
+
 The session drain switch (`POST /v1/drain`) remains separate: it rejects new
 session identities while existing sessions can submit work subject to the queue
 limit. To finish accepted work and exit, use shutdown with a grace period.

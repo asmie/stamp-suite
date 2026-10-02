@@ -16,16 +16,12 @@ mod handler;
 pub mod oids;
 pub mod state;
 
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use handler::StampMibHandler;
 use state::SnmpState;
+
+use crate::shutdown::CancellationToken;
 
 /// Error type for SNMP initialization failures.
 #[derive(Debug, thiserror::Error)]
@@ -40,13 +36,13 @@ pub enum SnmpError {
 
 /// Handle to the running SNMP sub-agent.
 pub struct SnmpServer {
-    cancel: Arc<AtomicBool>,
+    cancel: CancellationToken,
 }
 
 impl SnmpServer {
     /// Signals the SNMP sub-agent to shut down.
     pub fn shutdown(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 }
 
@@ -63,7 +59,7 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// a blocking event loop. Initial connection errors return to the caller.
 /// Later disconnects retry with capped exponential backoff until shutdown.
 pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServer, SnmpError> {
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = CancellationToken::new();
 
     // Validate connectivity up front (fail-fast on a bad socket path). The
     // handshake is blocking socket I/O with a read timeout, so it runs off
@@ -81,19 +77,19 @@ pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServ
 
     // Spawn the event loop in a blocking task (synchronous socket I/O), wrapped
     // in a reconnect loop. The first iteration reuses the validated session.
-    let cancel_loop = Arc::clone(&cancel);
+    let cancel_loop = cancel.clone();
     let join = tokio::task::spawn_blocking(move || {
         let handler = StampMibHandler::new(state);
         let mut session = session;
         loop {
             if let Err(e) = session.run_loop(&handler, &cancel_loop) {
-                if !cancel_loop.load(Ordering::Relaxed) {
+                if !cancel_loop.is_cancelled() {
                     log::warn!("AgentX event loop error: {e}; will attempt to reconnect");
                 }
             }
             // run_loop returned: either we were asked to shut down, or the
             // master went away. Stop on shutdown; otherwise reconnect.
-            if cancel_loop.load(Ordering::Relaxed) {
+            if cancel_loop.is_cancelled() {
                 break;
             }
             match reconnect(&socket_path, &cancel_loop) {
@@ -106,10 +102,10 @@ pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServ
 
     // Supervisor: log a panic in the blocking task rather than dropping it
     // silently (which would leave the sub-agent dead with no signal).
-    let cancel_for_supervisor = Arc::clone(&cancel);
+    let cancel_for_supervisor = cancel.clone();
     tokio::spawn(async move {
         if let Err(join_err) = join.await {
-            if !cancel_for_supervisor.load(Ordering::Relaxed) {
+            if !cancel_for_supervisor.is_cancelled() {
                 if join_err.is_panic() {
                     log::error!("AgentX event loop panicked: {join_err}; SNMP sub-agent is down");
                 } else {
@@ -127,10 +123,10 @@ pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServ
 ///
 /// Returns `None` if shutdown was requested before a connection was
 /// re-established.
-fn reconnect(socket_path: &str, cancel: &AtomicBool) -> Option<agentx::AgentXSession> {
+fn reconnect(socket_path: &str, cancel: &CancellationToken) -> Option<agentx::AgentXSession> {
     let mut backoff = RECONNECT_BACKOFF_START;
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return None;
         }
         match agentx::AgentXSession::connect(socket_path, AGENTX_DESCRIPTION) {
@@ -157,11 +153,11 @@ fn reconnect(socket_path: &str, cancel: &AtomicBool) -> Option<agentx::AgentXSes
 /// Sleeps for up to `dur`, returning early if `cancel` becomes set. Runs on the
 /// blocking thread, so it polls `cancel` in short steps to stay responsive to
 /// shutdown.
-fn sleep_cancellable(dur: Duration, cancel: &AtomicBool) {
+fn sleep_cancellable(dur: Duration, cancel: &CancellationToken) {
     let step = Duration::from_millis(200);
     let mut remaining = dur;
     while !remaining.is_zero() {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_cancelled() {
             return;
         }
         let s = remaining.min(step);
@@ -177,7 +173,8 @@ mod tests {
 
     #[test]
     fn test_sleep_cancellable_returns_early_when_cancelled() {
-        let cancel = AtomicBool::new(true);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
         let start = Instant::now();
         sleep_cancellable(Duration::from_secs(10), &cancel);
         assert!(
@@ -190,7 +187,8 @@ mod tests {
     fn test_reconnect_returns_none_when_cancelled() {
         // Already cancelled: reconnect must bail immediately without attempting
         // (or blocking on) a connection.
-        let cancel = AtomicBool::new(true);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
         let start = Instant::now();
         assert!(reconnect("/nonexistent/stamp-agentx.sock", &cancel).is_none());
         assert!(start.elapsed() < Duration::from_secs(1));

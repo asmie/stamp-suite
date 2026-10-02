@@ -20,7 +20,7 @@ pub const MIN_KEY_LENGTH: usize = 16;
 pub const HMAC_OUTPUT_LENGTH: usize = 16;
 
 /// Errors that can occur during HMAC operations.
-#[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[derive(Error, Debug)]
 pub enum HmacError {
     /// The provided key is too short.
     #[error("Key length {0} is less than minimum required {MIN_KEY_LENGTH} bytes")]
@@ -28,11 +28,11 @@ pub enum HmacError {
 
     /// Invalid hexadecimal string.
     #[error("Invalid hex string: {0}")]
-    InvalidHex(String),
+    InvalidHex(#[from] hex::FromHexError),
 
-    /// Failed to read key from file.
-    #[error("Failed to read key file: {0}")]
-    FileReadError(String),
+    /// A key file, token file or key directory could not be read.
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
 
     /// Key file or directory has insecure (group/other-accessible) permissions.
     #[error(
@@ -55,14 +55,12 @@ pub enum HmacError {
 /// Checks the opened descriptor to avoid a check/read race. Symlinks are allowed
 /// when their targets have owner-only permissions, supporting secret mounts.
 fn open_owner_only_file(path: &Path, detail: &'static str) -> Result<fs::File, HmacError> {
-    let file = fs::File::open(path).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+    let file = fs::File::open(path)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = file
-            .metadata()
-            .map_err(|e| HmacError::FileReadError(e.to_string()))?;
+        let metadata = file.metadata()?;
         let mode = metadata.permissions().mode();
         if mode & 0o077 != 0 {
             return Err(HmacError::InsecurePermissions {
@@ -79,6 +77,98 @@ fn open_owner_only_file(path: &Path, detail: &'static str) -> Result<fs::File, H
     Ok(file)
 }
 
+/// The configured HMAC key sources: `--hmac-key` (or `STAMP_HMAC_KEY`),
+/// `--hmac-key-file` and the reflector-only `--hmac-key-dir`.
+#[derive(Clone, Copy, Default)]
+pub struct KeySource<'a> {
+    pub hex: Option<&'a str>,
+    pub file: Option<&'a Path>,
+    pub dir: Option<&'a Path>,
+}
+
+impl std::fmt::Debug for KeySource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeySource")
+            .field("hex", &self.hex.map(|_| "<redacted>"))
+            .field("file", &self.file)
+            .field("dir", &self.dir)
+            .finish()
+    }
+}
+
+/// A configured key source that could not be loaded.
+#[derive(Error, Debug)]
+pub enum KeyLoadError {
+    #[error("--hmac-key: {0}")]
+    Inline(#[source] HmacError),
+    #[error("--hmac-key-file {}: {source}", path.display())]
+    File {
+        path: std::path::PathBuf,
+        #[source]
+        source: HmacError,
+    },
+    #[error("--hmac-key-dir {}: {source}", path.display())]
+    Dir {
+        path: std::path::PathBuf,
+        #[source]
+        source: HmacError,
+    },
+    #[error("--hmac-key-dir {} contains no usable keys", path.display())]
+    EmptyDir { path: std::path::PathBuf },
+}
+
+impl KeySource<'_> {
+    /// Whether any source, including a key directory, is configured.
+    #[must_use]
+    pub fn is_configured(&self) -> bool {
+        self.hex.is_some() || self.file.is_some() || self.dir.is_some()
+    }
+
+    /// Loads the single key from `--hmac-key` or `--hmac-key-file`, in that
+    /// order. A key directory is ignored here.
+    ///
+    /// # Errors
+    /// Fails when the configured source cannot be read or parsed.
+    pub fn load_key(&self) -> Result<Option<HmacKey>, KeyLoadError> {
+        if let Some(hex) = self.hex {
+            return HmacKey::from_hex(hex)
+                .map(Some)
+                .map_err(KeyLoadError::Inline);
+        }
+        if let Some(path) = self.file {
+            return HmacKey::from_file(path)
+                .map(Some)
+                .map_err(|source| KeyLoadError::File {
+                    path: path.to_path_buf(),
+                    source,
+                });
+        }
+        Ok(None)
+    }
+
+    /// Loads a keyset: per-SSID keys from the directory when one is
+    /// configured, otherwise the single key as the default.
+    ///
+    /// # Errors
+    /// Fails when the configured source cannot be read or parsed, or when
+    /// the directory holds no usable keys.
+    pub fn load_key_set(&self) -> Result<Option<HmacKeySet>, KeyLoadError> {
+        let Some(dir) = self.dir else {
+            return Ok(self.load_key()?.map(HmacKeySet::with_default));
+        };
+        let set = HmacKeySet::from_dir(dir).map_err(|source| KeyLoadError::Dir {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        if set.is_empty() {
+            return Err(KeyLoadError::EmptyDir {
+                path: dir.to_path_buf(),
+            });
+        }
+        Ok(Some(set))
+    }
+}
+
 /// Reads a bearer-token file with the same descriptor-based permission checks
 /// as [`HmacKey::from_file`] (see `doc/control-plane.md` §5).
 pub fn read_token_file(path: &Path) -> Result<String, HmacError> {
@@ -86,8 +176,7 @@ pub fn read_token_file(path: &Path) -> Result<String, HmacError> {
 
     let mut file = open_owner_only_file(path, "token file is accessible by group or other")?;
     let mut token = String::new();
-    file.read_to_string(&mut token)
-        .map_err(|e| HmacError::FileReadError(e.to_string()))?;
+    file.read_to_string(&mut token)?;
     Ok(token)
 }
 
@@ -158,7 +247,7 @@ impl HmacKey {
     /// Returns `HmacError::InvalidHex` for invalid hex or `HmacError::KeyTooShort`
     /// for fewer than 16 decoded bytes.
     pub fn from_hex(hex_str: &str) -> Result<Self, HmacError> {
-        let key = hex::decode(hex_str).map_err(|e| HmacError::InvalidHex(e.to_string()))?;
+        let key = hex::decode(hex_str)?;
         Self::new(key)
     }
 
@@ -168,7 +257,7 @@ impl HmacKey {
     /// bits (`0o077`). Symlinks are allowed; the target's permissions are checked.
     ///
     /// # Errors
-    /// Returns `HmacError::FileReadError` on read failure,
+    /// Returns `HmacError::Io` on read failure,
     /// `HmacError::InsecurePermissions` for group/other access (Unix), or
     /// `HmacError::KeyTooShort` for fewer than 16 key bytes.
     pub fn from_file(path: &Path) -> Result<Self, HmacError> {
@@ -183,8 +272,7 @@ impl HmacKey {
             .map_or(0, |m| usize::try_from(m.len()).unwrap_or(0))
             .saturating_add(1);
         let mut raw_bytes = zeroize::Zeroizing::new(Vec::with_capacity(capacity));
-        file.read_to_end(&mut raw_bytes)
-            .map_err(|e| HmacError::FileReadError(e.to_string()))?;
+        file.read_to_end(&mut raw_bytes)?;
 
         if let Ok(content) = std::str::from_utf8(&raw_bytes) {
             if let Ok(key) = Self::from_hex(content.trim()) {
@@ -325,7 +413,7 @@ impl HmacKeySet {
     /// Invalid key files are logged and skipped.
     ///
     /// # Errors
-    /// Returns `HmacError::FileReadError` if the directory cannot be listed, or
+    /// Returns `HmacError::Io` if the directory cannot be listed, or
     /// `HmacError::InsecurePermissions` if group/other can write it (Unix).
     pub fn from_dir(dir: &Path) -> Result<Self, HmacError> {
         // The directory may be group-readable (the recommended layout is
@@ -334,8 +422,7 @@ impl HmacKeySet {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let metadata =
-                fs::metadata(dir).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+            let metadata = fs::metadata(dir)?;
             let mode = metadata.permissions().mode();
             if mode & 0o022 != 0 {
                 return Err(HmacError::InsecurePermissions {
@@ -346,7 +433,7 @@ impl HmacKeySet {
             }
         }
 
-        let entries = fs::read_dir(dir).map_err(|e| HmacError::FileReadError(e.to_string()))?;
+        let entries = fs::read_dir(dir)?;
         let mut set = HmacKeySet::new();
         for entry in entries.flatten() {
             let path = entry.path();

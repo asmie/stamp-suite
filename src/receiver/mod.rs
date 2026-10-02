@@ -23,7 +23,7 @@ mod transmit;
 pub use crate::packets::{AUTH_BASE_SIZE, AUTH_HMAC_OFFSET, UNAUTH_BASE_SIZE};
 pub use assemble::*;
 pub use ingest::*;
-pub use keys::*;
+use keys::*;
 pub use limits::*;
 pub use local_addrs::*;
 pub use mtu::{interface_mtu, mtu_payload_cap};

@@ -3,7 +3,6 @@
 #![cfg(feature = "control")]
 
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use stamp_suite::control::{init, ControlState};
@@ -18,7 +17,7 @@ fn test_state() -> ControlState {
         rate_limiter: Arc::new(RateLimiter::with_burst(0, 0)),
         hmac_keys: Arc::new(std::sync::RwLock::new(None)),
         caps: Arc::new(RuntimeCaps::from_defaults()),
-        shutdown_requested: Arc::new(AtomicBool::new(false)),
+        shutdown: stamp_suite::shutdown::CancellationToken::new(),
         token: None,
     }
 }
@@ -41,7 +40,7 @@ fn http(addr: std::net::SocketAddr, request_head: &str, body: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn control_api_end_to_end() {
     let state = test_state();
-    let shutdown_flag = Arc::clone(&state.shutdown_requested);
+    let shutdown = state.shutdown.clone();
 
     // No TLS in this test: it drives the plaintext loopback path.
     let server = init("127.0.0.1:0".parse().unwrap(), state, None)
@@ -64,7 +63,7 @@ async fn control_api_end_to_end() {
         .await
         .unwrap();
     assert!(res.starts_with("HTTP/1.1 202"), "status line: {res}");
-    assert!(shutdown_flag.load(Ordering::Relaxed));
+    assert!(shutdown.is_cancelled());
 
     server.shutdown();
 }

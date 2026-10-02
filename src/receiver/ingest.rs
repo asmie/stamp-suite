@@ -61,23 +61,16 @@ impl ReflectorSettings {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .is_some();
+        // `create_shared_state` loads every configured source into the
+        // keyset; the single key covers callers that built the state without it.
         let hmac_key = if keyset_configured {
             None
         } else {
-            load_hmac_key(conf)
+            conf.key_source().load_key()?
         };
         if use_auth && hmac_key.is_none() && !keyset_configured {
-            return Err(crate::StartupError::new(
+            return Err(crate::StartupError::config(
                 "Authenticated mode (-A A) requires --hmac-key, --hmac-key-file, or --hmac-key-dir",
-            ));
-        }
-        // In open mode a key still signs and verifies TLV HMACs; running
-        // without the key that was asked for would silently drop that.
-        if hmac_key.is_none() && !keyset_configured && hmac_key_source_configured(conf) {
-            return Err(crate::StartupError::new(
-                "an HMAC key source was configured (--hmac-key, --hmac-key-file or \
-                 --hmac-key-dir) but no usable key could be loaded; see the error above. \
-                 Refusing to run without the key that was asked for",
             ));
         }
         if hmac_key.is_some() {
@@ -90,14 +83,14 @@ impl ReflectorSettings {
             conf.error_scale,
             conf.error_multiplier,
         )
-        .map_err(crate::StartupError::new)?;
+        .map_err(crate::StartupError::config)?;
 
         let location_disclosure = conf
             .location_disclosure()
-            .map_err(crate::StartupError::new)?;
+            .map_err(crate::StartupError::config)?;
         let cos_policy = conf
             .cos_admission_policy()
-            .map_err(crate::StartupError::new)?;
+            .map_err(crate::StartupError::config)?;
         if !cos_policy.is_permissive() {
             log::info!(
                 "CoS admission policy active (--allowed-dscp {}, --allowed-ecn {}, {} \

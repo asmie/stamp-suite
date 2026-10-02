@@ -59,7 +59,9 @@ impl TransportPlan {
             _ => source,
         };
         let mut options = SendOptions {
-            tos: response.cos_request.map_or(0, |(d, e)| (d << 2) | e),
+            tos: response
+                .cos_request
+                .map_or(0, |(d, e)| crate::tos::Tos::new(d, e).0),
             source: response
                 .reply_source
                 .filter(|s| crate::reply_source::supported() && s.is_ipv4() == target.is_ipv4()),

@@ -262,7 +262,7 @@ fn route_request(key: &RouteKey) -> Vec<u8> {
     request[8..12].copy_from_slice(&1u32.to_ne_bytes());
     request[16] = if v6 { libc::AF_INET6 } else { libc::AF_INET } as u8;
     request[17] = if v6 { 128 } else { 32 };
-    request[19] = key.tos & 0xfc;
+    request[19] = crate::tos::Tos(key.tos).without_ecn().0;
     fn ip_bytes(ip: std::net::IpAddr) -> Vec<u8> {
         match ip {
             std::net::IpAddr::V4(v) => v.octets().to_vec(),

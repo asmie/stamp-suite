@@ -676,14 +676,14 @@ impl AgentXSession {
     pub fn run_loop(
         &mut self,
         handler: &dyn MibHandler,
-        cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        cancel: &crate::shutdown::CancellationToken,
     ) -> Result<(), AgentXError> {
         // Set a shorter read timeout so we can check for cancellation
         self.stream.set_read_timeout(Some(Duration::from_secs(1)))?;
 
         let mut reader = PduReader::default();
         loop {
-            if cancel.load(Ordering::Relaxed) {
+            if cancel.is_cancelled() {
                 // An incomplete request cannot be mistaken for the response
                 // to our Close PDU. Abandon that transport on cancellation.
                 if reader.is_empty() {

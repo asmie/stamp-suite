@@ -478,7 +478,7 @@ fn test_control_plane_flags() {
     assert!(conf.control);
     assert_eq!(conf.control_addr, "127.0.0.1:9999".parse().unwrap());
     assert!(conf.control_token_file.is_none());
-    assert!(conf.validate().is_ok());
+    assert_eq!(conf.validate().is_ok(), cfg!(feature = "control"));
 
     // --control is reflector-only.
     let args = vec!["test", "--remote-addr", "127.0.0.1", "--control"];
@@ -2155,8 +2155,8 @@ fn test_on_zero_ssid_merges_from_file() {
     assert_eq!(conf.on_zero_ssid, ZeroSsidAction::Stop);
 }
 
-/// `--hmac-key-dir` is a reflector concept: `load_hmac_key` (the sender's
-/// path) does not read directories, so a sender given one used to ignore it
+/// `--hmac-key-dir` is a reflector concept: `KeySource::load_key` (the
+/// sender's path) does not read directories, so a sender given one used to ignore it
 /// silently — a typo'd path included.
 #[test]
 fn test_hmac_key_dir_is_reflector_only() {
@@ -2587,4 +2587,55 @@ fn revision13_rejects_invalid_headers_selectors_and_direction_ports() {
             "unexpectedly accepted {args:?}"
         );
     }
+}
+
+#[test]
+fn flags_for_missing_features_are_rejected() {
+    for (flag, built) in [
+        ("--metrics", cfg!(feature = "metrics")),
+        ("--snmp", cfg!(all(unix, feature = "snmp"))),
+        ("--control", cfg!(feature = "control")),
+    ] {
+        let conf = Configuration::parse_from(["test", "--is-reflector", flag]);
+        match conf.validate() {
+            Ok(()) => assert!(built, "{flag} accepted without its feature"),
+            Err(e) => {
+                assert!(!built, "{flag} rejected although built: {e}");
+                assert!(e.to_string().contains(flag), "{e}");
+            }
+        }
+    }
+}
+
+#[test]
+fn sender_count_zero_is_rejected() {
+    let conf = Configuration::parse_from(["test", "--remote-addr", "127.0.0.1", "--count", "0"]);
+    assert!(conf.validate().is_err());
+    let conf = Configuration::parse_from(["test", "--is-reflector", "--count", "0"]);
+    assert!(conf.validate().is_ok(), "the reflector ignores --count");
+}
+
+/// Every CLI option can also be set in the config file, apart from a few
+/// that must stay out of it.
+#[test]
+fn every_cli_option_has_a_config_file_key() {
+    use clap::CommandFactory;
+    // `hmac_key` keeps secrets out of files; `config` would be recursive;
+    // the rest are one-shot or terminal-only switches.
+    const CLI_ONLY: &[&str] = &[
+        "hmac_key",
+        "config",
+        "print_config_schema",
+        "verbose",
+        "help",
+        "version",
+    ];
+    let file = serde_json::to_value(FileConfiguration::default()).unwrap();
+    let file = file.as_object().unwrap();
+    let missing: Vec<String> = Configuration::command()
+        .get_arguments()
+        .map(|arg| arg.get_id().to_string())
+        .filter(|id| !CLI_ONLY.contains(&id.as_str()) && !file.contains_key(id))
+        .collect();
+    assert!(missing.is_empty(), "no config file key for {missing:?}");
 }

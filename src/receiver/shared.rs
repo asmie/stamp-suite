@@ -2,27 +2,6 @@
 
 use super::*;
 
-/// Ctrl-C on all platforms and SIGTERM on Unix use the same queue shutdown policy.
-pub(super) fn shutdown_signal() -> impl std::future::Future<Output = ()> {
-    // Register Unix listeners synchronously before accepting any traffic.
-    #[cfg(unix)]
-    let signals = (
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()),
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()),
-    );
-    async move {
-        #[cfg(unix)]
-        if let (Ok(mut interrupt), Ok(mut terminate)) = signals {
-            tokio::select! {
-                _ = interrupt.recv() => {},
-                _ = terminate.recv() => {},
-            }
-            return;
-        }
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
 /// Shared state created externally and passed into receiver backends.
 ///
 /// This allows the SNMP sub-agent, the control plane, and other
@@ -45,13 +24,15 @@ pub struct ReceiverSharedState {
     pub hmac_keys: Arc<std::sync::RwLock<Option<crate::crypto::HmacKeySet>>>,
     /// Runtime-adjustable reflector caps (see [`RuntimeCaps`]).
     pub caps: Arc<RuntimeCaps>,
-    /// Set by the control plane's shutdown endpoint; both backends poll it
-    /// and exit gracefully.
-    pub shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancelled by a signal (see [`crate::shutdown::cancel_on_signal`]) or
+    /// the control API. Both backends then drain queued replies and return.
+    pub shutdown: crate::shutdown::CancellationToken,
 }
 
 /// Creates the shared state for the receiver, using configuration values.
-pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
+pub fn create_shared_state(
+    conf: &Configuration,
+) -> Result<ReceiverSharedState, crate::StartupError> {
     let session_timeout = if conf.session_timeout > 0 {
         Some(Duration::from_secs(conf.session_timeout))
     } else {
@@ -73,34 +54,26 @@ pub fn create_shared_state(conf: &Configuration) -> ReceiverSharedState {
         None
     };
 
-    ReceiverSharedState {
+    let provisioned = conf
+        .provisioned_sessions()
+        .map_err(crate::StartupError::config)?;
+    let hmac_keys = conf.key_source().load_key_set()?;
+
+    Ok(ReceiverSharedState {
         counters: Arc::new(ReflectorCounters::new()),
-        session_manager: Arc::new(match conf.provisioned_sessions() {
-            Ok(keys) => SessionManager::with_admission(
-                session_timeout,
-                max_sessions,
-                conf.session_admission,
-                keys,
-            ),
-            Err(error) => {
-                // Startup validates first. Library callers that skip validation
-                // must still fail closed rather than enabling permissive admission.
-                log::error!("Invalid session admission configuration: {error}");
-                SessionManager::with_admission(
-                    session_timeout,
-                    max_sessions,
-                    crate::session::SessionAdmission::Provisioned,
-                    Default::default(),
-                )
-            }
-        }),
+        session_manager: Arc::new(SessionManager::with_admission(
+            session_timeout,
+            max_sessions,
+            conf.session_admission,
+            provisioned,
+        )),
         start_time: Instant::now(),
         rate_limiter,
         capture_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        hmac_keys: Arc::new(std::sync::RwLock::new(load_hmac_key_set(conf))),
+        hmac_keys: Arc::new(std::sync::RwLock::new(hmac_keys)),
         caps: Arc::new(RuntimeCaps::from_conf(conf)),
-        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    }
+        shutdown: crate::shutdown::CancellationToken::new(),
+    })
 }
 
 /// Builds and prints the reflector shutdown statistics.

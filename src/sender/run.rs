@@ -2,6 +2,7 @@
 //! Access Report retransmissions (RFC 8972 §4.6).
 
 use super::*;
+use crate::shutdown::CancellationToken;
 
 /// How each probe is built; decided once at startup.
 enum SendMode {
@@ -77,20 +78,31 @@ pub(super) struct SenderRun<'a> {
     header_trimmed: usize,
     ber: Option<BerCollector>,
     report_timer: Option<tokio::time::Interval>,
-    #[cfg(feature = "metrics")]
-    metrics_enabled: bool,
-    #[cfg(all(unix, feature = "snmp"))]
-    snmp_stats: SnmpStats,
+    observers: SenderObservers,
+    shutdown: CancellationToken,
 }
 
 impl<'a> SenderRun<'a> {
     /// Opens and configures the socket and builds the static probe TLVs.
     pub(super) async fn open(
         conf: &'a Configuration,
-        #[cfg(all(unix, feature = "snmp"))] snmp_stats: SnmpStats,
+        observers: SenderObservers,
+        shutdown: CancellationToken,
     ) -> Result<Self, crate::StartupError> {
-        #[cfg(feature = "metrics")]
-        let metrics_enabled = conf.metrics;
+        // Load the key before touching the network. It also signs the TLV
+        // HMAC in open mode, so a configured key that fails to load is an
+        // error in either mode. The key directory is reflector-only.
+        let use_auth = is_auth(conf.auth_mode);
+        let hmac_key = conf.key_source().load_key()?;
+        if use_auth && hmac_key.is_none() {
+            return Err(crate::StartupError::config(
+                "Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file)",
+            ));
+        }
+        if hmac_key.is_some() {
+            log::info!("HMAC authentication enabled");
+        }
+
         let local_addr: SocketAddr = conf.local_socket_addr();
         let remote_addr: SocketAddr = conf.remote_socket_addr();
 
@@ -101,27 +113,27 @@ impl<'a> SenderRun<'a> {
         let std_socket = match crate::net_policy::bind_sender(local_addr, remote_addr) {
             Ok(s) => s,
             Err(e) => {
-                return Err(crate::StartupError::new(format!(
-                    "Cannot bind to address {local_addr}: {e}"
-                )));
+                return Err(crate::StartupError::io(
+                    format!("Cannot bind to address {local_addr}"),
+                    e,
+                ));
             }
         };
 
         crate::net_policy::set_hops(&std_socket)
-            .map_err(|e| crate::StartupError::new(format!("Cannot set TTL/Hop Limit 255: {e}")))?;
+            .map_err(|e| crate::StartupError::io("Cannot set TTL/Hop Limit 255", e))?;
         std_socket
             .set_nonblocking(true)
-            .map_err(|e| crate::StartupError::new(e.to_string()))?;
-        let socket =
-            UdpSocket::from_std(std_socket).map_err(|e| crate::StartupError::new(e.to_string()))?;
+            .map_err(|e| crate::StartupError::io("Cannot make the socket nonblocking", e))?;
+        let socket = UdpSocket::from_std(std_socket)
+            .map_err(|e| crate::StartupError::io("Cannot register the socket", e))?;
 
         if conf.ber
             || !conf.attach_ext_hdr.is_empty()
             || !conf.reflected_fixed_hdr.is_empty()
             || !conf.reflected_ipv6_ext_hdr.is_empty()
         {
-            conf.validate()
-                .map_err(|e| crate::StartupError::new(e.to_string()))?;
+            conf.validate().map_err(crate::StartupError::config)?;
             #[cfg(target_os = "linux")]
             {
                 use std::os::fd::AsRawFd;
@@ -142,10 +154,10 @@ impl<'a> SenderRun<'a> {
                     )
                 } != 0
                 {
-                    return Err(crate::StartupError::new(format!(
-                        "BER PMTU setup: {}",
-                        std::io::Error::last_os_error()
-                    )));
+                    return Err(crate::StartupError::io(
+                        "BER PMTU setup",
+                        std::io::Error::last_os_error(),
+                    ));
                 }
             }
         }
@@ -212,9 +224,7 @@ impl<'a> SenderRun<'a> {
             if !attach_specs.is_empty() {
                 if conf.remote_addr.is_ipv6() {
                     apply_attach_ext_hdrs(socket.as_raw_fd(), &attach_specs).map_err(|e| {
-                        crate::StartupError::new(format!(
-                            "Cannot attach requested IPv6 header: {e}"
-                        ))
+                        crate::StartupError::io("Cannot attach requested IPv6 header", e)
                     })?;
                 } else {
                     log::warn!(
@@ -257,9 +267,10 @@ impl<'a> SenderRun<'a> {
         // invalidate Linux's cached route. Connecting last populates the route
         // used by the pre-send MTU check, without transmitting a probe first.
         if let Err(e) = socket.connect(remote_addr).await {
-            return Err(crate::StartupError::new(format!(
-                "Cannot connect to address {remote_addr}: {e}"
-            )));
+            return Err(crate::StartupError::io(
+                format!("Cannot connect to address {remote_addr}"),
+                e,
+            ));
         }
 
         // Kernel timestamping (feature "hwtstamp"): kernel RX timestamps give a
@@ -317,36 +328,8 @@ impl<'a> SenderRun<'a> {
             conf.error_scale,
             conf.error_multiplier,
         )
-        .map_err(crate::StartupError::new)?;
+        .map_err(crate::StartupError::config)?;
         let error_estimate_wire = error_estimate.to_wire();
-
-        // Check if authenticated mode is used
-        let use_auth = is_auth(conf.auth_mode);
-
-        // Load HMAC key if configured
-        let hmac_key = load_hmac_key(conf);
-
-        // Validate: authenticated mode requires HMAC key
-        if use_auth && hmac_key.is_none() {
-            return Err(crate::StartupError::new(
-                "Authenticated mode (-A A) requires HMAC key (--hmac-key or --hmac-key-file)",
-            ));
-        }
-
-        // A key source that failed to load is a configuration error in either mode:
-        // the key also signs the TLV HMAC this sender may originate, so continuing
-        // without it would silently send unauthenticated TLVs.
-        if hmac_key.is_none() && crate::receiver::single_hmac_key_source_configured(conf) {
-            return Err(crate::StartupError::new(
-                "an HMAC key source was configured (--hmac-key, --hmac-key-file or \
-                 --hmac-key-dir) but no usable key could be loaded; see the error above. \
-                 Refusing to run without the key that was asked for",
-            ));
-        }
-
-        if hmac_key.is_some() {
-            log::info!("HMAC authentication enabled");
-        }
 
         if let Some(mode) = conf.malformed {
             log::warn!(
@@ -558,7 +541,7 @@ impl<'a> SenderRun<'a> {
                 match crate::ber::parse_pattern(hex) {
                     Ok(bytes) => bytes,
                     Err(e) => {
-                        return Err(crate::StartupError::new(format!(
+                        return Err(crate::StartupError::config(format!(
                             "Invalid --ber-pattern ({hex}): {e}"
                         )));
                     }
@@ -636,7 +619,7 @@ impl<'a> SenderRun<'a> {
         {
             let route_mtu = egress_mtu(&socket);
             if header_requests && route_mtu.is_none() {
-                return Err(crate::StartupError::new(
+                return Err(crate::StartupError::config(
                     "Header reflection requires a known egress route MTU",
                 ));
             }
@@ -679,7 +662,7 @@ impl<'a> SenderRun<'a> {
             header_fixed_overhead = fixed_overhead;
             if conf.ber {
                 crate::ber::fit_padding(&mut extra_tlvs, mtu, fixed_overhead)
-                    .map_err(|e| crate::StartupError::new(e.to_string()))?;
+                    .map_err(|e| crate::StartupError::io("Cannot fit the BER padding", e))?;
             }
             header_template = header_requests.then(|| extra_tlvs.clone());
             let removed = enforce_egress_mtu(&mut extra_tlvs, mtu, fixed_overhead);
@@ -778,10 +761,8 @@ impl<'a> SenderRun<'a> {
             header_trimmed,
             ber,
             report_timer,
-            #[cfg(feature = "metrics")]
-            metrics_enabled,
-            #[cfg(all(unix, feature = "snmp"))]
-            snmp_stats,
+            observers,
+            shutdown,
         })
     }
 
@@ -804,9 +785,12 @@ impl<'a> SenderRun<'a> {
             due = (due + self.send_interval()).max(tokio::time::Instant::now());
             self.receive_until(due, Wait::NextSend, output).await;
             self.expire();
-            if self.stopped_on_zero_ssid() {
+            if self.stopping() {
                 break;
             }
+        }
+        if self.shutdown.is_cancelled() {
+            log::info!("Interrupted; stopping after {} probes", self.packets_sent);
         }
         if let Some(m) = self.measurements.monitor.as_mut() {
             m.idle();
@@ -818,7 +802,7 @@ impl<'a> SenderRun<'a> {
         // Access Report retries continue after the last probe (RFC 8972
         // §4.6), including `--count 1` runs, for an exchange the probe loop
         // started. Each retry carries identical report bytes.
-        while !self.stopped_on_zero_ssid()
+        while !self.stopping()
             && self
                 .access_report_state
                 .as_ref()
@@ -851,14 +835,7 @@ impl<'a> SenderRun<'a> {
         // Probes still unanswered are lost.
         let remaining_lost = self.pending.len() as u32;
         self.packets_lost += remaining_lost;
-        #[cfg(feature = "metrics")]
-        if self.metrics_enabled && remaining_lost > 0 {
-            crate::metrics::sender_metrics::record_packets_lost(remaining_lost as u64);
-        }
-        #[cfg(all(unix, feature = "snmp"))]
-        if let Some(stats) = &self.snmp_stats {
-            stats.inc_lost_by(remaining_lost);
-        }
+        self.observers.probes_lost(remaining_lost);
         if let Some(m) = self.measurements.monitor.as_mut() {
             m.idle();
         }
@@ -880,7 +857,15 @@ impl<'a> SenderRun<'a> {
         self.zero_ssid_seen && self.conf.on_zero_ssid == ZeroSsidAction::Stop
     }
 
+    /// A zero-SSID stop or a shutdown request ends the run early.
+    fn stopping(&self) -> bool {
+        self.stopped_on_zero_ssid() || self.shutdown.is_cancelled()
+    }
+
     fn wait_over(&self, wait: Wait) -> bool {
+        if self.shutdown.is_cancelled() {
+            return true;
+        }
         match wait {
             Wait::NextSend => false,
             Wait::Drain => {
@@ -910,6 +895,7 @@ impl<'a> SenderRun<'a> {
             MonitorDue,
             Deadline,
             Report,
+            Shutdown,
         }
         loop {
             if self.wait_over(wait) {
@@ -947,6 +933,7 @@ impl<'a> SenderRun<'a> {
                         None => std::future::pending().await,
                     }
                 } => Event::Report,
+                _ = self.shutdown.cancelled() => Event::Shutdown,
             };
             match event {
                 Event::Datagram(Ok((len, kernel_t4, reply_ecn))) => {
@@ -986,6 +973,7 @@ impl<'a> SenderRun<'a> {
                     let interim = self.snapshot();
                     output.print(&interim, true);
                 }
+                Event::Shutdown => return false,
             }
         }
     }
@@ -1089,14 +1077,7 @@ impl<'a> SenderRun<'a> {
 
     fn record_sent(&mut self, seq: u32, send_time: Instant, send_timestamp: u64) {
         self.packets_sent += 1;
-        #[cfg(all(unix, feature = "snmp"))]
-        if let Some(stats) = &self.snmp_stats {
-            stats.inc_sent();
-        }
-        #[cfg(feature = "metrics")]
-        if self.metrics_enabled {
-            crate::metrics::sender_metrics::record_packet_sent();
-        }
+        self.observers.probe_sent();
         let probe = PendingPacket {
             send_time,
             send_timestamp,
@@ -1154,10 +1135,7 @@ impl<'a> SenderRun<'a> {
             expected_ssid: self.expected_ssid,
             on_zero_ssid: conf.on_zero_ssid,
             zero_ssid_seen: &mut self.zero_ssid_seen,
-            #[cfg(feature = "metrics")]
-            metrics_enabled: self.metrics_enabled,
-            #[cfg(all(unix, feature = "snmp"))]
-            snmp_stats: self.snmp_stats.as_deref(),
+            observers: &self.observers,
         };
         process_response(
             &self.recv_buf[..len],
@@ -1182,14 +1160,7 @@ impl<'a> SenderRun<'a> {
             // Answered probes were already removed from `pending`.
             if self.pending.remove(&seq).is_some() {
                 self.packets_lost += 1;
-                #[cfg(feature = "metrics")]
-                if self.metrics_enabled {
-                    crate::metrics::sender_metrics::record_packets_lost(1);
-                }
-                #[cfg(all(unix, feature = "snmp"))]
-                if let Some(stats) = &self.snmp_stats {
-                    stats.inc_lost();
-                }
+                self.observers.probes_lost(1);
             }
         }
     }

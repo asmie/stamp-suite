@@ -131,7 +131,7 @@ impl Reflector {
             "off",
         ]);
         conf.validate().unwrap();
-        let shared = Arc::new(receiver::create_shared_state(&conf));
+        let shared = Arc::new(receiver::create_shared_state(&conf).unwrap());
         let task_shared = Arc::clone(&shared);
         let task =
             tokio::task::spawn_local(

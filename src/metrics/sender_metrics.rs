@@ -3,7 +3,7 @@
 //! Provides Prometheus metrics for monitoring sender operations including
 //! packet transmission, reception, loss, and RTT measurements.
 
-use metrics::{counter, gauge, histogram};
+use metrics::{counter, histogram};
 
 /// Records that a packet was sent.
 pub fn record_packet_sent() {
@@ -23,16 +23,6 @@ pub fn record_packets_lost(count: u64) {
 /// Records an RTT observation in seconds.
 pub fn record_rtt(rtt_seconds: f64) {
     histogram!("stamp_sender_rtt_seconds").record(rtt_seconds);
-}
-
-/// Updates the minimum RTT gauge in seconds.
-pub fn set_rtt_min(rtt_seconds: f64) {
-    gauge!("stamp_sender_rtt_min_seconds").set(rtt_seconds);
-}
-
-/// Updates the maximum RTT gauge in seconds.
-pub fn set_rtt_max(rtt_seconds: f64) {
-    gauge!("stamp_sender_rtt_max_seconds").set(rtt_seconds);
 }
 
 /// Records an HMAC verification failure.
@@ -55,6 +45,31 @@ pub fn record_tlv_errors(unrecognized: usize, malformed: usize, integrity: usize
     }
 }
 
+/// Records sender events as Prometheus metrics.
+pub struct PrometheusSenderObserver;
+
+impl crate::sender::SenderObserver for PrometheusSenderObserver {
+    fn probe_sent(&self) {
+        record_packet_sent();
+    }
+    fn reply_received(&self, rtt_ns: u64) {
+        record_packet_received();
+        record_rtt(rtt_ns as f64 / 1e9);
+    }
+    fn probes_lost(&self, count: u32) {
+        record_packets_lost(u64::from(count));
+    }
+    fn hmac_failed(&self) {
+        record_hmac_failure();
+    }
+    fn reply_rejected(&self) {
+        record_tlv_error("M");
+    }
+    fn tlv_flags(&self, unrecognized: usize, malformed: usize, integrity_failed: usize) {
+        record_tlv_errors(unrecognized, malformed, integrity_failed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,8 +82,6 @@ mod tests {
         record_packet_received();
         record_packets_lost(5);
         record_rtt(0.001);
-        set_rtt_min(0.0005);
-        set_rtt_max(0.002);
         record_hmac_failure();
         record_tlv_error("U");
         record_tlv_error("M");

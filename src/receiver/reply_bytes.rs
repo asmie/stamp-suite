@@ -42,7 +42,7 @@ pub fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usize) -> 
 /// See [`crate::tlv::ClassOfServiceTlv::reply_wire_tos`].
 #[must_use]
 pub fn cos_unable_fallback_tos(received_dscp: u8) -> u8 {
-    (received_dscp & 0x3F) << 2
+    crate::tos::Tos::new(received_dscp, 0).0
 }
 
 /// Sets the U-flag on the Return Path TLV in a serialized STAMP response.

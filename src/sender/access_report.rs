@@ -118,7 +118,7 @@ impl AccessReportRetransmitState {
     }
 
     /// Whether the original report was sent. Prevents the post-loop wait from
-    /// starting an exchange when `--count 0` sent nothing.
+    /// starting an exchange that no probe began.
     pub(super) fn has_started(&self) -> bool {
         !matches!(self.phase, AccessReportPhase::NotStarted)
     }

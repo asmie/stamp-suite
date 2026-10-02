@@ -1,13 +1,10 @@
 //! Independent AgentX master wire fixtures; no production encoders/decoders.
 #![cfg(all(unix, feature = "snmp"))]
+use stamp_suite::shutdown::CancellationToken;
 use stamp_suite::snmp::agentx::{AgentXSession, MibHandler, Oid, VarBind, VarBindValue};
 use std::{
     io::{Read, Write},
     os::unix::net::{UnixListener, UnixStream},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
     thread,
     time::Duration,
 };
@@ -84,7 +81,7 @@ fn read_pdu(stream: &mut UnixStream) -> (Vec<u8>, Vec<u8>) {
 }
 struct Peer {
     stream: UnixStream,
-    cancel: Arc<AtomicBool>,
+    cancel: CancellationToken,
     worker: Option<thread::JoinHandle<Result<(), String>>>,
     _dir: tempfile::TempDir,
 }
@@ -93,7 +90,7 @@ impl Peer {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("master");
         let listener = UnixListener::bind(&path).unwrap();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let worker = thread::spawn(move || {
             let mut session = AgentXSession::connect(path.to_str().unwrap(), "wire fixture")
@@ -137,7 +134,7 @@ impl Peer {
 }
 impl Drop for Peer {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -305,7 +302,7 @@ fn cancellation_during_partial_frame_closes_transport_promptly() {
     // during its next read. It must not wait to complete a bogus Close response.
     thread::sleep(Duration::from_millis(100));
     let start = std::time::Instant::now();
-    peer.cancel.store(true, Ordering::Relaxed);
+    peer.cancel.cancel();
     assert!(peer.worker.take().unwrap().join().unwrap().is_ok());
     assert!(start.elapsed() < Duration::from_secs(3));
     assert_eq!(peer.stream.read(&mut [0; 20]).unwrap(), 0);

@@ -28,7 +28,7 @@ readme = "README.md"
 default = []
 ttl-nix = ["dep:nix"]
 ttl-pnet = ["dep:pnet"]
-metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", "dep:tokio-util"]
+metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus"]
 # Runtime control-plane REST API (reflector only): localhost session/key
 # management, cap tuning, drain/shutdown. Design: doc/control-plane.md.
 # TLS is part of `control` rather than a sub-feature: the control plane
@@ -36,7 +36,6 @@ metrics = ["dep:axum", "dep:metrics", "dep:metrics-exporter-prometheus", "dep:to
 # extra for it, and one fewer cfg dimension keeps the matrix honest.
 control = [
     "dep:axum",
-    "dep:tokio-util",
     "dep:axum-server",
     "dep:rustls",
 ]
@@ -67,6 +66,7 @@ sha2 = "0.11"
 hex = "0.4"
 subtle = "2.6"
 zeroize = "1"
+tokio-util = "0.7"
 
 # TTL backend dependencies (all optional, selected by features)
 nix = { version = "0.31", optional = true, default-features = false, features = ["socket", "uio", "net"] }
@@ -76,7 +76,6 @@ pnet = { version = "0.35", optional = true }
 axum = { version = "0.8", optional = true }
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.18", optional = true }
-tokio-util = { version = "0.7", optional = true, features = ["rt"] }
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"], optional = true }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
 

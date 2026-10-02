@@ -4,7 +4,7 @@
 //! Bind to loopback (default) or configure a bearer token.
 //! Key material is write-only: never returned or logged.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -28,7 +28,7 @@ pub struct ControlState {
     pub rate_limiter: Arc<RateLimiter>,
     pub hmac_keys: Arc<std::sync::RwLock<Option<HmacKeySet>>>,
     pub caps: Arc<RuntimeCaps>,
-    pub shutdown_requested: Arc<AtomicBool>,
+    pub shutdown: CancellationToken,
     /// Bearer token required on every request when `Some`.
     pub token: Option<String>,
 }
@@ -337,7 +337,7 @@ async fn post_drain(State(s): State<ControlState>, Json(req): Json<DrainRequest>
 
 async fn post_shutdown(State(s): State<ControlState>) -> StatusCode {
     log::info!("control: shutdown requested via API");
-    s.shutdown_requested.store(true, Ordering::Relaxed);
+    s.shutdown.cancel();
     StatusCode::ACCEPTED
 }
 

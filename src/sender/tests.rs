@@ -4,6 +4,8 @@ use super::run::recv_packet;
 use super::*;
 use crate::packets::{ExtendedPacketAuthenticated, ExtendedPacketUnauthenticated};
 
+static NO_OBSERVERS: SenderObservers = SenderObservers::new();
+
 // --- draft-ietf-ippm-stamp-ext-hdr-15 header-reflection request TLVs ----
 
 #[cfg(target_os = "linux")]
@@ -945,8 +947,6 @@ fn test_validate_reflected_tlvs_auth_reply_without_hmac_tlv_fails() {
             &mut None,
             false,
             false,
-            #[cfg(feature = "metrics")]
-            false,
         )
         .unwrap()
         .hmac
@@ -987,8 +987,6 @@ fn test_validate_reflected_tlvs_msid_match_accepts() {
         &mut None,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("matching MSID must return Ok");
 
@@ -1015,8 +1013,6 @@ fn test_validate_reflected_tlvs_msid_mismatch_rejects() {
         &mut None,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect_err("mismatched MSID must reject");
 
@@ -1053,8 +1049,6 @@ fn test_validate_reflected_tlvs_msid_malformed_rejects() {
         &mut None,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect_err("malformed MSID must reject");
 
@@ -1069,17 +1063,8 @@ fn test_validate_reflected_tlvs_msid_not_requested() {
     tlvs.push(MicroSessionIdTlv::new(1, 2).to_raw()).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("no MSID binding requested → accept");
 
@@ -1126,8 +1111,6 @@ fn test_reflected_reflector_msid_mismatch_rejects() {
         &mut latched,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect_err("reflector MSID mismatch must reject");
 
@@ -1165,8 +1148,6 @@ fn test_reflected_reflector_msid_match_accepts() {
         &mut latched,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("reflector MSID match must accept");
     assert!(
@@ -1209,8 +1190,6 @@ fn test_reflected_reflector_msid_zero_config_latches_first_seen() {
         &mut latched,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("first reply must be accepted");
     assert!(status1.micro_session.is_some(), "got: {}", status1);
@@ -1234,8 +1213,6 @@ fn test_reflected_reflector_msid_zero_config_latches_first_seen() {
         &mut latched,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("second reply with the same reflector ID must also be accepted");
     assert!(status2.micro_session.is_some(), "got: {}", status2);
@@ -1264,8 +1241,6 @@ fn test_reflected_reflector_msid_zero_config_rejects_change_after_latch() {
         &mut latched,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("first reply must be accepted and latch the reflector ID");
     assert_eq!(latched, Some(0x22));
@@ -1284,8 +1259,6 @@ fn test_reflected_reflector_msid_zero_config_rejects_change_after_latch() {
         &mut latched,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect_err("a changed reflector ID after latching must be rejected");
 
@@ -1319,8 +1292,6 @@ fn test_forged_first_reply_does_not_latch_reflector_msid() {
         &mut latched,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect_err("a required but untrusted ID must reject the measurement");
 
@@ -1344,8 +1315,6 @@ fn test_forged_first_reply_does_not_latch_reflector_msid() {
         None,
         &mut latched,
         false,
-        false,
-        #[cfg(feature = "metrics")]
         false,
     )
     .expect("a valid reply after a forged one must be accepted");
@@ -1376,8 +1345,6 @@ fn test_forged_msid_with_i_flag_not_consumed() {
         &mut None,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect_err("required binding is unavailable; reject without trusting forged values");
     assert_eq!(status, TlvRejection::MsidUnavailable);
@@ -1403,8 +1370,6 @@ fn test_forged_msid_with_m_flag_not_consumed() {
         &mut None,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect_err("required binding is unavailable; reject without trusting forged values");
     assert_eq!(status, TlvRejection::MsidUnavailable);
@@ -1439,8 +1404,6 @@ fn test_forged_msid_ignored_when_tlv_hmac_fails() {
         &mut None,
         false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect_err("required binding is unavailable; reject without trusting forged values");
     assert_eq!(status, TlvRejection::MsidUnavailable);
@@ -1520,8 +1483,6 @@ fn measurement_telemetry_requires_usable_unambiguous_authenticated_values() {
                     &mut None,
                     false,
                     false,
-                    #[cfg(feature = "metrics")]
-                    false,
                 )
                 .unwrap();
                 let present = if kind == TlvType::DirectMeasurement {
@@ -1587,8 +1548,6 @@ proptest::proptest! {
         let report = validate_reflected_tlvs(
             &parsed, &data, base, with_key.then_some(&key), None, None,
             &mut None, true, true,
-            #[cfg(feature = "metrics")]
-            false,
         ).unwrap();
         // Authenticated mode with a key requires the HMAC TLV (RFC 8972 §4.8).
         let hmac_ok = if signed { with_key && !corrupt } else { !(auth && with_key) };
@@ -1626,8 +1585,6 @@ fn telemetry_unusable_hmac_flags_block_all_decisions() {
             &mut None,
             true,
             true,
-            #[cfg(feature = "metrics")]
-            false,
         )
         .unwrap();
         assert_eq!(report.hmac, HmacStatus::Unverified);
@@ -1643,20 +1600,9 @@ fn telemetry_duplicate_hmacs_include_every_integrity_flag() {
     bytes.extend_from_slice(&[0, 8, 0, 16]);
     bytes.extend_from_slice(&[0; 16]);
     let tlvs = TlvList::parse_lenient(&bytes).0;
-    let report = validate_reflected_tlvs(
-        &tlvs,
-        &[0; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        true,
-        true,
-        #[cfg(feature = "metrics")]
-        false,
-    )
-    .unwrap();
+    let report =
+        validate_reflected_tlvs(&tlvs, &[0; 44], 44, None, None, None, &mut None, true, true)
+            .unwrap();
     assert_eq!(report.tlv_count, 2);
     assert_eq!(report.flags.integrity_failed, 1);
     assert_eq!(report.hmac, HmacStatus::Failed);
@@ -1757,8 +1703,6 @@ fn assert_unverifiable_hmac_cannot_acknowledge(with_key: bool) {
         &mut None,
         true,
         false,
-        #[cfg(feature = "metrics")]
-        false,
     )
     .unwrap();
     assert!(status.access_report.is_none(), "{status}");
@@ -1771,17 +1715,7 @@ fn telemetry_bad_access_report_length_cannot_acknowledge() {
     raw.clear_reflector_flags();
     tlvs.push(raw).unwrap();
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        true,
-        false,
-        #[cfg(feature = "metrics")]
-        false,
+        &tlvs, &[0; 44], 44, None, None, None, &mut None, true, false,
     )
     .unwrap();
     assert!(status.access_report.is_none(), "{status}");
@@ -1795,17 +1729,8 @@ fn test_validate_reflected_tlvs_detects_access_report_ack() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        true,  // track_access_report
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, true,  // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("clean Access Report TLV must return Ok");
 
@@ -1823,17 +1748,8 @@ fn test_validate_reflected_tlvs_ignores_access_report_when_not_tracking() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("Ok regardless of tracking");
 
@@ -1850,17 +1766,7 @@ fn test_validate_reflected_tlvs_access_report_u_flagged_not_acked() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        true,
-        false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, true, false, // track_congestion
     )
     .expect("Ok even though unrecognized");
 
@@ -1882,17 +1788,7 @@ fn test_validate_reflected_tlvs_access_report_i_flagged_not_acked() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        true,
-        false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, true, false, // track_congestion
     )
     .expect("Ok even though integrity-failed");
 
@@ -1919,17 +1815,7 @@ fn test_validate_reflected_tlvs_access_report_m_flagged_halts_scan() {
     tlvs.push(good).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        true,
-        false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, true, false, // track_congestion
     )
     .expect("Ok — M just halts the scan, doesn't reject");
 
@@ -1964,8 +1850,6 @@ fn test_validate_reflected_tlvs_access_report_ack_survives_alongside_msid() {
         &mut None,
         true,
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("Ok");
 
@@ -1992,17 +1876,8 @@ fn test_validate_reflected_tlvs_detects_cos_ce() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
         true,  // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("clean CE-marked CoS TLV must return Ok");
 
@@ -2029,17 +1904,8 @@ fn test_validate_reflected_tlvs_ignores_cos_ce_when_not_tracking() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
         false, // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("Ok regardless of tracking");
 
@@ -2063,17 +1929,8 @@ fn test_validate_reflected_tlvs_cos_non_ce_ecn2_not_flagged() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
         true,  // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("Ok");
 
@@ -2098,17 +1955,8 @@ fn test_validate_reflected_tlvs_cos_ce_u_flagged_not_reported() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
         true,  // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("Ok even though unrecognized");
 
@@ -2138,17 +1986,8 @@ fn test_validate_reflected_tlvs_cos_ce_i_flagged_not_reported() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
         true,  // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("Ok even though integrity-failed");
 
@@ -2182,17 +2021,8 @@ fn test_validate_reflected_tlvs_cos_ce_m_flagged_before_it_halts_scan() {
     tlvs.push(good).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs,
-        &[0u8; 44],
-        44,
-        None,
-        None,
-        None,
-        &mut None,
-        false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
         true,  // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("Ok — M just halts the scan, doesn't reject");
 
@@ -2239,8 +2069,6 @@ fn test_validate_reflected_tlvs_cos_ce_suppressed_by_tlv_hmac_failure() {
         &mut None,
         false, // track_access_report
         true,  // track_congestion
-        #[cfg(feature = "metrics")]
-        false,
     )
     .expect("TLV-HMAC failure must stop TLV processing → accept, not reject");
 
@@ -2312,10 +2140,7 @@ fn test_process_response_acknowledges_access_report_state() {
         expected_ssid: None,
         on_zero_ssid: ZeroSsidAction::Continue,
         zero_ssid_seen: &mut false,
-        #[cfg(feature = "metrics")]
-        metrics_enabled: false,
-        #[cfg(all(unix, feature = "snmp"))]
-        snmp_stats: None,
+        observers: &NO_OBSERVERS,
     };
 
     process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
@@ -2381,10 +2206,7 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
         expected_ssid: None,
         on_zero_ssid: ZeroSsidAction::Continue,
         zero_ssid_seen: &mut false,
-        #[cfg(feature = "metrics")]
-        metrics_enabled: false,
-        #[cfg(all(unix, feature = "snmp"))]
-        snmp_stats: None,
+        observers: &NO_OBSERVERS,
     };
 
     process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
@@ -2433,10 +2255,7 @@ fn congestion_process_response_ctx<'a>(
         expected_ssid: None,
         on_zero_ssid: ZeroSsidAction::Continue,
         zero_ssid_seen,
-        #[cfg(feature = "metrics")]
-        metrics_enabled: false,
-        #[cfg(all(unix, feature = "snmp"))]
-        snmp_stats: None,
+        observers: &NO_OBSERVERS,
     }
 }
 
@@ -2802,10 +2621,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
         expected_ssid: None,
         on_zero_ssid: ZeroSsidAction::Continue,
         zero_ssid_seen: &mut false,
-        #[cfg(feature = "metrics")]
-        metrics_enabled: false,
-        #[cfg(all(unix, feature = "snmp"))]
-        snmp_stats: None,
+        observers: &NO_OBSERVERS,
     };
     process_response(
         &response.data,
@@ -2928,7 +2744,7 @@ async fn first_packet_tlv_types(conf: Configuration) -> Vec<TlvType> {
         ..conf
     };
     let reflector = tokio::spawn(collect_silently(socket, 1, Duration::from_secs(5)));
-    let _ = tokio::time::timeout(Duration::from_secs(8), run_sender(&conf, None)).await;
+    let _ = tokio::time::timeout(Duration::from_secs(8), run_sender(&conf)).await;
     let packets = reflector.await.unwrap();
     assert!(!packets.is_empty(), "the sender must emit a packet");
     let tlvs = TlvList::parse(&packets[0][UNAUTH_BASE_SIZE..]).expect("TLV area must parse");
@@ -3062,7 +2878,7 @@ async fn test_wait_phase_retransmit_still_carries_scaled_control_tlv() {
     let conf = access_report_with_scaled_control_config(port, 1, 2);
 
     let reflector = tokio::spawn(collect_silently(socket, 3, Duration::from_secs(8)));
-    let _ = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf, None))
+    let _ = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf))
         .await
         .expect("run_sender must not hang past the retry budget")
         .expect("run_sender must start successfully");
@@ -3221,7 +3037,7 @@ async fn test_wait_phase_retransmits_when_reflector_silent_then_aborts() {
     let conf = access_report_test_config(port, 1, 2);
 
     let reflector = tokio::spawn(collect_silently(socket, 4, Duration::from_secs(8)));
-    let snapshot = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf, None))
+    let snapshot = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf))
         .await
         .expect("run_sender must not hang past the retry budget")
         .expect("run_sender must start successfully");
@@ -3273,7 +3089,7 @@ async fn test_wait_phase_ack_mid_wait_stops_retransmitting() {
         Duration::from_secs(1),
         Duration::from_secs(6),
     ));
-    let snapshot = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf, None))
+    let snapshot = tokio::time::timeout(Duration::from_secs(10), run_sender(&conf))
         .await
         .expect("run_sender must finish promptly once acknowledged")
         .expect("run_sender must start successfully");
@@ -3319,7 +3135,7 @@ async fn test_wait_phase_unaffected_when_access_report_disabled() {
 
     let reflector = tokio::spawn(collect_silently(socket, 10, Duration::from_millis(1300)));
     let start = Instant::now();
-    let snapshot = tokio::time::timeout(Duration::from_secs(5), run_sender(&conf, None))
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), run_sender(&conf))
         .await
         .expect("run_sender must finish promptly with no Access Report extension")
         .expect("run_sender must start successfully");
@@ -3580,10 +3396,7 @@ fn test_process_response_records_forward_one_way_delay() {
         expected_ssid: None,
         on_zero_ssid: ZeroSsidAction::Continue,
         zero_ssid_seen: &mut false,
-        #[cfg(feature = "metrics")]
-        metrics_enabled: false,
-        #[cfg(all(unix, feature = "snmp"))]
-        snmp_stats: None,
+        observers: &NO_OBSERVERS,
     };
 
     process_response(&buf, false, false, ClockFormat::PTP, None, None, &mut ctx);
@@ -3853,10 +3666,7 @@ fn test_zero_ssid_policy_stop_discards_reply_and_latches() {
             expected_ssid: Some(4242),
             on_zero_ssid: ZeroSsidAction::Stop,
             zero_ssid_seen: &mut zero_ssid_seen,
-            #[cfg(feature = "metrics")]
-            metrics_enabled: false,
-            #[cfg(all(unix, feature = "snmp"))]
-            snmp_stats: None,
+            observers: &NO_OBSERVERS,
         };
         process_response(&buf, false, false, ClockFormat::NTP, None, None, &mut ctx);
     }
@@ -3928,10 +3738,7 @@ fn test_zero_ssid_policy_continue_still_accounts_the_reply() {
             expected_ssid: Some(4242),
             on_zero_ssid: ZeroSsidAction::Continue,
             zero_ssid_seen: &mut zero_ssid_seen,
-            #[cfg(feature = "metrics")]
-            metrics_enabled: false,
-            #[cfg(all(unix, feature = "snmp"))]
-            snmp_stats: None,
+            observers: &NO_OBSERVERS,
         };
         process_response(&buf, false, false, ClockFormat::NTP, None, None, &mut ctx);
     }
@@ -4006,10 +3813,7 @@ fn test_zero_ssid_policy_inert_without_a_configured_ssid() {
             expected_ssid: None,
             on_zero_ssid: ZeroSsidAction::Stop,
             zero_ssid_seen: &mut zero_ssid_seen,
-            #[cfg(feature = "metrics")]
-            metrics_enabled: false,
-            #[cfg(all(unix, feature = "snmp"))]
-            snmp_stats: None,
+            observers: &NO_OBSERVERS,
         };
         process_response(&buf, false, false, ClockFormat::NTP, None, None, &mut ctx);
     }
@@ -4084,10 +3888,7 @@ fn test_process_response_drops_packet_on_msid_mismatch() {
         expected_ssid: None,
         on_zero_ssid: ZeroSsidAction::Continue,
         zero_ssid_seen: &mut false,
-        #[cfg(feature = "metrics")]
-        metrics_enabled: false,
-        #[cfg(all(unix, feature = "snmp"))]
-        snmp_stats: None,
+        observers: &NO_OBSERVERS,
     };
 
     process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
@@ -4165,10 +3966,7 @@ fn test_process_response_accepts_packet_on_msid_match() {
         expected_ssid: None,
         on_zero_ssid: ZeroSsidAction::Continue,
         zero_ssid_seen: &mut false,
-        #[cfg(feature = "metrics")]
-        metrics_enabled: false,
-        #[cfg(all(unix, feature = "snmp"))]
-        snmp_stats: None,
+        observers: &NO_OBSERVERS,
     };
 
     process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);

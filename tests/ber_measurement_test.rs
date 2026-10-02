@@ -148,7 +148,7 @@ async fn measurement(ip: &str, auth: bool, unsupported: bool) {
             }
         }
     });
-    let stats = tokio::time::timeout(Duration::from_secs(5), run_sender(&conf, None))
+    let stats = tokio::time::timeout(Duration::from_secs(5), run_sender(&conf))
         .await
         .unwrap()
         .unwrap();

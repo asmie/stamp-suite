@@ -92,7 +92,7 @@ impl ClassOfServiceTlv {
     /// Note: this is *not* encoded byte 0, which carries DSCP2's upper bits.
     #[must_use]
     pub const fn wire_tos(&self) -> u8 {
-        ((self.dscp1 & 0x3F) << 2) | (self.ecn1 & 0x03)
+        crate::tos::Tos::new(self.dscp1, self.ecn1).0
     }
 
     /// Returns true if the reflector's policy rejected the requested DSCP.
@@ -129,7 +129,7 @@ impl ClassOfServiceTlv {
         } else {
             0
         };
-        ((dscp & 0x3F) << 2) | (ecn & 0x03)
+        crate::tos::Tos::new(dscp, ecn).0
     }
 }
 

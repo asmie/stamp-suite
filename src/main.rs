@@ -3,8 +3,15 @@
 #[macro_use]
 extern crate log;
 
-use stamp_suite::configuration::*;
-use stamp_suite::{receiver, sender};
+#[cfg(any(feature = "metrics", feature = "control", all(unix, feature = "snmp")))]
+use std::sync::Arc;
+
+use stamp_suite::{
+    configuration::*,
+    receiver, sender,
+    shutdown::{cancel_on_signal, CancellationToken},
+    StartupError,
+};
 
 /// Initializes stderr logging, including `log` calls via `tracing-log`.
 /// `RUST_LOG` overrides verbosity; `--log-format` selects text or JSON.
@@ -41,9 +48,8 @@ fn init_logging(format: LogFormat, verbose: u8) {
 
 #[tokio::main]
 async fn main() {
-    // Parse args BEFORE initialising logging so we know the user's
-    // --log-format choice. Errors from Configuration::load are printed
-    // raw to stderr; the tracing layer isn't up yet.
+    // Parse args before initialising logging so we know the user's
+    // --log-format choice. Configuration errors go to stderr directly.
     let conf = match Configuration::load() {
         Ok(c) => c,
         Err(e) => {
@@ -52,9 +58,7 @@ async fn main() {
         }
     };
 
-    // --print-config-schema: dump the JSON Schema and exit. Side-stepping
-    // logger init is intentional — this path is for tooling, not for
-    // operators tailing journalctl.
+    // --print-config-schema is for tooling: print and exit without logging.
     if conf.print_config_schema {
         println!("{}", stamp_suite::configuration::CONFIG_JSON_SCHEMA);
         return;
@@ -62,6 +66,15 @@ async fn main() {
 
     init_logging(conf.log_format, conf.verbose);
 
+    // A role that never got off the ground exits non-zero: the shipped
+    // systemd unit restarts on failure and reads exit 0 as a deliberate stop.
+    if let Err(e) = run(&conf).await {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+async fn run(conf: &Configuration) -> Result<(), StartupError> {
     // Probe the bound interface's timestamping capabilities and report
     // startup warnings. Socket setup configures the requested timestamp tier.
     let hw_iface = stamp_suite::hwtstamp::interface_for_addr(conf.local_addr);
@@ -89,245 +102,167 @@ async fn main() {
 
     info!("Configuration valid. Starting up...");
 
-    // Bind the requested metrics endpoint before starting the measurement role.
-    // Propagate bind failures so startup cannot silently omit metrics.
+    // Bind the requested metrics endpoint before starting the measurement
+    // role, so startup cannot silently omit metrics.
     #[cfg(feature = "metrics")]
     let _metrics_server = if conf.metrics {
-        match stamp_suite::metrics::init(conf.metrics_addr).await {
-            Ok(server) => {
-                info!("Metrics server started on {}", conf.metrics_addr);
-                Some(server)
-            }
-            Err(stamp_suite::metrics::MetricsError::BindError(io_err)) => {
-                let detail = match io_err.kind() {
-                    std::io::ErrorKind::AddrInUse => "address already in use",
-                    std::io::ErrorKind::AddrNotAvailable => "address not available on this host",
-                    std::io::ErrorKind::PermissionDenied => "permission denied (privileged port?)",
-                    _ => "bind failed",
-                };
-                eprintln!(
-                    "Failed to start metrics server on {}: {} ({})",
-                    conf.metrics_addr, detail, io_err
-                );
-                std::process::exit(1);
-            }
-            Err(e) => {
-                eprintln!("Failed to start metrics server: {}", e);
-                std::process::exit(1);
-            }
-        }
+        let server = stamp_suite::metrics::init(conf.metrics_addr)
+            .await
+            .map_err(|e| {
+                StartupError::service(
+                    format!("Cannot start the metrics server on {}", conf.metrics_addr),
+                    e,
+                )
+            })?;
+        info!("Metrics server started on {}", conf.metrics_addr);
+        Some(server)
     } else {
         None
     };
 
-    #[cfg(not(feature = "metrics"))]
+    if conf.is_reflector {
+        run_reflector(conf).await
+    } else {
+        run_sender(conf).await
+    }
+}
+
+async fn run_reflector(conf: &Configuration) -> Result<(), StartupError> {
+    let shared = receiver::create_shared_state(conf)?;
+    cancel_on_signal(shared.shutdown.clone());
+
+    // An operator who asked for the control API must not get a reflector
+    // that silently runs without it. Design: doc/control-plane.md.
+    #[cfg(feature = "control")]
+    let _control_server = if conf.control {
+        Some(start_control(conf, &shared).await?)
+    } else {
+        None
+    };
+
+    #[cfg(all(unix, feature = "snmp"))]
+    let _snmp_server = if conf.snmp {
+        start_snmp(
+            conf,
+            stamp_suite::snmp::state::SnmpState {
+                config: stamp_suite::snmp::state::SnmpConfig::from_conf(conf),
+                reflector_counters: Some(Arc::clone(&shared.counters)),
+                session_manager: Some(Arc::clone(&shared.session_manager)),
+                start_time: shared.start_time,
+                sender_stats: None,
+            },
+        )
+        .await
+    } else {
+        None
+    };
+
+    receiver::run_receiver(conf, &shared).await
+}
+
+async fn run_sender(conf: &Configuration) -> Result<(), StartupError> {
+    let shutdown = CancellationToken::new();
+    cancel_on_signal(shutdown.clone());
+
+    #[allow(unused_mut)]
+    let mut observers = sender::SenderObservers::default();
+    #[cfg(feature = "metrics")]
     if conf.metrics {
-        eprintln!("Warning: --metrics flag requires the 'metrics' feature to be enabled");
+        observers.push(Arc::new(
+            stamp_suite::metrics::sender_metrics::PrometheusSenderObserver,
+        ));
     }
 
-    if conf.is_reflector {
-        let shared = receiver::create_shared_state(&conf);
-
-        // Control-plane REST API (feature "control"): fail-fast wiring like
-        // metrics — if the operator asked for it, running without it would
-        // hide an outage. Design: doc/control-plane.md.
-        #[cfg(feature = "control")]
-        let _control_server = if conf.control {
-            let token = match conf.control_token_file.as_deref() {
-                // Same descriptor-based permission check as HMAC key files:
-                // a group/world-readable token hands any local user the
-                // key-management and shutdown endpoints.
-                Some(path) => match stamp_suite::crypto::read_token_file(path) {
-                    Ok(t) => Some(t.trim().to_string()),
-                    Err(e) => {
-                        eprintln!("Failed to read --control-token-file: {e}");
-                        std::process::exit(1);
-                    }
-                },
-                None => None,
-            };
-            let state = stamp_suite::control::ControlState {
-                counters: std::sync::Arc::clone(&shared.counters),
-                session_manager: std::sync::Arc::clone(&shared.session_manager),
-                start_time: shared.start_time,
-                rate_limiter: std::sync::Arc::clone(&shared.rate_limiter),
-                hmac_keys: std::sync::Arc::clone(&shared.hmac_keys),
-                caps: std::sync::Arc::clone(&shared.caps),
-                shutdown_requested: std::sync::Arc::clone(&shared.shutdown_requested),
-                token,
-            };
-            // Load the certificate/key before binding: a bad path must fail
-            // next to the operator who typed it, not on the first request.
-            let tls = match (&conf.control_tls_cert, &conf.control_tls_key) {
-                (Some(cert), Some(key)) => {
-                    match stamp_suite::control::ControlTls::load(cert, key) {
-                        Ok(tls) => Some(tls),
-                        Err(e) => {
-                            eprintln!("Failed to load control-plane TLS material: {e}");
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                _ => None,
-            };
-            match stamp_suite::control::init(conf.control_addr, state, tls).await {
-                Ok(server) => Some(server),
-                Err(e) => {
-                    eprintln!(
-                        "Failed to start control-plane API on {}: {e}",
-                        conf.control_addr
-                    );
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "control"))]
-        if conf.control {
-            eprintln!("--control requires building with the \"control\" feature");
-            std::process::exit(1);
-        }
-
-        #[cfg(all(unix, feature = "snmp"))]
-        let _snmp_server = if conf.snmp {
-            match stamp_suite::snmp::init(
-                conf.snmp_socket.clone(),
-                std::sync::Arc::new(stamp_suite::snmp::state::SnmpState {
-                    config: stamp_suite::snmp::state::SnmpConfig {
-                        is_reflector: true,
-                        listen_addr: conf.local_addr,
-                        listen_port: conf.local_port,
-                        remote_addr: conf.remote_addr,
-                        remote_port: conf.remote_port,
-                        auth_mode: conf.auth_mode.to_string(),
-                        tlv_mode: conf.tlv_mode,
-                        stateful_reflector: conf.stateful_reflector,
-                        session_timeout: conf.session_timeout,
-                        packet_count: conf.count,
-                        send_delay: conf.send_delay,
-                    },
-                    reflector_counters: Some(std::sync::Arc::clone(&shared.counters)),
-                    session_manager: Some(std::sync::Arc::clone(&shared.session_manager)),
-                    start_time: shared.start_time,
-                    sender_stats: None,
-                }),
-            )
-            .await
-            {
-                Ok(server) => {
-                    info!(
-                        "SNMP AgentX sub-agent started (socket: {})",
-                        conf.snmp_socket
-                    );
-                    Some(server)
-                }
-                Err(e) => {
-                    // AgentX startup failure leaves STAMP processing available.
-                    // Log the error and continue without SNMP.
-                    log::warn!("SNMP sub-agent disabled: {} (continuing without SNMP)", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        #[cfg(not(all(unix, feature = "snmp")))]
-        if conf.snmp {
-            #[cfg(not(unix))]
-            eprintln!(
-                "Error: --snmp flag requires a Unix platform (AgentX uses Unix domain sockets)"
-            );
-            #[cfg(unix)]
-            eprintln!("Warning: --snmp flag requires the 'snmp' feature to be enabled");
-            #[cfg(not(unix))]
-            std::process::exit(1);
-        }
-
-        // A reflector that never got off the ground must exit non-zero: the
-        // shipped systemd unit is Type=simple with Restart=on-failure, and
-        // exit 0 would be read as a deliberate stop.
-        if let Err(e) = receiver::run_receiver(&conf, &shared).await {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
+    #[cfg(all(unix, feature = "snmp"))]
+    let _snmp_server = if conf.snmp {
+        let stats = Arc::new(stamp_suite::snmp::state::SenderSnmpStats::new());
+        observers.push(stats.clone());
+        start_snmp(
+            conf,
+            stamp_suite::snmp::state::SnmpState {
+                config: stamp_suite::snmp::state::SnmpConfig::from_conf(conf),
+                reflector_counters: None,
+                session_manager: None,
+                start_time: std::time::Instant::now(),
+                sender_stats: Some(stats),
+            },
+        )
+        .await
     } else {
-        #[cfg(all(unix, feature = "snmp"))]
-        let sender_stats = std::sync::Arc::new(stamp_suite::snmp::state::SenderSnmpStats::new());
+        None
+    };
 
-        #[cfg(all(unix, feature = "snmp"))]
-        let _snmp_server = if conf.snmp {
-            match stamp_suite::snmp::init(
-                conf.snmp_socket.clone(),
-                std::sync::Arc::new(stamp_suite::snmp::state::SnmpState {
-                    config: stamp_suite::snmp::state::SnmpConfig {
-                        is_reflector: false,
-                        listen_addr: conf.local_addr,
-                        listen_port: conf.local_port,
-                        remote_addr: conf.remote_addr,
-                        remote_port: conf.remote_port,
-                        auth_mode: conf.auth_mode.to_string(),
-                        tlv_mode: conf.tlv_mode,
-                        stateful_reflector: conf.stateful_reflector,
-                        session_timeout: conf.session_timeout,
-                        packet_count: conf.count,
-                        send_delay: conf.send_delay,
-                    },
-                    reflector_counters: None,
-                    session_manager: None,
-                    start_time: std::time::Instant::now(),
-                    sender_stats: Some(std::sync::Arc::clone(&sender_stats)),
-                }),
+    let mut output = stamp_suite::stats::StatsOutput::new(conf.output_format);
+    let stats = sender::run_sender_with_output(conf, &mut output, observers, shutdown).await?;
+    output.print(&stats, false);
+    Ok(())
+}
+
+#[cfg(feature = "control")]
+async fn start_control(
+    conf: &Configuration,
+    shared: &receiver::ReceiverSharedState,
+) -> Result<stamp_suite::control::ControlServer, StartupError> {
+    let token = match conf.control_token_file.as_deref() {
+        // Same descriptor-based permission check as HMAC key files: a
+        // group/world-readable token hands any local user the key-management
+        // and shutdown endpoints.
+        Some(path) => Some(
+            stamp_suite::crypto::read_token_file(path)
+                .map_err(|e| StartupError::service(format!("Cannot read {}", path.display()), e))?
+                .trim()
+                .to_string(),
+        ),
+        None => None,
+    };
+    let state = stamp_suite::control::ControlState {
+        counters: Arc::clone(&shared.counters),
+        session_manager: Arc::clone(&shared.session_manager),
+        start_time: shared.start_time,
+        rate_limiter: Arc::clone(&shared.rate_limiter),
+        hmac_keys: Arc::clone(&shared.hmac_keys),
+        caps: Arc::clone(&shared.caps),
+        shutdown: shared.shutdown.clone(),
+        token,
+    };
+    // Load the certificate and key before binding, so a bad path fails at
+    // startup rather than on the first request.
+    let tls = match (&conf.control_tls_cert, &conf.control_tls_key) {
+        (Some(cert), Some(key)) => Some(
+            stamp_suite::control::ControlTls::load(cert, key).map_err(|e| {
+                StartupError::service("Cannot load the control-plane TLS material", e)
+            })?,
+        ),
+        _ => None,
+    };
+    stamp_suite::control::init(conf.control_addr, state, tls)
+        .await
+        .map_err(|e| {
+            StartupError::io(
+                format!("Cannot start the control API on {}", conf.control_addr),
+                e,
             )
-            .await
-            {
-                Ok(server) => {
-                    info!(
-                        "SNMP AgentX sub-agent started (socket: {})",
-                        conf.snmp_socket
-                    );
-                    Some(server)
-                }
-                Err(e) => {
-                    // AgentX startup failure leaves STAMP processing available.
-                    // Log the error and continue without SNMP.
-                    log::warn!("SNMP sub-agent disabled: {} (continuing without SNMP)", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        })
+}
 
-        #[cfg(not(all(unix, feature = "snmp")))]
-        if conf.snmp {
-            #[cfg(not(unix))]
-            eprintln!(
-                "Error: --snmp flag requires a Unix platform (AgentX uses Unix domain sockets)"
+/// Starts the AgentX sub-agent. Without a reachable master agent the
+/// measurement still runs; the failure is logged.
+#[cfg(all(unix, feature = "snmp"))]
+async fn start_snmp(
+    conf: &Configuration,
+    state: stamp_suite::snmp::state::SnmpState,
+) -> Option<stamp_suite::snmp::SnmpServer> {
+    match stamp_suite::snmp::init(conf.snmp_socket.clone(), Arc::new(state)).await {
+        Ok(server) => {
+            info!(
+                "SNMP AgentX sub-agent started (socket: {})",
+                conf.snmp_socket
             );
-            #[cfg(unix)]
-            eprintln!("Warning: --snmp flag requires the 'snmp' feature to be enabled");
-            #[cfg(not(unix))]
-            std::process::exit(1);
+            Some(server)
         }
-
-        // Same contract as the reflector: a sender that could not bind,
-        // connect, or load its key reports failure rather than printing an
-        // all-zero statistics block and exiting 0.
-        let mut output = stamp_suite::stats::StatsOutput::new(conf.output_format);
-        #[cfg(all(unix, feature = "snmp"))]
-        let outcome = sender::run_sender_with_output(&conf, Some(sender_stats), &mut output).await;
-        #[cfg(not(all(unix, feature = "snmp")))]
-        let outcome = sender::run_sender_with_output(&conf, None, &mut output).await;
-
-        match outcome {
-            Ok(stats) => output.print(&stats, false),
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
+        Err(e) => {
+            log::warn!("SNMP sub-agent disabled: {} (continuing without SNMP)", e);
+            None
         }
     }
 }

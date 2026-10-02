@@ -14,7 +14,7 @@ fn test_state() -> ControlState {
         rate_limiter: Arc::new(crate::receiver::RateLimiter::with_burst(0, 0)),
         hmac_keys: Arc::new(std::sync::RwLock::new(None)),
         caps: Arc::new(crate::receiver::RuntimeCaps::from_defaults()),
-        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        shutdown: crate::shutdown::CancellationToken::new(),
         token: None,
     }
 }
@@ -572,7 +572,7 @@ async fn drain_and_shutdown() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::ACCEPTED);
-    assert!(state.shutdown_requested.load(Ordering::Relaxed));
+    assert!(state.shutdown.is_cancelled());
 }
 
 #[tokio::test]

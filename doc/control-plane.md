@@ -133,8 +133,8 @@ fields are unsigned limits; PATCH does not validate cross-field combinations.
   after expiry returns. Re-admission starts fresh sequence/counter/replay state
   under a new internal ID. Provisioning survives expiry. Idle cleanup uses the
   same retirement rule; the idle clock is refreshed by incoming accepted packets.
-- **Shutdown** sets `shutdown_requested`; both backends observe it through a
-  250 ms control poll. They stop new packet intake and finish accepted work for
+- **Shutdown** cancels the reflector's shutdown token, the same one Ctrl-C and
+  Unix SIGTERM cancel. The backends stop new packet intake and finish accepted work for
   up to `--reflector-shutdown-grace-ms` (0–60000 ms, default 0), then cancel
   remaining copies. Pnet capture polls at 100 ms independently of session expiry;
   send-worker deadlines are checked between nonblocking sends. The grace interval
