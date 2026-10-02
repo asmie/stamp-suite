@@ -19,6 +19,7 @@ pub const SRH_ROUTING_TYPE: u8 = 4;
 pub const MAX_SEGMENTS: usize = 127;
 
 /// Builds an RFC 8754 SRH from segments in traversal order.
+///
 /// Reverses the RFC 9503 segment list so `Segment List[0]` is the final
 /// destination (RFC 8754 §2). Leaves Next Header zero for the kernel to fill.
 /// Returns `None` for an empty list or more than [`MAX_SEGMENTS`] entries.
@@ -30,15 +31,15 @@ pub fn build_srh(segments: &[Ipv6Addr]) -> Option<Vec<u8>> {
     }
     let last_index = (n - 1) as u8;
     let mut srh = Vec::with_capacity(8 + 16 * n);
-    srh.push(0); // Next Header — populated by the kernel on insertion.
+    srh.push(0); // Next Header: populated by the kernel on insertion.
     srh.push(2 * last_index + 2); // Hdr Ext Len = (8 + 16n)/8 - 1 = 2n.
     srh.push(SRH_ROUTING_TYPE); // Routing Type = 4 (SRH).
-    srh.push(last_index); // Segments Left — index of the first segment to visit.
-    srh.push(last_index); // Last Entry — index of the last list element.
+    srh.push(last_index); // Segments Left: index of the first segment to visit.
+    srh.push(last_index); // Last Entry: index of the last list element.
     srh.push(0); // Flags.
     srh.extend_from_slice(&0u16.to_be_bytes()); // Tag.
-                                                // Segment List in reverse (on-wire) order: index 0 is the final destination.
     for sid in segments.iter().rev() {
+        // Segment List in reverse (on-wire) order: index 0 is the final destination.
         srh.extend_from_slice(&sid.octets());
     }
     Some(srh)
@@ -62,27 +63,32 @@ pub fn srh_supported() -> bool {
     false
 }
 
-/// One-shot probe: open a throwaway IPv6 UDP socket and try to set a minimal
-/// type-4 SRH via `IPV6_RTHDR`. A kernel without seg6 support rejects the
-/// option, in which case we report "unsupported" and never attempt the real
-/// send path.
+/// Opens a throwaway IPv6 UDP socket and tries to set a minimal type-4 SRH
+/// via `IPV6_RTHDR`.
+///
+/// A kernel without seg6 support rejects the option, so the probe reports
+/// "unsupported" and the real send path is never attempted.
 #[cfg(target_os = "linux")]
 fn probe_srh_support() -> bool {
     use nix::libc;
     use std::os::fd::{FromRawFd, OwnedFd};
 
-    // SAFETY: socket() returns -1 on error (checked) or a fresh fd we wrap in
-    // an OwnedFd so it is closed on drop regardless of the outcome.
+    // SAFETY: socket() takes only integer arguments and returns -1 on error,
+    // which is checked before the result is used.
     let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, libc::IPPROTO_UDP) };
     if fd < 0 {
         return false;
     }
+    // SAFETY: `fd` is non-negative, freshly returned by socket() and owned by
+    // nothing else, so the OwnedFd is its sole owner and closes it on drop.
     let _guard = unsafe { OwnedFd::from_raw_fd(fd) };
 
     let Some(sample) = build_srh(&[Ipv6Addr::LOCALHOST]) else {
         return false;
     };
-    // SAFETY: `sample` lives for the call and its length is passed explicitly.
+    // SAFETY: `fd` stays open while `_guard` lives. `sample` is an initialized
+    // buffer that outlives the call, and its exact length is passed, so the
+    // kernel reads only those bytes.
     let rc = unsafe {
         libc::setsockopt(
             fd,

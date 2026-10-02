@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct Throttle(AtomicU64);
 
 impl Throttle {
+    /// A counter with no recorded occurrences.
     pub const fn new() -> Self {
         Self(AtomicU64::new(0))
     }

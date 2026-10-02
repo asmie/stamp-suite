@@ -151,7 +151,8 @@ pub(super) struct ReceivedPacket<'a> {
     /// Arrival interface when replies can be pinned to it (RFC 9503 §4.1.1).
     pub(super) ingress_ifindex: Option<u32>,
     pub(super) src_mac: Option<[u8; 6]>,
-    /// Raw IP headers, available only from packet capture.
+    /// Raw IP headers: fixed and extension headers from packet capture, or
+    /// IPv6 extension headers only from the nix backend on Linux.
     pub(super) captured_headers: Option<&'a CapturedHeaders>,
     /// Kernel or NIC receive timestamp (T2) in the configured wire format.
     pub(super) rx_timestamp: Option<u64>,

@@ -1,4 +1,4 @@
-//! Independent wire checks for the Type-12 non-monotonic response (§5).
+//! Independent wire checks for the Type-12 non-monotonic response (RFC 10052 §5).
 #![cfg(all(
     target_os = "linux",
     any(feature = "ttl-nix", not(feature = "ttl-pnet"))

@@ -19,9 +19,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
-# Default to a read-only token. Jobs that need to upload artifacts or
-# create check-runs should opt in explicitly with their own `permissions:`
-# block; today nothing on this workflow writes back to the repo.
+# Default to a read-only token. A job that needs write access opts in with
+# its own `permissions:` block; only security-audit does (checks and issues).
 permissions:
   contents: read
 
@@ -72,13 +71,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: clippy-pnet
-      # The pnet receiver backend (src/receiver/pnet.rs) is cfg-gated on
-      # `feature = "ttl-pnet" AND NOT feature = "ttl-nix"`, so it's
-      # compiled out under --all-features on any platform (ttl-nix wins
-      # there) and is otherwise not covered by the `clippy` job (which
-      # also runs an all-features leg). This dedicated job is the sole
-      # pnet-backend lint gate and a stable, individually addressable
-      # required check.
+      # The pnet receiver backend (src/receiver/pnet.rs) builds only with
+      # `ttl-pnet` and without `ttl-nix`. Neither `clippy` leg compiles it
+      # on Linux (both select nix), so this job is the only pnet-backend
+      # lint gate and a separately addressable required check.
       - name: Clippy (ttl-pnet, no default features)
         run: cargo clippy --locked --no-default-features --features ttl-pnet --all-targets -- -D warnings
 
@@ -161,9 +157,9 @@ jobs:
         shell: pwsh
         run: |
           # 7-Zip is not reliably preinstalled on GitHub-hosted Windows
-          # images any more (actions/runner-images#9361); Chocolatey is,
-          # so use it to guarantee 7z.exe is present rather than assuming
-          # a path. `choco` needs no credentials for a public package.
+          # images (actions/runner-images#9361); Chocolatey is, so install
+          # 7z.exe through it when it is missing. `choco` needs no
+          # credentials for a public package.
           $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
           if (-not $sevenZip -and (Test-Path "C:\Program Files\7-Zip\7z.exe")) {
             $sevenZip = "C:\Program Files\7-Zip\7z.exe"
@@ -299,7 +295,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: x86_64-apple-darwin
-          # See pin rationale on the test job above.
+          # The Npcap SDK step below matches this exact runner label.
           - os: windows-2022
             target: x86_64-pc-windows-msvc
     steps:
@@ -325,9 +321,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Pinned to Cargo.toml's rust-version: Debian trixie's rustc. Every
+      # Pinned to Cargo.toml's rust-version, Debian trixie's rustc. Every
       # target (tests, benches, examples) must build there, not just the
-      # library — distro builds run the test suite with the distro compiler.
+      # library: distro builds run the test suite with the distro compiler.
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
         with:
@@ -402,20 +398,15 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
-    # Override the workflow-default contents-read token so the
-    # rustsec/audit-check action can post its findings as a check-run
-    # (it needs checks:write) and open issues for new advisories
-    # (issues:write — optional but harmless).
+    # Override the workflow-default read-only token so
+    # rustsec/audit-check can post its findings as a check-run
+    # (checks:write) and open issues for new advisories (issues:write).
     #
-    # Overlap with `cargo-deny` below: both scan the RustSec advisory
-    # database for known vulnerabilities in this crate's dependency tree,
-    # so the [advisories] half of that job duplicates this one. Kept side
-    # by side deliberately -- this job's value is the PR-annotated
-    # check-run and issue-filing on new advisories, which
-    # `cargo-deny-action` doesn't do; `cargo deny check` is kept as the
-    # single command contributors run locally (see deny.toml) and also
-    # covers licenses/bans/sources in the same pass. Small redundancy on
-    # the advisories check, not wasted effort.
+    # `cargo-deny` below also scans the RustSec advisory database, so the
+    # advisory check runs twice on purpose. This job adds the PR-annotated
+    # check-run and issue filing, which `cargo-deny-action` does not do;
+    # `cargo deny check` is the single command contributors run locally
+    # (see deny.toml) and also covers licenses, bans and sources.
     permissions:
       contents: read
       checks: write

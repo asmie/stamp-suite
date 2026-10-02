@@ -341,8 +341,8 @@ async fn post_shutdown(State(s): State<ControlState>) -> StatusCode {
     StatusCode::ACCEPTED
 }
 
-/// Handle to the running control server; dropping it does NOT stop the
-/// server — call [`ControlServer::shutdown`].
+/// Handle to the running control server. Dropping it does NOT stop the
+/// server; call [`ControlServer::shutdown`].
 pub struct ControlServer {
     cancel: CancellationToken,
     local_addr: std::net::SocketAddr,
@@ -463,7 +463,7 @@ pub async fn init(
 ) -> Result<ControlServer, std::io::Error> {
     if !addr.ip().is_loopback() && tls.is_none() {
         log::warn!(
-            "control-plane API bound to non-loopback {addr} without TLS — it \
+            "control-plane API bound to non-loopback {addr} without TLS. It \
              manages keys and shutdown, and a bearer token crosses the network \
              in clear; set --control-tls-cert/--control-tls-key, or keep it on \
              loopback behind an SSH tunnel or reverse proxy"

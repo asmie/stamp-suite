@@ -1,8 +1,8 @@
 //! Class of Service TLV (Type 4) per RFC 8972 §4.4 (with verified erratum
 //! 8199), extended with the reverse-path ECN fields (EC1/RPE) of
-//! draft-ietf-ippm-stamp-cos-ecn-01 (wire format byte-identical to -00; -01
-//! §3.2 additionally requires the reply's on-wire ECN bits be zeroed when
-//! EC1 cannot be applied — see [`ClassOfServiceTlv::reply_wire_tos`]).
+//! draft-ietf-ippm-stamp-cos-ecn-01. Its §3.2 requires the reply's on-wire
+//! ECN bits to be zeroed when EC1 cannot be applied (see
+//! [`ClassOfServiceTlv::reply_wire_tos`]).
 
 use crate::tlv::core::{TlvError, TlvType, COS_TLV_VALUE_SIZE};
 use crate::tlv::traits::TypedTlv;
@@ -10,7 +10,7 @@ use crate::tlv::traits::TypedTlv;
 /// Class of Service TLV (Type 4) for DSCP/ECN measurement per RFC 8972 §4.4
 /// as updated by draft-ietf-ippm-stamp-cos-ecn-01. EC1 and RPE occupy bits
 /// that RFC 8972 reserved, so the extension is backward compatible in both
-/// directions (§3.3 of the draft).
+/// directions.
 ///
 /// # Wire Format
 ///
@@ -37,10 +37,9 @@ pub struct ClassOfServiceTlv {
     pub rpd: u8,
     /// RPE (reverse path ECN, 2 bits; draft-ietf-ippm-stamp-cos-ecn-01
     /// §3.2): 0b11 when the reflector set the reply's ECN to EC1, 0b10 when
-    /// it was unable to — in which case -01 additionally requires the
-    /// reply's on-wire ECN bits be forced to 0b00 (see
-    /// [`ClassOfServiceTlv::reply_wire_tos`]); 0b00 from senders and RFC
-    /// 8972-only reflectors.
+    /// it was unable to (the reply's on-wire ECN bits are then forced to
+    /// 0b00, see [`ClassOfServiceTlv::reply_wire_tos`]); 0b00 from senders
+    /// and RFC 8972-only reflectors.
     pub rpe: u8,
 }
 
@@ -65,8 +64,8 @@ impl ClassOfServiceTlv {
     /// `ecn_applied` reports whether the reflector set the reply packet's
     /// ECN field to EC1 (RPE = 0b11) or was unable to (RPE = 0b10), per
     /// draft-ietf-ippm-stamp-cos-ecn-01 §3.2. When unable, callers MUST
-    /// also zero the reply's on-wire ECN bits — see
-    /// [`ClassOfServiceTlv::reply_wire_tos`].
+    /// also zero the reply's on-wire ECN bits (see
+    /// [`ClassOfServiceTlv::reply_wire_tos`]).
     #[must_use]
     pub fn for_response(
         dscp1: u8,
@@ -89,7 +88,7 @@ impl ClassOfServiceTlv {
     /// Packs the requested DSCP1/EC1 pair into the single octet used by the
     /// IPv4 TOS / IPv6 Traffic Class field, so a sender can mark its egress
     /// IP header to match what this TLV requests for the reflected packet.
-    /// Note: this is *not* encoded byte 0, which carries DSCP2's upper bits.
+    /// This is *not* encoded byte 0, which carries DSCP2's upper bits.
     #[must_use]
     pub const fn wire_tos(&self) -> u8 {
         crate::tos::Tos::new(self.dscp1, self.ecn1).0
@@ -229,9 +228,8 @@ mod tests {
     #[test]
     fn test_cos_tlv_draft_figure_cross_vector() {
         // Hand-computed from draft-ietf-ippm-stamp-cos-ecn-01 Figure 1, §3.1
-        // (| DSCP1 | DSCP2 |EC2|RPD|EC1|RPE| Reserved |; byte-identical to
-        // -00's Figure 1). The same bytes round-trip through teaparty's CoS
-        // decoder, pinning interop.
+        // (| DSCP1 | DSCP2 |EC2|RPD|EC1|RPE| Reserved |). The same bytes
+        // round-trip through teaparty's CoS decoder, pinning interop.
         // DSCP1=46 (0b101110), DSCP2=20 (0b010100), EC2=1, RPD=0,
         // EC1=2, RPE=3:
         //   byte0 = 101110_01          = 0xB9
@@ -282,8 +280,8 @@ mod tests {
 
     #[test]
     fn test_reply_wire_tos_success_uses_ec1() {
-        // draft-ietf-ippm-stamp-cos-ecn-01 §3.2 success path (unchanged from
-        // -00): RPE=0b11, reply ECN = EC1.
+        // draft-ietf-ippm-stamp-cos-ecn-01 §3.2 success path: RPE=0b11,
+        // reply ECN = EC1.
         let cos = ClassOfServiceTlv::for_response(46, 2, 10, 1, false, true);
         assert_eq!(cos.rpe, 0b11);
         assert_eq!(cos.reply_wire_tos(), 0xBA); // (46 << 2) | 2
@@ -291,10 +289,10 @@ mod tests {
 
     #[test]
     fn test_reply_wire_tos_unable_zeroes_ecn_bits() {
-        // draft-ietf-ippm-stamp-cos-ecn-01 §3.2 MUST rule (the -01 delta):
-        // when the reflector is unable to set EC1, RPE=0b10 AND the
-        // reply's on-wire ECN bits must be forced to 0b00 — asserted here
-        // on the actual computed TOS byte, not just the TLV's RPE field.
+        // draft-ietf-ippm-stamp-cos-ecn-01 §3.2 MUST rule: when the
+        // reflector is unable to set EC1, RPE=0b10 AND the reply's on-wire
+        // ECN bits must be forced to 0b00. Asserted on the computed TOS
+        // byte, not just the TLV's RPE field.
         let cos = ClassOfServiceTlv::for_response(46, 2, 10, 1, false, false);
         assert_eq!(cos.rpe, 0b10, "unable to set EC1 => RPE=0b10");
         let tos = cos.reply_wire_tos();
@@ -312,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_reply_wire_tos_policy_rejected_uses_dscp2() {
-        // RPD cross-check (-01 §3.2, unchanged from -00): local policy
+        // RPD cross-check (draft-ietf-ippm-stamp-cos-ecn-01 §3.2): local policy
         // rejecting DSCP1 must make the reply use the received DSCP
         // (DSCP2), independently of whether EC1 was applied.
         let cos = ClassOfServiceTlv::for_response(46, 2, 10, 1, true, true);
@@ -341,8 +339,8 @@ mod tests {
     #[test]
     fn test_wire_tos_is_independent_of_received_fields() {
         // wire_tos() packs the *requested* DSCP1/EC1 pair for the IP TOS /
-        // Traffic Class field. Unlike the pre-cos-ecn layout it no longer
-        // equals encoded byte 0, which carries DSCP2's upper bits.
+        // Traffic Class field. It differs from encoded byte 0, which
+        // carries DSCP2's upper bits.
         let cos = ClassOfServiceTlv::for_response(46, 2, 20, 1, false, true);
         assert_eq!(cos.wire_tos(), 0xBA); // (46 << 2) | 2
         assert_ne!(cos.wire_tos(), cos.to_raw().value[0]);

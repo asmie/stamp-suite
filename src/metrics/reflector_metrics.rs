@@ -29,8 +29,8 @@ pub(crate) fn record_packet_reflected() {
 
 /// Records that a packet was dropped with the specified reason.
 ///
-/// # Arguments
-/// * `reason` - The reason for dropping: "parse_error", "hmac_failure", "short_packet", etc.
+/// `reason` becomes the `reason` label, for example "parse_error",
+/// "hmac_failure", "hmac_required" or "no_key_for_ssid".
 pub(crate) fn record_packet_dropped(reason: &'static str) {
     counter!("stamp_reflector_packets_dropped_total", "reason" => reason).increment(1);
 }

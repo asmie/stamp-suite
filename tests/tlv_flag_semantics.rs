@@ -1,23 +1,23 @@
-//! End-to-end conformance audit for TLV flag semantics.
+//! End-to-end conformance tests for TLV flag semantics.
 //!
-//! Pins the U/M/I/C flag contract against the RFC 8972 + draft-ietf-ippm-
-//! asymmetrical-pkts wire format. Each test drives `process_stamp_packet`
+//! Pins the U/M/I/C flag contract against the RFC 8972 and RFC 10052 wire
+//! format. Each test drives `process_stamp_packet`
 //! through the reflector pipeline with a deliberately-shaped TLV chain and
 //! asserts the expected flag is set in the echoed response.
 //!
-//! - **U** (Unrecognized, bit 0, mask 0x80) — RFC 8972 §3: reflector sets when
-//!   the TLV type is not known to it but still echoes the TLV.
-//! - **M** (Malformed, bit 1, mask 0x40) — RFC 8972 §3: set on length
+//! - **U** (Unrecognized, bit 0, mask 0x80), RFC 8972 §4: the reflector sets
+//!   it when the TLV type is not known to it but still echoes the TLV.
+//! - **M** (Malformed, bit 1, mask 0x40), RFC 8972 §4: set on length
 //!   mismatches and parser-detected structural errors (truncation, TLV after
 //!   HMAC, etc.). Sub-field range violations are *not* spec-mandated to be
 //!   flagged.
-//! - **I** (Integrity failed, bit 2, mask 0x20) — RFC 8972 §4.8: set on **all**
+//! - **I** (Integrity failed, bit 2, mask 0x20), RFC 8972 §4.8: set on **all**
 //!   TLVs when HMAC TLV verification fails; the packet is still echoed (not
 //!   dropped).
-//! - **C** (Conformant Reflected, bit 3, mask 0x10) — draft-ietf-ippm-
-//!   asymmetrical-pkts §3, IANA-assigned: set by the reflector on the
-//!   Reflected Test Packet Control TLV only, to indicate the requested
-//!   asymmetry parameters could not be honoured exactly.
+//! - **C** (Conformant Reflected, bit 3, mask 0x10), RFC 10052 §3: set by the
+//!   reflector on the Reflected Test Packet Control TLV when the requested
+//!   parameters could not be honoured exactly. draft-ietf-ippm-stamp-ext-hdr-15
+//!   also sets it on Type 246 and on Extension Header Control sub-TLVs.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -114,11 +114,11 @@ fn tlv_to_chain(tlv: &RawTlv) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// TlvFlags wire-format unit tests — pin the bit positions.
+// TlvFlags wire-format unit tests: pin the bit positions.
 
 #[test]
 fn tlv_flags_wire_bit_positions() {
-    // RFC 8972 §3 + RFC 10052 §3.
+    // RFC 8972 §4 + RFC 10052 §6.2.
     // U=bit0=0x80, M=bit1=0x40, I=bit2=0x20, C=bit3=0x10.
     assert_eq!(
         TlvFlags {
@@ -171,7 +171,7 @@ fn tlv_flags_round_trip_each_bit_set() {
 }
 
 // ---------------------------------------------------------------------------
-// U-flag — unknown TLV types are echoed with U set.
+// U-flag: unknown TLV types are echoed with U set.
 
 #[test]
 fn u_flag_set_on_unknown_tlv_type() {
@@ -198,7 +198,7 @@ fn u_flag_set_on_unknown_tlv_type() {
 
 #[test]
 fn u_flag_set_on_reserved_type_zero() {
-    // Type 0 is "Reserved" — also unknown to a conformant receiver.
+    // Type 0 is "Reserved", so also unknown to a conformant receiver.
     let raw = RawTlv::new(TlvType::Reserved, vec![0, 0, 0, 0]);
     let chain = tlv_to_chain(&raw);
 
@@ -214,7 +214,7 @@ fn u_flag_set_on_reserved_type_zero() {
 }
 
 // ---------------------------------------------------------------------------
-// M-flag — length mismatches and parser-detected structural errors.
+// M-flag: length mismatches and parser-detected structural errors.
 
 #[test]
 fn m_flag_set_on_cos_wrong_length() {
@@ -236,7 +236,7 @@ fn m_flag_set_on_cos_wrong_length() {
 fn m_flag_set_on_truncated_tlv() {
     // Append a TLV header that claims 16 bytes of Value but only supplies 4.
     // The reflector echoes the (still-malformed) TLV byte-exactly with M=1
-    // per RFC 8972 §4.8; parsing the response requires the lenient parser
+    // per RFC 8972 §4; parsing the response requires the lenient parser
     // since the wire is, by construction, still malformed.
     let mut chain = Vec::new();
     chain.push(0); // flags
@@ -419,8 +419,8 @@ fn cos_tlv_destination_scoped_policy_decides_per_peer() {
     let packet = build_unauth_packet(&cos.to_raw().to_bytes());
     let value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE;
 
-    // The Location-TLV address info is what carries the reply destination, so
-    // build a context whose observed source is the peer being tested.
+    // The reply destination is `packet_addr_info.src_addr`, so build a
+    // context whose observed source is the peer being tested.
     let permitted_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 5)), 12345);
     let mut ctx = make_ctx(None);
     ctx.received_dscp = 10;
@@ -459,12 +459,12 @@ fn cos_tlv_destination_scoped_policy_decides_per_peer() {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel timestamp seams — T2 override and per-direction method reporting.
+// Kernel timestamp seams: T2 override and per-direction method reporting.
 
 #[test]
 fn kernel_rx_timestamp_overrides_t2() {
     // When the backend supplies a kernel receive timestamp, the reflected
-    // packet's Receive Timestamp field (bytes 16..24, RFC 8762 §4.3) must
+    // packet's Receive Timestamp field (bytes 16..24, RFC 8762 §4.3.1) must
     // carry it verbatim instead of a fresh userspace timestamp.
     let packet = build_unauth_packet(&[]);
     let mut ctx = make_ctx(None);
@@ -535,7 +535,7 @@ fn follow_up_telemetry_reports_tx_method() {
 }
 
 // ---------------------------------------------------------------------------
-// I-flag — HMAC TLV verification failure marks all TLVs.
+// I-flag: HMAC TLV verification failure marks all TLVs.
 
 #[test]
 fn i_flag_set_on_corrupted_tlv_hmac() {
@@ -612,11 +612,11 @@ fn i_flag_not_set_on_valid_tlv_hmac() {
 }
 
 // ---------------------------------------------------------------------------
-// C-flag — Reflected Test Packet Control non-conformance signal.
+// C-flag: Reflected Test Packet Control non-conformance signal.
 
 #[test]
 fn c_flag_set_when_reflected_control_request_exceeds_local_caps() {
-    // Type 12 wire format (draft-14 §3 minimum 12 octets):
+    // Type 12 wire format (RFC 10052 §3, minimum 12 octets):
     //   length_of_reflected_packet (u16) | number_of_reflected_packets (u16)
     //   | interval_nanoseconds (u32) | one placeholder sub-TLV header (4 zero
     //   octets) so the value field reaches the mandatory 12-octet floor.
@@ -646,7 +646,7 @@ fn c_flag_set_when_reflected_control_request_exceeds_local_caps() {
 
 #[test]
 fn c_flag_clear_when_reflected_control_request_within_caps() {
-    // Request 2 packets, 1 ms — within REFLECTED_CONTROL_MAX_COUNT. The
+    // Request 2 packets, 1 ms apart: within the context's cap of 16. The
     // 12-byte minimum is honoured by the placeholder sub-TLV header below.
     let mut value = Vec::with_capacity(12);
     value.extend_from_slice(&0u16.to_be_bytes()); // length
@@ -675,8 +675,8 @@ fn c_flag_clear_when_reflected_control_request_within_caps() {
 #[test]
 fn reflected_control_disabled_by_default_emits_no_extra_copies() {
     // With reflected_control_max_count = 0 (the production default), a Type 12
-    // request must not amplify: zero extra copies, and the C flag set to tell
-    // the sender the request was not honoured.
+    // request must not amplify: zero extra copies, and the TLV is echoed with
+    // U set, as by a reflector without Type 12 support.
     let mut value = Vec::with_capacity(12);
     value.extend_from_slice(&0u16.to_be_bytes()); // length
     value.extend_from_slice(&8u16.to_be_bytes()); // count: 8 reply packets
@@ -839,8 +839,8 @@ fn reflected_control_duplicate_ext_hdr_control_sets_c_on_all_copies() {
 
 #[test]
 fn reflected_control_one_way_mode_defaults_off() {
-    // Without the sub-TLV the reflector follows the draft default
-    // (two-way mode).
+    // Without the sub-TLV no Extension Header Control request is recorded
+    // (the default unidirectional type, draft-ietf-ippm-stamp-ext-hdr-15 §5.2).
     let raw = RawTlv::new(
         TlvType::ReflectedControl,
         reflected_control_value(0, 2, 1_000_000),
@@ -861,7 +861,7 @@ fn reflected_control_one_way_mode_defaults_off() {
 
 #[test]
 fn reflected_control_count_zero_suppresses_reply() {
-    // draft-14 §3: "If the Number of Reflected Packets field is set to zero,
+    // RFC 10052 §3: "If the Number of Reflected Packets field is set to zero,
     // the Session-Reflector MUST NOT send any reflected packets", and SHOULD
     // discard the received test packet.
     let raw = RawTlv::new(
@@ -882,8 +882,8 @@ fn reflected_control_count_zero_suppresses_reply() {
 
 #[test]
 fn reflected_control_count_above_cap_collapses_to_single_reply() {
-    // draft-14 §3: a request that would exceed the reflector's volume limit
-    // gets C=1 and "a single reflected packet" — not a clamped burst.
+    // RFC 10052 §3: a request that would exceed the reflector's volume limit
+    // gets C=1 and "a single reflected packet", not a clamped burst.
     let raw = RawTlv::new(
         TlvType::ReflectedControl,
         reflected_control_value(0, 1000, 1_000_000),
@@ -899,7 +899,7 @@ fn reflected_control_count_above_cap_collapses_to_single_reply() {
 
 #[test]
 fn reflected_control_interval_below_floor_collapses_to_single_reply() {
-    // draft-14 §3: exceeding the configured *rate* limit (interval floor)
+    // RFC 10052 §3: exceeding the configured *rate* limit (interval floor)
     // also means C=1 plus a single reflected packet.
     let raw = RawTlv::new(
         TlvType::ReflectedControl,
@@ -930,7 +930,7 @@ fn reflected_control_interval_below_floor_collapses_to_single_reply() {
 
 #[test]
 fn reflected_control_strips_echoed_extra_padding() {
-    // draft-14 §3 rule (a): the reflected length is computed "excluding any
+    // RFC 10052 §3 rule (a): the reflected length is computed "excluding any
     // Extra Padding TLVs" so a sender can request replies SHORTER than its
     // test packet. The echoed chain must not contain the sender's padding.
     let padding = ExtraPaddingTlv::new_zeros(100).to_raw();
@@ -964,8 +964,8 @@ fn reflected_control_strips_echoed_extra_padding() {
 
 #[test]
 fn reflected_control_pads_to_four_octet_aligned_length() {
-    // draft-14 §3 rule (b): the requested length is taken "aligned at a
-    // four-octet boundary" — 101 must round up to 104.
+    // RFC 10052 §3 rule (b): the requested length is taken "aligned at a
+    // four-octet boundary", so 101 must round up to 104.
     let raw = RawTlv::new(
         TlvType::ReflectedControl,
         reflected_control_value(101, 1, 0),
@@ -984,8 +984,8 @@ fn reflected_control_pads_to_four_octet_aligned_length() {
 
 #[test]
 fn incoming_c_flag_on_request_is_ignored() {
-    // draft-14 §3: "the Session-Reflector MUST ignore its value on the
-    // receipt" — a sender-set C must not leak into a conformant echo.
+    // RFC 10052 §3: "the Session-Reflector MUST ignore its value on the
+    // receipt", so a sender-set C must not leak into a conformant echo.
     let raw = RawTlv::with_flags(
         TlvFlags::from_byte(0x90), // U (sender-mandated) + bogus C
         TlvType::ReflectedControl,
@@ -1011,10 +1011,10 @@ fn incoming_c_flag_on_request_is_ignored() {
 
 #[test]
 fn return_path_no_reply_conflict_sets_u_on_both_tlvs() {
-    // draft-14 §4.3: Return Path "no reply requested" combined with a
+    // RFC 10052 §4.3: Return Path "no reply requested" combined with a
     // non-zero Reflected Test Packet Control TLV is a sender error; the
     // reflector "MUST set the U flag to 1 in Return Path and Reflected Test
-    // Packet Control TLVs in the reflected STAMP packet" — so a reply IS
+    // Packet Control TLVs in the reflected STAMP packet", so a reply IS
     // sent, and no asymmetric behaviour happens.
     let rp = ReturnPathTlv::with_control_code(0x0).to_raw(); // no reply requested
     let control = RawTlv::new(
@@ -1093,8 +1093,9 @@ fn reflected_control_padding_uses_real_base_size_with_tlv_hmac() {
 
 #[test]
 fn reflected_control_length_padding_disabled_by_default() {
-    // With reflected_control_max_count=0, refuse padding with C set.
-    // Disabled asymmetric reflection must not amplify small requests.
+    // With reflected_control_max_count=0 the padding request is refused and the
+    // TLV is flagged U. Disabled asymmetric reflection must not amplify small
+    // requests.
     let mut value = Vec::with_capacity(12);
     value.extend_from_slice(&1500u16.to_be_bytes()); // length: pad to 1500
     value.extend_from_slice(&1u16.to_be_bytes()); // count: 1 (single reply)
@@ -1210,7 +1211,7 @@ fn reflected_control_rate_and_volume_limits_set_c() {
 }
 
 // ---------------------------------------------------------------------------
-// Independence — U/M/I bits must not bleed into each other.
+// Independence: U/M/I bits must not bleed into each other.
 
 #[test]
 fn unknown_tlv_does_not_set_m_or_i() {
@@ -1259,14 +1260,16 @@ fn malformed_tlv_does_not_set_u_or_i() {
 fn tlv_header_size_is_four_octets() {
     assert_eq!(
         TLV_HEADER_SIZE, 4,
-        "RFC 8972 §4.2.1: flags(1) + type(1) + length(2) = 4 octets"
+        "RFC 8972 §4: flags(1) + type(1) + length(2) = 4 octets"
     );
 }
 
 // ---------------------------------------------------------------------------
-// A1: Reflected Test Packet Control draft-14 extras.
+// Reflected Test Packet Control (RFC 10052 §3): length, padding and Address
+// Group filtering.
 
-/// 8-byte Type 12 value (pre-draft-14) must be rejected as malformed.
+/// An 8-byte Type 12 value is below the 12-octet minimum of RFC 10052 §3 and
+/// must be flagged malformed.
 #[test]
 fn a1_reflected_control_min_length_12_pre_14_rejected() {
     let mut value = Vec::with_capacity(8);
@@ -1286,7 +1289,7 @@ fn a1_reflected_control_min_length_12_pre_14_rejected() {
         .expect("Type 12 must be echoed");
     assert!(
         echoed.is_malformed(),
-        "8-byte Type 12 value must be rejected with M-flag per draft-14 §3 \
+        "8-byte Type 12 value must be rejected with M-flag per RFC 10052 §3 \
          (MUST NOT be smaller than 12 octets)"
     );
 }
@@ -1362,7 +1365,7 @@ fn a1_reflected_control_length_target_accounts_for_reflector_added_hmac() {
     value.extend_from_slice(&0u32.to_be_bytes()); // interval
     value.extend_from_slice(&[0u8; 4]); // sub-TLV placeholder
 
-    // The request carries NO HMAC TLV of its own — the reflector adds one.
+    // The request carries NO HMAC TLV of its own; the reflector adds one.
     let raw = RawTlv::new(TlvType::ReflectedControl, value);
     let packet = build_unauth_packet(&raw.to_bytes());
     let ctx = make_ctx(Some(&key));
@@ -1400,7 +1403,7 @@ fn a1_reflected_control_length_target_accounts_for_reflector_added_hmac() {
 /// to the cap (best-effort).
 #[test]
 fn a1_reflected_control_length_request_exceeds_cap_sets_c_flag() {
-    let target_length = 9000u16; // larger than default cap (1500)
+    let target_length = 9000u16; // larger than the context's cap (1500)
     let mut value = Vec::with_capacity(12);
     value.extend_from_slice(&target_length.to_be_bytes());
     value.extend_from_slice(&1u16.to_be_bytes());
@@ -1425,7 +1428,7 @@ fn a1_reflected_control_length_request_exceeds_cap_sets_c_flag() {
 }
 
 /// L3 Address Group sub-TLV present but no local address matches → packet
-/// processing stops per draft §3 ("MUST stop processing the received
+/// processing stops per RFC 10052 §3.1.2 ("MUST stop processing the received
 /// packet"). The backend observes `ReturnPathAction::SuppressReply` and
 /// does not transmit a reply.
 #[test]
@@ -1439,8 +1442,9 @@ fn a1_reflected_control_l3_mismatch_suppresses_reply() {
     value.extend_from_slice(&0u16.to_be_bytes()); // length
     value.extend_from_slice(&1u16.to_be_bytes()); // count
     value.extend_from_slice(&0u32.to_be_bytes()); // interval
-                                                  // L3 Address Group sub-TLV: flags=0, type=11, length=8, prefix_len=24,
-                                                  // reserved=0x000000, prefix=192.0.2.0.
+
+    // L3 Address Group sub-TLV: flags=0, type=11, length=8, prefix_len=24,
+    // reserved=0x000000, prefix=192.0.2.0.
     let sub_tlv = [
         0u8, 11, 0x00, 0x08, // header
         24, 0x00, 0x00, 0x00, // prefix_len + reserved
@@ -1472,7 +1476,7 @@ fn a1_reflected_control_l3_mismatch_suppresses_reply() {
 }
 
 /// Builds an L2 Address Group sub-TLV (type 10) with a 12-octet value
-/// (6-byte mask + 6-byte group — the only length that can match a 6-byte
+/// (6-byte mask + 6-byte group, the only length that can match a 6-byte
 /// EUI-48 local MAC).
 fn l2_group_sub_tlv(mask: [u8; 6], group: [u8; 6]) -> [u8; 16] {
     let mut sub_tlv = [0u8; 16];
@@ -1529,8 +1533,7 @@ fn a1_reflected_control_l2_mismatch_suppresses_reply() {
 
 /// L2 Address Group sub-TLV present and the mask/group matches one of the
 /// reflector's local MAC addresses → the packet is reflected normally, and
-/// the echoed Type 12 TLV must NOT carry the U-flag (the old "can't
-/// evaluate" fallback no longer applies now that real matching happens).
+/// the echoed Type 12 TLV must NOT carry the U-flag.
 #[test]
 fn a1_reflected_control_l2_match_replies_normally() {
     use stamp_suite::tlv::ReturnPathAction;
@@ -1578,9 +1581,9 @@ fn a1_reflected_control_l2_match_replies_normally() {
 }
 
 /// A malformed L2 Address Group sub-TLV (Sub-TLV Length not 4/12/16) is
-/// skipped rather than gating the packet — mirroring the existing L3
-/// malformed-length handling, it simply does not participate in matching,
-/// so the packet is reflected normally with no drop and no flag set for it.
+/// skipped rather than gating the packet. As with a malformed L3 sub-TLV, it
+/// does not participate in matching, so the packet is reflected normally with
+/// no drop and no flag set for it.
 #[test]
 fn a1_reflected_control_l2_malformed_length_does_not_drop() {
     use stamp_suite::tlv::ReturnPathAction;
@@ -1593,7 +1596,7 @@ fn a1_reflected_control_l2_malformed_length_does_not_drop() {
 
     let raw = RawTlv::new(TlvType::ReflectedControl, value);
     let packet = build_unauth_packet(&raw.to_bytes());
-    let ctx = make_ctx(None); // local_macs empty; must not matter — sub-TLV is ignored
+    let ctx = make_ctx(None); // local_macs empty; irrelevant since the sub-TLV is ignored
 
     let response = stamp_suite::receiver::process_stamp_packet(
         &packet,
@@ -1615,7 +1618,7 @@ fn a1_reflected_control_l2_malformed_length_does_not_drop() {
 }
 
 /// L2 and L3 Address Group sub-TLVs may appear on the same Type 12 TLV; each
-/// gates independently (draft §3.1.1/§3.1.2), so both must match for the
+/// gates independently (RFC 10052 §3.1.1, §3.1.2), so both must match for the
 /// packet to be reflected.
 #[test]
 fn a1_reflected_control_l2_and_l3_both_match_replies_normally() {
@@ -1628,7 +1631,7 @@ fn a1_reflected_control_l2_and_l3_both_match_replies_normally() {
     let l3 = [
         0u8, 11, 0x00, 0x08, // header: flags, type=11, length=8
         24, 0x00, 0x00, 0x00, // prefix_len + reserved
-        192, 0, 2, 0, // prefix 192.0.2.0/24 — matches 192.0.2.1
+        192, 0, 2, 0, // prefix 192.0.2.0/24, matches 192.0.2.1
     ];
     let mut sub_tlvs = Vec::new();
     sub_tlvs.extend_from_slice(&l2);
@@ -1664,7 +1667,7 @@ fn a1_reflected_control_l2_and_l3_both_match_replies_normally() {
 
 /// When L2 and L3 Address Group sub-TLVs are both present and only the L2
 /// one fails to match, the packet must still be dropped (each sub-TLV gates
-/// independently — an L3 match does not override an L2 mismatch).
+/// independently; an L3 match does not override an L2 mismatch).
 #[test]
 fn a1_reflected_control_l2_fails_l3_matches_still_suppresses() {
     use stamp_suite::tlv::ReturnPathAction;
@@ -1706,8 +1709,8 @@ fn a1_reflected_control_l2_fails_l3_matches_still_suppresses() {
 }
 
 /// The mirror of the case above: L2 matches, L3 does not. Independent gating
-/// (draft §3.1.1/§3.1.2) means the L3 mismatch still drops the packet — an L2
-/// match must not override it.
+/// (RFC 10052 §3.1.1, §3.1.2) means the L3 mismatch still drops the packet;
+/// an L2 match must not override it.
 #[test]
 fn a1_reflected_control_l2_matches_l3_fails_still_suppresses() {
     use stamp_suite::tlv::ReturnPathAction;
@@ -1752,15 +1755,15 @@ fn a1_reflected_control_l2_matches_l3_fails_still_suppresses() {
 }
 
 // ---------------------------------------------------------------------------
-// draft-ietf-ippm-stamp-ext-hdr-15 §4.1 Requested-field selector — end to end
+// draft-ietf-ippm-stamp-ext-hdr-15 §4.1 Requested-field selector, end to end
 // (sender-built request TLV → reflector match against captured headers).
 
 #[test]
 fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
     // Two extension-header records of the SAME length (both 8 bytes), differing
-    // only in body: the §5.1 disambiguation case. The sender's non-zero
+    // only in body: the §4.1 disambiguation case. The sender's non-zero
     // Requested field must pull back only the matching header. Since the
-    // selector equals rec_b's first 4 on-wire octets, the reflected value is
+    // selector equals rec_b's first 8 on-wire octets, the reflected value is
     // Requested(rec_b[..8]) + Reflected(rec_b[8..]) == rec_b.
     let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
     let rec_b = [0x3Cu8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
@@ -1772,7 +1775,7 @@ fn reflected_ipv6_ext_hdr_selector_matches_specific_header_end_to_end() {
         ipv6_ext_headers: blob,
     };
 
-    // Sender request carrying rec_b's first 4 on-wire bytes as the Requested field.
+    // Sender request carrying rec_b's first 8 on-wire bytes as the Requested field.
     let request = ReflectedIpv6ExtHdrTlv::request_with_selector(
         &[0x3C, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6],
         8,
@@ -1832,7 +1835,7 @@ fn reflected_ipv6_ext_hdr_selector_no_match_sets_c_flag_end_to_end() {
     assert_eq!(
         echoed.flags.to_byte() & 0x80,
         0x00,
-        "must NOT set the U flag under -11"
+        "must set C, not U, per ext-hdr-15 §4.1"
     );
     assert_eq!(
         &echoed.value[..8],
@@ -1842,9 +1845,9 @@ fn reflected_ipv6_ext_hdr_selector_no_match_sets_c_flag_end_to_end() {
 }
 
 #[test]
-fn revision13_selector_uses_all_eight_octets_and_reflects_only_the_tail() {
+fn revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled() {
     // Independent raw Type-246 encoder. Headers share their first four octets,
-    // so a revision-11 implementation would select the wrong header.
+    // so a selector that compared only four octets would pick the wrong one.
     let first = [17, 1, 1, 12, 1, 2, 3, 4, 10, 11, 12, 13, 14, 15, 16, 17];
     let second = [17, 1, 1, 12, 5, 6, 7, 8, 20, 21, 22, 23, 24, 25, 26, 27];
     let captured = CapturedHeaders {
@@ -1860,15 +1863,14 @@ fn revision13_selector_uses_all_eight_octets_and_reflects_only_the_tail() {
         let reply = reflect_unauth(&build_unauth_packet(&chain), &ctx);
         let tlv = &reply.non_hmac_tlvs()[0];
         assert_eq!(tlv.flags.to_byte(), 0);
-        assert_eq!(&tlv.value[..8], selector);
-        assert_eq!(
-            &tlv.value[8..],
-            if selector.iter().all(|b| *b == 0) {
-                &first[8..]
-            } else {
-                &second[8..]
-            }
-        );
+        // A zero selector matches the first header and is filled with its
+        // first eight octets (ext-hdr-15 §4.2 rule 1).
+        let expected = if selector.iter().all(|b| *b == 0) {
+            &first
+        } else {
+            &second
+        };
+        assert_eq!(&tlv.value[..], &expected[..]);
     }
 }
 

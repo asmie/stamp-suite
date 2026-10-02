@@ -1,4 +1,4 @@
-//! Error estimate encoding/decoding for STAMP timestamps (RFC 8762 Section 4.2).
+//! Error estimate encoding/decoding for STAMP timestamps (RFC 8762 §4.2.1).
 //!
 //! The error estimate is a 16-bit field that indicates the estimated error of the
 //! timestamp. The format is: S (1 bit) | Z (1 bit) | Scale (6 bits) | Multiplier (8 bits)
@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::clock_format::ClockFormat;
 
-/// Error estimate for STAMP timestamps (RFC 8762 Section 4.2).
+/// Error estimate for STAMP timestamps (RFC 8762 §4.2.1).
 ///
 /// 16-bit format: S (1 bit) | Z (1 bit) | Scale (6 bits) | Multiplier (8 bits)
 /// - S = Synchronization flag (1 = synchronized)
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_default_trait() {
-        // Default is now consistent with unsynchronized()
+        // Default matches unsynchronized().
         let estimate = ErrorEstimate::default();
         assert!(!estimate.synchronized);
         assert!(!estimate.z_flag);
@@ -351,9 +351,8 @@ mod tests {
 
     #[test]
     fn test_ntp_wire_format_backward_compat() {
-        // Old format without Z flag: S=1, Scale=10, Multiplier=100 -> 0x8A64
-        // New format with Z=0: S=1, Z=0, Scale=10, Multiplier=100 -> 0x8A64
-        // The values should be the same for NTP (Z=0)
+        // With Z=0 (NTP) the encoding is the same as the RFC 4656 format,
+        // which has no Z flag: S=1, Scale=10, Multiplier=100 -> 0x8A64.
         let estimate = ErrorEstimate::new(true, false, 10, 100).unwrap();
         assert_eq!(estimate.to_wire(), 0x8A64);
     }

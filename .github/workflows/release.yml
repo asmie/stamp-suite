@@ -8,10 +8,9 @@ permissions:
   contents: write
 
 jobs:
-  # First job in the workflow — every other job needs this one, directly
-  # or transitively, so a tag that doesn't match every version source (or
-  # doesn't even package cleanly) never reaches build, test, publish, or
-  # the GitHub Release.
+  # Every other job needs this one, directly or transitively, so a tag that
+  # does not match every version source (or does not package cleanly) never
+  # reaches build, test, publish, or the GitHub Release.
   release-preflight:
     name: Release Preflight
     runs-on: ubuntu-latest
@@ -116,9 +115,8 @@ jobs:
             stamp-suite-*-vendor.tar.xz
           if-no-files-found: error
 
-  # Linux DEB/RPM packages (existing) plus a plain tarball per target
-  # (new — see the "Artifacts" work item). Kept as one job since it
-  # already builds the release binary for these targets.
+  # Linux DEB/RPM packages plus a plain tarball per target, in one job
+  # because it already builds the release binary for these targets.
   package:
     name: Package ${{ matrix.target }}
     needs: [release-preflight]
@@ -175,13 +173,10 @@ jobs:
           path: stamp-suite-*.tar.gz
           if-no-files-found: error
 
-  # macOS tarballs — new (Windows is explicitly out of scope for this
-  # work item). No DEB/RPM here, macOS has neither.
+  # macOS tarballs (no DEB/RPM). No Windows release artifacts are built.
   #
-  # --all-features is known-broken when building for darwin (metrics ->
-  # aws-lc-sys needs a native C toolchain quirk that doesn't hold up
-  # here); build the explicit, metrics-free feature list instead so the
-  # CoS/HW-timestamp/SNMP/control-plane surface is still covered.
+  # Builds the nix backend with every optional feature. The pnet backend is
+  # left out because nix is the macOS default.
   package-macos:
     name: Package macOS (${{ matrix.target }})
     needs: [release-preflight]
@@ -203,7 +198,7 @@ jobs:
         with:
           key: release-${{ matrix.target }}
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ttl-nix,snmp,hwtstamp,control
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ttl-nix,snmp,hwtstamp,control,metrics
       - name: Assemble tarball
         shell: bash
         run: |
@@ -219,9 +214,8 @@ jobs:
           path: stamp-suite-*.tar.gz
           if-no-files-found: error
 
-  # Full test suite + strict clippy on the tagged commit. Nothing has
-  # been proven to actually pass on this tag until this job is green;
-  # publish and release both depend on it (directly or transitively).
+  # Full test suite and strict clippy on the tagged commit. Publish depends
+  # on it directly and the GitHub Release through publish.
   test-gate:
     name: Test Gate
     needs: [release-preflight]
@@ -256,7 +250,7 @@ jobs:
   #      environment: crates-io
   #    This is what lets the OIDC exchange below (via
   #    rust-lang/crates-io-auth-action) mint a short-lived publish
-  #    token — no long-lived API token is stored anywhere in the repo.
+  #    token, so no long-lived API token is stored in the repo.
   # ----------------------------------------------------------------------
   publish:
     name: Publish to crates.io
@@ -278,8 +272,8 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-      # ---- FALLBACK — only if Trusted Publishing (OIDC) genuinely -----
-      # ---- cannot be enabled for this repo -----------------------------
+      # ---- FALLBACK: only if Trusted Publishing (OIDC) cannot ---------
+      # ---- be enabled for this repo -------------------------------------
       # Remove the two steps above and the `id-token: write` permission,
       # then publish with a long-lived token stored as a repo secret:
       #
@@ -343,8 +337,8 @@ jobs:
             dist/*.tar.xz
             dist/SHA256SUMS
 
-      # Detached GPG signature over SHA256SUMS — the form Debian/Gentoo/Arch
-      # maintainers habitually check (`gpg --verify SHA256SUMS.asc SHA256SUMS`
+      # Detached GPG signature over SHA256SUMS, the form Debian/Gentoo/Arch
+      # maintainers usually check (`gpg --verify SHA256SUMS.asc SHA256SUMS`
       # then `sha256sum -c`). Skipped, not failed, when no key is configured,
       # so the attestation above is always present and the signature is an
       # additive extra.
@@ -356,8 +350,8 @@ jobs:
       #    secret `RELEASE_GPG_PRIVATE_KEY` with that armored block; add
       #    `RELEASE_GPG_PASSPHRASE` too if the key has one.
       # 3. Publish the public key (`gpg --armor --export <KEYID>`) where
-      #    packagers can find it — e.g. commit it as dist/RELEASE_KEY.asc and
-      #    upload to keys.openpgp.org — and note the fingerprint in README.md.
+      #    packagers can find it (for example, commit it as dist/RELEASE_KEY.asc
+      #    and upload it to keys.openpgp.org) and note the fingerprint in README.md.
       # ----------------------------------------------------------------------
       - name: Sign SHA256SUMS (if a release key is configured)
         working-directory: dist

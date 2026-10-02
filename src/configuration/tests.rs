@@ -523,7 +523,7 @@ fn test_return_path_no_reply_conflicts_with_reflected_control() {
     assert!(conf.validate().is_ok());
 
     // The ext-hdr-control sub-TLV also makes the TLV non-zero, even at
-    // the default count of 1 — same §4.3 conflict.
+    // the default count of 1: the same §4.3 conflict.
     let args = vec![
         "test",
         "--remote-addr",
@@ -652,7 +652,7 @@ fn test_auth_mode_variations() {
 
 #[test]
 fn test_auth_mode_invalid_rejected_by_clap() {
-    // Invalid values are now rejected by clap at parse time
+    // Invalid values are rejected by clap at parse time
     let invalid_modes = ["AO", "OA", "AA", "E", "X", "AE", "", "a", "o"];
     for mode in invalid_modes {
         let args = vec!["test", "--auth-mode", mode];
@@ -877,7 +877,7 @@ fn test_log_format_toml_round_trip() {
 }
 
 // -----------------------------------------------------------------------
-// D4: --print-config-schema.
+// --print-config-schema.
 
 /// The exported schema is well-formed JSON.
 #[test]
@@ -956,7 +956,7 @@ fn test_hwtstamp_default_auto() {
 
 #[test]
 fn test_reflected_control_max_count_defaults_to_zero() {
-    // RFC 10052: the reflected-packet feature MUST
+    // RFC 10052 §5: the reflected-packet feature MUST
     // be disabled by default. A zero cap means no amplification unless the
     // operator opts in via --reflected-control-max-count.
     let conf = Configuration::parse_from(["test"]);
@@ -1648,8 +1648,8 @@ fn test_access_report_retries_default_is_four() {
 }
 
 /// RFC 8972 §4.6: "An implementation MUST provide control of the
-/// retransmission timer value and the number of retransmissions" —
-/// both must be overridable via the CLI.
+/// retransmission timer value and the number of retransmissions." Both
+/// must be overridable via the CLI.
 #[test]
 fn test_access_report_timeout_and_retries_are_configurable() {
     let conf = load_from_args(&[
@@ -1870,7 +1870,7 @@ fn test_control_tls_requires_both_halves_and_a_token() {
 #[test]
 fn test_control_tls_half_configured_from_file_is_rejected() {
     // clap's `requires` covers the CLI, but a config file can set one
-    // alone — validate() has to catch that too.
+    // alone, so validate() has to catch that too.
     for (key, other) in [
         ("control_tls_cert", "control_tls_key"),
         ("control_tls_key", "control_tls_cert"),
@@ -2156,8 +2156,8 @@ fn test_on_zero_ssid_merges_from_file() {
 }
 
 /// `--hmac-key-dir` is a reflector concept: `KeySource::load_key` (the
-/// sender's path) does not read directories, so a sender given one used to ignore it
-/// silently — a typo'd path included.
+/// sender's path) does not read directories, so a sender would ignore it
+/// silently, a typo'd path included. Validation rejects it instead.
 #[test]
 fn test_hmac_key_dir_is_reflector_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -2175,7 +2175,7 @@ fn test_hmac_key_dir_is_reflector_only() {
 }
 
 /// The schema must accept the full Return Code octet, including 255,
-/// as the CLI and wire encoder do (RFC 8972 §4.6, Table 11).
+/// as the CLI and wire encoder do (RFC 8972 §4.6; Table 11 in §5.6).
 #[test]
 fn test_schema_access_return_code_spans_a_full_octet() {
     let schema: serde_json::Value =
@@ -2398,8 +2398,8 @@ fn test_resolve_log_filter_rust_log_env_overrides_verbose() {
 #[test]
 fn test_resolve_log_filter_empty_rust_log_env_falls_back_to_verbose() {
     // An empty RUST_LOG (e.g. present in the environment but set to
-    // the empty string) must not be treated as "explicitly set" --
-    // fall back to the -v/-vv-derived level instead.
+    // the empty string) must not be treated as "explicitly set"; it falls
+    // back to the -v/-vv-derived level instead.
     assert_eq!(resolve_log_filter(0, Some("")), "info");
     assert_eq!(resolve_log_filter(1, Some("")), "debug");
 }

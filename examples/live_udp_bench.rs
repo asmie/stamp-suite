@@ -35,7 +35,7 @@ mod linux {
     #[derive(Parser, Serialize)]
     #[command(about = "Measure a local reflector over real UDP; emit JSON on stdout")]
     struct Args {
-        /// Build this binary with the same features as the benchmark example.
+        /// Reflector binary to run; build it with the same features as this example.
         #[arg(long, default_value = "target/release/stamp-suite")]
         reflector: PathBuf,
         #[arg(long)]
@@ -85,6 +85,8 @@ mod linux {
 
     fn cpu_ticks(pid: u32) -> Result<u64> {
         let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+        // utime and stime are fields 14 and 15 of proc(5) stat. Splitting after the
+        // ')' that closes the command name starts at field 3, so they are at 11 and 12.
         let fields: Vec<_> = stat
             .rsplit_once(')')
             .ok_or("invalid proc stat")?
@@ -367,7 +369,8 @@ mod linux {
     fn run_inner() -> Result<()> {
         let mut args = Args::parse();
         args.reflector = fs::canonicalize(&args.reflector)?;
-        // SAFETY: sysconf with _SC_CLK_TCK does not use pointers.
+        // SAFETY: sysconf takes an integer name and no pointers; it has no memory-safety
+        // preconditions.
         let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
         if hz <= 0 {
             return Err("could not determine CPU tick frequency".into());

@@ -12,7 +12,7 @@ use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
 
 /// Default bit pattern `{0xFF, 0x00}` used when the sender omits Type 240
-/// (draft §4.1.1).
+/// (draft-gandhi-ippm-stamp-ber-07 §4.1.1).
 pub const BER_DEFAULT_PATTERN: [u8; 2] = [0xFF, 0x00];
 
 /// BER Bit Pattern in Padding TLV (Type 240).

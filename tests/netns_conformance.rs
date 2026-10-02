@@ -4,7 +4,7 @@
 //! cannot reach: real IP TOS/ECN bytes, TTL/Hop-Limit marking, IPv6 extension
 //! headers, SRv6 SRH routing, Address Group (MAC/IP) filtering, and Type-12
 //! multi-reply pacing. Each is mapped to the conformance-matrix clauses it
-//! evidences (RFC 8762 §4.x + erratum 8199, RFC 8972 §4.4, RFC 9503 §4,
+//! evidences (RFC 8762 §4, RFC 8972 §4.4 + erratum 8199, RFC 9503 §4,
 //! RFC 10052, draft-ietf-ippm-stamp-ext-hdr-15,
 //! draft-ietf-ippm-stamp-cos-ecn-01, draft-gandhi-ippm-stamp-ber).
 //!
@@ -47,13 +47,13 @@ const HMAC_HEX: &str = "0123456789abcdef0123456789abcdef";
 // Small shared helpers.
 // --------------------------------------------------------------------------
 
-/// Packets whose UDP source port is the reflector port — i.e. reflected
+/// Packets whose UDP source port is the reflector port, i.e. reflected
 /// replies leaving the reflector.
 fn replies(pkts: &[CapturedPacket], port: u16) -> Vec<&CapturedPacket> {
     pkts.iter().filter(|p| p.src_port == port).collect()
 }
 
-/// Packets whose UDP destination port is the reflector port — i.e. test
+/// Packets whose UDP destination port is the reflector port, i.e. test
 /// packets arriving at the reflector.
 fn requests(pkts: &[CapturedPacket], port: u16) -> Vec<&CapturedPacket> {
     pkts.iter().filter(|p| p.dst_port == port).collect()
@@ -95,14 +95,14 @@ fn craft_control_packet(sub: Vec<u8>) -> Vec<u8> {
     ExtendedPacketUnauthenticated::with_tlvs(base_unauth(7), tlvs).to_bytes()
 }
 
-/// L3 Address Group sub-TLV (type 11) — `prefix_len(1) + reserved(3) + v4(4)`.
+/// L3 Address Group sub-TLV (type 11): `prefix_len(1) + reserved(3) + v4(4)`.
 fn l3_sub(prefix_len: u8, prefix: [u8; 4]) -> Vec<u8> {
     let mut v = vec![0x00u8, 11, 0x00, 0x08, prefix_len, 0, 0, 0];
     v.extend_from_slice(&prefix);
     v
 }
 
-/// L2 Address Group sub-TLV (type 10) — `mask(6) + group(6)`.
+/// L2 Address Group sub-TLV (type 10): `mask(6) + group(6)`.
 fn l2_sub(mask: [u8; 6], group: [u8; 6]) -> Vec<u8> {
     let mut v = vec![0x00u8, 10, 0x00, 0x0c];
     v.extend_from_slice(&mask);
@@ -116,7 +116,7 @@ fn roundtrip_sender_args() -> Vec<&'static str> {
 }
 
 // ==========================================================================
-// Scenario 1 — unauthenticated + authenticated round-trip (RFC 8762 §4.2-4.5).
+// Scenario 1: unauthenticated + authenticated round-trip (RFC 8762 §4.2-§4.4).
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]
@@ -167,7 +167,7 @@ fn scenario_1_roundtrip_unauth_and_auth() {
 }
 
 // ==========================================================================
-// Scenario 2 — on-wire DSCP/ECN reflection + CoS reply-TOS
+// Scenario 2: on-wire DSCP/ECN reflection + CoS reply-TOS
 // (RFC 8972 §4.4 + erratum 8199 + draft-ietf-ippm-stamp-cos-ecn-01 §3.2).
 // ==========================================================================
 #[test]
@@ -249,7 +249,7 @@ fn scenario_2_cos_dscp_ecn_onwire() {
 }
 
 // ==========================================================================
-// Scenario 3 — SRv6 Return Path: SRH attached and routed (RFC 9503 §4 /
+// Scenario 3: SRv6 Return Path, SRH attached and routed (RFC 9503 §4 /
 // RFC 8754). Requires actual transit forwarding; skips without seg6.
 // ==========================================================================
 #[test]
@@ -391,7 +391,7 @@ fn verify_srv6_reply(payload: &[u8], auth: bool, expect_path: bool) {
 }
 
 // ==========================================================================
-// Scenario 4a — ext-hdr on the nix backend: the Destination Options header
+// Scenario 4a: ext-hdr on the nix backend. The Destination Options header
 // arrives as ancillary data and is reflected (draft-ietf-ippm-stamp-ext-hdr-15
 // §4.2). A UDP socket cannot see fixed headers, so Type 247 would get C.
 // ==========================================================================
@@ -460,8 +460,8 @@ fn scenario_4a_ext_hdr_nix_ancillary() {
 }
 
 // ==========================================================================
-// Scenario 4b — real ext-hdr capture + reflection on the pnet backend
-// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 4.1). Requires a pnet-feature
+// Scenario 4b: real ext-hdr capture + reflection on the pnet backend
+// (draft-ietf-ippm-stamp-ext-hdr-15 §4.1, §4.2). Requires a pnet-feature
 // reflector binary (STAMP_NETNS_PNET_BIN) and kernel IPV6_DSTOPTS injection.
 // ==========================================================================
 #[test]
@@ -540,7 +540,8 @@ fn scenario_4b_ext_hdr_pnet_capture() {
     let ext =
         find_tlv(&rtlvs, TlvType::ReflectedIpv6ExtHdr).expect("reflected Type-246 TLV present");
     // Success path: C flag clear, and the Reflected field (value[8..]) equals
-    // the captured header's bytes from offset 8 (§5.1: Requested(8)+Reflected).
+    // the captured header's bytes from offset 8 (ext-hdr-15 §4.1: Requested(8)
+    // + Reflected).
     assert!(
         !ext.flags.conformant_reflected,
         "pnet backend captured the header, so the C flag must be clear"
@@ -562,7 +563,7 @@ fn scenario_4b_ext_hdr_pnet_capture() {
 }
 
 // ==========================================================================
-// Scenario 5 — L2 + L3 Address Group filters
+// Scenario 5: L2 + L3 Address Group filters
 // (RFC 10052 §3.1.1 / §3.1.2): a matching filter
 // yields a reply, a non-matching filter drops the packet (no reply).
 // ==========================================================================
@@ -636,7 +637,7 @@ fn scenario_5_address_group_filters() {
 }
 
 // ==========================================================================
-// Scenario 6 — Type-12 multi-reply: count, pacing, and length padding on the
+// Scenario 6: Type-12 multi-reply count, pacing, and length padding on the
 // wire (RFC 10052 §3).
 // ==========================================================================
 #[test]
@@ -726,7 +727,7 @@ fn scenario_6_type12_multi_reply() {
 }
 
 // ==========================================================================
-// Scenario 7 — BER on the wire: the Bit Pattern fills the Extra Padding TLV,
+// Scenario 7: BER on the wire. The Bit Pattern fills the Extra Padding TLV,
 // and the reflector's Bit Error Count is 0 on a clean channel
 // (draft-gandhi-ippm-stamp-ber-07 §4).
 // ==========================================================================
@@ -818,8 +819,8 @@ fn scenario_7_ber_onwire() {
 }
 
 // ==========================================================================
-// Scenario 8 — TTL / Hop-Limit egress marking on the wire (`--ttl`,
-// sender.rs apply_egress_ip_options).
+// Scenario 8: TTL / Hop Limit 255 on the wire (`--ttl 255`; the sender
+// socket is set to 255 by `net_policy::set_hops`, ext-hdr-15 §3.1).
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]
@@ -860,7 +861,7 @@ fn scenario_8_ttl_egress_marking() {
         run.stderr
     );
     // The veth is a single L2 hop, so the requested TTL is not decremented in
-    // transit: the reflector-side capture sees exactly 33.
+    // transit: the reflector-side capture sees exactly 255.
     let req = *requests(&pkts, port)
         .first()
         .expect("a test packet on the wire");

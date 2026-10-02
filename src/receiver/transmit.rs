@@ -239,10 +239,14 @@ impl Transmission {
                     self.response.reflected_control.is_some(),
                 )?;
                 let timestamp = crate::time::generate_timestamp(self.clock);
+                // Reflector Timestamp offset: after the 4-byte Sequence Number,
+                // plus 12 MBZ bytes in authenticated mode (RFC 8762 §4.3.2).
                 let offset = if self.auth { 16 } else { 4 };
                 attempt[offset..offset + 8].copy_from_slice(&timestamp.to_be_bytes());
                 if let Some(key) = &self.key {
                     if self.auth {
+                        // The base-packet HMAC covers the first 96 bytes and
+                        // occupies bytes 96..112 (RFC 8762 §4.3.2).
                         let hmac = crate::crypto::compute_packet_hmac(key, &attempt, 96);
                         attempt[96..112].copy_from_slice(&hmac);
                     }
@@ -344,8 +348,9 @@ fn is_message_too_large(error: &io::Error) -> bool {
     }
     #[cfg(not(unix))]
     {
+        // WSAEMSGSIZE
         error.raw_os_error() == Some(10040)
-    } // WSAEMSGSIZE
+    }
 }
 
 fn is_reflected_header(tlv: &TlvSpan) -> bool {
@@ -519,6 +524,8 @@ fn sign_tlvs(data: &mut [u8], base: usize, key: &HmacKey) {
     if data.len() < base + HMAC_TLV_SIZE {
         return;
     }
+    // RFC 8972 §4.8: the HMAC covers the base Sequence Number and every
+    // TLV before the HMAC TLV.
     let sign = |data: &mut [u8], hmac_at: usize| {
         let digest = key.compute_parts([&data[..4], &data[base..hmac_at]]);
         data[hmac_at + TLV_HEADER_SIZE..hmac_at + HMAC_TLV_SIZE].copy_from_slice(&digest);
@@ -537,7 +544,8 @@ fn sign_tlvs(data: &mut [u8], base: usize, key: &HmacKey) {
             pos = tlv.end();
         }
     }
-    // Otherwise the HMAC is the last TLV, followed only by zero padding.
+    // Otherwise the HMAC is the last TLV, followed only by zero padding. Match
+    // its header after the flags byte: type, then the u16 length 16.
     let hmac_type = TlvType::Hmac.to_byte();
     let header_tail = [hmac_type, 0, HMAC_TLV_VALUE_SIZE as u8];
     for pos in (base..=data.len() - HMAC_TLV_SIZE).rev() {
@@ -838,7 +846,10 @@ fn send_datagram(
     #[cfg(target_os = "linux")] srh_setting: &mut Option<Arc<[u8]>>,
 ) -> io::Result<usize> {
     use nix::libc;
+    // SAFETY: `sockaddr_in` and `sockaddr_in6` are plain C structs of integers
+    // and byte arrays; all-zero is a valid value for both.
     let mut addr4: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
     let mut addr6: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
     #[cfg(any(
         target_os = "macos",
@@ -852,6 +863,8 @@ fn send_datagram(
         addr4.sin_len = std::mem::size_of_val(&addr4) as _;
         addr6.sin6_len = std::mem::size_of_val(&addr6) as _;
     }
+    // SAFETY: `msghdr` is a plain C struct; all-zero means null name, iov and
+    // control pointers with zero lengths, which is valid until filled in below.
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     match dst {
         SocketAddr::V4(v) => {
@@ -877,8 +890,8 @@ fn send_datagram(
     msg.msg_iov = std::ptr::addr_of_mut!(iov);
     msg.msg_iovlen = 1;
     #[cfg(target_os = "linux")]
-    // TOS plus one PKTINFO fit well within 128 bytes; usize elements give
-    // cmsghdr alignment without a heap allocation per send.
+    // TOS plus one PKTINFO fit well within the 16-word buffer; usize elements
+    // give cmsghdr alignment without a heap allocation per send.
     let mut control = ControlBuffer::default();
     #[cfg(target_os = "linux")]
     {
@@ -889,7 +902,11 @@ fn send_datagram(
         } else {
             libc::IP_PMTUDISC_WANT
         };
+        // IP_PMTUDISC_DO sets DF and fails oversized sends with EMSGSIZE;
+        // IP_PMTUDISC_WANT lets the kernel fragment locally when needed.
         update_socket_option(&mut settings[usize::from(dst.is_ipv6())], discover, || {
+            // SAFETY: `fd` is the open socket borrowed by the caller; the value
+            // pointer and length describe the live `discover` c_int.
             if unsafe {
                 libc::setsockopt(
                     fd,
@@ -913,6 +930,8 @@ fn send_datagram(
                 Ok(())
             }
         })?;
+        // IP_TOS / IPV6_TCLASS ancillary data is a host-order c_int holding
+        // the whole TOS / Traffic Class byte (DSCP and ECN).
         let tos = options.tos as libc::c_int;
         control.append(
             if dst.is_ipv4() {
@@ -974,7 +993,11 @@ fn send_datagram(
             let bytes = options.srh.as_deref().unwrap_or(&[]);
             // No await or other sender can interleave this option and sendmsg.
             // On failure retain the previous cache: a fallback must clear it
-            // successfully before transmitting an ordinary reply.
+            // successfully before transmitting an ordinary reply. An empty value
+            // removes the sticky routing header.
+            // SAFETY: `fd` is the open socket borrowed by the caller; the pointer
+            // and length describe `bytes`, which lives across the call (an empty
+            // slice has a dangling but non-null pointer and length 0).
             if unsafe {
                 libc::setsockopt(
                     fd,
@@ -996,6 +1019,8 @@ fn send_datagram(
     {
         let tos = options.tos as libc::c_int;
         update_socket_option(&mut settings[usize::from(dst.is_ipv6())], tos, || {
+            // SAFETY: `fd` is the open socket borrowed by the caller; the value
+            // pointer and length describe the live `tos` c_int.
             let result = unsafe {
                 libc::setsockopt(
                     fd,
@@ -1021,6 +1046,10 @@ fn send_datagram(
         })?;
     }
 
+    // SAFETY: `fd` is the open socket borrowed by the caller. Every pointer in
+    // `msg` refers to a local that outlives the call: the address (`addr4` or
+    // `addr6`), `iov` (whose base is `payload`, only read by sendmsg) and, on
+    // Linux, `control.words` with `control.used` initialized bytes.
     let sent = unsafe { libc::sendmsg(fd, &msg, 0) };
     if sent < 0 {
         Err(io::Error::last_os_error())
@@ -1041,6 +1070,8 @@ fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::
         fn setsockopt(s: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
     }
 
+    // Winsock values from ws2def.h / ws2ipdef.h; they differ from the Unix
+    // values of the same names.
     const IPPROTO_IP: i32 = 0;
     const IPPROTO_IPV6: i32 = 41;
     const IP_TOS: i32 = 3;
@@ -1054,6 +1085,8 @@ fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::
         (IPPROTO_IP, IP_TOS)
     };
 
+    // SAFETY: `raw_socket` is the open socket borrowed from `socket` for the
+    // call; the value pointer and length describe the live `tos_val` i32.
     let result = unsafe {
         setsockopt(
             raw_socket,

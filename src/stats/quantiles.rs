@@ -4,7 +4,7 @@
 
 pub(super) const EXACT_LIMIT: usize = 4096;
 pub(super) const RELATIVE_ERROR: f64 = 1.0 / 128.0;
-const UNSIGNED_BUCKETS: usize = 7424;
+const UNSIGNED_BUCKETS: usize = 7424; // magnitude_index(u64::MAX) + 1
 const SIGNED_ZERO: usize = 7296; // magnitude_index(2^63)
 
 fn magnitude_index(value: u64) -> usize {
@@ -108,7 +108,7 @@ impl<T: QuantileValue> Quantiles<T> {
     }
 
     /// All requested percentiles share one bounded sort or histogram traversal.
-    /// Rank is round(p / 100 * (n - 1)), as before. NaN/negative p selects min;
+    /// Rank is round(p / 100 * (n - 1)). NaN/negative p selects min;
     /// p >= 100 selects max. Endpoints and constant series remain exact.
     pub fn percentiles<const N: usize>(&self, ps: [f64; N]) -> [Option<T>; N] {
         let (Some(min), Some(max)) = (self.min, self.max) else {

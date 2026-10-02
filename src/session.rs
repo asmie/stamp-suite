@@ -18,7 +18,7 @@ pub enum ReplayVerdict {
     /// Ahead of every sequence number seen so far (the normal case), or the
     /// first packet of the session.
     New,
-    /// Behind the high-water mark but not seen before — a late or reordered
+    /// Behind the high-water mark but not seen before: a late or reordered
     /// packet, which is ordinary on a real network and not an attack signal.
     Reordered,
     /// Already seen: a duplicate or a replay.
@@ -88,7 +88,8 @@ impl Session {
         }
     }
 
-    /// Keep this guard through the send and its counter/telemetry updates.
+    /// Returns a guard that keeps the session active, or `None` once it is retired.
+    /// Hold it through the send and its counter/telemetry updates.
     pub(crate) fn transmission_guard(&self) -> Option<std::sync::RwLockReadGuard<'_, bool>> {
         let guard = self.active.read().unwrap_or_else(|e| e.into_inner());
         if *guard {
@@ -141,7 +142,7 @@ impl Session {
             let packed = self.replay_state.load(Ordering::Relaxed);
             let (_, next) = Self::replay_step(packed, seq);
             let Some(next) = next else {
-                return; // Already recorded (replay / out of window) — no update.
+                return; // Replay or out of window: nothing to record.
             };
             if self
                 .replay_state
@@ -512,8 +513,8 @@ impl SessionManager {
     #[cfg(test)]
     /// Generates and returns the next sequence number for a client's session.
     ///
-    /// Creates a new session if one doesn't exist for the client.
-    /// Also updates the last_active time in a single lock acquisition.
+    /// Creates a new session if one doesn't exist for the client, and
+    /// refreshes the session's last-active time.
     pub fn generate_sequence_number(&self, client: impl Into<SessionKey>) -> Option<u32> {
         self.get_session_and_seq(client).map(|(seq, _session)| seq)
     }
@@ -580,9 +581,7 @@ impl SessionManager {
     }
 
     /// Returns the session for a client only if it already exists, without
-    /// creating one or refreshing its activity time. Used by the kernel
-    /// TX-timestamp drain to apply late corrections without resurrecting
-    /// expired sessions.
+    /// creating one or refreshing its activity time.
     pub fn get_session(&self, client: impl Into<SessionKey>) -> Option<Arc<Session>> {
         let client = client.into();
         let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());

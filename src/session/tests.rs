@@ -204,7 +204,7 @@ fn test_replay_large_forward_jump_clears_the_window() {
 #[test]
 fn test_classify_replay_is_read_only_commit_advances() {
     let s = Session::new(1);
-    // Classification never advances the window — repeated classification
+    // Classification never advances the window, so repeated classification
     // of the same unseen sequence number stays New.
     assert_eq!(s.classify_replay(5), ReplayVerdict::New);
     assert_eq!(s.classify_replay(5), ReplayVerdict::New);
@@ -684,7 +684,7 @@ fn test_session_cap_reopens_after_cleanup_frees_space() {
     let manager = SessionManager::new(Some(Duration::from_millis(50)), Some(1));
     manager.generate_sequence_number(make_addr(1)).unwrap();
     assert_eq!(manager.session_count(), 1);
-    // Over cap now — second client is not stored.
+    // Over cap now, so the second client is not stored.
     assert!(manager.generate_sequence_number(make_addr(2)).is_none());
     assert_eq!(manager.session_count(), 1);
 

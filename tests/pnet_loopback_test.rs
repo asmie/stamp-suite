@@ -37,6 +37,7 @@ use stamp_suite::time::generate_timestamp;
 mod privileged;
 
 /// Inspect the effective capability, rather than assuming container root has it.
+/// CAP_NET_RAW is bit 13 of `CapEff`.
 fn has_raw_capability() -> bool {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -96,9 +97,6 @@ async fn one_packet_round_trip(
     hmac_key_hex: Option<&str>,
     sender_packet: Vec<u8>,
 ) -> Option<Vec<u8>> {
-    // The receiver task takes ownership of `conf` and `shared`; we
-    // re-parse the same args for the caller side by simply constructing
-    // them locally where needed (sender doesn't read conf).
     let conf = reflector_conf(local_port, auth, hmac_key_hex);
     let shared = receiver::create_shared_state(&conf).unwrap();
     let shared_capture_alive = shared.capture_alive.clone();

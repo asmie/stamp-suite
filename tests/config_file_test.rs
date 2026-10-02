@@ -68,10 +68,9 @@ fn config_file_unknown_key_is_rejected() {
     assert!(err.to_string().contains("remote_portt"));
 }
 
-/// Mirror of the private `Configuration::merge_file` — kept minimal and used
-/// only to exercise a small surface from the integration test. We cannot call
-/// the private method directly across crates, so this validates the public
-/// `FileConfiguration` shape plus a handful of fields.
+/// Minimal mirror of the private `Configuration::merge_file`, which an
+/// integration test cannot call. It checks the public `FileConfiguration`
+/// shape and the CLI-over-file precedence for a handful of fields.
 fn merge_via_public_api(
     conf: &mut Configuration,
     file: stamp_suite::configuration::FileConfiguration,

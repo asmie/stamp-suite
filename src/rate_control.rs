@@ -17,7 +17,7 @@ const MIN_BACKOFF_FLOOR: Duration = Duration::from_millis(1);
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AimdParams {
     /// The operator-configured steady-state send interval (`--send-delay`).
-    /// The controller never recovers past this — it is the floor for
+    /// The controller never recovers past this: it is the floor for
     /// `AimdController::on_clean_reply` and the starting point on
     /// construction.
     pub base_interval: Duration,
@@ -37,11 +37,10 @@ pub struct AimdParams {
 /// in the sender's stats output (`stats::CongestionSummary`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AimdStats {
-    /// Number of times `AimdController::on_ce_observed` was called
-    /// (i.e. CE-marked replies seen, counting both forward- and
-    /// reverse-path detections — a reply flagged in both directions at
-    /// once still counts once, since only one backoff step is applied per
-    /// reply).
+    /// Number of times `AimdController::on_ce_observed` was called, that is,
+    /// CE-marked replies seen on the forward or reverse path. A reply flagged
+    /// in both directions counts once, since only one backoff step is applied
+    /// per reply.
     pub ce_observations: u64,
     /// Number of times a CE observation actually grew the interval (i.e.
     /// excludes CE observations that arrived while already saturated at
@@ -136,8 +135,8 @@ impl AimdController {
     }
 
     /// Records a reply that was NOT CE-marked: additively shrinks the
-    /// interval by `params.recovery_step`, floored at `params.base_interval`
-    /// — recovery never overshoots past the operator-configured rate.
+    /// interval by `params.recovery_step`, floored at `params.base_interval`,
+    /// so recovery never overshoots the operator-configured rate.
     pub fn on_clean_reply(&mut self) {
         if self.current <= self.params.base_interval {
             self.current = self.params.base_interval;
@@ -242,9 +241,9 @@ mod tests {
     #[test]
     fn clean_reply_recovery_does_not_overshoot_below_base() {
         let mut c = AimdController::new(params());
+        // Recovery step is 20ms; from 200ms five clean replies reach exactly
+        // 100ms, and a sixth must clamp rather than go to 80ms.
         c.on_ce_observed(); // -> 200ms
-                            // Recovery step is 20ms; five clean replies would reach exactly
-                            // 100ms, a sixth must clamp rather than go to 80ms.
         for _ in 0..6 {
             c.on_clean_reply();
         }
@@ -327,7 +326,7 @@ mod tests {
             recovery_step: Duration::from_millis(1),
         };
         let mut c = AimdController::new(zero_base);
-        // At rest (current == 0) the documented value is 1.0 — a zero scale
+        // At rest (current == 0) the documented value is 1.0. A zero scale
         // would zero every scaled parameter (e.g. the Type 12 inter-packet
         // interval, which reflectors reject against their minimum).
         assert!((c.scale_factor() - 1.0).abs() < f64::EPSILON);
@@ -385,8 +384,8 @@ mod proptests {
 
     proptest! {
         /// For any sequence of CE / clean events, the controller's interval
-        /// stays within [base_interval, max_interval] at every step — the
-        /// core AIMD safety property this controller exists to guarantee.
+        /// stays within [base_interval, max_interval] at every step. This is
+        /// the core AIMD safety property the controller exists to guarantee.
         #[test]
         fn interval_always_stays_within_bounds(events in proptest::collection::vec(any::<bool>(), 0..200)) {
             let base = Duration::from_millis(50);
@@ -409,8 +408,7 @@ mod proptests {
         }
 
         /// A CE observation never *decreases* the interval, and a clean
-        /// reply never *increases* it — monotonic direction per event type,
-        /// regardless of history.
+        /// reply never *increases* it, regardless of history.
         #[test]
         fn ce_never_decreases_clean_never_increases(events in proptest::collection::vec(any::<bool>(), 1..200)) {
             let mut c = AimdController::new(AimdParams {

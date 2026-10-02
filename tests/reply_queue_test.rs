@@ -146,7 +146,8 @@ fn next(socket: &UdpSocket, auth: bool) -> (u32, u32) {
     }
 }
 fn signal(child: &Reflector, signal: i32) {
-    // SAFETY: kill takes only a live fixture PID and a standard signal number.
+    // SAFETY: kill(2) accesses no memory. The PID is our child, which is not
+    // reaped until `finish`, so it cannot name another process.
     assert_eq!(unsafe { libc::kill(child.0.id() as i32, signal) }, 0);
 }
 fn finish(child: &mut Reflector) -> serde_json::Value {

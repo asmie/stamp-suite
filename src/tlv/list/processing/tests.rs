@@ -41,8 +41,8 @@ fn test_update_timestamp_info_tlvs() {
     let raw = &list.non_hmac_tlvs()[0];
     let parsed = TimestampInfoTlv::from_raw(raw).unwrap();
     // RFC 8972 §4.3: all four octets describe the *reflector*, and the
-    // sender zeroes them (RFC8972-4.3-2), so the reflector fills every
-    // one — including the In pair, which characterizes its own ingress
+    // sender zeroes them, so the reflector fills every
+    // one, including the In pair, which characterizes its own ingress
     // (T2) rather than anything the sender put there.
     assert_eq!(parsed.sync_src_in, SyncSource::Ptp);
     assert_eq!(parsed.timestamp_in, TimestampMethod::SwLocal);
@@ -50,7 +50,7 @@ fn test_update_timestamp_info_tlvs() {
     assert_eq!(parsed.timestamp_out, TimestampMethod::HwAssist);
 }
 
-/// RFC8972-4.3-5/-6: the ingress ("In") pair must report the reflector's
+/// RFC 8972 §4.3: the ingress ("In") pair must report the reflector's
 /// own T2 clock, so a stale value a non-conformant sender left there is
 /// overwritten rather than echoed back.
 #[test]
@@ -161,7 +161,7 @@ fn test_reflector_answers_generic_source_ip_request_ipv4() {
     assert_eq!(&v[12..24], &[0u8; 12], "MBZ tail");
 }
 
-/// RFC8972-4.2.2-2: "Based on the local policy, the Session-Reflector MAY
+/// RFC 8972 §4.2.2: "Based on the local policy, the Session-Reflector MAY
 /// leave some fields unreported by filling them with zeroes. An
 /// implementation of the stateful Session-Reflector MUST provide control
 /// for managing such policies." A withheld field is answered as zeroes,
@@ -428,7 +428,7 @@ fn test_update_location_unrecognized_sub_tlv_gets_u_flag() {
 #[test]
 fn test_update_location_malformed_sub_tlv_sets_m_and_stops() {
     // RFC 8972 §4: a recognized type carrying an invalid Length is
-    // malformed — set M and stop processing further sub-TLVs.
+    // malformed: set M and stop processing further sub-TLVs.
     use std::net::{IpAddr, Ipv4Addr};
     let mut req = vec![0u8; 4];
     // Source IP (7) with a wrong Length of 4 (must be 16) → malformed.
@@ -455,7 +455,7 @@ fn test_update_location_malformed_sub_tlv_sets_m_and_stops() {
     // First sub-TLV (offset 4): M flag set.
     assert_eq!(raw.value[4], 0x40, "malformed sub-TLV → M flag");
     // Second sub-TLV (offset 12) left untouched (still the sender's U=1,
-    // type 7 request — not answered).
+    // type 7 request, not answered).
     assert_eq!(
         raw.value[12], 0x80,
         "processing stopped: second sub-TLV untouched"
@@ -554,7 +554,7 @@ fn test_update_follow_up_telemetry_tlvs() {
 
 #[test]
 fn test_update_follow_up_telemetry_stateless_zeroes_seq_and_timestamp() {
-    // RFC 8972 §4.7-7: "If the Session-Reflector is in the stateless mode
+    // RFC 8972 §4.7: "If the Session-Reflector is in the stateless mode
     // ..., it MUST zero the Sequence Number and Follow-Up Timestamp
     // fields." A `None` reflection argument represents stateless mode.
     let mut list = TlvList::new();
@@ -577,7 +577,7 @@ fn test_update_follow_up_telemetry_stateless_zeroes_seq_and_timestamp() {
 
 #[test]
 fn test_update_follow_up_telemetry_invalid_length_zeroed() {
-    // RFC 8972 §4.7-6 (with erratum 8339 scope): "If the value of the
+    // RFC 8972 §4.7 (with erratum 8339 scope): "If the value of the
     // Length field is invalid, the Session-Reflector MUST zero the Sequence
     // Number and Follow-Up Timestamp fields ...". An 8-octet value is an
     // invalid length (must be 16); the present seq/timestamp octets MUST be
@@ -614,8 +614,8 @@ fn test_access_report_valid_ids_not_flagged() {
 fn test_access_report_invalid_ids_discarded_with_u_flag() {
     // RFC 8972 §4.6: "a TLV that contains values other than '1' or '2' MUST
     // be discarded." The reflector discards the invalid Access Report TLV
-    // by marking it unrecognized (U flag) — the sender then skips
-    // processing it (§4-17) — while preserving symmetric packet size.
+    // by marking it unrecognized (U flag), so the sender skips
+    // processing it (§4), while preserving symmetric packet size.
     for id in [0u8, 3u8, 15u8] {
         let mut list = list_with_cleared(AccessReportTlv::new(id, 1).to_raw());
         list.discard_invalid_access_report_tlvs();
@@ -1075,7 +1075,7 @@ fn test_process_ber_duplicate_count_tlvs_flag_c() {
 
 #[test]
 fn test_process_ber_no_ber_tlvs_noop() {
-    // Packet without any BER TLVs — process_ber should be a no-op.
+    // Packet without any BER TLVs: process_ber should be a no-op.
     let mut list = list_with_cleared(ExtraPaddingTlv::new_zeros(8).to_raw());
 
     list.process_ber();
@@ -1116,7 +1116,7 @@ fn test_get_reflected_control_request_none_when_absent() {
 fn test_trim_reflected_headers_to_size_removes_246_before_247() {
     use crate::tlv::{ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv};
     let mut list = TlvList::new();
-    // §3.3 order: 247 first, then 246.
+    // §6.3 order: 247 first, then 246.
     list.push(ReflectedFixedHdrTlv::request_with_capacity(40).to_raw())
         .unwrap();
     list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(40).to_raw())
@@ -1153,9 +1153,9 @@ fn test_trim_reflected_headers_to_size_zero_disables() {
     assert_eq!(list.non_hmac_tlvs().len(), 1);
 }
 
-/// draft-ietf-ippm-stamp-ext-hdr-15 §6.2 rule 2: with an IP-in-IP tunnel's
+/// draft-ietf-ippm-stamp-ext-hdr-15 §6.2 rule 3: with an IP-in-IP tunnel's
 /// two captured fixed headers (outer→inner), two same-length Type-247 TLVs
-/// pair positionally — 1st↔outer, 2nd↔inner — via first-fit-with-consumption.
+/// pair positionally (1st↔outer, 2nd↔inner) via first-fit-with-consumption.
 #[test]
 fn test_multi_fixed_hdr_positional_pairing() {
     use crate::tlv::ReflectedFixedHdrTlv;
@@ -1179,7 +1179,7 @@ fn test_multi_fixed_hdr_positional_pairing() {
 }
 
 /// A non-zero Requested selector picks a specific captured fixed header even
-/// among same-length candidates (§5.2), independent of positional order.
+/// among same-length candidates (§6.2 rule 1), independent of positional order.
 #[test]
 fn test_multi_fixed_hdr_selector_picks_specific() {
     use crate::tlv::ReflectedFixedHdrTlv;
@@ -1241,7 +1241,8 @@ fn test_multi_fixed_hdr_mixed_family_lengths() {
 
 #[test]
 fn test_reflected_fixed_hdr_populated_when_captured() {
-    // ext-hdr-15 §6.1: Requested(4) preserved, Reflected = captured[4..].
+    // ext-hdr-15 §6.2 rule 1: a zero Requested gets the header's first 4
+    // octets; Reflected = captured[4..].
     use crate::tlv::ReflectedFixedHdrTlv;
     let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
 
@@ -1250,11 +1251,7 @@ fn test_reflected_fixed_hdr_populated_when_captured() {
 
     let tlv = &list.non_hmac_tlvs()[0];
     assert_eq!(tlv.tlv_type, TlvType::ReflectedFixedHdr);
-    assert_eq!(
-        &tlv.value[..4],
-        &[0, 0, 0, 0],
-        "Requested preserved (zeros)"
-    );
+    assert_eq!(&tlv.value[..4], &captured[..4], "zero Requested filled in");
     assert_eq!(&tlv.value[4..], &captured[4..], "Reflected = captured[4..]");
     assert!(!tlv.flags.conformant_reflected);
     assert!(!tlv.is_unrecognized());
@@ -1304,7 +1301,7 @@ fn test_reflected_fixed_hdr_ipv6_request_with_ipv6_capture_populated() {
     list.process_reflected_headers(Some(&captured), Some(&[]));
 
     let tlv = &list.non_hmac_tlvs()[0];
-    assert_eq!(&tlv.value[..4], &[0, 0, 0, 0], "Requested preserved");
+    assert_eq!(&tlv.value[..4], &captured[..4], "zero Requested filled in");
     assert_eq!(&tlv.value[4..], &captured[4..]);
     assert!(!tlv.flags.conformant_reflected);
 }
@@ -1374,8 +1371,8 @@ fn test_reflected_headers_out_of_order_sets_c_flag_no_copy() {
     // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: Reflected Fixed Header Data
     // (247) TLVs MUST precede Reflected IPv6 Extension Header Data (246)
     // TLVs. "If ... TLVs are not received in this order, the Session-
-    // Reflector MUST return these TLVs with the C flag ... set to 1 ...
-    // without copying any data."
+    // Reflector MUST return these TLVs with the Conformant Reflected Packet
+    // STAMP TLV flag set to 1 ... but without copying any data."
     use crate::tlv::{ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv};
 
     // Reversed order: 246 (ext hdr) BEFORE 247 (fixed hdr).
@@ -1405,7 +1402,7 @@ fn test_reflected_headers_out_of_order_sets_c_flag_no_copy() {
 
 #[test]
 fn test_reflected_headers_in_order_processed_normally() {
-    // The complement of the §3.3 check: with 247 correctly before 246,
+    // The complement of the §6.3 check: with 247 correctly before 246,
     // both TLVs are processed and copied normally (no false C flag).
     use crate::tlv::{ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv};
 
@@ -1435,7 +1432,8 @@ fn test_reflected_headers_in_order_processed_normally() {
 
 #[test]
 fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
-    // ext-hdr-15 §4.1: Requested(8) preserved, Reflected = captured[8..].
+    // ext-hdr-15 §4.2 rule 1: a zero Requested gets the header's first 8
+    // octets; Reflected = captured[8..].
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
     let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
 
@@ -1444,7 +1442,11 @@ fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
     list.process_reflected_headers(Some(&[]), Some(&captured_ext));
 
     let tlv = &list.non_hmac_tlvs()[0];
-    assert_eq!(&tlv.value[..8], &[0; 8], "Requested preserved (zeros)");
+    assert_eq!(
+        &tlv.value[..8],
+        &captured_ext[..8],
+        "zero Requested filled in"
+    );
     assert_eq!(
         &tlv.value[8..],
         &captured_ext[8..],
@@ -1455,9 +1457,9 @@ fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
 
 #[test]
 fn test_reflected_ipv6_ext_hdr_empty_capture_sets_c_flag() {
-    // ext-hdr-15 §4.1: IPv4 path or IPv6 without ext headers — no header to
-    // reflect, so the reflector "could not use it for reflecting any IPv6
-    // extension header received" → C flag.
+    // ext-hdr-15 §4.1: IPv4 path or IPv6 without ext headers has no header to
+    // reflect, so the reflector "cannot use it to reflect any received IPv6
+    // extension header" → C flag.
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
     let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
 
@@ -1596,10 +1598,9 @@ fn test_reflected_ipv6_ext_hdr_selector_no_match_on_empty_capture_sets_c_flag() 
 
 #[test]
 fn test_reflected_ipv6_ext_hdr_zero_selector_does_not_concatenate() {
-    // -11 removed the -08 "concatenate every captured header" behavior. A
-    // 16-byte request against two 8-byte headers can no longer length-match
-    // (the positionally-paired first header is 8 bytes) → C flag, proving
-    // concat-all is gone.
+    // Captured headers are matched one at a time, never concatenated. A
+    // 16-byte request against two 8-byte headers cannot length-match
+    // (the positionally-paired first header is 8 bytes) → C flag.
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
     let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
     let rec_b = [0x00u8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
@@ -1619,7 +1620,7 @@ fn test_reflected_ipv6_ext_hdr_zero_selector_does_not_concatenate() {
 
 #[test]
 fn test_reflected_headers_noop_when_no_tlvs() {
-    // Packet with only Extra Padding — should not flag anything.
+    // Packet with only Extra Padding: should not flag anything.
     let mut list = list_with_cleared(ExtraPaddingTlv::new_zeros(4).to_raw());
 
     list.process_reflected_headers(None, None);
@@ -1628,13 +1629,14 @@ fn test_reflected_headers_noop_when_no_tlvs() {
 }
 
 // --- draft-ietf-ippm-stamp-ext-hdr-15 semantics ---
-// Type 246 has Requested(8); Type 247 retains Requested(4). The selector
-// is preserved, and only the corresponding header tail is reflected. Failure is
-// signalled with the C flag (Conformance), NOT the U flag, and the value
-// is left as received.
+// Type 246 has Requested(8); Type 247 has Requested(4). A matched header is
+// copied whole: a nonzero selector already equals its first octets, and a
+// zero one is filled with them (§4.2 and §6.2 rule 1). Failure is signalled
+// with the C flag (Conformance), NOT the U flag, and the value is left as
+// received.
 
 #[test]
-fn test_v13_fixed_hdr_requested_preserved_reflected_is_offset_4() {
+fn test_v13_fixed_hdr_zero_requested_filled_reflected_is_offset_4() {
     use crate::tlv::ReflectedFixedHdrTlv;
     let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
 
@@ -1645,13 +1647,13 @@ fn test_v13_fixed_hdr_requested_preserved_reflected_is_offset_4() {
     let tlv = &list.non_hmac_tlvs()[0];
     assert_eq!(
         &tlv.value[..4],
-        &[0, 0, 0, 0],
-        "Requested field (value[..4]) preserved exactly as received"
+        &captured[..4],
+        "zero Requested field (value[..4]) filled with the header's first 4 octets"
     );
     assert_eq!(
         &tlv.value[4..],
         &captured[4..],
-        "Reflected field = header[4..], header's own first 4 octets not copied"
+        "Reflected field = header[4..]"
     );
     assert!(!tlv.flags.conformant_reflected, "success → no C flag");
     assert!(!tlv.is_unrecognized(), "success → no U flag");
@@ -1700,7 +1702,7 @@ fn test_v13_ext_hdr_zero_selector_picks_first_length_match() {
     list.process_reflected_headers(Some(&[]), Some(&blob));
 
     let tlv = &list.non_hmac_tlvs()[0];
-    assert_eq!(&tlv.value[..8], &[0; 8], "Requested preserved (zeros)");
+    assert_eq!(&tlv.value[..8], &rec_a[..8], "zero Requested filled in");
     assert_eq!(&tlv.value[8..], &rec_a[8..], "first header's [8..] copied");
     assert!(!tlv.flags.conformant_reflected);
 }
@@ -1769,8 +1771,8 @@ fn test_v13_ext_hdr_none_capture_sets_c_flag_not_u() {
 #[test]
 fn test_v13_ext_hdr_empty_capture_sets_c_flag() {
     // A Reflected IPv6 Ext Hdr TLV but no ext headers received (IPv4 path or
-    // IPv6 without options): the reflector "could not use it for reflecting
-    // any IPv6 extension header received" → C flag (ext-hdr-15 §4.1).
+    // IPv6 without options): the reflector "cannot use it to reflect any
+    // received IPv6 extension header" → C flag (ext-hdr-15 §4.1).
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
     let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
 
@@ -1784,7 +1786,7 @@ fn test_v13_ext_hdr_empty_capture_sets_c_flag() {
 #[test]
 fn test_v13_ext_hdr_zero_selector_first_fit_skips_length_mismatch() {
     // An 8-byte request must match the second captured header in
-    // [16-byte HBH, 8-byte DestOpts] (draft ext-hdr-15 §4.1).
+    // [16-byte HBH, 8-byte DestOpts] (ext-hdr-15 §4.2 rule 1).
     // Selection uses matching length, not the TLV's position alone.
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
     // 16-byte HBH record: NextHeader=0x3C, HdrExtLen=1 → (1+1)*8 = 16 bytes.
@@ -1800,7 +1802,7 @@ fn test_v13_ext_hdr_zero_selector_first_fit_skips_length_mismatch() {
     list.process_reflected_headers(Some(&[]), Some(&blob));
 
     let tlv = &list.non_hmac_tlvs()[0];
-    assert_eq!(&tlv.value[..8], &[0; 8], "Requested preserved (zeros)");
+    assert_eq!(&tlv.value[..8], &rec8[..8], "zero Requested filled in");
     assert_eq!(
         &tlv.value[8..],
         &rec8[8..],
@@ -1856,7 +1858,7 @@ fn test_v13_ext_hdr_zero_selector_first_fit_two_tlvs_reorder() {
 
 #[test]
 fn test_v13_ext_hdr_zero_selector_same_length_pairs_in_order() {
-    // Regression for §3.1 rule 2: two same-length (8-byte) zero-selector
+    // ext-hdr-15 §4.2 rule 3: two same-length (8-byte) zero-selector
     // TLVs against two same-length but DISTINGUISHABLE headers must pair in
     // wire order (1st↔1st, 2nd↔2nd). First-fit-with-consumption preserves
     // this: TLV[0] consumes header index 0, TLV[1] then finds index 1.

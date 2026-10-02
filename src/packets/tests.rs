@@ -213,15 +213,14 @@ fn test_reflected_packet_echoed_fields() {
     assert_eq!(deserialized.sess_sender_ttl, 64);
 
     // RFC 8972 §3 Figure 2: the SSID appears once. The two octets after
-    // the Session-Sender Error Estimate are MBZ, and a peer that verifies
-    // MBZ (RFC 8762 §4.6) drops the reply if they are not.
+    // the Session-Sender Error Estimate are MBZ and must be zeroed on
+    // transmission (RFC 8762 §4.3.1).
     assert_eq!(&serialized[38..40], &[0, 0], "octets 38-39 must stay MBZ");
     assert_eq!(deserialized.mbz2, [0; 2]);
 }
 
 #[test]
 fn test_buffer_larger_than_needed() {
-    // Create a packet and serialize it
     let packet = PacketUnauthenticated {
         sequence_number: 1,
         timestamp: 2,
@@ -231,7 +230,6 @@ fn test_buffer_larger_than_needed() {
     };
     let mut bytes = packet.to_bytes().to_vec();
 
-    // Add extra bytes at the end
     bytes.extend_from_slice(&[0xff; 100]);
 
     // Should still deserialize correctly (reads only what it needs)

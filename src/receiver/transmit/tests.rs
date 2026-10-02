@@ -247,7 +247,8 @@ fn socket_owner_keeps_interleaved_metadata_and_pmtu_policy_isolated() {
         } else {
             libc::IP_RECVTOS
         };
-        // SAFETY: live fd and correctly sized integer socket option.
+        // SAFETY: `peer` owns the open fd for the call; the pointer and length
+        // describe the live `enable` c_int.
         assert_eq!(
             unsafe {
                 libc::setsockopt(
@@ -326,7 +327,8 @@ fn socket_owner_keeps_interleaved_metadata_and_pmtu_policy_isolated() {
             } else {
                 libc::IP_MTU_DISCOVER
             };
-            // SAFETY: output points at a live integer with its exact size.
+            // SAFETY: `tx` owns the open fd for the call; `discover` is a live,
+            // writable c_int and `length` holds its exact size.
             assert_eq!(
                 unsafe {
                     libc::getsockopt(

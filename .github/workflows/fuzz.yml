@@ -1,8 +1,7 @@
 name: Fuzz
 
 # Fuzz targets are excluded from the default cargo workspace and require
-# nightly + cargo-fuzz. Run on demand or on a slow schedule, not on every
-# PR.
+# nightly + cargo-fuzz. Run on demand or weekly, not on every PR.
 on:
   workflow_dispatch:
     inputs:
@@ -14,9 +13,8 @@ on:
     # Sunday 03:30 UTC.
     - cron: "30 3 * * 0"
 
-# Default to a read-only token. The job uploads artifacts on failure,
-# which is satisfied by `contents: read` plus `actions/upload-artifact`'s
-# own scoping; no write access to repo contents is needed.
+# Read-only token. Uploading crash artifacts on failure does not need
+# write access to the repository.
 permissions:
   contents: read
 
@@ -40,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
-      # A prebuilt binary; building cargo-fuzz took minutes on every leg.
+      # A prebuilt binary; building cargo-fuzz from source takes minutes per leg.
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@v2
         with:

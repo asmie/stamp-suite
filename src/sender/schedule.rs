@@ -41,7 +41,8 @@ impl Schedule {
         }
     }
 
-    /// Uniform in (0, 1] from xorshift64*.
+    /// Uniform in (0, 1] from xorshift64*. The multiplier is the standard
+    /// xorshift64* constant; the top 53 bits fill an f64 mantissa exactly.
     fn uniform(&mut self) -> f64 {
         self.rng ^= self.rng >> 12;
         self.rng ^= self.rng << 25;

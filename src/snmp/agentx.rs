@@ -33,8 +33,8 @@ const RES_ERROR_NOT_WRITABLE: u16 = 17;
 const RES_ERROR_COMMIT_FAILED: u16 = 14;
 const RES_ERROR_UNDO_FAILED: u16 = 15;
 
-// Close reasons (RFC 2741 §6.2.2)
-const REASON_SHUTDOWN: u8 = 1;
+// Close reason sent by `close()`: reasonShutdown (RFC 2741 §6.2.2).
+const REASON_SHUTDOWN: u8 = 5;
 
 // AgentX protocol version
 const AGENTX_VERSION: u8 = 1;
@@ -608,6 +608,7 @@ impl AgentXSession {
         let pid = self.next_packet_id();
 
         // Register PDU payload: timeout(1) + priority(1) + range_subid(1) + reserved(1) + subtree(oid)
+        // 127 is the default priority from RFC 2741 §6.2.3.
         let mut payload = vec![30, 127, 0, 0]; // timeout, priority, range_subid, reserved
         payload.extend_from_slice(&encode_oid(subtree, false));
 
@@ -706,8 +707,9 @@ impl AgentXSession {
                     };
                     let response = match result {
                         Ok(response) => response,
-                        // RFC 2741 §7.2.3: report the failed range, without
-                        // returning a list whose omitted columns shift R.
+                        // RFC 2741 §7.2.3: report genErr (5) with the index of
+                        // the failed range and no varbinds, rather than a list
+                        // whose omitted columns would shift the rest.
                         Err(AgentXError::SearchRangeLimit) => self.build_response_with_status(
                             &header,
                             5,
@@ -722,14 +724,15 @@ impl AgentXSession {
                     if payload.len() != 4 {
                         return Err(AgentXError::Protocol("Invalid Close payload length".into()));
                     }
-                    // RFC 2741 §§6.2.2, 7.1.8: acknowledge before teardown.
+                    // Acknowledge before teardown, as the master does for a
+                    // subagent's Close (RFC 2741 §7.1.8).
                     self.stream.write_all(&self.build_response(&header, &[]))?;
                     log::info!("Master agent closed session");
                     return Ok(());
                 }
-                // SET sequence (RFC 2741 §§6.2.8–6.2.9). This sub-agent is
+                // SET sequence (RFC 2741 §6.2.8, §6.2.9). This sub-agent is
                 // read-only, so we reject the request with the appropriate
-                // error instead of silently dropping it — a silent drop leaves
+                // error instead of silently dropping it. A silent drop leaves
                 // the master waiting for a Response until it times out.
                 AGENTX_TESTSET_PDU => {
                     log::debug!("Rejecting SET (TestSet): STAMP-SUITE-MIB is read-only");
@@ -749,7 +752,7 @@ impl AgentXSession {
                     self.stream.write_all(&resp)?;
                 }
                 AGENTX_CLEANUPSET_PDU => {
-                    // RFC 2741 §6.2.9: no Response is sent for CleanupSet.
+                    // RFC 2741 §7.2.4.4: no Response is sent for CleanupSet.
                     log::debug!("CleanupSet received; no response required");
                 }
                 other => {
@@ -860,8 +863,8 @@ impl AgentXSession {
     }
 
     /// Builds a Response PDU with an explicit `res.error` / `res.index`
-    /// (RFC 2741 §6.2.2.1). Used to reject SET-phase requests on this read-only
-    /// sub-agent.
+    /// (RFC 2741 §6.2.16). Used to reject SET-phase requests on this read-only
+    /// sub-agent and to report a SearchRange limit failure.
     fn build_response_with_status(
         &self,
         request_header: &PduHeader,
@@ -1024,9 +1027,9 @@ mod tests {
         assert_eq!(consumed, OID_HEADER_SIZE);
     }
 
-    /// The wire layout itself, not just encode/decode agreement. A round-trip
-    /// test passes just as happily with a wrong-width header, which is how an
-    /// 8-octet `n_subid` survived: every reader was our own decoder.
+    /// Checks the wire layout itself, not just encode/decode agreement. A
+    /// round-trip test would pass even with a wrong-width header, because both
+    /// sides would use our own code.
     #[test]
     fn test_oid_wire_layout_matches_rfc2741_section_5_1() {
         // 1.3.6.1.4.1.65134 with the internet-prefix optimization: 1.3.6.1 is
@@ -1298,7 +1301,7 @@ mod tests {
 
     #[test]
     fn test_decode_search_range_rejects_when_end_oid_truncated() {
-        // A valid start OID followed by nothing — end OID can't decode.
+        // A valid start OID followed by nothing: the end OID can't decode.
         let start = Oid::from_slice(&[1, 2, 3]);
         let encoded_start = encode_oid(&start, false);
         assert!(decode_search_range(&encoded_start).is_err());
@@ -1306,11 +1309,9 @@ mod tests {
 
     #[test]
     fn test_get_bulk_handler_rejects_short_payload() {
-        // The handle_get_bulk path is only callable via run_loop, but we
-        // can exercise the length-check directly by encoding a malformed
-        // payload and verifying the error path is taken via a public
-        // helper. Since handle_get_bulk is private, we cover the same
-        // invariant by feeding decode_search_range a sub-4-byte buffer.
+        // handle_get_bulk needs a live session, so this covers the same
+        // short-buffer invariant by feeding decode_search_range a buffer
+        // shorter than 4 bytes.
         for len in 0..4 {
             let buf = vec![0u8; len];
             assert!(decode_search_range(&buf).is_err());

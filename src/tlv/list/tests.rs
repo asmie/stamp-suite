@@ -260,7 +260,7 @@ fn test_tlv_list_parse_hmac_not_last_error() {
     bytes.extend_from_slice(&[0x00, 0x08, 0x00, 0x10]);
     bytes.extend_from_slice(&[0xFF; 16]);
     // A Class of Service TLV after the HMAC. (Extra Padding here would be
-    // legal per RFC 8972 §4.8's explicit exemption — see
+    // legal per RFC 8972 §4.8's explicit exemption; see
     // `test_strict_parse_allows_only_extra_padding_after_hmac`.)
     bytes.extend_from_slice(&[0x00, 0x04, 0x00, 0x02, 0xAA, 0xBB]);
 
@@ -381,7 +381,7 @@ fn test_apply_reflector_flags_overwrites_uim() {
 fn test_apply_reflector_flags_drops_incoming_c_flag() {
     // RFC 10052 §3: the Session-Sender MUST
     // zero the C flag on transmission and the Session-Reflector MUST
-    // ignore its received value — C is reflector-owned output, re-derived
+    // ignore its received value. C is reflector-owned output, re-derived
     // by Reflected Test Packet Control processing after this clear pass.
     let mut list = TlvList::new();
     let mut tlv = RawTlv::new(TlvType::ReflectedControl, vec![0; 8]);
@@ -400,8 +400,8 @@ fn test_apply_reflector_flags_drops_incoming_c_flag() {
 fn test_apply_reflector_flags_clears_uim_then_sets_i_on_hmac_failure() {
     // Verifies the clear-then-rederive pipeline survives the HMAC branch:
     // even when the sender sets U=1 on a recognized TLV (per RFC mandate),
-    // the reflector must end up with U=0 (recognized) and I=1 (HMAC fail)
-    // — not U=1 (echoed-from-sender) plus I=1.
+    // the reflector must end up with U=0 (recognized) and I=1 (HMAC fail),
+    // not U=1 (echoed-from-sender) plus I=1.
     let key_sender = HmacKey::new(vec![0xAB; 32]).unwrap();
     let key_refl = HmacKey::new(vec![0xCD; 32]).unwrap();
     let base_packet = vec![0x01, 0x02, 0x03, 0x04];
@@ -427,7 +427,7 @@ fn test_apply_reflector_flags_preserves_parser_m_on_truncated_tlv() {
     // parse_lenient marks the truncated TLV as malformed via the parser
     // marker. The clear-then-rederive pass in apply_reflector_flags must
     // re-set M so the echoed response advertises malformed-ness to peers
-    // and metrics, per RFC 8972 §4 + §4.8.
+    // and metrics, per RFC 8972 §4 and §4.8.
     let mut buf = Vec::new();
     // ExtraPadding TLV with declared length 100 but only 4 bytes available.
     buf.push(0x00);
@@ -453,14 +453,14 @@ fn test_apply_reflector_flags_preserves_parser_m_on_truncated_tlv() {
 fn test_apply_reflector_flags_preserves_parser_m_on_after_hmac_tlv() {
     // RFC 8972 §4.8: the HMAC TLV must be followed by nothing except an
     // Extra Padding TLV. A *Class of Service* TLV after it leaves the HMAC
-    // misplaced — the positional signal must reach the echoed response.
+    // misplaced, and the positional signal must reach the echoed response.
     let mut buf = Vec::new();
     // Valid HMAC TLV (16-byte value).
     buf.push(0x00);
     buf.push(0x08); // HMAC type
     buf.extend_from_slice(&16u16.to_be_bytes());
     buf.extend_from_slice(&[0xAA; 16]);
-    // Class of Service TLV after the HMAC — illegal position.
+    // Class of Service TLV after the HMAC: illegal position.
     buf.push(0x00);
     buf.push(0x04); // ClassOfService
     buf.extend_from_slice(&4u16.to_be_bytes());
@@ -487,8 +487,8 @@ fn test_apply_reflector_flags_preserves_parser_m_on_after_hmac_tlv() {
     );
 }
 
-/// RFC8972-4.8-3: "If the HMAC TLV appears in any other position ... the
-/// situation MUST be processed as HMAC verification failure" — the §4.8
+/// RFC 8972 §4.8: "If the HMAC TLV appears in any other position ... the
+/// situation MUST be processed as HMAC verification failure". The §4.8
 /// failure procedure sets the I flag on *every* TLV, so an M flag on the
 /// offending TLV alone is not enough.
 #[test]
@@ -505,7 +505,7 @@ fn test_misplaced_hmac_runs_verification_failure_procedure() {
     buf.extend_from_slice(&16u16.to_be_bytes());
     buf.extend_from_slice(&[0xAA; 16]);
     buf.push(0x00);
-    buf.push(0x05); // DirectMeasurement — not Extra Padding
+    buf.push(0x05); // DirectMeasurement, not Extra Padding
     buf.extend_from_slice(&16u16.to_be_bytes());
     buf.extend_from_slice(&[0x22; 16]);
 
@@ -533,8 +533,8 @@ fn test_misplaced_hmac_runs_verification_failure_procedure() {
     }
 }
 
-/// RFC8972-4.8-2: "The HMAC TLV MUST follow all TLVs included in a STAMP
-/// test packet **except for the Extra Padding TLV**" — so Extra Padding
+/// RFC 8972 §4.8: "The HMAC TLV MUST follow all TLVs included in a STAMP
+/// test packet **except for the Extra Padding TLV**", so Extra Padding
 /// after the HMAC TLV is a legal layout from a conformant peer. It must
 /// not be marked malformed, and the HMAC must still verify: that trailing
 /// padding lies outside the HMAC's coverage.
@@ -1118,7 +1118,7 @@ fn test_parse_lenient_zero_padding_after_hmac() {
 #[test]
 fn test_parse_lenient_zero_run_with_late_nonzero_byte_is_linear() {
     // Every zero header before the final byte is an empty Type-0 TLV.
-    // Rescanning the tail at each one made this input quadratic.
+    // Rescanning the tail at each one would make this input quadratic.
     let mut buf = vec![0u8; 256 * 1024];
     *buf.last_mut().unwrap() = 1;
     let started = std::time::Instant::now();
@@ -1344,7 +1344,7 @@ fn test_micro_session_id_tlv_type_recognized() {
     assert!(TlvType::MicroSessionId.is_recognized());
 }
 
-/// Found by the round-trip fuzz oracle: with BER TLVs present, Extra Padding
+/// With BER TLVs present, Extra Padding
 /// received before the HMAC TLV must not move after it when re-serialized.
 #[test]
 fn padding_before_hmac_keeps_received_order_with_ber() {

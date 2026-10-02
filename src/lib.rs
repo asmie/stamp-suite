@@ -31,7 +31,7 @@ pub mod clock_format;
 /// Command-line configuration and validation.
 #[doc(hidden)]
 pub mod configuration;
-/// HMAC cryptographic operations for packet authentication.
+/// Reflector CoS admission policy: which DSCP and ECN values a reply may use.
 #[doc(hidden)]
 pub mod cos_policy;
 mod net_policy;

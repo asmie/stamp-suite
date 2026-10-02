@@ -250,6 +250,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   round-trip fuzz oracle.
 - Make `clock_metadata_test` robust: it restarts the reflector when another
   test takes its port, and skips late replies to warm-up probes.
+- Fill an all-zero Requested field in a reflected Type 246/247 TLV with the
+  matched header's first 8 or 4 octets (draft-ietf-ippm-stamp-ext-hdr-15
+  §4.2 and §6.2 rule 1). The reflector left it zero.
+- Close the AgentX session with reasonShutdown (5) instead of reasonOther (1)
+  (RFC 2741 §6.2.2).
+- Subscribe the route-MTU cache to IPv6 policy-rule changes. It subscribed
+  to the ND user-option group by mistake, so IPv6 rule changes were only
+  picked up when a cache entry expired.
+- Build macOS release archives with the `metrics` feature. It was left out
+  because the exporter's default features did not build there.
+- Correct log and error text: header-reflection warnings no longer tell nix
+  users to rebuild with pnet for IPv6 extension headers, and one debug
+  message lost a run of spaces.
 - Count sender probes in 64 bits. A continuous run would overflow the 32-bit
   counters. The Direct Measurement counter on the wire stays 32 bits and wraps.
 - Print `--report-interval` reports while the sender waits for outstanding
@@ -356,6 +369,10 @@ median of three trials, reflector CPU as a share of one core:
   fuzz job installs a prebuilt cargo-fuzz, caches each target's corpus and
   adds a `sender_reply` target; `process_stamp_packet` now covers keys and
   captured headers, and the parser targets check round trips.
+- Code comments were checked against the code and the standards: stale
+  statements and wrong section citations were fixed, every `unsafe` block
+  has a SAFETY comment, magic numbers in the netlink and capture code are
+  explained, and citations use the `RFC NNNN §X` form.
 - Thirteen per-TLV length errors are one `TlvError::InvalidLength { kind,
   length }`; the expected length comes from one table. Fixed and IPv6
   extension header reflection share one matching function, and Location

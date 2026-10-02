@@ -1,10 +1,9 @@
 //! Support harness for the privileged network-namespace conformance tier
-//! (`tests/netns_conformance.rs`). Linux only — every item here is compiled
+//! (`tests/netns_conformance.rs`). Linux only: every item here is compiled
 //! out on other platforms by the `#![cfg(target_os = "linux")]` on the parent
 //! test target.
 //!
-//! Design (see `doc/testing-netns.md` and the Phase 2 section of
-//! `docs/superpowers/specs/2026-07-07-rfc-compatibility-design.md`):
+//! Design (see `doc/testing-netns.md`):
 //!
 //! * A [`NetnsFixture`] is an RAII object that creates a pair of network
 //!   namespaces joined by a veth link, assigns unique v4/v6 addresses, and
@@ -12,8 +11,8 @@
 //!   id and a monotonic counter so concurrent fixtures never collide.
 //! * The Session-Reflector under test runs via `ip netns exec` in one
 //!   namespace; the Session-Sender is driven from the other, either as the
-//!   real binary (`ip netns exec … stamp-suite`) or — for scenarios that need
-//!   a packet no CLI can emit — as a crafted UDP datagram sent from a socket
+//!   real binary (`ip netns exec … stamp-suite`) or, for scenarios that need
+//!   a packet no CLI can emit, as a crafted UDP datagram sent from a socket
 //!   created *inside* the sender namespace via `setns()`.
 //! * On-wire behaviour (TOS/ECN, TTL/Hop-Limit, IPv6 extension headers,
 //!   Type-12 pacing/count, BER padding) is observed by capturing on the
@@ -165,7 +164,9 @@ impl Capture {
     pub fn stop(mut self) -> Vec<CapturedPacket> {
         // SIGINT lets tcpdump flush and exit cleanly. `-U` already flushes
         // per packet, so even a hard kill would not lose captured frames.
-        // SAFETY: kill() with a valid pid and signal only delivers a signal.
+        // SAFETY: the child has not been waited on yet, so its pid still names
+        // our tcpdump process; kill() only delivers a signal and touches no
+        // memory.
         unsafe {
             libc::kill(self.child.id() as libc::pid_t, libc::SIGINT);
         }
@@ -222,8 +223,8 @@ impl Drop for NetnsFixture {
 
 impl NetnsFixture {
     /// Creates both namespaces, the veth link, and assigns addresses. Any
-    /// failure returns `Err` (the caller should treat that as SKIP — it means
-    /// the environment can't host the tier, not that the product is wrong).
+    /// failure returns `Err`. The caller treats that as SKIP: it means the
+    /// environment can't host the tier, not that the product is wrong.
     pub fn new() -> Result<Self, String> {
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
         let n = (std::process::id().wrapping_mul(131)).wrapping_add(counter);
@@ -280,11 +281,12 @@ impl NetnsFixture {
         let v6s = format!("{v6}/64");
         ip(&["-n", ns, "addr", "add", &v4s, "dev", dev])?;
         // `nodad` makes the v6 address immediately usable (no Duplicate Address
-        // Detection wait) — the link is point-to-point and private.
+        // Detection wait); the link is point-to-point and private.
         ip(&["-n", ns, "addr", "add", &v6s, "dev", dev, "nodad"])?;
         ip(&["-n", ns, "link", "set", dev, "up"])?;
         ip(&["-n", ns, "link", "set", "lo", "up"])?;
-        // Only private veth devices: expose complete wire checksums to capture.
+        // Disable TX checksum offload on these private veth devices so the
+        // capture sees complete wire checksums.
         ip(&["netns", "exec", ns, "ethtool", "-K", dev, "tx", "off"])?;
         Ok(())
     }
@@ -490,7 +492,7 @@ impl NetnsFixture {
 
         let reflector = Reflector { child };
         // Poll until the reflector's UDP port shows up as a listener (or the
-        // budget elapses — the caller's traffic then simply retries/times out).
+        // budget elapses; the caller's traffic then retries or times out).
         wait_until(Duration::from_secs(3), || self.reflector_bound());
         Ok(reflector)
     }
@@ -677,7 +679,7 @@ impl NetnsFixture {
             }
             Err(e) => Err(format!("recv_from: {e}")),
         }
-        // _guard drops here → the calling thread's netns is restored.
+        // _guard drops here and restores the calling thread's netns.
     }
 }
 
@@ -693,8 +695,9 @@ impl NsGuard {
         let target = File::open(format!("/run/netns/{ns}"))
             .or_else(|_| File::open(format!("/var/run/netns/{ns}")))
             .map_err(|e| format!("open netns {ns}: {e}"))?;
-        // SAFETY: setns() with a valid namespace fd and CLONE_NEWNET only
-        // changes the calling thread's network namespace.
+        // SAFETY: `target` is an open namespace fd that outlives the call;
+        // setns() with CLONE_NEWNET only changes the calling thread's network
+        // namespace and touches no Rust-managed memory.
         let rc = unsafe { libc::setns(target.as_raw_fd(), libc::CLONE_NEWNET) };
         if rc != 0 {
             return Err(format!("setns({ns}): {}", std::io::Error::last_os_error()));
@@ -705,9 +708,10 @@ impl NsGuard {
 
 impl Drop for NsGuard {
     fn drop(&mut self) {
-        // SAFETY: restoring to the fd captured on entry; failure here would
-        // leak the thread into the test namespace, but there is no safe
-        // recovery inside Drop, so we best-effort it.
+        // SAFETY: `self.original` is the namespace fd opened on entry and is
+        // still open; setns() touches no Rust-managed memory. A failure would
+        // leave the thread in the test namespace, but Drop cannot recover, so
+        // the result is ignored.
         unsafe {
             libc::setns(self.original.as_raw_fd(), libc::CLONE_NEWNET);
         }
@@ -715,8 +719,9 @@ impl Drop for NsGuard {
 }
 
 fn set_ipv6_dstopts(fd: std::os::fd::RawFd, opts: &[u8]) -> Result<(), String> {
-    // SAFETY: setsockopt with a byte buffer of the given length; the kernel
-    // validates the extension-header contents and rejects a malformed buffer.
+    // SAFETY: `fd` belongs to a socket the caller keeps open; `opts` is a live
+    // slice and its exact length is passed, so the kernel reads only
+    // initialized bytes. The kernel validates the extension-header contents.
     let rc = unsafe {
         libc::setsockopt(
             fd,
@@ -914,8 +919,8 @@ fn decode_ipv6(ip: &[u8], ts_ns: u128) -> Option<CapturedPacket> {
     // Extension headers that use the (NextHdr, HdrExtLen, …) shape.
     loop {
         match next {
-            // Hop-by-Hop (0), Routing (43), Destination Options (60): length in
-            // 8-octet units, +1, excluding the first 8.
+            // Hop-by-Hop (0), Routing (43), Destination Options (60): Hdr Ext
+            // Len counts 8-octet units after the first 8 octets.
             0 | 43 | 60 => {
                 if cur + 2 > ip.len() {
                     return None;

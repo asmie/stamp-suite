@@ -50,7 +50,7 @@ pub(crate) fn evaluate_replay(
 }
 
 /// Records a *verified* packet's Sequence Number in its session's replay
-/// window — the mutating counterpart of [`evaluate_replay`]. The shared live
+/// window: the mutating counterpart of [`evaluate_replay`]. The shared live
 /// pipeline calls this after response assembly. Base parsing and configured
 /// HMAC verification have already succeeded; rejected authenticated-mode
 /// packets cannot advance the anti-replay state.

@@ -179,7 +179,7 @@ impl StampMibHandler {
                 return Some(VarBindValue::Gauge32(stats.loss_pct_x100()));
             }
         } else {
-            // No sender stats — return 0 for sender stat OIDs
+            // No sender stats: return 0 for sender stat OIDs.
             let sender_stat_oids = [
                 oids::stamp_send_pkts_sent(),
                 oids::stamp_send_pkts_recv(),
@@ -630,7 +630,7 @@ mod tests {
         let state = make_test_state(true);
         let handler = StampMibHandler::new(state);
         let vb = handler.get_next(&Oid::from_slice(&[]), &Oid::from_slice(&[]));
-        // Must produce some valid scalar — not NoSuchObject or panic.
+        // Must produce some valid scalar, not NoSuchObject or a panic.
         // (Could be Integer/Counter/Gauge depending on first sorted OID;
         // we just require it's not the "nothing here" sentinel.)
         assert!(!matches!(vb.value, VarBindValue::NoSuchObject));

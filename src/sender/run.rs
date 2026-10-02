@@ -11,6 +11,8 @@ use crate::shutdown::CancellationToken;
 /// probe is spun through instead, polling for replies between yields. Rates
 /// above 1000 probes per second therefore keep one CPU core busy.
 const TIMER_RESOLUTION: Duration = Duration::from_millis(1);
+/// How far behind schedule a probe may fall and still be sent at once.
+/// Beyond this the schedule restarts from now rather than bursting.
 const CATCH_UP: Duration = Duration::from_millis(2);
 
 /// How each probe is built; decided once at startup.
@@ -154,6 +156,9 @@ impl SenderRun {
             || !conf.reflected_ipv6_ext_hdr.is_empty()
         {
             conf.validate().map_err(crate::StartupError::config)?;
+            // Set Don't Fragment and let the kernel report the path MTU.
+            // Probes are sized to fit that MTU; a fragmented probe would hide
+            // the oversize instead of failing at send time.
             #[cfg(target_os = "linux")]
             {
                 use std::os::fd::AsRawFd;
@@ -163,7 +168,8 @@ impl SenderRun {
                 } else {
                     (nix::libc::IPPROTO_IP, nix::libc::IP_MTU_DISCOVER)
                 };
-                // SAFETY: the socket is live and value is a valid c_int.
+                // SAFETY: `socket` owns the open fd for the whole call, and
+                // `value` is a live, aligned c_int whose exact size is passed.
                 if unsafe {
                     nix::libc::setsockopt(
                         socket.as_raw_fd(),
@@ -224,7 +230,7 @@ impl SenderRun {
                          reverse-path congestion detection (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)"
                     ),
                     Err(e) => log::warn!(
-                        "Failed to enable reply ECN reception: {e} — reverse-path congestion \
+                        "Failed to enable reply ECN reception: {e}; reverse-path congestion \
                          detection (wire ECN of replies) disabled; forward-path detection via the \
                          reflected CoS TLV's EC2 field is unaffected"
                     ),
@@ -234,8 +240,8 @@ impl SenderRun {
 
         // draft-ietf-ippm-stamp-ext-hdr-15 §4.2: attach the real IPv6 extension
         // headers requested via --attach-ext-hdr. IPv6 destinations only, and
-        // Linux only (see `apply_attach_ext_hdrs` — the sticky IPV6_HOPOPTS /
-        // IPV6_DSTOPTS options are not exposed by `libc` on Darwin).
+        // Linux only: `libc` does not expose the sticky IPV6_HOPOPTS /
+        // IPV6_DSTOPTS options on Darwin (see `apply_attach_ext_hdrs`).
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd;
@@ -368,9 +374,8 @@ impl SenderRun {
             conf.session_loss_threshold,
             Duration::from_secs(u64::from(conf.timeout)),
         ));
-        // Time-ordered expiry queue for O(k) eviction instead of O(n) HashMap scan.
-        // Entries are (deadline, seq_num). Since packets are sent sequentially,
-        // deadlines are naturally ordered. Lazy deletion skips already-received entries.
+        // Probes are sent in order, so their (deadline, seq) entries are already
+        // sorted. Answered probes are skipped lazily when they reach the front.
         let expiry_queue: VecDeque<(Instant, u32)> = VecDeque::new();
         let rtt_collector = RttCollector::new();
         let owd_collector = OwdCollector::new();
@@ -378,7 +383,7 @@ impl SenderRun {
         let packets_received: u64 = 0;
         let packets_lost: u64 = 0;
         // Zero-config latch for the Reflector Micro-session ID (RFC 9534
-        // §3.2-11): populated from the first validly-received reply when
+        // §3.2): populated from the first validly-received reply when
         // `--reflector-member-link-id` was not given; persists for the whole
         // session so later replies are checked for self-consistency.
         let latched_reflector_msid: Option<u16> = None;
@@ -387,7 +392,7 @@ impl SenderRun {
         let recv_buf = vec![0u8; MAX_UDP_PAYLOAD];
         let timeout = Duration::from_secs(conf.timeout as u64);
 
-        // Scale Type-12 intervals with AIMD (cos-ecn-01 §3.4-3).
+        // Scale the Type-12 burst interval with AIMD (cos-ecn-01 §3.4).
         // Skip the static TLV when scaling is active; rebuild it on each send.
         let reflected_control_requested =
             conf.reflected_control_count > 1 || conf.reflected_control_no_ext_hdr;
@@ -458,7 +463,7 @@ impl SenderRun {
 
         if conf.timestamp_info {
             // RFC 8972 §4.3: the Session-Sender MUST send the Timestamp Info TLV
-            // value fully zeroed — all four octets describe the reflector's
+            // value fully zeroed. All four octets describe the reflector's
             // ingress/egress clocks, so there is no sender field to fill. The
             // reflector fills them in on reflection.
             extra_tlvs.push(TimestampInfoTlv::request().to_raw());
@@ -485,7 +490,7 @@ impl SenderRun {
             log::info!("Destination Node Address TLV enabled ({})", addr);
         }
 
-        // Build Return Path TLV (RFC 9503 §4) — at most one
+        // Build Return Path TLV (RFC 9503 §4); at most one is sent.
         if let Some(cc) = conf.return_path_cc {
             extra_tlvs.push(ReturnPathTlv::with_control_code(cc).to_raw());
             log::info!("Return Path TLV enabled (control code={})", cc);
@@ -522,9 +527,9 @@ impl SenderRun {
         }
 
         // Build Reflected Test Packet Control TLV (RFC 10052 §3).
-        // When `scale_reflected_control` is set, the TLV is instead rebuilt
-        // fresh every send-loop iteration with an AIMD-scaled interval
-        // (§3.4-3) — skip the static push here so it isn't emitted twice.
+        // When `scale_reflected_control` is set, `build_probe` rebuilds it for
+        // every probe with an AIMD-scaled interval (cos-ecn-01 §3.4), so it is
+        // not added to the static set here.
         if let Some(control) = build_reflected_control_tlv(
             conf.reflected_control_length,
             conf.reflected_control_count,
@@ -549,7 +554,7 @@ impl SenderRun {
         }
 
         // Standalone Extra Padding TLV (RFC 8972 §4.1), independent of BER.
-        // Pseudorandom fill per §4.2's recommendation. `validate()` has already
+        // Pseudorandom fill, as §4.1 recommends. `validate()` has already
         // rejected combining this with --ber, which needs a known pattern.
         if let Some(bytes) = conf.extra_padding {
             extra_tlvs.push(ExtraPaddingTlv::new(bytes).to_raw());
@@ -608,11 +613,11 @@ impl SenderRun {
         }
 
         // Reflected Fixed / IPv6 Extension Header Data TLVs
-        // (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 6.2). The value is
-        // Requested(4) + Reflected(Length-4): sent with a zero (or selector)
-        // Requested field and a zero-initialised Reflected field; the reflector
-        // fills the Reflected field when it has raw-capture access to IP headers,
-        // or echoes with the C flag.
+        // (draft-ietf-ippm-stamp-ext-hdr-15 §4.2, §6.2). The value is a
+        // Requested field (4 octets for Type 247, 8 for Type 246), zero or a
+        // selector, followed by a zeroed Reflected field. The reflector fills
+        // the Reflected field when it can see the header, or returns the TLV
+        // with the C flag set (§4.1, §6.1).
         extra_tlvs.extend(reflected_header_request_tlvs(conf));
 
         // RFC 8972 §4.8 origination is separate from holding a key: --tlv-hmac
@@ -626,13 +631,13 @@ impl SenderRun {
         };
 
         // draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 MTU rule (sender half): the
-        // resulting test packets MUST NOT exceed the IP/IPv6 MTU after adding the
+        // resulting test packets MUST NOT exceed the path MTU after adding the
         // Reflected Fixed/IPv6 Extension Header TLVs; if necessary, one or more of
         // those TLVs MUST be removed. Compare the worst-case assembled packet size
-        // against the egress interface MTU (route MTU via getsockopt on Linux;
-        // fail closed for header requests when unknown) and trim Type 246/247 TLVs to
-        // fit. Only these two TLV types are removed — the draft binds this rule to
-        // them specifically; oversize from other TLVs is out of scope here.
+        // against the egress route MTU (getsockopt on Linux; header requests fail
+        // closed when it is unknown) and trim Type 246/247 TLVs to fit. Only these
+        // two TLV types are removed, because the draft's rule covers only them;
+        // oversize from other TLVs is out of scope here.
         let header_requests = !conf.attach_ext_hdr.is_empty()
             || !conf.reflected_fixed_hdr.is_empty()
             || !conf.reflected_ipv6_ext_hdr.is_empty();
@@ -669,7 +674,7 @@ impl SenderRun {
                 UNAUTH_BASE_SIZE
             };
             // Worst-case per-packet extras: HMAC TLV (20), Direct Measurement (16),
-            // Access Report (8) — included when they can appear. The HMAC TLV
+            // Access Report (8), included when they can appear. The HMAC TLV
             // reserve follows the origination decision, not mere key possession:
             // with --tlv-hmac off no HMAC TLV is sent, and reserving for one
             // would trim Type 246/247 requests that actually fit on the wire.
@@ -708,7 +713,7 @@ impl SenderRun {
         });
 
         // Check if we need to include TLV extensions.
-        // SSID lives in the base header per RFC 8972 §3 — it alone does not force TLV mode.
+        // SSID lives in the base header per RFC 8972 §3, so it alone does not force TLV mode.
         let use_tlvs = !extra_tlvs.is_empty()
             || conf.direct_measurement
             || access_report_state.is_some()
@@ -791,8 +796,9 @@ impl SenderRun {
         })
     }
 
-    /// Sends `--count` probes on schedule, waits for outstanding replies, then
-    /// finishes any Access Report exchange.
+    /// Sends probes on schedule until `--count` is reached (`0` means no
+    /// limit), `--duration` elapses or shutdown is requested. Then waits for
+    /// outstanding replies and finishes any Access Report exchange.
     pub(super) async fn run(
         mut self,
         output: &mut crate::stats::StatsOutput,
@@ -1054,7 +1060,7 @@ impl SenderRun {
     }
 
     /// Serializes one probe. Direct Measurement, an Access Report and an
-    /// AIMD-scaled Reflected Test Packet Control TLV (cos-ecn-01 §3.4-3)
+    /// AIMD-scaled Reflected Test Packet Control TLV (cos-ecn-01 §3.4)
     /// change per probe; everything else comes from `extra_tlvs`.
     fn build_probe(&self, seq: u32, timestamp: u64, attach_access_report: bool) -> Vec<u8> {
         let conf = Arc::clone(&self.conf);

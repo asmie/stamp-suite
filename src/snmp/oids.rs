@@ -12,7 +12,7 @@ pub(crate) fn stamp_suite_root() -> Oid {
     Oid::from_slice(BASE)
 }
 
-// -- Reflector Config (.1.1.1.1.*) --
+// -- Reflector Config (.1.1.1.*) --
 
 fn refl_config(leaf: u32) -> Oid {
     let mut v = BASE.to_vec();

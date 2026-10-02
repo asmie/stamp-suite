@@ -1,7 +1,8 @@
 //! STAMP Session Reflector implementations.
 //!
 //! Platform defaults with real TTL capture:
-//! - **Linux/macOS**: Uses nix via IP_RECVTTL
+//! - **Linux/macOS**: Uses nix via IP_RECVTTL. On Linux it also reads IPv6
+//!   extension headers from ancillary data; fixed IP headers need pnet.
 //! - **Windows**: Uses pnet for raw packet capture
 //!
 //! Explicit overrides (for other platforms or to override defaults):
@@ -215,13 +216,14 @@ pub struct ProcessingContext<'a> {
     /// Session admission and state; live backends supply this in both modes.
     pub session_manager: Option<&'a Arc<SessionManager>>,
     /// Whether the reflector runs in stateful mode (`--stateful-reflector`).
-    /// Gates Follow-Up Telemetry reporting: in stateless mode (RFC 8762 §4.2)
+    /// Gates Follow-Up Telemetry reporting: in stateless mode (RFC 8762 §4)
     /// the Sequence Number and Follow-Up Timestamp fields MUST be zeroed
-    /// (RFC 8972 §4.7-7) rather than carry the previous reflection.
+    /// (RFC 8972 §4.7) rather than carry the previous reflection.
     pub stateful_reflector: bool,
     /// Ordering of this verified base packet in its session. Live processing
     /// supplies the verdict; standalone callers without history use `New`.
-    /// Non-monotonic Type-12 requests receive one U-flagged response (§5).
+    /// Non-monotonic Type-12 requests receive one U-flagged response
+    /// (RFC 10052 §5).
     pub replay_verdict: crate::session::ReplayVerdict,
     /// TLV handling mode.
     pub tlv_mode: TlvHandlingMode,
@@ -275,8 +277,8 @@ pub struct ProcessingContext<'a> {
     /// Raw bytes of the received IP fixed header and IPv6 extension headers,
     /// for draft-ietf-ippm-stamp-ext-hdr Reflected Fixed/Ext Header TLVs
     /// (Types 247/246). `None` on backends that cannot observe the IP layer
-    /// (UDP-socket `nix` backend): the reflector then echoes the TLV with the
-    /// U-flag set.
+    /// (the `nix` backend outside Linux): the reflector then returns those
+    /// TLVs with the C flag set.
     pub captured_headers: Option<&'a CapturedHeaders>,
     /// Reflector-side amplification cap on the Reflected Test Packet Control
     /// (Type 12) request: maximum number of reply packets the reflector
@@ -309,17 +311,17 @@ pub struct ProcessingContext<'a> {
 /// Raw IP-layer bytes captured at receive time for reflecting back to the
 /// sender via TLV Types 246 and 247 (draft-ietf-ippm-stamp-ext-hdr-15).
 ///
-/// Populated only by backends that capture at the datalink layer (pnet).
+/// The pnet backend, which captures at the datalink layer, fills both fields.
 /// The nix backend on Linux fills only the IPv6 extension headers, from
 /// ancillary data; it cannot observe fixed headers, so Type 247 requests get
-/// the C flag there. Other UDP-socket backends leave the struct unset.
+/// the C flag there. The nix backend on other systems supplies no struct.
 #[derive(Debug, Clone, Default)]
 pub struct CapturedHeaders {
     /// Raw IP fixed headers (20 bytes for IPv4, 40 bytes for IPv6), ordered
     /// outer→inner. In the common (non-tunneled) case this holds exactly one
     /// header; an IP-in-IP tunnel (IP protocol 4 / next-header 41) contributes
     /// one record per stacked IP header for draft-ietf-ippm-stamp-ext-hdr-15
-    /// §3.2 rule 2 positional pairing of multiple Type-247 TLVs. Empty when
+    /// §6.2 rule 3 positional pairing of multiple Type-247 TLVs. Empty when
     /// the backend cannot observe fixed headers; a captured IP packet always
     /// has at least one.
     pub fixed_headers: Vec<Vec<u8>>,
@@ -339,7 +341,7 @@ fn note_processing_panic(src: SocketAddr) {
     if !LOGGED.swap(true, Ordering::Relaxed) {
         log::error!(
             "panic while processing a packet from {src}; packet dropped. This is \
-             a bug — please report it. Further occurrences are logged at debug."
+             a bug; please report it. Further occurrences are logged at debug."
         );
     } else {
         log::debug!("panic while processing packet from {src} (dropped)");
@@ -721,8 +723,8 @@ fn process_auth_packet(
         }
     } else if ctx.hmac_key_set.is_some() {
         // A keyset exists (key dir / control plane) but resolved no key for
-        // this packet's SSID — an unknown SSID with no default, or the last
-        // key was deleted at runtime. Refuse the packet: removing a key must
+        // this packet's SSID (an unknown SSID with no default, or the last
+        // key was deleted at runtime). Refuse the packet: removing a key must
         // revoke access, never downgrade the reflector to answering
         // authenticated-layout packets without verification.
         crate::warn_throttled!(
@@ -789,7 +791,7 @@ struct SemanticResult {
     tlv_hmac_generated: bool,
 }
 
-/// Applies semantic TLV processing on the reflector side (RFC 8972 §4.8).
+/// Applies semantic TLV processing on the reflector side (RFC 8972 §4).
 ///
 /// Called when HMAC verification passed and no malformed TLVs were found.
 /// Returns `None` if the packet should be discarded (e.g. Micro-session ID mismatch).
@@ -826,8 +828,8 @@ fn apply_semantic_tlv_processing(
     }
 
     // RFC 8972 §4.7: report the previous reflection in stateful mode;
-    // `None` zeroes sequence/timestamp in stateless mode (§4.7-7).
-    // Always call this so invalid-length TLVs are also zeroed (§4.7-6).
+    // `None` zeroes sequence/timestamp in stateless mode. Always call this so
+    // invalid-length TLVs are also zeroed.
     let reflection = if ctx.stateful_reflector {
         ctx.last_reflection
     } else {
@@ -836,7 +838,7 @@ fn apply_semantic_tlv_processing(
     tlvs.update_follow_up_telemetry_tlvs(reflection, ctx.last_reflection_method);
 
     // Discard Access Report TLVs with an invalid Access ID (RFC 8972 §4.6:
-    // values other than 1/2 MUST be discarded — marked U, size preserved).
+    // values other than 1/2 MUST be discarded; marked U, size preserved).
     tlvs.discard_invalid_access_report_tlvs();
 
     // Process Destination Node Address TLV (RFC 9503 §3)
@@ -899,7 +901,8 @@ fn apply_semantic_tlv_processing(
     if let Some((dscp1, ec1)) = requested_cos {
         if !dscp_permitted {
             log::debug!(
-                "CoS admission policy refused DSCP1 {dscp1} for a reply to {:?};                  using the received DSCP {} with RPD=0b01",
+                "CoS admission policy refused DSCP1 {dscp1} for a reply to {:?}; \
+                 using the received DSCP {} with RPD=0b01",
                 reply_destination,
                 ctx.received_dscp
             );
@@ -1033,7 +1036,7 @@ fn apply_semantic_tlv_processing(
             if return_path_action == ReturnPathAction::SuppressReply
                 && req.number_of_reflected_packets != 0
             {
-                // §4.3: combining a Return Path "no reply requested" control
+                // RFC 10052 §4.3: combining a Return Path "no reply requested" control
                 // code with a non-zero Reflected Test Packet Control TLV is a
                 // sender error. The reflector MUST set U on both TLVs in the
                 // (single, normal) reflected packet and SHOULD log it.
@@ -1047,7 +1050,7 @@ fn apply_semantic_tlv_processing(
                 return_path_action = ReturnPathAction::Normal;
                 None
             } else if ctx.replay_verdict != crate::session::ReplayVerdict::New {
-                // §5 applies to duplicate, reordered, and out-of-window
+                // RFC 10052 §5 applies to duplicate, reordered, and out-of-window
                 // requests, including valid signed replays. Do not execute
                 // their count, padding, or interval instructions. Finish the
                 // normal TLV signing path after setting U on Type 12.
@@ -1064,7 +1067,7 @@ fn apply_semantic_tlv_processing(
                 tlvs.set_reflected_control_u_flag();
                 None
             } else if req.number_of_reflected_packets == 0 {
-                // §3: count 0 → "MUST NOT send any reflected packets", and
+                // RFC 10052 §3: count 0 → "MUST NOT send any reflected packets", and
                 // SHOULD discard the received test packet. (RFC 9503's
                 // no-reply control code is the preferred way to request this.)
                 log::debug!(
@@ -1075,7 +1078,7 @@ fn apply_semantic_tlv_processing(
             } else {
                 let requested_count = req.number_of_reflected_packets;
                 let mut non_conformant = false;
-                // §3 + §5: the reflector MUST limit the rate and volume of
+                // RFC 10052 §3 + §5: the reflector MUST limit the rate and volume of
                 // the traffic it generates per incoming packet; a request
                 // exceeding either limit gets C=1 and a SINGLE reflected
                 // packet, not a clamped burst. `max_count` is the volume
@@ -1089,7 +1092,7 @@ fn apply_semantic_tlv_processing(
                     non_conformant = true;
                 }
 
-                // §3 length rules: the reflected length is the larger of
+                // RFC 10052 §3 length rules: the reflected length is the larger of
                 //  (a) the base reply plus echoed TLVs *excluding* Extra
                 //      Padding TLVs (so replies can shrink below the
                 //      received packet's size), and

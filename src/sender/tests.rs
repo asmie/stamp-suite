@@ -29,9 +29,9 @@ fn tlvs_of(tlvs: &[RawTlv], ty: TlvType) -> Vec<&RawTlv> {
 #[test]
 #[cfg(target_os = "linux")]
 fn ext_hdr_multi_requests_emit_multiple_type246_tlvs_in_order() {
-    // §3.1 rule 2: multiple occurrences → multiple Type-246 TLVs with
+    // ext-hdr-15 §4.2: multiple occurrences → multiple Type-246 TLVs with
     // matching lengths, in order. The inline `LEN:SELECTORHEX` form carries
-    // a per-occurrence §5.1 selector.
+    // a per-occurrence Requested-field selector (§4.1).
     let conf = ext_hdr_conf(&[
         "--reflected-ipv6-ext-hdr",
         "8",
@@ -89,7 +89,7 @@ fn fixed_hdr_multi_requests_are_rejected_without_multiple_originated_headers() {
 #[test]
 #[cfg(target_os = "linux")]
 fn fixed_hdr_before_ext_hdr_per_section_3_4() {
-    // §3.3: every Type-247 TLV MUST precede every Type-246 TLV.
+    // ext-hdr-15 §6.3: every Type-247 TLV MUST precede every Type-246 TLV.
     let conf = ext_hdr_conf(&[
         "--attach-ext-hdr",
         "dest",
@@ -109,7 +109,8 @@ fn fixed_hdr_before_ext_hdr_per_section_3_4() {
 #[test]
 #[cfg(target_os = "linux")]
 fn attach_ext_hdr_emits_matching_type246_request() {
-    // §3.1: attaching a real header MUST add a corresponding Type-246 TLV.
+    // ext-hdr-15 §4.2: attaching a real header MUST add a corresponding
+    // Type-246 TLV.
     // Default (no HEX) is an 8-octet header ⇒ Length 8, all-zeros Requested.
     let conf = ext_hdr_conf(&["--attach-ext-hdr", "dest"]);
     let tlvs = reflected_header_request_tlvs(&conf);
@@ -150,7 +151,7 @@ fn enforce_egress_mtu_trims_header_tlvs_to_fit() {
 
 #[test]
 fn enforce_egress_mtu_keeps_non_header_tlvs() {
-    // A large non-header TLV that alone busts the MTU must NOT be removed —
+    // A large non-header TLV that alone busts the MTU must NOT be removed:
     // the draft's removal rule is specific to Types 246/247.
     let mut tlvs = vec![
         ExtraPaddingTlv::new_zeros(200).to_raw(),
@@ -206,8 +207,9 @@ fn test_access_report_first_tick_attaches_and_arms() {
 }
 
 /// A fresh state machine has not started: the sender's post-loop wait is
-/// gated on `has_started() && !is_terminal()`, so a `--count 0` run
-/// (main loop never ticks) must not enter it and originate packets.
+/// gated on `has_started() && !is_terminal()`, so a run that stops before
+/// its first probe (the loop never ticks) must not enter it and originate
+/// packets.
 #[test]
 fn test_access_report_fresh_state_has_not_started() {
     let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
@@ -322,7 +324,7 @@ fn test_access_report_acknowledge_after_retransmit_disarms_and_stops() {
 
 #[test]
 fn test_access_report_acknowledge_before_any_send_is_noop() {
-    // An ack cannot arrive before the TLV was ever sent — guards
+    // An ack cannot arrive before the TLV was ever sent. This guards
     // against a caller wiring this up backwards.
     let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
     state.acknowledge();
@@ -487,6 +489,9 @@ fn getsockopt_int(
     use nix::libc;
     let mut val: libc::c_int = -1;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `fd` is an open socket the caller keeps alive for the call;
+    // `val` and `len` are live, aligned locals and `len` holds the size of
+    // `val`, so the kernel's writes stay in bounds.
     let rc = unsafe {
         libc::getsockopt(
             fd,
@@ -626,7 +631,7 @@ fn test_finalize_auth_packet_sets_hmac() {
     let key = HmacKey::new(vec![0xab; 32]).unwrap();
     finalize_auth_packet(&mut packet, &key);
 
-    // HMAC should no longer be all zeros
+    // Finalizing replaces the all-zero placeholder HMAC.
     assert_ne!(packet.hmac, [0u8; 16]);
 }
 
@@ -1033,8 +1038,8 @@ fn test_validate_reflected_tlvs_msid_malformed_rejects() {
     // MSID TLV value must be exactly 4 bytes (RFC 9534 §3.1). 3 bytes
     // makes it unparseable but keeps the TLV present for the scanner.
     // Flags cleared: this models a non-conforming reflector that echoed a
-    // wrong-length MSID WITHOUT setting the M flag — so the value is still
-    // reached (an M-flagged TLV would instead halt processing per §4-18).
+    // wrong-length MSID WITHOUT setting the M flag, so the value is still
+    // reached (an M-flagged TLV would instead halt processing per RFC 8972 §4).
     let mut raw = crate::tlv::RawTlv::new(crate::tlv::TlvType::MicroSessionId, vec![0, 0, 0]);
     raw.clear_reflector_flags();
     tlvs.push(raw).unwrap();
@@ -1073,7 +1078,7 @@ fn test_validate_reflected_tlvs_msid_not_requested() {
 
 #[test]
 fn test_micro_session_request_tlv_populates_reflector_id() {
-    // RFC 9534 §3.2-3: "If the Session-Sender knows the Reflector member
+    // RFC 9534 §3.2: "If the Session-Sender knows the Reflector member
     // link identifier, the Reflector Micro-session ID field MUST be set."
     let tlv = micro_session_request_tlv(0x1234, Some(0xABCD));
     let parsed = MicroSessionIdTlv::from_raw(&tlv).unwrap();
@@ -1083,7 +1088,7 @@ fn test_micro_session_request_tlv_populates_reflector_id() {
 
 #[test]
 fn test_micro_session_request_tlv_reflector_id_absent_is_zero() {
-    // RFC 9534 §3.2-4: otherwise the field is left zero.
+    // RFC 9534 §3.2: otherwise the field is left zero.
     let tlv = micro_session_request_tlv(0x1234, None);
     let parsed = MicroSessionIdTlv::from_raw(&tlv).unwrap();
     assert_eq!(parsed.sender_micro_session_id, 0x1234);
@@ -1092,7 +1097,7 @@ fn test_micro_session_request_tlv_reflector_id_absent_is_zero() {
 
 #[test]
 fn test_reflected_reflector_msid_mismatch_rejects() {
-    // RFC 9534 §3.2-11/-12: when the reflector member-link ID is pre-known,
+    // RFC 9534 §3.2: when the reflector member-link ID is pre-known,
     // a reflected Reflector Micro-session ID that differs from it must be
     // discarded (validating the reflector's behaviour).
     let mut raw = MicroSessionIdTlv::new(7777, 0x11).to_raw();
@@ -1123,7 +1128,7 @@ fn test_reflected_reflector_msid_mismatch_rejects() {
     );
     // Pre-known configuration takes precedence and must never be
     // superseded by a first-seen value: the zero-config latch stays
-    // untouched (RFC 9534 §3.2-11/-12).
+    // untouched (RFC 9534 §3.2).
     assert_eq!(
         latched, None,
         "pre-known reflector ID must not populate the zero-config latch"
@@ -1160,7 +1165,7 @@ fn test_reflected_reflector_msid_match_accepts() {
     );
     // Pre-known configuration takes precedence and must never be
     // superseded by a first-seen value: the zero-config latch stays
-    // untouched (RFC 9534 §3.2-11/-12).
+    // untouched (RFC 9534 §3.2).
     assert_eq!(
         latched, None,
         "pre-known reflector ID must not populate the zero-config latch"
@@ -1169,7 +1174,7 @@ fn test_reflected_reflector_msid_match_accepts() {
 
 #[test]
 fn test_reflected_reflector_msid_zero_config_latches_first_seen() {
-    // RFC 9534 §3.2-11 (unconditional validation, zero-config path):
+    // RFC 9534 §3.2 (unconditional validation, zero-config path):
     // with no pre-known reflector member-link ID, the first
     // validly-received reply's Reflector Micro-session ID becomes the
     // expected value for the rest of the session. A second reply
@@ -1221,7 +1226,7 @@ fn test_reflected_reflector_msid_zero_config_latches_first_seen() {
 
 #[test]
 fn test_reflected_reflector_msid_zero_config_rejects_change_after_latch() {
-    // RFC 9534 §3.2-11 (zero-config path): once the first reply has
+    // RFC 9534 §3.2 (zero-config path): once the first reply has
     // latched a Reflector Micro-session ID, a later reply echoing a
     // different reflector ID must be discarded exactly like the
     // pre-known mismatch path (reuses `ReflectorMsidMismatch`).
@@ -1274,7 +1279,7 @@ fn test_reflected_reflector_msid_zero_config_rejects_change_after_latch() {
 #[test]
 fn test_forged_first_reply_does_not_latch_reflector_msid() {
     // An untrusted first reply must not set the expected reflector ID
-    // (RFC 9534 §3.2-11), or it could lock out valid replies.
+    // (RFC 9534 §3.2), or it could lock out valid replies.
     let mut latched: Option<u16> = None;
 
     let mut forged = MicroSessionIdTlv::new(7777, 0xDEAD).to_raw();
@@ -1329,7 +1334,7 @@ fn test_forged_first_reply_does_not_latch_reflector_msid() {
 #[test]
 fn test_forged_msid_with_i_flag_not_consumed() {
     // I-flagged MSID values cannot affect session binding
-    // (RFC 8972 §4-19 / §4.8-16), including through a forged mismatch.
+    // (RFC 8972 §4, §4.8), including through a forged mismatch.
     let mut raw = MicroSessionIdTlv::new(0xBAD, 42).to_raw();
     raw.set_integrity_failed();
     let mut tlvs = TlvList::new();
@@ -1352,7 +1357,7 @@ fn test_forged_msid_with_i_flag_not_consumed() {
 
 #[test]
 fn test_forged_msid_with_m_flag_not_consumed() {
-    // RFC 8972 §4-18: "If the M flag is set, the STAMP system MUST stop
+    // RFC 8972 §4: "If the M flag is set, the STAMP system MUST stop
     // processing the remainder of the extended STAMP packet." An M-flagged
     // MSID TLV's value MUST NOT be consumed for session binding.
     let mut raw = MicroSessionIdTlv::new(0xBAD, 42).to_raw();
@@ -1377,7 +1382,7 @@ fn test_forged_msid_with_m_flag_not_consumed() {
 
 #[test]
 fn test_forged_msid_ignored_when_tlv_hmac_fails() {
-    // RFC 8972 §4.8-17: "If HMAC verification by the Session-Sender fails,
+    // RFC 8972 §4.8: "If HMAC verification by the Session-Sender fails,
     // then the Session-Sender MUST stop processing TLVs." The forged MSID
     // value MUST NOT reach the session-binding check when the TLV-HMAC
     // cannot be verified.
@@ -1758,7 +1763,7 @@ fn test_validate_reflected_tlvs_ignores_access_report_when_not_tracking() {
 
 #[test]
 fn test_validate_reflected_tlvs_access_report_u_flagged_not_acked() {
-    // RFC 8972 §4-17: a U-flagged TLV must be skipped — an unrecognized
+    // RFC 8972 §4: a U-flagged TLV must be skipped. An unrecognized
     // echo cannot be trusted as the RFC 8972 §4.6 acknowledgment.
     let mut raw = AccessReportTlv::new(1, 1).to_raw();
     raw.set_unrecognized();
@@ -1780,7 +1785,7 @@ fn test_validate_reflected_tlvs_access_report_u_flagged_not_acked() {
 
 #[test]
 fn test_validate_reflected_tlvs_access_report_i_flagged_not_acked() {
-    // RFC 8972 §4-19: an I-flagged TLV means integrity failed —
+    // RFC 8972 §4: an I-flagged TLV means integrity failed, and
     // §4.6's ack semantics require an intact echo, so no ack.
     let mut raw = AccessReportTlv::new(1, 1).to_raw();
     raw.set_integrity_failed();
@@ -1802,8 +1807,8 @@ fn test_validate_reflected_tlvs_access_report_i_flagged_not_acked() {
 
 #[test]
 fn test_validate_reflected_tlvs_access_report_m_flagged_halts_scan() {
-    // RFC 8972 §4-18: an M-flagged TLV halts processing of the
-    // *remainder* of the packet — an Access Report TLV that comes after
+    // RFC 8972 §4: an M-flagged TLV halts processing of the
+    // *remainder* of the packet: an Access Report TLV that comes after
     // it in wire order must not be reached, hence not acked.
     let mut bad = crate::tlv::RawTlv::new(crate::tlv::TlvType::MicroSessionId, vec![0, 0, 0]);
     bad.set_malformed();
@@ -1914,7 +1919,7 @@ fn test_validate_reflected_tlvs_ignores_cos_ce_when_not_tracking() {
 
 #[test]
 fn test_validate_reflected_tlvs_cos_non_ce_ecn2_not_flagged() {
-    // ECT0 (0b10) is not congestion — must not be reported as CE.
+    // ECT0 (0b10) is not congestion and must not be reported as CE.
     let mut raw = ClassOfServiceTlv {
         dscp1: 0,
         ecn1: 1,
@@ -1939,7 +1944,7 @@ fn test_validate_reflected_tlvs_cos_non_ce_ecn2_not_flagged() {
 
 #[test]
 fn test_validate_reflected_tlvs_cos_ce_u_flagged_not_reported() {
-    // RFC 8972 §4-17: a U-flagged TLV must be skipped — an unrecognized
+    // RFC 8972 §4: a U-flagged TLV must be skipped. An unrecognized
     // echo cannot be trusted as a congestion signal.
     let mut raw = ClassOfServiceTlv {
         dscp1: 0,
@@ -1969,7 +1974,7 @@ fn test_validate_reflected_tlvs_cos_ce_u_flagged_not_reported() {
 
 #[test]
 fn test_validate_reflected_tlvs_cos_ce_i_flagged_not_reported() {
-    // RFC 8972 §4-19: an I-flagged TLV means integrity failed — the
+    // RFC 8972 §4: an I-flagged TLV means integrity failed, so the
     // controller must not be able to be forced into a spurious backoff
     // by an unverifiable echo.
     let mut raw = ClassOfServiceTlv {
@@ -2000,8 +2005,8 @@ fn test_validate_reflected_tlvs_cos_ce_i_flagged_not_reported() {
 
 #[test]
 fn test_validate_reflected_tlvs_cos_ce_m_flagged_before_it_halts_scan() {
-    // RFC 8972 §4-18: an M-flagged TLV halts processing of the
-    // *remainder* of the packet — a CE-marked CoS TLV that comes after
+    // RFC 8972 §4: an M-flagged TLV halts processing of the
+    // *remainder* of the packet: a CE-marked CoS TLV that comes after
     // it in wire order must not be reached.
     let mut bad = crate::tlv::RawTlv::new(crate::tlv::TlvType::MicroSessionId, vec![0, 0, 0]);
     bad.set_malformed();
@@ -2036,7 +2041,7 @@ fn test_validate_reflected_tlvs_cos_ce_m_flagged_before_it_halts_scan() {
 #[test]
 fn test_validate_reflected_tlvs_cos_ce_suppressed_by_tlv_hmac_failure() {
     // Failed TLV-HMAC verification must prevent a forged CE signal from
-    // triggering backoff (RFC 8972 §4.8-17).
+    // triggering backoff (RFC 8972 §4.8).
     let key = HmacKey::new(vec![0xAB; 32]).unwrap();
     let mut tlvs = TlvList::new();
     let mut cos = ClassOfServiceTlv {
@@ -2080,7 +2085,7 @@ fn test_validate_reflected_tlvs_cos_ce_suppressed_by_tlv_hmac_failure() {
     );
 }
 
-// --- process_response: Access Report acknowledgment wiring (§4.6) -----
+// --- process_response: Access Report acknowledgment wiring (RFC 8972 §4.6) --
 
 #[test]
 fn test_process_response_acknowledges_access_report_state() {
@@ -2330,7 +2335,7 @@ fn test_process_response_forward_path_ce_backs_off_congestion_controller() {
 fn test_process_response_reverse_path_ce_backs_off_congestion_controller() {
     use crate::packets::{ExtendedReflectedPacketUnauthenticated, ReflectedPacketUnauthenticated};
 
-    // No CoS TLV at all — the only CE signal is the reply's own on-wire
+    // No CoS TLV at all: the only CE signal is the reply's own on-wire
     // ECN, passed as `reply_ecn`.
     let reflected = ReflectedPacketUnauthenticated {
         sequence_number: 2,
@@ -2645,7 +2650,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
 #[test]
 fn test_access_report_no_reflector_echo_leads_to_retransmit_then_abort() {
     // Simulates total silence from the reflector (packet lost / dropped)
-    // by simply never calling `acknowledge()` — only driving `tick`
+    // by never calling `acknowledge()`, only driving `tick`
     // forward in time, exactly as the send loop does every iteration.
     let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
     let mut now = Instant::now();
@@ -2870,7 +2875,7 @@ fn access_report_with_scaled_control_config(
 }
 
 /// Wait-phase retries must rebuild the AIMD-scaled control TLV omitted from
-/// `extra_tlvs` (draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3).
+/// `extra_tlvs` (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
 #[tokio::test]
 async fn test_wait_phase_retransmit_still_carries_scaled_control_tlv() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -3032,8 +3037,7 @@ async fn test_wait_phase_retransmits_when_reflector_silent_then_aborts() {
     let port = socket.local_addr().unwrap().port();
 
     // timeout=1s, retries=2 ⇒ retry budget = 1*(1+2) = 3s worst case,
-    // on top of the pre-existing plain 1s wait before the extension
-    // even starts.
+    // after the 1s reply drain that precedes the retry phase.
     let conf = access_report_test_config(port, 1, 2);
 
     let reflector = tokio::spawn(collect_silently(socket, 4, Duration::from_secs(8)));
@@ -3043,7 +3047,7 @@ async fn test_wait_phase_retransmits_when_reflector_silent_then_aborts() {
         .expect("run_sender must start successfully");
     let packets = reflector.await.unwrap();
 
-    // Original send + exactly `retries` (2) retransmissions — no more:
+    // Original send + exactly `retries` (2) retransmissions, no more:
     // the retry budget caps it, since the reflector never acks.
     assert_eq!(
         packets.len(),
@@ -3607,7 +3611,7 @@ fn ssid_test_reply(
     reply
 }
 
-/// RFC8972-3-11: "An implementation of a Session-Sender MUST support
+/// RFC 8972 §3: "An implementation of a Session-Sender MUST support
 /// control of its behavior in such a scenario [a zeroed SSID]." The two
 /// actions must actually differ: `stop` refuses to account the reply and
 /// latches the condition, `continue` accounts it normally.
@@ -3809,7 +3813,7 @@ fn test_zero_ssid_policy_inert_without_a_configured_ssid() {
             latched_reflector_msid: &mut latched_reflector_msid,
             access_report_state: None,
             congestion: None,
-            // No SSID requested — even `stop` must not fire.
+            // No SSID requested, so even `stop` must not fire.
             expected_ssid: None,
             on_zero_ssid: ZeroSsidAction::Stop,
             zero_ssid_seen: &mut zero_ssid_seen,
@@ -3847,7 +3851,7 @@ fn test_process_response_drops_packet_on_msid_mismatch() {
     // Model a properly-reflected TLV: a conforming reflector clears the
     // U/M/I flags on a recognized, well-formed TLV (the typed constructor
     // sets the sender-side U flag, which would otherwise make the sender
-    // skip processing per RFC 8972 §4-17).
+    // skip processing per RFC 8972 §4).
     let mut raw = MicroSessionIdTlv::new(0xBAD, 99).to_raw();
     raw.clear_reflector_flags();
     tlvs.push(raw).unwrap();
@@ -4022,7 +4026,7 @@ fn test_build_auth_packet_ssid_round_trips_via_reflector() {
         assemble_auth_answer(&parsed, ClockFormat::NTP, 0, 64, 0, Some(&key), None);
     assert_eq!(reply.ssid, 0xBEEF);
 
-    // Reflector's HMAC must be computed over the echoed SSID too —
+    // Reflector's HMAC must be computed over the echoed SSID too:
     // serialize and verify it round-trips through from_bytes.
     let reply_bytes = reply.to_bytes();
     assert_eq!(
@@ -4140,9 +4144,7 @@ async fn recv_packet_clears_readiness_for_kernel_timestamps() {
     }
 }
 
-/// Creates an Extended unauthenticated packet from configuration.
-///
-/// This is a convenience wrapper for building packets with TLV support.
+/// Creates an extended unauthenticated packet with an empty TLV list.
 fn create_extended_unauth_packet(
     sequence_number: u32,
     timestamp: u64,
@@ -4160,9 +4162,8 @@ fn create_extended_unauth_packet(
     ExtendedPacketUnauthenticated::with_tlvs(base, TlvList::new())
 }
 
-/// Creates an Extended authenticated packet from configuration.
-///
-/// This is a convenience wrapper for building packets with TLV support.
+/// Creates an extended authenticated packet, base HMAC set, with an empty
+/// TLV list.
 fn create_extended_auth_packet(
     sequence_number: u32,
     timestamp: u64,

@@ -264,7 +264,7 @@ async fn status_reports_uptime_and_counters() {
     assert_eq!(v["counters"]["packets_received"], 0);
     assert_eq!(v["counters"]["packets_rate_limited"], 0);
     // Replay-detection counters are part of the status surface so the
-    // §5 detection is observable without a log-level change.
+    // RFC 10052 §5 detection is observable without a log-level change.
     assert_eq!(v["counters"]["packets_replayed"], 0);
     assert_eq!(v["counters"]["packets_reordered"], 0);
 }

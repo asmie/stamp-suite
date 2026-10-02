@@ -3,11 +3,12 @@
 
 use super::*;
 
-/// Applies the egress IP header options — DSCP/ECN (packed into the TOS /
-/// IPv6 Traffic Class octet) and an optional TTL / Hop Limit — directly to the
-/// raw socket `fd`, so the *wire* IP header matches what the Class of Service
-/// TLV advertises (RFC 8972 §4.4). Each option is independently optional;
-/// `None` leaves the kernel default untouched.
+/// Applies the egress IP header options to the socket `fd`.
+///
+/// DSCP/ECN is packed into the TOS / IPv6 Traffic Class octet so the *wire*
+/// IP header matches what the Class of Service TLV advertises (RFC 8972
+/// §4.4); `ttl` sets the TTL / Hop Limit. Each option is independently
+/// optional; `None` leaves the kernel default untouched.
 ///
 /// Only available on Linux/macOS, where `nix` (and thus `libc`) is guaranteed.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -19,11 +20,11 @@ pub(super) fn apply_egress_ip_options(
 ) -> std::io::Result<()> {
     use nix::libc;
 
-    // SAFETY: `fd` is an open socket owned by the caller for the duration of
-    // the call; the option value outlives the syscall and its length is passed
-    // explicitly, so `setsockopt` reads exactly `size_of::<c_int>()` bytes.
     let set_int =
         |level: libc::c_int, name: libc::c_int, value: libc::c_int| -> std::io::Result<()> {
+            // SAFETY: `fd` is an open socket owned by the caller for the
+            // duration of the call; `value` is a live, aligned c_int and its
+            // exact size is passed, so `setsockopt` reads only those bytes.
             let rc = unsafe {
                 libc::setsockopt(
                     fd,
@@ -109,8 +110,7 @@ pub(super) fn apply_attach_ext_hdrs(
 /// Returns the egress route/interface MTU for the (connected) sender socket via
 /// `getsockopt(IP_MTU / IPV6_MTU)` on Linux, or `None` when it cannot be
 /// determined (non-Linux, or the option is unavailable). This reads the kernel's
-/// cached route MTU for the connected peer — it does not perform active Path MTU
-/// Discovery probing.
+/// cached route MTU for the connected peer; it does not probe the path.
 #[cfg(target_os = "linux")]
 pub(super) fn egress_mtu(socket: &UdpSocket) -> Option<u32> {
     use std::os::fd::AsRawFd;
@@ -125,8 +125,9 @@ pub(super) fn egress_mtu(socket: &UdpSocket) -> Option<u32> {
     };
     let mut mtu: libc::c_int = 0;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-    // SAFETY: `mtu`/`len` are valid for the syscall's writes; `fd` is an open
-    // connected socket owned by the caller for the call's duration.
+    // SAFETY: `mtu` and `len` are live, aligned locals and `len` holds the
+    // size of `mtu`, so the kernel's writes stay in bounds; `socket` owns the
+    // open fd for the call's duration.
     let rc = unsafe {
         libc::getsockopt(
             socket.as_raw_fd(),

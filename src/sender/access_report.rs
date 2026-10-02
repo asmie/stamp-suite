@@ -41,7 +41,7 @@ pub(super) enum AccessReportPhase {
     /// The retry budget was exhausted without an acknowledgment; the
     /// procedure is aborted and nothing further is sent (RFC 8972 §4.6:
     /// "...before the procedure is aborted"). The measurement itself is
-    /// unaffected — only this sub-feature gives up.
+    /// unaffected; only this sub-feature gives up.
     Aborted,
 }
 
@@ -59,7 +59,7 @@ impl AccessReportRetransmitState {
         }
     }
 
-    /// Advances retransmission state before each send-loop iteration.
+    /// Advances retransmission state before a probe is sent.
     /// Returns `true` for the initial send or an expired retry; `false` while
     /// waiting or after acknowledgment/abort.
     pub(super) fn tick(&mut self, now: Instant) -> bool {
@@ -99,9 +99,8 @@ impl AccessReportRetransmitState {
     }
 
     /// The current delivery outcome, for reporting in the sender's stats
-    /// summary. `NotStarted`/`Armed` both surface as `Pending` — from the
-    /// caller's perspective the report has not (yet) been confirmed
-    /// delivered either way.
+    /// summary. `NotStarted` and `Armed` both surface as `Pending`: in
+    /// neither case has delivery been confirmed.
     pub(super) fn outcome(&self) -> AccessReportOutcome {
         match self.phase {
             AccessReportPhase::Acknowledged => AccessReportOutcome::Acknowledged,

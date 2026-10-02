@@ -73,7 +73,6 @@ pub async fn init(addr: SocketAddr) -> Result<MetricsServer, MetricsError> {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
 
-    // Build the HTTP server
     let app = Router::new().route("/metrics", get(move || metrics_handler(handle.clone())));
 
     if !addr.ip().is_loopback() {
@@ -87,7 +86,6 @@ pub async fn init(addr: SocketAddr) -> Result<MetricsServer, MetricsError> {
     let listener = TcpListener::bind(addr).await?;
     log::info!("Metrics server listening on http://{}/metrics", addr);
 
-    // Spawn the server task
     tokio::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -112,15 +110,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_server_starts() {
-        // Use a random available port
+        // Port 0 lets the OS pick a free port.
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 
-        // Note: This test may fail if run after other tests that already installed
-        // a global recorder. In production, init() is called once at startup.
-        // For testing, we just verify the function signature is correct.
+        // init() fails if another test in this process already installed the
+        // global recorder; in production it runs once at startup. The test
+        // only checks that init() does not panic.
         let result = init(addr).await;
 
-        // Clean up if successful
         if let Ok(server) = result {
             server.shutdown();
         }

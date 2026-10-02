@@ -1,4 +1,4 @@
-//! Draft ext-hdr-15 §9.2 sender state notifications.
+//! Sender session state notifications (draft-ietf-ippm-stamp-ext-hdr-15 §9.2).
 use std::{
     collections::{HashSet, VecDeque},
     time::{Duration, Instant},

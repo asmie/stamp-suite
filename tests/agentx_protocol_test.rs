@@ -329,3 +329,17 @@ fn range_limit_returns_an_error_without_losing_session_framing() {
         vec![(2, vec![1, 2])]
     );
 }
+
+#[test]
+fn cancellation_closes_the_session_with_reason_shutdown() {
+    let mut peer = Peer::start();
+    peer.cancel.cancel();
+    // Close-PDU (type 2) whose first payload octet is reasonShutdown (5),
+    // RFC 2741 §6.2.2.
+    let (h, payload) = read_pdu(&mut peer.stream);
+    assert_eq!(h[1], 2);
+    assert_eq!(payload[0], 5);
+    let id = u32::from_be_bytes(h[12..16].try_into().unwrap());
+    peer.stream.write_all(&pdu(18, 42, 0, id, &[0; 8])).unwrap();
+    assert!(peer.worker.take().unwrap().join().unwrap().is_ok());
+}

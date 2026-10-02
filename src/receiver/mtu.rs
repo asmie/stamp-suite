@@ -52,6 +52,8 @@ impl MtuCache {
         if self.notifications.is_none() {
             // Subscribe before querying so a change during lookup is observed
             // before the next use. A missing subscription disables caching.
+            // SAFETY: socket(2) takes no pointers; a negative result is
+            // handled below before the value is used as a descriptor.
             let raw = unsafe {
                 libc::socket(
                     libc::AF_NETLINK,
@@ -63,11 +65,29 @@ impl MtuCache {
                 self.entries.clear();
                 return false;
             }
+            // SAFETY: `raw` is a fresh, non-negative descriptor from socket(2)
+            // that nothing else owns, so `OwnedFd` may take ownership and close it.
             let socket = unsafe { OwnedFd::from_raw_fd(raw) };
+            // SAFETY: `sockaddr_nl` is a plain C struct of integers; all-zero is
+            // a valid value (pid 0 lets the kernel assign the port id).
             let mut address: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
             address.nl_family = libc::AF_NETLINK as _;
-            // RTMGRP_LINK, IPv4/IPv6 IFADDR, ROUTE and RULE.
-            address.nl_groups = 1 | 0x10 | 0x40 | 0x80 | 0x100 | 0x400 | 0x80000;
+            // Link, address, route and rule changes for both families can
+            // change a cached route MTU. Group n is bit n-1 of nl_groups.
+            address.nl_groups = [
+                libc::RTNLGRP_LINK,
+                libc::RTNLGRP_IPV4_IFADDR,
+                libc::RTNLGRP_IPV4_ROUTE,
+                libc::RTNLGRP_IPV4_RULE,
+                libc::RTNLGRP_IPV6_IFADDR,
+                libc::RTNLGRP_IPV6_ROUTE,
+                libc::RTNLGRP_IPV6_RULE,
+            ]
+            .into_iter()
+            .fold(0, |groups, group| groups | 1 << (group - 1));
+            // SAFETY: the fd is open and owned by `socket`; the address pointer
+            // and length describe the initialized `address` local, which outlives
+            // the call.
             if unsafe {
                 libc::bind(
                     socket.as_raw_fd(),
@@ -84,6 +104,10 @@ impl MtuCache {
         let socket = self.notifications.as_ref().unwrap();
         let mut bytes = [0u8; 8192];
         for _ in 0..64 {
+            // SAFETY: the fd is open and owned by `self.notifications`; the
+            // pointer and length describe the writable `bytes` buffer. With
+            // MSG_TRUNC the return value may exceed `bytes.len()`, but the kernel
+            // still writes at most `bytes.len()` bytes and the contents are unused.
             let received = unsafe {
                 libc::recv(
                     socket.as_raw_fd(),
@@ -194,8 +218,12 @@ fn route_mtu(key: &RouteKey) -> io::Result<u32> {
     // SAFETY: successful socket() returned a fresh owned descriptor.
     let socket = unsafe { OwnedFd::from_raw_fd(raw) };
     let request = route_request(key);
+    // SAFETY: `sockaddr_nl` is a plain C struct of integers; all-zero is valid
+    // and pid 0 addresses the kernel.
     let mut kernel: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
     kernel.nl_family = libc::AF_NETLINK as _;
+    // SAFETY: the fd is open and owned by `socket`; `request` and `kernel` are
+    // live, initialized locals and each pointer is passed with its exact length.
     if unsafe {
         libc::sendto(
             socket.as_raw_fd(),
@@ -210,8 +238,14 @@ fn route_mtu(key: &RouteKey) -> io::Result<u32> {
         return Err(io::Error::last_os_error());
     }
     let mut reply = [0u8; 8192];
+    // SAFETY: `sockaddr_nl` is a plain C struct of integers; all-zero is valid.
     let mut sender: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
     let mut sender_len = std::mem::size_of_val(&sender) as libc::socklen_t;
+    // SAFETY: the fd is open and owned by `socket`; `reply` is writable for
+    // `reply.len()` bytes and `sender`/`sender_len` describe a writable
+    // `sockaddr_nl` of the stated size. The kernel writes no more than those
+    // lengths even though MSG_TRUNC may report a larger `len`, which is checked
+    // below before slicing.
     let len = unsafe {
         libc::recvfrom(
             socket.as_raw_fd(),
@@ -230,9 +264,13 @@ fn route_mtu(key: &RouteKey) -> io::Result<u32> {
     }
     let (index, metric, overhead) = parse_route(&reply[..len as usize])?;
     let mut name = [0 as libc::c_char; libc::IFNAMSIZ];
+    // SAFETY: if_indextoname(3) requires a writable buffer of at least IFNAMSIZ
+    // bytes, which `name` is; it writes a NUL-terminated name on success.
     if unsafe { libc::if_indextoname(index, name.as_mut_ptr()) }.is_null() {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: the call above succeeded, so `name` holds a NUL-terminated
+    // string within its IFNAMSIZ bytes, and the buffer outlives the borrow.
     let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
         .to_str()
         .map_err(|_| invalid_route())?;
@@ -256,11 +294,16 @@ fn attr(bytes: &mut Vec<u8>, kind: u16, value: &[u8]) {
 fn route_request(key: &RouteKey) -> Vec<u8> {
     use nix::libc;
     let v6 = key.target.is_ipv6();
+    // 16-byte nlmsghdr (len 0..4, type 4..6, flags 6..8, seq 8..12, pid
+    // 12..16) followed by a 12-byte rtmsg (family 16, dst_len 17, src_len 18,
+    // tos 19, then table/protocol/scope/type/flags, left zero). Fields are in
+    // host byte order; the length is filled in once the attributes are added.
     let mut request = vec![0u8; 28]; // nlmsghdr + rtmsg
     request[4..6].copy_from_slice(&26u16.to_ne_bytes()); // RTM_GETROUTE
     request[6..8].copy_from_slice(&1u16.to_ne_bytes()); // NLM_F_REQUEST
-    request[8..12].copy_from_slice(&1u32.to_ne_bytes());
+    request[8..12].copy_from_slice(&1u32.to_ne_bytes()); // seq 1, checked in parse_route()
     request[16] = if v6 { libc::AF_INET6 } else { libc::AF_INET } as u8;
+    // rtm_dst_len: a host route (full-length prefix) for the exact target.
     request[17] = if v6 { 128 } else { 32 };
     request[19] = crate::tos::Tos(key.tos).without_ecn().0;
     fn ip_bytes(ip: std::net::IpAddr) -> Vec<u8> {
@@ -271,6 +314,7 @@ fn route_request(key: &RouteKey) -> Vec<u8> {
     }
     attr(&mut request, 1, &ip_bytes(key.target.ip())); // RTA_DST
     if !key.local.ip().is_unspecified() {
+        // rtm_src_len: full-length prefix for the bound source address.
         request[18] = request[17];
         attr(&mut request, 2, &ip_bytes(key.local.ip())); // RTA_SRC
     }
@@ -298,6 +342,11 @@ fn invalid_route() -> io::Error {
 }
 
 #[cfg(target_os = "linux")]
+/// Splits a run of netlink attributes into `(type, payload)` pairs.
+///
+/// Each attribute is a 4-byte header (u16 length including the header, u16
+/// type) followed by the payload, padded to a 4-byte boundary. The type is
+/// masked with 0x3fff to drop the NLA_F_NESTED and NLA_F_NET_BYTEORDER flags.
 fn attributes(mut bytes: &[u8]) -> io::Result<Vec<(u16, &[u8])>> {
     let mut result = Vec::new();
     while !bytes.is_empty() {
@@ -322,7 +371,10 @@ fn attributes(mut bytes: &[u8]) -> io::Result<Vec<(u16, &[u8])>> {
 }
 
 #[cfg(target_os = "linux")]
+/// Parses an RTM_GETROUTE reply into (egress ifindex, RTAX_MTU metric,
+/// encapsulation overhead in bytes).
 fn parse_route(bytes: &[u8]) -> io::Result<(u32, Option<u32>, u32)> {
+    // 16-byte nlmsghdr plus at least the 4-byte error code of an NLMSG_ERROR.
     if bytes.len() < 20 {
         return Err(invalid_route());
     }
@@ -332,7 +384,7 @@ fn parse_route(bytes: &[u8]) -> io::Result<(u32, Option<u32>, u32)> {
     }
     let kind = u16::from_ne_bytes(bytes[4..6].try_into().unwrap());
     if kind == 2 {
-        // NLMSG_ERROR
+        // NLMSG_ERROR: a negative errno follows the 16-byte header.
         let error = i32::from_ne_bytes(bytes[16..20].try_into().unwrap());
         return Err(if error < 0 {
             io::Error::from_raw_os_error(error.saturating_neg())
@@ -340,13 +392,16 @@ fn parse_route(bytes: &[u8]) -> io::Result<(u32, Option<u32>, u32)> {
             invalid_route()
         });
     }
+    // RTM_NEWROUTE (24) with a full nlmsghdr + rtmsg; attributes start at 28.
     if kind != 24 || len < 28 {
         return Err(invalid_route());
-    } // RTM_NEWROUTE
+    }
     let mut index = None;
     let mut mtu = None;
     let mut encap_type = None;
     let mut encap = None;
+    // RTA_OIF (4), RTA_METRICS (8) holding nested RTAX_MTU (2),
+    // RTA_ENCAP_TYPE (21) and RTA_ENCAP (22).
     for (kind, value) in attributes(&bytes[28..len])? {
         match kind {
             4 if value.len() == 4 => index = Some(u32::from_ne_bytes(value.try_into().unwrap())),
@@ -367,6 +422,9 @@ fn parse_route(bytes: &[u8]) -> io::Result<(u32, Option<u32>, u32)> {
     if encap_type.is_some() && encap.is_none() {
         return Err(invalid_route());
     }
+    // Only LWTUNNEL_ENCAP_SEG6 (5) has a known overhead. Its payload holds
+    // SEG6_IPTUNNEL_SRH (1): a host-order i32 mode, then the SRH, whose Hdr Ext
+    // Len byte (offset 5 here) counts 8-byte units beyond the first 8 bytes.
     let overhead = if let Some(encap) = encap {
         if encap_type != Some(5) {
             return Err(io::Error::new(
@@ -388,6 +446,8 @@ fn parse_route(bytes: &[u8]) -> io::Result<(u32, Option<u32>, u32)> {
         if srh.len() < 4 + srh_len as usize {
             return Err(invalid_route());
         }
+        // SEG6_IPTUN_MODE_INLINE (0) inserts only the SRH; ENCAP (1) and
+        // ENCAP_RED (3) add a 40-byte outer IPv6 header too.
         match mode {
             0 => srh_len,
             1 | 3 => 40 + srh_len, // reduced mode conservatively reserves full SRH
@@ -410,7 +470,7 @@ fn parse_route(bytes: &[u8]) -> io::Result<(u32, Option<u32>, u32)> {
 
 /// Reads an interface's MTU with `ioctl(SIOCGIFMTU)`.
 ///
-/// A throwaway UDP socket supplies the descriptor — `SIOCGIFMTU` only needs
+/// A throwaway UDP socket supplies the descriptor: `SIOCGIFMTU` only needs
 /// *some* socket of the right family, not the reflector's own.
 ///
 /// Returns `None` on any failure (unknown interface, permission, non-Linux), so
@@ -420,7 +480,7 @@ fn parse_route(bytes: &[u8]) -> io::Result<(u32, Option<u32>, u32)> {
 pub(crate) fn interface_mtu(iface: &str) -> Option<u32> {
     use std::os::fd::AsRawFd;
 
-    // `::nix` — inside this module, a bare `nix` would resolve to the sibling
+    // `::nix`: inside this module, a bare `nix` would resolve to the sibling
     // `receiver::nix` backend module.
     use ::nix::libc;
 
@@ -436,7 +496,7 @@ pub(crate) fn interface_mtu(iface: &str) -> Option<u32> {
         *dst = *byte as libc::c_char;
     }
 
-    // SAFETY: `fd` is an open socket owned for the call's duration and `req` is
+    // SAFETY: `probe` owns an open socket for the call's duration and `req` is
     // a valid, correctly-sized `ifreq` the kernel writes the MTU into.
     let rc = unsafe { libc::ioctl(probe.as_raw_fd(), libc::SIOCGIFMTU, &mut req) };
     if rc != 0 {

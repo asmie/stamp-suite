@@ -492,7 +492,7 @@ fn test_build_reflector_stats() {
 }
 
 // -----------------------------------------------------------------------
-// C11: Successive RTT variation and percentile edge cases.
+// Successive RTT variation and percentile edge cases.
 
 /// Empty collector: percentile_ns over any p must return None, never
 /// panic with a sort-empty / index-out-of-bounds.
@@ -634,13 +634,12 @@ fn test_two_sample_std_dev_defined() {
     );
 }
 
-/// Large RTT samples (sub-second but at the multi-billion-ns scale)
-/// must not overflow the u128 accumulators. Pin numerical stability.
+/// Large RTT samples (seconds, so billions of ns) must not overflow the
+/// u128 accumulators. Pins numerical stability.
 #[test]
 fn test_large_rtt_no_overflow() {
     let mut c = RttCollector::new();
-    // 1000 samples at ~3 seconds each — within u32::MAX seconds but
-    // accumulated as u128 ns to avoid overflow.
+    // 1000 samples of 3 seconds each, accumulated as u128 ns.
     for i in 0..1000 {
         c.record(RttSample {
             seq: i,
@@ -659,7 +658,7 @@ fn test_large_rtt_no_overflow() {
 }
 
 /// Percentile on a single-sample collector must return that sample for
-/// every valid p — no off-by-one in the index calculation.
+/// every valid p (no off-by-one in the index calculation).
 #[test]
 fn test_single_sample_percentile_returns_that_sample() {
     let mut c = RttCollector::new();

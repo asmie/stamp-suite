@@ -6,9 +6,9 @@ use crate::tlv::traits::TypedTlv;
 /// Access Report TLV (Type 6) per RFC 8972 §4.6.
 ///
 /// Carries an Access Identifier and Return Code. Per RFC 8972 §4.6 the
-/// Length field is "set equal to the value 4" -- the Value is 4 octets,
-/// with a 2-octet Reserved tail that is zeroed on transmission and whose
-/// value is ignored on receipt.
+/// Length field is "set equal to the value 4": the Value is 4 octets,
+/// with a 2-octet Reserved tail that is zeroed on transmission and
+/// ignored on receipt.
 ///
 /// # Wire Format
 ///
@@ -145,9 +145,8 @@ mod tests {
     #[test]
     fn test_access_report_tlv_decode_accepts_compliant_4_octet_value_with_nonzero_reserved() {
         // RFC 8972 §4.6: Length is "set equal to the value 4"; the trailing
-        // 2-octet Reserved field is "zeroed on transmission and its value
-        // ignored upon receipt" -- a compliant peer may send non-zero
-        // Reserved bytes and we must still decode successfully.
+        // 2-octet Reserved field "MUST be zeroed on transmission and ignored
+        // on receipt", so non-zero Reserved bytes must still decode.
         let raw = RawTlv::new(TlvType::AccessReport, vec![0xA0, 0x03, 0xFF, 0xEE]);
         let parsed = AccessReportTlv::from_raw(&raw).expect("4-octet value must decode");
         assert_eq!(parsed.access_id, 0x0A);

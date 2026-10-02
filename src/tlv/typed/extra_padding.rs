@@ -1,7 +1,7 @@
-//! Extra Padding TLV (Type 1) per RFC 8972 §4.2.
+//! Extra Padding TLV (Type 1) per RFC 8972 §4.1.
 //!
-//! The Value field carries opaque padding — typically pseudorandom bytes to
-//! ensure the TLV is non-compressible. SSID is **not** carried here: per
+//! The Value field carries opaque padding, typically pseudorandom bytes so
+//! the TLV is non-compressible. SSID is **not** carried here: per
 //! RFC 8972 §3 it lives in the base STAMP packet header (bytes 14-15 unauth /
 //! 26-27 auth), not in any TLV payload.
 
@@ -11,9 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
 
-// Per RFC 8972 §4.2, the Extra Padding TLV Value SHOULD carry a pseudorandom
+// Per RFC 8972 §4.1, the Extra Padding TLV Value SHOULD carry a pseudorandom
 // sequence of numbers. A xorshift64 stream is sufficient here: the bytes are
-// not keying material and do not need cryptographic quality — they only need
+// not keying material and do not need cryptographic quality. They only need
 // to be non-compressible and distinct across packets.
 thread_local! {
     static PRNG_STATE: Cell<u64> = Cell::new(seed_prng());
@@ -49,7 +49,7 @@ fn pseudorandom_bytes(n: usize) -> Vec<u8> {
     v
 }
 
-/// Extra Padding TLV (Type 1) per RFC 8972 §4.2.
+/// Extra Padding TLV (Type 1) per RFC 8972 §4.1.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtraPaddingTlv {
     /// Opaque padding bytes (pseudorandom for normal sender use).
@@ -57,7 +57,7 @@ pub struct ExtraPaddingTlv {
 }
 
 impl ExtraPaddingTlv {
-    /// Creates an Extra Padding TLV with pseudorandom padding per RFC 8972 §4.2.
+    /// Creates an Extra Padding TLV with pseudorandom padding per RFC 8972 §4.1.
     #[must_use]
     pub fn new(padding_size: usize) -> Self {
         Self {
@@ -69,7 +69,7 @@ impl ExtraPaddingTlv {
     ///
     /// Intended for deterministic construction (tests, fixtures). For normal
     /// sender use, prefer `new()` which fills with pseudorandom bytes as
-    /// recommended by RFC 8972 §4.2.
+    /// recommended by RFC 8972 §4.1.
     #[must_use]
     pub fn new_zeros(padding_size: usize) -> Self {
         Self {
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn test_extra_padding_tlv_new_is_pseudorandom() {
         // Two consecutive calls must not produce identical padding, and the
-        // padding must not be all-zero (RFC 8972 §4.2).
+        // padding must not be all-zero (pseudorandom fill, RFC 8972 §4.1).
         let a = ExtraPaddingTlv::new(32);
         let b = ExtraPaddingTlv::new(32);
         assert_ne!(a.padding, b.padding);

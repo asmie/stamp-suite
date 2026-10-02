@@ -8,7 +8,7 @@
 /// interface address on the system. Otherwise returns just `bind_addr`.
 ///
 /// Interface enumeration uses the `nix` crate on Unix and `pnet::datalink` on
-/// Windows — both produce the same logical output.
+/// Windows; both produce the same logical output.
 pub(crate) fn build_local_addresses(bind_addr: std::net::IpAddr) -> Vec<std::net::IpAddr> {
     let is_wildcard = match bind_addr {
         std::net::IpAddr::V4(v4) => v4.is_unspecified(),
@@ -49,7 +49,8 @@ pub(super) fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
 #[cfg(not(unix))]
 pub(super) fn enumerate_interface_addresses() -> Vec<std::net::IpAddr> {
     // Windows has no `getifaddrs`; fall back to pnet's datalink enumeration.
-    // pnet is always a build dependency on Windows (default ttl-pnet backend).
+    // pnet is always a build dependency on Windows, where it is the default
+    // reflector backend.
     // Use absolute `::pnet` so we resolve the external crate, not the
     // sibling `crate::receiver::pnet` submodule.
     ::pnet::datalink::interfaces()

@@ -1,4 +1,5 @@
-//! BER-07 end-to-end measurement, repair and peer compatibility.
+//! End-to-end BER measurement (draft-gandhi-ippm-stamp-ber-07): padding repair and
+//! peer compatibility.
 use clap::Parser;
 use stamp_suite::{
     configuration::{ClockFormat, Configuration, TlvHandlingMode},

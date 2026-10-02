@@ -4,13 +4,10 @@ use super::*;
 
 /// Assembles an unauthenticated reflected packet from a received test packet.
 ///
-/// # Arguments
-/// * `packet` - The received unauthenticated test packet
-/// * `cs` - Clock format to use for timestamps
-/// * `rcvt` - Receive timestamp when the packet was received
-/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
-/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
-/// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
+/// `rcvt` is the receive timestamp, `ttl` the request's TTL/Hop Limit and
+/// `reflector_error_estimate` the reflector's own estimate in wire format.
+/// `reflector_seq` replaces the echoed Sequence Number in stateful mode
+/// (RFC 8762 §4.3.1).
 pub fn assemble_unauth_answer(
     packet: &PacketUnauthenticated,
     cs: ClockFormat,
@@ -37,19 +34,10 @@ pub fn assemble_unauth_answer(
     }
 }
 
-/// Assembles an unauthenticated reflected packet with symmetric size (RFC 8762 Section 4.3).
+/// Assembles an unauthenticated reflected packet with symmetric size (RFC 8762 §4.3).
 ///
-/// Preserves the original packet length by padding with zeros beyond the base 44 bytes.
-/// Per RFC 8762 Section 4.2.1, extra octets SHOULD be filled with zeros.
-///
-/// # Arguments
-/// * `packet` - The received unauthenticated test packet
-/// * `original_data` - The original received packet data (used only for length)
-/// * `cs` - Clock format to use for timestamps
-/// * `rcvt` - Receive timestamp when the packet was received
-/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
-/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
-/// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
+/// The 44-byte base is followed by a copy of `original_data` beyond its first
+/// 44 bytes, so the reply matches the request's length.
 pub(crate) fn assemble_unauth_answer_symmetric(
     packet: &PacketUnauthenticated,
     original_data: &[u8],
@@ -79,14 +67,8 @@ pub(crate) fn assemble_unauth_answer_symmetric(
 
 /// Assembles an authenticated reflected packet from a received test packet.
 ///
-/// # Arguments
-/// * `packet` - The received authenticated test packet
-/// * `cs` - Clock format to use for timestamps
-/// * `rcvt` - Receive timestamp when the packet was received
-/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
-/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
-/// * `hmac_key` - Optional HMAC key for computing the response HMAC
-/// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
+/// Parameters match [`assemble_unauth_answer`]; `hmac_key`, when present,
+/// signs the base packet (RFC 8762 §4.4).
 pub fn assemble_auth_answer(
     packet: &PacketAuthenticated,
     cs: ClockFormat,
@@ -115,7 +97,6 @@ pub fn assemble_auth_answer(
         hmac: [0u8; 16],
     };
 
-    // Compute HMAC if key is provided
     if let Some(key) = hmac_key {
         let bytes = response.to_bytes();
         response.hmac = compute_packet_hmac(key, &bytes, AUTH_HMAC_OFFSET);
@@ -124,20 +105,10 @@ pub fn assemble_auth_answer(
     response
 }
 
-/// Assembles an authenticated reflected packet with symmetric size (RFC 8762 Section 4.3).
+/// Assembles an authenticated reflected packet with symmetric size (RFC 8762 §4.3).
 ///
-/// Preserves the original packet length by padding with zeros beyond the base 112 bytes.
-/// Per RFC 8762 Section 4.2.1, extra octets SHOULD be filled with zeros.
-///
-/// # Arguments
-/// * `packet` - The received authenticated test packet
-/// * `original_data` - The original received packet data (used only for length)
-/// * `cs` - Clock format to use for timestamps
-/// * `rcvt` - Receive timestamp when the packet was received
-/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
-/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
-/// * `hmac_key` - Optional HMAC key for computing the response HMAC
-/// * `reflector_seq` - Optional independent reflector sequence number (RFC 8972 stateful mode)
+/// The 112-byte base is followed by a copy of `original_data` beyond its
+/// first 112 bytes, outside the base HMAC's coverage.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_auth_answer_symmetric(
     packet: &PacketAuthenticated,
@@ -171,21 +142,8 @@ pub(crate) fn assemble_auth_answer_symmetric(
 /// Assembles an unauthenticated reflected packet with TLV handling (RFC 8972).
 ///
 /// Per RFC 8972 §4.8, on HMAC verification failure, TLVs are echoed with I-flag
-/// set on ALL TLVs rather than dropping the packet.
-///
-/// # Arguments
-/// * `packet` - The received unauthenticated test packet
-/// * `original_data` - The original received packet data
-/// * `cs` - Clock format to use for timestamps
-/// * `rcvt` - Receive timestamp when the packet was received
-/// * `ttl` - TTL/Hop Limit value from the received packet's IP header
-/// * `reflector_error_estimate` - The reflector's own error estimate in wire format
-/// * `reflector_seq` - Optional independent reflector sequence number
-/// * `tlv_mode` - How to handle TLV extensions
-/// * `tlv_hmac_key` - Optional HMAC key for TLV HMAC computation in response
-/// * `verify_incoming_hmac` - Whether to verify incoming TLV HMAC (sets I-flag on failure)
-/// * `received_dscp` - DSCP value received from IP header (for CoS TLV)
-/// * `received_ecn` - ECN value received from IP header (for CoS TLV)
+/// set on ALL TLVs rather than dropping the packet. `tlv_hmac_key` signs the
+/// reply's TLVs; `verify_incoming_hmac` checks the request's TLV HMAC with it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_unauth_answer_with_tlvs(
     packet: &PacketUnauthenticated,
@@ -250,7 +208,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                 // - U-flag for unrecognized types
                 // - I-flag on ALL TLVs if HMAC verification fails (only if verify_incoming_hmac)
                 // Per RFC 8972 §4.8: on failure, TLVs are echoed with I-flag set (not dropped)
-                // Note: Unauthenticated mode does not require HMAC TLV presence
+                // Unauthenticated mode does not require an HMAC TLV to be present.
                 let verify_key = if verify_incoming_hmac {
                     tlv_hmac_key
                 } else {

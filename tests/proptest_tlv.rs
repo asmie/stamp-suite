@@ -2,14 +2,14 @@
 //!
 //! Three flavours:
 //!
-//! 1. **Round-trip properties** — for each typed TLV, generate arbitrary
+//! 1. **Round-trip properties**: for each typed TLV, generate arbitrary
 //!    valid values and assert `parse(serialize(t)) == Ok(t)`. Catches
 //!    encoder/decoder asymmetries that hand-written tests miss.
 //!
-//! 2. **Wire round-trip properties** — bytes a parser accepts serialize back
+//! 2. **Wire round-trip properties**: bytes a parser accepts serialize back
 //!    to the same bytes, with reserved flag bits cleared.
 //!
-//! 3. **No-panic properties** — feed `RawTlv::parse` /
+//! 3. **No-panic properties**: feed `RawTlv::parse` /
 //!    `TlvList::parse_lenient` / `PacketUnauthenticated::from_bytes_lenient`
 //!    / the AgentX decoder arbitrary byte buffers and assert no panic.
 //!    These complement the libfuzzer harnesses under `fuzz/` by exercising
@@ -24,7 +24,7 @@ use stamp_suite::tlv::{
 };
 
 // ---------------------------------------------------------------------------
-// Round-trip properties: serialize → parse → equal.
+// Round-trip properties: serialize, parse, compare.
 
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, .. ProptestConfig::default() })]
@@ -115,12 +115,10 @@ proptest! {
     /// Ok or Err; either is fine.
     #[test]
     fn prop_raw_tlv_parse_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
-        // Catch any panic in this thread — return value is whatever parse
-        // produced.
         let _ = RawTlv::parse(&bytes);
     }
 
-    /// TlvList::parse never panics on arbitrary input — strict version.
+    /// TlvList::parse (strict) never panics on arbitrary input.
     #[test]
     fn prop_tlv_list_parse_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..1024)) {
         let _ = TlvList::parse(&bytes);
@@ -139,8 +137,8 @@ proptest! {
         let _ = PacketUnauthenticated::from_bytes(&bytes);
     }
 
-    /// PacketUnauthenticated::from_bytes_lenient never panics — zero-fills
-    /// missing tail per RFC 8762 §4.6.
+    /// PacketUnauthenticated::from_bytes_lenient never panics. It zero-fills
+    /// a missing tail (RFC 8762 §4.6).
     #[test]
     fn prop_packet_unauth_from_bytes_lenient_no_panic(
         bytes in prop::collection::vec(any::<u8>(), 0..256),
@@ -184,7 +182,7 @@ mod agentx_props {
 }
 
 // Wire round-trip: whatever a parser accepts, serializing it again gives the
-// accepted bytes back, with reserved flag bits cleared (RFC 8972 §4.2).
+// accepted bytes back, with reserved flag bits cleared (RFC 8972 §4).
 
 /// The input with every TLV's reserved flag bits cleared and without a
 /// trailing fragment shorter than a TLV header, which parsing ignores.

@@ -237,7 +237,7 @@ impl TypedTlv for ReturnPathTlv {
     const TYPE: TlvType = TlvType::ReturnPath;
 
     /// Parses the value as sub-TLVs with the standard 4-byte header, in wire
-    /// order. Sub-TLV types are their own registry (RFC 9503 §7.2), so they
+    /// order. Sub-TLV types are their own registry (RFC 9503 §7), so they
     /// are kept as raw numbers and get none of the top-level TLV rules.
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
         if value.len() < TLV_HEADER_SIZE {
@@ -291,7 +291,7 @@ pub enum ReturnPathAction {
         sids: Vec<Ipv6Addr>,
         destination: Option<SocketAddr>,
     },
-    /// SR forwarding requested but unsupported (e.g. SR-MPLS) — echo with the
+    /// SR forwarding requested but unsupported (e.g. SR-MPLS): echo with the
     /// U-flag set and reply normally.
     UnsupportedSr,
 }

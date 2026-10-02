@@ -199,8 +199,8 @@ async fn sender_reports_invalid_ber_pattern() {
     );
 }
 
-/// A successful run reports success, so the exit status stays 0 — including
-/// when every packet is lost, which is a measurement result and not a failure
+/// A successful run reports success, so the exit status stays 0. That holds
+/// when every packet is lost too: loss is a measurement result, not a failure
 /// to start.
 #[tokio::test]
 async fn sender_total_loss_is_not_a_startup_failure() {

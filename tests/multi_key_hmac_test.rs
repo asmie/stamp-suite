@@ -85,7 +85,7 @@ fn build_signed_auth_packet(ssid: u16, key: &HmacKey) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Legacy single-key path.
+// 1. Single-key path (no keyset).
 
 #[test]
 fn legacy_single_key_accepts_packet_with_any_ssid() {
@@ -99,10 +99,8 @@ fn legacy_single_key_accepts_packet_with_any_ssid() {
 
 #[test]
 fn legacy_single_key_accepts_packet_with_nonzero_ssid() {
-    // Backward compat: the historic single-key receiver had no SSID
-    // concept, so a non-zero SSID must still be accepted under the same
-    // key. The HmacKeySet wrapper (with_default) handles this case
-    // because for_ssid(any) falls back to the default key.
+    // A single configured key (no keyset) is not bound to any SSID, so a
+    // packet with a non-zero SSID must still verify under that key.
     let key = HmacKey::new(vec![0xBB; 16]).unwrap();
     let packet = build_signed_auth_packet(42, &key);
     let ctx = make_ctx(Some(&key), None);
@@ -141,8 +139,8 @@ fn per_ssid_key_set_rejects_wrong_key_for_ssid() {
     set.insert(1, key_a);
     set.insert(2, key_b);
 
-    // Sign with key_a but advertise SSID=2 → reflector picks key_b, HMAC
-    // verification fails, packet is dropped.
+    // Sign with key_a but advertise SSID=2: the reflector picks key_b, HMAC
+    // verification fails and the packet is dropped.
     let wrong_signer = HmacKey::new(vec![0xAA; 16]).unwrap();
     let packet = build_signed_auth_packet(2, &wrong_signer);
 
@@ -159,16 +157,13 @@ fn per_ssid_key_set_rejects_wrong_key_for_ssid() {
 
 #[test]
 fn per_ssid_key_set_unknown_ssid_no_default_drops() {
-    // Set has entries for SSID 1 and 2 only; no default.
+    // The set has a key for SSID 1 only and no default.
     let key_a = HmacKey::new(vec![0xAA; 16]).unwrap();
     let mut set = HmacKeySet::new();
     set.insert(1, key_a.clone());
 
-    // Build a signed packet with SSID=99 — the set returns None for that
-    // SSID; the auth check sees no key → if require_hmac is off, the
-    // legacy path silently accepts (since no key means "open"); to make
-    // the test meaningful we set the require_hmac bit so the reflector
-    // drops.
+    // The set resolves no key for SSID 99. A configured keyset drops such
+    // packets even without require_hmac; the test sets it as well.
     let packet = build_signed_auth_packet(99, &key_a);
     let mut ctx = make_ctx(None, Some(&set));
     ctx.require_hmac = true;
@@ -189,8 +184,8 @@ fn per_ssid_key_set_unknown_ssid_falls_back_to_default() {
     set.insert(1, key_a);
     set.set_default(default_key.clone());
 
-    // Sign with the default key under SSID=99 → reflector falls back to
-    // default and verification succeeds.
+    // Sign with the default key under SSID=99: the reflector falls back to
+    // the default key and verification succeeds.
     let packet = build_signed_auth_packet(99, &default_key);
 
     let ctx = make_ctx(None, Some(&set));
@@ -214,8 +209,8 @@ fn per_ssid_key_set_signs_no_tlv_response() {
 
     let ctx = make_ctx(None, Some(&set));
     let response = process_stamp_packet(&packet, src(), 64, true, &ctx).expect("must reflect");
-    // Reflected authenticated packet HMAC lives in the last 16 bytes
-    // of the 112-byte base. The buggy path left these zero.
+    // The reflected HMAC is the last 16 bytes of the 112-byte base. Signing
+    // with the unset single key would leave them zero.
     let hmac_field = &response.data[response.data.len() - 16..];
     assert!(
         hmac_field.iter().any(|&b| b != 0),

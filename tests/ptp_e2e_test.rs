@@ -154,7 +154,7 @@ fn ptp_reflector_fills_sync_src_out_ptp() {
 }
 
 // ---------------------------------------------------------------------------
-// NTP sender, NTP reflector — control case, both ends agree.
+// NTP sender, NTP reflector: control case, both ends agree.
 
 #[test]
 fn ntp_reflector_fills_sync_src_out_ntp() {
@@ -181,7 +181,7 @@ fn ntp_reflector_fills_sync_src_out_ntp() {
 }
 
 // Mixed NTP/PTP clocks: base timestamps retain each endpoint's format
-// (RFC 8762 §4.1.1). Type 3 reports the reflector's ingress/egress clocks
+// (RFC 8762 §4.2.1). Type 3 reports the reflector's ingress/egress clocks
 // (RFC 8972 §4.3).
 
 #[test]
@@ -206,7 +206,7 @@ fn mixed_mode_reflector_reports_own_clock_in_both_field_pairs() {
     let tinfo = TimestampInfoTlv::from_raw(raw).expect("decode Type 3");
 
     // RFC 8972 §4.3: Sync Src In characterizes "the source of clock
-    // synchronization at the ingress of a Session-Reflector" — the
+    // synchronization at the ingress of a Session-Reflector", that is, the
     // reflector's own clock, not the sender's. The sender is required to
     // zero it (RFC8972-4.3-2), so a value it left there is stale input and
     // must be overwritten, not echoed.
@@ -260,7 +260,7 @@ fn mixed_mode_ntp_reflector_overwrites_ptp_sender_in_field() {
 
 #[test]
 fn ptp_timestamp_appears_in_packet_at_expected_offset() {
-    // PacketUnauthenticated layout (RFC 8762 §4.1.1):
+    // PacketUnauthenticated layout (RFC 8762 §4.2.1, SSID from RFC 8972 §3):
     //   bytes 0..4   sequence number
     //   bytes 4..12  timestamp (big-endian u64)
     //   bytes 12..14 error estimate

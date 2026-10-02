@@ -17,7 +17,7 @@ pub(super) enum TlvRejection {
     /// packet, or a spoofed reply.
     MsidMismatch { got: u16, expected: u16 },
     /// Reflector ID differs from the configured or first accepted value
-    /// (RFC 9534 §3.2-11/-12). Discard the reply.
+    /// (RFC 9534 §3.2). Discard the reply.
     ReflectorMsidMismatch { got: u16, expected: u16 },
     /// Reflected Micro-session ID TLV could not be parsed. Since the TLV
     /// carries the session binding, we cannot attribute the response to this
@@ -51,7 +51,7 @@ impl std::fmt::Display for TlvRejection {
     }
 }
 
-/// Return typed decision fields after U/M/I/HMAC and required identifier checks.
+/// Returns typed decision fields after U/M/I/HMAC and required identifier checks.
 /// Wire bytes start at `base_size` (44 open, 112 authenticated). Diagnostic
 /// formatting is deferred to Display and never drives sender state changes.
 #[allow(clippy::too_many_arguments)]
@@ -137,10 +137,10 @@ pub(super) fn validate_reflected_tlvs(
     if integrity_ok {
         for raw in tlvs.non_hmac_tlvs() {
             if raw.is_malformed() {
-                break; // §4-18: M flag halts remainder.
+                break; // RFC 8972 §4: M flag halts the remainder.
             }
             if raw.is_unrecognized() {
-                continue; // §4-17: U flag skips this TLV.
+                continue; // RFC 8972 §4: U flag skips this TLV.
             }
             if track_access_report && raw.tlv_type == crate::tlv::TlvType::AccessReport {
                 // A recognized, well-formed echo acknowledges the report (RFC 8972 §4.6).
@@ -200,9 +200,9 @@ pub(super) fn validate_reflected_tlvs(
                 if parsed.reflector_micro_session_id == 0 {
                     return Err(TlvRejection::MsidUnavailable);
                 }
-                // RFC 9534 §3.2 / §3.2-9: our sender_micro_session_id must be
-                // echoed unchanged — a mismatch means the reply belongs to a
-                // different session (or is spoofed); discard.
+                // RFC 9534 §3.2: our sender_micro_session_id must be echoed
+                // unchanged. A mismatch means the reply belongs to a different
+                // session (or is spoofed); discard.
                 if let Some(expected) = expected_sender_msid {
                     if parsed.sender_micro_session_id != expected {
                         return Err(TlvRejection::MsidMismatch {
@@ -211,7 +211,7 @@ pub(super) fn validate_reflected_tlvs(
                         });
                     }
                 }
-                // Validate the reflector ID on every usable reply (RFC 9534 §3.2-11).
+                // Validate the reflector ID on every usable reply (RFC 9534 §3.2).
                 // A configured ID takes precedence; otherwise use the first accepted ID.
                 // Reject mismatches without replacing the expected value.
                 if let Some(expected_refl) = expected_reflector_msid {

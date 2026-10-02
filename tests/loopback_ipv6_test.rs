@@ -1,6 +1,6 @@
-//! IPv6 TLV processing through `process_stamp_packet`: Location, Destination
-//! Node Address, Micro-session ID, HMAC, and BER. Socket-level IPv6 coverage
-//! lives in `loopback_test.rs`.
+//! IPv6 processing through `process_stamp_packet`: authenticated mode, CoS,
+//! Location, Destination Node Address, Micro-session ID, BER and unknown TLVs.
+//! Socket-level IPv6 coverage lives in `loopback_test.rs`.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
@@ -126,7 +126,7 @@ fn ipv6_auth_mode_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. CoS TLV over IPv6 — DSCP/ECN echoed and reflector observations filled.
+// 3. CoS TLV over IPv6: DSCP/ECN echoed and reflector observations filled.
 
 #[test]
 fn ipv6_cos_tlv_round_trip() {
@@ -177,7 +177,7 @@ fn ipv6_dest_node_addr_match_clears_u_flag() {
 
 /// RFC 9503 §3: "it SHOULD be used as the Source Address in the IP header of
 /// the reply test packet". A matched address must reach the send path, not just
-/// clear the U-flag on the echo — the send path is where the SHOULD is honoured.
+/// clear the U flag on the echo, because the send path honours the SHOULD.
 #[test]
 fn ipv6_dest_node_addr_match_pins_the_reply_source() {
     let dest = DestinationNodeAddressTlv::new(ipv6_local()).to_raw();
@@ -213,8 +213,8 @@ fn ipv6_dest_node_addr_mismatch_pins_nothing() {
     );
 }
 
-/// With no Destination Node Address TLV at all there is nothing to pin, and the
-/// OS keeps choosing the source exactly as before.
+/// With no Destination Node Address TLV there is nothing to pin, and the OS
+/// chooses the source.
 #[test]
 fn ipv6_no_dest_node_addr_pins_nothing() {
     let cos = ClassOfServiceTlv::new(46, 2).to_raw();
@@ -226,8 +226,8 @@ fn ipv6_no_dest_node_addr_pins_nothing() {
     assert_eq!(response.reply_source, None);
 }
 
-/// RFC 9503: when the Dest Node Addr does not match any local address,
-/// reflector sets U flag on the echoed TLV.
+/// RFC 9503 §3: when the Destination Node Address does not match any local
+/// address, the reflector sets the U flag on the echoed TLV.
 #[test]
 fn ipv6_dest_node_addr_mismatch_sets_u_flag() {
     let dest =
@@ -346,7 +346,7 @@ fn ipv6_location_tlv_populated_from_addr_info() {
         .iter()
         .find(|t| t.tlv_type == TlvType::Location)
         .expect("Location TLV echoed");
-    // §4.2.2: Length preserved, and the generic requests answered with the
+    // RFC 8972 §4.2.2: Length preserved, and the generic requests answered with the
     // specific IPv6 variants (Source IPv6 = 9, Destination IPv6 = 6).
     assert_eq!(
         echoed.value.len(),

@@ -8,8 +8,8 @@ use std::net::IpAddr;
 
 /// Set of admissible 6-bit DSCP values, one bit per codepoint.
 ///
-/// 64 codepoints fit exactly in a `u64`, so membership is a shift and a mask —
-/// this is consulted per packet.
+/// 64 codepoints fit exactly in a `u64`, so the per-packet membership check is
+/// a shift and a mask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DscpSet(u64);
 
@@ -38,7 +38,8 @@ impl DscpSet {
     /// # Errors
     /// Returns a message naming the offending token for an unparsable value, a
     /// codepoint above 63, an inverted range, or an empty list. `all`/`none`
-    /// cannot be mixed with explicit values — `none,46` has no single reading.
+    /// cannot be mixed with explicit values, because `none,46` has no single
+    /// reading.
     pub fn parse(spec: &str) -> Result<Self, String> {
         let mut bits = 0u64;
         let mut saw_wildcard = false;
@@ -254,8 +255,9 @@ impl CosAdmissionPolicy {
     }
 
     /// Whether `dscp` is permitted for `destination`.
-    /// The longest matching prefix wins. Use the global set when no rule matches
-    /// or the destination is unknown.
+    ///
+    /// The longest matching prefix wins. The global set applies when no rule
+    /// matches or the destination is unknown.
     #[must_use]
     pub fn permits_dscp(&self, destination: Option<IpAddr>, dscp: u8) -> bool {
         if let Some(dest) = destination {
@@ -337,9 +339,9 @@ pub fn parse_destination_rule(spec: &str) -> Result<(IpAddr, u8, DscpSet), Strin
 #[cfg(test)]
 mod tests {
 
-    /// An empty element inside a list is a typo, not a no-op: skipping it
-    /// silently let `--allowed-dscp 0,,8` and a trailing comma through, so a
-    /// mistyped policy admitted a set the operator never wrote.
+    /// An empty element inside a list is a typo, not a no-op. Skipping it
+    /// would let `--allowed-dscp 0,,8` or a trailing comma admit a set the
+    /// operator never wrote.
     #[test]
     fn empty_list_elements_are_rejected() {
         for spec in ["0,,8", "0,46,", ",0", "0,,", "all,,"] {
@@ -459,8 +461,8 @@ mod tests {
         let inside: IpAddr = "192.0.2.7".parse().unwrap();
         let outside: IpAddr = "198.51.100.7".parse().unwrap();
 
-        // Inside the prefix the rule decides, and it decides *entirely* —
-        // it replaces the global set rather than adding to it.
+        // Inside the prefix the rule decides entirely: it replaces the global
+        // set rather than adding to it.
         assert!(p.permits_dscp(Some(inside), 34));
         assert!(!p.permits_dscp(Some(inside), 46));
         // Outside it, the global set applies.

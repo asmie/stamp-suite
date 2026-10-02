@@ -1,23 +1,23 @@
 //! Experimental TLV and sub-TLV codepoints, centralized for renumbering.
 //!
 //! The STAMP TLV and Sub-TLV registries reserve 240-251 for experimental use
-//! (RFC 8972 §5.1/§5.2). Peers must agree on these values; unrelated uses can
+//! (RFC 8972 §5.1 and §5.3). Peers must agree on these values; unrelated uses can
 //! collide. There are no runtime overrides.
 //!
 //! When IANA assigns a value, update its constant here, bump the minor version,
 //! and document the wire change in the release notes. See the versioning policy
 //! in `CHANGELOG.md` and the disclosure in `doc/conformance/README.md`.
 
-/// Bit Pattern in Padding TLV (draft-gandhi-ippm-stamp-ber-07 §3.2).
+/// Bit Pattern in Padding TLV (draft-gandhi-ippm-stamp-ber-07 §5.1).
 /// Experimental Type 240; replace with the IANA assignment when allocated.
 /// BER TLV allocations are independent, so update each constant separately.
 pub const BER_PATTERN_TLV_TYPE: u8 = 240;
 
-/// Bit Error Count in Padding TLV (draft-gandhi-ippm-stamp-ber-07 §3.3).
+/// Bit Error Count in Padding TLV (draft-gandhi-ippm-stamp-ber-07 §5.2).
 /// Experimental Type 241; replace when IANA assigns this TLV's codepoint.
 pub const BER_COUNT_TLV_TYPE: u8 = 241;
 
-/// Max Bit Error Burst Size TLV (draft-gandhi-ippm-stamp-ber-07 §3.4).
+/// Max Bit Error Burst Size TLV (draft-gandhi-ippm-stamp-ber-07 §5.3).
 /// Type 242 is this implementation's experimental choice, not a draft allocation.
 ///
 /// It conflicts with another implementation's incompatible Heartbeat TLV.
@@ -26,7 +26,7 @@ pub const BER_COUNT_TLV_TYPE: u8 = 241;
 pub const BER_MAX_BURST_TLV_TYPE: u8 = 242;
 
 /// Reflected IPv6 Extension Header Data TLV
-/// (draft-ietf-ippm-stamp-ext-hdr-15 §§3.1, 4.1).
+/// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.1, 4.2).
 /// Experimental Type 246 stands in for TBA1. Replace when IANA assigns it;
 /// check the related TBA2/TBA3 constants at the same time.
 /// See `doc/conformance/draft-stamp-ext-hdr.md` for peer agreement requirements.

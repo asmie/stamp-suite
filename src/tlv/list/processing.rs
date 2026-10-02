@@ -41,8 +41,7 @@ impl DestinationNodeAddressOutcome {
     }
 
     #[cfg(test)]
-    /// True unless a TLV was present and named an address that is not ours —
-    /// the sense the pre-existing callers used.
+    /// True unless a TLV was present and named an address that is not ours.
     #[must_use]
     pub fn matched_or_absent(self) -> bool {
         !matches!(self, Self::Unmatched)
@@ -78,7 +77,7 @@ impl TlvList {
     }
 
     /// Updates CoS DSCP2/EC2 from ingress metadata and RPD/RPE from the reply
-    /// policy (RFC 8972 §4.4, erratum 8199; cos-ecn-01 §3.2).
+    /// policy (RFC 8972 §4.4, erratum 8199; draft-ietf-ippm-stamp-cos-ecn-01 §3.2).
     /// Preserves requested DSCP1/EC1, zeroes the Reserved bits, and mutates
     /// without allocation.
     ///
@@ -128,7 +127,7 @@ impl TlvList {
 
         // Byte 2: keep EC1 (bits 7:6), write RPE, zero Reserved (bits 3:0).
         // Byte 3 is Reserved; reserved bits MUST be zeroed on transmission
-        // (RFC 8972 §4.4, cos-ecn-01 §3.1).
+        // (RFC 8972 §4.4, draft-ietf-ippm-stamp-cos-ecn-01 §3.1).
         let rpe = if reply_ecn_applied { 0b11 } else { 0b10 };
         value[2] = (value[2] & 0xC0) | (rpe << 4);
         value[3] = 0;
@@ -138,7 +137,7 @@ impl TlvList {
     /// Fills all Timestamp Information fields with reflector clock metadata
     /// (RFC 8972 §4.3). Ingress describes T2; egress describes T3.
     /// Report the methods separately because they can differ. Sender values are
-    /// replaced, as requests must zero all four bytes (RFC8972-4.3-2).
+    /// replaced, as requests must zero all four bytes (RFC 8972 §4.3).
     pub fn update_timestamp_info_tlvs(
         &mut self,
         sync_src: SyncSource,
@@ -200,8 +199,8 @@ impl TlvList {
     ///
     /// Per RFC 8972 §4.2, the Session-Reflector fills in the ports and adds
     /// sub-TLVs for the source and destination IP addresses it observed,
-    /// subject to `policy` — §4.2.2's operator-managed field-disclosure
-    /// control (see [`LocationDisclosure`]).
+    /// subject to `policy`, the operator-managed field-disclosure control of
+    /// §4.2.2 (see [`LocationDisclosure`]).
     pub fn update_location_tlvs(&mut self, info: &PacketAddressInfo, policy: LocationDisclosure) {
         self.for_each_matching_tlv(
             |tlv| {
@@ -368,10 +367,10 @@ impl TlvList {
     }
 
     /// Updates Follow-Up Telemetry (RFC 8972 §4.7).
-    /// `Some` reports the previous stateful reflection (§4.7-10); `None` zeroes
-    /// sequence/timestamp for stateless mode (§4.7-7).
+    /// `Some` reports the previous stateful reflection; `None` zeroes
+    /// sequence/timestamp for stateless mode.
     /// Invalid-length TLVs also zero any present sequence/timestamp bytes
-    /// (§4.7-6, erratum 8339); length validation sets M separately.
+    /// (erratum 8339); length validation sets M separately.
     pub fn update_follow_up_telemetry_tlvs(
         &mut self,
         reflection: Option<(u32, u64)>,
@@ -398,7 +397,7 @@ impl TlvList {
                         tlv.value[12] = mode_byte;
                         tlv.value[13..16].fill(0); // Reserved
                     }
-                    // Stateless mode (§4.7-7) OR invalid length (§4.7-6): zero
+                    // Stateless mode OR invalid length (RFC 8972 §4.7): zero
                     // the Sequence Number and Follow-Up Timestamp fields (the
                     // first 12 octets), clamped to whatever the value holds.
                     _ => {
@@ -411,7 +410,7 @@ impl TlvList {
     }
 
     /// Marks well-formed Access Reports with IDs other than 1 or 2 unrecognized
-    /// (RFC 8972 §4.6). U makes the sender skip the report (§4-17) while preserving
+    /// (RFC 8972 §4.6). U makes the sender skip the report (§4) while preserving
     /// the echoed bytes and symmetric packet size (RFC 8762 §4.3/§4.6).
     /// Invalid lengths are handled separately by the M-flag validator.
     pub fn discard_invalid_access_report_tlvs(&mut self) {
@@ -486,14 +485,14 @@ impl TlvList {
         };
 
         let Ok(rp) = ReturnPathTlv::from_raw(&self.non_hmac_tlvs()[idx]) else {
-            // Parse failed — set U-flag and return Normal
+            // A Return Path TLV that does not parse gets U.
             self.non_hmac_tlvs_mut()[idx].set_unrecognized();
 
             return ReturnPathAction::Normal;
         };
 
-        // Check for Control Code sub-TLV
-        // RFC 9503: only bit 0 (reply-request) is meaningful; remaining bits are reserved and ignored.
+        // RFC 9503 §4.1.1: only Control Code bit 0 (reply request) is
+        // meaningful; the remaining bits are reserved and ignored.
         if let Some(cc) = rp.get_control_code() {
             if cc & 1 == 0 {
                 return ReturnPathAction::SuppressReply;
@@ -674,10 +673,11 @@ impl TlvList {
             return;
         }
 
-        // BER-07 §4.2.1: invalid multiplicity is a conformance error.
+        // draft-gandhi-ippm-stamp-ber-07 §4.2.1: invalid multiplicity is a
+        // conformance error.
         let has_duplicate = pattern_count > 1 || count_count > 1 || burst_count > 1;
 
-        // BER-07 §4.2.1 requires exactly one Extra Padding TLV.
+        // draft-gandhi-ippm-stamp-ber-07 §4.2.1 requires exactly one Extra Padding TLV.
         // Treat missing-or-duplicate Extra Padding as a protocol error too.
         let padding_invalid = padding_count != 1;
 
@@ -778,7 +778,7 @@ impl TlvList {
 
     #[cfg(test)]
     /// Reflects captured headers into Types 246/247
-    /// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 6.2, 4.1, 6.1).
+    /// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.1, 4.2, 6.1, 6.2).
     ///
     /// Preserves Requested (8 bytes for Type 246, 4 for Type 247) and copies only
     /// the matching header's tail. Match by length and, for nonzero Requested,
@@ -804,15 +804,15 @@ impl TlvList {
         self.process_reflected_headers_multi(fixed_list.as_deref(), captured_ext_headers);
     }
 
-    /// Multi-header entry point (draft-ietf-ippm-stamp-ext-hdr-15 §6.2 rule 2):
+    /// Multi-header entry point (draft-ietf-ippm-stamp-ext-hdr-15 §6.2 rule 3):
     /// `captured_fixed` is the ordered list of IP fixed headers (outer→inner)
     /// captured from an IP-in-IP tunnel, one record per stacked IP header.
     /// `None` means the backend cannot observe the IP layer. Multiple Type-247
     /// TLVs pair with these records using the same first-fit-with-consumption
     /// discipline as Type-246: each captured header is reflected by at most one
     /// TLV, so successive same-length Type-247 TLVs pair 1st↔outer, 2nd↔inner
-    /// (§3.2 rule 2 ordering) while a non-zero Requested field still selects a
-    /// specific header (§5.2).
+    /// (§6.2 rule 3 ordering) while a non-zero Requested field still selects a
+    /// specific header (§6.2 rule 1).
     pub fn process_reflected_headers_multi(
         &mut self,
         captured_fixed: Option<&[Vec<u8>]>,
@@ -829,7 +829,7 @@ impl TlvList {
     /// the reply until `base_len + self.wire_size() <= max_reply_bytes`, per
     /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 ("one or more ... TLVs MUST be
     /// removed to avoid violating the ... MTU limit"). Type-246 TLVs are removed
-    /// before Type-247 (they sit last in §3.4 wire order, so trimming from the
+    /// before Type-247 (they sit last in §6.3 wire order, so trimming from the
     /// tail keeps survivors ordered); only these two types are removed. Applied
     /// to the canonical owners and updates wire indices. Returns the number removed.
     ///
@@ -881,9 +881,10 @@ impl TlvList {
         // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: the Reflected Fixed Header
         // Data (247) TLVs MUST precede the Reflected IPv6 Extension Header Data
         // (246) TLVs. "If ... TLVs are not received in this order, the Session-
-        // Reflector MUST return these TLVs with the C flag ... set to 1 ...
-        // without copying any data." Detect a 247 that appears after any 246
-        // and, on violation, C-flag every header TLV and copy nothing.
+        // Reflector MUST return these TLVs with the Conformant Reflected Packet
+        // STAMP TLV flag set to 1 ... but without copying any data." Detect a
+        // 247 that appears after any 246 and, on violation, C-flag every
+        // header TLV and copy nothing.
         let mut seen_ext = false;
         let mut out_of_order = false;
         for tlv in tlvs.iter().filter(|tlv| tlv.is_processable()) {
@@ -916,8 +917,8 @@ impl TlvList {
             captured_fixed.map(|list| list.iter().map(Vec::as_slice).collect());
 
         // Per-packet consumed sets for Type 246 (ext) and Type 247 (fixed)
-        // first-fit-with-consumption pairing (§5.1/§5.2 first-fit-by-length
-        // reconciled with §3.1/§3.2 rule 2 ordering). Each captured header is
+        // first-fit-with-consumption pairing (§4.2/§6.2 rule 1 first-fit-by-length
+        // reconciled with rule 3 outer-to-inner ordering). Each captured header is
         // reflected by at most one TLV. Pair each owner once; wire indices
         // observe the same filled payload.
         let mut consumed_ext: Vec<bool> = Vec::new();
@@ -953,8 +954,8 @@ impl TlvList {
     /// A nonzero N-octet Requested selector picks the first unconsumed
     /// captured header of the TLV's length that starts with it; an all-zero
     /// selector picks the first unconsumed header of that length
-    /// (ext-hdr-15 §§5.1/5.2). Marking headers consumed pairs successive TLVs
-    /// with successive headers, as §3.2 rule 2 requires, so an IP-in-IP
+    /// (ext-hdr-15 §4.2/§6.2 rule 1). Marking headers consumed pairs successive
+    /// TLVs with successive headers, as rule 3 requires, so an IP-in-IP
     /// tunnel's stacked fixed headers or repeated extension headers each go
     /// to one TLV. Without captured headers or a match the TLV gets C.
     fn apply_reflected_header<const N: usize>(
@@ -994,13 +995,15 @@ impl TlvList {
         }
     }
 
-    /// Preserve the N-octet Requested selector and copy only the header tail.
-    /// N is eight for Type 246 and four for Type 247 (ext-hdr-15 §§4.1/6.1).
+    /// Copies the whole matched header into the TLV value. A nonzero N-octet
+    /// Requested selector already equals the header's first N octets; a zero
+    /// one must be filled with them (ext-hdr-15 §4.2 and §6.2 rule 1). N is
+    /// eight for Type 246 and four for Type 247.
     fn copy_reflected<const N: usize>(value: &mut [u8], header: &[u8]) {
         debug_assert_eq!(value.len(), header.len());
-        if value.len() >= N {
-            value[N..].copy_from_slice(&header[N..]);
-        }
+        debug_assert!(Self::reflected_hdr_selector::<N>(value)
+            .is_none_or(|s| header.get(..N) == Some(&s[..])));
+        value.copy_from_slice(header);
     }
 
     /// Return a nonzero N-octet Requested selector. All-zero selectors use
@@ -1150,33 +1153,35 @@ fn parse_ext_header_records(blob: &[u8]) -> Vec<&[u8]> {
 
 /// Emits a one-time warning when the reflector receives an extension-header
 /// reflection request (TLV 246/247) but the backend cannot observe raw IP
-/// headers. Fired from `apply_reflected_headers`.
+/// headers. Fired from `apply_reflected_header`.
 fn log_reflected_hdr_unsupported_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static LOGGED: AtomicBool = AtomicBool::new(false);
     if !LOGGED.swap(true, Ordering::Relaxed) {
         log::warn!(
-            "Reflected Fixed/IPv6 Ext Header TLV (Types 247/246) requested but \
-             this backend cannot observe raw IP headers — echoing with the C flag \
+            "Reflected Fixed/IPv6 Ext Header TLV (Type 247/246) requested, but \
+             this backend cannot see those headers; echoing with the C flag \
              (Conformance) per draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1. \
-             Rebuild with --features ttl-pnet to enable header reflection."
+             The pnet backend sees both; the nix backend sees IPv6 extension \
+             headers on Linux only."
         );
     }
 }
 
-/// Emits a one-time warning when a Reflected Fixed Header Data TLV (Type 247)
-/// arrives with a requested Length that doesn't match the captured IP
-/// header size (e.g. 20 bytes requested for an IPv6 packet). Per
-/// draft-ietf-ippm-stamp-ext-hdr-15 §6.1 the reflector sets the C flag in that
-/// case rather than reflecting a mismatched header.
+/// Emits a one-time warning when a Reflected Fixed or IPv6 Extension Header
+/// Data TLV (Type 247/246) has a Length that matches no captured header (e.g.
+/// 20 bytes requested for an IPv6 packet). Per draft-ietf-ippm-stamp-ext-hdr-15
+/// §4.1/§6.1 the reflector sets the C flag in that case rather than reflecting
+/// a mismatched header.
 fn log_reflected_hdr_length_mismatch_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static LOGGED: AtomicBool = AtomicBool::new(false);
     if !LOGGED.swap(true, Ordering::Relaxed) {
         log::warn!(
-            "Reflected Fixed Header Data TLV (Type 247) length does not match the \
-             captured IP header (sender requested wrong address family?); echoing \
-             with the C flag (Conformance) per draft-ietf-ippm-stamp-ext-hdr-15 §6.1."
+            "Reflected Fixed/IPv6 Ext Header TLV (Type 247/246) length matches no \
+             received header (for a fixed header, perhaps the wrong address \
+             family); echoing with the C flag (Conformance) per \
+             draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1."
         );
     }
 }
@@ -1191,7 +1196,7 @@ fn log_reflected_hdr_selector_no_match_once() {
     if !LOGGED.swap(true, Ordering::Relaxed) {
         log::warn!(
             "Reflected Fixed/IPv6 Ext Header TLV (Type 246/247) Requested field matched \
-             no captured header — echoing with the C flag (Conformance) per \
+             no captured header; echoing with the C flag (Conformance) per \
              draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1."
         );
     }

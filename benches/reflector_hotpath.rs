@@ -171,8 +171,8 @@ fn bench_unauth_full_chain(c: &mut Criterion) {
 
 fn bench_auth_no_tlvs(c: &mut Criterion) {
     let key = HmacKey::new(vec![0xAA; 16]).unwrap();
-    // Sign the packet so verification succeeds — we want to measure the
-    // hot success path, not the early-out reject path.
+    // Sign the packet so verification succeeds: this measures the success
+    // path, not the early reject path.
     let mut packet = build_auth_base();
     let hmac = stamp_suite::crypto::compute_packet_hmac(&key, &packet, 96);
     packet[96..112].copy_from_slice(&hmac);
@@ -210,8 +210,9 @@ fn bench_auth_full_chain(c: &mut Criterion) {
     });
 }
 
-/// Stateful processing through a populated session table, as the live
-/// reflector does: lookup, counters and the replay window are included.
+/// Stateful processing through a populated session table. Session admission
+/// and lookup are included; receive counters and replay classification run
+/// only on the live backend path and are not measured here.
 fn bench_unauth_stateful_sessions(c: &mut Criterion) {
     let manager = std::sync::Arc::new(stamp_suite::session::SessionManager::new(None, None));
     for port in 0..1000u16 {

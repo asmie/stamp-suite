@@ -8,7 +8,8 @@ use crate::tlv::core::{RawTlv, TlvError, TlvFlags, TlvType, HMAC_TLV_VALUE_SIZE,
 /// A list of TLVs with special handling for HMAC TLV.
 ///
 /// Per RFC 8972, only Extra Padding may follow the HMAC TLV.
-/// For failure echo paths, wire order is preserved to comply with RFC 8972 §4.8.
+/// Failure echoes preserve wire order, since the reflector copies the received
+/// TLVs (RFC 8972 §4 and §4.8).
 #[derive(Debug, Clone, Default)]
 pub struct TlvList {
     /// One owner per TLV: non-HMAC entries first in encounter order, then
@@ -29,7 +30,7 @@ pub struct TlvList {
     ///
     /// RFC 8972 §4.8: "If the HMAC TLV appears in any other position in a
     /// STAMP extended test packet, then the situation MUST be processed as
-    /// HMAC verification failure" — see `apply_reflector_flags_strict`.
+    /// HMAC verification failure". See `apply_reflector_flags_strict`.
     hmac_misplaced: bool,
 }
 
@@ -231,7 +232,7 @@ impl TlvList {
             let (tlv, consumed) = RawTlv::parse(&buf[offset..])?;
 
             // RFC 8972 §4.8: "The HMAC TLV MUST follow all TLVs included in a
-            // STAMP test packet except for the Extra Padding TLV" — trailing
+            // STAMP test packet except for the Extra Padding TLV". Trailing
             // Extra Padding is pure filler outside the HMAC's coverage, so it
             // is a legal position, not a misplaced HMAC.
             if found_hmac && tlv.tlv_type != TlvType::ExtraPadding {
@@ -299,7 +300,8 @@ impl TlvList {
     /// - Handles truncated TLVs by marking them as malformed (M-flag)
     /// - Continues parsing after recoverable errors
     /// - Does not fail on HMAC length mismatch (marks as malformed instead)
-    /// - Preserves wire order for RFC 8972 §4.8 "copy all TLVs" compliance
+    /// - Preserves wire order so failure echoes copy the received TLVs
+    ///   (RFC 8972 §4 and §4.8)
     ///
     /// # Returns
     /// A tuple of (TlvList, bool) where the bool indicates if any TLV was malformed.
@@ -331,8 +333,8 @@ impl TlvList {
                         // RFC 8972 §4.8: the HMAC TLV must precede only Extra
                         // Padding TLVs. Anything else after it leaves the HMAC
                         // misplaced, which §4.8 says "MUST be processed as
-                        // HMAC verification failure" — recorded here and acted
-                        // on in `apply_reflector_flags_strict`. The M flag is
+                        // HMAC verification failure". This is recorded here and
+                        // acted on in `apply_reflector_flags_strict`. The M flag is
                         // set via the parser variant as well, so the
                         // structural signal survives the reflector's
                         // clear-and-rederive pass.
@@ -760,13 +762,12 @@ impl TlvList {
         }
     }
 
-    /// Clears U, M, I *and* the C/Conformant bit on every TLV (reserved bits
-    /// and the parser's own malformed marker are preserved) so the setters in
+    /// Clears U, M, I *and* the C/Conformant bit on every TLV (the parser's
+    /// own malformed marker is preserved) so the setters in
     /// `apply_reflector_flags_strict` can re-derive each flag per RFC 8972 §4.
     ///
     /// C is cleared rather than preserved because the Session-Reflector MUST
-    /// ignore the received C value and derive its own
-    /// (RFC 10052 §3) — see
+    /// ignore the received C value and derive its own (RFC 10052 §3). See
     /// [`RawTlv::clear_reflector_flags`], which this delegates to.
     pub fn clear_reflector_flags(&mut self) {
         for tlv in &mut self.entries {
@@ -780,8 +781,8 @@ impl TlvList {
     /// For each TLV, sets M=1 when **either**:
     /// - the parser previously detected a structural / positional error and
     ///   recorded it via `mark_malformed_by_parser` (truncation, TLV after
-    ///   HMAC, bad HMAC length — preserved across the reflector's flag-clear
-    ///   pass via the parser-marker), or
+    ///   HMAC, bad HMAC length; the marker survives the reflector's
+    ///   flag-clear pass), or
     /// - the value length doesn't match the type's RFC-defined size for
     ///   recognized types.
     ///
@@ -818,8 +819,9 @@ impl TlvList {
                 TlvType::Hmac => tlv.value.len() != HMAC_TLV_VALUE_SIZE,
                 TlvType::MicroSessionId => tlv.value.len() != MICRO_SESSION_ID_TLV_VALUE_SIZE,
                 TlvType::ReflectedControl => tlv.value.len() < REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,
-                // BerPattern: empty = default pattern. 246/247: variable Value
-                // is valid (request: zeros sized to header; response: filled).
+                // BerPattern: any length parses; BER processing sets C on an
+                // empty one. 246/247: variable Value is valid (request: zeros
+                // sized to header; response: filled).
                 TlvType::BerPattern | TlvType::ReflectedIpv6ExtHdr | TlvType::ReflectedFixedHdr => {
                     false
                 }

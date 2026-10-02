@@ -34,22 +34,22 @@ pub(super) const REFLECTED_CONTROL_SUBTLV_L3_GROUP: u8 = 11;
 /// Parsed Reflected Control sub-TLV per RFC 10052 §3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ReflectedControlSubTlv {
-    /// Layer 2 Address Group (sub-TLV type 10, draft-ietf-ippm-
-    /// RFC 10052 §3.1.1) — bitwise mask/group filter matched
+    /// Layer 2 Address Group (sub-TLV type 10, RFC 10052 §3.1.1): bitwise
+    /// mask/group filter matched
     /// against the reflector's own local MAC addresses. `mask` and `group`
     /// are always equal length (half of the validated Sub-TLV Length: 2, 6,
     /// or 8 octets).
     L2Group { mask: Vec<u8>, group: Vec<u8> },
-    /// Layer 3 Address Group (sub-TLV type 11) — IP prefix match.
+    /// Layer 3 Address Group (sub-TLV type 11, RFC 10052 §3.1.2): IP prefix match.
     L3Group { prefix_len: u8, prefix: Vec<u8> },
     /// IPv6 Extension Header Control (draft-ietf-ippm-stamp-ext-hdr-15
-    /// §5.3) — presence-only (Sub-TLV Length 0) request to add matching IPv6
+    /// §5.1): presence-only (Sub-TLV Length 0) request to add matching IPv6
     /// extension headers to the reply. This reflector cannot add reply
     /// extension headers, so its presence yields the C flag on the reflected
-    /// sub-TLV (rule 4); more than one is a cardinality violation.
+    /// sub-TLV; more than one is a cardinality violation.
     Ipv6ExtHdrControl,
     /// Anything else (including the 4-byte zero placeholder that pads the
-    /// TLV to the draft-14 §3 12-octet minimum). Ignored by the reflector.
+    /// TLV to the RFC 10052 §3 12-octet minimum). Ignored by the reflector.
     Unknown {
         #[allow(dead_code)]
         type_byte: u8,
@@ -108,9 +108,10 @@ pub(super) fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedCont
 }
 
 /// Returns true if the L3 Address Group prefix matches any of the
-/// reflector's local addresses. Per draft §3, the comparison is "bitwise
-/// AND the prefix mask with each local address and check equality with
-/// the prefix field." Empty `locals` is treated as "no match" (drop).
+/// reflector's local addresses. Per RFC 10052 §3.1.2, a mask of Prefix Length
+/// bits is ANDed with each local address of the same family and compared with
+/// the IP Prefix field; this code also ignores the prefix's bits beyond Prefix
+/// Length. Empty `locals` is treated as "no match" (drop).
 pub(super) fn l3_group_matches_any_local(
     prefix_len: u8,
     prefix: &[u8],

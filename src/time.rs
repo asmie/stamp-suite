@@ -28,12 +28,14 @@ pub(crate) fn unix_now() -> (i64, u32) {
     )
 }
 
-/// Decode a wire timestamp onto the Unix epoch, unfolding the 32-bit seconds
-/// word to the era nearest `reference_unix_seconds` (within about 68 years).
-/// The reference must use the same timescale as the timestamp. PTP's seconds
-/// are treated as UTC here; callers must remove a known remote UTC offset.
-/// The Z bit specifies encoding, not synchronization or a UTC offset.
-/// Returns None for an invalid PTP nanoseconds word (>= one second).
+/// Decodes a wire timestamp to nanoseconds since the Unix epoch.
+///
+/// The 32-bit seconds word is unfolded to the era nearest
+/// `reference_unix_seconds` (within about 68 years). The reference must use the
+/// same timescale as the timestamp. PTP's seconds are treated as UTC here;
+/// callers must remove a known remote UTC offset. The Z bit specifies encoding,
+/// not synchronization or a UTC offset. Returns `None` for an invalid PTP
+/// nanoseconds word (>= one second).
 #[must_use]
 pub(crate) fn timestamp_to_unix_nanos(
     value: u64,
@@ -56,11 +58,12 @@ pub(crate) fn timestamp_to_unix_nanos(
     Some((reference + delta) * 1_000_000_000 + i128::from(nanos))
 }
 
-/// Converts a raw `(seconds, nanoseconds)` pair — e.g. a kernel `timespec`
-/// from an `SCM_TIMESTAMPING` control message — into the STAMP wire format.
-/// `secs` is seconds since the Unix epoch (CLOCK_REALTIME domain); the
-/// arithmetic is identical to [`generate_timestamp`]'s, so kernel and
-/// userspace timestamps remain directly subtractable.
+/// Converts a raw `(seconds, nanoseconds)` pair into the STAMP wire format.
+///
+/// The pair can be a kernel `timespec` from an `SCM_TIMESTAMPING` control
+/// message. `secs` is seconds since the Unix epoch (CLOCK_REALTIME domain);
+/// [`generate_timestamp`] uses this function, so kernel and userspace
+/// timestamps remain directly subtractable.
 #[must_use]
 pub(crate) fn timestamp_from_parts(secs: i64, nanos: u32, cs: ClockFormat) -> u64 {
     match cs {

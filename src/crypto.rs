@@ -170,7 +170,8 @@ impl KeySource<'_> {
 }
 
 /// Reads a bearer-token file with the same descriptor-based permission checks
-/// as [`HmacKey::from_file`] (see `doc/control-plane.md` §5).
+/// as [`HmacKey::from_file`] (see "Security and failures" in
+/// `doc/control-plane.md`).
 pub fn read_token_file(path: &Path) -> Result<String, HmacError> {
     use std::io::Read;
 
@@ -332,7 +333,7 @@ impl HmacKey {
     }
 }
 
-/// Per-SSID HMAC keys with an optional default (RFC 8972 §4.1).
+/// Per-SSID HMAC keys (SSID as in RFC 8972 §3) with an optional default.
 ///
 /// `for_ssid` checks the per-SSID entry, then the default, then returns `None`.
 /// Single-key configurations populate only the default, serving every SSID.
@@ -650,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_constant_time_compare() {
-        // Note: This test verifies correctness only. The constant-time property
+        // This test verifies correctness only. The constant-time property
         // (resistance to timing attacks) cannot be reliably tested in a unit test
         // and must be verified by code inspection or specialized timing analysis tools.
         let a = [1, 2, 3, 4];
@@ -685,7 +686,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // HmacKeySet — per-SSID HMAC keys.
+    // HmacKeySet: per-SSID HMAC keys.
 
     #[test]
     fn test_keyset_empty_returns_none() {
@@ -703,7 +704,7 @@ mod tests {
         let k2 = set
             .for_ssid(0xFFFF)
             .expect("default returned for SSID 0xFFFF");
-        // Same bytes — same key.
+        // Same bytes, same key.
         assert_eq!(k1.compute(b"x"), k2.compute(b"x"));
     }
 
@@ -763,7 +764,7 @@ mod tests {
         );
         write_key_file(dir.path(), "002a.key", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); // SSID 42
         write_key_file(dir.path(), "ffff.key", "cccccccccccccccccccccccccccccccc"); // SSID 65535
-                                                                                    // Unparseable file — must be skipped, not fatal.
+                                                                                    // Unparseable file: must be skipped, not fatal.
         write_key_file(dir.path(), "notes.txt", "this is a comment file");
 
         let set = HmacKeySet::from_dir(dir.path()).expect("load");

@@ -17,7 +17,7 @@ pub struct ReflectorCounters {
     /// operators tell rate-limit pressure from parse / HMAC failures.
     pub packets_rate_limited: AtomicU64,
     /// Received packets whose Sequence Number had already been seen on that
-    /// session — duplicates or replays
+    /// session: duplicates or replays
     /// (RFC 10052 §5). Counted whether or not
     /// `--drop-replayed` acts on them; when it does, they are also included in
     /// `packets_dropped`.
@@ -165,7 +165,7 @@ impl RateLimiter {
 }
 
 /// Reflector caps adjustable at runtime via the control plane.
-/// Loaded per packet with Relaxed ordering — these are tuning knobs,
+/// Loaded per packet with Relaxed ordering: these are tuning knobs,
 /// not synchronization points.
 #[derive(Debug)]
 pub struct RuntimeCaps {
@@ -236,11 +236,11 @@ pub const REFLECTED_CONTROL_MAX_COUNT: u16 = 16;
 /// administrative value via `--reflected-control-max-size` or the control API.
 pub(crate) const REFLECTED_CONTROL_MAX_SIZE: u16 = 1500;
 
-/// Default minimum inter-packet gap (nanoseconds) — the per-request *rate*
+/// Default minimum inter-packet gap (nanoseconds): the per-request *rate*
 /// limit of RFC 10052 §3, and a floor that avoids
 /// tight busy-loops in the backends. A multi-packet request with a shorter
 /// interval collapses to a single reply with the C flag set. Operators can
-/// override at runtime via `--reflected-control-min-interval-ns`.
+/// override it via `--reflected-control-min-interval-ns`.
 pub(crate) const REFLECTED_CONTROL_MIN_INTERVAL_NS: u32 = 1_000;
 
 /// Default Type 12 data-rate limit in bytes per second (100 Mbit/s).
@@ -282,8 +282,8 @@ mod tests {
         assert!(state.sources.contains_key(&trigger));
     }
 
-    /// Synthetic burst exceeding the bucket size must produce exactly
-    /// `burst` accepts then deny — no off-by-one in the consume logic.
+    /// Rate and burst changes made at runtime take effect immediately:
+    /// unlimited, then limited, then unlimited again.
     #[test]
     fn test_rate_limiter_runtime_adjust() {
         // Starts unlimited (rate 0): always allows and allocates no buckets.
@@ -314,7 +314,7 @@ mod tests {
     fn test_rate_limiter_burst_exhausts_then_denies() {
         let limiter = RateLimiter::with_burst(/* rate */ 1, /* burst */ 5);
         let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        // First 5 calls consume one token each — accepted.
+        // First 5 calls consume one token each and are accepted.
         for i in 0..5 {
             assert!(limiter.allow(src), "call {i} must be accepted within burst");
         }
@@ -351,7 +351,7 @@ mod tests {
 
     /// Sustained rate at the configured `rate` value must be sustainable
     /// (no false denies once the bucket is empty and the refill kicks in).
-    /// Uses a real sleep so the test is timing-sensitive — keep the rate
+    /// Uses a real sleep so the test is timing-sensitive; keep the rate
     /// and sleep small.
     #[test]
     fn test_rate_limiter_sustained_rate_refills() {
@@ -371,8 +371,8 @@ mod tests {
         );
     }
 
-    /// Burst=0 in the explicit constructor falls back to `rate`,
-    /// preserving backward compatibility with the old `--max-pps` flag.
+    /// Burst=0 in the explicit constructor falls back to `rate`, matching
+    /// `--max-pps` without `--reflector-rate-burst` (one second of traffic).
     #[test]
     fn test_rate_limiter_burst_zero_falls_back_to_rate() {
         let limiter = RateLimiter::with_burst(7, 0);

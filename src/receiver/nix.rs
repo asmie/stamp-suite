@@ -42,7 +42,6 @@ pub async fn run_receiver(
     let local_addr: SocketAddr = conf.local_socket_addr();
     let is_ipv6 = conf.local_addr.is_ipv6();
 
-    // Create a standard UDP socket
     let std_socket = match std::net::UdpSocket::bind(local_addr) {
         Ok(s) => s,
         Err(e) => {
@@ -71,13 +70,16 @@ pub async fn run_receiver(
         log::debug!("Cannot enlarge the receive buffer: {e}");
     }
 
-    // Enable TTL/hop limit and TOS/Traffic Class reception via setsockopt using libc directly
-    // nix doesn't expose IP_RECVTTL/IP_RECVTOS, so we use libc
+    // Enable TTL/Hop Limit and TOS/Traffic Class reception with libc directly:
+    // nix exposes these options only on Linux, Android and FreeBSD, and this
+    // backend also builds for macOS.
     let fd = std_socket.as_raw_fd();
     let enable: libc::c_int = 1;
 
     // Enable TTL/Hop Limit reception
     let result = if is_ipv6 {
+        // SAFETY: `fd` is the open socket owned by `std_socket`; the value
+        // pointer and length describe the live `enable` c_int.
         unsafe {
             libc::setsockopt(
                 fd,
@@ -88,6 +90,8 @@ pub async fn run_receiver(
             )
         }
     } else {
+        // SAFETY: `fd` is the open socket owned by `std_socket`; the value
+        // pointer and length describe the live `enable` c_int.
         unsafe {
             libc::setsockopt(
                 fd,
@@ -108,6 +112,8 @@ pub async fn run_receiver(
 
     // Enable TOS/Traffic Class reception (for DSCP/ECN measurement)
     let tos_result = if is_ipv6 {
+        // SAFETY: `fd` is the open socket owned by `std_socket`; the value
+        // pointer and length describe the live `enable` c_int.
         unsafe {
             libc::setsockopt(
                 fd,
@@ -118,6 +124,8 @@ pub async fn run_receiver(
             )
         }
     } else {
+        // SAFETY: `fd` is the open socket owned by `std_socket`; the value
+        // pointer and length describe the live `enable` c_int.
         unsafe {
             libc::setsockopt(
                 fd,
@@ -147,7 +155,8 @@ pub async fn run_receiver(
             libc::IPV6_RECVDSTOPTS,
             libc::IPV6_RECVRTHDR,
         ] {
-            // SAFETY: live socket and correctly sized c_int option.
+            // SAFETY: `fd` is the open socket owned by `std_socket`; the value
+            // pointer and length describe the live `enable` c_int.
             let result = unsafe {
                 libc::setsockopt(
                     fd,
@@ -170,6 +179,8 @@ pub async fn run_receiver(
     // Enable packet info reception for destination address (for Location TLV).
     // Without this, a wildcard bind (0.0.0.0/::) reports the bind address as dst_addr.
     let pktinfo_result = if is_ipv6 {
+        // SAFETY: `fd` is the open socket owned by `std_socket`; the value
+        // pointer and length describe the live `enable` c_int.
         unsafe {
             libc::setsockopt(
                 fd,
@@ -180,6 +191,8 @@ pub async fn run_receiver(
             )
         }
     } else {
+        // SAFETY: `fd` is the open socket owned by `std_socket`; the value
+        // pointer and length describe the live `enable` c_int.
         unsafe {
             libc::setsockopt(
                 fd,
@@ -276,7 +289,8 @@ pub async fn run_receiver(
     let mut buf = vec![0u8; crate::packets::MAX_UDP_PAYLOAD];
     // 512 bytes: TTL + TOS + PKTINFO plus the 64-byte SCM_TIMESTAMPING
     // cmsg (feature "hwtstamp") with headroom. IPv6 adds room for Hop-by-Hop,
-    // Destination Options and Routing headers of up to 2048 bytes each.
+    // Destination Options and Routing headers of up to 2048 bytes each (Hdr
+    // Ext Len 255), each behind a 16-byte cmsg header.
     let mut cmsg_buf = vec![0u8; if is_ipv6 { 512 + 3 * (2048 + 16) } else { 512 }];
 
     // One loop owns every send and its OPT_ID assignment, including burst copies.
@@ -408,7 +422,6 @@ pub async fn run_receiver(
                     std::future::pending::<tokio::time::Instant>().await
                 }
             } => {
-                // Run periodic session cleanup
                 let removed = session_manager.cleanup_stale_sessions();
                 if removed > 0 {
                     log::debug!("Session cleanup: removed {} stale sessions", removed);
@@ -451,7 +464,6 @@ pub async fn run_receiver(
                     let len = msg.bytes;
                     let src_storage = msg.address;
 
-                    // Extract TTL from control messages
                     let ttl = match extract_ttl_from_cmsgs(&msg) {
                         Some(t) => t,
                         None => {
@@ -551,6 +563,8 @@ pub async fn run_receiver(
                         src_mac: None, // a UDP socket does not see the link layer
                         // A UDP socket cannot read fixed IP headers, so Type 247
                         // requests get C (draft-ietf-ippm-stamp-ext-hdr-15 §6.1).
+                        // Linux supplies IPv6 extension headers for Type 246;
+                        // other systems supply none, so those requests get C too.
                         #[cfg(target_os = "linux")]
                         captured_headers: Some(&captured),
                         #[cfg(not(target_os = "linux"))]
@@ -765,7 +779,7 @@ fn extract_tos_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> O
                     return Some(data[0]);
                 }
             }
-            // IPv6 Traffic Class (level=IPPROTO_IPV6, type=IPV6_RECVTCLASS)
+            // IPv6 Traffic Class (level=IPPROTO_IPV6, type=IPV6_TCLASS)
             else if level == libc::IPPROTO_IPV6 && cmsg_type == libc::IPV6_TCLASS {
                 if data.len() >= 4 {
                     let tclass = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
@@ -845,9 +859,8 @@ mod tests {
         );
     }
 
-    /// A second, non-palindromic-octet address makes any byte reversal
-    /// obvious (unlike 127.0.0.1's mostly-zero octets, though that case is
-    /// covered above since it was the exact regression report).
+    /// An address with four distinct octets makes any byte reversal obvious,
+    /// unlike 127.0.0.1's mostly-zero octets.
     #[test]
     fn ipv4_pktinfo_extraction_non_symmetric_address() {
         let s_addr = u32::from(Ipv4Addr::new(192, 0, 2, 55)).to_be();

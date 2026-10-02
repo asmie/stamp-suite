@@ -1,11 +1,12 @@
 //! Regression tests for the BER (Bit Error Rate) TLV trio per
 //! draft-gandhi-ippm-stamp-ber-07.
 //!
-//! Implementation lives in `src/sender.rs::run_sender` (sender fills Extra
-//! Padding with the configured pattern, attaches BerPattern + zero-init
-//! BerCount + BerBurst) and `src/tlv/list/processing.rs::process_ber`
-//! (reflector XORs the received padding against the pattern, writes the
-//! popcount into BerCount and the longest run of error bits into BerBurst).
+//! The sender side lives in `SenderRun::open` (`src/sender/run.rs`): it fills
+//! Extra Padding with the configured pattern and attaches BerPattern plus
+//! zero-initialized BerCount and BerBurst. The reflector side is
+//! `TlvList::process_ber` (`src/tlv/list/processing.rs`): it XORs the received
+//! padding against the pattern, writes the popcount into BerCount and the
+//! longest run of error bits into BerBurst.
 //!
 //! These tests pin the on-wire contract end-to-end through
 //! `process_stamp_packet`:
@@ -78,8 +79,8 @@ fn make_ctx<'a>() -> ProcessingContext<'a> {
     }
 }
 
-/// Builds Extra Padding bytes by repeating the pattern. Matches what the
-/// sender does at `src/sender.rs::run_sender`.
+/// Builds Extra Padding bytes by repeating the pattern, as `SenderRun::open`
+/// does in `src/sender/run.rs`.
 fn build_padding_from_pattern(pattern: &[u8], size: usize) -> Vec<u8> {
     let mut padding = Vec::with_capacity(size);
     for i in 0..size {
@@ -166,7 +167,7 @@ fn ber_single_bit_flip_reports_one_error() {
     let mut packet = build_ber_packet(padding);
 
     // Flip bit 0 of padding[3]. padding[3] corresponds to pattern[3 % 2] =
-    // pattern[1] = 0x00, so XOR'd byte = 0x01 → one error bit, one burst.
+    // pattern[1] = 0x00, so XOR'd byte = 0x01: one error bit, one burst.
     let off = padding_value_offset() + 3;
     packet[off] ^= 0x01;
 
@@ -198,13 +199,13 @@ fn ber_three_bit_burst_within_byte_reports_three() {
 
 #[test]
 fn ber_burst_spanning_byte_boundary_reports_continuous_run() {
-    // The bit walk in xor_popcount_and_max_burst is MSB-first per byte. To
+    // xor_popcount_and_max_burst reads bits MSB-first per byte. To
     // produce a cross-byte run we need byte3's LSB set + byte4's high bits
     // set so the MSB-first stream is …,0,0,0,1 | 1,1,1,0,…
     //
     // Pattern repeats [0xFF,0x00,0xFF,0x00,…] so:
-    //   padding[3] expected 0x00 → choose 0x01 (XOR = 0x01, sets bit-0).
-    //   padding[4] expected 0xFF → choose 0x1F (XOR = 0xE0, sets bits 7,6,5).
+    //   padding[3] expected 0x00, choose 0x01 (XOR = 0x01, sets bit 0).
+    //   padding[4] expected 0xFF, choose 0x1F (XOR = 0xE0, sets bits 7,6,5).
     //
     // Resulting bit stream across the byte boundary contains one '1' then
     // three contiguous '1's = a 4-bit run, with no surrounding 1-bits.
@@ -219,11 +220,11 @@ fn ber_burst_spanning_byte_boundary_reports_continuous_run() {
 }
 
 // ---------------------------------------------------------------------------
-// Sender-shaped packet — hex-dump check
+// Sender-shaped packet: hex-dump check
 
 #[test]
 fn ber_sender_padding_carries_pattern_at_expected_offset() {
-    // The sender (src/sender.rs:252-255) fills padding by repeating the
+    // The sender (`SenderRun::open`) fills padding by repeating the
     // configured pattern. We rebuild the same chain and verify the wire
     // bytes at the ExtraPadding value offset match the expected pattern
     // repetition, byte-for-byte.
@@ -243,7 +244,7 @@ fn ber_sender_padding_carries_pattern_at_expected_offset() {
 }
 
 // ---------------------------------------------------------------------------
-// Custom pattern — non-default channel exercises the BerPattern TLV path
+// Custom pattern: a non-default pattern exercises the BerPattern TLV path
 
 #[test]
 fn ber_custom_pattern_clean_channel_zero_errors() {

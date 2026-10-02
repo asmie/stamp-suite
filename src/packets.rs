@@ -59,8 +59,8 @@ fn check_size(buf: &[u8], expected: usize) -> Result<(), PacketError> {
 
 /// Reads a big-endian u16 from buffer at given offset.
 ///
-/// # Safety invariant
-/// Caller must ensure `offset + 2 <= buf.len()`. This is checked via assert.
+/// # Panics
+/// Panics if `offset + 2 > buf.len()`.
 #[inline]
 fn read_u16(buf: &[u8], offset: usize) -> u16 {
     assert!(
@@ -69,14 +69,14 @@ fn read_u16(buf: &[u8], offset: usize) -> u16 {
         offset,
         buf.len()
     );
-    // SAFETY: assert ensures bounds; slice length is exactly 2
+    // The assert above keeps every index in bounds.
     u16::from_be_bytes([buf[offset], buf[offset + 1]])
 }
 
 /// Reads a big-endian u32 from buffer at given offset.
 ///
-/// # Safety invariant
-/// Caller must ensure `offset + 4 <= buf.len()`. This is checked via assert.
+/// # Panics
+/// Panics if `offset + 4 > buf.len()`.
 #[inline]
 fn read_u32(buf: &[u8], offset: usize) -> u32 {
     assert!(
@@ -85,7 +85,7 @@ fn read_u32(buf: &[u8], offset: usize) -> u32 {
         offset,
         buf.len()
     );
-    // SAFETY: assert ensures bounds; slice length is exactly 4
+    // The assert above keeps every index in bounds.
     u32::from_be_bytes([
         buf[offset],
         buf[offset + 1],
@@ -96,8 +96,8 @@ fn read_u32(buf: &[u8], offset: usize) -> u32 {
 
 /// Reads a big-endian u64 from buffer at given offset.
 ///
-/// # Safety invariant
-/// Caller must ensure `offset + 8 <= buf.len()`. This is checked via assert.
+/// # Panics
+/// Panics if `offset + 8 > buf.len()`.
 #[inline]
 fn read_u64(buf: &[u8], offset: usize) -> u64 {
     assert!(
@@ -106,7 +106,7 @@ fn read_u64(buf: &[u8], offset: usize) -> u64 {
         offset,
         buf.len()
     );
-    // SAFETY: assert ensures bounds; slice length is exactly 8
+    // The assert above keeps every index in bounds.
     u64::from_be_bytes([
         buf[offset],
         buf[offset + 1],
@@ -121,8 +121,8 @@ fn read_u64(buf: &[u8], offset: usize) -> u64 {
 
 /// Copies a fixed-size array from buffer at given offset.
 ///
-/// # Safety invariant
-/// Caller must ensure `offset + N <= buf.len()`. This is checked via assert.
+/// # Panics
+/// Panics if `offset + N > buf.len()`.
 #[inline]
 fn read_array<const N: usize>(buf: &[u8], offset: usize) -> [u8; N] {
     assert!(
@@ -133,14 +133,15 @@ fn read_array<const N: usize>(buf: &[u8], offset: usize) -> [u8; N] {
         N,
         buf.len()
     );
-    // SAFETY: assert ensures bounds; try_into succeeds because slice length equals N
+    // The assert keeps the slice in bounds, and `try_into` cannot fail because the
+    // slice length is exactly N.
     buf[offset..offset + N].try_into().unwrap()
 }
 
 /// Unauthenticated STAMP test packet sent by the Session-Sender.
 ///
 /// This is the basic packet format without HMAC authentication (44 bytes).
-/// See RFC 8762 Section 4.2, with the RFC 8972 §3 SSID extension occupying
+/// See RFC 8762 §4.2.1, with the RFC 8972 §3 SSID extension occupying
 /// the two octets immediately following Error Estimate.
 ///
 /// Wire format:
@@ -201,7 +202,7 @@ impl PacketUnauthenticated {
         })
     }
 
-    /// Deserializes a packet with zero-fill for missing bytes (RFC 8762 Section 4.6).
+    /// Deserializes a packet with zero-fill for missing bytes (RFC 8762 §4.6).
     ///
     /// This method enables interoperability with TWAMP-Light implementations that
     /// may send packets smaller than the base 44 bytes. Missing bytes are zero-filled.
@@ -223,7 +224,8 @@ impl PacketUnauthenticated {
 /// Unauthenticated STAMP reflected packet sent by the Session-Reflector.
 ///
 /// Contains the original sender information plus reflector timestamps (44 bytes).
-/// See RFC 8762 Section 4.3.
+/// See RFC 8762 §4.3.1, with the RFC 8972 §3 SSID in the two octets after
+/// Error Estimate.
 ///
 /// Wire format:
 /// ```text
@@ -235,7 +237,7 @@ impl PacketUnauthenticated {
 /// |                          Timestamp                           |
 /// |                                                               |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |         Error Estimate        |           MBZ                 |
+/// |         Error Estimate        |             SSID              |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |                       Receive Timestamp                       |
 /// |                                                               |
@@ -258,7 +260,7 @@ pub struct ReflectedPacketUnauthenticated {
     pub timestamp: u64,
     /// Reflector's error estimate.
     pub error_estimate: u16,
-    /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §4.1.1).
+    /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §3).
     pub ssid: u16,
     /// Timestamp when the reflector received the test packet.
     pub receive_timestamp: u64,
@@ -268,7 +270,7 @@ pub struct ReflectedPacketUnauthenticated {
     pub sess_sender_timestamp: u64,
     /// Original sender's error estimate (echoed back).
     pub sess_sender_err_estimate: u16,
-    /// Reserved bytes 38-39; must remain zero (RFC 8762 §4.6).
+    /// Reserved bytes 38-39; must be zero (RFC 8762 §4.3.1).
     /// The reply SSID appears only at bytes 14-15 (RFC 8972 §3 Figure 2).
     pub mbz2: [u8; 2],
     /// TTL/Hop Limit of the received test packet.
@@ -344,7 +346,7 @@ impl ReflectedPacketUnauthenticated {
 /// Authenticated STAMP test packet sent by the Session-Sender.
 ///
 /// Includes HMAC for integrity verification (112 bytes).
-/// See RFC 8762 Section 4.4, with the RFC 8972 §3 SSID extension occupying
+/// See RFC 8762 §4.2.2, with the RFC 8972 §3 SSID extension occupying
 /// the two octets immediately following Error Estimate.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct PacketAuthenticated {
@@ -401,10 +403,11 @@ impl PacketAuthenticated {
         })
     }
 
-    /// Deserializes a packet with zero-fill for missing bytes (RFC 8762 Section 4.6).
+    /// Deserializes a packet with zero-fill for missing bytes.
     ///
-    /// This method enables interoperability with TWAMP-Light implementations that
-    /// may send packets smaller than the base 112 bytes. Missing bytes are zero-filled.
+    /// Accepts packets shorter than the 112-byte base and zero-fills the missing
+    /// bytes. RFC 8762 §4.6 covers TWAMP Light interoperability for unauthenticated
+    /// mode only; this applies the same short-packet handling here.
     pub fn from_bytes_lenient(buf: &[u8]) -> Self {
         let (packet, _) = Self::from_bytes_lenient_with_canonical(buf);
         packet
@@ -413,8 +416,8 @@ impl PacketAuthenticated {
     /// Deserializes a packet leniently and returns the canonical zero-padded buffer.
     ///
     /// Returns the parsed packet and the canonical 112-byte buffer for HMAC verification.
-    /// This is needed because HMAC must be verified against the canonical (zero-padded)
-    /// representation per RFC 8762 §4.6.
+    /// The HMAC is verified against this zero-padded buffer, so a short packet is
+    /// checked against the same bytes the parsed fields came from.
     #[must_use]
     pub fn from_bytes_lenient_with_canonical(buf: &[u8]) -> (Self, [u8; 112]) {
         let mut padded = [0u8; 112];
@@ -440,7 +443,8 @@ impl PacketAuthenticated {
 /// Authenticated STAMP reflected packet sent by the Session-Reflector.
 ///
 /// Contains the original sender information plus reflector timestamps with HMAC (112 bytes).
-/// See RFC 8762 Section 4.5.
+/// See RFC 8762 §4.3.2, with the RFC 8972 §3 SSID in the two octets after
+/// Error Estimate.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ReflectedPacketAuthenticated {
     /// Reflector's sequence number.
@@ -451,7 +455,7 @@ pub struct ReflectedPacketAuthenticated {
     pub timestamp: u64,
     /// Reflector's error estimate.
     pub error_estimate: u16,
-    /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §4.1.2).
+    /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §3).
     pub ssid: u16,
     /// Must Be Zero - reserved padding (4 bytes).
     pub mbz1: [u8; 4],
@@ -733,8 +737,8 @@ impl ExtendedReflectedPacketUnauthenticated {
 
 /// Authenticated STAMP packet with TLV extensions (RFC 8972).
 ///
-/// Note: The base packet HMAC covers only the base packet fields.
-/// TLV integrity uses a separate HMAC TLV per RFC 8972.
+/// The base packet HMAC covers only the base packet fields.
+/// TLV integrity uses a separate HMAC TLV (RFC 8972 §4.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtendedPacketAuthenticated {
     /// The base authenticated packet.

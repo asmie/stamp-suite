@@ -137,7 +137,7 @@ pub async fn run_receiver(
             && has_addr
     };
 
-    // Find the network interface with the provided local IP address
+    // Find the interface matching --interface (if given) and the local address.
     let interfaces = datalink::interfaces();
     let interface = interfaces.into_iter().find(interface_ip_match);
 
@@ -174,7 +174,6 @@ pub async fn run_receiver(
         ..Default::default()
     };
 
-    // Create a channel to receive on
     let (_, rx) = match datalink::channel(&interface, config) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => {
@@ -246,10 +245,9 @@ pub async fn run_receiver(
         capture_alive_for_loop.store(false, AtomicOrdering::Relaxed);
     }
 
-    // Print reflector stats on shutdown
     print_reflector_stats(&counters, &session_manager, start_time, output_format);
     // Reaching here is a normal shutdown (ctrl-c or the control plane), not a
-    // startup failure — those return Err above and make main exit non-zero.
+    // startup failure. Those return Err above and make main exit non-zero.
     Ok(())
 }
 
@@ -326,7 +324,10 @@ fn run_capture_loop(
         match rx.next() {
             Ok(packet) => {
                 // Loopback and point-to-point interfaces on Apple platforms
-                // deliver IP packets without an Ethernet header.
+                // deliver IP packets without an Ethernet header. For loopback,
+                // pnet's BPF backend swaps the 4-byte DLT_NULL header for a
+                // zeroed placeholder Ethernet header (14 bytes assumed here);
+                // point-to-point packets start at the IP header.
                 if cfg!(any(
                     target_os = "macos",
                     target_os = "ios",
@@ -350,7 +351,7 @@ fn run_capture_loop(
                 handle_packet(&ethernet, &config, &transmitter);
             }
             Err(e) => {
-                // Timeout errors are expected when read_timeout is set - just continue to run cleanup
+                // read_timeout makes timeouts routine; keep looping so cleanup runs.
                 if e.kind() != std::io::ErrorKind::TimedOut
                     && e.kind() != std::io::ErrorKind::WouldBlock
                 {
@@ -455,6 +456,9 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
     for _ in 0..=MAX_IP_TUNNEL_DEPTH {
         let (src, dst, ttl, tos, proto, offset, end) = if version == 4 {
             let ip = Ipv4Packet::new(bytes)?;
+            // IHL counts 32-bit words; 20 bytes is the minimum IPv4 header.
+            // Fragments are rejected: a nonzero offset or the More Fragments
+            // bit (bit 0 of pnet's 3-bit flags field).
             let ihl = usize::from(ip.get_header_length()) * 4;
             let end = usize::from(ip.get_total_length());
             if ip.get_version() != 4
@@ -479,6 +483,8 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
             )
         } else {
             let ip = Ipv6Packet::new(bytes)?;
+            // 40-byte fixed header plus Payload Length. A zero Payload Length
+            // (end == 40) is either empty or a jumbogram; both are rejected.
             let end = 40 + usize::from(ip.get_payload_length());
             if ip.get_version() != 6 || end > bytes.len() || end == 40 {
                 return None;
@@ -504,6 +510,8 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
         if proto == IpNextHeaderProtocols::Udp.0 {
             let udp = UdpPacket::new(upper)?;
             let len = usize::from(udp.get_length());
+            // The UDP Length covers the 8-byte header and must match the IP
+            // payload exactly.
             if len < 8 || len != upper.len() || udp.get_checksum() == 0 {
                 return None;
             }
@@ -516,6 +524,7 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
                 }
                 _ => return None,
             };
+            // A computed zero is transmitted as all ones (RFC 768).
             let checksum = if checksum == 0 { u16::MAX } else { checksum };
             if checksum != udp.get_checksum() {
                 static WARNED: std::sync::atomic::AtomicBool =
@@ -592,7 +601,7 @@ fn ext_header_len(hdr_type: u8, rec: &[u8]) -> Option<usize> {
         // second octet is Reserved, not a length field.
         FRAGMENT => Some(8),
         // AH's length is in a different unit and ESP's payload is encrypted, so
-        // neither can be reflected — the walk terminates here (§5.1-E C-flag).
+        // neither can be reflected; the walk terminates here.
         AUTH_HEADER | ESP => None,
         // Upper-layer protocol (e.g. UDP) or anything else: not an ext header.
         _ => None,
@@ -620,6 +629,9 @@ fn walk_ipv6_ext_header_chain(payload: &[u8], first_next: u8) -> (Vec<u8>, u8, u
         }
         // This header's own Next Header field (byte 0) names the FOLLOWING
         // header. Emit the header verbatim.
+        // Fragment (44): bytes 2..4 hold the 13-bit Fragment Offset, two
+        // reserved bits and the M flag (mask 0xf9 skips the reserved bits).
+        // Only an atomic fragment (offset 0, M = 0) is walked past.
         if this_header_type == 44 && (rec[2] != 0 || rec[3] & 0xf9 != 0) {
             break; // No reassembly at the capture layer; only atomic fragments proceed.
         }
@@ -1067,10 +1079,10 @@ mod tests {
     use clap::Parser;
 
     /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§4.1: captured extension headers
-    /// must be stored verbatim as on the wire — byte 0 is the header's OWN Next
+    /// must be stored verbatim as on the wire. Byte 0 is the header's OWN Next
     /// Header field (naming what follows), NOT the header's own type (which is
     /// carried in the preceding Next Header pointer). This is what the
-    /// reflector's first-4-byte Requested selector matches against.
+    /// reflector's eight-byte Requested selector matches against.
     #[test]
     fn extract_ipv6_ext_headers_stores_records_verbatim_on_wire() {
         // 40-byte IPv6 fixed header + one 8-byte Hop-by-Hop Options header.
@@ -1078,10 +1090,10 @@ mod tests {
         buf[0] = 0x60; // Version 6
         buf[4] = 0x00; // Payload Length hi
         buf[5] = 0x08; // Payload Length = 8 (the HBH header)
-        buf[6] = 0; // Next Header = 0 (Hop-by-Hop Options) — names the HBH header
+        buf[6] = 0; // Next Header = 0 (Hop-by-Hop Options): names the HBH header
         buf[7] = 64; // Hop Limit
                      // Hop-by-Hop Options header (on the wire, at offset 40):
-        buf[40] = 17; // its OWN Next Header = 17 (UDP) — names what follows
+        buf[40] = 17; // its OWN Next Header = 17 (UDP): names what follows
         buf[41] = 0; // HdrExtLen = 0 → (0 + 1) * 8 = 8 octets
         buf[42..48].copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6]);
 
@@ -1098,10 +1110,10 @@ mod tests {
         assert_eq!(payload_offset, 48, "40-byte fixed + 8-byte HBH");
     }
 
-    /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2 rule 2 / §4.2's example list:
-    /// the walk must traverse and capture a Routing Header (type 43, incl. the
-    /// Segment Routing Header / routing type 4) in the chain, in order, and
-    /// continue to the upper layer.
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2 (rule 3) processes extension
+    /// headers in order from the outermost. The walk must capture a Routing
+    /// Header (type 43, including the Segment Routing Header, routing type 4)
+    /// in order and continue to the upper layer.
     #[test]
     fn walk_captures_routing_header_including_srh() {
         // Chain: fixed(next=HBH) → HBH(8, next=Routing) → SRH(16, next=UDP).

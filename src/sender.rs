@@ -100,12 +100,12 @@ struct SenderRecvContext<'a> {
     /// `None` means the sender did not request Micro-session ID measurement.
     expected_sender_msid: Option<u16>,
     /// Pre-known reflector member-link identifier (`--reflector-member-link-id`,
-    /// RFC 9534 §3.2-11/-12). When set, the reflected Reflector Micro-session ID
-    /// must equal it — validating the reflector's behaviour; a mismatching reply
+    /// RFC 9534 §3.2). When set, the reflected Reflector Micro-session ID must
+    /// equal it, which validates the reflector's behaviour; a mismatching reply
     /// is discarded. `None` means the reflector ID is not pre-known.
     expected_reflector_msid: Option<u16>,
     /// Reflector Micro-session ID learned from the first accepted reply when
-    /// no expected ID is configured (RFC 9534 §3.2-11). Later mismatches are
+    /// no expected ID is configured (RFC 9534 §3.2). Later mismatches are
     /// rejected. Retained for the sender session.
     latched_reflector_msid: &'a mut Option<u16>,
     /// Access Report TLV retransmission state (RFC 8972 §4.6). `Some` only
@@ -135,12 +135,13 @@ struct SenderRecvContext<'a> {
     observers: &'a SenderObservers,
 }
 
-/// Runs the STAMP sender, transmitting test packets and collecting statistics.
+/// Runs one STAMP sender session and returns its final statistics.
 ///
-/// Sends packets to the configured remote address and waits for reflected responses.
-/// Returns statistics about the measurement session including RTT and packet loss.
-/// For a continuous CSV stream including the final snapshot, use
-/// [`run_sender_with_output`] with a shared [`crate::stats::StatsOutput`].
+/// Probes the first `--remote-addr` (use [`run_senders`] for several targets)
+/// and waits for reflected responses. The returned snapshot covers RTT,
+/// one-way delay and packet loss. For a continuous CSV stream including the
+/// final snapshot, use [`run_sender_with_output`] with a shared
+/// [`crate::stats::StatsOutput`].
 pub async fn run_sender(conf: &Configuration) -> Result<StatsSnapshot, crate::StartupError> {
     let mut output = crate::stats::StatsOutput::new(conf.output_format);
     run_sender_with_output(
@@ -315,8 +316,9 @@ fn process_response(
 
     let mut ber_observation = None;
 
-    // Parse response and validate TLVs if extension mode is enabled
-    // Use lenient parsing per RFC 8762 §4.6 to handle short packets.
+    // Parse the reply and, in extension mode, validate its TLVs. Lenient
+    // parsing accepts short replies, such as a TWAMP Light reflector's
+    // (RFC 8762 §4.6).
     let (
         seq_num,
         reflector_recv_ts,
@@ -338,7 +340,8 @@ fn process_response(
             let ttl = base.sess_sender_ttl;
             let hmac = base.hmac;
 
-            // Verify base packet HMAC against canonical buffer (RFC 8762 §4.4, §4.6)
+            // Verify the base packet HMAC over the canonical buffer before any
+            // field is used (RFC 8762 §4.4).
             if let Some(key) = ctx.hmac_key {
                 if !verify_packet_hmac(key, &canonical_buf, AUTH_HMAC_OFFSET, &hmac) {
                     crate::eprintln_throttled!(
@@ -412,7 +415,8 @@ fn process_response(
             let ttl = packet.sess_sender_ttl;
             let hmac = packet.hmac;
 
-            // Verify HMAC against canonical buffer when key is present (RFC 8762 §4.4, §4.6)
+            // Verify the base packet HMAC over the canonical buffer when a key
+            // is present (RFC 8762 §4.4).
             if let Some(key) = ctx.hmac_key {
                 if !verify_packet_hmac(key, &canonical_buf, AUTH_HMAC_OFFSET, &hmac) {
                     crate::eprintln_throttled!(

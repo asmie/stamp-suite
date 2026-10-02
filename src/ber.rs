@@ -41,6 +41,8 @@ pub(crate) enum Observation {
     },
 }
 
+/// Extracts a BER sample from a reply's TLVs, or `None` when it is unusable.
+///
 /// `integrity_ok` is the sender's verdict on the reply's TLV HMAC: true only
 /// when the HMAC verified or no key is configured and none was sent.
 pub(crate) fn observation(
@@ -191,7 +193,10 @@ pub(crate) struct BerCollector {
     start: Instant,
     interval: Duration,
     current: IntervalSummary,
+    /// Alarm thresholds per million: `[bit_errors, packets_with_errors]`.
     thresholds: [Option<f64>; 2],
+    /// Whether each (direction, metric) was above its threshold in the last
+    /// interval, indexed `direction * 2 + metric`.
     above: [bool; 4],
 }
 impl BerCollector {
@@ -384,8 +389,9 @@ pub(crate) fn xor_popcount_and_max_burst(padding: &[u8], pattern: &[u8]) -> (u32
     (count, max_burst)
 }
 
-/// Reduce padding in whole pattern repetitions to meet a complete packet budget.
-/// Metadata and at least one full pattern must fit; otherwise sending fails.
+/// Shrinks the padding in whole pattern repetitions so the packet fits `cap`.
+/// Returns whether it was resized. Metadata and at least one full pattern
+/// must fit; otherwise returns an `InvalidInput` error.
 pub(crate) fn fit_padding(
     tlvs: &mut [RawTlv],
     cap: usize,
@@ -401,6 +407,7 @@ pub(crate) fn fit_padding(
             "BER metadata and one pattern exceed the MTU",
         )
     };
+    // Without a pattern TLV, assume the 2-octet default pattern (0xFF00).
     let pattern_len = tlvs
         .iter()
         .find(|t| t.tlv_type == TlvType::BerPattern)

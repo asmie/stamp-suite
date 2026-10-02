@@ -2,7 +2,7 @@ use std::fmt;
 
 use clap::ValueEnum;
 
-/// This enum represents the clock format used in the application.
+/// Format of the 64-bit STAMP timestamps: NTP or PTP.
 #[derive(
     Copy, Clone, PartialEq, Eq, Debug, Default, ValueEnum, serde::Serialize, serde::Deserialize,
 )]

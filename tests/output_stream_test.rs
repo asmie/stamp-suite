@@ -172,6 +172,8 @@ fn exercise(format: &str, log_format: &str, periodic: bool, quiet: bool) {
     let (stdout, stderr) = sender.finish(true);
     // The readiness probe proves the signal handler is running before shutdown.
     assert_eq!(
+        // SAFETY: kill(2) takes only integers and accesses no memory. The pid
+        // belongs to our child, which is not reaped yet, so it cannot be reused.
         unsafe { libc::kill(reflector.child.id() as i32, libc::SIGINT) },
         0
     );

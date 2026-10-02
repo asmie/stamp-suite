@@ -153,6 +153,8 @@ fn exercise(ip: &str, auth: bool, clock: &str, stateful: bool, kernel: bool) {
         (nix::libc::IPPROTO_IP, nix::libc::IP_RECVTOS)
     };
     assert_eq!(
+        // SAFETY: the fd is owned by `socket`, which outlives the call, and the
+        // option value points to a live, aligned c_int whose size is passed.
         unsafe {
             nix::libc::setsockopt(
                 socket.as_raw_fd(),

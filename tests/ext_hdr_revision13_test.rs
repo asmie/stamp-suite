@@ -1,4 +1,5 @@
-//! Independent loopback peer for draft ext-hdr-15 header and state policy.
+//! Independent loopback peer for draft-ietf-ippm-stamp-ext-hdr-15 rules: source
+//! ports, TTL/Hop Limit 255 and session state notifications.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 use nix::libc;
 use std::{
@@ -28,8 +29,9 @@ fn socket(ip: &str) -> UdpSocket {
         (libc::IPPROTO_IP, libc::IP_RECVTTL)
     };
     let on: libc::c_int = 1;
-    // SAFETY: live socket and correctly sized c_int option.
     assert_eq!(
+        // SAFETY: the fd belongs to `socket`, which outlives the call, and the
+        // option value points to a live, aligned c_int whose size is passed.
         unsafe {
             libc::setsockopt(
                 socket.as_raw_fd(),
@@ -54,17 +56,24 @@ fn receive(socket: &UdpSocket) -> (Vec<u8>, std::net::SocketAddr, i32) {
     };
     // usize provides cmsghdr alignment on both Darwin and Linux.
     let mut control = [0usize; 16];
+    // SAFETY: msghdr is a plain C struct; all-zero (null pointers, zero
+    // lengths) is a valid value, and every pointer used is set below.
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
     msg.msg_controllen = std::mem::size_of_val(&control) as _;
-    // SAFETY: all receive buffers remain live and writable during recvmsg.
+    // SAFETY: `msg` points to `iov` and `control`, which stay live and writable
+    // for the call, with lengths that match their buffers; the fd is owned by
+    // `socket`.
     let len = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut msg, 0) };
     assert!(len >= 0, "recvmsg: {}", std::io::Error::last_os_error());
     assert_eq!(msg.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC), 0);
     let mut hops = None;
-    // SAFETY: the kernel supplied this bounded, aligned ancillary buffer.
+    // SAFETY: recvmsg filled `control` (usize-aligned) and set msg_controllen,
+    // so CMSG_FIRSTHDR/CMSG_NXTHDR only yield headers inside it or null. Each
+    // payload length is checked before it is read, and multi-byte reads are
+    // unaligned.
     unsafe {
         let mut header = libc::CMSG_FIRSTHDR(&msg);
         while !header.is_null() {

@@ -25,16 +25,17 @@ pub enum HwTsMode {
     /// Use kernel *software* timestamps when the build supports them
     /// (feature "hwtstamp"); transparently fall back to userspace
     /// timestamps otherwise. Never reconfigures the NIC and needs no
-    /// privileges. This is the default — safe to leave on every host.
+    /// privileges. This is the default and is safe to leave on every host.
     #[default]
     Auto,
     /// Additionally attempt NIC *hardware* timestamping: sets the NIC
     /// timestamp filters (SIOCSHWTSTAMP, needs CAP_NET_ADMIN) and requests
     /// the raw-hardware tier, falling back to kernel software timestamps
     /// with a warning when any step fails. Operators are responsible for
-    /// PHC synchronization (ptp4l/phc2sys) — see doc/architecture.md.
+    /// PHC synchronization (ptp4l/phc2sys); see doc/architecture.md.
     On,
-    /// Always use software timestamping, even when HW is available.
+    /// Use userspace timestamps only, even when kernel or HW timestamping
+    /// is available.
     /// Useful for A/B-style measurement comparisons or as a fallback
     /// when a particular NIC's HW path is suspect.
     Off,
@@ -50,8 +51,8 @@ pub struct HwTsCapability {
     /// `SOF_TIMESTAMPING_TX_HARDWARE`.
     pub tx_hw: bool,
     /// True when the PTP hardware clock (`/dev/ptpN`) is exposed by
-    /// the driver — informational; the receive/send paths don't
-    /// require this directly.
+    /// the driver. Informational only; the receive/send paths don't
+    /// require it.
     pub ptp_supported: bool,
 }
 
@@ -98,9 +99,9 @@ struct EthtoolTsInfo {
 }
 
 /// Queries ETHTOOL_GET_TS_INFO for `interface`. Returns `None` when the
-/// interface doesn't exist or the kernel/driver rejects the ioctl —
-/// callers treat `None` as "no capabilities" (graceful fallback, never
-/// fatal, per the project's defensive hardware-features contract).
+/// interface doesn't exist or the kernel/driver rejects the ioctl.
+/// Callers treat `None` as "no capabilities" and fall back to software
+/// timestamps; it is never fatal.
 #[cfg(target_os = "linux")]
 fn ethtool_ts_info(interface: &str) -> Option<EthtoolTsInfo> {
     use std::os::fd::AsRawFd;
@@ -182,7 +183,7 @@ pub struct EnabledTimestamping {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KernelTimestamp {
     /// Seconds since the Unix epoch (CLOCK_REALTIME for software stamps,
-    /// the NIC PHC clock for hardware stamps — see the PHC caveat in
+    /// the NIC PHC clock for hardware stamps; see the PHC caveat in
     /// `doc/architecture.md`).
     pub secs: i64,
     /// Sub-second nanoseconds.
@@ -366,7 +367,7 @@ pub fn extract_kernel_rx_timestamp(
 /// Drains all pending transmit timestamps from the socket error queue
 /// (non-blocking; returns what is available right now). Each entry pairs
 /// the `SOF_TIMESTAMPING_OPT_ID` send counter with the STAMP wire-format
-/// timestamp. Linux only — TX timestamps require `MSG_ERRQUEUE`.
+/// timestamp. Linux only: TX timestamps require `MSG_ERRQUEUE`.
 #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
 pub fn drain_tx_timestamps(
     fd: std::os::fd::RawFd,
@@ -440,7 +441,7 @@ fn is_tx_timestamp_notification(origin: u8, errno: u32, info: u32) -> bool {
 
 /// Requests NIC-level hardware timestamping filters via `SIOCSHWTSTAMP`
 /// (requires CAP_NET_ADMIN and reconfigures the interface for *all*
-/// sockets — only attempted under `--hwtstamp on`). Returns true on
+/// sockets, so it is only attempted under `--hwtstamp on`). Returns true on
 /// success; failure is logged and the caller stays on the software tier.
 #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
 pub fn request_nic_hw_timestamping(interface: &str) -> bool {
@@ -454,11 +455,14 @@ pub fn request_nic_hw_timestamping(interface: &str) -> bool {
     let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else {
         return false;
     };
+    // SAFETY: `hwtstamp_config` is a plain C struct of integer fields, for
+    // which the all-zero bit pattern is a valid value.
     let mut cfg: libc::hwtstamp_config = unsafe { std::mem::zeroed() };
     cfg.tx_type = libc::HWTSTAMP_TX_ON as libc::c_int;
     cfg.rx_filter = libc::HWTSTAMP_FILTER_ALL as libc::c_int;
-    // SAFETY: same contract as `ethtool_ts_info` — zeroed ifreq,
-    // NUL-bounded name, `ifru_data` valid for the ioctl duration.
+    // SAFETY: same contract as `ethtool_ts_info`: zeroed ifreq, a name
+    // shorter than IFNAMSIZ (checked above) so it stays NUL-terminated, and
+    // `ifru_data` pointing at the live `cfg` for the duration of the ioctl.
     let rc = unsafe {
         let mut ifr: libc::ifreq = std::mem::zeroed();
         for (dst, src) in ifr.ifr_name.iter_mut().zip(interface.as_bytes()) {
@@ -479,10 +483,10 @@ pub fn request_nic_hw_timestamping(interface: &str) -> bool {
     true
 }
 
-/// Resolves the interface that owns `addr`, used to pick the probe
-/// target from `--local-addr` (there is no dedicated `--interface`
-/// flag). Wildcard addresses return `None` — no single interface
-/// applies, so the probe conservatively reports "not supported".
+/// Resolves the interface that owns `addr`. Callers use it to pick the
+/// probe target from `--local-addr` when `--interface` is not given.
+/// Wildcard addresses return `None`: no single interface applies, so the
+/// probe conservatively reports "not supported".
 #[cfg(unix)]
 #[must_use]
 pub fn interface_for_addr(addr: std::net::IpAddr) -> Option<String> {
@@ -519,7 +523,6 @@ pub fn interface_for_addr(_addr: std::net::IpAddr) -> Option<String> {
 /// Returns `HwAssist` when hardware is present and mode is `On` or `Auto`,
 /// otherwise `SwLocal`. This is capability policy, not per-packet provenance.
 #[must_use]
-// Capability policy only; not evidence of how a particular timestamp was acquired.
 #[cfg(test)]
 pub fn effective_method(
     mode: HwTsMode,
@@ -632,7 +635,7 @@ mod tests {
     fn interface_for_addr_finds_loopback() {
         let lo = interface_for_addr("127.0.0.1".parse().unwrap());
         assert_eq!(lo.as_deref(), Some("lo"));
-        // Wildcard → ambiguous → None.
+        // A wildcard address matches no single interface, so None.
         assert_eq!(interface_for_addr("0.0.0.0".parse().unwrap()), None);
         assert_eq!(interface_for_addr("::".parse().unwrap()), None);
     }
@@ -659,7 +662,7 @@ mod tests {
 
     #[test]
     fn probe_with_no_interface_returns_default() {
-        // No interface hint → conservative "not supported".
+        // Without an interface the probe reports "not supported".
         let cap = probe(None);
         assert!(!cap.any_hw_supported());
         assert!(!cap.rx_hw);
@@ -739,8 +742,8 @@ mod tests {
 
     #[test]
     fn on_mode_reports_hw_when_present_sw_when_not() {
-        // `On` mode behaves like Auto for the TLV reporting — the
-        // fail-fast check is at startup, not per-packet.
+        // `On` mode behaves like Auto for the TLV reporting. Missing
+        // hardware support is reported once at startup, not per packet.
         let cap = HwTsCapability {
             rx_hw: true,
             tx_hw: false,
@@ -750,7 +753,7 @@ mod tests {
             effective_method(HwTsMode::On, cap, Direction::Receive),
             TimestampMethod::HwAssist
         );
-        // TX HW not present → still SwLocal in the TLV, even under On.
+        // TX HW not present: still SwLocal in the TLV, even under On.
         assert_eq!(
             effective_method(HwTsMode::On, cap, Direction::Transmit),
             TimestampMethod::SwLocal
@@ -774,9 +777,8 @@ mod tests {
             startup_action(HwTsMode::Auto, &no_hw),
             StartupAction::Continue
         ));
-        // Auto with HW present: still software (the kernel read path is
-        // not implemented), but that's not worth a warning — the operator
-        // didn't explicitly demand hardware.
+        // Auto with HW present does not warn: the operator did not
+        // explicitly ask for hardware timestamps.
         assert!(matches!(
             startup_action(HwTsMode::Auto, &hw),
             StartupAction::Continue
@@ -826,7 +828,7 @@ mod tests {
 
         // The kernel activates RX timestamping via a deferred static key
         // (net_enable_timestamp), so the first packets after the very
-        // first enable on a host can legitimately miss the cmsg — retry.
+        // first enable on a host can legitimately miss the cmsg. Retry.
         let mut got = None;
         for _ in 0..50 {
             tx.send_to(b"ping", rx.local_addr().unwrap()).unwrap();

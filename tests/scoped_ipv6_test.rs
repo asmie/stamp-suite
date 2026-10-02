@@ -71,6 +71,8 @@ fn request(auth: bool, seq: u32, burst: bool, alternate: bool) -> Vec<u8> {
 #[ignore = "requires STAMP_SCOPE_NETNS_TESTS=1 inside unshare -Urn"]
 fn link_local_replies_bursts_alternates_and_sender_zones() {
     assert_eq!(std::env::var("STAMP_SCOPE_NETNS_TESTS").as_deref(), Ok("1"));
+    // SAFETY: geteuid(2) takes no arguments, always succeeds and touches no
+    // caller memory.
     assert_eq!(unsafe { libc::geteuid() }, 0, "run inside unshare -Urn");
     let holder = Process(
         Command::new("unshare")

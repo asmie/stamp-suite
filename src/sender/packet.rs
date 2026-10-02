@@ -5,11 +5,11 @@ use super::*;
 /// Removes Reflected Fixed/IPv6 Extension Header TLVs (Types 247/246) from
 /// `extra_tlvs` until the assembled packet fits within `mtu`
 /// (draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2: "one or more ... TLVs MUST be
-/// removed to avoid violating the ... MTU limit"). `fixed_overhead` is every
+/// removed to avoid violating the path MTU limit"). `fixed_overhead` is every
 /// on-wire byte outside `extra_tlvs` (IP + attached ext headers + UDP + STAMP
 /// base + the per-packet HMAC/DM/Access TLVs). Type-246 TLVs are removed before
-/// Type-247 (they sit last in ext-hdr-15 §6.3 wire order, so trimming from the tail keeps
-/// the survivors ordered). Only these two TLV types are ever removed.
+/// Type-247: they come last in the ext-hdr-15 §6.3 order, so trimming from the
+/// tail keeps the survivors ordered. Only these two TLV types are ever removed.
 ///
 /// Returns how many TLVs were removed.
 pub(super) fn enforce_egress_mtu(
@@ -31,7 +31,7 @@ pub(super) fn enforce_egress_mtu(
     let mut removed = 0usize;
     while fixed_overhead + wire(extra_tlvs) > mtu {
         let Some(idx) = extra_tlvs.iter().rposition(is_header_tlv) else {
-            break; // No header TLV left to remove; remaining oversize is out of scope.
+            break; // No header TLV left; other oversize is not this rule's concern.
         };
         extra_tlvs.remove(idx);
         removed += 1;
@@ -50,34 +50,35 @@ pub(super) fn log_header_trim(removed: usize, mtu: usize) {
 
 /// Builds the wire bytes of one deliberately malformed TLV, used by the
 /// `--malformed` conformance-testing switch to exercise a reflector's
-/// RFC 8972 §4.2 handling. The TLV is appended after the packet's regular
-/// content; the sender does not otherwise rely on or parse it.
+/// malformed-TLV handling (RFC 8972 §4). The TLV is appended after the packet's
+/// regular content; the sender does not otherwise rely on or parse it.
 pub(super) fn malformed_tlv_bytes(mode: MalformedMode) -> Vec<u8> {
     // Flags, Type, Length(hi), Length(lo), then Value.
     const U_FLAG: u8 = crate::tlv::TlvFlags::U;
     let padding_type = TlvType::ExtraPadding.to_byte();
     match mode {
         // Structurally valid (length matches the 4 value octets) but with
-        // reserved flag bits set — `U_FLAG | 0x07` lights the three lowest
+        // reserved flag bits set: `U_FLAG | 0x07` lights the three lowest
         // reserved bits while still asserting U as a sender must.
         MalformedMode::BadFlags => vec![U_FLAG | 0x07, padding_type, 0x00, 0x04, 0, 0, 0, 0],
         // Length field claims 0xFFFF octets but only four follow, so the
-        // declared length overruns the packet (RFC 8972 §4.2 → M-flag).
+        // declared length overruns the packet (RFC 8972 §4: M flag).
         MalformedMode::BadLength => vec![U_FLAG, padding_type, 0xFF, 0xFF, 0, 0, 0, 0],
     }
 }
 
 /// Builds a Micro-session ID TLV with the sender's member-link ID.
-/// Writes the known `reflector_id`, or zero when unknown (RFC 9534 §3.2-3/-4).
+/// Writes the known `reflector_id`, or zero when unknown (RFC 9534 §3.2).
 pub(super) fn micro_session_request_tlv(sender_id: u16, reflector_id: Option<u16>) -> RawTlv {
     MicroSessionIdTlv::new(sender_id, reflector_id.unwrap_or(0)).to_raw()
 }
 
-/// Builds the Reflected Test Packet Control TLV
-/// (RFC 10052 §3) when the configuration requests
-/// asymmetric replies (count > 1) and/or attaches an IPv6 Extension Header
-/// Control sub-TLV (draft-ietf-ippm-stamp-ext-hdr-15 §5.1). Returns `None` for
-/// plain symmetric measurements so trivial sessions are not amplified.
+/// Builds the Reflected Test Packet Control TLV (RFC 10052 §3) when needed.
+///
+/// It is needed when the configuration requests asymmetric replies
+/// (count > 1) and/or attaches an IPv6 Extension Header Control sub-TLV
+/// (draft-ietf-ippm-stamp-ext-hdr-15 §5.1). Returns `None` for plain
+/// symmetric measurements so trivial sessions are not amplified.
 pub(super) fn build_reflected_control_tlv(
     length: u16,
     count: u16,
@@ -107,10 +108,11 @@ pub(super) fn build_reflected_control_tlv(
 }
 
 /// Builds the control TLV with the current AIMD-scaled interval
-/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4-3).
+/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
 ///
-/// Both the main loop and Access Report retries must call this when
-/// `scale_reflected_control` is active, since `extra_tlvs` omits the static TLV.
+/// `SenderRun::build_probe` calls this for every probe, including Access
+/// Report retries, when `scale_reflected_control` is active, since
+/// `extra_tlvs` omits the static TLV.
 pub(super) fn scaled_reflected_control_tlv(
     length: u16,
     count: u16,
@@ -125,8 +127,8 @@ pub(super) fn scaled_reflected_control_tlv(
 }
 
 /// Builds the Reflected Fixed / IPv6 Extension Header request TLVs
-/// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 6.2) for the outgoing packet,
-/// honoring the optional §5.1/§5.2 Requested-field selectors. Assumes `conf`
+/// (draft-ietf-ippm-stamp-ext-hdr-15 §4.2, §6.2) for the outgoing packet,
+/// honoring the optional Requested-field selectors (§4.1, §6.1). Assumes `conf`
 /// has passed `validate()` (so any selector decodes and fits); a stray decode
 /// error degrades to the zero-filled request rather than panicking.
 pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
@@ -141,10 +143,10 @@ pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv>
         IPV6_FIXED_HEADER_SIZE
     };
     let fixed_specs = conf.fixed_hdr_requests();
-    // §3.2 rule 2: each occurrence adds a Type-247 TLV, all of matching length,
-    // paired positionally with the reflector's outer→inner capture. The
-    // backward-compatible standalone `--reflected-fixed-hdr-selector` applies
-    // only to the single-header form.
+    // §6.2: each occurrence adds a Type-247 TLV of the family's header length,
+    // in header order; the reflector pairs them with its outer-to-inner
+    // capture (rule 3). The backward-compatible standalone
+    // `--reflected-fixed-hdr-selector` applies only to the single-header form.
     let single_fixed = fixed_specs.len() == 1;
     for spec in &fixed_specs {
         let selector = spec.selector.clone().or_else(|| {
@@ -172,7 +174,7 @@ pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv>
     // on the wire before any externally-supplied ones, and each carries an
     // all-zeros Requested field: the header's first on-wire octet (Next Header)
     // is assigned by the kernel and cannot be predicted here, so positional
-    // pairing (§3.1 rule 2), not a selector, disambiguates them.
+    // pairing (§4.2 rule 3), not a selector, disambiguates them.
     // IPv6 extension headers do not exist for IPv4, so attach-derived request
     // TLVs are emitted only for IPv6 destinations (matching the send-path gate).
     let attach_specs = if conf.remote_ip().is_ipv6() {
@@ -193,9 +195,9 @@ pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv>
         );
     }
 
-    // Explicit `--reflected-ipv6-ext-hdr` request TLVs (§3.1 rule 2: lengths
-    // matching, in order). The standalone `--reflected-ipv6-ext-hdr-selector`
-    // applies only to the single-header form.
+    // Explicit `--reflected-ipv6-ext-hdr` request TLVs (§4.2: in header order,
+    // each Length matching its header). The standalone
+    // `--reflected-ipv6-ext-hdr-selector` applies only to the single-header form.
     let ext_specs = conf.ext_hdr_requests();
     let single_ext = ext_specs.len() == 1;
     for spec in &ext_specs {
@@ -231,10 +233,8 @@ pub(super) fn selector_bytes(sel: Option<&str>) -> Option<Vec<u8>> {
 
 /// Creates a new unauthenticated STAMP test packet with the specified error estimate.
 ///
-/// The caller should set the sequence number and timestamp before sending.
-///
-/// # Arguments
-/// * `error_estimate` - The 16-bit error estimate value in wire format
+/// `error_estimate` is in wire format. The caller should set the sequence
+/// number and timestamp before sending.
 pub fn assemble_unauth_packet(error_estimate: u16) -> PacketUnauthenticated {
     PacketUnauthenticated {
         timestamp: 0,
@@ -247,11 +247,9 @@ pub fn assemble_unauth_packet(error_estimate: u16) -> PacketUnauthenticated {
 
 /// Creates a new authenticated STAMP test packet with the specified error estimate.
 ///
-/// The caller should set the sequence number and timestamp before sending.
-/// Use `finalize_auth_packet` to compute and set the HMAC after all fields are set.
-///
-/// # Arguments
-/// * `error_estimate` - The 16-bit error estimate value in wire format
+/// `error_estimate` is in wire format. The caller should set the sequence
+/// number and timestamp before sending, then call `finalize_auth_packet` to
+/// compute and set the HMAC.
 pub fn assemble_auth_packet(error_estimate: u16) -> PacketAuthenticated {
     PacketAuthenticated {
         timestamp: 0,
@@ -274,13 +272,8 @@ pub(crate) fn finalize_auth_packet(packet: &mut PacketAuthenticated, key: &HmacK
 
 /// Builds an unauthenticated STAMP packet with TLV extensions.
 ///
-/// # Arguments
-/// * `sequence_number` - Packet sequence number
-/// * `timestamp` - Send timestamp
-/// * `error_estimate` - Error estimate in wire format
-/// * `ssid` - Optional Session-Sender Identifier
-/// * `extra_tlvs` - Additional TLVs to include
-/// * `tlv_hmac_key` - Optional HMAC key for TLV integrity
+/// `error_estimate` is in wire format; a `None` SSID is sent as zero. With
+/// `tlv_hmac_key`, an HMAC TLV (RFC 8972 §4.8) follows `extra_tlvs`.
 pub fn build_unauth_packet_with_tlvs(
     sequence_number: u32,
     timestamp: u64,
@@ -300,13 +293,12 @@ pub fn build_unauth_packet_with_tlvs(
 
     let mut tlvs = TlvList::new();
 
-    // Add any extra TLVs
     for tlv in extra_tlvs {
         tlvs.push(tlv.clone()).ok();
     }
 
-    // Add TLV HMAC if key is provided
-    // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + preceding TLVs
+    // RFC 8972 §4.8: the TLV HMAC covers the Sequence Number (first 4 bytes)
+    // and all preceding TLVs.
     if let Some(key) = tlv_hmac_key {
         let seq_bytes = &base_bytes[..4];
         tlvs.set_hmac(key, seq_bytes);
@@ -322,14 +314,9 @@ pub fn build_unauth_packet_with_tlvs(
 
 /// Builds an authenticated STAMP packet with TLV extensions.
 ///
-/// # Arguments
-/// * `sequence_number` - Packet sequence number
-/// * `timestamp` - Send timestamp
-/// * `error_estimate` - Error estimate in wire format
-/// * `base_hmac_key` - HMAC key for base packet authentication
-/// * `ssid` - Optional Session-Sender Identifier
-/// * `extra_tlvs` - Additional TLVs to include
-/// * `tlv_hmac_key` - Optional HMAC key for TLV integrity (can be same as base)
+/// `base_hmac_key` signs the base packet; `tlv_hmac_key`, which may be the
+/// same key, adds an HMAC TLV (RFC 8972 §4.8) after `extra_tlvs`.
+/// `error_estimate` is in wire format; a `None` SSID is sent as zero.
 pub fn build_auth_packet_with_tlvs(
     sequence_number: u32,
     timestamp: u64,
@@ -351,19 +338,17 @@ pub fn build_auth_packet_with_tlvs(
         hmac: [0u8; 16],
     };
 
-    // Compute base packet HMAC
     finalize_auth_packet(&mut base, base_hmac_key);
     let base_bytes = base.to_bytes();
 
     let mut tlvs = TlvList::new();
 
-    // Add any extra TLVs
     for tlv in extra_tlvs {
         tlvs.push(tlv.clone()).ok();
     }
 
-    // Add TLV HMAC if key is provided
-    // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + preceding TLVs
+    // RFC 8972 §4.8: the TLV HMAC covers the Sequence Number (first 4 bytes)
+    // and all preceding TLVs.
     if let Some(key) = tlv_hmac_key {
         let seq_bytes = &base_bytes[..4];
         tlvs.set_hmac(key, seq_bytes);

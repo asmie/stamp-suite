@@ -112,7 +112,7 @@ fn exercise(ip: &str, auth: bool, provisioned: bool, stateful: bool) {
         );
     }
     // Same tuple, different SSID; same SSID, different source port; and
-    // an unprovisioned micro-session must be admitted only in legacy mode.
+    // an unprovisioned micro-session must be admitted only in permissive mode.
     for (sender, ssid, micro) in [
         (&socket, 43, None),
         (&other, 42, None),

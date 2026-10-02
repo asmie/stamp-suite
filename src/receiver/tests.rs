@@ -900,7 +900,7 @@ fn test_assemble_unauth_answer_timestamp_generated() {
 }
 
 // -----------------------------------------------------------------------
-// token-bucket per-client rate limiting.
+// Base and symmetric reply assembly.
 
 #[test]
 fn test_assemble_auth_answer_echoes_sender_fields() {
@@ -1330,7 +1330,7 @@ fn test_assemble_unauth_with_tlvs_marks_unknown() {
         &test_ctx(0, 0),
     );
 
-    // Check U-flag is set (bit 0 of flags byte per RFC 8972)
+    // Check U-flag is set (0x80, the most significant flags bit, RFC 8972 §4)
     // Byte 0: Flags (U=0x80), Byte 1: Type
     assert_eq!(response.data[44], 0x80); // U-flag set in flags byte
     assert_eq!(response.data[45], 15); // Type 15 in type byte
@@ -1537,7 +1537,7 @@ fn test_zero_trailer_reply_preserves_symmetric_size_auth() {
         None,
         TlvHandlingMode::Echo,
         // No TLV-HMAC key: no HMAC TLV is appended, so the whole trailing
-        // area is pure zero padding — the cleanest symmetric-size probe.
+        // area is pure zero padding: the cleanest symmetric-size probe.
         None,
         false,
         &test_ctx(0, 0),
@@ -1638,8 +1638,8 @@ fn test_stateless_vs_stateful_follow_up_telemetry_reply() {
         )
     };
 
-    // Stateless mode (RFC 8972 §4.7-7): the previous reflection is present
-    // but MUST NOT be reported — seq/timestamp zeroed.
+    // Stateless mode (RFC 8972 §4.7): the previous reflection is present
+    // but MUST NOT be reported; seq/timestamp are zeroed.
     let mut ctx = test_ctx(0, 0);
     ctx.stateful_reflector = false;
     ctx.last_reflection = Some((42, 0xDEAD_BEEF));
@@ -1652,7 +1652,7 @@ fn test_stateless_vs_stateful_follow_up_telemetry_reply() {
         "stateless: timestamp must be zero"
     );
 
-    // Stateful mode (§4.7-10): the same reflection IS reported.
+    // Stateful mode (RFC 8972 §4.7): the same reflection IS reported.
     ctx.stateful_reflector = true;
     let resp = assemble(&ctx);
     let tlvs = TlvList::parse(&resp.data[UNAUTH_BASE_SIZE..]).unwrap();
@@ -1903,7 +1903,7 @@ fn test_assemble_unauth_with_tlvs_hmac_failure_preserves_original() {
     // Find HMAC TLV in response (last TLV)
     let hmac_tlv_start = 44 + TLV_HEADER_SIZE + 4;
 
-    // Check I-flag is set on HMAC TLV (bit 5 of flags byte)
+    // Check I-flag is set on HMAC TLV (0x20 in the flags byte)
     let hmac_flags = response.data[hmac_tlv_start];
     assert!(
         hmac_flags & 0x20 != 0,
@@ -2034,7 +2034,7 @@ fn test_assemble_unauth_with_malformed_tlv_sets_mflag() {
     // The TLV should have whatever data was available
     assert!(response.data.len() > 44, "Response should include TLV data");
 
-    // Check M-flag is set on the TLV (bit 6 of flags byte = 0x40)
+    // Check M-flag is set on the TLV (0x40 in the flags byte)
     let tlv_flags = response.data[44];
     assert!(
         tlv_flags & 0x40 != 0,
@@ -2151,7 +2151,7 @@ fn test_assemble_unauth_with_cos_tlv_updates_dscp_ecn() {
     ); // Type
 
     // Parse the value via the typed decoder (single source of truth for
-    // the RFC 8972 + cos-ecn-01 bit layout, unchanged from -00).
+    // the RFC 8972 + cos-ecn-01 bit layout).
     let value_start = tlv_start + TLV_HEADER_SIZE;
     let raw = crate::tlv::RawTlv::new(
         TlvType::ClassOfService,
@@ -2258,8 +2258,7 @@ fn test_cos_unable_fallback_tos_zeroes_ecn_and_matches_reply_wire_tos() {
 #[test]
 fn test_mtu_payload_cap_subtracts_ip_and_udp_headers() {
     // 1500-byte Ethernet MTU: 20 (IPv4) + 8 (UDP) of headers leaves 1472.
-    // This is the case that matters — the old default cap of 1500 would
-    // have built a 1528-byte datagram on exactly this link.
+    // A 1500-byte payload cap would build a 1528-byte datagram on this link.
     assert_eq!(mtu_payload_cap(1500, false), 1472);
     // IPv6's fixed header is 40 bytes.
     assert_eq!(mtu_payload_cap(1500, true), 1452);
@@ -2294,7 +2293,7 @@ fn test_interface_mtu_rejects_bad_interface_names() {
 #[test]
 fn test_interface_mtu_reads_loopback() {
     // Loopback always exists on Linux. Tolerant of a sandbox that refuses
-    // the socket or the ioctl — the point is that a success is sane, not
+    // the socket or the ioctl: the point is that a success is sane, not
     // that the environment cooperates.
     if let Some(mtu) = interface_mtu("lo") {
         assert!(mtu >= 1500, "loopback MTU looks wrong: {mtu}");
@@ -2355,7 +2354,7 @@ fn test_evaluate_replay_counts_duplicates_and_reorders() {
         "reordering must not inflate the replay count"
     );
 
-    // A packet older than the window is counted with the reorders — the
+    // A packet older than the window is counted with the reorders: the
     // window cannot claim it was seen. Advance far enough first that the
     // "older than the window" sequence number is still positive.
     assert_eq!(eval_commit(&packet(1000)), ReplayVerdict::New);
@@ -2391,7 +2390,7 @@ fn test_evaluate_replay_reads_sequence_from_both_layouts() {
     }
 }
 
-/// An unverified packet (classified but never committed — e.g. bad HMAC)
+/// An unverified packet (classified but never committed, e.g. bad HMAC)
 /// must not poison the anti-replay window: the genuine packet carrying
 /// the same sequence number is still `New`.
 #[test]
@@ -2412,7 +2411,7 @@ fn test_replay_window_only_advances_on_commit() {
         evaluate_replay(&session, &packet(7), &counters),
         ReplayVerdict::New
     );
-    // The genuine packet with that sequence number must still be New —
+    // The genuine packet with that sequence number must still be New;
     // under --drop-replayed it would otherwise be dropped.
     assert_eq!(
         evaluate_replay(&session, &packet(7), &counters),
@@ -2581,7 +2580,8 @@ fn test_set_cos_policy_rejected_reserved_tlv_before_cos() {
     response.extend_from_slice(&reflected_bytes(&cos_tlv));
 
     // Verify RPD (value byte 1, bits 1:0) is initially 0
-    let cos_value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE + TLV_HEADER_SIZE; // Skip Reserved + CoS header
+    // Skip the Reserved TLV and the CoS header.
+    let cos_value_start = UNAUTH_BASE_SIZE + TLV_HEADER_SIZE + TLV_HEADER_SIZE;
     assert_eq!(response[cos_value_start + 1] & 0x03, 0);
 
     // The Reserved TLV (00 00 00 00) should NOT stop iteration because
@@ -2712,8 +2712,8 @@ fn l2_group_matches_any_local_no_match() {
 #[test]
 fn l2_group_matches_any_local_length_mismatch_never_matches() {
     // A 2-byte or 8-byte mask/group (Sub-TLV Length 4 or 16) can never
-    // match a 6-byte EUI-48 local MAC — "with the same length" in the
-    // draft text excludes them by construction.
+    // match a 6-byte EUI-48 local MAC: "with the same length" in the
+    // RFC 10052 §3.1.1 text excludes them by construction.
     let locals = [[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]];
     assert!(!l2_group_matches_any_local(&[0xFF; 2], &[0x00; 2], &locals));
     assert!(!l2_group_matches_any_local(&[0xFF; 8], &[0x00; 8], &locals));
@@ -2872,7 +2872,7 @@ fn test_unauth_return_path_alternate_addr() {
 #[test]
 fn test_unauth_return_path_alternate_addr_denied_by_default() {
     // Security: with return_path_allow_alternate = false (the default),
-    // a Return Address sub-TLV must NOT redirect the reply — otherwise an
+    // a Return Address sub-TLV must NOT redirect the reply; otherwise an
     // unauthenticated peer could aim the reflector's reply at a third party.
     use crate::tlv::ReturnPathTlv;
 
@@ -3145,7 +3145,7 @@ fn test_unauth_with_micro_session_id_mismatch_discards() {
         mbz: [0; 28],
     };
 
-    // Build packet with Micro-session ID TLV (sender_id=42, reflector_id=50 — mismatch)
+    // Build packet with Micro-session ID TLV (sender_id=42, reflector_id=50: mismatch)
     let msid_raw = MicroSessionIdTlv::new(42, 50).to_raw();
     let mut data = sender_packet.to_bytes().to_vec();
     data.extend_from_slice(&msid_raw.to_bytes());
@@ -3277,7 +3277,7 @@ fn loopback_src() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345)
 }
 
-/// Full-size unauthenticated packet — both modes accept.
+/// Full-size unauthenticated packet: both modes accept.
 #[test]
 fn strict_packets_unauth_full_size_both_modes_accept() {
     let packet = PacketUnauthenticated {
@@ -3378,7 +3378,7 @@ fn strict_packets_unauth_short_rejected_only_in_strict() {
     );
 }
 
-/// Full-size authenticated packet — both modes accept (no HMAC key
+/// Full-size authenticated packet: both modes accept (no HMAC key
 /// configured here, so HMAC verification is skipped).
 #[test]
 fn strict_packets_auth_full_size_both_modes_accept() {
@@ -3428,7 +3428,7 @@ fn strict_packets_auth_short_rejected_only_in_strict() {
     );
 }
 
-/// Empty packet (0 bytes) — strict mode must reject without panicking.
+/// Empty packet (0 bytes): strict mode must reject without panicking.
 /// Lenient mode happens to accept it (everything zero), which is by
 /// design per RFC 8762 §4.6.
 #[test]
@@ -3470,7 +3470,7 @@ fn strict_packets_require_hmac_rejects_regardless_of_mode() {
         let mut ctx = test_ctx(0, 0);
         ctx.strict_packets = strict;
         ctx.require_hmac = true;
-        // hmac_key stays None — require_hmac without a key drops.
+        // hmac_key stays None; require_hmac without a key drops.
         assert!(
             process_stamp_packet(&data, loopback_src(), 64, true, &ctx).is_none(),
             "strict={strict} + require_hmac without key must drop"
@@ -3480,7 +3480,7 @@ fn strict_packets_require_hmac_rejects_regardless_of_mode() {
 
 /// A present-but-empty keyset (e.g. the control plane deleted the last
 /// key at runtime) must CLOSE the reflector to authenticated packets,
-/// not downgrade it to answering them without verification — even with
+/// not downgrade it to answering them without verification, even with
 /// the default `require_hmac = false`.
 #[test]
 fn auth_packet_rejected_when_keyset_present_but_resolves_no_key() {
@@ -3497,7 +3497,7 @@ fn auth_packet_rejected_when_keyset_present_but_resolves_no_key() {
     };
     let data = packet.to_bytes();
 
-    // Empty keyset — the "last key deleted" state.
+    // Empty keyset: the "last key deleted" state.
     let empty_set = crate::crypto::HmacKeySet::new();
     let mut ctx = test_ctx(0, 0);
     ctx.hmac_key_set = Some(&empty_set);
@@ -3517,8 +3517,8 @@ fn auth_packet_rejected_when_keyset_present_but_resolves_no_key() {
         "unknown SSID with no default key must be rejected"
     );
 
-    // Sanity: with NO keyset at all (never configured), the legacy
-    // keyless-open behavior is unchanged.
+    // Sanity: with NO keyset at all (never configured), a keyless reflector
+    // still answers authenticated-layout packets without verification.
     let ctx = test_ctx(0, 0);
     assert!(
         process_stamp_packet(&data, loopback_src(), 64, true, &ctx).is_some(),
@@ -3526,7 +3526,7 @@ fn auth_packet_rejected_when_keyset_present_but_resolves_no_key() {
     );
 }
 
-/// Non-zero MBZ bytes — RFC 8762 §4.1.1 requires receivers to *ignore*
+/// Non-zero MBZ bytes: RFC 8762 §4.2.1 requires receivers to *ignore*
 /// MBZ on receipt. Both modes must accept (strict mode does not extend
 /// to MBZ enforcement).
 #[test]
@@ -3545,7 +3545,7 @@ fn strict_packets_nonzero_mbz_accepted_per_rfc_8762() {
         ctx.strict_packets = strict;
         assert!(
             process_stamp_packet(&data, loopback_src(), 64, false, &ctx).is_some(),
-            "strict={strict} must ignore non-zero MBZ per RFC 8762 §4.1.1"
+            "strict={strict} must ignore non-zero MBZ per RFC 8762 §4.2.1"
         );
     }
 }

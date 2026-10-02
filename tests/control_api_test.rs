@@ -57,7 +57,7 @@ async fn control_api_end_to_end() {
     assert!(res.contains("\"version\""), "body: {res}");
     assert!(res.contains("\"counters\""), "body: {res}");
 
-    // Shutdown request flips the shared flag.
+    // A shutdown request cancels the shared shutdown token.
     let addr2 = addr;
     let res = tokio::task::spawn_blocking(move || http(addr2, "POST /v1/shutdown HTTP/1.1", ""))
         .await

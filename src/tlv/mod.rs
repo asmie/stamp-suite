@@ -1,8 +1,8 @@
-//! TLV (Type-Length-Value) extension support per RFC 8972 Section 4.
+//! TLV (Type-Length-Value) extension support per RFC 8972 §4.
 //!
 //! Parses and serializes STAMP extensions for timestamps, telemetry, and HMAC.
 //!
-//! # TLV Wire Format (RFC 8972 Section 4.2)
+//! # TLV Wire Format (RFC 8972 §4)
 //!
 //! ```text
 //!  0                   1                   2                   3
@@ -20,7 +20,7 @@ mod list;
 mod traits;
 mod typed;
 
-// Re-export public API — this is the only external surface.
+// Public API. These re-exports are the module's only external surface.
 
 // Trait
 pub use traits::TypedTlv;
@@ -39,55 +39,55 @@ pub use self::core::{
 // Collection
 pub use list::TlvList;
 
-// Type 1 — Extra Padding
+// Type 1: Extra Padding
 pub use typed::ExtraPaddingTlv;
 
-// Type 2 — Location
+// Type 2: Location
 pub use typed::{
     LocationDisclosure, LocationSubTlv, LocationSubType, LocationTlv, PacketAddressInfo,
 };
 
-// Type 3 — Timestamp Information
+// Type 3: Timestamp Information
 pub use typed::{SyncSource, TimestampInfoTlv, TimestampMethod};
 
-// Type 4 — Class of Service
+// Type 4: Class of Service
 pub use typed::ClassOfServiceTlv;
 
-// Type 5 — Direct Measurement
+// Type 5: Direct Measurement
 pub use typed::DirectMeasurementTlv;
 
-// Type 6 — Access Report
+// Type 6: Access Report
 pub use typed::AccessReportTlv;
 
-// Type 7 — Follow-Up Telemetry
+// Type 7: Follow-Up Telemetry
 pub use typed::FollowUpTelemetryTlv;
 
-// Type 8 — HMAC
+// Type 8: HMAC
 pub use typed::HmacTlv;
 
-// Type 9 — Destination Node Address (RFC 9503)
+// Type 9: Destination Node Address (RFC 9503)
 pub use typed::DestinationNodeAddressTlv;
 
-// Type 10 — Return Path (RFC 9503)
+// Type 10: Return Path (RFC 9503)
 pub use typed::{ReturnPathAction, ReturnPathSubType, ReturnPathTlv, SegmentList};
 
-// Type 11 — Micro-session ID (RFC 9534)
+// Type 11: Micro-session ID (RFC 9534)
 pub use typed::MicroSessionIdTlv;
 
-// Type 12 — Reflected Test Packet Control (RFC 10052)
+// Type 12: Reflected Test Packet Control (RFC 10052)
 pub use typed::ReflectedControlTlv;
 
-// Type 240 — BER Bit Pattern in Padding (draft-gandhi-ippm-stamp-ber)
+// Type 240: BER Bit Pattern in Padding (draft-gandhi-ippm-stamp-ber)
 pub use typed::{BerPatternTlv, BER_DEFAULT_PATTERN};
 
-// Type 241 — BER Bit Error Count in Padding (draft-gandhi-ippm-stamp-ber)
+// Type 241: BER Bit Error Count in Padding (draft-gandhi-ippm-stamp-ber)
 pub use typed::BerCountTlv;
 
-// Type 242 — BER Max Bit Error Burst Size (draft-gandhi-ippm-stamp-ber)
+// Type 242: BER Max Bit Error Burst Size (draft-gandhi-ippm-stamp-ber)
 pub use typed::BerBurstTlv;
 
-// Type 246 — Reflected IPv6 Extension Header Data (draft-ietf-ippm-stamp-ext-hdr)
+// Type 246: Reflected IPv6 Extension Header Data (draft-ietf-ippm-stamp-ext-hdr)
 pub use typed::{ReflectedIpv6ExtHdrTlv, DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY};
 
-// Type 247 — Reflected Fixed Header Data (draft-ietf-ippm-stamp-ext-hdr)
+// Type 247: Reflected Fixed Header Data (draft-ietf-ippm-stamp-ext-hdr)
 pub use typed::{ReflectedFixedHdrTlv, IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE};

@@ -344,14 +344,14 @@ pub enum AccessReportOutcome {
     /// The reflector echoed the Access Report TLV (disarming the
     /// retransmission timer) before the retry budget was exhausted.
     Acknowledged,
-    /// Still awaiting acknowledgment when the run ended — e.g. the fixed
-    /// `--count`/`--interval` schedule finished before the timer expired or
-    /// the retry budget was exhausted.
+    /// Still awaiting acknowledgment when the run ended, for example because
+    /// the run reached `--count` or `--duration`, or was interrupted, before
+    /// the timer expired or the retry budget was exhausted.
     Pending,
     /// Retransmission retries were exhausted without acknowledgment; the
     /// procedure was aborted per RFC 8972 §4.6 ("...SHOULD be repeated up to
     /// four times before the procedure is aborted"). The measurement itself
-    /// is unaffected — this reflects only the Access Report sub-feature.
+    /// is unaffected; this reflects only the Access Report sub-feature.
     Aborted,
 }
 
@@ -394,12 +394,12 @@ pub struct AccessReportSummary {
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct CongestionSummary {
     /// CE-marked replies observed (forward-path EC2 in the reflected CoS
-    /// TLV, or reverse-path wire ECN on the reply itself — a reply flagged
-    /// by both counts once).
+    /// TLV, or reverse-path wire ECN on the reply itself). A reply flagged
+    /// by both counts once.
     pub ce_replies: u64,
     /// Number of times a CE observation actually grew the send interval
-    /// (excludes CE observations that arrived already saturated at
-    /// `max_interval_reached_ms`'s cap).
+    /// (excludes CE observations that arrived with the interval already at
+    /// the `--ecn-max-delay` cap).
     pub backoffs_applied: u64,
     /// The send interval in effect when the run ended, milliseconds.
     pub current_interval_ms: f64,

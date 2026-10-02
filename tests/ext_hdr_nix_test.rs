@@ -68,7 +68,8 @@ fn nix_reflects_destination_options_from_ancillary_data() {
     // Hdr Ext Len 1, then a 12-byte option of the RFC 4727 experimental type
     // 0x1E, which receivers skip. Linux drops PadN longer than 7 bytes.
     let dstopts = [0u8, 1, 0x1E, 12, 0, 0, 0, 0, 11, 12, 13, 14, 15, 16, 17, 18];
-    // SAFETY: live socket and a byte buffer of the given length.
+    // SAFETY: the fd belongs to `sender`, which outlives the call, and the
+    // option value is a live byte buffer whose exact length is passed.
     let rc = unsafe {
         libc::setsockopt(
             sender.as_raw_fd(),

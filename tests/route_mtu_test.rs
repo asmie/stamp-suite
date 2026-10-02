@@ -126,6 +126,8 @@ fn exchange(
 #[ignore = "requires STAMP_MTU_NETNS_TESTS=1 inside unshare -Urn"]
 fn live_route_mtu_changes_and_alternate_destinations() {
     assert_eq!(std::env::var("STAMP_MTU_NETNS_TESTS").as_deref(), Ok("1"));
+    // SAFETY: geteuid(2) takes no arguments, always succeeds and touches no
+    // caller memory.
     assert_eq!(unsafe { libc::geteuid() }, 0, "run inside unshare -Urn");
     let holder = Process(
         Command::new("unshare")
@@ -180,6 +182,7 @@ fn live_route_mtu_changes_and_alternate_destinations() {
         };
         let alternate = if ipv6 { "2001:db8::3" } else { "192.0.2.3" };
         let wildcard: IpAddr = if ipv6 { "::" } else { "0.0.0.0" }.parse().unwrap();
+        // IP header plus 8-byte UDP header.
         let overhead = if ipv6 { 48 } else { 28 };
         for auth in [false, true] {
             for bound in [false, true] {

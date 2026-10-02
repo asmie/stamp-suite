@@ -1,4 +1,4 @@
-"""Regression cases for evidence drift and privileged artifact selection."""
+"""Tests for the conformance count, citation and privileged-runner checkers."""
 import importlib.util
 import json
 from pathlib import Path

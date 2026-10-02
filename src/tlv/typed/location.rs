@@ -13,9 +13,6 @@ const LOCATION_MAC_SUBTLV_LEN: usize = 8;
 
 /// Location fields the reflector may disclose (RFC 8972 §4.2.2).
 /// Withheld fields are zeroed, preserving length and flags. Defaults to all fields.
-///
-/// Source MAC is excluded from this policy: both backends already return a
-/// zeroed EUI-64 response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocationDisclosure {
     /// Report the observed source port (value octets 2-3).
@@ -37,7 +34,7 @@ impl Default for LocationDisclosure {
 }
 
 impl LocationDisclosure {
-    /// Every field reported — the default.
+    /// Every field reported (the default).
     #[must_use]
     pub const fn all() -> Self {
         Self {
@@ -68,12 +65,12 @@ impl LocationDisclosure {
     }
 
     /// Parses a comma-separated field list: `all`, `none`, or any combination
-    /// of `src-port`, `dst-port`, `ports`, `src-ip`, `dst-ip`, `ips`.
+    /// of `src-port`, `dst-port`, `ports`, `src-ip`, `dst-ip`, `ips`, `src-mac`.
     ///
     /// # Errors
     /// Returns the offending token when it is not a recognized field name, and
-    /// rejects mixing `all`/`none` with individual field names — a list like
-    /// `none,src-ip` has no unambiguous reading.
+    /// rejects mixing `all`/`none` with individual field names, because a list
+    /// like `none,src-ip` has no unambiguous reading.
     pub fn parse(spec: &str) -> Result<Self, String> {
         let mut policy = Self::none();
         let mut saw_wildcard = false;
@@ -143,8 +140,8 @@ impl LocationDisclosure {
         if saw_wildcard && saw_field {
             return Err("'all'/'none' cannot be combined with individual field names".to_string());
         }
-        // `all,none` used to resolve to whichever came last. It states two
-        // incompatible policies, so there is no reading to pick.
+        // `all,none` states two incompatible policies, so there is no reading
+        // to pick.
         if wildcards > 1 {
             return Err(format!(
                 "'{spec}' names more than one wildcard; use exactly one of 'all' or 'none'"
@@ -164,19 +161,19 @@ impl LocationDisclosure {
 /// (EUI-48/EUI-64 for MAC, IPv4/IPv6 for the addresses) per §4.2.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocationSubType {
-    /// Source MAC Address (Type 1) — generic request. Value is an 8-octet MBZ.
+    /// Source MAC Address (Type 1), generic request. Value is an 8-octet MBZ.
     SourceMac,
     /// Source EUI-48 Address (Type 2). Value is 6-octet EUI-48 + 2-octet MBZ.
     SourceEui48,
     /// Source EUI-64 Address (Type 3). Value is an 8-octet EUI-64.
     SourceEui64,
-    /// Destination IP Address (Type 4) — generic request. Value is 16-octet MBZ.
+    /// Destination IP Address (Type 4), generic request. Value is 16-octet MBZ.
     DestinationIp,
     /// Destination IPv4 Address (Type 5). Value is 4-octet IPv4 + 12-octet MBZ.
     DestinationIpv4,
     /// Destination IPv6 Address (Type 6). Value is a 16-octet IPv6 address.
     DestinationIpv6,
-    /// Source IP Address (Type 7) — generic request. Value is 16-octet MBZ.
+    /// Source IP Address (Type 7), generic request. Value is 16-octet MBZ.
     SourceIp,
     /// Source IPv4 Address (Type 8). Value is 4-octet IPv4 + 12-octet MBZ.
     SourceIpv4,
@@ -246,7 +243,7 @@ impl LocationSubType {
 
 /// A single sub-TLV within the Location TLV, per RFC 8972 §4.2.1.
 ///
-/// # Wire Format (Figure 5 — the standard 4-octet STAMP TLV header)
+/// # Wire Format (Figure 5: the standard 4-octet STAMP TLV header)
 ///
 /// ```text
 ///  0                   1                   2                   3
@@ -359,9 +356,9 @@ impl LocationSubTlv {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocationTlv {
-    /// Destination Port — the received STAMP packet's UDP destination port.
+    /// Destination Port: the received STAMP packet's UDP destination port.
     pub dest_port: u16,
-    /// Source Port — the received STAMP packet's UDP source port.
+    /// Source Port: the received STAMP packet's UDP source port.
     pub src_port: u16,
     /// Sub-TLVs (generic requests on the wire from a sender; specific answers
     /// from a reflector).
@@ -464,9 +461,8 @@ pub struct PacketAddressInfo {
 #[cfg(test)]
 mod tests {
 
-    /// `all,none` states two incompatible policies. It used to resolve to
-    /// whichever token came last, silently disclosing (or withholding)
-    /// everything depending on the order typed.
+    /// `all,none` states two incompatible policies, so it is rejected rather
+    /// than resolved by token order.
     #[test]
     fn contradictory_wildcards_are_rejected() {
         for spec in ["all,none", "none,all", "all,all", "none,none"] {
@@ -534,7 +530,7 @@ mod tests {
         // Mixing a wildcard with named fields has no unambiguous reading.
         assert!(LocationDisclosure::parse("none,src-ip").is_err());
         assert!(LocationDisclosure::parse("all,ports").is_err());
-        // An empty list is a typo, not "disclose nothing" — `none` says that.
+        // An empty list is a typo, not "disclose nothing"; `none` says that.
         assert!(LocationDisclosure::parse("").is_err());
         assert!(LocationDisclosure::parse(" , ").is_err());
     }

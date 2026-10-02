@@ -16,7 +16,7 @@ are checked:
   there, or, for a path-qualified name, appear there as a use.
 - Any other `path.rs` must exist. A bare file name must match exactly one file.
 
-Line citations (`path.rs:N` or `path.rs:N-M`) are still accepted. One is OK
+Line citations (`path.rs:N` or `path.rs:N-M`) are also checked. One is OK
 when its range intersects the extent of an identifier named before it; it is
 STALE when such identifiers are defined in the file but none of them overlap,
 and unverifiable when none are defined there.

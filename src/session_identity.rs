@@ -2,6 +2,7 @@
 
 use std::{fmt, net::SocketAddr, str::FromStr};
 
+/// How the reflector admits new sessions.
 #[derive(
     Debug,
     Clone,
@@ -22,9 +23,10 @@ pub enum SessionAdmission {
     Provisioned,
 }
 
-/// A UDP four-tuple, SSID, and optional RFC 9534 sender member identifier.
-/// The reflector's member identifier is configuration, not a changing lookup
-/// field: a sender can initially send zero before learning it from a reply.
+/// A UDP four-tuple, SSID, and optional RFC 9534 Sender Micro-session ID.
+///
+/// The Reflector Micro-session ID is not part of the key. It comes from
+/// configuration, and a sender can send zero before learning it from a reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionKey {
     pub client: SocketAddr,
@@ -76,9 +78,11 @@ impl FromStr for SessionKey {
     }
 }
 
-/// Compatibility for callers of the original source-only SessionManager API.
-/// Receiver backends always supply a complete SessionKey. This conversion
-/// represents a base session with an unknown local endpoint, never a wildcard
+/// Builds a key from the source address alone: SSID 0, no micro-session ID,
+/// and an unspecified local endpoint with port 0.
+///
+/// Receiver backends supply a complete `SessionKey`. This conversion represents
+/// a base session with an unknown local endpoint, never a wildcard
 /// provisioning rule.
 impl From<SocketAddr> for SessionKey {
     fn from(client: SocketAddr) -> Self {

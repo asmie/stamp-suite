@@ -124,14 +124,12 @@ async fn test_loopback_unauthenticated_single_packet() {
     let reflector_port = find_available_port().await;
     let sender_port = find_available_port().await;
 
-    // Start reflector in background
     let reflector_handle =
         tokio::spawn(async move { run_test_reflector(reflector_port, false).await });
 
     // Give reflector time to bind
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Run sender
     let seq_num = 42u32;
     let sender_result = run_test_sender(sender_port, reflector_port, false, seq_num).await;
 
@@ -155,14 +153,12 @@ async fn test_loopback_authenticated_single_packet() {
     let reflector_port = find_available_port().await;
     let sender_port = find_available_port().await;
 
-    // Start reflector in background
     let reflector_handle =
         tokio::spawn(async move { run_test_reflector(reflector_port, true).await });
 
     // Give reflector time to bind
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Run sender
     let seq_num = 123u32;
     let sender_result = run_test_sender(sender_port, reflector_port, true, seq_num).await;
 
@@ -256,7 +252,6 @@ async fn test_loopback_timestamp_ordering() {
     let reflector_port = find_available_port().await;
     let sender_port = find_available_port().await;
 
-    // Start reflector
     let socket = UdpSocket::bind(format!("127.0.0.1:{}", reflector_port))
         .await
         .unwrap();
@@ -324,8 +319,8 @@ async fn test_loopback_timestamp_ordering() {
 
 /// Test stateful reflector mode with multiple clients getting independent sequence numbers.
 ///
-/// This verifies RFC 8972 Section 4 compliance: each client (IP:port) should receive
-/// independent reflector sequence numbers, allowing detection of reflector-side packet loss.
+/// In stateful mode (RFC 8762 §4.3.1) each client (IP:port) receives its own
+/// reflector sequence numbers, starting at zero, so loss can be split by direction.
 #[tokio::test]
 async fn test_stateful_reflector_multi_client() {
     use std::sync::Arc;
@@ -380,7 +375,6 @@ async fn test_stateful_reflector_multi_client() {
     // Give reflector time to bind
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Create two client sockets
     let client1_socket = UdpSocket::bind(format!("127.0.0.1:{}", client1_port))
         .await
         .unwrap();
@@ -614,8 +608,8 @@ fn test_location_tlv_ipv4_round_trip() {
         LocationSubType::DestinationIpv4
     );
 
-    // The regression: the Destination IPv4 octets must come back as
-    // 127.0.0.1, not byte-reversed (1.0.0.127).
+    // The Destination IPv4 octets must come back as 127.0.0.1, not
+    // byte-reversed (1.0.0.127).
     assert_eq!(
         &loc_parsed.sub_tlvs[1].value[0..4],
         &[127, 0, 0, 1],

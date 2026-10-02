@@ -10,6 +10,8 @@ use crate::{
     tlv::{DirectMeasurementTlv, FollowUpTelemetryTlv, TimestampMethod},
 };
 
+/// Probes, replies and Direct Measurement counters retained for duplicate,
+/// late-reply and loss accounting; older entries are evicted.
 pub(crate) const HISTORY_LIMIT: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
@@ -179,7 +181,9 @@ impl Direct {
             .reflector_rx_count
             .wrapping_sub(anchor.reflector_rx_count);
         if tx >= 1 << 31 || sender >= 1 << 31 || rx >= 1 << 31 {
-            // Could be a reset or data from before the anchor. Neither proves loss.
+            // A delta of 2^31 or more is a backwards step in serial-number
+            // arithmetic: a reset or data from before the anchor. Neither
+            // proves loss.
             self.summary.discontinuities += 1;
             self.anchor = None;
             self.seen.clear();
@@ -338,7 +342,7 @@ impl Measurements {
         let probe = self.probes.get_mut(&key.sender).unwrap();
         if let Some(packet) = pending {
             probe.packet = packet;
-        } // corrected kernel T1
+        } // `pending` carries a T1 corrected by a kernel TX timestamp
         if probe.answered {
             self.summary.additional_replies += 1;
         } else {

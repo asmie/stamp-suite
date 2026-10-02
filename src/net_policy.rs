@@ -50,8 +50,12 @@ pub(crate) fn bind_to_interface(socket: &UdpSocket, name: &str) -> io::Result<()
     }
 }
 
-/// Randomized dynamic-port binding. Avoid the peer's listening port so
-/// reverse-direction requests cannot be confused with reflected packets.
+/// Binds a Session-Sender socket.
+///
+/// With local port 0, picks a random port from the Dynamic Ports range
+/// (49152-65535) and retries up to 128 times. The peer's listening port is
+/// never used, so reverse-direction requests cannot be confused with reflected
+/// packets. An explicit local port equal to the remote port is rejected.
 pub(crate) fn bind_sender(local: SocketAddr, remote: SocketAddr) -> io::Result<UdpSocket> {
     bind_sender_with(
         local,

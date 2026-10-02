@@ -2,10 +2,9 @@
 
 use thiserror::Error;
 
-// Experimental/pending-IANA codepoint stand-ins live in `super::experimental`
-// (single edit point — see that module's doc comment for the renumbering
-// policy). Re-exported here so existing `crate::tlv::core::…` import paths
-// keep working unchanged.
+// Experimental and pending-IANA codepoints are defined once in `super::experimental`
+// (see its module docs for the renumbering policy) and re-exported here so
+// `crate::tlv::core::…` import paths resolve.
 pub use super::experimental::{
     BER_COUNT_TLV_TYPE, BER_MAX_BURST_TLV_TYPE, BER_PATTERN_TLV_TYPE,
     REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, REFLECTED_FIXED_HDR_TLV_TYPE,
@@ -78,7 +77,7 @@ pub enum TlvError {
     LengthExceedsBuffer { length: usize, available: usize },
 
     /// A TLV other than Extra Padding follows HMAC.
-    #[error("Only Extra Padding may follow the HMAC TLV per RFC 8972 section 4.8")]
+    #[error("Only Extra Padding may follow the HMAC TLV per RFC 8972 §4.8")]
     HmacNotLast,
 
     /// HMAC verification failed.
@@ -123,7 +122,7 @@ fn expected_length(kind: TlvType) -> String {
     }
 }
 
-/// TLV flag bits as defined in RFC 8972 Section 4.2.
+/// TLV flag bits as defined in RFC 8972 §4.
 ///
 /// Flags occupy a full octet with the following layout:
 /// ```text
@@ -151,11 +150,11 @@ pub struct TlvFlags {
 }
 
 impl TlvFlags {
-    /// U bit in the flags octet (RFC 8972 §5.2).
+    /// U bit in the flags octet (RFC 8972 §4).
     pub const U: u8 = 0x80;
-    /// M bit in the flags octet (RFC 8972 §5.2).
+    /// M bit in the flags octet (RFC 8972 §4).
     pub const M: u8 = 0x40;
-    /// I bit in the flags octet (RFC 8972 §5.2).
+    /// I bit in the flags octet (RFC 8972 §4).
     pub const I: u8 = 0x20;
     /// C bit in the flags octet (RFC 10052 §6.2).
     pub const C: u8 = 0x10;
@@ -236,13 +235,13 @@ impl TlvFlags {
     }
 }
 
-/// TLV type identifiers as defined in RFC 8972 Section 4.3.
+/// TLV type codepoints (RFC 8972 §5.1 registry and later STAMP extensions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TlvType {
     /// Reserved type (0).
     Reserved = 0,
-    /// Extra Padding TLV (1) - Can carry SSID in first 2 bytes.
+    /// Extra Padding TLV (1).
     ExtraPadding = 1,
     /// Location TLV (2).
     Location = 2,
@@ -267,31 +266,27 @@ pub enum TlvType {
     /// Reflected Test Packet Control TLV (12) - RFC 10052 §3.
     ReflectedControl = 12,
     /// BER Bit Pattern in Padding TLV (240) - draft-gandhi-ippm-stamp-ber-07 §5.1.
-    /// Experimental-range codepoint stand-in; see `experimental::BER_PATTERN_TLV_TYPE`
-    /// — single edit point for renumbering.
+    /// Experimental-range stand-in, renumbered via `experimental::BER_PATTERN_TLV_TYPE`.
     BerPattern = BER_PATTERN_TLV_TYPE,
     /// BER Bit Error Count in Padding TLV (241) - draft-gandhi-ippm-stamp-ber-07 §5.2.
-    /// Experimental-range codepoint stand-in; see `experimental::BER_COUNT_TLV_TYPE`
-    /// — single edit point for renumbering.
+    /// Experimental-range stand-in, renumbered via `experimental::BER_COUNT_TLV_TYPE`.
     BerCount = BER_COUNT_TLV_TYPE,
     /// BER Max Bit Error Burst Size TLV (242) - draft-gandhi-ippm-stamp-ber-07 §5.3.
-    /// Experimental-range codepoint stand-in (and a known collision with an
-    /// unrelated TLV in another implementation — see the const's doc); see
-    /// `experimental::BER_MAX_BURST_TLV_TYPE` — single edit point for renumbering.
+    /// Experimental-range stand-in that collides with an unrelated TLV in another
+    /// implementation; renumbered via `experimental::BER_MAX_BURST_TLV_TYPE`.
     BerBurst = BER_MAX_BURST_TLV_TYPE,
     /// Reflected IPv6 Extension Header Data TLV (246) -
-    /// draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 4.1. Reflects received
-    /// Hop-by-Hop and Destination Options extension headers; requires
-    /// raw-capture backend. Experimental-range codepoint stand-in (IANA
-    /// TBA1); see `experimental::REFLECTED_IPV6_EXT_HDR_TLV_TYPE` — single
-    /// edit point for renumbering.
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §§4.1, 4.2. Reflects received IPv6
+    /// extension headers such as Hop-by-Hop and Destination Options. The nix
+    /// backend on Linux reads them from ancillary data; elsewhere this needs
+    /// the raw-capture backend. Experimental-range stand-in for IANA TBA1,
+    /// renumbered via `experimental::REFLECTED_IPV6_EXT_HDR_TLV_TYPE`.
     ReflectedIpv6ExtHdr = REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
     /// Reflected Fixed Header Data TLV (247) -
-    /// draft-ietf-ippm-stamp-ext-hdr-15 §§6.2, 6.1. Reflects the raw IPv4/IPv6
-    /// fixed header (20/40 bytes); requires raw-capture backend.
-    /// Experimental-range codepoint stand-in (IANA TBA2); see
-    /// `experimental::REFLECTED_FIXED_HDR_TLV_TYPE` — single edit point for
-    /// renumbering.
+    /// draft-ietf-ippm-stamp-ext-hdr-15 §§6.1, 6.2. Reflects the raw IPv4/IPv6
+    /// fixed header (20/40 bytes); requires the raw-capture backend.
+    /// Experimental-range stand-in for IANA TBA2, renumbered via
+    /// `experimental::REFLECTED_FIXED_HDR_TLV_TYPE`.
     ReflectedFixedHdr = REFLECTED_FIXED_HDR_TLV_TYPE,
     /// Unknown type.
     Unknown(u8),
@@ -425,7 +420,7 @@ pub struct RawTlv {
     /// Raw value bytes.
     pub value: Vec<u8>,
     /// Original wire length for truncated TLVs (when different from value.len()).
-    /// Used to echo malformed TLVs byte-exactly per RFC 8972 §4.8.
+    /// Used to echo malformed TLVs byte-exactly per RFC 8972 §4.
     wire_length: Option<u16>,
     /// Parser-detected structural error preserved across the reflector
     /// flag-clear pass (RFC 8972 §4). See `mark_malformed_by_parser`.
@@ -472,7 +467,7 @@ impl RawTlv {
     ///
     /// Returns the parsed TLV and the number of bytes consumed.
     ///
-    /// Wire format per RFC 8972 Section 4.2:
+    /// Wire format per RFC 8972 §4:
     /// - Byte 0: Flags (1 octet)
     /// - Byte 1: Type (1 octet)
     /// - Bytes 2-3: Length (2 octets, big-endian)
@@ -631,8 +626,8 @@ impl RawTlv {
         self.flags.malformed = true;
     }
 
-    /// Marks this TLV as malformed by the parser (structural/positional error
-    /// — truncation, TLV after HMAC, bad HMAC length). Sets the M-flag and
+    /// Marks this TLV as malformed by the parser (a structural or positional
+    /// error: truncation, TLV after HMAC, bad HMAC length). Sets the M-flag and
     /// records that the parser detected the malformed-ness so the reflector's
     /// flag-clear pass can re-derive M without losing the parser's signal.
     pub(crate) fn mark_malformed_by_parser(&mut self) {
@@ -660,11 +655,10 @@ impl RawTlv {
     }
 
     /// Clears the U, M, and I flags so the reflector can re-derive them
-    /// per RFC 8972 §4, and drops the C flag — the Session-Reflector
+    /// per RFC 8972 §4, and drops the C flag, because the Session-Reflector
     /// MUST ignore the received C value and derive its own
-    /// (RFC 10052 §3). Reserved bits and the
-    /// `parser_marked_malformed` marker (used to re-set M for parser-detected
-    /// structural errors) are preserved.
+    /// (RFC 10052 §3). The `parser_marked_malformed` marker (used to re-set M
+    /// for parser-detected structural errors) is preserved.
     pub fn clear_reflector_flags(&mut self) {
         self.flags.unrecognized = false;
         self.flags.malformed = false;
@@ -922,8 +916,8 @@ mod tests {
         let mut tlv =
             RawTlv::with_flags(TlvFlags::from_byte(0xF0), TlvType::ReflectedControl, vec![]);
         tlv.clear_reflector_flags();
-        // U/M/I cleared. C is reflector-owned output: draft-ietf-ippm-
-        // RFC 10052 §3 says the incoming value MUST be ignored,
+        // U/M/I cleared. C is reflector-owned output: RFC 10052 §3
+        // says the incoming value MUST be ignored,
         // so the clear pass drops it and processing re-derives it.
         assert_eq!(tlv.flags.to_byte(), 0x00);
     }
@@ -979,7 +973,7 @@ mod tests {
     #[test]
     fn test_plain_set_malformed_does_not_set_parser_marker() {
         // set_malformed (without _by_parser) is for type/length validators
-        // that re-derive M on every pass — they don't need the persistent
+        // that re-derive M on every pass, so they don't need the persistent
         // marker.
         let mut tlv = RawTlv::with_flags(TlvFlags::default(), TlvType::ClassOfService, vec![0; 4]);
         tlv.set_malformed();

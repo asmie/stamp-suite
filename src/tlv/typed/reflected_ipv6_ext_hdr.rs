@@ -1,5 +1,5 @@
 //! Reflected IPv6 Extension Header Data TLV (Type 246) per
-//! draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 4.1.
+//! draft-ietf-ippm-stamp-ext-hdr-15 §§4.1, 4.2.
 //!
 //! # Wire Format (ext-hdr-15 Figure 2)
 //!
@@ -20,7 +20,8 @@
 //! Length equals the target extension header size. Requested occupies eight
 //! bytes; Reflected receives `header[8..]`. The sender zeroes Reflected and
 //! sets Requested to zero or the target header's first eight wire bytes.
-//! The reflector preserves Requested. On missing capture or no match, it
+//! A zero Requested is filled with the matched header's first eight bytes
+//! (ext-hdr-15 §4.2 rule 1). On missing capture or no match, the reflector
 //! sets C and preserves the value.
 //!
 //! Nonzero Requested matches the header's prefix, including its own Next
@@ -126,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_request_with_selector_prefixes_then_zero_pads() {
-        // draft §3.2 selector: first 8 bytes carry the match pattern, the
+        // ext-hdr-15 §4.1 selector: first 8 bytes carry the match pattern, the
         // rest of the requested capacity is zero for the reflector to fill.
         let tlv = ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0x01, 0x02], 8);
         assert_eq!(tlv.data, vec![0x3C, 0x00, 0x01, 0x02, 0, 0, 0, 0]);

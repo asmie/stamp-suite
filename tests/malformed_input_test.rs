@@ -1,7 +1,7 @@
 //! Malformed packet and TLV regression tests through the reflector pipeline.
 //!
-//! Covers base sizes (RFC 8762 §4.1.x), TLV layouts and HMAC ordering
-//! (RFC 8972 §4.2.1/§4.8), and Return Path sub-TLVs (RFC 9503 §4).
+//! Covers base sizes (RFC 8762 §4.2.1/§4.2.2), TLV layouts and HMAC ordering
+//! (RFC 8972 §4/§4.8), and Return Path sub-TLVs (RFC 9503 §4).
 //! Checks rejection/response flags and preservation of echoed chains.
 //! The fuzz harnesses in `fuzz/` cover broader input sequences.
 
@@ -77,7 +77,7 @@ fn build_unauth_packet(tlv_bytes: &[u8]) -> Vec<u8> {
 }
 
 // ===========================================================================
-// Group A: base-packet length boundaries (RFC 8762 §4.1.1 / §4.1.2)
+// Group A: base-packet length boundaries (RFC 8762 §4.2.1 / §4.2.2)
 
 /// Lenient mode accepts any zero-padded buffer up to the base size; strict
 /// mode rejects anything shorter. Sweep every length from 0 to BASE-1 to
@@ -118,7 +118,7 @@ fn group_a_one_byte_packet_does_not_panic() {
 }
 
 // ===========================================================================
-// Group B: TLV-header length-field abuses (RFC 8972 §4.2.1)
+// Group B: TLV-header length-field abuses (RFC 8972 §4)
 
 /// TLV claims `length` larger than the remaining buffer. Reflector must
 /// echo (lenient) with M-flag set on the truncated TLV, no panic.
@@ -142,7 +142,7 @@ fn group_b_tlv_length_exceeds_remaining_buffer() {
     );
 }
 
-/// TLV with claimed length 0xFFFF (max u16) — buffer-length math must not
+/// TLV with claimed length 0xFFFF (max u16): buffer-length math must not
 /// overflow.
 #[test]
 fn group_b_tlv_length_u16_max_no_panic() {
@@ -185,7 +185,7 @@ fn group_c_tlv_after_hmac_marked_malformed() {
     chain.extend_from_slice(&16u16.to_be_bytes());
     chain.extend_from_slice(&[0u8; 16]);
 
-    // A Direct Measurement TLV after the HMAC — positionally illegal (unlike
+    // A Direct Measurement TLV after the HMAC is positionally illegal (unlike
     // Extra Padding, which §4.8 explicitly exempts).
     chain.push(0);
     chain.push(TlvType::DirectMeasurement.to_byte());
@@ -240,7 +240,7 @@ fn group_c_extra_padding_after_hmac_is_not_malformed() {
     );
 }
 
-/// HMAC TLV with wrong value length (not 16 bytes) — must M-flag, not
+/// HMAC TLV with wrong value length (not 16 bytes): must M-flag, not
 /// crash.
 #[test]
 fn group_c_hmac_wrong_length_no_panic() {
