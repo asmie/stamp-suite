@@ -179,6 +179,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove `ExtraPaddingTlv::from_raw` and `HmacTlv::from_raw` inherent methods
   that skipped the TLV type check; the `TypedTlv` versions check it.
 - Wipe key-file read buffers and rejected keys from memory.
+- Stop TLV processing at a malformed TLV instead of skipping the whole
+  packet or ignoring the stop (RFC 8972 §4). TLVs before it are processed,
+  the malformed TLV gets M, and later TLVs are copied with U. A TLV whose
+  Length is wrong for its type now stops processing too.
+- Accept Timestamp Information TLVs that carry optional sub-TLVs
+  (RFC 8972 §4.3); they were flagged malformed.
+- Copy content after the base packet that the reflector does not parse
+  instead of zeroing it: 1-3 trailing octets in echo mode, and everything
+  in `--tlv-mode ignore`, which now behaves like a reflector without TLV
+  support (RFC 8762 §4.3, RFC 8972 §4).
+- Answer a Location Source MAC request with the frame's EUI-48 source address
+  when the pnet backend sees it (RFC 8972 §4.2.2). `--location-disclose`
+  gains `src-mac`.
+- Reject `--error-multiplier 0` (RFC 4656 §4.1.2) and `--access-report` IDs
+  other than 1 and 2, which reflectors must discard (RFC 8972 §4.6).
+- Allow only a single Extra Padding TLV, not several, without an HMAC TLV in
+  authenticated mode (RFC 8972 §4.8). The sender now treats an authenticated
+  reply without the HMAC TLV as an integrity failure.
+- Consume a stateful reflector sequence number only when the reply is sent,
+  so failed sends leave no gap (RFC 8762 §4.3.1).
 
 - Validate pnet startup binds/keys before privileged capture, preserve interface
   errors, and repair startup tests. Require valid authenticated pnet replies and

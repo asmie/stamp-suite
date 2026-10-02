@@ -513,7 +513,7 @@ fn run_capture_loop(
                     if let Some(ip) = packet.get(payload_offset..).filter(|ip| !ip.is_empty()) {
                         let version = ip[0] >> 4;
                         if version == 4 || version == 6 {
-                            handle_ip_packet(ip, version, &config, &transmitter);
+                            handle_ip_packet(ip, version, None, &config, &transmitter);
                             continue;
                         }
                     }
@@ -589,12 +589,20 @@ fn handle_packet(
         EtherTypes::Ipv6 => 6,
         _ => return,
     };
-    handle_ip_packet(ethernet.payload(), version, config, transmitter);
+    let src_mac = ethernet.get_source().octets();
+    handle_ip_packet(
+        ethernet.payload(),
+        version,
+        Some(src_mac),
+        config,
+        transmitter,
+    );
 }
 
 fn handle_ip_packet(
     ip: &[u8],
     version: u8,
+    src_mac: Option<[u8; 6]>,
     config: &CaptureConfig,
     transmitter: &std::sync::mpsc::SyncSender<QueuedTransmission>,
 ) {
@@ -606,6 +614,7 @@ fn handle_ip_packet(
     }
     pkt.src =
         crate::net_scope::received_endpoint(pkt.src.ip(), udp.get_source(), config.interface_index);
+    pkt.src_mac = src_mac;
     handle_stamp_packet(udp.payload(), &pkt, config, transmitter);
 }
 
@@ -697,6 +706,7 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
                 dscp: tos >> 2,
                 ecn: tos & 3,
                 captured,
+                src_mac: None,
             };
             return Some((udp, pkt));
         }
@@ -807,6 +817,8 @@ struct PacketMeta {
     /// (Types 246/247). Captured at the datalink layer; always available
     /// when using this backend.
     captured: super::CapturedHeaders,
+    /// Source MAC of the Ethernet frame; `None` without an Ethernet header.
+    src_mac: Option<[u8; 6]>,
 }
 
 fn handle_stamp_packet(
@@ -851,6 +863,7 @@ fn handle_stamp_packet(
         src_port: pkt.src.port(),
         dst_addr: pkt.dst_addr,
         dst_port: config.local_port,
+        src_mac: pkt.src_mac,
     });
 
     // Panic-isolated: a panic in processing must not unwind out of the capture

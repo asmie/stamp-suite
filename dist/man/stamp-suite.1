@@ -139,10 +139,10 @@ Print individual packet statistics (stderr for JSON/CSV output, stdout for text)
 Run as Session Reflector instead of Session Sender
 .TP
 \fB\-\-error\-scale\fR \fI<ERROR_SCALE>\fR [default: 0]
-Error estimate scale (0\-63). Default: 0
+Error Estimate scale (0\-63)
 .TP
 \fB\-\-error\-multiplier\fR \fI<ERROR_MULTIPLIER>\fR [default: 1]
-Error estimate multiplier (0\-255). Default: 1
+Error Estimate multiplier (1\-255). RFC 4656 §4.1.2 forbids zero
 .TP
 \fB\-\-clock\-synchronized\fR
 Assert the Error Estimate S bit; independent of wire format and Type 3 source
@@ -211,19 +211,19 @@ Non\-monotonic Type\-12 requests always receive a single U\-flagged reply after 
 Reflector\-side only.
 .TP
 \fB\-\-location\-disclose\fR \fI<FIELDS>\fR [default: all]
-Location TLV fields the reflector may report (RFC 8972 §4.2.2). Comma\-separated: `all` (default), `none`, or `src\-port`, `dst\-port`, `ports`, `src\-ip`, `dst\-ip`, `ips`. Withheld fields are zeroed without changing the TLV length or structure.
+Location TLV fields the reflector may report (RFC 8972 §4.2.2). Comma\-separated: `all` (default), `none`, or `src\-port`, `dst\-port`, `ports`, `src\-ip`, `dst\-ip`, `ips`, `src\-mac`. Withheld fields are zeroed without changing the TLV length or structure.
 
 Reflector\-side only; ignored by the sender.
 .TP
 \fB\-\-tlv\-mode\fR \fI<TLV_MODE>\fR [default: echo]
-TLV handling mode for the reflector (RFC 8972). Default: echo. \- ignore: Strip TLVs from reflected packets (zero\-pad to preserve length) \- echo: Echo TLVs back, marking unknown types with U\-flag
+Reflector TLV handling (RFC 8972). \- echo: process supported TLVs and set U/M/I flags \- ignore: copy everything after the base packet unprocessed, like a reflector without TLV support
 .br
 
 .br
 \fIPossible values:\fR
 .RS 14
 .IP \(bu 2
-ignore: Ignore TLVs \- strip them from reflected packets (zero\-pad to preserve length)
+ignore: Copy TLVs unprocessed, as a reflector without TLV support does
 .IP \(bu 2
 echo: Echo TLVs back to sender, marking unknown types with U\-flag per RFC 8972
 .RE
@@ -290,7 +290,7 @@ bad\-length: A TLV whose Length field far exceeds the bytes actually present, so
 .RE
 .TP
 \fB\-\-access\-report\fR \fI<ACCESS_REPORT>\fR
-Enable Access Report TLV with Access ID 1\-15 (RFC 8972 §4.6). IDs 1 (3GPP Network) and 2 (Non\-3GPP Network) are defined; 3\-15 are accepted with a startup warning. Zero is rejected. The reflector echoes valid reports unchanged
+Send an Access Report TLV with this Access ID (RFC 8972 §4.6): 1 = 3GPP Network, 2 = Non\-3GPP Network. A reflector discards other IDs
 .TP
 \fB\-\-access\-return\-code\fR \fI<ACCESS_RETURN_CODE>\fR [default: 1]
 Return code for Access Report TLV (default: 1 = available). Only used when \-\-access\-report is enabled

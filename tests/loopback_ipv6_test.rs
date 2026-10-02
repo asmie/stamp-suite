@@ -331,6 +331,7 @@ fn ipv6_location_tlv_populated_from_addr_info() {
         src_port: 12345,
         dst_addr: ipv6_local(),
         dst_port: 862,
+        src_mac: None,
     };
     let ctx = make_ctx(None, &[], Some(addr_info));
 

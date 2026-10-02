@@ -174,7 +174,7 @@ impl Transmission {
             UNAUTH_BASE_SIZE
         };
         let sequence = if self.stateful {
-            self.session.generate_sequence_number()
+            self.session.peek_sequence_number()
         } else {
             u32::from_be_bytes(data[..4].try_into().expect("validated response base"))
         };
@@ -239,6 +239,9 @@ impl Transmission {
                 Ok(timestamp) => {
                     if clamped {
                         self.remaining = 1;
+                    }
+                    if self.stateful {
+                        self.session.generate_sequence_number();
                     }
                     self.session.record_transmitted();
                     self.session.record_reflection(sequence, timestamp);
@@ -1208,6 +1211,11 @@ mod tests {
         assert_eq!(attempts, 1);
         assert_eq!(transmission.remaining, 0);
         assert_eq!(transmission.session.get_transmitted_count(), 0);
+        assert_eq!(
+            transmission.session.peek_sequence_number(),
+            0,
+            "a failed send must not consume a stateful sequence number"
+        );
         assert_eq!(transmission.session.get_last_reflection(), (0, 0));
         assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 0);
         assert_eq!(counters.packets_dropped.load(Ordering::Relaxed), 1);

@@ -191,7 +191,9 @@ for allocation and renumbering policy.
 ### TLV handling modes
 
 `--tlv-mode echo` (default) processes and reflects TLVs, setting U for unknown
-types. `ignore` strips extensions from the response.
+types. A malformed TLV gets M; TLVs before it are still processed and TLVs after
+it are copied with U set (RFC 8972 §4). `ignore` copies everything after the base
+packet unprocessed, as a reflector without TLV support does.
 
 ### Backward compatibility
 

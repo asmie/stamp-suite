@@ -2560,6 +2560,11 @@ fn validate_reflected_tlvs(
             }
         }
         (None, Some(_)) => HmacStatus::Unverified,
+        // Authenticated mode requires the HMAC TLV unless the only TLV is
+        // Extra Padding (RFC 8972 §4.8). The base size identifies the mode.
+        (Some(_), None) if base_size == AUTH_BASE_SIZE && !tlvs.contains_only_extra_padding() => {
+            HmacStatus::Failed
+        }
         (Some(_), None) => HmacStatus::Missing,
         (None, None) => HmacStatus::NotRequested,
     };
@@ -4011,6 +4016,41 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_reflected_tlvs_auth_reply_without_hmac_tlv_fails() {
+        // RFC 8972 §4.8: authenticated mode requires the HMAC TLV unless the
+        // only TLV is Extra Padding.
+        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+        let validate = |tlvs: &TlvList| {
+            validate_reflected_tlvs(
+                tlvs,
+                &[0u8; AUTH_BASE_SIZE],
+                AUTH_BASE_SIZE,
+                Some(&key),
+                None,
+                None,
+                &mut None,
+                false,
+                false,
+                #[cfg(feature = "metrics")]
+                false,
+            )
+            .unwrap()
+            .hmac
+        };
+        let mut cos = ClassOfServiceTlv::new(46, 0).to_raw();
+        cos.clear_reflector_flags();
+        let mut tlvs = TlvList::new();
+        tlvs.push(cos).unwrap();
+        assert_eq!(validate(&tlvs), HmacStatus::Failed);
+
+        let mut padding = ExtraPaddingTlv::new_zeros(4).to_raw();
+        padding.clear_reflector_flags();
+        let mut tlvs = TlvList::new();
+        tlvs.push(padding).unwrap();
+        assert_eq!(validate(&tlvs), HmacStatus::Missing);
+    }
+
+    #[test]
     fn test_validate_reflected_tlvs_msid_match_accepts() {
         // RFC 9534 §3.2: reflected MSID TLV must carry the sender's sender_id
         // unchanged; the reflector fills reflector_micro_session_id.
@@ -4636,7 +4676,9 @@ mod tests {
                 #[cfg(feature = "metrics")]
                 false,
             ).unwrap();
-            let usable = flag_counts[2] == 0 && (!signed || (with_key && !corrupt));
+            // Authenticated mode with a key requires the HMAC TLV (RFC 8972 §4.8).
+            let hmac_ok = if signed { with_key && !corrupt } else { !(auth && with_key) };
+            let usable = flag_counts[2] == 0 && hmac_ok;
             proptest::prop_assert_eq!(report.access_report.is_some(), usable && access);
             proptest::prop_assert_eq!(report.forward_ce, usable && ce);
             proptest::prop_assert_eq!(report.flags.unrecognized, flag_counts[0]);

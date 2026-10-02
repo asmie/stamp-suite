@@ -41,6 +41,7 @@ fuzz_target!(|data: &[u8]| {
             src_port: src.port(),
             dst_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             dst_port: 862,
+            src_mac: None,
         }),
         last_reflection: Some((0, 0)),
         location_disclosure: Default::default(),

@@ -26,6 +26,8 @@ pub struct LocationDisclosure {
     pub src_ip: bool,
     /// Answer a Destination IP Address generic request (sub-TLV Type 4).
     pub dst_ip: bool,
+    /// Answer a Source MAC Address generic request (sub-TLV Type 1).
+    pub src_mac: bool,
 }
 
 impl Default for LocationDisclosure {
@@ -43,6 +45,7 @@ impl LocationDisclosure {
             dst_port: true,
             src_ip: true,
             dst_ip: true,
+            src_mac: true,
         }
     }
 
@@ -54,13 +57,14 @@ impl LocationDisclosure {
             dst_port: false,
             src_ip: false,
             dst_ip: false,
+            src_mac: false,
         }
     }
 
     /// True when no field may be reported.
     #[must_use]
     pub const fn discloses_nothing(&self) -> bool {
-        !self.src_port && !self.dst_port && !self.src_ip && !self.dst_ip
+        !self.src_port && !self.dst_port && !self.src_ip && !self.dst_ip && !self.src_mac
     }
 
     /// Parses a comma-separated field list: `all`, `none`, or any combination
@@ -123,10 +127,14 @@ impl LocationDisclosure {
                     policy.dst_ip = true;
                     saw_field = true;
                 }
+                "src-mac" => {
+                    policy.src_mac = true;
+                    saw_field = true;
+                }
                 other => {
                     return Err(format!(
                         "unknown Location field '{other}' (expected all, none, \
-                         src-port, dst-port, ports, src-ip, dst-ip, or ips)"
+                         src-port, dst-port, ports, src-ip, dst-ip, ips, or src-mac)"
                     ))
                 }
             }
@@ -456,6 +464,8 @@ pub struct PacketAddressInfo {
     pub dst_addr: std::net::IpAddr,
     /// Destination port of the received packet.
     pub dst_port: u16,
+    /// Source MAC of the received frame, when the backend sees the link layer.
+    pub src_mac: Option<[u8; 6]>,
 }
 
 #[cfg(test)]
@@ -527,7 +537,7 @@ mod tests {
     #[test]
     fn test_location_disclosure_parse_rejects_bad_input() {
         // Unknown field name.
-        assert!(LocationDisclosure::parse("src-mac").is_err());
+        assert!(LocationDisclosure::parse("src-vlan").is_err());
         // Mixing a wildcard with named fields has no unambiguous reading.
         assert!(LocationDisclosure::parse("none,src-ip").is_err());
         assert!(LocationDisclosure::parse("all,ports").is_err());

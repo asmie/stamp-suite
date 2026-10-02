@@ -223,6 +223,14 @@ impl Session {
         self.curr_seq.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Returns the next sequence number without consuming it. A stateful
+    /// reflector consumes it only after a successful send, so failed sends
+    /// leave no gap (RFC 8762 §4.3.1 counts transmitted packets). Callers
+    /// must be the session's only sender.
+    pub fn peek_sequence_number(&self) -> u32 {
+        self.curr_seq.load(Ordering::Relaxed)
+    }
+
     /// Records a received packet for this session.
     pub fn record_received(&self) {
         self.packets_received.fetch_add(1, Ordering::Relaxed);

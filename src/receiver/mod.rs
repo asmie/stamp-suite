@@ -1553,12 +1553,12 @@ fn process_stamp_packet_inner(
             // drop policy applies only when that TLV is not being handled.
             // Inspect only this opt-in duplicate path; semantic processing
             // still performs normal TLV integrity and address-group checks.
-            let handles_control = ctx.tlv_mode == TlvHandlingMode::Echo
-                && has_tlvs
-                && TlvList::parse_lenient(&data[base_size..])
-                    .0
-                    .get_reflected_control_request()
-                    .is_some();
+            let handles_control = ctx.tlv_mode == TlvHandlingMode::Echo && has_tlvs && {
+                let (mut tlvs, _) = TlvList::parse_lenient(&data[base_size..]);
+                // Requests carry the sender's U=1; clear it to inspect them.
+                tlvs.clear_reflector_flags();
+                tlvs.get_reflected_control_request().is_some()
+            };
             if !handles_control {
                 return None;
             }
@@ -1828,9 +1828,9 @@ pub fn assemble_unauth_answer_symmetric(
     );
     let mut response = base.to_bytes().to_vec();
 
-    // Pad with zeros to match original length (RFC 8762 Section 4.2.1)
-    if original_data.len() > UNAUTH_BASE_SIZE {
-        response.resize(original_data.len(), 0);
+    // Copy any content beyond the base packet (RFC 8762 §4.3).
+    if let Some(tail) = original_data.get(UNAUTH_BASE_SIZE..) {
+        response.extend_from_slice(tail);
     }
 
     response
@@ -1919,9 +1919,9 @@ pub fn assemble_auth_answer_symmetric(
     );
     let mut response = base.to_bytes().to_vec();
 
-    // Pad with zeros to match original length (RFC 8762 Section 4.2.1)
-    if original_data.len() > AUTH_BASE_SIZE {
-        response.resize(original_data.len(), 0);
+    // Copy any content beyond the base packet (RFC 8762 §4.3).
+    if let Some(tail) = original_data.get(AUTH_BASE_SIZE..) {
+        response.extend_from_slice(tail);
     }
 
     response
@@ -2299,17 +2299,15 @@ fn apply_semantic_tlv_processing(
     // (see `TlvList::set_hmac_response`, RFC 8972 §4.8).
     tlvs.finish_ber_padding(ber_padding_len);
 
-    if let Some(key) = tlv_hmac_key {
-        let response_seq_bytes = &base_bytes[..4];
-        tlvs.set_hmac_response(key, response_seq_bytes);
-    }
+    let tlv_hmac_generated =
+        tlv_hmac_key.is_some_and(|key| tlvs.set_hmac_response(key, &base_bytes[..4]));
 
     Some(SemanticResult {
         cos_request,
         return_path_action,
         reflected_control,
         reply_source,
-        tlv_hmac_generated: tlv_hmac_key.is_some(),
+        tlv_hmac_generated,
     })
 }
 
@@ -2371,10 +2369,10 @@ pub fn assemble_unauth_answer_with_tlvs(
     // Handle TLVs based on mode
     match tlv_mode {
         TlvHandlingMode::Ignore => {
-            // Strip TLVs - just return base packet, optionally padded
-            if original_data.len() > UNAUTH_BASE_SIZE {
-                // Preserve symmetric size with zero padding (no TLVs)
-                response.resize(original_data.len(), 0);
+            // Act as a reflector without TLV support: copy the content
+            // beyond the base packet unprocessed (RFC 8762 §4.3, RFC 8972 §4).
+            if let Some(tail) = original_data.get(UNAUTH_BASE_SIZE..) {
+                response.extend_from_slice(tail);
             }
         }
         TlvHandlingMode::Echo => {
@@ -2382,10 +2380,11 @@ pub fn assemble_unauth_answer_with_tlvs(
             if original_data.len() > UNAUTH_BASE_SIZE {
                 let tlv_data = &original_data[UNAUTH_BASE_SIZE..];
 
-                // Parse TLVs leniently - this handles both valid and malformed TLVs in a single pass.
-                // had_malformed indicates whether any TLV was malformed (which also means strict
-                // parsing would have failed). This avoids double-parsing malformed/adversarial traffic.
-                let (mut tlvs, had_malformed) = TlvList::parse_lenient(tlv_data);
+                // One lenient pass handles valid and malformed TLVs alike.
+                let (mut tlvs, _) = TlvList::parse_lenient(tlv_data);
+                // Bytes the parser left alone: an all-zero tail or 1-3 octets
+                // too short for a TLV header.
+                let unparsed_tail = &tlv_data[tlvs.wire_size().min(tlv_data.len())..];
 
                 // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + TLVs
                 let incoming_seq_bytes = &original_data[..4];
@@ -2417,9 +2416,10 @@ pub fn assemble_unauth_answer_with_tlvs(
                     }
                 }
 
-                // Per RFC 8972 §4.8: on HMAC failure or malformed TLVs, only echo
-                // TLVs with flags set — do NOT perform semantic TLV processing.
-                if hmac_ok && !had_malformed {
+                // On HMAC failure only echo, with I set (RFC 8972 §4.8). With a
+                // malformed TLV, process the TLVs before it; the flags already
+                // mark it M and the rest U (RFC 8972 §4).
+                if hmac_ok && tlvs.allows_processing() {
                     match apply_semantic_tlv_processing(&mut tlvs, ctx, tlv_hmac_key, &base_bytes) {
                         Some(result) => {
                             cos_request = result.cos_request;
@@ -2443,12 +2443,16 @@ pub fn assemble_unauth_answer_with_tlvs(
 
                 tlvs.write_to(&mut response);
 
-                // Restore symmetric size after lenient parsing omits trailing zeros
-                // or a short tail (RFC 8762 §4.3/§4.6). Append padding after the HMAC
-                // so its coverage stays unchanged; never truncate a longer reply.
-                // Skip when Type 12 controls reply length
+                // Copy the unparsed tail after the TLVs so the reply keeps the
+                // request's size and bytes (RFC 8762 §4.3/§4.6). It follows the
+                // HMAC, outside its coverage. Never truncate a longer reply, and
+                // skip when Type 12 controls the reply length
                 // (draft-ietf-ippm-asymmetrical-pkts §3).
                 if reflected_control.is_none() && response.len() < original_data.len() {
+                    let take = unparsed_tail
+                        .len()
+                        .min(original_data.len() - response.len());
+                    response.extend_from_slice(&unparsed_tail[..take]);
                     response.resize(original_data.len(), 0);
                 }
             }
@@ -2511,9 +2515,10 @@ pub fn assemble_auth_answer_with_tlvs(
     // Handle TLVs based on mode
     match tlv_mode {
         TlvHandlingMode::Ignore => {
-            // Strip TLVs - just return base packet, optionally padded
-            if original_data.len() > AUTH_BASE_SIZE {
-                response.resize(original_data.len(), 0);
+            // See the unauthenticated path. The base HMAC covers octets
+            // 0-95 only, so the copied tail does not affect it.
+            if let Some(tail) = original_data.get(AUTH_BASE_SIZE..) {
+                response.extend_from_slice(tail);
             }
         }
         TlvHandlingMode::Echo => {
@@ -2521,10 +2526,11 @@ pub fn assemble_auth_answer_with_tlvs(
             if original_data.len() > AUTH_BASE_SIZE {
                 let tlv_data = &original_data[AUTH_BASE_SIZE..];
 
-                // Parse TLVs leniently - this handles both valid and malformed TLVs in a single pass.
-                // had_malformed indicates whether any TLV was malformed (which also means strict
-                // parsing would have failed). This avoids double-parsing malformed/adversarial traffic.
-                let (mut tlvs, had_malformed) = TlvList::parse_lenient(tlv_data);
+                // One lenient pass handles valid and malformed TLVs alike.
+                let (mut tlvs, _) = TlvList::parse_lenient(tlv_data);
+                // Bytes the parser left alone: an all-zero tail or 1-3 octets
+                // too short for a TLV header.
+                let unparsed_tail = &tlv_data[tlvs.wire_size().min(tlv_data.len())..];
 
                 // Per RFC 8972 §4.8: HMAC covers Sequence Number (first 4 bytes) + TLVs
                 let incoming_seq_bytes = &original_data[..4];
@@ -2562,9 +2568,10 @@ pub fn assemble_auth_answer_with_tlvs(
                     }
                 }
 
-                // Per RFC 8972 §4.8: on HMAC failure or malformed TLVs, only echo
-                // TLVs with flags set — do NOT perform semantic TLV processing.
-                if hmac_ok && !had_malformed {
+                // On HMAC failure only echo, with I set (RFC 8972 §4.8). With a
+                // malformed TLV, process the TLVs before it; the flags already
+                // mark it M and the rest U (RFC 8972 §4).
+                if hmac_ok && tlvs.allows_processing() {
                     match apply_semantic_tlv_processing(&mut tlvs, ctx, tlv_hmac_key, &base_bytes) {
                         Some(result) => {
                             cos_request = result.cos_request;
@@ -2588,15 +2595,13 @@ pub fn assemble_auth_answer_with_tlvs(
 
                 tlvs.write_to(&mut response);
 
-                // RFC 8762 §4.3/§4.6: preserve symmetric size. In the
-                // authenticated layout the padding is appended AFTER the base
-                // packet (including its own HMAC field) and after all echoed
-                // TLVs and the TLV HMAC, so neither the base packet HMAC nor
-                // the TLV HMAC coverage is affected. Never truncate a
-                // legitimately longer reply. Skipped when a Reflected Test
-                // Packet Control TLV (Type 12) governs the reply size. See the
-                // unauthenticated path for the full rationale.
+                // See the unauthenticated path. The tail follows the base
+                // HMAC field and the TLV HMAC, outside both coverages.
                 if reflected_control.is_none() && response.len() < original_data.len() {
+                    let take = unparsed_tail
+                        .len()
+                        .min(original_data.len() - response.len());
+                    response.extend_from_slice(&unparsed_tail[..take]);
                     response.resize(original_data.len(), 0);
                 }
             }
@@ -3373,6 +3378,77 @@ mod tests {
             .is_ok()
     }
 
+    fn reflect_unauth_tlvs(tlvs: &[u8], ctx: &ProcessingContext) -> Vec<u8> {
+        let sender_packet = PacketUnauthenticated {
+            sequence_number: 1,
+            timestamp: 100,
+            error_estimate: 0,
+            ssid: 0,
+            mbz: [0; 28],
+        };
+        let mut request = sender_packet.to_bytes().to_vec();
+        request.extend_from_slice(tlvs);
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &request,
+            ClockFormat::NTP,
+            200,
+            255,
+            0,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            ctx,
+        );
+        response.data[UNAUTH_BASE_SIZE..].to_vec()
+    }
+
+    /// RFC 8972 §4: a TLV whose Length is wrong for its type stops processing.
+    /// It is echoed with M; later TLVs are copied unprocessed with U.
+    #[test]
+    fn test_invalid_length_tlv_stops_processing_of_later_tlvs() {
+        let mut tlvs = vec![0x80, 4, 0, 8, 0xB8, 0, 0, 0, 0, 0, 0, 0]; // CoS, Length 8
+        tlvs.extend_from_slice(&[0x80, 5, 0, 12, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut ctx = test_ctx(10, 1);
+        ctx.reflector_rx_count = Some(7);
+        ctx.reflector_tx_count = Some(9);
+        let reply = reflect_unauth_tlvs(&tlvs, &ctx);
+        assert_eq!(reply[0], 0x40, "CoS carries M only");
+        assert_eq!(reply[12], 0x80, "Direct Measurement is not processed");
+        assert_eq!(&reply[20..28], &[0; 8], "R_RxC/R_TxC left unfilled");
+    }
+
+    /// RFC 8972 §4.3: a Timestamp Information TLV may carry sub-TLVs.
+    #[test]
+    fn test_timestamp_info_with_sub_tlvs_is_filled() {
+        let tlvs = [0x80, 3, 0, 8, 0, 0, 0, 0, 0, 9, 0, 0];
+        let reply = reflect_unauth_tlvs(&tlvs, &test_ctx(0, 0));
+        assert_eq!(reply[0], 0x00, "neither U nor M");
+        assert_ne!(&reply[4..8], &[0, 0, 0, 0], "fields filled");
+        assert_eq!(&reply[8..12], &[0, 9, 0, 0], "sub-TLV bytes copied");
+    }
+
+    /// RFC 8762 §4.3: octets too short for a TLV header are copied, not zeroed.
+    #[test]
+    fn test_short_trailing_octets_are_copied() {
+        let tlvs = [0x80, 1, 0, 4, 0, 0, 0, 0, 0x11, 0x22];
+        let reply = reflect_unauth_tlvs(&tlvs, &test_ctx(0, 0));
+        assert_eq!(&reply[8..], &[0x11, 0x22]);
+    }
+
+    /// RFC 8972 §4: TLVs before a truncated TLV are still processed.
+    #[test]
+    fn test_tlvs_before_truncated_tlv_are_processed() {
+        let mut tlvs = vec![0x80, 4, 0, 4, 0xB8, 0, 0, 0]; // CoS, DSCP1 46
+        tlvs.extend_from_slice(&[0x80, 1, 0, 16, 1, 2, 3, 4]); // Length runs past the end
+        let reply = reflect_unauth_tlvs(&tlvs, &test_ctx(10, 1));
+        assert_eq!(reply[0], 0x00, "processed CoS has U=0, M=0");
+        assert_eq!(reply[5], 0xA4, "DSCP2=10 and ECN=1 were filled in");
+        assert_eq!(reply[8], 0x40, "truncated TLV carries M");
+        assert_eq!(&reply[12..16], &[1, 2, 3, 4], "remainder copied");
+    }
+
     #[test]
     fn test_assemble_unauth_answer_echoes_sender_fields() {
         let sender_packet = PacketUnauthenticated {
@@ -3797,8 +3873,8 @@ mod tests {
 
         // Response should be 48 bytes (44 base + 4 extra)
         assert_eq!(response.len(), 48);
-        // Extra bytes should be zeros per RFC 8762 Section 4.2.1
-        assert_eq!(&response[44..], &[0x00, 0x00, 0x00, 0x00]);
+        // Content beyond the base packet is copied (RFC 8762 §4.3).
+        assert_eq!(&response[44..], &[0xAA, 0xBB, 0xCC, 0xDD]);
     }
 
     #[test]
@@ -3832,8 +3908,8 @@ mod tests {
 
         // Response should be 117 bytes (112 base + 5 extra)
         assert_eq!(response.len(), 117);
-        // Extra bytes should be zeros per RFC 8762 Section 4.2.1
-        assert_eq!(&response[112..], &[0x00, 0x00, 0x00, 0x00, 0x00]);
+        // Content beyond the base packet is copied (RFC 8762 §4.3).
+        assert_eq!(&response[112..], &[0x11, 0x22, 0x33, 0x44, 0x55]);
     }
 
     #[test]
@@ -3896,10 +3972,9 @@ mod tests {
             &test_ctx(0, 0),
         );
 
-        // Response should match original length but TLVs stripped (zero-padded)
+        // TLVs are copied unprocessed, flags included (RFC 8972 §4).
         assert_eq!(response.data.len(), 44 + TLV_HEADER_SIZE + 8);
-        // Extra bytes should be zero (TLVs stripped)
-        assert!(response.data[44..].iter().all(|&b| b == 0));
+        assert_eq!(&response.data[44..], &original_data[44..]);
     }
 
     #[test]
@@ -4047,10 +4122,9 @@ mod tests {
             &test_ctx(0, 0),
         );
 
-        // Response should match original length but TLVs stripped
+        // TLVs are copied unprocessed, flags included (RFC 8972 §4).
         assert_eq!(response.data.len(), 112 + TLV_HEADER_SIZE + 8);
-        // Extra bytes should be zero
-        assert!(response.data[112..].iter().all(|&b| b == 0));
+        assert_eq!(&response.data[112..], &original_data[112..]);
     }
 
     #[test]

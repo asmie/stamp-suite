@@ -49,32 +49,31 @@ impl DestinationNodeAddressOutcome {
 }
 
 impl TlvList {
-    /// Calls `f` once on each non-HMAC owner for which `pred` returns true.
+    /// Calls `f` once on each processable non-HMAC owner for which `pred`
+    /// returns true. See [`RawTlv::is_processable`].
     fn for_each_matching_tlv(
         &mut self,
         mut pred: impl FnMut(&RawTlv) -> bool,
         mut f: impl FnMut(&mut RawTlv),
     ) {
         for tlv in self.non_hmac_tlvs_mut() {
-            if pred(tlv) {
+            if tlv.is_processable() && pred(tlv) {
                 f(tlv);
             }
         }
     }
 
-    /// Extracts the requested DSCP1/ECN1 from the first CoS TLV if present.
-    ///
-    /// Returns `Some((dscp1, ecn1))` if a CoS TLV is found and valid.
+    /// Extracts the requested DSCP1/ECN1 from the first CoS TLV, when that
+    /// TLV is processable and valid.
     #[must_use]
     pub fn get_cos_request(&self) -> Option<(u8, u8)> {
-        for tlv in self.non_hmac_tlvs() {
-            if tlv.tlv_type == TlvType::ClassOfService {
-                if let Ok(cos) = ClassOfServiceTlv::from_raw(tlv) {
-                    return Some((cos.dscp1, cos.ecn1));
-                }
-            }
-        }
-        None
+        let tlv = self
+            .non_hmac_tlvs()
+            .iter()
+            .find(|tlv| tlv.tlv_type == TlvType::ClassOfService)
+            .filter(|tlv| tlv.is_processable())?;
+        let cos = ClassOfServiceTlv::from_raw(tlv).ok()?;
+        Some((cos.dscp1, cos.ecn1))
     }
 
     /// Updates CoS DSCP2/EC2 from ingress metadata and RPD/RPE from the reply
@@ -161,7 +160,7 @@ impl TlvList {
         self.for_each_matching_tlv(
             |tlv| {
                 tlv.tlv_type == TlvType::TimestampInfo
-                    && tlv.value.len() == TIMESTAMP_INFO_TLV_VALUE_SIZE
+                    && tlv.value.len() >= TIMESTAMP_INFO_TLV_VALUE_SIZE
             },
             |tlv| {
                 tlv.value[0] = ingress_source.to_byte();
@@ -281,12 +280,21 @@ impl TlvList {
 
         match sub_type {
             LocationSubType::SourceMac => {
-                // §4.2.2: neither backend observes the received frame's source
-                // MAC (nix = UDP socket, no L2; pnet does not thread it), so we
-                // take the explicit "does not have the Source MAC Address"
-                // branch: answer with Source EUI-64 (3), EUI-64 field zeroed.
-                sub[1] = LocationSubType::SourceEui64.to_byte();
+                // §4.2.2: an EUI-48 source MAC is copied into a Source EUI-48
+                // answer. Without one (the nix backend has no link layer) the
+                // answer is Source EUI-64 with the field zeroed.
+                if !policy.src_mac {
+                    Self::suppress_sub_tlv_answer(sub);
+                    return LocationSubOutcome::Answered;
+                }
                 sub[TLV_HEADER_SIZE..].fill(0);
+                match info.src_mac {
+                    Some(mac) => {
+                        sub[1] = LocationSubType::SourceEui48.to_byte();
+                        sub[TLV_HEADER_SIZE..TLV_HEADER_SIZE + 6].copy_from_slice(&mac);
+                    }
+                    None => sub[1] = LocationSubType::SourceEui64.to_byte(),
+                }
                 set_sub_tlv_flag(sub, LocationSubFlag::Answered);
                 LocationSubOutcome::Answered
             }
@@ -364,9 +372,16 @@ impl TlvList {
         mode: TimestampMethod,
     ) {
         let mode_byte = mode.to_byte();
-        self.for_each_matching_tlv(
-            |tlv| tlv.tlv_type == TlvType::FollowUpTelemetry,
-            |tlv| {
+        // Not `for_each_matching_tlv`: an invalid-length TLV carries M and
+        // must still have its fields zeroed (erratum 8339).
+        for tlv in self.non_hmac_tlvs_mut() {
+            if tlv.tlv_type != TlvType::FollowUpTelemetry
+                || tlv.is_unrecognized()
+                || tlv.is_integrity_failed()
+            {
+                continue;
+            }
+            {
                 let valid_len = tlv.value.len() == FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE;
                 match reflection {
                     // Stateful mode + well-formed TLV: report the previous
@@ -385,8 +400,8 @@ impl TlvList {
                         tlv.value[..end].fill(0);
                     }
                 }
-            },
-        );
+            }
+        }
     }
 
     /// Marks well-formed Access Reports with IDs other than 1 or 2 unrecognized
@@ -425,6 +440,9 @@ impl TlvList {
         // The non-HMAC prefix retains encounter order.
         for tlv in self.non_hmac_tlvs_mut() {
             if tlv.tlv_type == TlvType::DestinationNodeAddress {
+                if !tlv.is_processable() {
+                    break;
+                }
                 if let Ok(dna) = DestinationNodeAddressTlv::from_raw(tlv) {
                     if local_addrs.contains(&dna.address) {
                         outcome = DestinationNodeAddressOutcome::Matched(dna.address);
@@ -454,7 +472,7 @@ impl TlvList {
             .iter()
             .position(|tlv| tlv.tlv_type == TlvType::ReturnPath);
 
-        let Some(idx) = rp_idx else {
+        let Some(idx) = rp_idx.filter(|&i| self.non_hmac_tlvs()[i].is_processable()) else {
             return ReturnPathAction::Normal;
         };
 
@@ -552,14 +570,12 @@ impl TlvList {
     /// honoured; duplicates are ignored.
     #[must_use]
     pub fn get_reflected_control_request(&self) -> Option<ReflectedControlTlv> {
-        for tlv in self.non_hmac_tlvs() {
-            if tlv.tlv_type == TlvType::ReflectedControl {
-                if let Ok(parsed) = ReflectedControlTlv::from_raw(tlv) {
-                    return Some(parsed);
-                }
-            }
-        }
-        None
+        let tlv = self
+            .non_hmac_tlvs()
+            .iter()
+            .find(|tlv| tlv.tlv_type == TlvType::ReflectedControl)
+            .filter(|tlv| tlv.is_processable())?;
+        ReflectedControlTlv::from_raw(tlv).ok()
     }
 
     /// Marks the first Reflected Test Packet Control TLV with U when its request
@@ -604,6 +620,9 @@ impl TlvList {
         let mut burst_idx: Option<usize> = None;
 
         for (i, tlv) in self.non_hmac_tlvs().iter().enumerate() {
+            if !tlv.is_processable() {
+                continue;
+            }
             match tlv.tlv_type {
                 TlvType::ExtraPadding => {
                     padding_count += 1;
@@ -670,7 +689,7 @@ impl TlvList {
                 Self::mark_ber_tlvs_nonconformant(self.non_hmac_tlvs_mut());
             }
             for tlv in self.non_hmac_tlvs_mut() {
-                if tlv.tlv_type == TlvType::BerPattern {
+                if tlv.tlv_type == TlvType::BerPattern && tlv.is_processable() {
                     tlv.set_conformant_reflected();
                 }
             }
@@ -839,7 +858,7 @@ impl TlvList {
         // and, on violation, C-flag every header TLV and copy nothing.
         let mut seen_ext = false;
         let mut out_of_order = false;
-        for tlv in tlvs.iter() {
+        for tlv in tlvs.iter().filter(|tlv| tlv.is_processable()) {
             match tlv.tlv_type {
                 TlvType::ReflectedIpv6ExtHdr => seen_ext = true,
                 TlvType::ReflectedFixedHdr if seen_ext => {
@@ -850,7 +869,7 @@ impl TlvList {
             }
         }
         if out_of_order {
-            for tlv in tlvs.iter_mut() {
+            for tlv in tlvs.iter_mut().filter(|tlv| tlv.is_processable()) {
                 if matches!(
                     tlv.tlv_type,
                     TlvType::ReflectedFixedHdr | TlvType::ReflectedIpv6ExtHdr
@@ -875,7 +894,7 @@ impl TlvList {
         // observe the same filled payload.
         let mut consumed_ext: Vec<bool> = Vec::new();
         let mut consumed_fixed: Vec<bool> = Vec::new();
-        for tlv in tlvs {
+        for tlv in tlvs.iter_mut().filter(|tlv| tlv.is_processable()) {
             match tlv.tlv_type {
                 TlvType::ReflectedFixedHdr => {
                     Self::apply_reflected_fixed(tlv, fixed_records.as_deref(), &mut consumed_fixed);
@@ -1041,7 +1060,7 @@ impl TlvList {
 
     fn mark_ipv6_ext_hdr_control_c(tlvs: &mut [RawTlv]) {
         for tlv in tlvs {
-            if tlv.tlv_type != TlvType::ReflectedControl {
+            if tlv.tlv_type != TlvType::ReflectedControl || !tlv.is_processable() {
                 continue;
             }
             let value = &mut tlv.value;
@@ -1071,7 +1090,7 @@ impl TlvList {
     }
 
     fn mark_ber_tlvs_nonconformant(tlvs: &mut [RawTlv]) {
-        for tlv in tlvs {
+        for tlv in tlvs.iter_mut().filter(|tlv| tlv.is_processable()) {
             if matches!(
                 tlv.tlv_type,
                 TlvType::BerPattern | TlvType::BerCount | TlvType::BerBurst
@@ -1097,10 +1116,10 @@ impl TlvList {
     ///
     /// Returns `false` if a non-zero reflector ID doesn't match `refl_id`.
     fn apply_micro_session_id(tlvs: &mut [RawTlv], refl_id: u16) -> bool {
-        for tlv in tlvs {
+        for tlv in tlvs.iter_mut().filter(|tlv| tlv.is_processable()) {
             if tlv.tlv_type == TlvType::MicroSessionId {
                 let Ok(msid) = MicroSessionIdTlv::from_raw(tlv) else {
-                    continue; // Malformed — skip (M-flag already set by parse_lenient)
+                    continue;
                 };
 
                 if msid.reflector_micro_session_id != 0
@@ -1234,6 +1253,7 @@ mod tests {
         let (mut list, malformed) =
             TlvList::parse_lenient(&[0, 4, 0, 4, 0, 0, 0, 0, 0, 1, 0, 8, 42]);
         assert!(malformed);
+        list.clear_reflector_flags();
         let mut visits = 0;
         list.for_each_matching_tlv(|_| true, |_| visits += 1);
         assert_eq!(visits, list.non_hmac_tlvs().len());
@@ -1262,6 +1282,7 @@ mod tests {
         let sender_tlv = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::SwLocal);
         list.push(sender_tlv.to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         list.update_timestamp_info_tlvs(
             SyncSource::Ptp,
             TimestampMethod::SwLocal,
@@ -1290,6 +1311,7 @@ mod tests {
         let stale = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::HwAssist);
         list.push(stale.to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         list.update_timestamp_info_tlvs(
             SyncSource::Ptp,
             TimestampMethod::SwLocal,
@@ -1332,6 +1354,7 @@ mod tests {
         let sender_tlv = DirectMeasurementTlv::new(100);
         list.push(sender_tlv.to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         list.update_direct_measurement_tlvs(50, 49);
 
         let raw = &list.non_hmac_tlvs()[0];
@@ -1373,7 +1396,9 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
+            src_mac: None,
         };
+        list.clear_reflector_flags();
         list.update_location_tlvs(&info, LocationDisclosure::all());
         let v = &list.non_hmac_tlvs()[0].value;
         assert_eq!(v.len(), req.len(), "Location TLV Length preserved (§4.2.2)");
@@ -1406,8 +1431,10 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
+            src_mac: None,
         };
 
+        list.clear_reflector_flags();
         list.update_location_tlvs(&info, LocationDisclosure::none());
         let v = &list.non_hmac_tlvs()[0].value;
 
@@ -1440,6 +1467,7 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
+            src_mac: None,
         };
 
         // Ports allowed, addresses withheld.
@@ -1448,7 +1476,9 @@ mod tests {
             dst_port: true,
             src_ip: false,
             dst_ip: false,
+            src_mac: false,
         };
+        list.clear_reflector_flags();
         list.update_location_tlvs(&info, policy);
         let v = &list.non_hmac_tlvs()[0].value;
         assert_eq!(&v[0..2], &862u16.to_be_bytes(), "dst port disclosed");
@@ -1472,7 +1502,9 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
+            src_mac: None,
         };
+        list.clear_reflector_flags();
         list.update_location_tlvs(&info, LocationDisclosure::all());
 
         let raw = &list.non_hmac_tlvs()[0];
@@ -1517,7 +1549,9 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V6(dst),
             dst_port: 862,
+            src_mac: None,
         };
+        list.clear_reflector_flags();
         list.update_location_tlvs(&info, LocationDisclosure::all());
 
         let raw = &list.non_hmac_tlvs()[0];
@@ -1559,13 +1593,53 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
+            src_mac: None,
         };
+        list.clear_reflector_flags();
         list.update_location_tlvs(&info, LocationDisclosure::all());
         let parsed = LocationTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
         assert_eq!(parsed.sub_tlvs.len(), 1);
         assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceEui64);
         assert_eq!(parsed.sub_tlvs[0].value, vec![0u8; 8]);
         assert!(!parsed.sub_tlvs[0].flags.unrecognized);
+    }
+
+    #[test]
+    fn test_update_location_source_mac_answered_as_eui48() {
+        // RFC 8972 §4.2.2: an observed EUI-48 source MAC is copied into a
+        // Source EUI-48 (2) answer with the two MBZ octets zeroed.
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut req = vec![0u8; 4];
+        req.extend_from_slice(&[0x80, 1, 0x00, 0x08]);
+        req.extend_from_slice(&[0xFF; 8]);
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::Location, req)).unwrap();
+        let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let info = PacketAddressInfo {
+            src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            src_port: 50000,
+            dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            dst_port: 862,
+            src_mac: Some(mac),
+        };
+        list.clear_reflector_flags();
+        list.update_location_tlvs(&info, LocationDisclosure::all());
+        let parsed = LocationTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+        assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceEui48);
+        assert_eq!(&parsed.sub_tlvs[0].value[..6], &mac);
+        assert_eq!(&parsed.sub_tlvs[0].value[6..], &[0, 0]);
+
+        // Withheld: the generic request stays, zeroed.
+        let mut req = vec![0u8; 4];
+        req.extend_from_slice(&[0x80, 1, 0x00, 0x08]);
+        req.extend_from_slice(&[0u8; 8]);
+        let mut list = TlvList::new();
+        list.push(RawTlv::new(TlvType::Location, req)).unwrap();
+        list.clear_reflector_flags();
+        list.update_location_tlvs(&info, LocationDisclosure::none());
+        let parsed = LocationTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+        assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceMac);
+        assert_eq!(parsed.sub_tlvs[0].value, vec![0u8; 8]);
     }
 
     #[test]
@@ -1586,6 +1660,7 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
+            src_mac: None,
         };
         list.update_location_tlvs(&info, LocationDisclosure::all());
         let raw = &list.non_hmac_tlvs()[0];
@@ -1622,7 +1697,9 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
+            src_mac: None,
         };
+        list.clear_reflector_flags();
         list.update_location_tlvs(&info, LocationDisclosure::all());
         let raw = &list.non_hmac_tlvs()[0];
         assert_eq!(raw.value.len(), req.len(), "Length preserved");
@@ -1654,7 +1731,9 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
+            src_mac: None,
         };
+        list.clear_reflector_flags();
         list.update_location_tlvs(&info, LocationDisclosure::all());
 
         let raw = &list.non_hmac_tlvs()[0];
@@ -1687,7 +1766,9 @@ mod tests {
             src_port: 50000,
             dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             dst_port: 862,
+            src_mac: None,
         };
+        list.clear_reflector_flags();
         list.update_location_tlvs(&info, LocationDisclosure::all());
 
         let raw = &list.non_hmac_tlvs()[0];
@@ -1712,6 +1793,7 @@ mod tests {
         list.push(sender_tlv.to_raw()).unwrap();
 
         // Stateful mode: report the previous reflection's seq/timestamp.
+        list.clear_reflector_flags();
         list.update_follow_up_telemetry_tlvs(
             Some((42, 0xDEADBEEFCAFEBABE)),
             TimestampMethod::SwLocal,
@@ -1758,6 +1840,7 @@ mod tests {
         list.push(RawTlv::new(TlvType::FollowUpTelemetry, vec![0xFF; 8]))
             .unwrap();
 
+        list.clear_reflector_flags();
         list.update_follow_up_telemetry_tlvs(Some((42, 100)), TimestampMethod::SwLocal);
 
         assert_eq!(
@@ -1822,6 +1905,7 @@ mod tests {
         list.push(tlv.to_raw()).unwrap();
 
         let local_addrs = vec!["10.0.0.1".parse().unwrap()];
+        list.clear_reflector_flags();
         let outcome = list.process_destination_node_address(&local_addrs);
         assert!(!outcome.matched_or_absent());
         assert_eq!(
@@ -1838,6 +1922,7 @@ mod tests {
         let mut list = TlvList::new();
         list.push(rp.to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         let action = list.process_return_path(1234, false);
         assert_eq!(action, ReturnPathAction::SuppressReply);
     }
@@ -1870,6 +1955,7 @@ mod tests {
         let mut list = TlvList::new();
         list.push(rp.to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         let action = list.process_return_path(1234, false);
         assert_eq!(action, ReturnPathAction::SuppressReply);
     }
@@ -1901,6 +1987,7 @@ mod tests {
 
         // allow_alternate = true: the operator opted in, so the reply is
         // directed to the requested address.
+        list.clear_reflector_flags();
         let action = list.process_return_path(862, true);
         assert_eq!(
             action,
@@ -1937,6 +2024,7 @@ mod tests {
         let mut list = TlvList::new();
         list.push(rp.to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         let action = list.process_return_path(862, false);
         assert_eq!(action, ReturnPathAction::UnsupportedSr);
         assert!(list.non_hmac_tlvs()[0].is_unrecognized());
@@ -1975,6 +2063,7 @@ mod tests {
         let mut list = TlvList::new();
         list.push(msid.to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         let ok = list.update_micro_session_id_tlvs(99);
         assert!(ok);
 
@@ -2002,6 +2091,7 @@ mod tests {
         let mut list = TlvList::new();
         list.push(msid.to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         let ok = list.update_micro_session_id_tlvs(99);
         assert!(!ok);
     }
@@ -2120,6 +2210,7 @@ mod tests {
         list.push(BerCountTlv::default().to_raw()).unwrap();
         list.push(BerBurstTlv::default().to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         list.process_ber();
 
         let tlvs = list.non_hmac_tlvs();
@@ -2173,6 +2264,7 @@ mod tests {
         list.push(BerCountTlv::default().to_raw()).unwrap();
         list.push(BerBurstTlv::default().to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         list.process_ber();
 
         for tlv in list.non_hmac_tlvs() {
@@ -2197,6 +2289,7 @@ mod tests {
         list.push(BerCountTlv::default().to_raw()).unwrap();
         list.push(BerCountTlv::default().to_raw()).unwrap();
 
+        list.clear_reflector_flags();
         list.process_ber();
 
         let tlvs = list.non_hmac_tlvs();
@@ -2231,6 +2324,7 @@ mod tests {
         list.push(ReflectedControlTlv::new(1500, 4, 1_000_000).to_raw())
             .unwrap();
 
+        list.clear_reflector_flags();
         let req = list.get_reflected_control_request().unwrap();
         assert_eq!(req.length_of_reflected_packet, 1500);
         assert_eq!(req.number_of_reflected_packets, 4);

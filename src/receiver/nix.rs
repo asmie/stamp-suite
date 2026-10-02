@@ -584,6 +584,7 @@ pub async fn run_receiver(
                     src_port: src_addr.port(),
                     dst_addr,
                     dst_port: local_addr.port(),
+                    src_mac: None, // a UDP socket does not see the link layer
                 });
 
                 // Catch packet-processing panics so the receive loop survives.

@@ -140,7 +140,7 @@ impl fmt::Display for AuthMode {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum TlvHandlingMode {
-    /// Ignore TLVs - strip them from reflected packets (zero-pad to preserve length).
+    /// Copy TLVs unprocessed, as a reflector without TLV support does.
     Ignore,
     /// Echo TLVs back to sender, marking unknown types with U-flag per RFC 8972.
     #[default]
@@ -310,11 +310,11 @@ pub struct Configuration {
     #[clap(short = 'i', long, default_value_t = false)]
     pub is_reflector: bool,
 
-    /// Error estimate scale (0-63). Default: 0
+    /// Error Estimate scale (0-63).
     #[clap(long, default_value_t = 0)]
     pub error_scale: u8,
 
-    /// Error estimate multiplier (0-255). Default: 1
+    /// Error Estimate multiplier (1-255). RFC 4656 §4.1.2 forbids zero.
     #[clap(long, default_value_t = 1)]
     pub error_multiplier: u8,
 
@@ -416,16 +416,17 @@ pub struct Configuration {
 
     /// Location TLV fields the reflector may report (RFC 8972 §4.2.2).
     /// Comma-separated: `all` (default), `none`, or `src-port`, `dst-port`,
-    /// `ports`, `src-ip`, `dst-ip`, `ips`. Withheld fields are zeroed without
-    /// changing the TLV length or structure.
+    /// `ports`, `src-ip`, `dst-ip`, `ips`, `src-mac`. Withheld fields are
+    /// zeroed without changing the TLV length or structure.
     ///
     /// Reflector-side only; ignored by the sender.
     #[clap(long, default_value = "all", value_name = "FIELDS")]
     pub location_disclose: String,
 
-    /// TLV handling mode for the reflector (RFC 8972). Default: echo.
-    /// - ignore: Strip TLVs from reflected packets (zero-pad to preserve length)
-    /// - echo: Echo TLVs back, marking unknown types with U-flag
+    /// Reflector TLV handling (RFC 8972).
+    /// - echo: process supported TLVs and set U/M/I flags
+    /// - ignore: copy everything after the base packet unprocessed, like a
+    ///   reflector without TLV support
     #[clap(long, value_enum, default_value_t = TlvHandlingMode::Echo)]
     pub tlv_mode: TlvHandlingMode,
 
@@ -506,11 +507,9 @@ pub struct Configuration {
     #[clap(long, value_enum)]
     pub malformed: Option<MalformedMode>,
 
-    /// Enable Access Report TLV with Access ID 1-15 (RFC 8972 §4.6).
-    /// IDs 1 (3GPP Network) and 2 (Non-3GPP Network) are defined; 3-15 are
-    /// accepted with a startup warning. Zero is rejected.
-    /// The reflector echoes valid reports unchanged.
-    #[clap(long, value_parser = clap::value_parser!(u8).range(1..=15))]
+    /// Send an Access Report TLV with this Access ID (RFC 8972 §4.6):
+    /// 1 = 3GPP Network, 2 = Non-3GPP Network. A reflector discards other IDs.
+    #[clap(long, value_parser = clap::value_parser!(u8).range(1..=2))]
     pub access_report: Option<u8>,
 
     /// Return code for Access Report TLV (default: 1 = available).
@@ -1162,6 +1161,11 @@ impl Configuration {
                 self.error_scale
             )));
         }
+        if self.error_multiplier == 0 {
+            return Err(ConfigurationError::InvalidConfiguration(
+                "Error multiplier must not be 0 (RFC 4656 §4.1.2, used by RFC 8762 §4.2.1)".into(),
+            ));
+        }
 
         // Validate --verify-tlv-hmac requires HMAC key to be configured
         if self.verify_tlv_hmac
@@ -1276,30 +1280,12 @@ impl Configuration {
             ));
         }
         if let Some(id) = self.access_report {
-            // RFC 8972 §4.6: Access ID is four bits; zero is invalid.
-            // Accept unassigned IDs 3-15 with a startup warning.
-            if id == 0 {
-                return Err(ConfigurationError::InvalidConfiguration(
-                    "access_report value 0 is invalid: RFC 8972 §4.6 defines no Access ID 0 \
-                     (valid range is 1-15)"
-                        .to_string(),
-                ));
-            }
-            if id > 15 {
+            // RFC 8972 §4.6: reflectors MUST discard Access IDs other than 1 and 2.
+            if !matches!(id, 1 | 2) {
                 return Err(ConfigurationError::InvalidConfiguration(format!(
-                    "access_report value {} exceeds maximum of 15",
-                    id
+                    "access_report value {id} is invalid: RFC 8972 §4.6 defines Access ID 1 \
+                     (3GPP Network) and 2 (Non-3GPP Network)"
                 )));
-            }
-            if id > 2 {
-                // validate() runs before init_logging(), so a log::warn! here
-                // would be silently dropped; pre-init diagnostics go to stderr
-                // like the other configuration messages on this path.
-                eprintln!(
-                    "warning: access_report Access ID {id} is not in the RFC 8972 §4.6 registry \
-                     (only 1=3GPP Network and 2=Non-3GPP Network are currently defined); \
-                     proceeding since it may be a future registry allocation"
-                );
             }
         }
         // RFC 8972 §4.6: "An implementation MUST provide control of the
@@ -1958,7 +1944,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "print_stats": { "type": "boolean" },
     "is_reflector": { "type": "boolean" },
     "error_scale": { "type": "integer", "minimum": 0, "maximum": 63 },
-    "error_multiplier": { "type": "integer", "minimum": 0, "maximum": 255 },
+    "error_multiplier": { "type": "integer", "minimum": 1, "maximum": 255 },
     "clock_synchronized": { "type": "boolean" },
     "hmac_key_file": { "type": "string" },
     "hmac_key_dir":  { "type": "string" },
@@ -1987,7 +1973,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "ecn_recovery_step": { "type": "integer", "minimum": 1 },
     "ttl":  { "type": "integer", "const": 255 },
     "malformed": { "enum": ["bad-flags", "bad-length"] },
-    "access_report": { "type": "integer", "minimum": 1, "maximum": 15 },
+    "access_report": { "type": "integer", "minimum": 1, "maximum": 2 },
     "access_return_code": { "type": "integer", "minimum": 0, "maximum": 255 },
     "access_report_timeout": { "type": "integer", "minimum": 1, "maximum": 3600 },
     "access_report_retries": { "type": "integer", "minimum": 0, "maximum": 255 },
@@ -3070,6 +3056,14 @@ mod tests {
     }
 
     #[test]
+    fn test_error_multiplier_zero_is_rejected() {
+        let conf = Configuration::parse_from(["test", "--error-multiplier", "0"]);
+        assert!(conf.validate().is_err());
+        let conf = Configuration::parse_from(["test", "--error-multiplier", "1"]);
+        assert!(conf.validate().is_ok());
+    }
+
+    #[test]
     fn test_hmac_key_option() {
         let args = vec!["test", "--hmac-key", "0123456789abcdef0123456789abcdef"];
         let conf = Configuration::parse_from(args);
@@ -3917,26 +3911,23 @@ mod tests {
         }
     }
 
-    /// Accept unassigned Access IDs 3-15 within the four-bit field (RFC 8972 §4.6).
-    /// The startup warning is not asserted here.
+    /// RFC 8972 §4.6: reflectors discard Access IDs other than 1 and 2, so the
+    /// sender refuses to send them, from the CLI or a config file.
     #[test]
-    fn test_access_report_accepts_undefined_registry_values_within_4_bits() {
-        for value in ["3", "15"] {
-            let conf = load_from_args(&["test", "--access-report", value])
-                .unwrap_or_else(|e| panic!("--access-report {value} must be accepted: {e}"));
-            assert_eq!(conf.access_report, Some(value.parse().unwrap()));
+    fn test_access_report_rejects_ids_outside_registry() {
+        for value in ["0", "3", "15", "16"] {
+            assert!(
+                Configuration::command()
+                    .try_get_matches_from(["test", "--access-report", value])
+                    .is_err(),
+                "--access-report {value} must be rejected"
+            );
         }
-    }
-
-    /// The field is 4 bits wide: 16 and above must still be rejected.
-    #[test]
-    fn test_access_report_cli_rejects_above_4_bit_range() {
-        let result =
-            Configuration::command().try_get_matches_from(["test", "--access-report", "16"]);
-        assert!(
-            result.is_err(),
-            "--access-report 16 exceeds the 4-bit field width and must be rejected"
-        );
+        let mut conf = Configuration::parse_from(["test"]);
+        conf.access_report = Some(3);
+        assert!(conf.validate().is_err());
+        conf.access_report = Some(2);
+        assert!(conf.validate().is_ok());
     }
 
     /// RFC 8972 §4.6: "The default value of the retransmission timer for
@@ -4566,7 +4557,7 @@ mod tests {
     fn test_validate_rejects_bad_location_disclose() {
         // A typo must fail at startup, not silently degrade to a default
         // policy on every packet.
-        let err = load_from_args(&["test", "--location-disclose", "src-mac"])
+        let err = load_from_args(&["test", "--location-disclose", "src-vlan"])
             .expect_err("an unknown Location field must be rejected");
         assert!(
             err.to_string().contains("location-disclose"),

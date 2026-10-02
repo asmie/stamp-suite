@@ -542,6 +542,7 @@ fn test_location_tlv_ipv4_round_trip() {
         src_port: 12345,
         dst_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         dst_port: 862,
+        src_mac: None,
     };
 
     let ctx = ProcessingContext {

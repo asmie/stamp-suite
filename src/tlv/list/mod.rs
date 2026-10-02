@@ -560,14 +560,11 @@ impl TlvList {
         }
     }
 
-    /// Returns true if the TLV list contains only Extra Padding TLVs.
+    /// True when the list is exactly one Extra Padding TLV, the only case in
+    /// which authenticated mode may omit the HMAC TLV (RFC 8972 §4.8).
     #[must_use]
     pub fn contains_only_extra_padding(&self) -> bool {
-        !self.entries.is_empty()
-            && self
-                .entries
-                .iter()
-                .all(|t| t.tlv_type == TlvType::ExtraPadding)
+        matches!(self.entries.as_slice(), [only] if only.tlv_type == TlvType::ExtraPadding)
     }
 
     /// Counts TLVs with each error flag type (U, M, I).
@@ -622,14 +619,27 @@ impl TlvList {
     /// RFC 8972 §4.8 requires TLV authentication in authenticated mode (except a
     /// sole Extra Padding TLV) and permits it in unauthenticated mode.
     /// Callers skip this when TLV handling is `Ignore`.
-    pub fn set_hmac_response(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) {
+    ///
+    /// Returns false, leaving the list unchanged, for structurally malformed
+    /// lists: a new HMAC TLV cannot follow a truncated TLV.
+    pub fn set_hmac_response(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) -> bool {
         if self.malformed_echo {
-            return;
+            return false;
         }
         self.set_hmac(key, sequence_number_bytes);
         if let Some(hmac) = self.hmac_tlv_mut() {
             hmac.flags = TlvFlags::default();
         }
+        true
+    }
+
+    /// Whether the TLVs before the first malformed one may be processed.
+    /// A structurally malformed list that carries an HMAC TLV is only echoed:
+    /// processing would change bytes its HMAC covers, and the reply cannot
+    /// be re-signed without changing the received layout.
+    #[must_use]
+    pub fn allows_processing(&self) -> bool {
+        !(self.malformed_echo && self.hmac_tlv().is_some())
     }
 
     /// Marks unrecognized TLV types with the U flag.
@@ -675,6 +685,7 @@ impl TlvList {
             }
             Self::validate_known_tlv_lengths_slice(std::slice::from_mut(tlv));
         }
+        self.mark_unprocessed_after_malformed();
 
         // A misplaced HMAC sets I on every TLV (RFC 8972 §4.8), even without
         // a configured key. Check position before verification branches.
@@ -698,6 +709,25 @@ impl TlvList {
             false
         } else {
             true
+        }
+    }
+
+    /// RFC 8972 §4: "If a TLV is malformed, the processing of extension TLVs
+    /// MUST be stopped" and the remainder is copied. Every non-HMAC TLV after
+    /// the first malformed one, in wire order, gets U (not processed) instead
+    /// of the flags derived for it. The HMAC TLV is still verified.
+    fn mark_unprocessed_after_malformed(&mut self) {
+        let mut stopped = false;
+        let non_hmac_len = self.non_hmac_len;
+        for position in 0..self.entries.len() {
+            let index = self.wire_order.as_ref().map_or(position, |o| o[position]);
+            let tlv = &mut self.entries[index];
+            if stopped && index < non_hmac_len {
+                tlv.clear_reflector_flags();
+                tlv.set_unrecognized();
+            } else if tlv.is_malformed() && index < non_hmac_len {
+                stopped = true;
+            }
         }
     }
 
@@ -745,7 +775,8 @@ impl TlvList {
             let bad_length = match tlv.tlv_type {
                 TlvType::ClassOfService => tlv.value.len() != COS_TLV_VALUE_SIZE,
                 TlvType::AccessReport => tlv.value.len() != ACCESS_REPORT_TLV_VALUE_SIZE,
-                TlvType::TimestampInfo => tlv.value.len() != TIMESTAMP_INFO_TLV_VALUE_SIZE,
+                // Optional sub-TLVs may follow the four fields (RFC 8972 §4.3).
+                TlvType::TimestampInfo => tlv.value.len() < TIMESTAMP_INFO_TLV_VALUE_SIZE,
                 TlvType::DirectMeasurement => tlv.value.len() != DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
                 TlvType::Location => tlv.value.len() < LOCATION_TLV_MIN_VALUE_SIZE,
                 TlvType::FollowUpTelemetry => tlv.value.len() != FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE,
@@ -1614,9 +1645,11 @@ mod tests {
         let mut list = TlvList::new();
         list.push(RawTlv::new(TlvType::ExtraPadding, vec![0; 4]))
             .unwrap();
+        assert!(list.contains_only_extra_padding());
+        // RFC 8972 §4.8 exempts a single Extra Padding TLV, not several.
         list.push(RawTlv::new(TlvType::ExtraPadding, vec![0; 8]))
             .unwrap();
-        assert!(list.contains_only_extra_padding());
+        assert!(!list.contains_only_extra_padding());
     }
 
     #[test]

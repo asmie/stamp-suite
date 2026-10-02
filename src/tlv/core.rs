@@ -102,7 +102,7 @@ pub enum TlvError {
     InvalidAccessReportLength(usize),
 
     /// Timestamp Information TLV has invalid length.
-    #[error("Timestamp Info TLV has invalid length {0}, expected {TIMESTAMP_INFO_TLV_VALUE_SIZE}")]
+    #[error("Timestamp Info TLV has invalid length {0}, expected at least {TIMESTAMP_INFO_TLV_VALUE_SIZE}")]
     InvalidTimestampInfoLength(usize),
 
     /// Direct Measurement TLV has invalid length.
@@ -577,6 +577,14 @@ impl RawTlv {
     #[must_use]
     pub fn is_integrity_failed(&self) -> bool {
         self.flags.integrity_failed
+    }
+
+    /// True when the reflector may act on this TLV: none of U, M or I is set.
+    /// After `TlvList::apply_reflector_flags_strict`, TLVs that follow a
+    /// malformed one carry U, so this also ends processing there (RFC 8972 §4).
+    #[must_use]
+    pub fn is_processable(&self) -> bool {
+        !(self.flags.unrecognized || self.flags.malformed || self.flags.integrity_failed)
     }
 
     /// Sets the unrecognized flag (U-flag).

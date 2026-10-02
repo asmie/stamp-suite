@@ -428,6 +428,7 @@ fn cos_tlv_destination_scoped_policy_decides_per_peer() {
         src_port: permitted_peer.port(),
         dst_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         dst_port: 862,
+        src_mac: None,
     });
     let response =
         process_stamp_packet(&packet, permitted_peer, 64, false, &ctx).expect("reflected");
@@ -444,6 +445,7 @@ fn cos_tlv_destination_scoped_policy_decides_per_peer() {
         src_port: refused_peer.port(),
         dst_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
         dst_port: 862,
+        src_mac: None,
     });
     let response = process_stamp_packet(&packet, refused_peer, 64, false, &ctx).expect("reflected");
     assert_eq!(
