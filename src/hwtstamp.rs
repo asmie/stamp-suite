@@ -14,6 +14,7 @@
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(test, feature = "hwtstamp"))]
 use crate::tlv::TimestampMethod;
 
 /// Operator preference for hardware-assisted timestamping. Selected via
@@ -518,6 +519,7 @@ pub fn interface_for_addr(_addr: std::net::IpAddr) -> Option<String> {
 /// otherwise `SwLocal`. This is capability policy, not per-packet provenance.
 #[must_use]
 // Capability policy only; not evidence of how a particular timestamp was acquired.
+#[cfg(test)]
 pub fn effective_method(
     mode: HwTsMode,
     cap: HwTsCapability,

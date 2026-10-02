@@ -355,8 +355,10 @@ async fn test_stateful_reflector_multi_client() {
                 let rcvt = generate_timestamp(ClockFormat::NTP);
                 if let Ok(packet) = PacketUnauthenticated::from_bytes(&buf[..len]) {
                     // Generate reflector sequence number from SessionManager
-                    let reflector_seq =
-                        session_manager_clone.generate_sequence_number(src).unwrap();
+                    let reflector_seq = session_manager_clone
+                        .get_or_create_session(src)
+                        .unwrap()
+                        .generate_sequence_number();
 
                     let answer = assemble_unauth_answer(
                         &packet,

@@ -1,0 +1,1935 @@
+#[test]
+fn canonical_mutation_visits_each_wire_tlv_once() {
+    let (mut list, malformed) = TlvList::parse_lenient(&[0, 4, 0, 4, 0, 0, 0, 0, 0, 1, 0, 8, 42]);
+    assert!(malformed);
+    list.clear_reflector_flags();
+    let mut visits = 0;
+    list.for_each_matching_tlv(|_| true, |_| visits += 1);
+    assert_eq!(visits, list.non_hmac_tlvs().len());
+}
+
+use super::*;
+use crate::tlv::core::RawTlv;
+use crate::tlv::{
+    AccessReportTlv, BerBurstTlv, BerCountTlv, BerPatternTlv, DirectMeasurementTlv,
+    ExtraPaddingTlv, FollowUpTelemetryTlv, LocationTlv, ReflectedControlTlv, TimestampInfoTlv,
+};
+
+/// Builds a single-TLV list and runs the reflector clear pass on it,
+/// mimicking the production pipeline state at the point each
+/// `process_*` function would normally run.
+fn list_with_cleared(tlv: RawTlv) -> TlvList {
+    let mut list = TlvList::new();
+    list.push(tlv).unwrap();
+    list.clear_reflector_flags();
+    list
+}
+
+#[test]
+fn test_update_timestamp_info_tlvs() {
+    let mut list = TlvList::new();
+    let sender_tlv = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::SwLocal);
+    list.push(sender_tlv.to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    list.update_timestamp_info_tlvs(
+        SyncSource::Ptp,
+        TimestampMethod::SwLocal,
+        TimestampMethod::HwAssist,
+    );
+
+    let raw = &list.non_hmac_tlvs()[0];
+    let parsed = TimestampInfoTlv::from_raw(raw).unwrap();
+    // RFC 8972 §4.3: all four octets describe the *reflector*, and the
+    // sender zeroes them (RFC8972-4.3-2), so the reflector fills every
+    // one — including the In pair, which characterizes its own ingress
+    // (T2) rather than anything the sender put there.
+    assert_eq!(parsed.sync_src_in, SyncSource::Ptp);
+    assert_eq!(parsed.timestamp_in, TimestampMethod::SwLocal);
+    assert_eq!(parsed.sync_src_out, SyncSource::Ptp);
+    assert_eq!(parsed.timestamp_out, TimestampMethod::HwAssist);
+}
+
+/// RFC8972-4.3-5/-6: the ingress ("In") pair must report the reflector's
+/// own T2 clock, so a stale value a non-conformant sender left there is
+/// overwritten rather than echoed back.
+#[test]
+fn test_update_timestamp_info_overwrites_sender_supplied_in_fields() {
+    let mut list = TlvList::new();
+    // A non-conformant sender that filled the In fields itself.
+    let stale = TimestampInfoTlv::new(SyncSource::Ntp, TimestampMethod::HwAssist);
+    list.push(stale.to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    list.update_timestamp_info_tlvs(
+        SyncSource::Ptp,
+        TimestampMethod::SwLocal,
+        TimestampMethod::SwLocal,
+    );
+
+    let parsed = TimestampInfoTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!(
+        parsed.sync_src_in,
+        SyncSource::Ptp,
+        "Sync Src In must be the reflector's clock, not the sender's"
+    );
+    assert_eq!(
+        parsed.timestamp_in,
+        TimestampMethod::SwLocal,
+        "Timestamp In must be the reflector's real T2 method"
+    );
+}
+
+#[test]
+fn test_update_timestamp_info_skips_wrong_size() {
+    let mut list = TlvList::new();
+    // Push a TimestampInfo with wrong size (3 bytes instead of 4)
+    list.push(RawTlv::new(TlvType::TimestampInfo, vec![1, 2, 3]))
+        .unwrap();
+
+    list.update_timestamp_info_tlvs(
+        SyncSource::Ptp,
+        TimestampMethod::SwLocal,
+        TimestampMethod::HwAssist,
+    );
+
+    // Value should be unchanged since size didn't match
+    assert_eq!(list.non_hmac_tlvs()[0].value, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_update_direct_measurement_tlvs() {
+    let mut list = TlvList::new();
+    let sender_tlv = DirectMeasurementTlv::new(100);
+    list.push(sender_tlv.to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    list.update_direct_measurement_tlvs(50, 49);
+
+    let raw = &list.non_hmac_tlvs()[0];
+    let parsed = DirectMeasurementTlv::from_raw(raw).unwrap();
+    // Sender tx count preserved
+    assert_eq!(parsed.sender_tx_count, 100);
+    // Reflector counts filled
+    assert_eq!(parsed.reflector_rx_count, 50);
+    assert_eq!(parsed.reflector_tx_count, 49);
+}
+
+#[test]
+fn test_update_direct_measurement_skips_wrong_size() {
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::DirectMeasurement, vec![0; 8]))
+        .unwrap();
+
+    list.update_direct_measurement_tlvs(50, 49);
+
+    // Value should be unchanged
+    assert_eq!(list.non_hmac_tlvs()[0].value, vec![0; 8]);
+}
+
+#[test]
+fn test_reflector_answers_generic_source_ip_request_ipv4() {
+    use std::net::{IpAddr, Ipv4Addr};
+    // Sender request per RFC 8972 §4.2/§4.2.1: ports(4 zero octets) +
+    // one generic Source IP Address sub-TLV (Type 7) with the standard
+    // 4-octet STAMP TLV header and a 16-octet zeroed value:
+    //   [flags=0x80][type=7][length=0x0010][16 MBZ octets]
+    let mut req = vec![0u8; 4];
+    req.extend_from_slice(&[0x80, 7, 0x00, 0x10]);
+    req.extend_from_slice(&[0u8; 16]);
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, req.clone()))
+        .unwrap();
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: None,
+    };
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::all());
+    let v = &list.non_hmac_tlvs()[0].value;
+    assert_eq!(v.len(), req.len(), "Location TLV Length preserved (§4.2.2)");
+    assert_eq!(&v[0..2], &862u16.to_be_bytes(), "dest port");
+    assert_eq!(&v[2..4], &50000u16.to_be_bytes(), "src port");
+    // Generic Source IP (7) answered as Source IPv4 (8) in place, U=0.
+    assert_eq!(v[4], 0x00, "answered sub-TLV flags cleared (U=0)");
+    assert_eq!(v[5], 8, "Source IP (7) answered as Source IPv4 (8)");
+    assert_eq!(&v[6..8], &16u16.to_be_bytes(), "sub-TLV Length 16");
+    assert_eq!(&v[8..12], &[10, 0, 0, 1], "source IPv4 copied");
+    assert_eq!(&v[12..24], &[0u8; 12], "MBZ tail");
+}
+
+/// RFC8972-4.2.2-2: "Based on the local policy, the Session-Reflector MAY
+/// leave some fields unreported by filling them with zeroes. An
+/// implementation of the stateful Session-Reflector MUST provide control
+/// for managing such policies." A withheld field is answered as zeroes,
+/// keeping the reply's length and structure identical.
+#[test]
+fn test_location_disclosure_policy_withholds_fields_as_zeroes() {
+    use std::net::{IpAddr, Ipv4Addr};
+    let mut req = vec![0u8; 4];
+    req.extend_from_slice(&[0x80, 7, 0x00, 0x10]); // generic Source IP
+    req.extend_from_slice(&[0u8; 16]);
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, req.clone()))
+        .unwrap();
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: None,
+    };
+
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::none());
+    let v = &list.non_hmac_tlvs()[0].value;
+
+    assert_eq!(v.len(), req.len(), "Length is preserved when withholding");
+    assert_eq!(&v[0..2], &[0, 0], "withheld destination port reads as zero");
+    assert_eq!(&v[2..4], &[0, 0], "withheld source port reads as zero");
+    assert_eq!(
+        v[4], 0x00,
+        "the sub-TLV is still Answered, not flagged unrecognized"
+    );
+    assert_eq!(
+        v[5], 7,
+        "type stays the generic request: rewriting it to IPv4/IPv6 would \
+             itself disclose the observed address family"
+    );
+    assert_eq!(&v[8..24], &[0u8; 16], "withheld address reads as zero");
+}
+
+/// A partial policy discloses only what it names.
+#[test]
+fn test_location_disclosure_policy_partial_discloses_only_named_fields() {
+    use std::net::{IpAddr, Ipv4Addr};
+    let mut req = vec![0u8; 4];
+    req.extend_from_slice(&[0x80, 7, 0x00, 0x10]); // generic Source IP
+    req.extend_from_slice(&[0u8; 16]);
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, req)).unwrap();
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: None,
+    };
+
+    // Ports allowed, addresses withheld.
+    let policy = LocationDisclosure {
+        src_port: true,
+        dst_port: true,
+        src_ip: false,
+        dst_ip: false,
+        src_mac: false,
+    };
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, policy);
+    let v = &list.non_hmac_tlvs()[0].value;
+    assert_eq!(&v[0..2], &862u16.to_be_bytes(), "dst port disclosed");
+    assert_eq!(&v[2..4], &50000u16.to_be_bytes(), "src port disclosed");
+    assert_eq!(&v[8..24], &[0u8; 16], "source address still withheld");
+}
+
+#[test]
+fn test_update_location_tlvs_ipv4() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let mut list = TlvList::new();
+    // RFC 8972 §4.2 request: ports + generic Source IP (7) and
+    // Destination IP (4) sub-TLVs, each a 4-octet header + 16-octet MBZ
+    // value.
+    list.push(LocationTlv::request().to_raw()).unwrap();
+    let original_len = list.non_hmac_tlvs()[0].value.len();
+
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: None,
+    };
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::all());
+
+    let raw = &list.non_hmac_tlvs()[0];
+    assert_eq!(
+        raw.value.len(),
+        original_len,
+        "Location TLV Length must be preserved (§4.2.2)"
+    );
+    let parsed = LocationTlv::from_raw(raw).unwrap();
+    assert_eq!(parsed.dest_port, 862);
+    assert_eq!(parsed.src_port, 50000);
+    assert_eq!(parsed.sub_tlvs.len(), 2);
+    // Source IP (7) → Source IPv4 (8): 4-octet address + 12-octet MBZ.
+    assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceIpv4);
+    assert!(
+        !parsed.sub_tlvs[0].flags.unrecognized,
+        "answered sub-TLV must clear U"
+    );
+    assert_eq!(&parsed.sub_tlvs[0].value[..4], &[10, 0, 0, 1]);
+    assert_eq!(&parsed.sub_tlvs[0].value[4..], &[0u8; 12]);
+    // Destination IP (4) → Destination IPv4 (5).
+    assert_eq!(
+        parsed.sub_tlvs[1].sub_type,
+        LocationSubType::DestinationIpv4
+    );
+    assert_eq!(&parsed.sub_tlvs[1].value[..4], &[10, 0, 0, 2]);
+    assert_eq!(&parsed.sub_tlvs[1].value[4..], &[0u8; 12]);
+}
+
+#[test]
+fn test_update_location_tlvs_ipv6() {
+    use std::net::{IpAddr, Ipv6Addr};
+
+    let mut list = TlvList::new();
+    list.push(LocationTlv::request().to_raw()).unwrap();
+    let original_len = list.non_hmac_tlvs()[0].value.len();
+
+    let src = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    let dst = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V6(src),
+        src_port: 50000,
+        dst_addr: IpAddr::V6(dst),
+        dst_port: 862,
+        src_mac: None,
+    };
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::all());
+
+    let raw = &list.non_hmac_tlvs()[0];
+    assert_eq!(
+        raw.value.len(),
+        original_len,
+        "Location TLV Length must be preserved (§4.2.2)"
+    );
+    let parsed = LocationTlv::from_raw(raw).unwrap();
+    assert_eq!(parsed.dest_port, 862);
+    assert_eq!(parsed.src_port, 50000);
+    assert_eq!(parsed.sub_tlvs.len(), 2);
+    // Source IP (7) → Source IPv6 (9): full 16-octet address.
+    assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceIpv6);
+    assert_eq!(parsed.sub_tlvs[0].value, src.octets().to_vec());
+    // Destination IP (4) → Destination IPv6 (6).
+    assert_eq!(
+        parsed.sub_tlvs[1].sub_type,
+        LocationSubType::DestinationIpv6
+    );
+    assert_eq!(parsed.sub_tlvs[1].value, dst.octets().to_vec());
+}
+
+#[test]
+fn test_update_location_source_mac_answered_as_eui64_zeroed() {
+    // RFC 8972 §4.2.2: with no observed source MAC (UDP-socket
+    // reflectors), a generic Source MAC (1) request MUST be answered with
+    // Source EUI-64 (3) and the EUI-64 field zeroed.
+    use std::net::{IpAddr, Ipv4Addr};
+    let mut req = vec![0u8; 4];
+    // Generic Source MAC: flags U=1, type 1, length 8, 8 MBZ octets.
+    req.extend_from_slice(&[0x80, 1, 0x00, 0x08]);
+    req.extend_from_slice(&[0u8; 8]);
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, req.clone()))
+        .unwrap();
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: None,
+    };
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::all());
+    let parsed = LocationTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!(parsed.sub_tlvs.len(), 1);
+    assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceEui64);
+    assert_eq!(parsed.sub_tlvs[0].value, vec![0u8; 8]);
+    assert!(!parsed.sub_tlvs[0].flags.unrecognized);
+}
+
+#[test]
+fn test_update_location_source_mac_answered_as_eui48() {
+    // RFC 8972 §4.2.2: an observed EUI-48 source MAC is copied into a
+    // Source EUI-48 (2) answer with the two MBZ octets zeroed.
+    use std::net::{IpAddr, Ipv4Addr};
+    let mut req = vec![0u8; 4];
+    req.extend_from_slice(&[0x80, 1, 0x00, 0x08]);
+    req.extend_from_slice(&[0xFF; 8]);
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, req)).unwrap();
+    let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: Some(mac),
+    };
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::all());
+    let parsed = LocationTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceEui48);
+    assert_eq!(&parsed.sub_tlvs[0].value[..6], &mac);
+    assert_eq!(&parsed.sub_tlvs[0].value[6..], &[0, 0]);
+
+    // Withheld: the generic request stays, zeroed.
+    let mut req = vec![0u8; 4];
+    req.extend_from_slice(&[0x80, 1, 0x00, 0x08]);
+    req.extend_from_slice(&[0u8; 8]);
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, req)).unwrap();
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::none());
+    let parsed = LocationTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceMac);
+    assert_eq!(parsed.sub_tlvs[0].value, vec![0u8; 8]);
+}
+
+#[test]
+fn test_update_location_unrecognized_sub_tlv_gets_u_flag() {
+    // RFC 8972 §4: a sub-TLV whose type the reflector cannot act on is
+    // copied verbatim with the U flag set.
+    use std::net::{IpAddr, Ipv4Addr};
+    let mut req = vec![0u8; 4];
+    // Unknown sub-type 200 with a 4-octet value the reflector must not
+    // touch.
+    req.extend_from_slice(&[0x80, 200, 0x00, 0x04]);
+    req.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, req.clone()))
+        .unwrap();
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: None,
+    };
+    list.update_location_tlvs(&info, LocationDisclosure::all());
+    let raw = &list.non_hmac_tlvs()[0];
+    assert_eq!(raw.value.len(), req.len(), "Length preserved");
+    let parsed = LocationTlv::from_raw(raw).unwrap();
+    assert_eq!(parsed.sub_tlvs.len(), 1);
+    assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::Unknown(200));
+    assert!(
+        parsed.sub_tlvs[0].flags.unrecognized,
+        "unrecognized sub-TLV must set U"
+    );
+    // Value copied verbatim.
+    assert_eq!(parsed.sub_tlvs[0].value, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+}
+
+#[test]
+fn test_update_location_malformed_sub_tlv_sets_m_and_stops() {
+    // RFC 8972 §4: a recognized type carrying an invalid Length is
+    // malformed — set M and stop processing further sub-TLVs.
+    use std::net::{IpAddr, Ipv4Addr};
+    let mut req = vec![0u8; 4];
+    // Source IP (7) with a wrong Length of 4 (must be 16) → malformed.
+    req.extend_from_slice(&[0x80, 7, 0x00, 0x04]);
+    req.extend_from_slice(&[0u8; 4]);
+    // A second, well-formed generic Source IP request that MUST NOT be
+    // processed because processing stops at the malformed one.
+    req.extend_from_slice(&[0x80, 7, 0x00, 0x10]);
+    req.extend_from_slice(&[0u8; 16]);
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, req.clone()))
+        .unwrap();
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: None,
+    };
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::all());
+    let raw = &list.non_hmac_tlvs()[0];
+    assert_eq!(raw.value.len(), req.len(), "Length preserved");
+    // First sub-TLV (offset 4): M flag set.
+    assert_eq!(raw.value[4], 0x40, "malformed sub-TLV → M flag");
+    // Second sub-TLV (offset 12) left untouched (still the sender's U=1,
+    // type 7 request — not answered).
+    assert_eq!(
+        raw.value[12], 0x80,
+        "processing stopped: second sub-TLV untouched"
+    );
+    assert_eq!(raw.value[13], 7);
+}
+
+#[test]
+fn test_update_location_tlvs_ports_only_no_sub_tlvs() {
+    // A sender that allocates only the ports (the minimum valid Location
+    // TLV value, per LOCATION_TLV_MIN_VALUE_SIZE) makes no sub-TLV
+    // request; the reflector fills the ports and answers nothing, without
+    // growing the TLV (RFC 8972 §4.2.2).
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, vec![0u8; 4]))
+        .unwrap();
+
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: None,
+    };
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::all());
+
+    let raw = &list.non_hmac_tlvs()[0];
+    assert_eq!(raw.value.len(), 4, "Location TLV Length must be preserved");
+    let parsed = LocationTlv::from_raw(raw).unwrap();
+    assert_eq!(parsed.dest_port, 862);
+    assert_eq!(parsed.src_port, 50000);
+    assert!(parsed.sub_tlvs.is_empty());
+}
+
+#[test]
+fn test_update_location_tlvs_preserves_sender_length_no_shrink() {
+    // Location replies must retain the request length (RFC 8972 §4.2.2).
+    // Ports (4) + Source IP request (20) + Source MAC request (12) = 36 bytes,
+    // even after generic requests become specific responses.
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let mut req = vec![0u8; 4];
+    req.extend_from_slice(&[0x80, 7, 0x00, 0x10]);
+    req.extend_from_slice(&[0u8; 16]);
+    req.extend_from_slice(&[0x80, 1, 0x00, 0x08]);
+    req.extend_from_slice(&[0u8; 8]);
+    assert_eq!(req.len(), 36);
+
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::Location, req)).unwrap();
+
+    let info = PacketAddressInfo {
+        src_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        src_port: 50000,
+        dst_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        dst_port: 862,
+        src_mac: None,
+    };
+    list.clear_reflector_flags();
+    list.update_location_tlvs(&info, LocationDisclosure::all());
+
+    let raw = &list.non_hmac_tlvs()[0];
+    assert_eq!(
+        raw.value.len(),
+        36,
+        "reflector must not change the Location TLV Length (RFC 8972 §4.2.2)"
+    );
+    assert_eq!(&raw.value[0..2], &862u16.to_be_bytes());
+    assert_eq!(&raw.value[2..4], &50000u16.to_be_bytes());
+    // Both requests answered: Source IPv4 (8) then Source EUI-64 (3).
+    let parsed = LocationTlv::from_raw(raw).unwrap();
+    assert_eq!(parsed.sub_tlvs.len(), 2);
+    assert_eq!(parsed.sub_tlvs[0].sub_type, LocationSubType::SourceIpv4);
+    assert_eq!(parsed.sub_tlvs[1].sub_type, LocationSubType::SourceEui64);
+}
+
+#[test]
+fn test_update_follow_up_telemetry_tlvs() {
+    let mut list = TlvList::new();
+    let sender_tlv = FollowUpTelemetryTlv::new();
+    list.push(sender_tlv.to_raw()).unwrap();
+
+    // Stateful mode: report the previous reflection's seq/timestamp.
+    list.clear_reflector_flags();
+    list.update_follow_up_telemetry_tlvs(Some((42, 0xDEADBEEFCAFEBABE)), TimestampMethod::SwLocal);
+
+    let raw = &list.non_hmac_tlvs()[0];
+    let parsed = FollowUpTelemetryTlv::from_raw(raw).unwrap();
+    assert_eq!(parsed.sequence_number, 42);
+    assert_eq!(parsed.follow_up_timestamp, 0xDEADBEEFCAFEBABE);
+    assert_eq!(parsed.timestamp_mode, TimestampMethod::SwLocal);
+}
+
+#[test]
+fn test_update_follow_up_telemetry_stateless_zeroes_seq_and_timestamp() {
+    // RFC 8972 §4.7-7: "If the Session-Reflector is in the stateless mode
+    // ..., it MUST zero the Sequence Number and Follow-Up Timestamp
+    // fields." A `None` reflection argument represents stateless mode.
+    let mut list = TlvList::new();
+    list.push(FollowUpTelemetryTlv::new().to_raw()).unwrap();
+
+    // First populate as if stateful, then apply the stateless path.
+    list.update_follow_up_telemetry_tlvs(Some((42, 0xDEADBEEF)), TimestampMethod::SwLocal);
+    list.update_follow_up_telemetry_tlvs(None, TimestampMethod::SwLocal);
+
+    let parsed = FollowUpTelemetryTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!(
+        parsed.sequence_number, 0,
+        "seq must be zeroed in stateless mode"
+    );
+    assert_eq!(
+        parsed.follow_up_timestamp, 0,
+        "timestamp must be zeroed in stateless mode"
+    );
+}
+
+#[test]
+fn test_update_follow_up_telemetry_invalid_length_zeroed() {
+    // RFC 8972 §4.7-6 (with erratum 8339 scope): "If the value of the
+    // Length field is invalid, the Session-Reflector MUST zero the Sequence
+    // Number and Follow-Up Timestamp fields ...". An 8-octet value is an
+    // invalid length (must be 16); the present seq/timestamp octets MUST be
+    // zeroed rather than left as received.
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::FollowUpTelemetry, vec![0xFF; 8]))
+        .unwrap();
+
+    list.clear_reflector_flags();
+    list.update_follow_up_telemetry_tlvs(Some((42, 100)), TimestampMethod::SwLocal);
+
+    assert_eq!(
+        list.non_hmac_tlvs()[0].value,
+        vec![0u8; 8],
+        "invalid-length FUT value must be zeroed"
+    );
+}
+
+#[test]
+fn test_access_report_valid_ids_not_flagged() {
+    // RFC 8972 §4.6: Access ID values 1 (3GPP) and 2 (Non-3GPP) are valid.
+    for id in [1u8, 2u8] {
+        let mut list = list_with_cleared(AccessReportTlv::new(id, 1).to_raw());
+        list.discard_invalid_access_report_tlvs();
+        assert!(
+            !list.non_hmac_tlvs()[0].is_unrecognized(),
+            "Access ID {} is valid and must not be flagged",
+            id
+        );
+    }
+}
+
+#[test]
+fn test_access_report_invalid_ids_discarded_with_u_flag() {
+    // RFC 8972 §4.6: "a TLV that contains values other than '1' or '2' MUST
+    // be discarded." The reflector discards the invalid Access Report TLV
+    // by marking it unrecognized (U flag) — the sender then skips
+    // processing it (§4-17) — while preserving symmetric packet size.
+    for id in [0u8, 3u8, 15u8] {
+        let mut list = list_with_cleared(AccessReportTlv::new(id, 1).to_raw());
+        list.discard_invalid_access_report_tlvs();
+        assert!(
+            list.non_hmac_tlvs()[0].is_unrecognized(),
+            "Access ID {} is invalid and must be discarded (U flag)",
+            id
+        );
+    }
+}
+
+#[test]
+fn test_process_destination_node_address_match() {
+    let addr: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+    let mut list = list_with_cleared(DestinationNodeAddressTlv::new(addr).to_raw());
+
+    let local_addrs = vec![addr];
+    let outcome = list.process_destination_node_address(&local_addrs);
+    assert!(outcome.matched_or_absent());
+    assert_eq!(
+        outcome.pinned_source(),
+        Some(addr),
+        "a matched address must be handed to the send path for RFC 9503 §3 pinning"
+    );
+    assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
+}
+
+#[test]
+fn test_process_destination_node_address_mismatch() {
+    let addr: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+    let tlv = DestinationNodeAddressTlv::new(addr);
+    let mut list = TlvList::new();
+    list.push(tlv.to_raw()).unwrap();
+
+    let local_addrs = vec!["10.0.0.1".parse().unwrap()];
+    list.clear_reflector_flags();
+    let outcome = list.process_destination_node_address(&local_addrs);
+    assert!(!outcome.matched_or_absent());
+    assert_eq!(
+        outcome.pinned_source(),
+        None,
+        "an unmatched address must not be pinned as the reply source"
+    );
+    assert!(list.non_hmac_tlvs()[0].is_unrecognized());
+}
+
+#[test]
+fn test_process_return_path_suppress() {
+    let rp = ReturnPathTlv::with_control_code(0x0);
+    let mut list = TlvList::new();
+    list.push(rp.to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    let action = list.process_return_path(1234, false, None);
+    assert_eq!(action, ReturnPathAction::SuppressReply);
+}
+
+#[test]
+fn test_process_return_path_same_link_pins_ingress_interface() {
+    // RFC 9503 §4.1.1: reply over the link the request arrived on.
+    let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0x1).to_raw());
+    let action = list.process_return_path(1234, false, Some(7));
+    assert_eq!(action, ReturnPathAction::SameLink(7));
+    assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
+}
+
+#[test]
+fn test_process_return_path_same_link_without_interface_sets_u() {
+    // RFC 9503 §4: U when the reflector cannot use the requested path.
+    let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0x1).to_raw());
+    let action = list.process_return_path(1234, false, None);
+    assert_eq!(action, ReturnPathAction::Normal);
+    assert!(list.non_hmac_tlvs()[0].is_unrecognized());
+}
+
+#[test]
+fn test_process_return_path_cc_reserved_bits_suppress() {
+    // RFC 9503: only bit 0 matters; reserved bits are ignored.
+    // 0xFE has bit 0 clear → suppress.
+    let rp = ReturnPathTlv::with_control_code(0xFE);
+    let mut list = TlvList::new();
+    list.push(rp.to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    let action = list.process_return_path(1234, false, None);
+    assert_eq!(action, ReturnPathAction::SuppressReply);
+}
+
+#[test]
+fn test_process_return_path_cc_reserved_bits_normal() {
+    // RFC 9503: only bit 0 matters; reserved bits are ignored.
+    // 0xFF has bit 0 set, so it is a same-link request.
+    let mut list = list_with_cleared(ReturnPathTlv::with_control_code(0xFF).to_raw());
+    let action = list.process_return_path(1234, false, Some(3));
+    assert_eq!(action, ReturnPathAction::SameLink(3));
+}
+
+#[test]
+fn test_process_return_path_address_and_srv6_combined() {
+    // RFC 9503 §4.1: Return Address and a segment list may be combined.
+    let sid: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let mut rp = ReturnPathTlv::with_srv6_sids(&[sid]);
+    rp.add_return_address("2001:db8::9".parse().unwrap());
+    let mut list = list_with_cleared(rp.to_raw());
+    assert_eq!(
+        list.process_return_path(862, true, None),
+        ReturnPathAction::Srv6Forward {
+            sids: vec![sid],
+            destination: Some("[2001:db8::9]:862".parse().unwrap()),
+        }
+    );
+}
+
+#[test]
+fn test_process_return_path_first_segment_list_wins() {
+    // RFC 9503 §4.1.3: SR-MPLS first means the SRv6 list is ignored.
+    let mut rp = ReturnPathTlv::with_sr_mpls_labels(&[100]);
+    rp.sub_tlvs
+        .extend(ReturnPathTlv::with_srv6_sids(&["::1".parse().unwrap()]).sub_tlvs);
+    let mut list = list_with_cleared(rp.to_raw());
+    assert_eq!(
+        list.process_return_path(862, true, None),
+        ReturnPathAction::UnsupportedSr
+    );
+    assert!(list.non_hmac_tlvs()[0].is_unrecognized());
+}
+
+#[test]
+fn test_process_return_path_alternate_addr() {
+    let addr: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+    let rp = ReturnPathTlv::with_return_address(addr);
+    let mut list = TlvList::new();
+    list.push(rp.to_raw()).unwrap();
+
+    // allow_alternate = true: the operator opted in, so the reply is
+    // directed to the requested address.
+    list.clear_reflector_flags();
+    let action = list.process_return_path(862, true, None);
+    assert_eq!(
+        action,
+        ReturnPathAction::AlternateAddress(std::net::SocketAddr::new(addr, 862))
+    );
+}
+
+#[test]
+fn test_process_return_path_alternate_addr_denied_by_default() {
+    // allow_alternate = false (the default): a Return Address sub-TLV must
+    // NOT redirect the reply. The reflector echoes the TLV with the U-flag
+    // and replies normally to the packet source. This blocks open-reflector
+    // traffic-redirection / reflection aimed at arbitrary third parties.
+    let addr: std::net::IpAddr = "10.0.0.5".parse().unwrap();
+    let mut list = list_with_cleared(ReturnPathTlv::with_return_address(addr).to_raw());
+
+    let action = list.process_return_path(862, false, None);
+    assert_eq!(action, ReturnPathAction::Normal);
+
+    let echoed = list
+        .non_hmac_tlvs()
+        .iter()
+        .find(|t| t.tlv_type == TlvType::ReturnPath)
+        .expect("return path TLV kept in response");
+    assert!(
+        echoed.is_unrecognized(),
+        "denied alternate address must set the U-flag on the echoed TLV"
+    );
+}
+
+#[test]
+fn test_process_return_path_sr_unsupported() {
+    let rp = ReturnPathTlv::with_sr_mpls_labels(&[100, 200]);
+    let mut list = TlvList::new();
+    list.push(rp.to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    let action = list.process_return_path(862, false, None);
+    assert_eq!(action, ReturnPathAction::UnsupportedSr);
+    assert!(list.non_hmac_tlvs()[0].is_unrecognized());
+}
+
+#[test]
+fn test_process_return_path_srv6_returns_segment_list_without_premature_u_flag() {
+    let sids = [
+        std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+        std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2),
+    ];
+    let rp = ReturnPathTlv::with_srv6_sids(&sids);
+    let mut list = TlvList::new();
+    list.push(rp.to_raw()).unwrap();
+    // Simulate the reflector pipeline, which clears the sender's U-flag
+    // before semantic TLV processing runs.
+    list.clear_reflector_flags();
+
+    let action = list.process_return_path(862, false, None);
+    assert_eq!(
+        action,
+        ReturnPathAction::Srv6Forward {
+            sids: vec![sids[0], sids[1]],
+            destination: None,
+        },
+        "SRv6 return path must surface the segment list for the send path"
+    );
+    // The U-flag decision is deferred to the send path (it depends on
+    // kernel capability + the opt-in), so it must NOT be set here.
+    assert!(
+        !list.non_hmac_tlvs()[0].is_unrecognized(),
+        "SRv6 must not be pre-flagged unrecognized during TLV processing"
+    );
+}
+
+#[test]
+fn test_update_micro_session_id_tlvs_sets_reflector_id() {
+    let msid = MicroSessionIdTlv::new(42, 0);
+    let mut list = TlvList::new();
+    list.push(msid.to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    let ok = list.update_micro_session_id_tlvs(99);
+    assert!(ok);
+
+    let parsed = MicroSessionIdTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!(parsed.sender_micro_session_id, 42);
+    assert_eq!(parsed.reflector_micro_session_id, 99);
+}
+
+#[test]
+fn test_update_micro_session_id_tlvs_echoes_sender_id() {
+    let msid = MicroSessionIdTlv::new(1234, 0);
+    let mut list = TlvList::new();
+    list.push(msid.to_raw()).unwrap();
+
+    list.update_micro_session_id_tlvs(5678);
+
+    let parsed = MicroSessionIdTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!(parsed.sender_micro_session_id, 1234);
+}
+
+#[test]
+fn test_update_micro_session_id_tlvs_validates_reflector_id() {
+    // Non-zero reflector ID that does NOT match → should return false
+    let msid = MicroSessionIdTlv::new(42, 50);
+    let mut list = TlvList::new();
+    list.push(msid.to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    let ok = list.update_micro_session_id_tlvs(99);
+    assert!(!ok);
+}
+
+#[test]
+fn test_update_micro_session_id_tlvs_zero_reflector_id_accepted() {
+    // Reflector ID 0 (unknown) should always pass
+    let msid = MicroSessionIdTlv::new(42, 0);
+    let mut list = TlvList::new();
+    list.push(msid.to_raw()).unwrap();
+
+    let ok = list.update_micro_session_id_tlvs(99);
+    assert!(ok);
+}
+
+#[test]
+fn test_update_micro_session_id_tlvs_matching_reflector_id_accepted() {
+    // Non-zero reflector ID that matches → should pass
+    let msid = MicroSessionIdTlv::new(42, 99);
+    let mut list = TlvList::new();
+    list.push(msid.to_raw()).unwrap();
+
+    let ok = list.update_micro_session_id_tlvs(99);
+    assert!(ok);
+
+    let parsed = MicroSessionIdTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!(parsed.reflector_micro_session_id, 99);
+}
+
+// --- BER (draft-gandhi-ippm-stamp-ber) tests ---
+
+#[test]
+fn test_ber_xor_helper_no_errors() {
+    // Padding exactly equals the repeated pattern → 0 errors.
+    let padding = vec![0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00];
+    let pattern = vec![0xFF, 0x00];
+    let (count, burst) = xor_popcount_and_max_burst(&padding, &pattern);
+    assert_eq!(count, 0);
+    assert_eq!(burst, 0);
+}
+
+#[test]
+fn test_ber_xor_helper_all_ones_against_zeros() {
+    // Padding all 1s, pattern all 0s → every bit an error.
+    let padding = vec![0xFF, 0xFF];
+    let pattern = vec![0x00];
+    let (count, burst) = xor_popcount_and_max_burst(&padding, &pattern);
+    assert_eq!(count, 16);
+    assert_eq!(burst, 16); // all 16 bits form a single run
+}
+
+#[test]
+fn test_ber_xor_helper_burst_across_bytes() {
+    // Errors spanning the byte boundary: 0x0F ^ 0x00 = 0x0F (4 errors at LSBs),
+    // then 0xF0 ^ 0x00 = 0xF0 (4 errors at MSBs). Together they form an 8-bit run.
+    let padding = vec![0x0F, 0xF0];
+    let pattern = vec![0x00];
+    let (count, burst) = xor_popcount_and_max_burst(&padding, &pattern);
+    assert_eq!(count, 8);
+    assert_eq!(burst, 8);
+}
+
+#[test]
+fn test_ber_xor_helper_isolated_bits() {
+    // Padding: 0x55 (01010101), pattern 0x00 → 4 isolated error bits, max burst = 1.
+    let padding = vec![0x55];
+    let pattern = vec![0x00];
+    let (count, burst) = xor_popcount_and_max_burst(&padding, &pattern);
+    assert_eq!(count, 4);
+    assert_eq!(burst, 1);
+}
+
+#[test]
+fn test_process_ber_happy_path() {
+    let mut list = TlvList::new();
+    // Padding differs from pattern on every bit of first byte.
+    list.push(
+        ExtraPaddingTlv {
+            padding: vec![0xAA, 0x55],
+        }
+        .to_raw(),
+    )
+    .unwrap();
+    list.push(BerPatternTlv::new(vec![0xAA, 0x55]).to_raw())
+        .unwrap();
+    list.push(BerCountTlv::default().to_raw()).unwrap();
+    list.push(BerBurstTlv::default().to_raw()).unwrap();
+
+    list.process_ber();
+
+    // 0xAA ^ 0xAA = 0, 0x55 ^ 0x55 = 0, so 0 errors.
+    let tlvs = list.non_hmac_tlvs();
+    let count_tlv = tlvs
+        .iter()
+        .find(|t| t.tlv_type == TlvType::BerCount)
+        .unwrap();
+    assert_eq!(
+        BerCountTlv::from_raw(count_tlv).unwrap().count,
+        0,
+        "identical padding and pattern → 0 errors"
+    );
+}
+
+#[test]
+fn test_process_ber_computes_count_and_burst() {
+    let mut list = TlvList::new();
+    // Padding 0xFF, pattern 0x00 → 8 errors, max burst 8.
+    list.push(
+        ExtraPaddingTlv {
+            padding: vec![0xFF],
+        }
+        .to_raw(),
+    )
+    .unwrap();
+    list.push(BerPatternTlv::new(vec![0x00]).to_raw()).unwrap();
+    list.push(BerCountTlv::default().to_raw()).unwrap();
+    list.push(BerBurstTlv::default().to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    list.process_ber();
+
+    let tlvs = list.non_hmac_tlvs();
+    let count = BerCountTlv::from_raw(
+        tlvs.iter()
+            .find(|t| t.tlv_type == TlvType::BerCount)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(count.count, 8);
+    let burst = BerBurstTlv::from_raw(
+        tlvs.iter()
+            .find(|t| t.tlv_type == TlvType::BerBurst)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(burst.max_burst, 8);
+}
+
+#[test]
+fn test_process_ber_uses_default_pattern_when_empty() {
+    // No explicit Bit Pattern TLV; padding matches the 0xFF00 default.
+    let mut list = TlvList::new();
+    list.push(
+        ExtraPaddingTlv {
+            padding: vec![0xFF, 0x00, 0xFF, 0x00],
+        }
+        .to_raw(),
+    )
+    .unwrap();
+    list.push(BerCountTlv::default().to_raw()).unwrap();
+    list.push(BerBurstTlv::default().to_raw()).unwrap();
+
+    list.process_ber();
+
+    let tlvs = list.non_hmac_tlvs();
+    let count = BerCountTlv::from_raw(
+        tlvs.iter()
+            .find(|t| t.tlv_type == TlvType::BerCount)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(count.count, 0);
+}
+
+#[test]
+fn test_process_ber_missing_extra_padding_flags_c() {
+    // BER TLVs without a companion Extra Padding TLV → all three get C-flag.
+    let mut list = TlvList::new();
+    list.push(BerPatternTlv::new(vec![0xFF]).to_raw()).unwrap();
+    list.push(BerCountTlv::default().to_raw()).unwrap();
+    list.push(BerBurstTlv::default().to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    list.process_ber();
+
+    for tlv in list.non_hmac_tlvs() {
+        assert!(
+            tlv.flags.conformant_reflected,
+            "missing Extra Padding should mark all BER TLVs nonconformant"
+        );
+    }
+}
+
+#[test]
+fn test_process_ber_duplicate_count_tlvs_flag_c() {
+    let mut list = TlvList::new();
+    list.push(
+        ExtraPaddingTlv {
+            padding: vec![0xAA],
+        }
+        .to_raw(),
+    )
+    .unwrap();
+    list.push(BerPatternTlv::new(vec![0xAA]).to_raw()).unwrap();
+    list.push(BerCountTlv::default().to_raw()).unwrap();
+    list.push(BerCountTlv::default().to_raw()).unwrap();
+
+    list.clear_reflector_flags();
+    list.process_ber();
+
+    let tlvs = list.non_hmac_tlvs();
+    let ber_tlvs: Vec<_> = tlvs
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.tlv_type,
+                TlvType::BerPattern | TlvType::BerCount | TlvType::BerBurst
+            )
+        })
+        .collect();
+    assert!(ber_tlvs.iter().all(|t| t.flags.conformant_reflected));
+}
+
+#[test]
+fn test_process_ber_no_ber_tlvs_noop() {
+    // Packet without any BER TLVs — process_ber should be a no-op.
+    let mut list = list_with_cleared(ExtraPaddingTlv::new_zeros(8).to_raw());
+
+    list.process_ber();
+
+    // No panics, no flags set.
+    assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
+}
+
+// --- Reflected Test Packet Control (RFC 10052) tests ---
+
+#[test]
+fn test_get_reflected_control_request_returns_parsed_tlv() {
+    let mut list = TlvList::new();
+    list.push(ReflectedControlTlv::new(1500, 4, 1_000_000).to_raw())
+        .unwrap();
+
+    list.clear_reflector_flags();
+    let req = list.get_reflected_control_request().unwrap();
+    assert_eq!(req.length_of_reflected_packet, 1500);
+    assert_eq!(req.number_of_reflected_packets, 4);
+    assert_eq!(req.interval_nanoseconds, 1_000_000);
+}
+
+#[test]
+fn test_get_reflected_control_request_none_when_absent() {
+    let mut list = TlvList::new();
+    list.push(ExtraPaddingTlv::new_zeros(4).to_raw()).unwrap();
+
+    assert!(list.get_reflected_control_request().is_none());
+}
+
+// --- Reflected Fixed/IPv6 Ext Header Data (draft-ietf-ippm-stamp-ext-hdr-15) tests ---
+
+/// draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 reflector MTU rule: reflected
+/// header TLVs are removed (246 before 247) until the reply fits the size
+/// limit; only Types 246/247 are removed, other TLVs stay.
+#[test]
+fn test_trim_reflected_headers_to_size_removes_246_before_247() {
+    use crate::tlv::{ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv};
+    let mut list = TlvList::new();
+    // §3.3 order: 247 first, then 246.
+    list.push(ReflectedFixedHdrTlv::request_with_capacity(40).to_raw())
+        .unwrap();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(40).to_raw())
+        .unwrap();
+    list.push(ExtraPaddingTlv::new_zeros(4).to_raw()).unwrap();
+    list.clear_reflector_flags();
+
+    // Each header TLV is 44 bytes on the wire; padding is 8. base=44.
+    // Cap at 100 forces removal until 44 + wire_size <= 100.
+    let removed = list.trim_reflected_headers_to_size(44, 100);
+    assert!(removed >= 1, "at least one header TLV removed");
+    // The Type-246 (ext) TLV is removed before the Type-247 (fixed) one.
+    assert!(
+        !list
+            .non_hmac_tlvs()
+            .iter()
+            .any(|t| t.tlv_type == TlvType::ReflectedIpv6ExtHdr),
+        "246 removed first"
+    );
+    assert!(
+        list.non_hmac_tlvs()
+            .iter()
+            .any(|t| t.tlv_type == TlvType::ExtraPadding),
+        "non-header TLVs are preserved"
+    );
+    assert!(44 + list.wire_size() <= 100, "reply now fits the limit");
+}
+
+#[test]
+fn test_trim_reflected_headers_to_size_zero_disables() {
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(40).to_raw());
+    assert_eq!(list.trim_reflected_headers_to_size(44, 0), 0, "0 disables");
+    assert_eq!(list.non_hmac_tlvs().len(), 1);
+}
+
+/// draft-ietf-ippm-stamp-ext-hdr-15 §6.2 rule 2: with an IP-in-IP tunnel's
+/// two captured fixed headers (outer→inner), two same-length Type-247 TLVs
+/// pair positionally — 1st↔outer, 2nd↔inner — via first-fit-with-consumption.
+#[test]
+fn test_multi_fixed_hdr_positional_pairing() {
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = TlvList::new();
+    list.push(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw())
+        .unwrap();
+    list.push(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw())
+        .unwrap();
+    list.clear_reflector_flags();
+
+    let outer: Vec<u8> = (10u8..30).collect();
+    let inner: Vec<u8> = (40u8..60).collect();
+    let captured = vec![outer.clone(), inner.clone()];
+    list.process_reflected_headers_multi(Some(&captured), Some(&[]));
+
+    let tlvs = list.non_hmac_tlvs();
+    assert_eq!(&tlvs[0].value[4..], &outer[4..], "1st TLV ↔ outer header");
+    assert_eq!(&tlvs[1].value[4..], &inner[4..], "2nd TLV ↔ inner header");
+    assert!(!tlvs[0].flags.conformant_reflected);
+    assert!(!tlvs[1].flags.conformant_reflected);
+}
+
+/// A non-zero Requested selector picks a specific captured fixed header even
+/// among same-length candidates (§5.2), independent of positional order.
+#[test]
+fn test_multi_fixed_hdr_selector_picks_specific() {
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut outer = vec![0x45u8; 20];
+    outer[..4].copy_from_slice(&[0x45, 0x00, 0xAA, 0xAA]);
+    let mut inner = vec![0x45u8; 20];
+    inner[..4].copy_from_slice(&[0x45, 0x00, 0xBB, 0xBB]);
+
+    // Single Type-247 TLV whose selector matches the INNER header's first 4.
+    let mut list = list_with_cleared(
+        ReflectedFixedHdrTlv::request_with_selector(&[0x45, 0x00, 0xBB, 0xBB], 20).to_raw(),
+    );
+    let captured = vec![outer, inner.clone()];
+    list.process_reflected_headers_multi(Some(&captured), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert!(
+        !tlv.flags.conformant_reflected,
+        "selector matched inner header"
+    );
+    assert_eq!(
+        &tlv.value[4..],
+        &inner[4..],
+        "reflected the selected header"
+    );
+}
+
+/// Mixed-family tunnel (IPv6 outer, IPv4 inner): a Length-40 TLV pairs with
+/// the 40-byte outer, a Length-20 TLV with the 20-byte inner, by length.
+#[test]
+fn test_multi_fixed_hdr_mixed_family_lengths() {
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = TlvList::new();
+    list.push(ReflectedFixedHdrTlv::request_with_capacity(40).to_raw())
+        .unwrap();
+    list.push(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw())
+        .unwrap();
+    list.clear_reflector_flags();
+
+    let outer_v6: Vec<u8> = (0u8..40).collect();
+    let inner_v4: Vec<u8> = (100u8..120).collect();
+    let captured = vec![outer_v6.clone(), inner_v4.clone()];
+    list.process_reflected_headers_multi(Some(&captured), Some(&[]));
+
+    let tlvs = list.non_hmac_tlvs();
+    assert_eq!(tlvs[0].value.len(), 40);
+    assert_eq!(
+        &tlvs[0].value[4..],
+        &outer_v6[4..],
+        "40-byte TLV ↔ IPv6 outer"
+    );
+    assert_eq!(tlvs[1].value.len(), 20);
+    assert_eq!(
+        &tlvs[1].value[4..],
+        &inner_v4[4..],
+        "20-byte TLV ↔ IPv4 inner"
+    );
+}
+
+#[test]
+fn test_reflected_fixed_hdr_populated_when_captured() {
+    // ext-hdr-15 §6.1: Requested(4) preserved, Reflected = captured[4..].
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
+
+    let captured: Vec<u8> = (10u8..30).collect(); // 20 distinct bytes
+    list.process_reflected_headers(Some(&captured), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(tlv.tlv_type, TlvType::ReflectedFixedHdr);
+    assert_eq!(
+        &tlv.value[..4],
+        &[0, 0, 0, 0],
+        "Requested preserved (zeros)"
+    );
+    assert_eq!(&tlv.value[4..], &captured[4..], "Reflected = captured[4..]");
+    assert!(!tlv.flags.conformant_reflected);
+    assert!(!tlv.is_unrecognized());
+}
+
+#[test]
+fn test_reflected_fixed_hdr_c_flag_when_backend_cant_capture() {
+    // ext-hdr-15 §6.1 case (b): backend cannot observe IP layer → C flag, not U.
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
+
+    // None = backend cannot observe IP layer (nix UDP-socket backend).
+    list.process_reflected_headers(None, None);
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(tlv.value.len(), 20, "sender-advertised length is preserved");
+    assert!(tlv.value.iter().all(|&b| b == 0), "value left as received");
+    assert!(tlv.flags.conformant_reflected, "C flag set");
+    assert!(!tlv.is_unrecognized(), "U flag must NOT be set");
+}
+
+#[test]
+fn test_reflected_fixed_hdr_length_mismatch_sets_c_flag() {
+    // ext-hdr-15 §6.1 case (a): the sender-advertised Length does not match the
+    // captured header size (20-byte request but the packet is IPv6 with a
+    // 40-byte fixed header) → C flag, value left as received.
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
+
+    let ipv6_header = vec![0x60u8; 40];
+    list.process_reflected_headers(Some(&ipv6_header), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(tlv.value.len(), 20, "sender-advertised length preserved");
+    assert!(tlv.value.iter().all(|&b| b == 0), "value left as received");
+    assert!(tlv.flags.conformant_reflected, "C flag on length mismatch");
+    assert!(!tlv.is_unrecognized());
+}
+
+#[test]
+fn test_reflected_fixed_hdr_ipv6_request_with_ipv6_capture_populated() {
+    // 40-byte request + 40-byte captured header → Reflected = captured[4..].
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(40).to_raw());
+
+    let captured: Vec<u8> = (0u8..40).collect();
+    list.process_reflected_headers(Some(&captured), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(&tlv.value[..4], &[0, 0, 0, 0], "Requested preserved");
+    assert_eq!(&tlv.value[4..], &captured[4..]);
+    assert!(!tlv.flags.conformant_reflected);
+}
+
+#[test]
+fn test_reflected_fixed_hdr_selector_match_populates() {
+    // ext-hdr-15 §6.1: a non-zero Requested field that matches the captured IP
+    // header's first 4 octets → copy Reflected = captured[4..]. Here the
+    // selector equals captured[..4], so the whole header is conveyed.
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut captured: Vec<u8> = (0u8..40).collect();
+    captured[..4].copy_from_slice(&[0x60, 0x01, 0x02, 0x03]);
+
+    let mut list = list_with_cleared(
+        ReflectedFixedHdrTlv::request_with_selector(&[0x60, 0x01, 0x02, 0x03], 40).to_raw(),
+    );
+    list.process_reflected_headers(Some(&captured), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(
+        &tlv.value[..4],
+        &[0x60, 0x01, 0x02, 0x03],
+        "Requested preserved"
+    );
+    assert_eq!(&tlv.value[4..], &captured[4..]);
+    assert_eq!(
+        tlv.value, captured,
+        "selector == header[..4] → whole header"
+    );
+    assert!(!tlv.flags.conformant_reflected);
+    assert!(!tlv.is_unrecognized());
+}
+
+#[test]
+fn test_reflected_fixed_hdr_selector_mismatch_sets_c_flag() {
+    // ext-hdr-15 §6.1 case (c): length matches but the Requested field does NOT
+    // match the captured header → C flag, value (incl. Requested) preserved.
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut captured = vec![0u8; 40];
+    captured[..4].copy_from_slice(&[0x60, 0x01, 0x02, 0x03]);
+
+    let mut list = list_with_cleared(
+        ReflectedFixedHdrTlv::request_with_selector(&[0x60, 0xFF, 0xFF, 0xFF], 40).to_raw(),
+    );
+    list.process_reflected_headers(Some(&captured), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(tlv.value.len(), 40, "advertised length preserved");
+    assert_eq!(
+        &tlv.value[..4],
+        &[0x60, 0xFF, 0xFF, 0xFF],
+        "Requested preserved on failure"
+    );
+    assert!(
+        tlv.value[4..].iter().all(|&b| b == 0),
+        "Reflected unchanged"
+    );
+    assert!(
+        tlv.flags.conformant_reflected,
+        "Requested mismatch → C flag"
+    );
+    assert!(!tlv.is_unrecognized());
+}
+
+#[test]
+fn test_reflected_headers_out_of_order_sets_c_flag_no_copy() {
+    // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: Reflected Fixed Header Data
+    // (247) TLVs MUST precede Reflected IPv6 Extension Header Data (246)
+    // TLVs. "If ... TLVs are not received in this order, the Session-
+    // Reflector MUST return these TLVs with the C flag ... set to 1 ...
+    // without copying any data."
+    use crate::tlv::{ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv};
+
+    // Reversed order: 246 (ext hdr) BEFORE 247 (fixed hdr).
+    let mut list = TlvList::new();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw())
+        .unwrap();
+    list.push(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw())
+        .unwrap();
+    list.clear_reflector_flags();
+
+    // Data that WOULD match if the TLVs were processed normally.
+    let ext_blob = [0x00u8, 0x00, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25];
+    let fixed: Vec<u8> = (10u8..30).collect();
+    list.process_reflected_headers(Some(&fixed), Some(&ext_blob));
+
+    for tlv in list.non_hmac_tlvs() {
+        assert!(
+            tlv.flags.conformant_reflected,
+            "out-of-order header TLV must get the C flag"
+        );
+        assert!(
+            tlv.value.iter().all(|&b| b == 0),
+            "out-of-order header TLV must not have data copied in"
+        );
+    }
+}
+
+#[test]
+fn test_reflected_headers_in_order_processed_normally() {
+    // The complement of the §3.3 check: with 247 correctly before 246,
+    // both TLVs are processed and copied normally (no false C flag).
+    use crate::tlv::{ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv};
+
+    let mut list = TlvList::new();
+    list.push(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw())
+        .unwrap();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw())
+        .unwrap();
+    list.clear_reflector_flags();
+
+    let ext_blob = [0x00u8, 0x00, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25];
+    let fixed: Vec<u8> = (10u8..30).collect();
+    list.process_reflected_headers(Some(&fixed), Some(&ext_blob));
+
+    let tlvs = list.non_hmac_tlvs();
+    assert!(
+        !tlvs[0].flags.conformant_reflected,
+        "in-order 247 processed"
+    );
+    assert!(
+        !tlvs[1].flags.conformant_reflected,
+        "in-order 246 processed"
+    );
+    assert_eq!(&tlvs[0].value[4..], &fixed[4..], "247 reflected");
+    assert_eq!(&tlvs[1].value[8..], &ext_blob[8..], "246 reflected");
+}
+
+#[test]
+fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
+    // ext-hdr-15 §4.1: Requested(8) preserved, Reflected = captured[8..].
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
+
+    // Destination Options header: NextHeader=60, HdrExtLen=0, 6 body bytes.
+    let captured_ext = vec![60u8, 0u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+    list.process_reflected_headers(Some(&[]), Some(&captured_ext));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(&tlv.value[..8], &[0; 8], "Requested preserved (zeros)");
+    assert_eq!(
+        &tlv.value[8..],
+        &captured_ext[8..],
+        "Reflected = header[8..]"
+    );
+    assert!(!tlv.flags.conformant_reflected);
+}
+
+#[test]
+fn test_reflected_ipv6_ext_hdr_empty_capture_sets_c_flag() {
+    // ext-hdr-15 §4.1: IPv4 path or IPv6 without ext headers — no header to
+    // reflect, so the reflector "could not use it for reflecting any IPv6
+    // extension header received" → C flag.
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
+
+    list.process_reflected_headers(Some(&[0x45]), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(tlv.value.len(), 8, "advertised capacity preserved");
+    assert!(tlv.flags.conformant_reflected, "no ext headers → C flag");
+    assert!(!tlv.is_unrecognized(), "U flag must NOT be set");
+}
+
+#[test]
+fn test_reflected_ipv6_ext_hdr_c_flag_when_backend_cant_capture() {
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
+
+    list.process_reflected_headers(None, None);
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(tlv.value.len(), 8, "advertised capacity preserved");
+    assert!(tlv.flags.conformant_reflected, "None capture → C flag");
+    assert!(!tlv.is_unrecognized());
+}
+
+#[test]
+fn test_reflected_ipv6_ext_hdr_incomplete_capture_sets_c_flag() {
+    // A blob shorter than one valid ext-header record (HdrExtLen=0 →
+    // 8 octets, but only 4 present) yields no parseable record → C flag.
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
+
+    let captured = vec![60u8, 0u8, 0xAA, 0xBB]; // 4 bytes < 8-byte record
+    list.process_reflected_headers(Some(&[]), Some(&captured));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(tlv.value.len(), 8, "capacity preserved");
+    assert!(tlv.flags.conformant_reflected, "no valid record → C flag");
+    assert!(!tlv.is_unrecognized());
+}
+
+#[test]
+fn test_reflected_ipv6_ext_hdr_length_smaller_than_record_sets_c_flag() {
+    // A request Length (4) smaller than the minimum ext-header record
+    // (8 octets) can never length-match → C flag. (Values are never truncated.)
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(4).to_raw());
+
+    let captured = vec![60u8, 0u8, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    list.process_reflected_headers(Some(&[]), Some(&captured));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(tlv.value.len(), 4);
+    assert!(tlv.flags.conformant_reflected, "length mismatch → C flag");
+}
+
+#[test]
+fn test_reflected_ipv6_ext_hdr_selector_matches_specific_header() {
+    // ext-hdr-15 §4.1 disambiguation: two extension headers of the SAME length
+    // (both 8 bytes), differing only in body. A non-zero Requested field
+    // must pick the matching one. Here the selector equals rec_b's first 8
+    // on-wire octets, so the whole rec_b (Requested + Reflected) is conveyed.
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+    let rec_b = [0x3Cu8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&rec_a);
+    blob.extend_from_slice(&rec_b);
+
+    // Selector = rec_b's first 8 on-wire bytes.
+    let mut list = list_with_cleared(
+        ReflectedIpv6ExtHdrTlv::request_with_selector(
+            &[0x3C, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6],
+            8,
+        )
+        .to_raw(),
+    );
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(
+        &tlv.value[..8],
+        &[0x3C, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6],
+        "Requested preserved"
+    );
+    assert_eq!(
+        &tlv.value[8..],
+        &rec_b[8..],
+        "Reflected = matched header[8..]"
+    );
+    assert_eq!(
+        tlv.value,
+        rec_b.to_vec(),
+        "selector == rec_b[..8] → whole rec_b"
+    );
+    assert!(!tlv.flags.conformant_reflected);
+}
+
+#[test]
+fn test_reflected_ipv6_ext_hdr_selector_no_match_sets_c_flag() {
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let blob = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+
+    let mut list = list_with_cleared(
+        ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0xFF, 0xFF], 8).to_raw(),
+    );
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(tlv.value.len(), 8, "advertised capacity preserved");
+    assert_eq!(
+        &tlv.value[..8],
+        &[0x3C, 0x00, 0xFF, 0xFF, 0, 0, 0, 0],
+        "Requested preserved on failure"
+    );
+    assert!(
+        tlv.flags.conformant_reflected,
+        "no Requested match → C flag"
+    );
+    assert!(!tlv.is_unrecognized(), "U flag must NOT be set");
+}
+
+#[test]
+fn test_reflected_ipv6_ext_hdr_selector_no_match_on_empty_capture_sets_c_flag() {
+    // Non-zero Requested but no captured ext headers (IPv4 / no options):
+    // the requested header isn't present → C flag.
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let mut list = list_with_cleared(
+        ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0x01, 0x02], 8).to_raw(),
+    );
+    list.process_reflected_headers(Some(&[0x45]), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert!(tlv.flags.conformant_reflected);
+    assert!(!tlv.is_unrecognized());
+}
+
+#[test]
+fn test_reflected_ipv6_ext_hdr_zero_selector_does_not_concatenate() {
+    // -11 removed the -08 "concatenate every captured header" behavior. A
+    // 16-byte request against two 8-byte headers can no longer length-match
+    // (the positionally-paired first header is 8 bytes) → C flag, proving
+    // concat-all is gone.
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+    let rec_b = [0x00u8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&rec_a);
+    blob.extend_from_slice(&rec_b);
+
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(16).to_raw());
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert!(
+        tlv.flags.conformant_reflected,
+        "16-byte request vs 8-byte header → length mismatch → C flag"
+    );
+}
+
+#[test]
+fn test_reflected_headers_noop_when_no_tlvs() {
+    // Packet with only Extra Padding — should not flag anything.
+    let mut list = list_with_cleared(ExtraPaddingTlv::new_zeros(4).to_raw());
+
+    list.process_reflected_headers(None, None);
+
+    assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
+}
+
+// --- draft-ietf-ippm-stamp-ext-hdr-15 semantics ---
+// Type 246 has Requested(8); Type 247 retains Requested(4). The selector
+// is preserved, and only the corresponding header tail is reflected. Failure is
+// signalled with the C flag (Conformance), NOT the U flag, and the value
+// is left as received.
+
+#[test]
+fn test_v13_fixed_hdr_requested_preserved_reflected_is_offset_4() {
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
+
+    // Bytes 0,1,2,...,19 so we can see exactly which land where.
+    let captured: Vec<u8> = (0u8..20).collect();
+    list.process_reflected_headers(Some(&captured), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(
+        &tlv.value[..4],
+        &[0, 0, 0, 0],
+        "Requested field (value[..4]) preserved exactly as received"
+    );
+    assert_eq!(
+        &tlv.value[4..],
+        &captured[4..],
+        "Reflected field = header[4..], header's own first 4 octets not copied"
+    );
+    assert!(!tlv.flags.conformant_reflected, "success → no C flag");
+    assert!(!tlv.is_unrecognized(), "success → no U flag");
+}
+
+#[test]
+fn test_v13_fixed_hdr_none_capture_sets_c_flag_not_u() {
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
+
+    list.process_reflected_headers(None, None);
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert!(tlv.flags.conformant_reflected, "None capture → C flag");
+    assert!(!tlv.is_unrecognized(), "must NOT set the U flag");
+    assert!(tlv.value.iter().all(|&b| b == 0), "value left as received");
+}
+
+#[test]
+fn test_v13_fixed_hdr_length_mismatch_sets_c_flag_not_u() {
+    use crate::tlv::ReflectedFixedHdrTlv;
+    let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
+
+    let ipv6_header = vec![0x60u8; 40];
+    list.process_reflected_headers(Some(&ipv6_header), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert!(tlv.flags.conformant_reflected, "length mismatch → C flag");
+    assert!(!tlv.is_unrecognized());
+    assert_eq!(tlv.value.len(), 20, "advertised length preserved");
+    assert!(tlv.value.iter().all(|&b| b == 0), "value left as received");
+}
+
+#[test]
+fn test_v13_ext_hdr_zero_selector_picks_first_length_match() {
+    // Two extension headers of the SAME length (8 bytes). A zero Requested
+    // field must pick the FIRST (positional) header, copy only its [8..].
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let rec_a = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+    let rec_b = [0x00u8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&rec_a);
+    blob.extend_from_slice(&rec_b);
+
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(&tlv.value[..8], &[0; 8], "Requested preserved (zeros)");
+    assert_eq!(&tlv.value[8..], &rec_a[8..], "first header's [8..] copied");
+    assert!(!tlv.flags.conformant_reflected);
+}
+
+#[test]
+fn test_v13_ext_hdr_positional_pairing_two_tlvs_two_headers() {
+    // 2 TLVs (both zero Requested, Length 8) ↔ 2 headers (8 bytes each),
+    // paired in wire order: TLV[0] ↔ header[0], TLV[1] ↔ header[1].
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let rec0 = [0x3Cu8, 0x00, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15];
+    let rec1 = [0x00u8, 0x00, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25];
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&rec0);
+    blob.extend_from_slice(&rec1);
+
+    let mut list = TlvList::new();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw())
+        .unwrap();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw())
+        .unwrap();
+    list.clear_reflector_flags();
+
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlvs = list.non_hmac_tlvs();
+    assert_eq!(&tlvs[0].value[8..], &rec0[8..], "1st TLV ↔ 1st header");
+    assert_eq!(&tlvs[1].value[8..], &rec1[8..], "2nd TLV ↔ 2nd header");
+    assert!(!tlvs[0].flags.conformant_reflected);
+    assert!(!tlvs[1].flags.conformant_reflected);
+}
+
+#[test]
+fn test_v13_ext_hdr_no_selector_match_sets_c_flag_not_u() {
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let blob = [0x3Cu8, 0x00, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6];
+    let mut list = list_with_cleared(
+        ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0xFF, 0xFF], 8).to_raw(),
+    );
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert!(
+        tlv.flags.conformant_reflected,
+        "no Requested match → C flag"
+    );
+    assert!(!tlv.is_unrecognized(), "must NOT set U flag");
+    assert_eq!(
+        &tlv.value[..8],
+        &[0x3C, 0x00, 0xFF, 0xFF, 0, 0, 0, 0],
+        "Requested preserved on failure"
+    );
+}
+
+#[test]
+fn test_v13_ext_hdr_none_capture_sets_c_flag_not_u() {
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
+
+    list.process_reflected_headers(None, None);
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert!(tlv.flags.conformant_reflected, "None capture → C flag");
+    assert!(!tlv.is_unrecognized());
+}
+
+#[test]
+fn test_v13_ext_hdr_empty_capture_sets_c_flag() {
+    // A Reflected IPv6 Ext Hdr TLV but no ext headers received (IPv4 path or
+    // IPv6 without options): the reflector "could not use it for reflecting
+    // any IPv6 extension header received" → C flag (ext-hdr-15 §4.1).
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
+
+    list.process_reflected_headers(Some(&[0x45]), Some(&[]));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert!(tlv.flags.conformant_reflected, "no ext headers → C flag");
+    assert!(!tlv.is_unrecognized());
+}
+
+#[test]
+fn test_v13_ext_hdr_zero_selector_first_fit_skips_length_mismatch() {
+    // An 8-byte request must match the second captured header in
+    // [16-byte HBH, 8-byte DestOpts] (draft ext-hdr-15 §4.1).
+    // Selection uses matching length, not the TLV's position alone.
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    // 16-byte HBH record: NextHeader=0x3C, HdrExtLen=1 → (1+1)*8 = 16 bytes.
+    let mut rec16 = vec![0x3Cu8, 0x01];
+    rec16.resize(16, 0xAA);
+    // 8-byte DestOpts record: NextHeader=0x3C, HdrExtLen=0 → 8 bytes.
+    let rec8 = [0x3Cu8, 0x00, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6];
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&rec16);
+    blob.extend_from_slice(&rec8);
+
+    let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlv = &list.non_hmac_tlvs()[0];
+    assert_eq!(&tlv.value[..8], &[0; 8], "Requested preserved (zeros)");
+    assert_eq!(
+        &tlv.value[8..],
+        &rec8[8..],
+        "8-byte header reflected via first-fit-by-length (not the 16-byte first header)"
+    );
+    assert!(
+        !tlv.flags.conformant_reflected,
+        "first-fit by length matched → no C flag"
+    );
+}
+
+#[test]
+fn test_v13_ext_hdr_zero_selector_first_fit_two_tlvs_reorder() {
+    // Requests of lengths 8 then 16 match captured headers of lengths
+    // 16 then 8 in reverse order, consuming each match once.
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let mut rec16 = vec![0x3Cu8, 0x01];
+    rec16.resize(16, 0xCC);
+    let rec8 = [0x3Cu8, 0x00, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6];
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&rec16);
+    blob.extend_from_slice(&rec8);
+
+    let mut list = TlvList::new();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw())
+        .unwrap();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(16).to_raw())
+        .unwrap();
+    list.clear_reflector_flags();
+
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlvs = list.non_hmac_tlvs();
+    assert_eq!(
+        &tlvs[0].value[8..],
+        &rec8[8..],
+        "Length-8 TLV ↔ 8-byte header (first-fit by length)"
+    );
+    assert_eq!(
+        &tlvs[1].value[8..],
+        &rec16[8..],
+        "Length-16 TLV ↔ 16-byte header (first-fit by length)"
+    );
+    assert!(
+        !tlvs[0].flags.conformant_reflected,
+        "8-byte match → no C flag"
+    );
+    assert!(
+        !tlvs[1].flags.conformant_reflected,
+        "16-byte match → no C flag"
+    );
+}
+
+#[test]
+fn test_v13_ext_hdr_zero_selector_same_length_pairs_in_order() {
+    // Regression for §3.1 rule 2: two same-length (8-byte) zero-selector
+    // TLVs against two same-length but DISTINGUISHABLE headers must pair in
+    // wire order (1st↔1st, 2nd↔2nd). First-fit-with-consumption preserves
+    // this: TLV[0] consumes header index 0, TLV[1] then finds index 1.
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let rec0 = [0x3Cu8, 0x00, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15];
+    let rec1 = [0x00u8, 0x00, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25];
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&rec0);
+    blob.extend_from_slice(&rec1);
+
+    let mut list = TlvList::new();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw())
+        .unwrap();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw())
+        .unwrap();
+    list.clear_reflector_flags();
+
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlvs = list.non_hmac_tlvs();
+    assert_eq!(&tlvs[0].value[8..], &rec0[8..], "1st TLV ↔ 1st header");
+    assert_eq!(&tlvs[1].value[8..], &rec1[8..], "2nd TLV ↔ 2nd header");
+    assert!(!tlvs[0].flags.conformant_reflected);
+    assert!(!tlvs[1].flags.conformant_reflected);
+}
+
+#[test]
+fn test_v13_ext_hdr_duplicate_nonzero_selector_consumes_successively() {
+    // Identical selectors must consume distinct matching headers.
+    // The replies retain each header's different body.
+    use crate::tlv::ReflectedIpv6ExtHdrTlv;
+    let sel = [0x3Cu8, 0x01, 0xAA, 0xBB, 0, 0, 0, 0];
+    let rec0 = [
+        0x3Cu8, 0x01, 0xAA, 0xBB, 0, 0, 0, 0, 0x10, 0x11, 0x12, 0x13, 1, 2, 3, 4,
+    ];
+    let rec1 = [
+        0x3Cu8, 0x01, 0xAA, 0xBB, 0, 0, 0, 0, 0x20, 0x21, 0x22, 0x23, 5, 6, 7, 8,
+    ];
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&rec0);
+    blob.extend_from_slice(&rec1);
+
+    let mut list = TlvList::new();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_selector(&sel, 16).to_raw())
+        .unwrap();
+    list.push(ReflectedIpv6ExtHdrTlv::request_with_selector(&sel, 16).to_raw())
+        .unwrap();
+    list.clear_reflector_flags();
+
+    list.process_reflected_headers(Some(&[]), Some(&blob));
+
+    let tlvs = list.non_hmac_tlvs();
+    assert_eq!(
+        tlvs[0].value, rec0,
+        "1st duplicate TLV consumes the 1st matching header"
+    );
+    assert_eq!(
+        tlvs[1].value, rec1,
+        "2nd duplicate TLV consumes the 2nd matching header"
+    );
+    assert!(!tlvs[0].flags.conformant_reflected);
+    assert!(!tlvs[1].flags.conformant_reflected);
+}
+
+#[test]
+fn test_set_reflected_control_c_flag() {
+    let mut list = TlvList::new();
+    list.push(ReflectedControlTlv::new(0, 2, 1_000).to_raw())
+        .unwrap();
+
+    assert!(!list.non_hmac_tlvs()[0].flags.conformant_reflected);
+
+    list.set_reflected_control_c_flag();
+
+    assert!(list.non_hmac_tlvs()[0].flags.conformant_reflected);
+}

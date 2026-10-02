@@ -215,6 +215,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the requested DSCP/ECN cannot be applied (RFC 8972 §4.4,
   cos-ecn-01 §3.1/§3.2).
 
+### Changed (internal)
+
+- Split `src/receiver/mod.rs` and `src/sender.rs` into focused modules and
+  moved large inline test modules into `tests.rs` files next to the code.
+  No behaviour change.
+- Remove unused library code: `reply_source::send_from`,
+  `srv6::send_with_srh`, `Stats::print_interim`, the TLV-HMAC recompute and
+  isolated-processing helpers in `receiver`, and duplicate metric and
+  pattern-parsing wrappers. Test-only helpers are now `#[cfg(test)]`. The
+  library API is internal and not covered by the 1.x contract.
+- The reflector skips the CoS fallback retry when the fallback TOS byte is
+  the one that just failed to send.
+
 ### Changed (standards)
 
 - draft-ietf-ippm-asymmetrical-pkts is now RFC 10052. Codepoints are

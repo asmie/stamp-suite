@@ -15,11 +15,6 @@ pub fn record_packet_received() {
     counter!("stamp_sender_packets_received_total").increment(1);
 }
 
-/// Records that a packet was lost (timed out).
-pub fn record_packet_lost() {
-    counter!("stamp_sender_packets_lost_total").increment(1);
-}
-
 /// Records that multiple packets were lost (batch variant).
 pub fn record_packets_lost(count: u64) {
     counter!("stamp_sender_packets_lost_total").increment(count);
@@ -63,7 +58,6 @@ mod tests {
         // Actual metric recording requires a recorder to be installed.
         record_packet_sent();
         record_packet_received();
-        record_packet_lost();
         record_packets_lost(5);
         record_rtt(0.001);
         set_rtt_min(0.0005);

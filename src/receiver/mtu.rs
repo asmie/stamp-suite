@@ -42,7 +42,7 @@ impl MtuCache {
         #[cfg(target_os = "linux")]
         let refresh = refresh || !self.invalidate_routes();
         let mtu = self.lookup(key, Instant::now(), refresh, route_mtu)?;
-        Ok(usize::from(super::mtu_payload_cap(mtu, target.is_ipv6())).saturating_sub(overhead))
+        Ok(usize::from(mtu_payload_cap(mtu, target.is_ipv6())).saturating_sub(overhead))
     }
 
     #[cfg(target_os = "linux")]
@@ -236,7 +236,7 @@ fn route_mtu(key: &RouteKey) -> io::Result<u32> {
     let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
         .to_str()
         .map_err(|_| invalid_route())?;
-    let mtu = super::interface_mtu(name).ok_or_else(|| {
+    let mtu = interface_mtu(name).ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "egress interface MTU unavailable")
     })?;
     // A tunnel device advertises its inner IP MTU. Lightweight route
@@ -408,6 +408,74 @@ fn parse_route(bytes: &[u8]) -> io::Result<(u32, Option<u32>, u32)> {
     ))
 }
 
+/// Reads an interface's MTU with `ioctl(SIOCGIFMTU)`.
+///
+/// A throwaway UDP socket supplies the descriptor — `SIOCGIFMTU` only needs
+/// *some* socket of the right family, not the reflector's own.
+///
+/// Returns `None` on any failure (unknown interface, permission, non-Linux), so
+/// callers can reject a reply whose egress budget cannot be established.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn interface_mtu(iface: &str) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+
+    // `::nix` — inside this module, a bare `nix` would resolve to the sibling
+    // `receiver::nix` backend module.
+    use ::nix::libc;
+
+    if iface.is_empty() || iface.len() >= libc::IFNAMSIZ {
+        return None;
+    }
+    let probe = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+
+    // SAFETY: `ifreq` is a plain C struct with no invalid bit patterns; an
+    // all-zero value is a valid "empty request" before the name is filled in.
+    let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (dst, byte) in req.ifr_name.iter_mut().zip(iface.as_bytes()) {
+        *dst = *byte as libc::c_char;
+    }
+
+    // SAFETY: `fd` is an open socket owned for the call's duration and `req` is
+    // a valid, correctly-sized `ifreq` the kernel writes the MTU into.
+    let rc = unsafe { libc::ioctl(probe.as_raw_fd(), libc::SIOCGIFMTU, &mut req) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: SIOCGIFMTU populates the `ifru_mtu` arm of the union.
+    let mtu = unsafe { req.ifr_ifru.ifru_mtu };
+    (mtu > 0).then_some(mtu as u32)
+}
+
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn interface_mtu(_iface: &str) -> Option<u32> {
+    None
+}
+
+/// Largest STAMP payload (UDP payload) that fits in `mtu` without fragmenting.
+///
+/// `--reflected-control-max-size` bounds the *STAMP packet*, while an MTU bounds
+/// the whole IP datagram, so the IP and UDP headers have to come off before the
+/// two are comparable.
+///
+/// No base-size floor: a reply whose mandatory fields cannot fit is dropped.
+#[must_use]
+pub fn mtu_payload_cap(mtu: u32, is_ipv6: bool) -> u16 {
+    use crate::tlv::{IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE};
+    const UDP_HEADER: u32 = 8;
+
+    let ip_hdr = if is_ipv6 {
+        IPV6_FIXED_HEADER_SIZE as u32
+    } else {
+        IPV4_FIXED_HEADER_SIZE as u32
+    };
+    let payload = mtu.saturating_sub(ip_hdr).saturating_sub(UDP_HEADER);
+    // Ordinary UDP/IP lengths exclude jumbograms.
+    let protocol_cap = if is_ipv6 { 65_527 } else { 65_507 };
+    payload.min(protocol_cap) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,7 +631,7 @@ mod tests {
         assert_eq!(key.local, "[2001:db8::2]:862".parse().unwrap());
         assert_eq!(key.target, "[2001:db8::1]:5000".parse().unwrap());
         assert_eq!(
-            usize::from(super::super::mtu_payload_cap(1500, true)) - overhead,
+            usize::from(super::mtu_payload_cap(1500, true)) - overhead,
             1500 - 40 - 8 - 40
         );
         let mut invalid = options;
