@@ -279,3 +279,27 @@ async fn sender_stops_on_shutdown_and_reports_what_it_sent() {
         stats.packets_sent
     );
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn reflector_reports_missing_interface() {
+    let conf = Configuration::parse_from([
+        "stamp-suite",
+        "--is-reflector",
+        "--local-addr",
+        "127.0.0.1",
+        "--local-port",
+        &free_port().await.to_string(),
+        "--interface",
+        "nosuchif0",
+    ]);
+    let shared = receiver::create_shared_state(&conf).unwrap();
+    let err = receiver::run_receiver(&conf, &shared)
+        .await
+        .expect_err("a missing interface cannot be bound");
+    assert!(
+        err.to_string()
+            .contains("Cannot bind to interface nosuchif0"),
+        "unexpected error: {err}"
+    );
+}

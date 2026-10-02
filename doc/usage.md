@@ -121,6 +121,37 @@ in JSON/text and is appended as CSV column 29 (`owd_clock_quality`). Requested c
 that remain unobserved include reflector policy limits and are not a network-loss
 total. Ordinary RTT/OWD and probe-loss fields retain their first-reply semantics.
 
+### Sender schedule
+
+`--send-delay` sets the gap between probes. A plain number is milliseconds;
+`us`, `ms` and `s` select the unit, for example `250us` or `1.5ms`, up to one
+hour. `--send-schedule poisson` draws exponentially distributed gaps with that
+mean (RFC 2330 §11.1.1); the default `periodic` keeps them fixed (RFC 3432).
+
+Send times follow a fixed timeline, so processing time does not stretch it.
+Gaps under 1 ms are busy-waited because Tokio timers have 1 ms resolution, so
+rates above 1000 probes per second keep one CPU core busy. A sender that falls
+more than 2 ms behind restarts its timeline instead of sending a burst.
+
+`--count` sends that many probes; `--count 0` keeps sending until `--duration`
+seconds have passed or the sender is interrupted. `--duration` also ends a run
+before `--count` is reached. Either way the sender then waits `--timeout`
+seconds for outstanding replies.
+
+```bash
+# 4000 probes per second for ten minutes, with a summary every 10 s.
+stamp-suite --remote-addr 192.0.2.10 --send-delay 250us --count 0 --duration 600 \
+  --report-interval 10
+```
+
+### Interface binding
+
+`--interface NAME` binds the sender or reflector socket to a network interface
+or VRF device (Linux `SO_BINDTODEVICE`, macOS `IP_BOUND_IF`/`IPV6_BOUND_IF`).
+Probes and replies then use that device's routes; on Linux the reflector also
+accepts only packets that arrive on it. The pnet backend captures on the named
+interface and also accepts a wildcard `--local-addr` with it.
+
 ### Reflector mode
 
 **CoS policy.** `--allowed-dscp`, `--allowed-ecn`, and destination-specific

@@ -156,7 +156,7 @@ impl RttCollector {
     }
 
     /// Builds a snapshot of current statistics.
-    pub fn snapshot(&self, packets_sent: u32, packets_lost: u32) -> StatsSnapshot {
+    pub fn snapshot(&self, packets_sent: u64, packets_lost: u64) -> StatsSnapshot {
         let packets_received = self.quantiles.count();
         let [median, p95, p99] = self.quantiles.percentiles([50.0, 95.0, 99.0]);
         let total = packets_sent.max(1) as f64;
@@ -428,9 +428,9 @@ pub struct StatsSnapshot {
     /// Residual BER totals and computation intervals, when requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ber: Option<crate::ber::BerSummary>,
-    pub packets_sent: u32,
+    pub packets_sent: u64,
     pub packets_received: u64,
-    pub packets_lost: u32,
+    pub packets_lost: u64,
     pub loss_percent: f64,
     pub min_rtt_ms: Option<f64>,
     pub max_rtt_ms: Option<f64>,

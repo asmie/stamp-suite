@@ -4,7 +4,7 @@
 .SH NAME
 stamp\-suite \- Simple Two\-Way Active Measurement Protocol (STAMP)
 .SH SYNOPSIS
-\fBstamp\-suite\fR [\fB\-\-config\fR] [\fB\-\-print\-config\-schema\fR] [\fB\-r\fR|\fB\-\-remote\-addr\fR] [\fB\-S\fR|\fB\-\-local\-addr\fR] [\fB\-\-local\-scope\-id\fR] [\fB\-\-remote\-scope\-id\fR] [\fB\-p\fR|\fB\-\-remote\-port\fR] [\fB\-o\fR|\fB\-\-local\-port\fR] [\fB\-K\fR|\fB\-\-clock\-source\fR] [\fB\-\-clock\-sync\-source\fR] [\fB\-\-hardware\-clock\-sync\-source\fR] [\fB\-\-reflector\-utc\-offset\fR] [\fB\-d\fR|\fB\-\-send\-delay\fR] [\fB\-c\fR|\fB\-\-count\fR] [\fB\-L\fR|\fB\-\-timeout\fR] [\fB\-\-session\-loss\-threshold\fR] [\fB\-A\fR|\fB\-\-auth\-mode\fR] [\fB\-R \fR] [\fB\-i\fR|\fB\-\-is\-reflector\fR] [\fB\-\-error\-scale\fR] [\fB\-\-error\-multiplier\fR] [\fB\-\-clock\-synchronized\fR] [\fB\-\-hmac\-key\fR] [\fB\-\-hmac\-key\-file\fR] [\fB\-\-hmac\-key\-dir\fR] [\fB\-\-require\-hmac\fR] [\fB\-\-strict\-packets\fR] [\fB\-\-stateful\-reflector\fR] [\fB\-\-session\-admission\fR] [\fB\-\-reflector\-session\fR] [\fB\-\-session\-timeout\fR] [\fB\-\-allowed\-dscp\fR] [\fB\-\-allowed\-ecn\fR] [\fB\-\-allowed\-dscp\-for\fR] [\fB\-\-drop\-replayed\fR] [\fB\-\-location\-disclose\fR] [\fB\-\-tlv\-mode\fR] [\fB\-\-verify\-tlv\-hmac\fR] [\fB\-\-ssid\fR] [\fB\-\-on\-zero\-ssid\fR] [\fB\-\-metrics\fR] [\fB\-\-metrics\-addr\fR] [\fB\-\-cos\fR] [\fB\-\-dscp\fR] [\fB\-\-ecn\fR] [\fB\-\-ecn\-backoff\-factor\fR] [\fB\-\-ecn\-max\-delay\fR] [\fB\-\-ecn\-recovery\-step\fR] [\fB\-\-ttl\fR] [\fB\-\-malformed\fR] [\fB\-\-access\-report\fR] [\fB\-\-access\-return\-code\fR] [\fB\-\-access\-report\-timeout\fR] [\fB\-\-access\-report\-retries\fR] [\fB\-\-timestamp\-info\fR] [\fB\-\-direct\-measurement\fR] [\fB\-\-location\fR] [\fB\-\-follow\-up\-telemetry\fR] [\fB\-\-snmp\fR] [\fB\-\-snmp\-socket\fR] [\fB\-\-control\fR] [\fB\-\-control\-addr\fR] [\fB\-\-control\-token\-file\fR] [\fB\-\-control\-tls\-cert\fR] [\fB\-\-control\-tls\-key\fR] [\fB\-\-output\-format\fR] [\fB\-\-log\-format\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-hwtstamp\fR] [\fB\-\-report\-interval\fR] [\fB\-\-dest\-node\-addr\fR] [\fB\-\-return\-path\-cc\fR] [\fB\-\-return\-address\fR] [\fB\-\-return\-sr\-mpls\-labels\fR] [\fB\-\-return\-srv6\-sids\fR] [\fB\-\-srv6\-return\-forwarding\fR] [\fB\-\-return\-path\-allow\-alternate\fR] [\fB\-\-micro\-session\-id\fR] [\fB\-\-reflector\-member\-link\-id\fR] [\fB\-\-max\-pps\fR] [\fB\-\-reflector\-rate\-burst\fR] [\fB\-\-reflector\-queue\-capacity\fR] [\fB\-\-reflector\-shutdown\-grace\-ms\fR] [\fB\-\-max\-sessions\fR] [\fB\-\-ber\fR] [\fB\-\-extra\-padding\fR] [\fB\-\-ber\-omit\-burst\fR] [\fB\-\-tlv\-hmac\fR] [\fB\-\-ber\-pattern\fR] [\fB\-\-ber\-padding\-size\fR] [\fB\-\-ber\-interval\fR] [\fB\-\-ber\-bit\-threshold\fR] [\fB\-\-ber\-packet\-threshold\fR] [\fB\-\-reflected\-control\-count\fR] [\fB\-\-reflected\-control\-length\fR] [\fB\-\-reflected\-control\-interval\-ns\fR] [\fB\-\-reflected\-control\-no\-ext\-hdr\fR] [\fB\-\-reflected\-control\-max\-count\fR] [\fB\-\-reflected\-control\-max\-size\fR] [\fB\-\-reflected\-control\-min\-interval\-ns\fR] [\fB\-\-reflected\-control\-max\-rate\fR] [\fB\-\-reflected\-control\-max\-volume\fR] [\fB\-\-reflected\-fixed\-hdr\fR] [\fB\-\-reflected\-ipv6\-ext\-hdr\fR] [\fB\-\-attach\-ext\-hdr\fR] [\fB\-\-reflected\-ipv6\-ext\-hdr\-selector\fR] [\fB\-\-reflected\-fixed\-hdr\-selector\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBstamp\-suite\fR [\fB\-\-config\fR] [\fB\-\-print\-config\-schema\fR] [\fB\-r\fR|\fB\-\-remote\-addr\fR] [\fB\-S\fR|\fB\-\-local\-addr\fR] [\fB\-\-local\-scope\-id\fR] [\fB\-\-remote\-scope\-id\fR] [\fB\-p\fR|\fB\-\-remote\-port\fR] [\fB\-o\fR|\fB\-\-local\-port\fR] [\fB\-\-interface\fR] [\fB\-K\fR|\fB\-\-clock\-source\fR] [\fB\-\-clock\-sync\-source\fR] [\fB\-\-hardware\-clock\-sync\-source\fR] [\fB\-\-reflector\-utc\-offset\fR] [\fB\-d\fR|\fB\-\-send\-delay\fR] [\fB\-\-send\-schedule\fR] [\fB\-c\fR|\fB\-\-count\fR] [\fB\-\-duration\fR] [\fB\-L\fR|\fB\-\-timeout\fR] [\fB\-\-session\-loss\-threshold\fR] [\fB\-A\fR|\fB\-\-auth\-mode\fR] [\fB\-R \fR] [\fB\-i\fR|\fB\-\-is\-reflector\fR] [\fB\-\-error\-scale\fR] [\fB\-\-error\-multiplier\fR] [\fB\-\-clock\-synchronized\fR] [\fB\-\-hmac\-key\fR] [\fB\-\-hmac\-key\-file\fR] [\fB\-\-hmac\-key\-dir\fR] [\fB\-\-require\-hmac\fR] [\fB\-\-strict\-packets\fR] [\fB\-\-stateful\-reflector\fR] [\fB\-\-session\-admission\fR] [\fB\-\-reflector\-session\fR] [\fB\-\-session\-timeout\fR] [\fB\-\-allowed\-dscp\fR] [\fB\-\-allowed\-ecn\fR] [\fB\-\-allowed\-dscp\-for\fR] [\fB\-\-drop\-replayed\fR] [\fB\-\-location\-disclose\fR] [\fB\-\-tlv\-mode\fR] [\fB\-\-verify\-tlv\-hmac\fR] [\fB\-\-ssid\fR] [\fB\-\-on\-zero\-ssid\fR] [\fB\-\-metrics\fR] [\fB\-\-metrics\-addr\fR] [\fB\-\-cos\fR] [\fB\-\-dscp\fR] [\fB\-\-ecn\fR] [\fB\-\-ecn\-backoff\-factor\fR] [\fB\-\-ecn\-max\-delay\fR] [\fB\-\-ecn\-recovery\-step\fR] [\fB\-\-ttl\fR] [\fB\-\-malformed\fR] [\fB\-\-access\-report\fR] [\fB\-\-access\-return\-code\fR] [\fB\-\-access\-report\-timeout\fR] [\fB\-\-access\-report\-retries\fR] [\fB\-\-timestamp\-info\fR] [\fB\-\-direct\-measurement\fR] [\fB\-\-location\fR] [\fB\-\-follow\-up\-telemetry\fR] [\fB\-\-snmp\fR] [\fB\-\-snmp\-socket\fR] [\fB\-\-control\fR] [\fB\-\-control\-addr\fR] [\fB\-\-control\-token\-file\fR] [\fB\-\-control\-tls\-cert\fR] [\fB\-\-control\-tls\-key\fR] [\fB\-\-output\-format\fR] [\fB\-\-log\-format\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-hwtstamp\fR] [\fB\-\-report\-interval\fR] [\fB\-\-dest\-node\-addr\fR] [\fB\-\-return\-path\-cc\fR] [\fB\-\-return\-address\fR] [\fB\-\-return\-sr\-mpls\-labels\fR] [\fB\-\-return\-srv6\-sids\fR] [\fB\-\-srv6\-return\-forwarding\fR] [\fB\-\-return\-path\-allow\-alternate\fR] [\fB\-\-micro\-session\-id\fR] [\fB\-\-reflector\-member\-link\-id\fR] [\fB\-\-max\-pps\fR] [\fB\-\-reflector\-rate\-burst\fR] [\fB\-\-reflector\-queue\-capacity\fR] [\fB\-\-reflector\-shutdown\-grace\-ms\fR] [\fB\-\-max\-sessions\fR] [\fB\-\-ber\fR] [\fB\-\-extra\-padding\fR] [\fB\-\-ber\-omit\-burst\fR] [\fB\-\-tlv\-hmac\fR] [\fB\-\-ber\-pattern\fR] [\fB\-\-ber\-padding\-size\fR] [\fB\-\-ber\-interval\fR] [\fB\-\-ber\-bit\-threshold\fR] [\fB\-\-ber\-packet\-threshold\fR] [\fB\-\-reflected\-control\-count\fR] [\fB\-\-reflected\-control\-length\fR] [\fB\-\-reflected\-control\-interval\-ns\fR] [\fB\-\-reflected\-control\-no\-ext\-hdr\fR] [\fB\-\-reflected\-control\-max\-count\fR] [\fB\-\-reflected\-control\-max\-size\fR] [\fB\-\-reflected\-control\-min\-interval\-ns\fR] [\fB\-\-reflected\-control\-max\-rate\fR] [\fB\-\-reflected\-control\-max\-volume\fR] [\fB\-\-reflected\-fixed\-hdr\fR] [\fB\-\-reflected\-ipv6\-ext\-hdr\fR] [\fB\-\-attach\-ext\-hdr\fR] [\fB\-\-reflected\-ipv6\-ext\-hdr\-selector\fR] [\fB\-\-reflected\-fixed\-hdr\-selector\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Simple Two\-Way Active Measurement Protocol (STAMP)
 .SH OPTIONS
@@ -49,6 +49,9 @@ UDP port number for outgoing packets
 .TP
 \fB\-o\fR, \fB\-\-local\-port\fR \fI<LOCAL_PORT>\fR [default: 0]
 Local UDP port: randomized dynamic sender port (0), or 862 for a reflector
+.TP
+\fB\-\-interface\fR \fI<NAME>\fR
+Bind the socket to this network interface or VRF device. Linux uses SO_BINDTODEVICE and macOS IP_BOUND_IF; the pnet backend captures on it
 .TP
 \fB\-i\fR, \fB\-\-is\-reflector\fR
 Run as Session Reflector instead of Session Sender
@@ -149,11 +152,27 @@ off: Always use software timestamping, even when HW is available. Useful for A/B
 .RE
 .SH SENDER
 .TP
-\fB\-d\fR, \fB\-\-send\-delay\fR \fI<SEND_DELAY>\fR [default: 1000]
-Delay between next packets
+\fB\-d\fR, \fB\-\-send\-delay\fR \fI<INTERVAL>\fR [default: 1000]
+Interval between probes. A plain number is milliseconds; `us`, `ms` and `s` suffixes select the unit (for example `250us` or `1.5ms`). With `\-\-send\-schedule poisson` this is the mean interval
+.TP
+\fB\-\-send\-schedule\fR \fI<SEND_SCHEDULE>\fR [default: periodic]
+How probe send times are spaced: `periodic` (RFC 3432) or `poisson`, with exponentially distributed gaps (RFC 2330 §11.1.1)
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+periodic: A fixed interval (RFC 3432)
+.IP \(bu 2
+poisson: Exponentially distributed gaps with the interval as their mean (RFC 2330 §11.1.1)
+.RE
 .TP
 \fB\-c\fR, \fB\-\-count\fR \fI<COUNT>\fR [default: 1000]
-Count of packets to be sent
+Number of probes to send; 0 sends until `\-\-duration` ends or the sender is interrupted
+.TP
+\fB\-\-duration\fR \fI<SECONDS>\fR
+Stop sending after this many seconds, even if `\-\-count` probes have not all been sent. Replies are still awaited for `\-\-timeout`
 .TP
 \fB\-L\fR, \fB\-\-timeout\fR \fI<TIMEOUT>\fR [default: 5]
 Amount of time to wait for packet until consider it lost (in seconds)

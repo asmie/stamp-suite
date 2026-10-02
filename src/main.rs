@@ -77,7 +77,10 @@ async fn main() {
 async fn run(conf: &Configuration) -> Result<(), StartupError> {
     // Probe the bound interface's timestamping capabilities and report
     // startup warnings. Socket setup configures the requested timestamp tier.
-    let hw_iface = stamp_suite::hwtstamp::interface_for_addr(conf.local_addr);
+    let hw_iface = conf
+        .interface
+        .clone()
+        .or_else(|| stamp_suite::hwtstamp::interface_for_addr(conf.local_addr));
     let hw_cap = stamp_suite::hwtstamp::probe(hw_iface.as_deref());
     log::info!(
         "hwtstamp probe: interface={} rx_hw={} tx_hw={} ptp={}",

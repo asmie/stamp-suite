@@ -39,6 +39,105 @@ impl fmt::Debug for SecretString {
     }
 }
 
+/// The probe interval from `--send-delay`. A plain number is milliseconds;
+/// `us`, `ms` and `s` suffixes select the unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProbeInterval(std::time::Duration);
+
+impl ProbeInterval {
+    /// The longest accepted interval.
+    pub const MAX: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    #[must_use]
+    pub const fn from_millis(ms: u64) -> Self {
+        Self(std::time::Duration::from_millis(ms))
+    }
+
+    #[must_use]
+    pub const fn duration(self) -> std::time::Duration {
+        self.0
+    }
+}
+
+impl std::str::FromStr for ProbeInterval {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let text = text.trim();
+        let split = text
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(text.len());
+        let (number, unit) = text.split_at(split);
+        let scale = match unit.trim() {
+            "" | "ms" => 1e-3,
+            "us" | "µs" => 1e-6,
+            "s" => 1.0,
+            other => return Err(format!("unknown unit {other:?}; use us, ms or s")),
+        };
+        let value: f64 = number
+            .parse()
+            .map_err(|_| format!("invalid interval {text:?}"))?;
+        let seconds = value * scale;
+        if !seconds.is_finite() || seconds > Self::MAX.as_secs_f64() {
+            return Err(format!(
+                "interval {text:?} exceeds {}s",
+                Self::MAX.as_secs()
+            ));
+        }
+        // Microsecond resolution; finer values are rounded.
+        let micros = (seconds * 1e6).round() as u64;
+        Ok(Self(std::time::Duration::from_micros(micros)))
+    }
+}
+
+impl fmt::Display for ProbeInterval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let micros = self.0.as_micros();
+        if micros % 1000 == 0 {
+            write!(f, "{}", micros / 1000)
+        } else {
+            write!(f, "{micros}us")
+        }
+    }
+}
+
+impl serde::Serialize for ProbeInterval {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ProbeInterval {
+    /// Accepts a number of milliseconds or a string with a unit.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Millis(u64),
+            Text(String),
+        }
+        match Repr::deserialize(deserializer)? {
+            Repr::Millis(ms) => format!("{ms}").parse(),
+            Repr::Text(text) => text.parse(),
+        }
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// How probe send times are spaced.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum SendSchedule {
+    /// A fixed interval (RFC 3432).
+    #[default]
+    Periodic,
+    /// Exponentially distributed gaps with the interval as their mean
+    /// (RFC 2330 §11.1.1).
+    Poisson,
+}
+
 /// Operator-declared clock discipline, independent of STAMP timestamp encoding.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
@@ -277,6 +376,10 @@ pub struct Configuration {
         help_heading = "Endpoints"
     )]
     pub local_port: u16,
+    /// Bind the socket to this network interface or VRF device. Linux uses
+    /// SO_BINDTODEVICE and macOS IP_BOUND_IF; the pnet backend captures on it.
+    #[clap(long, value_name = "NAME", help_heading = "Endpoints")]
+    pub interface: Option<String>,
     /// Timestamp wire encoding (NTP or PTP); does not configure clock synchronization.
     #[clap(
         short = 'K',
@@ -314,12 +417,29 @@ pub struct Configuration {
         help_heading = "Timestamps and clock"
     )]
     pub reflector_utc_offset: i32,
-    /// Delay between next packets
-    #[clap(short = 'd', long, default_value_t = 1000, help_heading = "Sender")]
-    pub send_delay: u16,
-    /// Count of packets to be sent
+    /// Interval between probes. A plain number is milliseconds; `us`, `ms`
+    /// and `s` suffixes select the unit (for example `250us` or `1.5ms`).
+    /// With `--send-schedule poisson` this is the mean interval.
+    #[clap(
+        short = 'd',
+        long,
+        default_value = "1000",
+        value_name = "INTERVAL",
+        help_heading = "Sender"
+    )]
+    pub send_delay: ProbeInterval,
+    /// How probe send times are spaced: `periodic` (RFC 3432) or `poisson`,
+    /// with exponentially distributed gaps (RFC 2330 §11.1.1).
+    #[clap(long, value_enum, default_value_t = SendSchedule::Periodic, help_heading = "Sender")]
+    pub send_schedule: SendSchedule,
+    /// Number of probes to send; 0 sends until `--duration` ends or the
+    /// sender is interrupted.
     #[clap(short = 'c', long, default_value_t = 1000, help_heading = "Sender")]
-    pub count: u16,
+    pub count: u32,
+    /// Stop sending after this many seconds, even if `--count` probes have
+    /// not all been sent. Replies are still awaited for `--timeout`.
+    #[clap(long, value_name = "SECONDS", help_heading = "Sender")]
+    pub duration: Option<u32>,
     /// Amount of time to wait for packet until consider it lost (in seconds).
     #[clap(short = 'L', long, default_value_t = 5, help_heading = "Sender")]
     pub timeout: u8,
@@ -1010,18 +1130,19 @@ impl Configuration {
         }
         let burst_ns = u64::from(self.reflected_control_count - 1)
             * u64::from(self.reflected_control_interval_ns);
-        let send_delay_ns = u64::from(self.send_delay) * 1_000_000;
+        let send_delay_ns =
+            u64::try_from(self.send_delay.duration().as_nanos()).unwrap_or(u64::MAX);
         if send_delay_ns >= burst_ns {
             return None;
         }
         Some(format!(
-            "--send-delay {} ms is shorter than the {:.3} ms the reflected burst \
+            "--send-delay {:?} is shorter than the {:.3} ms the reflected burst \
              is expected to take (--reflected-control-count {} x \
              --reflected-control-interval-ns {}); the next test packet will be \
              sent while the reflector is still replying to the previous one \
              (RFC 10052 §5 SHOULD NOT). Raise \
              --send-delay to at least {} ms, or lower the count/interval.",
-            self.send_delay,
+            self.send_delay.duration(),
             burst_ns as f64 / 1_000_000.0,
             self.reflected_control_count,
             self.reflected_control_interval_ns,
@@ -1167,10 +1288,16 @@ impl Configuration {
 
     /// Sender-only run parameters.
     fn validate_sender_run(&self) -> Result<(), ConfigurationError> {
-        if !self.is_reflector && self.count == 0 {
+        if self.duration == Some(0) {
             return Err(ConfigurationError::InvalidConfiguration(
-                "--count must be at least 1".into(),
+                "--duration must be at least 1 second".into(),
             ));
+        }
+        if self.send_delay.duration() > ProbeInterval::MAX {
+            return Err(ConfigurationError::InvalidConfiguration(format!(
+                "send_delay exceeds {} seconds",
+                ProbeInterval::MAX.as_secs()
+            )));
         }
 
         if self.session_loss_threshold == 0 {
@@ -1187,8 +1314,25 @@ impl Configuration {
         Ok(())
     }
 
-    /// Address scope IDs and the probe TTL.
+    /// Address scope IDs, interface binding and the probe TTL.
     fn validate_addresses(&self) -> Result<(), ConfigurationError> {
+        if let Some(name) = self.interface.as_deref() {
+            if !cfg!(any(
+                target_os = "linux",
+                target_os = "android",
+                target_os = "macos"
+            )) {
+                return Err(ConfigurationError::InvalidConfiguration(
+                    "--interface is supported on Linux and macOS".into(),
+                ));
+            }
+            // IFNAMSIZ is 16 bytes including the terminating NUL.
+            if name.is_empty() || name.len() > 15 || name.contains('\0') {
+                return Err(ConfigurationError::InvalidConfiguration(format!(
+                    "invalid interface name {name:?}"
+                )));
+            }
+        }
         for (name, addr, scope, active) in [
             ("local", self.local_addr, self.local_scope_id, true),
             (
@@ -1369,7 +1513,7 @@ impl Configuration {
                     "ber_padding_size must be positive and a multiple of the pattern length".into(),
                 ));
             }
-            if self.ber_interval == 0 || self.send_delay == 0 {
+            if self.ber_interval == 0 || self.send_delay.duration().is_zero() {
                 return Err(ConfigurationError::InvalidConfiguration(
                     "BER requires positive ber_interval and send_delay".into(),
                 ));
@@ -1555,12 +1699,14 @@ impl Configuration {
         // that never touches --cos/--ecn.
         if self.cos
             && matches!(self.ecn, 1 | 2)
-            && (self.ecn_max_delay as u64) < (self.send_delay as u64)
+            && std::time::Duration::from_millis(u64::from(self.ecn_max_delay))
+                < self.send_delay.duration()
         {
             return Err(ConfigurationError::InvalidConfiguration(format!(
-                "ecn_max_delay ({} ms) must be >= send_delay ({} ms) when the AIMD \
+                "ecn_max_delay ({} ms) must be >= send_delay ({:?}) when the AIMD \
                  congestion-response controller is active (--cos with --ecn 1 or 2)",
-                self.ecn_max_delay, self.send_delay
+                self.ecn_max_delay,
+                self.send_delay.duration()
             )));
         }
         Ok(())
@@ -1888,12 +2034,15 @@ impl Configuration {
             remote_scope_id,
             remote_port,
             local_port,
+            interface,
             clock_source,
             clock_sync_source,
             hardware_clock_sync_source,
             reflector_utc_offset,
             send_delay,
+            send_schedule,
             count,
+            duration,
             timeout,
             session_loss_threshold,
             auth_mode,
@@ -2010,12 +2159,15 @@ impl Configuration {
         merge!(remote_scope_id);
         merge!(remote_port);
         merge!(local_port);
+        merge_opt!(interface);
         merge!(clock_source);
         merge!(clock_sync_source);
         merge!(hardware_clock_sync_source);
         merge!(reflector_utc_offset);
         merge!(send_delay);
+        merge!(send_schedule);
         merge!(count);
+        merge_opt!(duration);
         merge!(timeout);
         merge!(session_loss_threshold);
         merge!(auth_mode);
@@ -2138,12 +2290,15 @@ pub struct FileConfiguration {
     pub remote_scope_id: Option<u32>,
     pub remote_port: Option<u16>,
     pub local_port: Option<u16>,
+    pub interface: Option<String>,
     pub clock_source: Option<ClockFormat>,
     pub clock_sync_source: Option<ClockSyncSource>,
     pub hardware_clock_sync_source: Option<ClockSyncSource>,
     pub reflector_utc_offset: Option<i32>,
-    pub send_delay: Option<u16>,
-    pub count: Option<u16>,
+    pub send_delay: Option<ProbeInterval>,
+    pub send_schedule: Option<SendSchedule>,
+    pub count: Option<u32>,
+    pub duration: Option<u32>,
     pub timeout: Option<u8>,
     pub session_loss_threshold: Option<u16>,
     pub auth_mode: Option<AuthMode>,
@@ -2255,12 +2410,18 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "remote_scope_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "remote_port": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "local_port":  { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "interface":   { "type": "string", "minLength": 1, "maxLength": 15 },
     "clock_source": { "enum": ["NTP", "PTP"] },
     "clock_sync_source": { "enum": ["ntp", "ptp", "gps", "glonass", "loran-c", "bds", "galileo", "local", "ssu-bits"] },
     "hardware_clock_sync_source": { "enum": ["ntp", "ptp", "gps", "glonass", "loran-c", "bds", "galileo", "local", "ssu-bits"] },
     "reflector_utc_offset": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
-    "send_delay":  { "type": "integer", "minimum": 0, "maximum": 65535 },
-    "count":       { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "send_delay":  { "anyOf": [
+      { "type": "integer", "minimum": 0, "maximum": 3600000 },
+      { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(us|µs|ms|s)?$" }
+    ] },
+    "send_schedule": { "enum": ["periodic", "poisson"] },
+    "count":       { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "duration":    { "type": "integer", "minimum": 1, "maximum": 4294967295 },
     "session_loss_threshold": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "timeout":     { "type": "integer", "minimum": 0, "maximum": 255 },
     "auth_mode":   { "enum": ["A", "O"] },

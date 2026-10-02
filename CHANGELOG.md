@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--count 0` sends until `--duration` ends or the sender is interrupted, and
+  `--count` now goes up to 2^32 - 1. `--duration SECONDS` limits a run by time.
+  Before, `--count 0` sent nothing and reported success.
+- `--send-delay` accepts units (`250us`, `1.5ms`, `2s`; a plain number is still
+  milliseconds) and intervals below 1 ms, which are busy-waited for exact
+  spacing. On loopback 100 µs gives 30,000 probes in 3 s.
+- `--send-schedule poisson` spaces probes with exponential gaps (RFC 2330
+  §11.1.1).
+- `--interface NAME` binds the sender, the nix reflector and the pnet reply
+  sockets to a device or VRF; pnet captures on it.
+
 - A sender stops on Ctrl-C or SIGTERM and prints the statistics collected so
   far. It used to exit without a summary.
 - `--help` and the man page group options into sections (Endpoints, Sender,
@@ -222,8 +233,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Send probes on a fixed schedule. Each send deadline was measured from the
   end of the previous send, so send time and timer rounding stretched every
   interval: 2000 probes at `--send-delay 1` took 4.2 s and now take 2.2 s.
-  A sender that falls behind resumes from the current time rather than
-  sending a catch-up burst.
+  A probe up to 2 ms late is followed at once by the next; further behind,
+  the schedule restarts from the current time rather than sending a burst.
+- Count sender probes in 64 bits. A continuous run would overflow the 32-bit
+  counters. The Direct Measurement counter on the wire stays 32 bits and wraps.
 - Print `--report-interval` reports while the sender waits for outstanding
   replies and Access Report acknowledgements; they used to stop with the
   last probe.
@@ -232,7 +245,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refuse to start when `--metrics` or `--snmp` is given to a binary built
   without that feature, as `--control` already did. Both used to print a
   warning and run without the service.
-- Reject `--count 0`. The sender sent nothing and reported success.
 - Report HMAC key load failures with the option, path and OS error, at the
   point of failure. They were logged and followed by a generic "no usable key"
   error. The sender loads its key before opening sockets.

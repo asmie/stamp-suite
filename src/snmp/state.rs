@@ -39,8 +39,9 @@ pub struct SnmpConfig {
     pub tlv_mode: TlvHandlingMode,
     pub stateful_reflector: bool,
     pub session_timeout: u64,
-    pub packet_count: u16,
-    pub send_delay: u16,
+    pub packet_count: u32,
+    /// Milliseconds, rounded down.
+    pub send_delay: u32,
 }
 
 impl crate::sender::SenderObserver for SenderSnmpStats {
@@ -71,7 +72,7 @@ impl SnmpConfig {
             stateful_reflector: conf.stateful_reflector,
             session_timeout: conf.session_timeout,
             packet_count: conf.count,
-            send_delay: conf.send_delay,
+            send_delay: u32::try_from(conf.send_delay.duration().as_millis()).unwrap_or(u32::MAX),
         }
     }
 }

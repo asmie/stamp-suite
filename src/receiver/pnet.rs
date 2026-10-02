@@ -104,6 +104,11 @@ pub async fn run_receiver(
     for socket in std::iter::once(&send_socket_v4).chain(send_socket_v6.iter()) {
         crate::net_policy::set_hops(socket)
             .map_err(|e| crate::StartupError::io("Cannot set reply TTL/Hop Limit 255", e))?;
+        if let Some(name) = conf.interface.as_deref() {
+            crate::net_policy::bind_to_interface(socket, name).map_err(|e| {
+                crate::StartupError::io(format!("Cannot bind to interface {name}"), e)
+            })?;
+        }
         socket
             .set_nonblocking(true)
             .map_err(|e| crate::StartupError::io("Cannot make reply socket nonblocking", e))?;
@@ -120,9 +125,16 @@ pub async fn run_receiver(
 
     // Interface discovery can itself depend on capture-driver availability.
     // Report ordinary socket and key failures before consulting that driver.
+    // `--interface` selects the capture interface by name; the local
+    // address, unless it is a wildcard, must still be one of its addresses.
     let interface_ip_match = |iface: &NetworkInterface| {
-        (conf.local_scope_id == 0 || iface.index == conf.local_scope_id)
-            && iface.ips.iter().any(|ip| ip.ip() == conf.local_addr)
+        let has_addr = (conf.interface.is_some() && conf.local_addr.is_unspecified())
+            || iface.ips.iter().any(|ip| ip.ip() == conf.local_addr);
+        conf.interface
+            .as_deref()
+            .is_none_or(|name| iface.name == name)
+            && (conf.local_scope_id == 0 || iface.index == conf.local_scope_id)
+            && has_addr
     };
 
     // Find the network interface with the provided local IP address
@@ -133,10 +145,14 @@ pub async fn run_receiver(
         Some(iface) => iface,
         None => {
             shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::config(format!(
-                "No interface found with IP address {}",
-                conf.local_addr
-            )));
+            return Err(crate::StartupError::config(
+                match conf.interface.as_deref() {
+                    Some(name) => {
+                        format!("No interface {name} with IP address {}", conf.local_addr)
+                    }
+                    None => format!("No interface found with IP address {}", conf.local_addr),
+                },
+            ));
         }
     };
 

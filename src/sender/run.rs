@@ -1,8 +1,15 @@
 //! One sender run: setup, the probe schedule, the final reply drain, and
 //! Access Report retransmissions (RFC 8972 §4.6).
 
+use super::schedule::Schedule;
 use super::*;
 use crate::shutdown::CancellationToken;
+
+/// Tokio timers fire on whole milliseconds, so a shorter gap before the next
+/// probe is spun through instead, polling for replies between yields. Rates
+/// above 1000 probes per second therefore keep one CPU core busy.
+const TIMER_RESOLUTION: Duration = Duration::from_millis(1);
+const CATCH_UP: Duration = Duration::from_millis(2);
 
 /// How each probe is built; decided once at startup.
 enum SendMode {
@@ -19,8 +26,9 @@ enum SendMode {
 /// What a receive wait ends on, besides its deadline.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wait {
-    /// The next probe is due.
-    NextSend,
+    /// The next probe is due. `spin` busy-waits a gap shorter than the
+    /// timer resolution.
+    NextSend { spin: bool },
     /// Every probe has a reply (or its burst copies are in), or time is up.
     Drain,
     /// The Access Report timer expires or the report is acknowledged.
@@ -56,9 +64,9 @@ pub(super) struct SenderRun<'a> {
     expiry_queue: VecDeque<(Instant, u32)>,
     rtt_collector: RttCollector,
     owd_collector: OwdCollector,
-    packets_sent: u32,
-    packets_received: u32,
-    packets_lost: u32,
+    packets_sent: u64,
+    packets_received: u64,
+    packets_lost: u64,
     latched_reflector_msid: Option<u16>,
     recv_buf: Vec<u8>,
     /// Ancillary data for `recvmsg`, reused across replies.
@@ -80,6 +88,7 @@ pub(super) struct SenderRun<'a> {
     report_timer: Option<tokio::time::Interval>,
     observers: SenderObservers,
     shutdown: CancellationToken,
+    schedule: Schedule,
 }
 
 impl<'a> SenderRun<'a> {
@@ -122,6 +131,12 @@ impl<'a> SenderRun<'a> {
 
         crate::net_policy::set_hops(&std_socket)
             .map_err(|e| crate::StartupError::io("Cannot set TTL/Hop Limit 255", e))?;
+        // Bind to the device before connecting so the route lookup uses it.
+        if let Some(name) = conf.interface.as_deref() {
+            crate::net_policy::bind_to_interface(&std_socket, name).map_err(|e| {
+                crate::StartupError::io(format!("Cannot bind to interface {name}"), e)
+            })?;
+        }
         std_socket
             .set_nonblocking(true)
             .map_err(|e| crate::StartupError::io("Cannot make the socket nonblocking", e))?;
@@ -287,7 +302,10 @@ impl<'a> SenderRun<'a> {
             } else {
                 #[cfg(target_os = "linux")]
                 let want_hw = conf.hwtstamp == HwTsMode::On && {
-                    let iface = hwtstamp::interface_for_addr(conf.local_addr);
+                    let iface = conf
+                        .interface
+                        .clone()
+                        .or_else(|| hwtstamp::interface_for_addr(conf.local_addr));
                     let cap = hwtstamp::probe(iface.as_deref());
                     cap.any_hw_supported()
                         && iface
@@ -351,9 +369,9 @@ impl<'a> SenderRun<'a> {
         let expiry_queue: VecDeque<(Instant, u32)> = VecDeque::new();
         let rtt_collector = RttCollector::new();
         let owd_collector = OwdCollector::new();
-        let packets_sent: u32 = 0;
-        let packets_received: u32 = 0;
-        let packets_lost: u32 = 0;
+        let packets_sent: u64 = 0;
+        let packets_received: u64 = 0;
+        let packets_lost: u64 = 0;
         // Zero-config latch for the Reflector Micro-session ID (RFC 9534
         // §3.2-11): populated from the first validly-received reply when
         // `--reflector-member-link-id` was not given; persists for the whole
@@ -383,15 +401,15 @@ impl<'a> SenderRun<'a> {
 
         let congestion = ecn_response_active.then(|| {
             let params = AimdParams {
-                base_interval: Duration::from_millis(conf.send_delay as u64),
+                base_interval: conf.send_delay.duration(),
                 backoff_factor: conf.ecn_backoff_factor,
                 max_interval: Duration::from_millis(conf.ecn_max_delay as u64),
                 recovery_step: Duration::from_millis(conf.ecn_recovery_step as u64),
             };
             log::info!(
                 "AIMD congestion-response controller enabled (draft-ietf-ippm-stamp-cos-ecn-01 \
-                 §3.4): base={}ms backoff_factor={} max={}ms recovery_step={}ms{}",
-                conf.send_delay,
+                 §3.4): base={:?} backoff_factor={} max={}ms recovery_step={}ms{}",
+                conf.send_delay.duration(),
                 conf.ecn_backoff_factor,
                 conf.ecn_max_delay,
                 conf.ecn_recovery_step,
@@ -678,7 +696,7 @@ impl<'a> SenderRun<'a> {
                     .find(|t| t.tlv_type == TlvType::ExtraPadding)
                     .map_or(0, |t| t.value.len()),
                 !conf.ber_omit_burst,
-                Duration::from_millis(u64::from(conf.ber_interval) * u64::from(conf.send_delay)),
+                conf.send_delay.duration() * conf.ber_interval,
                 Instant::now(),
                 [conf.ber_bit_threshold, conf.ber_packet_threshold],
             )
@@ -763,6 +781,7 @@ impl<'a> SenderRun<'a> {
             report_timer,
             observers,
             shutdown,
+            schedule: Schedule::new(conf.send_schedule),
         })
     }
 
@@ -772,18 +791,37 @@ impl<'a> SenderRun<'a> {
         mut self,
         output: &mut crate::stats::StatsOutput,
     ) -> Result<StatsSnapshot, crate::StartupError> {
-        // Each probe is due one interval after the previous due time, so the
-        // time spent building and sending does not stretch the interval. A
-        // late probe goes out at once without catching up on missed ones.
-        let mut due = tokio::time::Instant::now();
-        for _ in 0..self.conf.count {
+        // Each probe is due one gap after the previous due time, so the time
+        // spent building and sending does not stretch the gap. Timer wakeups
+        // can land a tick late; up to CATCH_UP behind, the next probe follows
+        // at once so the rate holds. Further behind, the schedule restarts
+        // from now instead of sending a burst.
+        let start = tokio::time::Instant::now();
+        let stop_at = self
+            .conf
+            .duration
+            .map(|seconds| start + Duration::from_secs(seconds.into()));
+        let count = u64::from(self.conf.count);
+        let mut due = start;
+        while count == 0 || self.packets_sent < count {
+            if stop_at.is_some_and(|at| tokio::time::Instant::now() >= at) {
+                break;
+            }
             let attach_access_report = self
                 .access_report_state
                 .as_mut()
                 .is_some_and(|state| state.tick(Instant::now()));
             self.send_probe(attach_access_report).await;
-            due = (due + self.send_interval()).max(tokio::time::Instant::now());
-            self.receive_until(due, Wait::NextSend, output).await;
+            let gap = self.schedule.next_gap(self.send_interval());
+            due += gap;
+            let now = tokio::time::Instant::now();
+            if now.saturating_duration_since(due) > CATCH_UP {
+                due = now;
+            }
+            let until = stop_at.map_or(due, |at| due.min(at));
+            let spin = gap < TIMER_RESOLUTION;
+            self.receive_until(until, Wait::NextSend { spin }, output)
+                .await;
             self.expire();
             if self.stopping() {
                 break;
@@ -834,7 +872,7 @@ impl<'a> SenderRun<'a> {
 
         // Probes still unanswered are lost.
         let remaining_lost = self.pending.len() as u32;
-        self.packets_lost += remaining_lost;
+        self.packets_lost += u64::from(remaining_lost);
         self.observers.probes_lost(remaining_lost);
         if let Some(m) = self.measurements.monitor.as_mut() {
             m.idle();
@@ -848,7 +886,7 @@ impl<'a> SenderRun<'a> {
         self.congestion
             .as_ref()
             .map(|c| c.controller.current_interval())
-            .unwrap_or_else(|| Duration::from_millis(self.conf.send_delay as u64))
+            .unwrap_or_else(|| self.conf.send_delay.duration())
     }
 
     /// RFC 8972 §3: `--on-zero-ssid=stop` ends the run at the first reply
@@ -867,7 +905,7 @@ impl<'a> SenderRun<'a> {
             return true;
         }
         match wait {
-            Wait::NextSend => false,
+            Wait::NextSend { .. } => false,
             Wait::Drain => {
                 self.stopped_on_zero_ssid()
                     || (self.pending.is_empty() && !self.measurements.needs_burst_wait())
@@ -897,8 +935,14 @@ impl<'a> SenderRun<'a> {
             Report,
             Shutdown,
         }
+        // A gap shorter than the timer resolution is spun through, yielding
+        // between receive polls, so sub-millisecond spacing stays exact.
+        let spin = matches!(wait, Wait::NextSend { spin: true });
         loop {
             if self.wait_over(wait) {
+                return true;
+            }
+            if spin && tokio::time::Instant::now() >= deadline {
                 return true;
             }
             let monitor_due = self
@@ -924,7 +968,13 @@ impl<'a> SenderRun<'a> {
                         None => std::future::pending().await,
                     }
                 } => Event::MonitorDue,
-                _ = tokio::time::sleep_until(deadline) => Event::Deadline,
+                _ = async {
+                    if spin {
+                        tokio::task::yield_now().await;
+                    } else {
+                        tokio::time::sleep_until(deadline).await;
+                    }
+                } => Event::Deadline,
                 _ = async {
                     match report_timer {
                         Some(timer) => {
@@ -949,13 +999,13 @@ impl<'a> SenderRun<'a> {
                 }
                 Event::Datagram(Err(e)) => {
                     let during = match wait {
-                        Wait::NextSend => "",
+                        Wait::NextSend { .. } => "",
                         Wait::Drain => " during final wait",
                         Wait::AccessReport => " while awaiting Access Report ack",
                     };
                     crate::eprintln_throttled!("Receive error{during}: {e}");
                     if !is_icmp_feedback(&e) {
-                        if wait == Wait::NextSend {
+                        if matches!(wait, Wait::NextSend { .. }) {
                             // Keep the send schedule even if the socket keeps failing.
                             tokio::time::sleep_until(deadline).await;
                             return true;
@@ -968,7 +1018,8 @@ impl<'a> SenderRun<'a> {
                         m.advance(Instant::now());
                     }
                 }
-                Event::Deadline => return true,
+                Event::Deadline if !spin => return true,
+                Event::Deadline => {}
                 Event::Report => {
                     let interim = self.snapshot();
                     output.print(&interim, true);
@@ -1007,7 +1058,8 @@ impl<'a> SenderRun<'a> {
         let tlvs: &[RawTlv] = if per_probe {
             let mut tlvs = self.extra_tlvs.clone();
             if conf.direct_measurement {
-                tlvs.push(DirectMeasurementTlv::new(self.packets_sent + 1).to_raw());
+                // The wire counter is 32 bits and wraps (RFC 8972 §4.5).
+                tlvs.push(DirectMeasurementTlv::new((self.packets_sent + 1) as u32).to_raw());
             }
             if let Some(access_id) = conf.access_report.filter(|_| attach_access_report) {
                 tlvs.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
@@ -1083,7 +1135,8 @@ impl<'a> SenderRun<'a> {
             send_timestamp,
         };
         self.pending.insert(seq, probe);
-        self.measurements.sent(seq, probe, self.packets_sent);
+        // The ordinal follows the 32-bit Direct Measurement counter.
+        self.measurements.sent(seq, probe, self.packets_sent as u32);
         // Pair this send's kernel OPT_ID with the sequence number so a later
         // TX timestamp can correct the stored T1.
         #[cfg(all(feature = "hwtstamp", target_os = "linux"))]

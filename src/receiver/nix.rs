@@ -55,6 +55,10 @@ pub async fn run_receiver(
 
     crate::net_policy::set_hops(&std_socket)
         .map_err(|e| crate::StartupError::io("Cannot set reply TTL/Hop Limit 255", e))?;
+    if let Some(name) = conf.interface.as_deref() {
+        crate::net_policy::bind_to_interface(&std_socket, name)
+            .map_err(|e| crate::StartupError::io(format!("Cannot bind to interface {name}"), e))?;
+    }
 
     let local_addr = std_socket
         .local_addr()
@@ -177,7 +181,10 @@ pub async fn run_receiver(
         } else {
             #[cfg(target_os = "linux")]
             let want_hw = conf.hwtstamp == HwTsMode::On && {
-                let iface = hwtstamp::interface_for_addr(conf.local_addr);
+                let iface = conf
+                    .interface
+                    .clone()
+                    .or_else(|| hwtstamp::interface_for_addr(conf.local_addr));
                 let cap = hwtstamp::probe(iface.as_deref());
                 cap.any_hw_supported()
                     && iface

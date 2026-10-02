@@ -817,7 +817,7 @@ fn unsolicited_msid_cannot_seed_the_reflector_latch() {
             &mut ctx,
         );
         assert_eq!(latched, (seq == 42).then_some(9));
-        assert_eq!(received, u32::from(seq == 42));
+        assert_eq!(received, u64::from(seq == 42));
         assert_eq!(
             congestion.controller.stats().ce_observations,
             u64::from(seq == 42)
@@ -918,7 +918,7 @@ fn required_msid_rejects_unusable_reply_without_consuming_state() {
                     );
                     assert_eq!(
                         received,
-                        u32::from(valid),
+                        u64::from(valid),
                         "{name} auth={auth} keyed={keyed} ext={extensions}"
                     );
                     assert_eq!(pending.contains_key(&42), !valid);
@@ -2116,7 +2116,7 @@ fn test_process_response_acknowledges_access_report_state() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
     access_report_state.tick(Instant::now()); // simulate the original send having armed it
@@ -2182,7 +2182,7 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
     access_report_state.tick(Instant::now());
@@ -2230,7 +2230,7 @@ fn congestion_process_response_ctx<'a>(
     pending: &'a mut HashMap<u32, PendingPacket>,
     rtt_collector: &'a mut RttCollector,
     owd_collector: &'a mut OwdCollector,
-    packets_received: &'a mut u32,
+    packets_received: &'a mut u64,
     latched_reflector_msid: &'a mut Option<u16>,
     congestion: Option<&'a mut CongestionState>,
     zero_ssid_seen: &'a mut bool,
@@ -2301,7 +2301,7 @@ fn test_process_response_forward_path_ce_backs_off_congestion_controller() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut congestion = CongestionState::new(congestion_test_params());
     let mut zero_ssid_seen = false;
@@ -2358,7 +2358,7 @@ fn test_process_response_reverse_path_ce_backs_off_congestion_controller() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut congestion = CongestionState::new(congestion_test_params());
     let mut zero_ssid_seen = false;
@@ -2420,7 +2420,7 @@ fn test_process_response_clean_reply_recovers_congestion_controller() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut congestion = CongestionState::new(congestion_test_params());
     congestion.controller.on_ce_observed(); // pre-back off to 200ms
@@ -2480,7 +2480,7 @@ fn test_process_response_no_panic_when_congestion_inactive() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     // `--cos`/`--ecn` not requesting ECT0/ECT1: controller absent.
     let mut zero_ssid_seen = false;
@@ -2599,7 +2599,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut recv_ctx = SenderRecvContext {
         local_error_estimate: None,
@@ -3374,7 +3374,7 @@ fn test_process_response_records_forward_one_way_delay() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut ctx = SenderRecvContext {
         local_error_estimate: None,
@@ -3464,7 +3464,7 @@ fn mismatched_ssid_preserves_measurement_and_control_state() {
                     let accepted = ssid == 42;
                     assert_eq!(
                         received,
-                        u32::from(accepted),
+                        u64::from(accepted),
                         "auth={auth} extensions={extensions} ssid={ssid}"
                     );
                     assert_eq!(pending.contains_key(&42), !accepted);
@@ -3535,7 +3535,7 @@ fn zero_ssid_policy_applies_in_every_reply_parser() {
                 );
                 assert!(*ctx.zero_ssid_seen);
                 let accepted = policy == ZeroSsidAction::Continue;
-                assert_eq!(*ctx.packets_received, u32::from(accepted));
+                assert_eq!(*ctx.packets_received, u64::from(accepted));
                 assert_eq!(ctx.pending.contains_key(&42), !accepted);
                 // Seeing a legacy zero must not disable subsequent SSID validation.
                 ctx.pending.insert(
@@ -3561,7 +3561,7 @@ fn zero_ssid_policy_applies_in_every_reply_parser() {
                     None,
                     &mut ctx,
                 );
-                assert_eq!(*ctx.packets_received, u32::from(accepted));
+                assert_eq!(*ctx.packets_received, u64::from(accepted));
                 assert!(ctx.pending.contains_key(&43));
             }
         }
@@ -3641,7 +3641,7 @@ fn test_zero_ssid_policy_stop_discards_reply_and_latches() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut zero_ssid_seen = false;
     {
@@ -3714,7 +3714,7 @@ fn test_zero_ssid_policy_continue_still_accounts_the_reply() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut zero_ssid_seen = false;
     {
@@ -3788,7 +3788,7 @@ fn test_zero_ssid_policy_inert_without_a_configured_ssid() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut zero_ssid_seen = false;
     {
@@ -3864,7 +3864,7 @@ fn test_process_response_drops_packet_on_msid_mismatch() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut ctx = SenderRecvContext {
         local_error_estimate: None,
@@ -3944,7 +3944,7 @@ fn test_process_response_accepts_packet_on_msid_match() {
     );
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
-    let mut packets_received = 0u32;
+    let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
     let mut ctx = SenderRecvContext {
         local_error_estimate: None,

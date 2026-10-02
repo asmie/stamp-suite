@@ -21,6 +21,35 @@ pub(crate) fn set_hops(socket: &UdpSocket) -> io::Result<()> {
     }
 }
 
+/// Binds `socket` to the named interface or VRF device: SO_BINDTODEVICE on
+/// Linux, IP_BOUND_IF / IPV6_BOUND_IF on macOS.
+pub(crate) fn bind_to_interface(socket: &UdpSocket, name: &str) -> io::Result<()> {
+    let sock = socket2::SockRef::from(socket);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        sock.bind_device(Some(name.as_bytes()))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let index = nix::net::if_::if_nametoindex(name).map_err(io::Error::from)?;
+        let index = std::num::NonZeroU32::new(index)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such interface"))?;
+        if socket.local_addr()?.is_ipv6() {
+            sock.bind_device_by_index_v6(Some(index))
+        } else {
+            sock.bind_device_by_index_v4(Some(index))
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = (sock, name);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "interface binding is not supported on this platform",
+        ))
+    }
+}
+
 /// Randomized dynamic-port binding. Avoid the peer's listening port so
 /// reverse-direction requests cannot be confused with reflected packets.
 pub(crate) fn bind_sender(local: SocketAddr, remote: SocketAddr) -> io::Result<UdpSocket> {

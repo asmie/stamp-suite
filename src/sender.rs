@@ -4,6 +4,7 @@ pub(crate) mod measurements;
 mod observer;
 mod packet;
 mod run;
+mod schedule;
 pub(crate) mod session_state;
 mod socket;
 mod telemetry;
@@ -90,7 +91,7 @@ struct SenderRecvContext<'a> {
     pending: &'a mut HashMap<u32, PendingPacket>,
     rtt_collector: &'a mut RttCollector,
     owd_collector: &'a mut OwdCollector,
-    packets_received: &'a mut u32,
+    packets_received: &'a mut u64,
     print_stats: bool,
     output_format: crate::stats::OutputFormat,
     hmac_key: Option<&'a HmacKey>,

@@ -153,7 +153,7 @@ fn test_valid_configuration_parsing() {
     assert_eq!(conf.remote_port, 862);
     assert_eq!(conf.local_port, 862);
     assert_eq!(conf.clock_source, ClockFormat::NTP);
-    assert_eq!(conf.send_delay, 1000);
+    assert_eq!(conf.send_delay, ProbeInterval::from_millis(1000));
     assert_eq!(conf.count, 1000);
     assert_eq!(conf.timeout, 5);
     assert_eq!(conf.auth_mode, AuthMode::Authenticated);
@@ -561,7 +561,7 @@ fn test_default_configuration() {
     assert_eq!(conf.remote_port, 862);
     assert_eq!(conf.local_port, 0);
     assert_eq!(conf.clock_source, ClockFormat::NTP);
-    assert_eq!(conf.send_delay, 1000);
+    assert_eq!(conf.send_delay, ProbeInterval::from_millis(1000));
     assert_eq!(conf.count, 1000);
     assert_eq!(conf.timeout, 5);
     assert_eq!(conf.auth_mode, AuthMode::Open); // RFC 8762 default
@@ -606,11 +606,11 @@ fn test_timeout_values() {
 fn test_send_delay_values() {
     let args = vec!["test", "--send-delay", "0"];
     let conf = Configuration::parse_from(args);
-    assert_eq!(conf.send_delay, 0);
+    assert_eq!(conf.send_delay, ProbeInterval::from_millis(0));
 
     let args = vec!["test", "--send-delay", "65535"];
     let conf = Configuration::parse_from(args);
-    assert_eq!(conf.send_delay, 65535);
+    assert_eq!(conf.send_delay, ProbeInterval::from_millis(65535));
 }
 
 #[test]
@@ -1541,7 +1541,7 @@ fn test_validate_allows_ecn_max_delay_below_send_delay_when_controller_inactive(
     // must not spuriously fail validation.
     let conf = load_from_args(&["test", "--send-delay", "50000"])
         .expect("controller inactive, cross-check must not apply");
-    assert_eq!(conf.send_delay, 50000);
+    assert_eq!(conf.send_delay, ProbeInterval::from_millis(50000));
 }
 
 #[test]
@@ -1558,7 +1558,7 @@ fn test_validate_allows_ecn_max_delay_below_send_delay_when_ecn_zero() {
         "1000",
     ])
     .expect("controller inactive when ecn=0, cross-check must not apply");
-    assert_eq!(conf.send_delay, 50000);
+    assert_eq!(conf.send_delay, ProbeInterval::from_millis(50000));
 }
 
 #[test]
@@ -2608,11 +2608,67 @@ fn flags_for_missing_features_are_rejected() {
 }
 
 #[test]
-fn sender_count_zero_is_rejected() {
+fn sender_count_zero_runs_until_stopped() {
     let conf = Configuration::parse_from(["test", "--remote-addr", "127.0.0.1", "--count", "0"]);
+    assert!(conf.validate().is_ok());
+    let conf = Configuration::parse_from(["test", "--count", "100000"]);
+    assert_eq!(conf.count, 100_000);
+    let conf = Configuration::parse_from(["test", "--duration", "0"]);
     assert!(conf.validate().is_err());
-    let conf = Configuration::parse_from(["test", "--is-reflector", "--count", "0"]);
-    assert!(conf.validate().is_ok(), "the reflector ignores --count");
+}
+
+#[test]
+fn probe_interval_parses_units() {
+    for (text, micros) in [
+        ("1000", 1_000_000),
+        ("0", 0),
+        ("250us", 250),
+        ("250µs", 250),
+        ("1.5ms", 1500),
+        ("2s", 2_000_000),
+        ("0.5 ms", 500),
+    ] {
+        let interval: ProbeInterval = text.parse().unwrap();
+        assert_eq!(interval.duration().as_micros(), micros, "{text}");
+    }
+    for bad in ["", "ms", "1h", "-5", "3601s", "1e3", "abc"] {
+        assert!(bad.parse::<ProbeInterval>().is_err(), "{bad} accepted");
+    }
+    assert_eq!(
+        "1500us".parse::<ProbeInterval>().unwrap().to_string(),
+        "1500us"
+    );
+    assert_eq!("2s".parse::<ProbeInterval>().unwrap().to_string(), "2000");
+}
+
+#[test]
+fn send_delay_and_schedule_load_from_toml() {
+    for (value, micros) in [("50", 50_000), ("\"250us\"", 250)] {
+        let file: FileConfiguration = toml::from_str(&format!(
+            "send_delay = {value}\nsend_schedule = \"poisson\""
+        ))
+        .unwrap();
+        assert_eq!(file.send_delay.unwrap().duration().as_micros(), micros);
+        assert_eq!(file.send_schedule, Some(SendSchedule::Poisson));
+    }
+    assert!(toml::from_str::<FileConfiguration>("send_delay = \"5min\"").is_err());
+}
+
+#[test]
+fn interface_names_are_checked() {
+    let conf = Configuration::parse_from(["test", "--interface", "eth0"]);
+    assert_eq!(
+        conf.validate().is_ok(),
+        cfg!(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos"
+        ))
+    );
+    for bad in ["", "sixteen_chars_xx"] {
+        let conf = Configuration::parse_from(["test", "--interface", bad]);
+        assert!(conf.validate().is_err(), "{bad:?} accepted");
+    }
 }
 
 /// Every CLI option can also be set in the config file, apart from a few

@@ -124,10 +124,10 @@ impl StampMibHandler {
             return Some(VarBindValue::Gauge32(self.state.config.listen_port as u32));
         }
         if *oid == oids::stamp_send_pkt_count() {
-            return Some(VarBindValue::Gauge32(self.state.config.packet_count as u32));
+            return Some(VarBindValue::Gauge32(self.state.config.packet_count));
         }
         if *oid == oids::stamp_send_delay() {
-            return Some(VarBindValue::Gauge32(self.state.config.send_delay as u32));
+            return Some(VarBindValue::Gauge32(self.state.config.send_delay));
         }
         if *oid == oids::stamp_send_auth_mode() {
             let val = if self.state.config.auth_mode == "A" {
