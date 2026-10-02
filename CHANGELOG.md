@@ -142,6 +142,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Parse trailing zero padding in linear time. A crafted datagram of zeros
+  ending in one non-zero byte cost about 75 ms of reflector CPU at 64 KB.
+- Keep the sender's send schedule when sends fail or the reflector answers
+  with ICMP port unreachable. Repeated send and receive errors are printed
+  on the 1st, 10th, 100th, ... occurrence.
+- Do not abort a sender run when a per-probe route-MTU lookup fails, and
+  restore Type 246/247 requests when the route MTU grows again.
+- Allow `AF_NETLINK` in the packaged systemd unit. Route-MTU lookups and
+  interface address discovery failed under the previous restriction.
+- Document `--max-pps` as a per-source-IP limit, which is what it has always
+  enforced. The unused per-SSID limiter API is removed.
+- Replace the deprecated `AtomicUsize::fetch_update` so clippy passes on
+  current toolchains.
+
 - Validate pnet startup binds/keys before privileged capture, preserve interface
   errors, and repair startup tests. Require valid authenticated pnet replies and
   join fixture workers on shutdown. Add strict privileged CI, exact artifact/test

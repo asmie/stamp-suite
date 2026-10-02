@@ -34,7 +34,7 @@ The key includes source and destination UDP endpoints, SSID, and optional sender
 Micro-session ID. At capacity, new identities are dropped; existing sessions
 continue. Idle expiry or explicit expiry frees capacity.
 
-`--max-pps` limits traffic per source IP and SSID; it defaults to unlimited.
+`--max-pps` limits reflected packets per source IP address; it defaults to unlimited.
 `--reflector-queue-capacity` separately bounds accepted pending requests
 (default 1024), including bursts. It is a request limit, not a byte quota.
 See [capacity and drain](usage.md#session-capacity-drain-and-restart).
@@ -114,13 +114,12 @@ The [packaged unit](../dist/systemd/stamp-suite.service) grants
 `CAP_NET_BIND_SERVICE`, restarts on failure, makes the filesystem read-only,
 hides home directories, and restricts devices, namespaces, privilege changes,
 and kernel settings. Its allowed socket families are `AF_INET`, `AF_INET6`,
-and `AF_UNIX`.
+`AF_UNIX`, and `AF_NETLINK`. Linux uses netlink for route-MTU lookups and for
+listing interface addresses.
 
 Read access still follows Unix ownership and permissions. For pnet capture,
-add the required raw-socket capability and address family. The packaged family
-restriction also excludes `AF_NETLINK`, which Linux route-MTU queries and
-interface discovery may need; configure a suitable override before relying on
-those features. Hardware timestamping needs additional device/capability access.
+add the required raw-socket capability and the `AF_PACKET` family. Hardware
+timestamping needs additional device and capability access.
 Review the resulting unit with `systemd-analyze security stamp-suite.service`.
 
 ## Enabling authenticated mode on the packaged unit

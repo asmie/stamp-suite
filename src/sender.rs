@@ -57,6 +57,51 @@ struct PendingPacket {
     send_timestamp: u64,
 }
 
+/// Prints a repeated I/O error on its 1st, 10th, 100th, ... occurrence.
+///
+/// Send and receive errors repeat once per probe while a path is down; this
+/// keeps stderr readable without hiding that the condition persists.
+struct ErrorThrottle {
+    count: u64,
+    next_report: u64,
+}
+
+impl Default for ErrorThrottle {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            next_report: 1,
+        }
+    }
+}
+
+impl ErrorThrottle {
+    fn report(&mut self, msg: std::fmt::Arguments<'_>) {
+        self.count += 1;
+        if self.count < self.next_report {
+            return;
+        }
+        self.next_report = self.next_report.saturating_mul(10);
+        if self.count == 1 {
+            eprintln!("{msg}");
+        } else {
+            eprintln!("{msg} ({} occurrences)", self.count);
+        }
+    }
+}
+
+/// Errors a connected UDP socket reports for ICMP feedback on an earlier
+/// datagram. The socket stays usable, so the run continues on its schedule.
+fn is_icmp_feedback(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::HostUnreachable
+            | std::io::ErrorKind::NetworkUnreachable
+    )
+}
+
 /// Mutable context for processing received responses.
 struct SenderRecvContext<'a> {
     local_error_estimate: Option<ErrorEstimate>,
@@ -448,7 +493,9 @@ fn egress_mtu(_socket: &UdpSocket) -> Option<u32> {
 /// base + the per-packet HMAC/DM/Access TLVs). Type-246 TLVs are removed before
 /// Type-247 (they sit last in §3.4 wire order, so trimming from the tail keeps
 /// the survivors ordered). Only these two TLV types are ever removed.
-fn enforce_egress_mtu(extra_tlvs: &mut Vec<RawTlv>, mtu: usize, fixed_overhead: usize) {
+///
+/// Returns how many TLVs were removed.
+fn enforce_egress_mtu(extra_tlvs: &mut Vec<RawTlv>, mtu: usize, fixed_overhead: usize) -> usize {
     let wire = |tlvs: &[RawTlv]| -> usize {
         tlvs.iter()
             .map(|t| crate::tlv::TLV_HEADER_SIZE + t.value.len())
@@ -468,6 +515,10 @@ fn enforce_egress_mtu(extra_tlvs: &mut Vec<RawTlv>, mtu: usize, fixed_overhead: 
         extra_tlvs.remove(idx);
         removed += 1;
     }
+    removed
+}
+
+fn log_header_trim(removed: usize, mtu: usize) {
     if removed > 0 {
         log::warn!(
             "Removed {removed} Reflected Fixed/IPv6 Ext Header TLV(s) (Type 246/247) to keep the \
@@ -896,6 +947,8 @@ pub async fn run_sender_with_output(
     let mut rtt_collector = RttCollector::new();
     let mut owd_collector = OwdCollector::new();
     let mut packets_sent: u32 = 0;
+    let mut send_errors = ErrorThrottle::default();
+    let mut recv_errors = ErrorThrottle::default();
     let mut packets_received: u32 = 0;
     let mut packets_lost: u32 = 0;
     // Zero-config latch for the Reflector Micro-session ID (RFC 9534
@@ -1156,6 +1209,8 @@ pub async fn run_sender_with_output(
         || !conf.reflected_fixed_hdr.is_empty()
         || !conf.reflected_ipv6_ext_hdr.is_empty();
     let header_fixed_overhead;
+    let header_template: Option<Vec<RawTlv>>;
+    let mut header_trimmed;
     {
         let route_mtu = egress_mtu(&socket);
         if header_requests && route_mtu.is_none() {
@@ -1204,7 +1259,10 @@ pub async fn run_sender_with_output(
             crate::ber::fit_padding(&mut extra_tlvs, mtu, fixed_overhead)
                 .map_err(|e| crate::StartupError::new(e.to_string()))?;
         }
-        enforce_egress_mtu(&mut extra_tlvs, mtu, fixed_overhead);
+        header_template = header_requests.then(|| extra_tlvs.clone());
+        let removed = enforce_egress_mtu(&mut extra_tlvs, mtu, fixed_overhead);
+        log_header_trim(removed, mtu);
+        header_trimmed = removed;
     }
 
     let mut ber = conf.ber.then(|| {
@@ -1276,26 +1334,30 @@ pub async fn run_sender_with_output(
         timer.tick().await;
     }
 
-    let prepare_header_requests =
-        |extra_tlvs: &mut Vec<RawTlv>| -> Result<(), crate::StartupError> {
-            if header_requests {
-                let mtu = egress_mtu(&socket).ok_or_else(|| {
-                    crate::StartupError::new("Cannot determine current header-reflection route MTU")
-                })? as usize;
-                enforce_egress_mtu(extra_tlvs, mtu, header_fixed_overhead);
-                if header_fixed_overhead
-                    + extra_tlvs.iter().map(|t| 4 + t.value.len()).sum::<usize>()
-                    > mtu
-                {
-                    return Err(crate::StartupError::new(
-                        "Mandatory test packet fields exceed the route MTU",
-                    ));
+    // The route MTU can change during a run. Each probe trims from the
+    // untrimmed startup set, so a temporary MTU drop does not remove header
+    // requests for the rest of the run. A failed lookup keeps the last set.
+    let mut mtu_errors = ErrorThrottle::default();
+    let mut prepare_header_requests = |extra_tlvs: &mut Vec<RawTlv>| {
+        let Some(template) = &header_template else {
+            return;
+        };
+        match egress_mtu(&socket) {
+            Some(mtu) => {
+                extra_tlvs.clone_from(template);
+                let removed = enforce_egress_mtu(extra_tlvs, mtu as usize, header_fixed_overhead);
+                if removed != header_trimmed {
+                    log_header_trim(removed, mtu as usize);
+                    header_trimmed = removed;
                 }
             }
-            Ok(())
-        };
+            None => mtu_errors.report(format_args!(
+                "Cannot read the route MTU; keeping the previous header-reflection requests"
+            )),
+        }
+    };
     for _ in 0..conf.count {
-        prepare_header_requests(&mut extra_tlvs)?;
+        prepare_header_requests(&mut extra_tlvs);
         if let Some(ber) = ber.as_mut() {
             ber.advance(Instant::now());
             ber.filter_requests(&mut extra_tlvs);
@@ -1395,50 +1457,50 @@ pub async fn run_sender_with_output(
             buf.extend_from_slice(&malformed_tlv_bytes(mode));
         }
 
-        let send_result = socket.send(&buf).await;
-
-        if let Err(e) = send_result {
-            eprintln!("Failed to send packet {}: {}", seq_num, e);
-            continue;
-        }
-
-        packets_sent += 1;
-        #[cfg(all(unix, feature = "snmp"))]
-        if let Some(ref stats) = snmp_stats {
-            stats.inc_sent();
-        }
-        #[cfg(feature = "metrics")]
-        if metrics_enabled {
-            crate::metrics::sender_metrics::record_packet_sent();
-        }
-        pending.insert(
-            seq_num,
-            PendingPacket {
-                send_time,
-                send_timestamp,
-            },
-        );
-        measurements.sent(
-            seq_num,
-            PendingPacket {
-                send_time,
-                send_timestamp,
-            },
-            packets_sent,
-        );
-        // Pair this send's kernel OPT_ID with the sequence number so the
-        // error-queue drain can retroactively correct the stored T1.
-        #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-        if sender_kernel_ts.tx_kernel {
-            tx_id_to_seq.insert(sender_tx_counter, seq_num);
-            sender_tx_counter = sender_tx_counter.wrapping_add(1);
-            if tx_id_to_seq.len() > 4096 {
-                // Defensive: TX timestamps stopped arriving; reset.
-                tx_id_to_seq.clear();
+        // A failed send still waits out the send delay below; skipping the
+        // wait would turn a persistent error into an unpaced loop.
+        match socket.send(&buf).await {
+            Err(e) => send_errors.report(format_args!("Failed to send packet {seq_num}: {e}")),
+            Ok(_) => {
+                packets_sent += 1;
+                #[cfg(all(unix, feature = "snmp"))]
+                if let Some(ref stats) = snmp_stats {
+                    stats.inc_sent();
+                }
+                #[cfg(feature = "metrics")]
+                if metrics_enabled {
+                    crate::metrics::sender_metrics::record_packet_sent();
+                }
+                pending.insert(
+                    seq_num,
+                    PendingPacket {
+                        send_time,
+                        send_timestamp,
+                    },
+                );
+                measurements.sent(
+                    seq_num,
+                    PendingPacket {
+                        send_time,
+                        send_timestamp,
+                    },
+                    packets_sent,
+                );
+                // Pair this send's kernel OPT_ID with the sequence number so the
+                // error-queue drain can retroactively correct the stored T1.
+                #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+                if sender_kernel_ts.tx_kernel {
+                    tx_id_to_seq.insert(sender_tx_counter, seq_num);
+                    sender_tx_counter = sender_tx_counter.wrapping_add(1);
+                    if tx_id_to_seq.len() > 4096 {
+                        // Defensive: TX timestamps stopped arriving; reset.
+                        tx_id_to_seq.clear();
+                    }
+                }
+                if timeout > Duration::ZERO {
+                    expiry_queue.push_back((send_time + timeout, seq_num));
+                }
             }
-        }
-        if timeout > Duration::ZERO {
-            expiry_queue.push_back((send_time + timeout, seq_num));
         }
 
         // Receive until the next send deadline. AIMD supplies the interval when
@@ -1518,8 +1580,13 @@ pub async fn run_sender_with_output(
                             }
                         }
                         Err(e) => {
-                            eprintln!("Receive error: {}", e);
-                            break;
+                            recv_errors.report(format_args!("Receive error: {e}"));
+                            if !is_icmp_feedback(&e) {
+                                // Keep the send schedule even if the socket
+                                // keeps failing.
+                                tokio::time::sleep_until(deadline).await;
+                                break;
+                            }
                         }
                     }
                 }
@@ -1662,8 +1729,10 @@ pub async fn run_sender_with_output(
                 continue;
             }
             Ok(Err(e)) => {
-                eprintln!("Receive error during final wait: {}", e);
-                break;
+                recv_errors.report(format_args!("Receive error during final wait: {e}"));
+                if !is_icmp_feedback(&e) {
+                    break;
+                }
             }
             Err(_) => break, // Timeout expired
         }
@@ -1688,7 +1757,7 @@ pub async fn run_sender_with_output(
             .unwrap_or(false);
 
         if attach {
-            prepare_header_requests(&mut extra_tlvs)?;
+            prepare_header_requests(&mut extra_tlvs);
             // Rebuild the test packet with the same Access ID and Return Code
             // so the report's wire bytes are identical on every retry.
             let seq_num = sess.generate_sequence_number();
@@ -1801,12 +1870,9 @@ pub async fn run_sender_with_output(
                         expiry_queue.push_back((send_time + timeout, seq_num));
                     }
                 }
-                Err(e) => {
-                    eprintln!(
-                        "Failed to send Access Report retransmission {}: {}",
-                        seq_num, e
-                    );
-                }
+                Err(e) => send_errors.report(format_args!(
+                    "Failed to send Access Report retransmission {seq_num}: {e}"
+                )),
             }
 
             continue;
@@ -1888,8 +1954,12 @@ pub async fn run_sender_with_output(
                         }
                     }
                     Err(e) => {
-                        eprintln!("Receive error while awaiting Access Report ack: {}", e);
-                        break;
+                        recv_errors.report(format_args!(
+                            "Receive error while awaiting Access Report ack: {e}"
+                        ));
+                        if !is_icmp_feedback(&e) {
+                            break;
+                        }
                     }
                 }
             }

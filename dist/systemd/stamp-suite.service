@@ -30,7 +30,8 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 ProtectClock=yes
 RestrictNamespaces=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK: route-MTU lookups and interface address discovery (getifaddrs).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

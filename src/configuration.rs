@@ -682,16 +682,14 @@ pub struct Configuration {
     #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex)]
     pub reflector_member_link_id: Option<u16>,
 
-    /// Maximum packets per second per source (0 = unlimited).
-    /// Implemented as a per-(source IP, SSID) token bucket; see
-    /// `--reflector-rate-burst` for the bucket capacity. Kept under the
-    /// historic `--max-pps` name for backward compatibility.
+    /// Maximum reflected packets per second per source IP address (0 = unlimited).
+    /// A token bucket; `--reflector-rate-burst` sets its capacity. Each
+    /// Type-12 copy counts as one packet.
     #[clap(long, default_value_t = 0)]
     pub max_pps: u32,
 
-    /// Per-client token-bucket burst capacity in packets. 0 = use
-    /// `--max-pps` (one-second worth of capacity), which matches the
-    /// classic fixed-window behaviour. Ignored when `--max-pps` is 0.
+    /// Token-bucket capacity per source IP, in packets. 0 uses the
+    /// `--max-pps` value (one second of traffic). Ignored when `--max-pps` is 0.
     #[clap(long, default_value_t = 0)]
     pub reflector_rate_burst: u32,
 

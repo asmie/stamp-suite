@@ -516,18 +516,26 @@ impl ReplyBudget {
         })
     }
 
+    /// `fetch_update` is deprecated on current toolchains and its
+    /// replacement is newer than the MSRV, so the CAS loop is spelled out.
+    fn try_take_slot(&self) -> bool {
+        let mut used = self.used.load(Ordering::Acquire);
+        while used < self.limit {
+            match self.used.compare_exchange_weak(
+                used,
+                used + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => used = actual,
+            }
+        }
+        false
+    }
+
     pub fn reserve(self: &Arc<Self>) -> Option<ReplyReservation> {
-        if self
-            .used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                if used < self.limit {
-                    Some(used + 1)
-                } else {
-                    None
-                }
-            })
-            .is_err()
-        {
+        if !self.try_take_slot() {
             self.counters
                 .reply_queue_rejected
                 .fetch_add(1, Ordering::Relaxed);

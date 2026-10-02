@@ -295,14 +295,13 @@ impl TlvList {
         let mut has_multiple_hmac = false;
         let mut hmac_wire_offset: Option<usize> = None;
         let mut hmac_misplaced = false;
+        // An all-zero remainder is padding, not a run of empty Type-0 TLVs.
+        // Computed once: rescanning the tail at every zero header is
+        // quadratic in the datagram size.
+        let data_end = buf.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
 
         while offset < buf.len() {
-            if buf.len() - offset < TLV_HEADER_SIZE {
-                break;
-            }
-
-            let header = &buf[offset..offset + TLV_HEADER_SIZE];
-            if header == [0, 0, 0, 0] && buf[offset..].iter().all(|&b| b == 0) {
+            if buf.len() - offset < TLV_HEADER_SIZE || offset >= data_end {
                 break;
             }
 
@@ -1891,6 +1890,22 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert!(list.hmac_tlv().is_some());
         assert!(list.non_hmac_tlvs().is_empty());
+    }
+
+    #[test]
+    fn test_parse_lenient_zero_run_with_late_nonzero_byte_is_linear() {
+        // Every zero header before the final byte is an empty Type-0 TLV.
+        // Rescanning the tail at each one made this input quadratic.
+        let mut buf = vec![0u8; 256 * 1024];
+        *buf.last_mut().unwrap() = 1;
+        let started = std::time::Instant::now();
+        let (list, _) = TlvList::parse_lenient(&buf);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "parse took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(list.len(), buf.len() / TLV_HEADER_SIZE);
     }
 
     #[test]
