@@ -122,7 +122,9 @@ async fn run_test_sender(
 #[tokio::test]
 async fn test_loopback_unauthenticated_single_packet() {
     let reflector_port = find_available_port().await;
-    let sender_port = find_available_port().await;
+    // Port 0: the OS picks a free port at bind time, so no other test can
+    // take it between choosing and binding.
+    let sender_port = 0;
 
     let reflector_handle =
         tokio::spawn(async move { run_test_reflector(reflector_port, false).await });
@@ -151,7 +153,9 @@ async fn test_loopback_unauthenticated_single_packet() {
 #[tokio::test]
 async fn test_loopback_authenticated_single_packet() {
     let reflector_port = find_available_port().await;
-    let sender_port = find_available_port().await;
+    // Port 0: the OS picks a free port at bind time, so no other test can
+    // take it between choosing and binding.
+    let sender_port = 0;
 
     let reflector_handle =
         tokio::spawn(async move { run_test_reflector(reflector_port, true).await });
@@ -180,7 +184,9 @@ async fn test_loopback_authenticated_single_packet() {
 #[tokio::test]
 async fn test_loopback_multiple_packets() {
     let reflector_port = find_available_port().await;
-    let sender_port = find_available_port().await;
+    // Port 0: the OS picks a free port at bind time, so no other test can
+    // take it between choosing and binding.
+    let sender_port = 0;
 
     let socket = UdpSocket::bind(format!("127.0.0.1:{}", reflector_port))
         .await
@@ -250,7 +256,9 @@ async fn test_loopback_multiple_packets() {
 #[tokio::test]
 async fn test_loopback_timestamp_ordering() {
     let reflector_port = find_available_port().await;
-    let sender_port = find_available_port().await;
+    // Port 0: the OS picks a free port at bind time, so no other test can
+    // take it between choosing and binding.
+    let sender_port = 0;
 
     let socket = UdpSocket::bind(format!("127.0.0.1:{}", reflector_port))
         .await

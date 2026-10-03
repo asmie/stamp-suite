@@ -259,6 +259,8 @@ median of three trials, reflector CPU as a share of one core:
   allocated a parsed TLV list per reply.
 - Packet layout constants (base sizes, HMAC and SSID offsets) are defined once
   in `packets.rs`.
+- `ReceiverSharedState::capture_alive` is removed. Nothing outside tests read
+  it, and every path that cleared it ended the process.
 - Each base packet's field layout is declared once with the `wire_packet!`
   macro, which generates the struct, `to_bytes`, `from_bytes` and the lenient
   parsers, and fails the build if the field offsets leave a gap or overlap.
@@ -359,9 +361,23 @@ median of three trials, reflector CPU as a share of one core:
   passes on current toolchains.
 - `clock_metadata_test` restarts the reflector when another test takes its
   port, and skips late replies to warm-up probes.
+- `loopback_test` binds its sender sockets to port 0 instead of a port chosen
+  earlier, which another test could take in the meantime.
 
 ### Fixed
 
+- The pnet reflector on macOS loopback finds the IP header after pnet's zeroed
+  placeholder instead of assuming 14 octets. pnet_datalink 0.35 inserts 12
+  octets on 64-bit macOS, so every request on `lo0` was misparsed and dropped.
+- A panic in the pnet capture thread makes the reflector exit non-zero. It
+  exited with status 0, so a supervisor configured to restart on failure did
+  not restart it.
+- STAMP-SUITE-MIB has a new REVISION for the clarified object descriptions.
+- RFC8972-3-10 (stop on a zeroed SSID) and RFC8972-4.1-5 (Extra Padding for
+  larger test packets) are scored Compliant. Both are implemented, and the
+  matrices use N-A only for optional behavior that is not.
+- The CHANGELOG has entries for 0.6.1 and 0.9.0, and the 0.1.0 and 0.2.0
+  dates match the version history.
 - T1 and the RTT start are read after the probe's TLVs are built, just before
   the base packet is written and sent. Building the TLVs (BER padding, Direct
   Measurement, the TLV HMAC) counted as network delay; on loopback with
@@ -1015,6 +1031,36 @@ Gaps and three Excluded rows were documented, deliberate exclusions.
   accounted for. Tests: `test_forged_msid_with_{u,m,i}_flag_not_consumed`,
   `test_forged_msid_ignored_when_tlv_hmac_fails` (`src/sender.rs`).
 
+## [0.9.0] - 2026-06-10
+
+### Added
+
+- **One-way delay statistics.** The sender reports forward (T2 − T1) and
+  reverse (T4 − T3) one-way delay as min, average, median and max next to RTT.
+  The figures are meaningful only when both ends have synchronized clocks.
+- **Egress IP header marking.** `--ttl` sets the IPv4 TTL or IPv6 Hop Limit of
+  test packets, and `--cos` also sets the DSCP and ECN of outgoing test packets
+  to the values the Class of Service TLV requests (Linux and macOS).
+- **Malformed TLV injection.** `--malformed bad-flags|bad-length` appends a
+  deliberately malformed TLV to every test packet, to test how a reflector
+  handles RFC 8972 §4.2 flags and lengths. It is not for normal measurements.
+- **SRv6 return path.** With `--srv6-return-forwarding`, a Linux reflector
+  answering over IPv6 inserts a Segment Routing Header built from the Return
+  Path TLV's SRv6 Segment List (RFC 9503 §5, RFC 8754). Without the option, or
+  where the kernel or path does not support it, the reflector replies normally
+  and sets the U flag. SR-MPLS segment lists are echoed with the U flag.
+
+### Changed
+
+- Reflected Test Packet Control (Type 12) multi-reply is off by default:
+  `--reflected-control-max-count` defaults to 0, so the reflector sends one
+  reply and sets the C flag. Set a positive value to allow more replies.
+- `--hwtstamp on` warns and uses software timestamps when hardware
+  timestamping is unavailable instead of refusing to start. Hardware
+  timestamping was not implemented in this release.
+- Dependencies updated to their current versions, including criterion 0.8 for
+  the benchmarks.
+
 ## [0.8.0] - 2026-05-18
 
 ### Added
@@ -1318,6 +1364,12 @@ Gaps and three Excluded rows were documented, deliberate exclusions.
   chain), as the draft requires. It used to send Length 0, which conforming
   reflectors that validate the request's Length rejected as malformed.
 
+## [0.6.1] - 2026-04-22
+
+### Changed
+
+- The `toml` dependency is updated from 0.9 to 1.1.
+
 ## [0.6.0] - 2026-04-22
 
 ### Added
@@ -1568,7 +1620,7 @@ Gaps and three Excluded rows were documented, deliberate exclusions.
 - Malformed TLVs are echoed byte-exactly, with the original declared length
   preserved.
 
-## [0.2.0] - 2024-12-01
+## [0.2.0] - 2026-02-03
 
 ### Added
 
@@ -1587,7 +1639,9 @@ Gaps and three Excluded rows were documented, deliberate exclusions.
 - Packet serialization uses big-endian encoding.
 - Error handling is improved throughout the codebase.
 
-## [0.1.0] - 2024-01-01
+## [0.1.0] - 2022-03-10
+
+This entry covers versions 0.1.0 to 0.1.3 (2022-03-10 to 2024-06-03).
 
 ### Added
 

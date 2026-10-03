@@ -14,7 +14,7 @@ behavior it checks.
 | Document | Revision frozen | Clauses | Compliant | Partial | Gap | N-A | Excluded |
 |---|---|---:|---:|---:|---:|---:|---:|
 | [RFC 8762](rfc8762.md): STAMP base protocol | RFC 8762, March 2020 | 62 | 52 | 0 | 0 | 9 | 1 |
-| [RFC 8972](rfc8972.md): STAMP optional extensions | RFC 8972, January 2021 | 151 | 141 | 0 | 0 | 10 | 0 |
+| [RFC 8972](rfc8972.md): STAMP optional extensions | RFC 8972, January 2021 | 151 | 143 | 0 | 0 | 8 | 0 |
 | [RFC 9503](rfc9503.md): Destination Node Address and Return Path | RFC 9503, October 2023 | 26 | 22 | 0 | 0 | 3 | 1 |
 | [RFC 9534](rfc9534.md): Micro-session ID (LAG) | RFC 9534, January 2024 | 18 | 9 | 6 | 1 | 2 | 0 |
 | [RFC 8545](rfc8545.md): OWAMP/TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
@@ -22,7 +22,7 @@ behavior it checks.
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -15, 30 September 2026 | 63 | 54 | 2 | 0 | 7 | 0 |
 | [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md): residual BER (Types 240 to 242) | -07, 30 June 2026 | 30 | 27 | 2 | 0 | 1 | 0 |
-| **Total** | | **421** | **360** | **11** | **1** | **46** | **3** |
+| **Total** | | **421** | **362** | **11** | **1** | **44** | **3** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).

@@ -134,15 +134,6 @@ Nix `recvmsg` calls run inside `UdpSocket::try_io`. `WouldBlock` clears the
 cached readiness; bypassing this wrapper can make an idle loop spin. The sender
 uses the same pattern for ECN and kernel timestamps.
 
-### Capture liveness flag
-
-`ReceiverSharedState::capture_alive` starts as `true`. The pnet backend sets it
-to `false` when capture cannot start or the capture thread ends abnormally; the
-nix backend never changes it. No production code reads the flag: metrics, SNMP
-and the control API do not report it. Only tests read it (a unit test in
-`receiver/pnet.rs` and `tests/pnet_loopback_test.rs`). Capture failures are
-logged, and a startup failure returns an error so the process exits nonzero.
-
 ## Reflector packet path
 
 ### Ingest

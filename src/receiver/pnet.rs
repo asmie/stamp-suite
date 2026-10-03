@@ -83,16 +83,12 @@ pub async fn run_receiver(
         // reflector was pointed at an IPv6 (or wildcard) address.
         std::net::IpAddr::V6(_) => (std::net::Ipv4Addr::UNSPECIFIED, conf.local_port).into(),
     };
-    let send_socket_v4 = match std::net::UdpSocket::bind(send_bind_v4) {
-        Ok(s) => s,
-        Err(e) => {
-            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::io(
-                format!("Cannot bind to address {send_bind_v4} (IPv4 send socket)"),
-                e,
-            ));
-        }
-    };
+    let send_socket_v4 = std::net::UdpSocket::bind(send_bind_v4).map_err(|e| {
+        crate::StartupError::io(
+            format!("Cannot bind to address {send_bind_v4} (IPv4 send socket)"),
+            e,
+        )
+    })?;
     let send_bind_v6: SocketAddr = match conf.local_addr {
         std::net::IpAddr::V6(_) => conf.local_socket_addr(),
         std::net::IpAddr::V4(_) => (std::net::Ipv6Addr::UNSPECIFIED, conf.local_port).into(),
@@ -115,13 +111,7 @@ pub async fn run_receiver(
     }
 
     // Key and policy errors are reported before capture-driver discovery.
-    let settings = match ReflectorSettings::from_config(conf, shared, false) {
-        Ok(settings) => settings,
-        Err(e) => {
-            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(e);
-        }
-    };
+    let settings = ReflectorSettings::from_config(conf, shared, false)?;
 
     // Interface discovery can itself depend on capture-driver availability.
     // Report ordinary socket and key failures before consulting that driver.
@@ -141,19 +131,13 @@ pub async fn run_receiver(
     let interfaces = datalink::interfaces();
     let interface = interfaces.into_iter().find(interface_ip_match);
 
-    let interface = match interface {
-        Some(iface) => iface,
-        None => {
-            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
-            return Err(crate::StartupError::config(
-                match conf.interface.as_deref() {
-                    Some(name) => {
-                        format!("No interface {name} with IP address {}", conf.local_addr)
-                    }
-                    None => format!("No interface found with IP address {}", conf.local_addr),
-                },
-            ));
-        }
+    let Some(interface) = interface else {
+        return Err(crate::StartupError::config(
+            match conf.interface.as_deref() {
+                Some(name) => format!("No interface {name} with IP address {}", conf.local_addr),
+                None => format!("No interface found with IP address {}", conf.local_addr),
+            },
+        ));
     };
 
     // Extract interface properties for macOS special handling (NetworkInterface is not Send)
@@ -177,14 +161,12 @@ pub async fn run_receiver(
     let (_, rx) = match datalink::channel(&interface, config) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => {
-            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
             return Err(crate::StartupError::config(format!(
                 "Unhandled channel type for interface {}",
                 interface.name
             )));
         }
         Err(e) => {
-            shared.capture_alive.store(false, AtomicOrdering::Relaxed);
             return Err(crate::StartupError::io(
                 format!("Unable to create capture channel on {}", interface.name),
                 e,
@@ -232,23 +214,16 @@ pub async fn run_receiver(
     // Spawn the blocking packet capture loop on a dedicated thread.
     // This prevents starvation of the async runtime which may be running
     // other tasks like the metrics HTTP server.
-    let capture_alive_for_loop = Arc::clone(&shared.capture_alive);
     let result = tokio::task::spawn_blocking(move || {
         run_capture_loop(rx, capture_config, send_ctx, iface_props);
     })
     .await;
 
-    // Report capture-task panics and clear readiness so monitors can detect
-    // capture failure.
-    if let Err(e) = result {
-        log::error!("Capture thread terminated abnormally: {}", e);
-        capture_alive_for_loop.store(false, AtomicOrdering::Relaxed);
-    }
-
     print_reflector_stats(&counters, &session_manager, start_time, output_format);
-    // Reaching here is a normal shutdown (ctrl-c or the control plane), not a
-    // startup failure. Those return Err above and make main exit non-zero.
-    Ok(())
+    // A normal shutdown (a signal or the control API) returns Ok. A panicked
+    // capture thread returns an error so main exits non-zero and a
+    // supervisor can restart the reflector.
+    result.map_err(|e| crate::StartupError::service("Capture thread terminated abnormally", e))
 }
 
 struct TransmitWorker {
@@ -325,8 +300,8 @@ fn run_capture_loop(
             Ok(packet) => {
                 // Loopback and point-to-point interfaces on Apple platforms
                 // deliver IP packets without an Ethernet header. For loopback,
-                // pnet's BPF backend swaps the 4-byte DLT_NULL header for a
-                // zeroed placeholder Ethernet header (14 bytes assumed here);
+                // pnet's BPF backend replaces the 4-byte DLT_NULL header with
+                // a zeroed placeholder (see `bpf_loopback_ip_offset`);
                 // point-to-point packets start at the IP header.
                 if cfg!(any(
                     target_os = "macos",
@@ -336,8 +311,15 @@ fn run_capture_loop(
                     && !iface_props.is_broadcast
                     && (iface_props.is_loopback || iface_props.is_point_to_point)
                 {
-                    let payload_offset = if iface_props.is_loopback { 14 } else { 0 };
-                    if let Some(ip) = packet.get(payload_offset..).filter(|ip| !ip.is_empty()) {
+                    let payload_offset = if iface_props.is_loopback {
+                        bpf_loopback_ip_offset(packet)
+                    } else {
+                        Some(0)
+                    };
+                    if let Some(ip) = payload_offset
+                        .and_then(|offset| packet.get(offset..))
+                        .filter(|ip| !ip.is_empty())
+                    {
                         let version = ip[0] >> 4;
                         if version == 4 || version == 6 {
                             handle_ip_packet(ip, version, None, &config, &transmitter);
@@ -362,6 +344,23 @@ fn run_capture_loop(
     }
     drop(transmitter);
     worker.join();
+}
+
+/// Offset of the IP header in a frame pnet's BPF backend read from a
+/// loopback (DLT_NULL) interface.
+///
+/// pnet replaces the 4-byte DLT_NULL header with a zeroed placeholder whose
+/// length is 14 - 4 rounded up to the alignment of `bpf_hdr`: 12 octets on
+/// 64-bit macOS in pnet_datalink 0.35, not the 14 of an Ethernet header.
+/// IPv4 and IPv6 headers never start with a zero octet, so the first
+/// non-zero octet within the first 16 marks the IP header whatever the
+/// placeholder length. Returns `None` for a frame with no IP header there.
+fn bpf_loopback_ip_offset(frame: &[u8]) -> Option<usize> {
+    const MAX_PLACEHOLDER: usize = 16;
+    frame
+        .iter()
+        .take(MAX_PLACEHOLDER + 1)
+        .position(|&octet| octet != 0)
 }
 
 /// Opens the AF_PACKET socket for capture with outgoing frames ignored.
@@ -825,6 +824,22 @@ mod tests {
     use crate::{clock_format::ClockFormat, receiver::create_shared_state};
 
     #[test]
+    fn bpf_loopback_ip_offset_skips_zeroed_placeholder() {
+        let ipv4 = [0x45, 0x00, 0x00, 0x48];
+        let ipv6 = [0x60, 0x00, 0x00, 0x00];
+        // 12: pnet_datalink 0.35 on 64-bit macOS; 14 and 16: other alignments.
+        for placeholder in [0, 12, 14, 16] {
+            for ip in [&ipv4[..], &ipv6[..]] {
+                let mut frame = vec![0u8; placeholder];
+                frame.extend_from_slice(ip);
+                assert_eq!(bpf_loopback_ip_offset(&frame), Some(placeholder));
+            }
+        }
+        assert_eq!(bpf_loopback_ip_offset(&[0u8; 40]), None);
+        assert_eq!(bpf_loopback_ip_offset(&[]), None);
+    }
+
+    #[test]
     fn transmit_worker_shutdown_finishes_or_cancels_reserved_bursts() {
         for (grace, interval, expected) in [
             (0, 1_000_000_000, 1),
@@ -1167,15 +1182,13 @@ mod tests {
         assert_eq!(walked, 0);
     }
 
-    /// `run_receiver` must return cleanly (not panic) when the configured
-    /// local address is not bound to any interface, and the shared
-    /// `capture_alive` flag must transition to `false` so an external
-    /// readiness probe can observe the dead capture.
+    /// `run_receiver` reports a local address that is not on any interface
+    /// as a startup error instead of panicking.
     ///
     /// Bind an ephemeral wildcard socket so socket setup succeeds before
     /// discovery rejects the address, which is not assigned to an interface.
     #[tokio::test]
-    async fn run_receiver_clears_capture_alive_on_missing_interface() {
+    async fn run_receiver_fails_on_missing_interface() {
         let mut conf = Configuration::parse_from([
             "stamp-suite",
             "--remote-addr",
@@ -1188,21 +1201,13 @@ mod tests {
         conf.local_port = 0;
         let shared = create_shared_state(&conf).unwrap();
 
-        assert!(shared.capture_alive.load(AtomicOrdering::Relaxed));
-
-        // run_receiver fails immediately when no interface matches, and that
-        // failure must be reported (not a clean exit) so main can exit non-zero.
+        // The failure must be an error, not a clean exit, so main exits non-zero.
         let err = run_receiver(&conf, &shared)
             .await
             .expect_err("a missing capture interface is a startup failure");
         assert!(
             err.to_string().contains("No interface found"),
             "unexpected startup error: {err}"
-        );
-
-        assert!(
-            !shared.capture_alive.load(AtomicOrdering::Relaxed),
-            "capture_alive must clear when capture cannot start"
         );
     }
 }

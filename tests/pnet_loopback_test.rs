@@ -21,7 +21,6 @@
 #![cfg(all(target_os = "linux", feature = "ttl-pnet", not(feature = "ttl-nix")))]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
@@ -99,7 +98,6 @@ async fn one_packet_round_trip(
 ) -> Option<Vec<u8>> {
     let conf = reflector_conf(local_port, auth, hmac_key_hex);
     let shared = receiver::create_shared_state(&conf).unwrap();
-    let shared_capture_alive = shared.capture_alive.clone();
     let shutdown = shared.shutdown.clone();
     let _shutdown_guard = shutdown.clone().drop_guard();
 
@@ -107,12 +105,12 @@ async fn one_packet_round_trip(
     // task so they outlive run_receiver's borrow.
     let handle = tokio::spawn(async move { receiver::run_receiver(&conf, &shared).await });
 
-    // Give the pnet capture thread time to attach to the interface;
-    // then check capture_alive in case it bailed out (e.g. bad perms).
+    // Give the pnet capture thread time to attach to the interface, then
+    // check that the receiver did not stop (for example, missing permissions).
     tokio::time::sleep(Duration::from_millis(250)).await;
-    if !shared_capture_alive.load(Ordering::Relaxed) {
-        eprintln!("Receiver shut down before we could send a packet; check perms / interface");
-        handle.abort();
+    if handle.is_finished() {
+        let outcome = handle.await;
+        eprintln!("Receiver stopped before a packet was sent: {outcome:?}");
         return None;
     }
 

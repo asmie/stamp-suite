@@ -13,11 +13,6 @@ pub struct ReceiverSharedState {
     /// Always constructed; `rate() == 0` means unlimited, so limiting can
     /// be enabled at runtime via the control plane.
     pub rate_limiter: Arc<RateLimiter>,
-    /// Flag observable by a future readiness probe (and the pnet
-    /// `spawn_blocking` join path). Set to `false` when the capture / receive
-    /// loop exits unexpectedly so external monitors can distinguish
-    /// "process alive but not reflecting" from "process alive and healthy".
-    pub capture_alive: Arc<std::sync::atomic::AtomicBool>,
     /// Per-SSID HMAC keyset; runtime-mutable via the control plane. The
     /// legacy single `--hmac-key` stays startup-immutable and backend-local.
     /// Packet loops take short read guards that never cross an `.await`.
@@ -92,7 +87,6 @@ pub fn create_shared_state(
         )),
         start_time: Instant::now(),
         rate_limiter,
-        capture_alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         hmac_keys: Arc::new(std::sync::RwLock::new(hmac_keys)),
         caps: Arc::new(RuntimeCaps::from_conf(conf)),
         shutdown: crate::shutdown::CancellationToken::new(),

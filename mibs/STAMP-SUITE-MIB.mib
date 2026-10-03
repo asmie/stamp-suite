@@ -21,7 +21,7 @@ IMPORTS
         FROM SNMPv2-SMI;
 
 stampSuiteMIB MODULE-IDENTITY
-    LAST-UPDATED "202608050000Z"
+    LAST-UPDATED "202610030000Z"
     ORGANIZATION "stamp-suite project"
     CONTACT-INFO
         "https://github.com/asmie/stamp-suite"
@@ -34,6 +34,10 @@ stampSuiteMIB MODULE-IDENTITY
          sub-agent (--snmp) serves them. A reflector process fills
          the reflector subtree; a sender process fills the sender
          subtree."
+    REVISION     "202610030000Z"
+    DESCRIPTION  "Object descriptions clarified to match the
+                  implementation. No object was added or removed, and
+                  no syntax, OID or access changed."
     REVISION     "202608050000Z"
     DESCRIPTION  "Version 1.0.0. Object definitions unchanged from the
                   initial version; re-stamped for the 1.0.0 release."
