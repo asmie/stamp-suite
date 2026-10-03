@@ -1,6 +1,10 @@
 //! Sender and reflector packet layouts (RFC 8762 and RFC 8972).
-//! `to_bytes()` and `from_bytes()` explicitly encode/decode big-endian wire fields;
-//! the Rust structs are in-memory representations.
+//!
+//! Each base packet's layout is declared once with `wire_packet!`, which
+//! generates the struct, its big-endian `to_bytes`/`from_bytes` and the
+//! lenient parsers, and checks at compile time that the fields tile the packet.
+//! [`Extended`](crate::packets::Extended) adds the TLVs that follow a base
+//! packet.
 
 use thiserror::Error;
 
@@ -57,849 +61,392 @@ fn check_size(buf: &[u8], expected: usize) -> Result<(), PacketError> {
     }
 }
 
-/// Reads a big-endian u16 from buffer at given offset.
-///
-/// # Panics
-/// Panics if `offset + 2 > buf.len()`.
-#[inline]
-fn read_u16(buf: &[u8], offset: usize) -> u16 {
-    assert!(
-        offset + 2 <= buf.len(),
-        "read_u16: offset {} + 2 exceeds buffer length {}",
-        offset,
-        buf.len()
-    );
-    // The assert above keeps every index in bounds.
-    u16::from_be_bytes([buf[offset], buf[offset + 1]])
+/// A fixed-width big-endian wire field.
+trait WireField: Sized {
+    const SIZE: usize;
+    /// Writes the field at the start of `buf`.
+    fn put(&self, buf: &mut [u8]);
+    /// Reads the field from the start of `buf`.
+    fn get(buf: &[u8]) -> Self;
 }
 
-/// Reads a big-endian u32 from buffer at given offset.
-///
-/// # Panics
-/// Panics if `offset + 4 > buf.len()`.
-#[inline]
-fn read_u32(buf: &[u8], offset: usize) -> u32 {
-    assert!(
-        offset + 4 <= buf.len(),
-        "read_u32: offset {} + 4 exceeds buffer length {}",
-        offset,
-        buf.len()
-    );
-    // The assert above keeps every index in bounds.
-    u32::from_be_bytes([
-        buf[offset],
-        buf[offset + 1],
-        buf[offset + 2],
-        buf[offset + 3],
-    ])
-}
-
-/// Reads a big-endian u64 from buffer at given offset.
-///
-/// # Panics
-/// Panics if `offset + 8 > buf.len()`.
-#[inline]
-fn read_u64(buf: &[u8], offset: usize) -> u64 {
-    assert!(
-        offset + 8 <= buf.len(),
-        "read_u64: offset {} + 8 exceeds buffer length {}",
-        offset,
-        buf.len()
-    );
-    // The assert above keeps every index in bounds.
-    u64::from_be_bytes([
-        buf[offset],
-        buf[offset + 1],
-        buf[offset + 2],
-        buf[offset + 3],
-        buf[offset + 4],
-        buf[offset + 5],
-        buf[offset + 6],
-        buf[offset + 7],
-    ])
-}
-
-/// Copies a fixed-size array from buffer at given offset.
-///
-/// # Panics
-/// Panics if `offset + N > buf.len()`.
-#[inline]
-fn read_array<const N: usize>(buf: &[u8], offset: usize) -> [u8; N] {
-    assert!(
-        offset + N <= buf.len(),
-        "read_array<{}>: offset {} + {} exceeds buffer length {}",
-        N,
-        offset,
-        N,
-        buf.len()
-    );
-    // The assert keeps the slice in bounds, and `try_into` cannot fail because the
-    // slice length is exactly N.
-    buf[offset..offset + N].try_into().unwrap()
-}
-
-/// Unauthenticated STAMP test packet sent by the Session-Sender.
-///
-/// This is the basic packet format without HMAC authentication (44 bytes).
-/// See RFC 8762 §4.2.1, with the RFC 8972 §3 SSID extension occupying
-/// the two octets immediately following Error Estimate.
-///
-/// Wire format:
-/// ```text
-///  0                   1                   2                   3
-///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                        Sequence Number                       |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                          Timestamp                           |
-/// |                                                               |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |         Error Estimate        |             SSID              |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                                                               |
-/// |                         MBZ (28 octets)                       |
-/// |                                                               |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// ```
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct PacketUnauthenticated {
-    /// Packet sequence number for ordering and loss detection.
-    pub sequence_number: u32,
-    /// Timestamp when the packet was sent (NTP or PTP format).
-    pub timestamp: u64,
-    /// Error estimate for the timestamp.
-    pub error_estimate: u16,
-    /// Session-Sender Identifier per RFC 8972 §3 (0 if unused).
-    pub ssid: u16,
-    /// Must Be Zero - reserved padding bytes.
-    pub mbz: [u8; 28],
-}
-
-impl PacketUnauthenticated {
-    /// Serializes the packet to a 44-byte array in big-endian wire format.
-    pub fn to_bytes(&self) -> [u8; 44] {
-        let mut buf = [0u8; 44];
-        buf[0..4].copy_from_slice(&self.sequence_number.to_be_bytes());
-        buf[4..12].copy_from_slice(&self.timestamp.to_be_bytes());
-        buf[12..14].copy_from_slice(&self.error_estimate.to_be_bytes());
-        buf[14..16].copy_from_slice(&self.ssid.to_be_bytes());
-        buf[16..44].copy_from_slice(&self.mbz);
-        buf
-    }
-
-    /// Deserializes a packet from big-endian wire format.
-    ///
-    /// # Errors
-    /// Returns an error if the buffer is smaller than 44 bytes.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        check_size(buf, 44)?;
-        Ok(Self {
-            sequence_number: read_u32(buf, 0),
-            timestamp: read_u64(buf, 4),
-            error_estimate: read_u16(buf, 12),
-            ssid: read_u16(buf, 14),
-            mbz: read_array(buf, 16),
-        })
-    }
-
-    /// Deserializes a packet with zero-fill for missing bytes (RFC 8762 §4.6).
-    ///
-    /// This method enables interoperability with TWAMP-Light implementations that
-    /// may send packets smaller than the base 44 bytes. Missing bytes are zero-filled.
-    pub fn from_bytes_lenient(buf: &[u8]) -> Self {
-        let mut padded = [0u8; 44];
-        let copy_len = buf.len().min(44);
-        padded[..copy_len].copy_from_slice(&buf[..copy_len]);
-
-        Self {
-            sequence_number: read_u32(&padded, 0),
-            timestamp: read_u64(&padded, 4),
-            error_estimate: read_u16(&padded, 12),
-            ssid: read_u16(&padded, 14),
-            mbz: read_array(&padded, 16),
+macro_rules! wire_int {
+    ($($ty:ty),*) => {$(
+        impl WireField for $ty {
+            const SIZE: usize = std::mem::size_of::<$ty>();
+            fn put(&self, buf: &mut [u8]) {
+                buf[..Self::SIZE].copy_from_slice(&self.to_be_bytes());
+            }
+            fn get(buf: &[u8]) -> Self {
+                // `wire_packet!` passes a slice of at least SIZE bytes.
+                Self::from_be_bytes(buf[..Self::SIZE].try_into().unwrap())
+            }
         }
+    )*};
+}
+wire_int!(u8, u16, u32, u64);
+
+impl<const N: usize> WireField for [u8; N] {
+    const SIZE: usize = N;
+    fn put(&self, buf: &mut [u8]) {
+        buf[..N].copy_from_slice(self);
+    }
+    fn get(buf: &[u8]) -> Self {
+        buf[..N].try_into().unwrap()
     }
 }
 
-/// Unauthenticated STAMP reflected packet sent by the Session-Reflector.
+/// A fixed-size STAMP base packet. [`Extended`] is generic over it.
 ///
-/// Contains the original sender information plus reflector timestamps (44 bytes).
-/// See RFC 8762 §4.3.1, with the RFC 8972 §3 SSID in the two octets after
-/// Error Estimate.
-///
-/// Wire format:
-/// ```text
-///  0                   1                   2                   3
-///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                        Sequence Number                       |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                          Timestamp                           |
-/// |                                                               |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |         Error Estimate        |             SSID              |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                       Receive Timestamp                       |
-/// |                                                               |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                  Session-Sender Seq Number                    |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                  Session-Sender Timestamp                     |
-/// |                                                               |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// | Session-Sender Error Estimate |           MBZ                 |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |Ses-Sender TTL |                      MBZ                      |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// ```
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct ReflectedPacketUnauthenticated {
-    /// Reflector's sequence number.
-    pub sequence_number: u32,
-    /// Timestamp when the reflector sent the response.
-    pub timestamp: u64,
-    /// Reflector's error estimate.
-    pub error_estimate: u16,
-    /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §3).
-    pub ssid: u16,
-    /// Timestamp when the reflector received the test packet.
-    pub receive_timestamp: u64,
-    /// Original sender's sequence number (echoed back).
-    pub sess_sender_seq_number: u32,
-    /// Original sender's timestamp (echoed back).
-    pub sess_sender_timestamp: u64,
-    /// Original sender's error estimate (echoed back).
-    pub sess_sender_err_estimate: u16,
-    /// Reserved bytes 38-39; must be zero (RFC 8762 §4.3.1).
-    /// The reply SSID appears only at bytes 14-15 (RFC 8972 §3 Figure 2).
-    pub mbz2: [u8; 2],
-    /// TTL/Hop Limit of the received test packet.
-    pub sess_sender_ttl: u8,
-    /// Must Be Zero - reserved (3 bytes).
-    pub mbz3: [u8; 3],
-}
+/// The packet types also have inherent `to_bytes`/`from_bytes` methods, so
+/// callers that name a concrete type need not import this trait.
+pub trait BasePacket: Sized + Copy {
+    /// Wire size in octets.
+    const SIZE: usize;
+    /// The serialized packet, `[u8; SIZE]`.
+    type Bytes: AsRef<[u8]> + AsMut<[u8]>;
 
-impl ReflectedPacketUnauthenticated {
-    /// Serializes the packet to a 44-byte array in big-endian wire format.
-    pub fn to_bytes(&self) -> [u8; 44] {
-        let mut buf = [0u8; 44];
-        buf[0..4].copy_from_slice(&self.sequence_number.to_be_bytes());
-        buf[4..12].copy_from_slice(&self.timestamp.to_be_bytes());
-        buf[12..14].copy_from_slice(&self.error_estimate.to_be_bytes());
-        buf[14..16].copy_from_slice(&self.ssid.to_be_bytes());
-        buf[16..24].copy_from_slice(&self.receive_timestamp.to_be_bytes());
-        buf[24..28].copy_from_slice(&self.sess_sender_seq_number.to_be_bytes());
-        buf[28..36].copy_from_slice(&self.sess_sender_timestamp.to_be_bytes());
-        buf[36..38].copy_from_slice(&self.sess_sender_err_estimate.to_be_bytes());
-        buf[38..40].copy_from_slice(&self.mbz2);
-        buf[40] = self.sess_sender_ttl;
-        buf[41..44].copy_from_slice(&self.mbz3);
-        buf
-    }
+    /// Serializes the packet in big-endian wire format.
+    fn to_wire(&self) -> Self::Bytes;
 
-    /// Deserializes a packet from big-endian wire format.
+    /// Parses a packet; fails if `buf` is shorter than `SIZE`.
     ///
     /// # Errors
-    /// Returns an error if the buffer is smaller than 44 bytes.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        check_size(buf, 44)?;
-        Ok(Self {
-            sequence_number: read_u32(buf, 0),
-            timestamp: read_u64(buf, 4),
-            error_estimate: read_u16(buf, 12),
-            ssid: read_u16(buf, 14),
-            receive_timestamp: read_u64(buf, 16),
-            sess_sender_seq_number: read_u32(buf, 24),
-            sess_sender_timestamp: read_u64(buf, 28),
-            sess_sender_err_estimate: read_u16(buf, 36),
-            mbz2: read_array(buf, 38),
-            sess_sender_ttl: buf[40],
-            mbz3: read_array(buf, 41),
-        })
-    }
+    /// Returns [`PacketError::BufferTooSmall`] for a short buffer.
+    fn from_wire(buf: &[u8]) -> Result<Self, PacketError>;
 
-    /// Deserializes a packet leniently, zero-filling missing bytes per RFC 8762 §4.6.
-    ///
-    /// Short packets are accepted and missing bytes are treated as zero.
-    #[must_use]
-    pub fn from_bytes_lenient(buf: &[u8]) -> Self {
-        let mut padded = [0u8; 44];
-        let copy_len = buf.len().min(44);
-        padded[..copy_len].copy_from_slice(&buf[..copy_len]);
+    /// Parses a packet, zero-filling missing octets (RFC 8762 §4.6), and
+    /// returns the zero-filled buffer the fields were read from. HMAC
+    /// verification uses that buffer.
+    fn from_wire_lenient(buf: &[u8]) -> (Self, Self::Bytes);
+}
 
-        Self {
-            sequence_number: read_u32(&padded, 0),
-            timestamp: read_u64(&padded, 4),
-            error_estimate: read_u16(&padded, 12),
-            ssid: read_u16(&padded, 14),
-            receive_timestamp: read_u64(&padded, 16),
-            sess_sender_seq_number: read_u32(&padded, 24),
-            sess_sender_timestamp: read_u64(&padded, 28),
-            sess_sender_err_estimate: read_u16(&padded, 36),
-            mbz2: read_array(&padded, 38),
-            sess_sender_ttl: padded[40],
-            mbz3: read_array(&padded, 41),
+/// Declares a base packet: the struct, its wire codec, and a compile-time
+/// check that each field starts where the previous one ends and that the
+/// fields fill exactly `$size` octets.
+macro_rules! wire_packet {
+    (
+        $(#[$meta:meta])*
+        pub struct $name:ident ($size:expr) {
+            $( $(#[$fmeta:meta])* $field:ident: $ty:ty = $at:expr, )*
         }
-    }
-}
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+        pub struct $name {
+            $( $(#[$fmeta])* pub $field: $ty, )*
+        }
 
-/// Authenticated STAMP test packet sent by the Session-Sender.
-///
-/// Includes HMAC for integrity verification (112 bytes).
-/// See RFC 8762 §4.2.2, with the RFC 8972 §3 SSID extension occupying
-/// the two octets immediately following Error Estimate.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct PacketAuthenticated {
-    /// Packet sequence number for ordering and loss detection.
-    pub sequence_number: u32,
-    /// Must Be Zero - reserved padding (12 bytes).
-    pub mbz0: [u8; 12],
-    /// Timestamp when the packet was sent (NTP or PTP format).
-    pub timestamp: u64,
-    /// Error estimate for the timestamp.
-    pub error_estimate: u16,
-    /// Session-Sender Identifier per RFC 8972 §3 (0 if unused).
-    pub ssid: u16,
-    /// Must Be Zero - reserved padding (68 bytes total = 30+32+6).
-    pub mbz1a: [u8; 30],
-    pub mbz1b: [u8; 32],
-    pub mbz1c: [u8; 6],
-    /// HMAC for packet authentication.
-    pub hmac: [u8; 16],
-}
-
-impl PacketAuthenticated {
-    /// Serializes the packet to a 112-byte array in big-endian wire format.
-    pub fn to_bytes(&self) -> [u8; 112] {
-        let mut buf = [0u8; 112];
-        buf[0..4].copy_from_slice(&self.sequence_number.to_be_bytes());
-        buf[4..16].copy_from_slice(&self.mbz0);
-        buf[16..24].copy_from_slice(&self.timestamp.to_be_bytes());
-        buf[24..26].copy_from_slice(&self.error_estimate.to_be_bytes());
-        buf[26..28].copy_from_slice(&self.ssid.to_be_bytes());
-        buf[28..58].copy_from_slice(&self.mbz1a);
-        buf[58..90].copy_from_slice(&self.mbz1b);
-        buf[90..96].copy_from_slice(&self.mbz1c);
-        buf[96..112].copy_from_slice(&self.hmac);
-        buf
-    }
-
-    /// Deserializes a packet from big-endian wire format.
-    ///
-    /// # Errors
-    /// Returns an error if the buffer is smaller than 112 bytes.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        check_size(buf, 112)?;
-        Ok(Self {
-            sequence_number: read_u32(buf, 0),
-            mbz0: read_array(buf, 4),
-            timestamp: read_u64(buf, 16),
-            error_estimate: read_u16(buf, 24),
-            ssid: read_u16(buf, 26),
-            mbz1a: read_array(buf, 28),
-            mbz1b: read_array(buf, 58),
-            mbz1c: read_array(buf, 90),
-            hmac: read_array(buf, 96),
-        })
-    }
-
-    /// Deserializes a packet with zero-fill for missing bytes.
-    ///
-    /// Accepts packets shorter than the 112-byte base and zero-fills the missing
-    /// bytes. RFC 8762 §4.6 covers TWAMP Light interoperability for unauthenticated
-    /// mode only; this applies the same short-packet handling here.
-    pub fn from_bytes_lenient(buf: &[u8]) -> Self {
-        let (packet, _) = Self::from_bytes_lenient_with_canonical(buf);
-        packet
-    }
-
-    /// Deserializes a packet leniently and returns the canonical zero-padded buffer.
-    ///
-    /// Returns the parsed packet and the canonical 112-byte buffer for HMAC verification.
-    /// The HMAC is verified against this zero-padded buffer, so a short packet is
-    /// checked against the same bytes the parsed fields came from.
-    #[must_use]
-    pub fn from_bytes_lenient_with_canonical(buf: &[u8]) -> (Self, [u8; 112]) {
-        let mut padded = [0u8; 112];
-        let copy_len = buf.len().min(112);
-        padded[..copy_len].copy_from_slice(&buf[..copy_len]);
-
-        let packet = Self {
-            sequence_number: read_u32(&padded, 0),
-            mbz0: read_array(&padded, 4),
-            timestamp: read_u64(&padded, 16),
-            error_estimate: read_u16(&padded, 24),
-            ssid: read_u16(&padded, 26),
-            mbz1a: read_array(&padded, 28),
-            mbz1b: read_array(&padded, 58),
-            mbz1c: read_array(&padded, 90),
-            hmac: read_array(&padded, 96),
+        const _: () = {
+            let mut at = 0;
+            $( assert!($at == at, "field offset does not follow the previous field"); at += <$ty as WireField>::SIZE; )*
+            assert!(at == $size, "fields do not fill the packet");
         };
 
-        (packet, padded)
+        impl BasePacket for $name {
+            const SIZE: usize = $size;
+            type Bytes = [u8; $size];
+
+            fn to_wire(&self) -> [u8; $size] {
+                let mut buf = [0u8; $size];
+                $( self.$field.put(&mut buf[$at..]); )*
+                buf
+            }
+
+            fn from_wire(buf: &[u8]) -> Result<Self, PacketError> {
+                check_size(buf, $size)?;
+                Ok(Self { $( $field: <$ty as WireField>::get(&buf[$at..]), )* })
+            }
+
+            fn from_wire_lenient(buf: &[u8]) -> (Self, [u8; $size]) {
+                let mut padded = [0u8; $size];
+                let len = buf.len().min($size);
+                padded[..len].copy_from_slice(&buf[..len]);
+                let packet = Self { $( $field: <$ty as WireField>::get(&padded[$at..]), )* };
+                (packet, padded)
+            }
+        }
+
+        impl $name {
+            /// Serializes the packet in big-endian wire format.
+            #[must_use]
+            pub fn to_bytes(&self) -> [u8; $size] {
+                self.to_wire()
+            }
+
+            /// Parses a packet from big-endian wire format.
+            ///
+            /// # Errors
+            /// Returns [`PacketError::BufferTooSmall`] if `buf` is shorter
+            /// than the packet.
+            pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
+                Self::from_wire(buf)
+            }
+
+            /// Parses a packet, zero-filling missing octets (RFC 8762 §4.6
+            /// short-packet handling for TWAMP Light peers).
+            #[must_use]
+            pub fn from_bytes_lenient(buf: &[u8]) -> Self {
+                Self::from_wire_lenient(buf).0
+            }
+
+            /// Like [`Self::from_bytes_lenient`], also returning the
+            /// zero-filled buffer the fields were read from.
+            #[must_use]
+            pub fn from_bytes_lenient_with_canonical(buf: &[u8]) -> (Self, [u8; $size]) {
+                Self::from_wire_lenient(buf)
+            }
+        }
+    };
+}
+
+wire_packet! {
+    /// Unauthenticated STAMP test packet sent by the Session-Sender.
+    ///
+    /// This is the basic packet format without HMAC authentication (44 bytes).
+    /// See RFC 8762 §4.2.1, with the RFC 8972 §3 SSID extension occupying
+    /// the two octets immediately following Error Estimate.
+    ///
+    /// Wire format:
+    /// ```text
+    ///  0                   1                   2                   3
+    ///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |                        Sequence Number                       |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |                          Timestamp                           |
+    /// |                                                               |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |         Error Estimate        |             SSID              |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |                                                               |
+    /// |                         MBZ (28 octets)                       |
+    /// |                                                               |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// ```
+    pub struct PacketUnauthenticated (UNAUTH_BASE_SIZE) {
+        /// Packet sequence number for ordering and loss detection.
+        sequence_number: u32 = 0,
+        /// Timestamp when the packet was sent (NTP or PTP format).
+        timestamp: u64 = 4,
+        /// Error estimate for the timestamp.
+        error_estimate: u16 = 12,
+        /// Session-Sender Identifier per RFC 8972 §3 (0 if unused).
+        ssid: u16 = 14,
+        /// Must Be Zero.
+        mbz: [u8; 28] = 16,
     }
 }
 
-/// Authenticated STAMP reflected packet sent by the Session-Reflector.
-///
-/// Contains the original sender information plus reflector timestamps with HMAC (112 bytes).
-/// See RFC 8762 §4.3.2, with the RFC 8972 §3 SSID in the two octets after
-/// Error Estimate.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct ReflectedPacketAuthenticated {
-    /// Reflector's sequence number.
-    pub sequence_number: u32,
-    /// Must Be Zero - reserved padding (12 bytes).
-    pub mbz0: [u8; 12],
-    /// Timestamp when the reflector sent the response.
-    pub timestamp: u64,
-    /// Reflector's error estimate.
-    pub error_estimate: u16,
-    /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §3).
-    pub ssid: u16,
-    /// Must Be Zero - reserved padding (4 bytes).
-    pub mbz1: [u8; 4],
-    /// Timestamp when the reflector received the test packet.
-    pub receive_timestamp: u64,
-    /// Must Be Zero - reserved padding (8 bytes).
-    pub mbz2: [u8; 8],
-    /// Original sender's sequence number (echoed back).
-    pub sess_sender_seq_number: u32,
-    /// Must Be Zero - reserved padding (12 bytes).
-    pub mbz3: [u8; 12],
-    /// Original sender's timestamp (echoed back).
-    pub sess_sender_timestamp: u64,
-    /// Original sender's error estimate (echoed back).
-    pub sess_sender_err_estimate: u16,
-    /// Must Be Zero - reserved padding (6 bytes).
+wire_packet! {
+    /// Unauthenticated STAMP reflected packet sent by the Session-Reflector.
     ///
-    /// Covers octets 74-79. RFC 8972 §3 places the SSID once per reflected
-    /// packet (`ssid`, octets 26-27); the run after the Session-Sender Error
-    /// Estimate is MBZ. See `ReflectedPacketUnauthenticated::mbz2`.
-    pub mbz4: [u8; 6],
-    /// TTL/Hop Limit of the received test packet.
-    pub sess_sender_ttl: u8,
-    /// Must Be Zero - reserved padding (15 bytes).
-    pub mbz5: [u8; 15],
-    /// HMAC for packet authentication.
-    pub hmac: [u8; 16],
-}
-
-impl ReflectedPacketAuthenticated {
-    /// Serializes the packet to a 112-byte array in big-endian wire format.
-    pub fn to_bytes(&self) -> [u8; 112] {
-        let mut buf = [0u8; 112];
-        buf[0..4].copy_from_slice(&self.sequence_number.to_be_bytes());
-        buf[4..16].copy_from_slice(&self.mbz0);
-        buf[16..24].copy_from_slice(&self.timestamp.to_be_bytes());
-        buf[24..26].copy_from_slice(&self.error_estimate.to_be_bytes());
-        buf[26..28].copy_from_slice(&self.ssid.to_be_bytes());
-        buf[28..32].copy_from_slice(&self.mbz1);
-        buf[32..40].copy_from_slice(&self.receive_timestamp.to_be_bytes());
-        buf[40..48].copy_from_slice(&self.mbz2);
-        buf[48..52].copy_from_slice(&self.sess_sender_seq_number.to_be_bytes());
-        buf[52..64].copy_from_slice(&self.mbz3);
-        buf[64..72].copy_from_slice(&self.sess_sender_timestamp.to_be_bytes());
-        buf[72..74].copy_from_slice(&self.sess_sender_err_estimate.to_be_bytes());
-        buf[74..80].copy_from_slice(&self.mbz4);
-        buf[80] = self.sess_sender_ttl;
-        buf[81..96].copy_from_slice(&self.mbz5);
-        buf[96..112].copy_from_slice(&self.hmac);
-        buf
-    }
-
-    /// Deserializes a packet from big-endian wire format.
+    /// Contains the original sender information plus reflector timestamps (44 bytes).
+    /// See RFC 8762 §4.3.1, with the RFC 8972 §3 SSID in the two octets after
+    /// Error Estimate.
     ///
-    /// # Errors
-    /// Returns an error if the buffer is smaller than 112 bytes.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        check_size(buf, 112)?;
-        Ok(Self {
-            sequence_number: read_u32(buf, 0),
-            mbz0: read_array(buf, 4),
-            timestamp: read_u64(buf, 16),
-            error_estimate: read_u16(buf, 24),
-            ssid: read_u16(buf, 26),
-            mbz1: read_array(buf, 28),
-            receive_timestamp: read_u64(buf, 32),
-            mbz2: read_array(buf, 40),
-            sess_sender_seq_number: read_u32(buf, 48),
-            mbz3: read_array(buf, 52),
-            sess_sender_timestamp: read_u64(buf, 64),
-            sess_sender_err_estimate: read_u16(buf, 72),
-            mbz4: read_array(buf, 74),
-            sess_sender_ttl: buf[80],
-            mbz5: read_array(buf, 81),
-            hmac: read_array(buf, 96),
-        })
-    }
-
-    /// Deserializes a packet leniently, zero-filling missing bytes per RFC 8762 §4.6.
-    ///
-    /// Short packets are accepted and missing bytes are treated as zero.
-    /// Returns the parsed packet and the canonical zero-padded buffer for HMAC verification.
-    #[must_use]
-    pub fn from_bytes_lenient(buf: &[u8]) -> (Self, [u8; 112]) {
-        let mut padded = [0u8; 112];
-        let copy_len = buf.len().min(112);
-        padded[..copy_len].copy_from_slice(&buf[..copy_len]);
-
-        let packet = Self {
-            sequence_number: read_u32(&padded, 0),
-            mbz0: read_array(&padded, 4),
-            timestamp: read_u64(&padded, 16),
-            error_estimate: read_u16(&padded, 24),
-            ssid: read_u16(&padded, 26),
-            mbz1: read_array(&padded, 28),
-            receive_timestamp: read_u64(&padded, 32),
-            mbz2: read_array(&padded, 40),
-            sess_sender_seq_number: read_u32(&padded, 48),
-            mbz3: read_array(&padded, 52),
-            sess_sender_timestamp: read_u64(&padded, 64),
-            sess_sender_err_estimate: read_u16(&padded, 72),
-            mbz4: read_array(&padded, 74),
-            sess_sender_ttl: padded[80],
-            mbz5: read_array(&padded, 81),
-            hmac: read_array(&padded, 96),
-        };
-
-        (packet, padded)
+    /// Wire format:
+    /// ```text
+    ///  0                   1                   2                   3
+    ///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |                        Sequence Number                       |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |                          Timestamp                           |
+    /// |                                                               |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |         Error Estimate        |             SSID              |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |                       Receive Timestamp                       |
+    /// |                                                               |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |                  Session-Sender Seq Number                    |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |                  Session-Sender Timestamp                     |
+    /// |                                                               |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// | Session-Sender Error Estimate |           MBZ                 |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// |Ses-Sender TTL |                      MBZ                      |
+    /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    /// ```
+    pub struct ReflectedPacketUnauthenticated (UNAUTH_BASE_SIZE) {
+        /// Reflector's sequence number.
+        sequence_number: u32 = 0,
+        /// Timestamp when the reflector sent the response.
+        timestamp: u64 = 4,
+        /// Reflector's error estimate.
+        error_estimate: u16 = 12,
+        /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §3).
+        ssid: u16 = 14,
+        /// Timestamp when the reflector received the test packet.
+        receive_timestamp: u64 = 16,
+        /// Original sender's sequence number (echoed back).
+        sess_sender_seq_number: u32 = 24,
+        /// Original sender's timestamp (echoed back).
+        sess_sender_timestamp: u64 = 28,
+        /// Original sender's error estimate (echoed back).
+        sess_sender_err_estimate: u16 = 36,
+        /// Must Be Zero (RFC 8762 §4.3.1). The reply SSID is only at octets
+        /// 14-15 (RFC 8972 §3 Figure 2).
+        mbz2: [u8; 2] = 38,
+        /// TTL/Hop Limit of the received test packet.
+        sess_sender_ttl: u8 = 40,
+        /// Must Be Zero.
+        mbz3: [u8; 3] = 41,
     }
 }
 
-/// Unauthenticated STAMP packet with TLV extensions (RFC 8972).
-///
-/// Contains the base packet data plus optional TLV extensions.
+wire_packet! {
+    /// Authenticated STAMP test packet sent by the Session-Sender.
+    ///
+    /// Includes HMAC for integrity verification (112 bytes).
+    /// See RFC 8762 §4.2.2, with the RFC 8972 §3 SSID extension occupying
+    /// the two octets immediately following Error Estimate.
+    pub struct PacketAuthenticated (AUTH_BASE_SIZE) {
+        /// Packet sequence number for ordering and loss detection.
+        sequence_number: u32 = 0,
+        /// Must Be Zero.
+        mbz0: [u8; 12] = 4,
+        /// Timestamp when the packet was sent (NTP or PTP format).
+        timestamp: u64 = 16,
+        /// Error estimate for the timestamp.
+        error_estimate: u16 = 24,
+        /// Session-Sender Identifier per RFC 8972 §3 (0 if unused).
+        ssid: u16 = 26,
+        /// Must Be Zero.
+        mbz1: [u8; 68] = 28,
+        /// HMAC over octets 0-95 (RFC 8762 §4.4).
+        hmac: [u8; 16] = 96,
+    }
+}
+
+wire_packet! {
+    /// Authenticated STAMP reflected packet sent by the Session-Reflector.
+    ///
+    /// Contains the original sender information plus reflector timestamps with HMAC (112 bytes).
+    /// See RFC 8762 §4.3.2, with the RFC 8972 §3 SSID in the two octets after
+    /// Error Estimate.
+    pub struct ReflectedPacketAuthenticated (AUTH_BASE_SIZE) {
+        /// Reflector's sequence number.
+        sequence_number: u32 = 0,
+        /// Must Be Zero.
+        mbz0: [u8; 12] = 4,
+        /// Timestamp when the reflector sent the response.
+        timestamp: u64 = 16,
+        /// Reflector's error estimate.
+        error_estimate: u16 = 24,
+        /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §3).
+        ssid: u16 = 26,
+        /// Must Be Zero.
+        mbz1: [u8; 4] = 28,
+        /// Timestamp when the reflector received the test packet.
+        receive_timestamp: u64 = 32,
+        /// Must Be Zero.
+        mbz2: [u8; 8] = 40,
+        /// Original sender's sequence number (echoed back).
+        sess_sender_seq_number: u32 = 48,
+        /// Must Be Zero.
+        mbz3: [u8; 12] = 52,
+        /// Original sender's timestamp (echoed back).
+        sess_sender_timestamp: u64 = 64,
+        /// Original sender's error estimate (echoed back).
+        sess_sender_err_estimate: u16 = 72,
+        /// Must Be Zero (octets 74-79). RFC 8972 §3 places the SSID once per
+        /// reflected packet, at octets 26-27.
+        mbz4: [u8; 6] = 74,
+        /// TTL/Hop Limit of the received test packet.
+        sess_sender_ttl: u8 = 80,
+        /// Must Be Zero.
+        mbz5: [u8; 15] = 81,
+        /// HMAC over octets 0-95 (RFC 8762 §4.4).
+        hmac: [u8; 16] = 96,
+    }
+}
+
+/// A base packet followed by RFC 8972 TLVs. The base packet's own HMAC (in
+/// authenticated mode) covers only the base packet; TLV integrity uses the
+/// HMAC TLV (RFC 8972 §4.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtendedPacketUnauthenticated {
-    /// The base unauthenticated packet.
-    pub base: PacketUnauthenticated,
-    /// TLV extensions following the base packet.
+pub struct Extended<B> {
+    /// The base packet.
+    pub base: B,
+    /// TLVs following the base packet.
     pub tlvs: TlvList,
 }
 
-impl ExtendedPacketUnauthenticated {
-    /// Base packet size (44 bytes).
-    pub const BASE_SIZE: usize = UNAUTH_BASE_SIZE;
+/// Unauthenticated Session-Sender test packet with TLVs.
+pub type ExtendedPacketUnauthenticated = Extended<PacketUnauthenticated>;
+/// Unauthenticated reflected packet with TLVs.
+pub type ExtendedReflectedPacketUnauthenticated = Extended<ReflectedPacketUnauthenticated>;
+/// Authenticated Session-Sender test packet with TLVs.
+pub type ExtendedPacketAuthenticated = Extended<PacketAuthenticated>;
+/// Authenticated reflected packet with TLVs.
+pub type ExtendedReflectedPacketAuthenticated = Extended<ReflectedPacketAuthenticated>;
 
-    /// Creates a new extended packet with just the base packet.
+impl<B: BasePacket> Extended<B> {
+    /// Base packet size in octets.
+    pub const BASE_SIZE: usize = B::SIZE;
+
+    /// A packet with no TLVs.
     #[must_use]
-    pub fn new(base: PacketUnauthenticated) -> Self {
+    pub fn new(base: B) -> Self {
         Self {
             base,
             tlvs: TlvList::new(),
         }
     }
 
-    /// Creates a new extended packet with TLVs.
+    /// A packet with the given TLVs.
     #[must_use]
-    pub fn with_tlvs(base: PacketUnauthenticated, tlvs: TlvList) -> Self {
+    pub fn with_tlvs(base: B, tlvs: TlvList) -> Self {
         Self { base, tlvs }
     }
 
-    /// Parses an extended packet from bytes.
+    /// Parses a complete base packet and a well-formed TLV list.
     ///
     /// # Errors
-    /// Returns an error if the buffer is too small or TLV parsing fails.
+    /// Returns an error if the base packet is short or a TLV is malformed.
     pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        let base = PacketUnauthenticated::from_bytes(buf)?;
-
-        let tlvs = if buf.len() > Self::BASE_SIZE {
-            TlvList::parse(&buf[Self::BASE_SIZE..])?
+        let base = B::from_wire(buf)?;
+        let tlvs = if buf.len() > B::SIZE {
+            TlvList::parse(&buf[B::SIZE..])?
         } else {
             TlvList::new()
         };
-
         Ok(Self { base, tlvs })
     }
 
-    /// Parses with lenient base packet handling (zero-fills missing bytes).
-    pub fn from_bytes_lenient(buf: &[u8]) -> Result<Self, PacketError> {
-        let base = PacketUnauthenticated::from_bytes_lenient(buf);
-
-        let tlvs = if buf.len() > Self::BASE_SIZE {
-            TlvList::parse(&buf[Self::BASE_SIZE..])?
+    /// Parses leniently: a short base packet is zero-filled (RFC 8762 §4.6)
+    /// and malformed TLVs are kept with the M flag instead of failing.
+    /// Also returns the zero-filled base packet, which HMAC verification uses.
+    #[must_use]
+    pub fn from_bytes_lenient(buf: &[u8]) -> (Self, B::Bytes) {
+        let (base, canonical) = B::from_wire_lenient(buf);
+        let tlvs = if buf.len() > B::SIZE {
+            TlvList::parse_lenient(&buf[B::SIZE..]).0
         } else {
             TlvList::new()
         };
-
-        Ok(Self { base, tlvs })
-    }
-
-    /// Serializes the extended packet to bytes.
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        // Pre-allocate exact capacity to avoid reallocations
-        let mut buf = Vec::with_capacity(Self::BASE_SIZE + self.tlvs.wire_size());
-        buf.extend_from_slice(&self.base.to_bytes());
-        self.tlvs.write_to(&mut buf);
-        buf
-    }
-
-    /// Returns the total wire size of the packet.
-    #[must_use]
-    pub fn wire_size(&self) -> usize {
-        Self::BASE_SIZE + self.tlvs.wire_size()
-    }
-
-    /// Returns true if the packet has TLV extensions.
-    #[must_use]
-    pub fn has_tlvs(&self) -> bool {
-        !self.tlvs.is_empty()
-    }
-}
-
-/// Unauthenticated reflected STAMP packet with TLV extensions (RFC 8972).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtendedReflectedPacketUnauthenticated {
-    /// The base reflected packet.
-    pub base: ReflectedPacketUnauthenticated,
-    /// TLV extensions following the base packet.
-    pub tlvs: TlvList,
-}
-
-impl ExtendedReflectedPacketUnauthenticated {
-    /// Base packet size (44 bytes).
-    pub const BASE_SIZE: usize = UNAUTH_BASE_SIZE;
-
-    /// Creates a new extended packet with just the base packet.
-    #[must_use]
-    pub fn new(base: ReflectedPacketUnauthenticated) -> Self {
-        Self {
-            base,
-            tlvs: TlvList::new(),
-        }
-    }
-
-    /// Creates a new extended packet with TLVs.
-    #[must_use]
-    pub fn with_tlvs(base: ReflectedPacketUnauthenticated, tlvs: TlvList) -> Self {
-        Self { base, tlvs }
-    }
-
-    /// Serializes the extended packet to bytes.
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        // Pre-allocate exact capacity to avoid reallocations
-        let mut buf = Vec::with_capacity(Self::BASE_SIZE + self.tlvs.wire_size());
-        buf.extend_from_slice(&self.base.to_bytes());
-        self.tlvs.write_to(&mut buf);
-        buf
-    }
-
-    /// Returns the total wire size of the packet.
-    #[must_use]
-    pub fn wire_size(&self) -> usize {
-        Self::BASE_SIZE + self.tlvs.wire_size()
-    }
-
-    /// Parses an extended reflected packet from bytes.
-    ///
-    /// # Errors
-    /// Returns an error if the buffer is too small or TLV parsing fails.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        let base = ReflectedPacketUnauthenticated::from_bytes(buf)?;
-
-        let tlvs = if buf.len() > Self::BASE_SIZE {
-            TlvList::parse(&buf[Self::BASE_SIZE..])?
-        } else {
-            TlvList::new()
-        };
-
-        Ok(Self { base, tlvs })
-    }
-
-    /// Parses an extended reflected packet leniently (RFC 8762 §4.6 short-packet support).
-    ///
-    /// Unlike `from_bytes`, this method:
-    /// - Handles short base packets by zero-filling missing bytes
-    /// - Handles malformed TLVs by marking them with M-flag rather than failing
-    pub fn from_bytes_lenient(buf: &[u8]) -> Self {
-        // Use lenient parsing for base packet (zero-fills short packets)
-        let base = ReflectedPacketUnauthenticated::from_bytes_lenient(buf);
-
-        let tlvs = if buf.len() > Self::BASE_SIZE {
-            let (tlvs, _malformed) = TlvList::parse_lenient(&buf[Self::BASE_SIZE..]);
-            tlvs
-        } else {
-            TlvList::new()
-        };
-
-        Self { base, tlvs }
-    }
-
-    /// Returns true if the packet has TLV extensions.
-    #[must_use]
-    pub fn has_tlvs(&self) -> bool {
-        !self.tlvs.is_empty()
-    }
-}
-
-/// Authenticated STAMP packet with TLV extensions (RFC 8972).
-///
-/// The base packet HMAC covers only the base packet fields.
-/// TLV integrity uses a separate HMAC TLV (RFC 8972 §4.8).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtendedPacketAuthenticated {
-    /// The base authenticated packet.
-    pub base: PacketAuthenticated,
-    /// TLV extensions following the base packet.
-    pub tlvs: TlvList,
-}
-
-impl ExtendedPacketAuthenticated {
-    /// Base packet size (112 bytes).
-    pub const BASE_SIZE: usize = AUTH_BASE_SIZE;
-
-    /// Creates a new extended packet with just the base packet.
-    #[must_use]
-    pub fn new(base: PacketAuthenticated) -> Self {
-        Self {
-            base,
-            tlvs: TlvList::new(),
-        }
-    }
-
-    /// Creates a new extended packet with TLVs.
-    #[must_use]
-    pub fn with_tlvs(base: PacketAuthenticated, tlvs: TlvList) -> Self {
-        Self { base, tlvs }
-    }
-
-    /// Parses an extended packet from bytes.
-    ///
-    /// # Errors
-    /// Returns an error if the buffer is too small or TLV parsing fails.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        let base = PacketAuthenticated::from_bytes(buf)?;
-
-        let tlvs = if buf.len() > Self::BASE_SIZE {
-            TlvList::parse(&buf[Self::BASE_SIZE..])?
-        } else {
-            TlvList::new()
-        };
-
-        Ok(Self { base, tlvs })
-    }
-
-    /// Parses with lenient base packet handling (zero-fills missing bytes).
-    pub fn from_bytes_lenient(buf: &[u8]) -> Result<Self, PacketError> {
-        let base = PacketAuthenticated::from_bytes_lenient(buf);
-
-        let tlvs = if buf.len() > Self::BASE_SIZE {
-            TlvList::parse(&buf[Self::BASE_SIZE..])?
-        } else {
-            TlvList::new()
-        };
-
-        Ok(Self { base, tlvs })
-    }
-
-    /// Serializes the extended packet to bytes.
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        // Pre-allocate exact capacity to avoid reallocations
-        let mut buf = Vec::with_capacity(Self::BASE_SIZE + self.tlvs.wire_size());
-        buf.extend_from_slice(&self.base.to_bytes());
-        self.tlvs.write_to(&mut buf);
-        buf
-    }
-
-    /// Returns the total wire size of the packet.
-    #[must_use]
-    pub fn wire_size(&self) -> usize {
-        Self::BASE_SIZE + self.tlvs.wire_size()
-    }
-
-    /// Returns true if the packet has TLV extensions.
-    #[must_use]
-    pub fn has_tlvs(&self) -> bool {
-        !self.tlvs.is_empty()
-    }
-}
-
-/// Authenticated reflected STAMP packet with TLV extensions (RFC 8972).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtendedReflectedPacketAuthenticated {
-    /// The base reflected packet.
-    pub base: ReflectedPacketAuthenticated,
-    /// TLV extensions following the base packet.
-    pub tlvs: TlvList,
-}
-
-impl ExtendedReflectedPacketAuthenticated {
-    /// Base packet size (112 bytes).
-    pub const BASE_SIZE: usize = AUTH_BASE_SIZE;
-
-    /// Creates a new extended packet with just the base packet.
-    #[must_use]
-    pub fn new(base: ReflectedPacketAuthenticated) -> Self {
-        Self {
-            base,
-            tlvs: TlvList::new(),
-        }
-    }
-
-    /// Creates a new extended packet with TLVs.
-    #[must_use]
-    pub fn with_tlvs(base: ReflectedPacketAuthenticated, tlvs: TlvList) -> Self {
-        Self { base, tlvs }
-    }
-
-    /// Serializes the extended packet to bytes.
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        // Pre-allocate exact capacity to avoid reallocations
-        let mut buf = Vec::with_capacity(Self::BASE_SIZE + self.tlvs.wire_size());
-        buf.extend_from_slice(&self.base.to_bytes());
-        self.tlvs.write_to(&mut buf);
-        buf
-    }
-
-    /// Returns the total wire size of the packet.
-    #[must_use]
-    pub fn wire_size(&self) -> usize {
-        Self::BASE_SIZE + self.tlvs.wire_size()
-    }
-
-    /// Parses an extended reflected packet from bytes.
-    ///
-    /// # Errors
-    /// Returns an error if the buffer is too small or TLV parsing fails.
-    pub fn from_bytes(buf: &[u8]) -> Result<Self, PacketError> {
-        let base = ReflectedPacketAuthenticated::from_bytes(buf)?;
-
-        let tlvs = if buf.len() > Self::BASE_SIZE {
-            TlvList::parse(&buf[Self::BASE_SIZE..])?
-        } else {
-            TlvList::new()
-        };
-
-        Ok(Self { base, tlvs })
-    }
-
-    /// Parses an extended reflected packet leniently (RFC 8762 §4.6 short-packet support).
-    ///
-    /// Unlike `from_bytes`, this method:
-    /// - Handles short base packets by zero-filling missing bytes
-    /// - Handles malformed TLVs by marking them with M-flag rather than failing
-    ///
-    /// Returns the packet and the canonical 112-byte buffer for HMAC verification.
-    pub fn from_bytes_lenient(buf: &[u8]) -> (Self, [u8; 112]) {
-        // Use lenient parsing for base packet (zero-fills short packets)
-        let (base, canonical) = ReflectedPacketAuthenticated::from_bytes_lenient(buf);
-
-        let tlvs = if buf.len() > Self::BASE_SIZE {
-            let (tlvs, _malformed) = TlvList::parse_lenient(&buf[Self::BASE_SIZE..]);
-            tlvs
-        } else {
-            TlvList::new()
-        };
-
         (Self { base, tlvs }, canonical)
     }
 
-    /// Returns true if the packet has TLV extensions.
+    /// Serializes the base packet followed by the TLVs.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.wire_size());
+        buf.extend_from_slice(self.base.to_wire().as_ref());
+        self.tlvs.write_to(&mut buf);
+        buf
+    }
+
+    /// Total wire size in octets.
+    #[must_use]
+    pub fn wire_size(&self) -> usize {
+        B::SIZE + self.tlvs.wire_size()
+    }
+
+    /// Whether any TLVs follow the base packet.
     #[must_use]
     pub fn has_tlvs(&self) -> bool {
         !self.tlvs.is_empty()

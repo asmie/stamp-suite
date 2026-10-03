@@ -258,9 +258,7 @@ pub fn assemble_auth_packet(error_estimate: u16) -> PacketAuthenticated {
         ssid: 0,
         sequence_number: 0,
         hmac: [0u8; 16],
-        mbz1a: [0u8; 30],
-        mbz1b: [0u8; 32],
-        mbz1c: [0u8; 6],
+        mbz1: [0u8; 68],
     }
 }
 
@@ -349,9 +347,7 @@ pub fn build_auth_packet_with_tlvs(
         error_estimate,
         ssid: ssid.unwrap_or(0),
         mbz0: [0u8; 12],
-        mbz1a: [0u8; 30],
-        mbz1b: [0u8; 32],
-        mbz1c: [0u8; 6],
+        mbz1: [0u8; 68],
         hmac: [0u8; 16],
     };
     finalize_auth_packet(&mut base, base_hmac_key);

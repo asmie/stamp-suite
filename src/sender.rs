@@ -408,7 +408,8 @@ fn process_response(
             )
         } else {
             // Parse base packet only (lenient, returns canonical buffer)
-            let (packet, canonical_buf) = ReflectedPacketAuthenticated::from_bytes_lenient(data);
+            let (packet, canonical_buf) =
+                ReflectedPacketAuthenticated::from_bytes_lenient_with_canonical(data);
             let seq_num = packet.sess_sender_seq_number;
             let recv_ts = packet.receive_timestamp;
             let send_ts = packet.timestamp;
@@ -440,7 +441,7 @@ fn process_response(
         }
     } else if use_tlvs {
         // Parse as extended packet with TLVs (unauthenticated, lenient)
-        let ext_packet = ExtendedReflectedPacketUnauthenticated::from_bytes_lenient(data);
+        let (ext_packet, _) = ExtendedReflectedPacketUnauthenticated::from_bytes_lenient(data);
         let base = &ext_packet.base;
 
         // Validate TLVs if present

@@ -91,9 +91,7 @@ fn build_auth_packet(tlv_bytes: &[u8]) -> Vec<u8> {
         timestamp: 0,
         error_estimate: 0,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     let mut data = base.to_bytes().to_vec();

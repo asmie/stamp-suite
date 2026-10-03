@@ -259,6 +259,14 @@ median of three trials, reflector CPU as a share of one core:
   allocated a parsed TLV list per reply.
 - Packet layout constants (base sizes, HMAC and SSID offsets) are defined once
   in `packets.rs`.
+- Each base packet's field layout is declared once with the `wire_packet!`
+  macro, which generates the struct, `to_bytes`, `from_bytes` and the lenient
+  parsers, and fails the build if the field offsets leave a gap or overlap.
+  The four `Extended*` packet types are aliases of one generic
+  `Extended<B: BasePacket>`, whose `from_bytes_lenient` returns the zero-filled
+  base packet with the parsed packet. `PacketAuthenticated`'s
+  `mbz1a`/`mbz1b`/`mbz1c` fields are one `mbz1: [u8; 68]`. Decoding of 2000
+  random buffers was compared before and after and is identical.
 - Thirteen per-TLV length errors are one `TlvError::InvalidLength { kind,
   length }`, and the expected length comes from one table. Fixed and IPv6
   extension header reflection share one matching function, and Location

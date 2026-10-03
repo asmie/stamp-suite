@@ -910,9 +910,7 @@ fn test_assemble_auth_answer_echoes_sender_fields() {
         timestamp: 123456789,
         error_estimate: 100,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0xab; 16],
     };
 
@@ -970,9 +968,7 @@ fn test_assemble_auth_answer_ttl_preserved() {
         timestamp: 2,
         error_estimate: 3,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -992,9 +988,7 @@ fn test_assemble_auth_answer_with_hmac() {
         timestamp: 123456789,
         error_estimate: 100,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -1021,9 +1015,7 @@ fn test_assemble_auth_answer_without_hmac() {
         timestamp: 123456789,
         error_estimate: 100,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -1075,9 +1067,7 @@ fn test_assemble_auth_answer_with_reflector_seq() {
         timestamp: 123456789,
         error_estimate: 100,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -1136,9 +1126,7 @@ fn test_assemble_auth_answer_symmetric_preserves_length() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -1347,9 +1335,7 @@ fn test_assemble_auth_with_tlvs_ignore_mode() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -1388,9 +1374,7 @@ fn test_assemble_auth_with_tlvs_echo_mode() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -1430,9 +1414,7 @@ fn test_assemble_auth_with_tlvs_does_not_truncate_oversized_response() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -1514,9 +1496,7 @@ fn test_zero_trailer_reply_preserves_symmetric_size_auth() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -1722,9 +1702,7 @@ fn test_assemble_auth_with_tlvs_adds_hmac_even_when_request_has_none() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -2176,9 +2154,7 @@ fn test_assemble_auth_with_cos_tlv_updates_dscp_ecn() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -2503,9 +2479,7 @@ fn test_set_cos_policy_rejected_auth() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     let mut original_data = sender_packet.to_bytes().to_vec();
@@ -3184,9 +3158,7 @@ fn test_auth_with_micro_session_id_fills_reflector_id() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -3235,9 +3207,7 @@ fn test_auth_with_micro_session_id_mismatch_discards() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
 
@@ -3308,9 +3278,7 @@ fn open_mode_reflector_drops_authenticated_shaped_packet() {
         timestamp: 0xEE26_C5EE_6734_968E,
         error_estimate: 0x0001,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0xAB; 16],
     };
     let data = auth.to_bytes();
@@ -3388,9 +3356,7 @@ fn strict_packets_auth_full_size_both_modes_accept() {
         timestamp: 200,
         error_estimate: 0,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     let data = packet.to_bytes();
@@ -3459,9 +3425,7 @@ fn strict_packets_require_hmac_rejects_regardless_of_mode() {
         timestamp: 200,
         error_estimate: 0,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     let data = packet.to_bytes();
@@ -3490,9 +3454,7 @@ fn auth_packet_rejected_when_keyset_present_but_resolves_no_key() {
         timestamp: 200,
         error_estimate: 0,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     let data = packet.to_bytes();

@@ -30,7 +30,7 @@ contract.
 
 | Module | Purpose |
 | --- | --- |
-| `packets.rs` | Base packet layouts (44-byte open, 112-byte authenticated) with hand-written big-endian `to_bytes`/`from_bytes`. |
+| `packets.rs` | Base packet layouts (44-byte open, 112-byte authenticated), each declared once with `wire_packet!`, which generates the big-endian `to_bytes`/`from_bytes` and checks field offsets at compile time. `Extended<B>` is a base packet followed by TLVs. |
 | `tlv/core.rs` | `TlvError`, `TlvFlags`, `TlvType`, `RawTlv` and size constants. |
 | `tlv/experimental.rs` | Experimental TLV and sub-TLV codepoints (240 to 251), kept in one place for renumbering. |
 | `tlv/list/` | `TlvList`: parsing, ownership, HMAC placement and serialization; `processing.rs` holds the in-place reflector updates. |

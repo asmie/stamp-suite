@@ -608,9 +608,7 @@ fn test_assemble_auth_packet_defaults() {
     assert_eq!(packet.error_estimate, 0);
     assert_eq!(packet.ssid, 0);
     assert_eq!(packet.mbz0, [0u8; 12]);
-    assert_eq!(packet.mbz1a, [0u8; 30]);
-    assert_eq!(packet.mbz1b, [0u8; 32]);
-    assert_eq!(packet.mbz1c, [0u8; 6]);
+    assert_eq!(packet.mbz1, [0u8; 68]);
     assert_eq!(packet.hmac, [0u8; 16]);
 }
 
@@ -4178,9 +4176,7 @@ fn create_extended_auth_packet(
         error_estimate,
         ssid: ssid.unwrap_or(0),
         mbz0: [0u8; 12],
-        mbz1a: [0u8; 30],
-        mbz1b: [0u8; 32],
-        mbz1c: [0u8; 6],
+        mbz1: [0u8; 68],
         hmac: [0u8; 16],
     };
 

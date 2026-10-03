@@ -33,9 +33,7 @@ fn test_wire_format_sizes_match_rfc() {
         timestamp: 0,
         error_estimate: 0,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     assert_eq!(auth.to_bytes().len(), 112);
@@ -103,9 +101,7 @@ fn test_packet_authenticated_serialization() {
         timestamp: 123456789,
         error_estimate: 100,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     let serialized = packet.to_bytes();
@@ -318,9 +314,7 @@ fn test_ssid_at_correct_offset_auth() {
         timestamp: 0,
         error_estimate: 0,
         ssid: 0xABCD,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     let bytes = packet.to_bytes();
@@ -355,9 +349,7 @@ fn test_hmac_at_correct_offset_auth() {
         timestamp: 0,
         error_estimate: 0,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: hmac_pattern,
     };
     let bytes = packet.to_bytes();
@@ -518,9 +510,7 @@ fn test_from_bytes_lenient_auth_full_packet() {
         timestamp: 0xDEADBEEFCAFEBABE,
         error_estimate: 0xABCD,
         ssid: 0x9988,
-        mbz1a: [0x22; 30],
-        mbz1b: [0x33; 32],
-        mbz1c: [0x44; 6],
+        mbz1: std::array::from_fn(|i| i as u8 + 1),
         hmac: [0x55; 16],
     };
     let bytes = packet.to_bytes();
@@ -531,14 +521,14 @@ fn test_from_bytes_lenient_auth_full_packet() {
 
 #[test]
 fn test_from_bytes_lenient_auth_short_packet() {
-    // Only 30 bytes provided: seq(4) + mbz0(12) + timestamp(8) + error_estimate(2) + ssid(2) + 2 bytes mbz1a
+    // Only 30 bytes provided: seq(4) + mbz0(12) + timestamp(8) + error_estimate(2) + ssid(2) + 2 bytes of mbz1
     let mut short_buf = [0u8; 30];
     short_buf[0..4].copy_from_slice(&0x12345678u32.to_be_bytes()); // seq
     short_buf[4..16].copy_from_slice(&[0x11; 12]); // mbz0
     short_buf[16..24].copy_from_slice(&0xDEADBEEFCAFEBABEu64.to_be_bytes()); // timestamp
     short_buf[24..26].copy_from_slice(&0xABCDu16.to_be_bytes()); // error_estimate
     short_buf[26..28].copy_from_slice(&0x4321u16.to_be_bytes()); // ssid
-    short_buf[28..30].copy_from_slice(&[0x22; 2]); // partial mbz1a
+    short_buf[28..30].copy_from_slice(&[0x22; 2]); // partial mbz1
 
     let restored = PacketAuthenticated::from_bytes_lenient(&short_buf);
 
@@ -547,11 +537,9 @@ fn test_from_bytes_lenient_auth_short_packet() {
     assert_eq!(restored.timestamp, 0xDEADBEEFCAFEBABE);
     assert_eq!(restored.error_estimate, 0xABCD);
     assert_eq!(restored.ssid, 0x4321);
-    // First 2 bytes of mbz1a should be 0x22, rest zero-filled
-    assert_eq!(restored.mbz1a[0..2], [0x22; 2]);
-    assert_eq!(restored.mbz1a[2..30], [0; 28]);
-    assert_eq!(restored.mbz1b, [0; 32]);
-    assert_eq!(restored.mbz1c, [0; 6]);
+    // First 2 bytes of mbz1 should be 0x22, rest zero-filled
+    assert_eq!(restored.mbz1[0..2], [0x22; 2]);
+    assert_eq!(restored.mbz1[2..], [0; 66]);
     assert_eq!(restored.hmac, [0; 16]);
 }
 
@@ -668,9 +656,7 @@ fn test_extended_packet_auth_new() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     let ext = ExtendedPacketAuthenticated::new(base);
@@ -689,9 +675,7 @@ fn test_extended_packet_auth_to_bytes() {
         timestamp: 100,
         error_estimate: 10,
         ssid: 0,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0xAB; 16],
     };
 

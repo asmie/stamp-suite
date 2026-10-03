@@ -70,9 +70,7 @@ fn build_signed_auth_packet(ssid: u16, key: &HmacKey) -> Vec<u8> {
         timestamp: 0,
         error_estimate: 0,
         ssid,
-        mbz1a: [0; 30],
-        mbz1b: [0; 32],
-        mbz1c: [0; 6],
+        mbz1: [0; 68],
         hmac: [0; 16],
     };
     // Sign: serialise once with HMAC zeroed, compute HMAC over the first
