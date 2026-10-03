@@ -182,6 +182,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Performance**
 
+- Probe TLVs are written directly into the packet buffer instead of being
+  copied into a list and serialized; the static TLVs (including BER padding)
+  are no longer cloned per probe, and the authenticated base packet is
+  serialized once.
+
 Measured with `live_udp_bench` on loopback (Intel Core Ultra 9 275HX, WSL2),
 median of three trials, reflector CPU as a share of one core:
 
@@ -349,6 +354,13 @@ median of three trials, reflector CPU as a share of one core:
 
 ### Fixed
 
+- T1 and the RTT start are read after the probe's TLVs are built, just before
+  the base packet is written and sent. Building the TLVs (BER padding, Direct
+  Measurement, the TLV HMAC) counted as network delay; on loopback with
+  authenticated BER probes the median RTT dropped by about 3 µs.
+- macOS and Windows builds compile without warnings, and `--features snmp`
+  tests no longer fail to build on Windows. CI now runs clippy on the macOS
+  and Windows jobs.
 - A configuration file with `return_srv6_sids = []` or
   `return_sr_mpls_labels = []` is rejected at startup. It passed validation
   and the sender sent a Segment List sub-TLV with Length 0 (RFC 9503 §4.1.3).

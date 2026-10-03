@@ -156,7 +156,7 @@ proptest! {
 // ---------------------------------------------------------------------------
 // AgentX decoders (only when the snmp feature is on).
 
-#[cfg(feature = "snmp")]
+#[cfg(all(unix, feature = "snmp"))]
 mod agentx_props {
     use super::*;
     use stamp_suite::snmp::agentx;

@@ -770,20 +770,14 @@ fn extract_tos_from_cmsgs(msg: &nix::sys::socket::RecvMsg<SockaddrStorage>) -> O
             let cmsg_type = ucmsg.cmsg_header.cmsg_type;
             let data = &ucmsg.data_bytes;
 
-            // IPv4 TOS (level=IPPROTO_IP, type=IP_RECVTOS)
-            if level == libc::IPPROTO_IP && cmsg_type == libc::IP_RECVTOS {
+            // IPv4 TOS (IP_RECVTOS) or IPv6 Traffic Class (IPV6_TCLASS): an
+            // int on most systems, a single byte on some.
+            let is_tos = (level == libc::IPPROTO_IP && cmsg_type == libc::IP_RECVTOS)
+                || (level == libc::IPPROTO_IPV6 && cmsg_type == libc::IPV6_TCLASS);
+            if is_tos {
                 if data.len() >= 4 {
                     let tos = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
                     return Some(tos.clamp(0, 255) as u8);
-                } else if !data.is_empty() {
-                    return Some(data[0]);
-                }
-            }
-            // IPv6 Traffic Class (level=IPPROTO_IPV6, type=IPV6_TCLASS)
-            else if level == libc::IPPROTO_IPV6 && cmsg_type == libc::IPV6_TCLASS {
-                if data.len() >= 4 {
-                    let tclass = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
-                    return Some(tclass.clamp(0, 255) as u8);
                 } else if !data.is_empty() {
                     return Some(data[0]);
                 }
@@ -812,6 +806,8 @@ fn extract_dst_addr_from_cmsgs(
             ControlMessageOwned::Ipv4PacketInfo(pktinfo) => {
                 return Some((
                     IpAddr::V4(ipv4_addr_from_pktinfo(&pktinfo)),
+                    // `ipi_ifindex` is an i32 on Linux and a u32 on macOS.
+                    #[allow(clippy::useless_conversion)]
                     u32::try_from(pktinfo.ipi_ifindex).unwrap_or(0),
                 ));
             }

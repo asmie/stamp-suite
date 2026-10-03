@@ -221,13 +221,9 @@ pub(super) fn extract_reply_ecn_from_cmsgs(
             let cmsg_type = ucmsg.cmsg_header.cmsg_type;
             let data = &ucmsg.data_bytes;
 
-            let tos = if level == libc::IPPROTO_IP && cmsg_type == libc::IP_RECVTOS {
-                Some(data)
-            } else if level == libc::IPPROTO_IPV6 && cmsg_type == libc::IPV6_TCLASS {
-                Some(data)
-            } else {
-                None
-            };
+            let tos = ((level == libc::IPPROTO_IP && cmsg_type == libc::IP_RECVTOS)
+                || (level == libc::IPPROTO_IPV6 && cmsg_type == libc::IPV6_TCLASS))
+                .then_some(data);
             if let Some(data) = tos {
                 if data.len() >= 4 {
                     let v = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);

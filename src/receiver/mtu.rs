@@ -507,7 +507,9 @@ pub(crate) fn interface_mtu(iface: &str) -> Option<u32> {
     (mtu > 0).then_some(mtu as u32)
 }
 
+// Off Linux only the unit tests call this.
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub(crate) fn interface_mtu(_iface: &str) -> Option<u32> {
     None

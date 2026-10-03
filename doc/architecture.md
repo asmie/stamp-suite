@@ -244,6 +244,13 @@ when a key is given.
    1 ms are busy-waited, which keeps one CPU core busy above 1000 probes per
    second. The loop ends at `--count` probes (`0` means no limit), at the end
    of `--duration`, on a zero-SSID stop, or on shutdown.
+
+   Each probe is built in two steps. `build_probe` writes the TLVs straight
+   into the packet buffer behind a zeroed base packet (`write_probe_tlvs`, no
+   copy of the static TLVs). Only then are T1 and the RTT start read, and
+   `stamp_probe` writes the base packet with that timestamp (and its HMAC,
+   which covers the timestamp) before the send. TLV construction therefore
+   does not count as network delay.
 2. **Drain.** The run waits up to `--timeout` for outstanding replies and burst
    copies. Shutdown ends the wait at once.
 3. **Access Report retries.** An Access Report exchange that started during

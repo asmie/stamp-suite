@@ -270,6 +270,41 @@ pub(crate) fn finalize_auth_packet(packet: &mut PacketAuthenticated, key: &HmacK
     packet.hmac = compute_packet_hmac(key, &bytes, AUTH_HMAC_OFFSET);
 }
 
+/// Appends `groups` of TLVs to `out` in order, followed by an HMAC TLV when
+/// `tlv_hmac_key` is set (RFC 8972 §4.8). The HMAC covers the Sequence Number
+/// and the TLVs before it. When the probe carries BER TLVs, Extra Padding goes
+/// after the HMAC and outside its coverage, so residual bit errors can be
+/// measured. The layout matches a `TlvList` built from the same TLVs and
+/// signed with `set_hmac`, without copying the TLVs into one.
+pub(super) fn write_probe_tlvs(
+    out: &mut Vec<u8>,
+    sequence_number: u32,
+    groups: &[&[RawTlv]],
+    tlv_hmac_key: Option<&HmacKey>,
+) {
+    let tlvs = || groups.iter().flat_map(|group| group.iter());
+    let padding_last = tlv_hmac_key.is_some() && tlvs().any(|tlv| crate::ber::is_ber(tlv.tlv_type));
+    let covered = |tlv: &&RawTlv| !(padding_last && tlv.tlv_type == TlvType::ExtraPadding);
+    let mut signer = tlv_hmac_key.map(|key| {
+        let mut signer = key.signer();
+        signer.update(&sequence_number.to_be_bytes());
+        signer
+    });
+    for tlv in tlvs().filter(covered) {
+        tlv.write_to(out);
+        if let Some(signer) = signer.as_mut() {
+            signer.update(&tlv.wire_header());
+            signer.update(&tlv.value);
+        }
+    }
+    if let Some(signer) = signer {
+        RawTlv::new(TlvType::Hmac, signer.finish().to_vec()).write_to(out);
+    }
+    for tlv in tlvs().filter(|tlv| !covered(tlv)) {
+        tlv.write_to(out);
+    }
+}
+
 /// Builds an unauthenticated STAMP packet with TLV extensions.
 ///
 /// `error_estimate` is in wire format; a `None` SSID is sent as zero. With
@@ -289,27 +324,9 @@ pub fn build_unauth_packet_with_tlvs(
         ssid: ssid.unwrap_or(0),
         mbz: [0u8; 28],
     };
-    let base_bytes = base.to_bytes();
-
-    let mut tlvs = TlvList::new();
-
-    for tlv in extra_tlvs {
-        tlvs.push(tlv.clone()).ok();
-    }
-
-    // RFC 8972 §4.8: the TLV HMAC covers the Sequence Number (first 4 bytes)
-    // and all preceding TLVs.
-    if let Some(key) = tlv_hmac_key {
-        let seq_bytes = &base_bytes[..4];
-        tlvs.set_hmac(key, seq_bytes);
-    }
-
-    let mut result = base_bytes.to_vec();
-    if !tlvs.is_empty() {
-        result.extend_from_slice(&tlvs.to_bytes());
-    }
-
-    result
+    let mut out = base.to_bytes().to_vec();
+    write_probe_tlvs(&mut out, sequence_number, &[extra_tlvs], tlv_hmac_key);
+    out
 }
 
 /// Builds an authenticated STAMP packet with TLV extensions.
@@ -337,27 +354,8 @@ pub fn build_auth_packet_with_tlvs(
         mbz1c: [0u8; 6],
         hmac: [0u8; 16],
     };
-
     finalize_auth_packet(&mut base, base_hmac_key);
-    let base_bytes = base.to_bytes();
-
-    let mut tlvs = TlvList::new();
-
-    for tlv in extra_tlvs {
-        tlvs.push(tlv.clone()).ok();
-    }
-
-    // RFC 8972 §4.8: the TLV HMAC covers the Sequence Number (first 4 bytes)
-    // and all preceding TLVs.
-    if let Some(key) = tlv_hmac_key {
-        let seq_bytes = &base_bytes[..4];
-        tlvs.set_hmac(key, seq_bytes);
-    }
-
-    let mut result = base_bytes.to_vec();
-    if !tlvs.is_empty() {
-        result.extend_from_slice(&tlvs.to_bytes());
-    }
-
-    result
+    let mut out = base.to_bytes().to_vec();
+    write_probe_tlvs(&mut out, sequence_number, &[extra_tlvs], tlv_hmac_key);
+    out
 }

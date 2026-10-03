@@ -118,9 +118,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: native-macos-${{ matrix.profile }}
+      # The Linux clippy jobs do not compile macOS-only code.
+      - name: Clippy (macOS)
+        run: cargo clippy --locked --all-targets ${{ matrix.profile == 'all-features' && '--all-features' || '' }} -- -D warnings
       - name: Run native tests and record evidence
         env:
           TOKIO_WORKER_THREADS: 2
@@ -144,6 +149,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-windows
@@ -232,6 +239,10 @@ jobs:
           } else {
             throw "Incomplete Npcap runtime: both x64 DLLs are required for the runtime gate."
           }
+      # The Linux clippy jobs do not compile Windows-only code.
+      - name: Clippy (Windows, pnet)
+        shell: bash
+        run: cargo clippy --locked --all-targets --no-default-features --features ttl-pnet -- -D warnings
       - name: Require unit, portable runtime and UDP sender tests
         run: >-
           cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet

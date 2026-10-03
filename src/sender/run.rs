@@ -51,6 +51,8 @@ pub(super) struct SenderRun {
     ecn_response_active: bool,
     kernel_rx_enabled: bool,
     #[cfg(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos")))]
+    // Read only by the Linux TX-timestamp path.
+    #[cfg_attr(not(all(feature = "hwtstamp", target_os = "linux")), allow(dead_code))]
     kernel_ts: crate::hwtstamp::EnabledTimestamping,
     /// Mirrors the kernel's per-send OPT_ID counter; `send_probe` is the
     /// only send site.
@@ -1050,93 +1052,97 @@ impl SenderRun {
             ber.filter_requests(&mut self.extra_tlvs);
         }
         let seq = self.sess.generate_sequence_number();
+        let mut packet = self.build_probe(seq, attach_access_report);
+        // T1 and the RTT start are read after the TLVs are built, so build
+        // time is not measured as network delay. Only the base packet (and
+        // its HMAC, which covers the timestamp) is written after this point.
         let send_time = Instant::now();
         let send_timestamp = generate_timestamp(self.conf.clock_source);
-        let packet = self.build_probe(seq, send_timestamp, attach_access_report);
+        self.stamp_probe(&mut packet, seq, send_timestamp);
         match self.socket.send(&packet).await {
             Err(e) => crate::eprintln_throttled!("Failed to send packet {seq}: {e}"),
             Ok(_) => self.record_sent(seq, send_time, send_timestamp),
         }
     }
 
-    /// Serializes one probe. Direct Measurement, an Access Report and an
-    /// AIMD-scaled Reflected Test Packet Control TLV (cos-ecn-01 §3.4)
-    /// change per probe; everything else comes from `extra_tlvs`.
-    fn build_probe(&self, seq: u32, timestamp: u64, attach_access_report: bool) -> Vec<u8> {
-        let conf = Arc::clone(&self.conf);
-        let per_probe =
-            conf.direct_measurement || attach_access_report || self.scale_reflected_control;
-        let owned;
-        let tlvs: &[RawTlv] = if per_probe {
-            let mut tlvs = self.extra_tlvs.clone();
-            if conf.direct_measurement {
-                // The wire counter is 32 bits and wraps (RFC 8972 §4.5).
-                tlvs.push(DirectMeasurementTlv::new((self.packets_sent + 1) as u32).to_raw());
+    /// Serializes one probe with a zeroed base packet for `stamp_probe` to
+    /// fill. Direct Measurement, an Access Report and an AIMD-scaled
+    /// Reflected Test Packet Control TLV (cos-ecn-01 §3.4) change per probe;
+    /// everything else comes from `extra_tlvs` and is written without a copy.
+    fn build_probe(&self, seq: u32, attach_access_report: bool) -> Vec<u8> {
+        let conf = &*self.conf;
+        let mut per_probe: Vec<RawTlv> = Vec::new();
+        if conf.direct_measurement {
+            // The wire counter is 32 bits and wraps (RFC 8972 §4.5).
+            per_probe.push(DirectMeasurementTlv::new((self.packets_sent + 1) as u32).to_raw());
+        }
+        if let Some(access_id) = conf.access_report.filter(|_| attach_access_report) {
+            per_probe.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
+        }
+        if self.scale_reflected_control {
+            let scale = self
+                .congestion
+                .as_ref()
+                .map_or(1.0, |c| c.controller.scale_factor());
+            if let Some(control) = scaled_reflected_control_tlv(
+                conf.reflected_control_length,
+                conf.reflected_control_count,
+                conf.reflected_control_interval_ns,
+                conf.reflected_control_no_ext_hdr,
+                scale,
+            ) {
+                per_probe.push(control);
             }
-            if let Some(access_id) = conf.access_report.filter(|_| attach_access_report) {
-                tlvs.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
-            }
-            if self.scale_reflected_control {
-                let scale = self
-                    .congestion
-                    .as_ref()
-                    .map_or(1.0, |c| c.controller.scale_factor());
-                if let Some(control) = scaled_reflected_control_tlv(
-                    conf.reflected_control_length,
-                    conf.reflected_control_count,
-                    conf.reflected_control_interval_ns,
-                    conf.reflected_control_no_ext_hdr,
-                    scale,
-                ) {
-                    tlvs.push(control);
-                }
-            }
-            owned = tlvs;
-            &owned
-        } else {
-            &self.extra_tlvs
+        }
+        let (base_size, tlv_key) = match &self.send_mode {
+            SendMode::AuthTlv { key } => (AUTH_BASE_SIZE, Some(Some(key))),
+            SendMode::AuthBase { .. } => (AUTH_BASE_SIZE, None),
+            SendMode::OpenTlv { tlv_key } => (UNAUTH_BASE_SIZE, Some(tlv_key.as_ref())),
+            SendMode::OpenBase => (UNAUTH_BASE_SIZE, None),
         };
-        let error_estimate = self.error_estimate_wire;
-        let mut packet = match &self.send_mode {
-            SendMode::AuthTlv { key } => build_auth_packet_with_tlvs(
-                seq,
-                timestamp,
-                error_estimate,
-                key,
-                conf.ssid,
-                tlvs,
-                Some(key),
-            ),
-            SendMode::AuthBase { key } => {
-                let mut packet = assemble_auth_packet(error_estimate);
-                packet.sequence_number = seq;
-                packet.timestamp = timestamp;
-                packet.ssid = conf.ssid.unwrap_or(0);
-                finalize_auth_packet(&mut packet, key);
-                packet.to_bytes().to_vec()
-            }
-            SendMode::OpenTlv { tlv_key } => build_unauth_packet_with_tlvs(
-                seq,
-                timestamp,
-                error_estimate,
-                conf.ssid,
-                tlvs,
-                tlv_key.as_ref(),
-            ),
-            SendMode::OpenBase => {
-                let mut packet = assemble_unauth_packet(error_estimate);
-                packet.sequence_number = seq;
-                packet.timestamp = timestamp;
-                packet.ssid = conf.ssid.unwrap_or(0);
-                packet.to_bytes().to_vec()
-            }
-        };
+        let tlv_bytes: usize = self
+            .extra_tlvs
+            .iter()
+            .chain(&per_probe)
+            .map(RawTlv::wire_size)
+            .sum();
+        // Room for the TLV HMAC and a `--malformed` TLV as well.
+        let mut packet = Vec::with_capacity(base_size + tlv_bytes + 64);
+        packet.resize(base_size, 0);
+        if let Some(key) = tlv_key {
+            write_probe_tlvs(&mut packet, seq, &[&self.extra_tlvs, &per_probe], key);
+        }
         // `--malformed` appends one deliberately malformed TLV after
         // everything else, including the HMAC TLV, to exercise a reflector.
         if let Some(mode) = conf.malformed {
             packet.extend_from_slice(&malformed_tlv_bytes(mode));
         }
         packet
+    }
+
+    /// Writes the base packet with its final timestamp (and, in authenticated
+    /// mode, its HMAC) into the prefix reserved by `build_probe`.
+    fn stamp_probe(&self, packet: &mut [u8], seq: u32, timestamp: u64) {
+        let ssid = self.conf.ssid.unwrap_or(0);
+        match &self.send_mode {
+            SendMode::AuthTlv { key } | SendMode::AuthBase { key } => {
+                let mut base = assemble_auth_packet(self.error_estimate_wire);
+                base.sequence_number = seq;
+                base.timestamp = timestamp;
+                base.ssid = ssid;
+                let bytes = &mut packet[..AUTH_BASE_SIZE];
+                bytes.copy_from_slice(&base.to_bytes());
+                let hmac = compute_packet_hmac(key, bytes, AUTH_HMAC_OFFSET);
+                bytes[AUTH_HMAC_OFFSET..].copy_from_slice(&hmac);
+            }
+            SendMode::OpenTlv { .. } | SendMode::OpenBase => {
+                let mut base = assemble_unauth_packet(self.error_estimate_wire);
+                base.sequence_number = seq;
+                base.timestamp = timestamp;
+                base.ssid = ssid;
+                packet[..UNAUTH_BASE_SIZE].copy_from_slice(&base.to_bytes());
+            }
+        }
     }
 
     fn record_sent(&mut self, seq: u32, send_time: Instant, send_timestamp: u64) {

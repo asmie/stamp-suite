@@ -1,5 +1,6 @@
 #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
 use super::run::apply_tx_corrections;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::run::recv_packet;
 use super::*;
 use crate::packets::{ExtendedPacketAuthenticated, ExtendedPacketUnauthenticated};
@@ -4186,4 +4187,46 @@ fn create_extended_auth_packet(
     finalize_auth_packet(&mut base, hmac_key);
 
     ExtendedPacketAuthenticated::with_tlvs(base, TlvList::new())
+}
+
+proptest::proptest! {
+    /// `write_probe_tlvs` matches a `TlvList` built from the same TLVs and
+    /// signed with `set_hmac`, however the TLVs are split into groups.
+    #[test]
+    fn probe_tlv_writer_matches_tlv_list(
+        entries in proptest::collection::vec(
+            (0usize..5, proptest::collection::vec(proptest::prelude::any::<u8>(), 0..24)),
+            0..6,
+        ),
+        split in 0usize..7,
+        keyed in proptest::prelude::any::<bool>(),
+        seq in proptest::prelude::any::<u32>(),
+    ) {
+        let kinds = [
+            TlvType::ExtraPadding,
+            TlvType::BerPattern,
+            TlvType::ClassOfService,
+            TlvType::DirectMeasurement,
+            TlvType::Location,
+        ];
+        let tlvs: Vec<RawTlv> = entries
+            .into_iter()
+            .map(|(kind, value)| RawTlv::new(kinds[kind], value))
+            .collect();
+        let key = HmacKey::new(vec![0x5A; 16]).unwrap();
+        let key = keyed.then_some(&key);
+
+        let mut expected = TlvList::new();
+        for tlv in &tlvs {
+            expected.push(tlv.clone()).unwrap();
+        }
+        if let Some(key) = key {
+            expected.set_hmac(key, &seq.to_be_bytes());
+        }
+
+        let split = split.min(tlvs.len());
+        let mut written = Vec::new();
+        write_probe_tlvs(&mut written, seq, &[&tlvs[..split], &tlvs[split..]], key);
+        proptest::prop_assert_eq!(written, expected.to_bytes());
+    }
 }
