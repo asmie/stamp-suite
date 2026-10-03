@@ -496,8 +496,9 @@ pub struct Configuration {
     #[clap(long, conflicts_with_all = ["hmac_key", "hmac_key_file"], help_heading = "Authentication")]
     pub hmac_key_dir: Option<PathBuf>,
 
-    /// Require HMAC key to be configured (error if missing in auth mode).
-    /// When an HMAC key is present, verification is always mandatory (RFC 8762 §4.4).
+    /// Reflector: drop authenticated packets for which no HMAC key is
+    /// configured. Authenticated mode already needs a key source at startup;
+    /// with a key, verification is always mandatory (RFC 8762 §4.4).
     #[clap(long, help_heading = "Authentication")]
     pub require_hmac: bool,
 
@@ -1595,6 +1596,19 @@ impl Configuration {
             return Err(invalid(
                 "--dest-node-addr requires --ssid to be specified (RFC 9503)",
             ));
+        }
+
+        // An empty list would send a Segment List sub-TLV of length 0. The
+        // CLI cannot produce one; a config file can.
+        if self
+            .return_sr_mpls_labels
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            return Err(invalid("return_sr_mpls_labels must not be empty"));
+        }
+        if self.return_srv6_sids.as_ref().is_some_and(Vec::is_empty) {
+            return Err(invalid("return_srv6_sids must not be empty"));
         }
 
         if let Some(cc) = self.return_path_cc {

@@ -26,12 +26,14 @@ stampSuiteMIB MODULE-IDENTITY
     CONTACT-INFO
         "https://github.com/asmie/stamp-suite"
     DESCRIPTION
-        "MIB module for the stamp-suite implementation of the
+        "MIB module for stamp-suite, an implementation of the
          Simple Two-Way Active Measurement Protocol (STAMP)
          per RFC 8762 and RFC 8972.
 
-         This MIB exposes reflector and sender configuration,
-         operational counters, and per-session state."
+         All objects are read-only. The stamp-suite AgentX
+         sub-agent (--snmp) serves them. A reflector process fills
+         the reflector subtree; a sender process fills the sender
+         subtree."
     REVISION     "202608050000Z"
     DESCRIPTION  "Version 1.0.0. Object definitions unchanged from the
                   initial version; re-stamped for the 1.0.0 release."
@@ -63,8 +65,8 @@ stampReflAdminStatus OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Administrative status of the STAMP reflector.
-         enabled(1) when running in reflector mode."
+        "Whether this process runs as a STAMP reflector.
+         enabled(1) in reflector mode, disabled(2) in sender mode."
     ::= { stampReflectorConfig 1 }
 
 stampReflListenAddr OBJECT-TYPE
@@ -72,7 +74,8 @@ stampReflListenAddr OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "The IP address the reflector is listening on.
+        "The configured local IP address (--local-addr) the
+         reflector binds to. An all-zero value means all addresses.
          4 octets for IPv4, 16 octets for IPv6."
     ::= { stampReflectorConfig 2 }
 
@@ -81,7 +84,7 @@ stampReflListenPort OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "The UDP port the reflector is listening on."
+        "The UDP port the reflector listens on (862 by default)."
     ::= { stampReflectorConfig 3 }
 
 stampReflAuthMode OBJECT-TYPE
@@ -97,9 +100,11 @@ stampReflTlvMode OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "TLV handling mode for the reflector per RFC 8972.
-         echo(1): Echo TLVs back to sender.
-         ignore(2): Strip TLVs from reflected packets."
+        "TLV handling mode of the reflector (RFC 8972 Section 4).
+         echo(1): process supported TLVs, echo them and set the
+         U, M and I flags.
+         ignore(2): copy everything after the base packet back
+         unprocessed, as a reflector without TLV support does."
     ::= { stampReflectorConfig 5 }
 
 stampReflStateful OBJECT-TYPE
@@ -107,9 +112,11 @@ stampReflStateful OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Whether stateful reflector mode is enabled (RFC 8972 Section 4).
-         When true, the reflector maintains independent sequence counters
-         per client."
+        "Whether stateful reflector mode is enabled (RFC 8762
+         Section 4). When true, the reflector keeps an independent
+         sequence counter for each session. A session is identified
+         by both UDP endpoints, the SSID and the optional sender
+         Micro-session ID."
     ::= { stampReflectorConfig 6 }
 
 stampReflSessionTimeout OBJECT-TYPE
@@ -118,8 +125,8 @@ stampReflSessionTimeout OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Session timeout in seconds. Sessions inactive for this
-         duration may be cleaned up. 0 means no timeout."
+        "Session timeout in seconds. Sessions with no accepted
+         packet for this long may be removed. 0 means no timeout."
     ::= { stampReflectorConfig 7 }
 
 -- -------------------------------------------------------------------
@@ -131,7 +138,9 @@ stampReflPktsReceived OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Total number of STAMP test packets received by the reflector."
+        "Total number of packets received by the reflector that
+         passed the per-source rate limit, including packets that
+         were dropped later for other reasons."
     ::= { stampReflectorStats 1 }
 
 stampReflPktsReflected OBJECT-TYPE
@@ -139,7 +148,7 @@ stampReflPktsReflected OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Total number of STAMP test packets reflected (sent back)."
+        "Total number of reflected packets sent."
     ::= { stampReflectorStats 2 }
 
 stampReflPktsDropped OBJECT-TYPE
@@ -147,7 +156,9 @@ stampReflPktsDropped OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Total number of STAMP test packets dropped (e.g., errors)."
+        "Total number of received packets that were not answered,
+         for any reason: parse or HMAC failures, rate limits,
+         session limits, a full reply queue or cancelled replies."
     ::= { stampReflectorStats 3 }
 
 stampReflActiveSessions OBJECT-TYPE
@@ -155,7 +166,7 @@ stampReflActiveSessions OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Current number of active client sessions."
+        "Current number of sessions the reflector tracks."
     ::= { stampReflectorStats 4 }
 
 stampReflUptime OBJECT-TYPE
@@ -163,7 +174,7 @@ stampReflUptime OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Time since the reflector was started, in hundredths of a second."
+        "Time since the process started, in hundredths of a second."
     ::= { stampReflectorStats 5 }
 
 -- -------------------------------------------------------------------
@@ -175,7 +186,10 @@ stampReflSessionTable OBJECT-TYPE
     MAX-ACCESS  not-accessible
     STATUS      current
     DESCRIPTION
-        "Table of active STAMP reflector sessions, one per client."
+        "Table of the sessions the reflector tracks. Each row is
+         one session, identified by both UDP endpoints, the SSID
+         and the optional sender Micro-session ID. Several rows can
+         share one sender address and port."
     ::= { stampReflector 3 }
 
 stampReflSessionEntry OBJECT-TYPE
@@ -202,7 +216,9 @@ stampReflSessIndex OBJECT-TYPE
     MAX-ACCESS  not-accessible
     STATUS      current
     DESCRIPTION
-        "Unique index for this session (matches internal session ID)."
+        "Internal session ID, the same value as session_id in the
+         control API. A session created again after expiry gets a
+         new index."
     ::= { stampReflSessionEntry 1 }
 
 stampReflSessClientAddr OBJECT-TYPE
@@ -250,7 +266,7 @@ stampReflSessLastActive OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Time since the last packet was reflected in this session,
+        "Time since the last accepted packet in this session,
          in hundredths of a second."
     ::= { stampReflSessionEntry 7 }
 
@@ -271,7 +287,8 @@ stampSendRemoteAddr OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Remote (reflector) IP address for the sender."
+        "Reflector IP address of the sender. When several
+         reflectors are configured, the first one."
     ::= { stampSenderConfig 1 }
 
 stampSendRemotePort OBJECT-TYPE
@@ -279,7 +296,7 @@ stampSendRemotePort OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Remote (reflector) UDP port for the sender."
+        "Reflector UDP port of the sender (862 by default)."
     ::= { stampSenderConfig 2 }
 
 stampSendLocalPort OBJECT-TYPE
@@ -287,7 +304,8 @@ stampSendLocalPort OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Local UDP port used by the sender."
+        "Configured local UDP port of the sender. 0 means the
+         sender uses a randomized dynamic port."
     ::= { stampSenderConfig 3 }
 
 stampSendPktCount OBJECT-TYPE
@@ -295,7 +313,9 @@ stampSendPktCount OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Configured number of packets to send per measurement run."
+        "Configured number of test packets to send to each
+         reflector. 0 means send until the configured duration
+         ends or the sender is stopped."
     ::= { stampSenderConfig 4 }
 
 stampSendDelay OBJECT-TYPE
@@ -304,7 +324,9 @@ stampSendDelay OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Configured delay between sending consecutive test packets."
+        "Configured interval between test packets, in whole
+         milliseconds (rounded down, so intervals below 1 ms read
+         as 0). With a Poisson schedule this is the mean interval."
     ::= { stampSenderConfig 5 }
 
 stampSendAuthMode OBJECT-TYPE
@@ -324,7 +346,8 @@ stampSendPktsSent OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Total number of STAMP test packets sent."
+        "Total number of test packets sent, summed over all
+         reflectors."
     ::= { stampSenderStats 1 }
 
 stampSendPktsRecv OBJECT-TYPE
@@ -332,7 +355,8 @@ stampSendPktsRecv OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Total number of reflected packets received."
+        "Total number of test packets answered by a reflected
+         packet, summed over all reflectors."
     ::= { stampSenderStats 2 }
 
 stampSendPktsLost OBJECT-TYPE
@@ -340,7 +364,8 @@ stampSendPktsLost OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Total number of test packets considered lost (timed out)."
+        "Total number of test packets with no reply within the
+         timeout, summed over all reflectors."
     ::= { stampSenderStats 3 }
 
 stampSendRttMin OBJECT-TYPE
@@ -349,7 +374,8 @@ stampSendRttMin OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Minimum observed round-trip time in microseconds."
+        "Minimum round-trip time in microseconds, over all
+         reflectors."
     ::= { stampSenderStats 4 }
 
 stampSendRttMax OBJECT-TYPE
@@ -358,7 +384,8 @@ stampSendRttMax OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Maximum observed round-trip time in microseconds."
+        "Maximum round-trip time in microseconds, over all
+         reflectors."
     ::= { stampSenderStats 5 }
 
 stampSendRttAvg OBJECT-TYPE
@@ -367,7 +394,8 @@ stampSendRttAvg OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Average round-trip time in microseconds."
+        "Mean round-trip time in microseconds, over all
+         reflectors."
     ::= { stampSenderStats 6 }
 
 stampSendJitter OBJECT-TYPE
@@ -376,7 +404,9 @@ stampSendJitter OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Observed jitter (RTT variation) in microseconds."
+        "Smoothed jitter in microseconds: the RFC 3550 interarrival
+         jitter estimator, J = J + (|D| - J)/16, applied to the
+         difference D between consecutive round-trip times."
     ::= { stampSenderStats 7 }
 
 stampSendLossPct OBJECT-TYPE
@@ -384,8 +414,8 @@ stampSendLossPct OBJECT-TYPE
     MAX-ACCESS  read-only
     STATUS      current
     DESCRIPTION
-        "Packet loss percentage multiplied by 100.
-         For example, 250 represents 2.50% loss."
+        "Lost test packets as a percentage of test packets sent,
+         multiplied by 100. For example, 250 represents 2.50% loss."
     ::= { stampSenderStats 8 }
 
 -- ===================================================================

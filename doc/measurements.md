@@ -1,5 +1,9 @@
 # Sender reply and directional measurements
 
+This document explains the sender's reply-copy counters, Direct Measurement
+and Follow-Up results, clock-quality metadata and session state, for anyone
+reading sender reports.
+
 JSON reports include `measurements` and `ber` objects; text reports print their
 summaries. CSV embeds JSON in the `ber`, `measurements`, and `owd_clock_quality`
 columns. Read columns by name and use a CSV parser to handle quoted commas.
@@ -11,16 +15,17 @@ stamp-suite --remote-addr 192.0.2.10 --count 100 --direct-measurement \
 ```
 
 The reflector must support the requested extensions. Follow-Up requires a
-stateful reflector. Reflected Packet Control is an experimental draft extension;
-the reflector can limit or decline the requested burst. `--ber` options
-add directional bit/packet error totals under the separate `ber` object.
+stateful reflector. Reflected Test Packet Control (RFC 10052) is off on a
+stock reflector until it sets `--reflected-control-max-count`, and the
+reflector can limit or decline the requested burst. The `--ber` options add
+directional bit and packet error totals under the separate `ber` object.
 
 ## Probes, reply copies, and duplicates
 
 `packets_received`, RTT and OWD fields count the first accepted reply
 for each pending probe. Timeout-based `packets_lost` and loss percentage
 count expired probes. A late first reply does not undo an expired probe's loss.
-Prometheus/SNMP counters and `-R` details retain this probe-based behavior.
+Prometheus and SNMP counters and `-R` details also count probes this way.
 
 The reply collector runs after base authentication, TLV validation and session
 admission. Its counters distinguish individual reflected packets:
@@ -49,8 +54,9 @@ validation rejection, timeout and network loss. **They are not a network-loss
 estimate.** Extra replies to one probe cannot satisfy another probe's request.
 For bursts, the final receive phase continues after the first response, until
 all requested copies have been observed or the final `--timeout` expires.
-Zero-SSID stop policy still terminates reception. Ordinary single-reply runs
-finish after their first accepted reply; packets arriving after exit are unobserved.
+`--on-zero-ssid stop` ends reception early. A run without bursts finishes
+once every probe has its first accepted reply; packets that arrive after exit
+are unobserved.
 
 The recent probe and reply identity histories each retain at most **4096**
 entries. `history_limit`, `probes_evicted` and `replies_evicted` disclose this
@@ -132,14 +138,16 @@ DM and Follow-Up require a unique usable TLV of their type. U skips a value,
 M stops processing the remainder, and any I flag blocks all values. Bad lengths
 stop subsequent value processing. If a key is configured, a verified HMAC TLV
 is required for these measurement values. Missing, invalid or unverifiable
-metadata contributes no directional sample; authenticated base reply accounting
-can still proceed. Unsigned, unkeyed measurements remain unauthenticated.
+metadata contributes no directional sample, but the authenticated base reply
+is still counted. Without a key, these measurements are not authenticated.
 
-BER remains one accepted pending-probe observation per probe, so burst copies do
-not repeat the forward bit denominator or inflate the residual BER
-aggregate. Its directional totals, intervals, alarms and omission counts remain
-in `ber`; they do not represent a per-burst-copy BER metric. See
-[statistics retention](statistics.md) and [BER behavior](architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber).
+BER records one observation per probe, from the first accepted reply to a
+pending probe. Burst copies therefore do not repeat the forward bit count or
+inflate the reverse BER totals. The directional totals, intervals, alarms and
+omission counts are in the `ber` object; they are not a per-copy BER metric.
+See [BER history](statistics.md#memory-and-ber-history), the
+[TLV reference](architecture.md#tlv-extensions-reference) and the
+[BER draft conformance](conformance/draft-stamp-ber.md).
 
 
 ## Clock quality accompanying delay
@@ -157,23 +165,23 @@ and duplicates do not contribute quality samples.
 | `both_synchronized` | Both endpoints asserted S=1 and supplied valid nonzero error multipliers. |
 | `unsynchronized` | Usable error estimates, with at least one endpoint asserting S=0. |
 | `invalid_estimate` | At least one invalid error estimate, such as Multiplier=0. |
-| `unknown` | Local/remote quality metadata unavailable (for example, the library's plain `OwdCollector::record`). |
+| `unknown` | Local or remote quality metadata unavailable (for example, samples recorded through the library without metadata). |
 | `last_sender`, `last_reflector` | Most recent sample's S bit, NTP/PTP format, Scale, Multiplier and decoded `error_ms`; null when metadata is absent. |
 | `max_combined_error_ms` | Largest sum of two usable advertised errors over the samples; null if none. |
 
 The four categories are mutually exclusive and sum to `samples`. Invalid errors
 are null, never a claim of zero uncertainty. The maximum includes usable estimates
 from unsynchronized clocks, so it is **not a bound on actual OWD accuracy**.
-A later unknown sample clears the last endpoints while retaining cumulative counts
-and the maximum from earlier usable estimates.
+A later unknown sample clears `last_sender` and `last_reflector`; the
+cumulative counts and the maximum from earlier usable estimates are kept.
 
 The sender uses its configured Error Estimate, rather than the reflector's echoed
-sender field. The remote estimate comes from the accepted base reply. Their S bits
-remain operator/peer declarations: neither proves that NTP/PTP is locked, a PHC is
-aligned, or clocks share a compatible timescale. The default tiny scale/multiplier
-is a configured wire value, not a measured workstation timing precision. Existing
-RTT/OWD values remain available with an unsynchronized or invalid declaration;
-metadata qualifies them instead of silently removing previously accepted samples.
+sender field. The remote estimate comes from the accepted base reply. The S bits
+are declarations by the operator and the peer: neither proves that NTP or PTP is
+locked, a PHC is aligned, or the clocks share a timescale. The small default
+scale and multiplier are configured wire values, not a measured timing
+precision. RTT and OWD values are reported even with an unsynchronized or
+invalid declaration; the metadata qualifies the samples and never removes them.
 
 [RFC 8762 §4.2.1](https://www.rfc-editor.org/rfc/rfc8762.html#section-4.2.1)
 uses the error interpretation from
@@ -186,7 +194,9 @@ Configure `--clock-synchronized`, `--error-scale`, `--error-multiplier`, and
 `--reflector-utc-offset` from the endpoints' clock setup. The sender does not
 detect clock discipline or discover timescale offsets.
 
-### Session-state notifications (draft ext-hdr-13 §7.1)
+## Session-state notifications
+
+These notifications follow draft-ietf-ippm-stamp-ext-hdr-15 §9.2.
 
 The sender logs state changes with target `stamp_suite::session_state` and includes
 `session_state` within `measurements` in summaries. It becomes active after a
@@ -203,6 +213,8 @@ and report idle when a transition is needed.
 Notifications count probes, not requested burst copies. Duplicate, invalid-session
 and unauthenticated replies do not reset failure detection. A newer successful
 probe ends the preceding loss run; older unanswered probes still count as packet
-loss but cannot trigger a fresh failure after recovery. Notification counters are cumulative; event history is not retained. Configure enough endpoint
-capacity for offered traffic and correlate queue/cap/policing counters with failed
-state: local overload and path loss are indistinguishable from missing replies.
+loss but cannot trigger a fresh failure after recovery. Notification counters
+are cumulative, and individual events are only logged, not stored. Configure
+enough endpoint capacity for the offered traffic, and compare the reflector's
+queue, session-cap and rate-limit counters with failed states: a missing reply
+looks the same whether the reflector was overloaded or the path lost it.

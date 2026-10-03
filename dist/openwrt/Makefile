@@ -28,10 +28,11 @@ define Package/stamp-suite
 endef
 
 define Package/stamp-suite/description
-  stamp-suite is a Rust implementation of the Simple Two-Way Active
-  Measurement Protocol (STAMP) as defined in RFC 8762 and RFC 8972.
-  It provides a client-server application pair for measuring packet
-  loss and network delays.
+  stamp-suite implements the Simple Two-Way Active Measurement Protocol
+  (STAMP, RFC 8762 and RFC 8972) to measure round-trip time, packet loss
+  and one-way delay. A single binary runs as the Session-Sender or, with
+  --is-reflector, as the Session-Reflector. The init script starts a
+  reflector.
 endef
 
 define Package/stamp-suite/install

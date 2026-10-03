@@ -541,14 +541,14 @@ impl StatsSnapshot {
             println!("{prefix}Requested replies unobserved: {} (includes policy caps); history evictions: {} probes, {} replies",
                 m.unobserved_requested_replies, m.probes_evicted, m.replies_evicted);
             println!(
-                "{prefix}Reply RTT: {} samples, avg {} ms",
+                "{prefix}Reply RTT: {} samples, avg {}",
                 m.reply_rtt.samples,
-                fmt_opt(m.reply_rtt.avg_ms)
+                fmt_ms_text(m.reply_rtt.avg_ms)
             );
             println!("{prefix}Direct Measurement window: forward missing {}, reverse missing {}; unavailable {}, discontinuities {}",
                 m.direct_measurement.forward_missing.map_or_else(|| "unavailable".into(), |n| n.to_string()), m.direct_measurement.reverse_missing.map_or_else(|| "unavailable".into(), |n| n.to_string()), m.direct_measurement.unavailable, m.direct_measurement.discontinuities);
-            println!("{prefix}Follow-Up: {} matched, {} repeated, {} unmatched, {} ambiguous, {} unavailable; reverse delay avg {} ms",
-                m.follow_up.matched, m.follow_up.repeated, m.follow_up.unmatched, m.follow_up.ambiguous, m.follow_up.unavailable, fmt_opt(m.follow_up.reverse_delay.avg_ms));
+            println!("{prefix}Follow-Up: {} matched, {} repeated, {} unmatched, {} ambiguous, {} unavailable; reverse delay avg {}",
+                m.follow_up.matched, m.follow_up.repeated, m.follow_up.unmatched, m.follow_up.ambiguous, m.follow_up.unavailable, fmt_ms_text(m.follow_up.reverse_delay.avg_ms));
         }
         if let Some(v) = self.min_rtt_ms {
             println!("{}Min RTT: {:.3} ms", prefix, v);
@@ -734,6 +734,11 @@ impl StatsSnapshot {
 
 fn fmt_opt(v: Option<f64>) -> String {
     v.map_or_else(String::new, |x| format!("{:.3}", x))
+}
+
+/// Text-report form of an optional millisecond value.
+fn fmt_ms_text(v: Option<f64>) -> String {
+    v.map_or_else(|| "n/a".to_string(), |x| format!("{x:.3} ms"))
 }
 
 /// Per-client session statistics for reflector reporting.

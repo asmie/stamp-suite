@@ -1,205 +1,177 @@
 # stamp-suite
 
-A Rust sender and reflector for the Simple Two-Way Active Measurement Protocol
-(STAMP). Measures round-trip time, packet loss, one-way delay, and residual bit
-errors in delivered test packets.
+stamp-suite measures round-trip time, packet loss, one-way delay and residual
+bit errors with the Simple Two-Way Active Measurement Protocol (STAMP, RFC 8762
+and RFC 8972). It is one binary that runs either as a Session-Sender, which
+sends test packets and reports results, or as a Session-Reflector, which
+answers them.
 
 [![CI](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml/badge.svg)](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml)
 [![Latest version](https://img.shields.io/crates/v/stamp-suite.svg)](https://crates.io/crates/stamp-suite)
 [![License](https://img.shields.io/crates/l/stamp-suite.svg)](LICENSE)
 
+New to STAMP? Read the [protocol overview](doc/protocol.md) first.
+
 ## Quick start
 
-Run a reflector on a trusted network:
+Start a reflector. It listens on UDP port 862, which on Linux needs root or
+`CAP_NET_BIND_SERVICE`:
 
 ```sh
-stamp-suite --is-reflector
+sudo stamp-suite --is-reflector
 ```
 
-Send 100 probes, 100 ms apart:
+From another host, send 100 test packets 100 ms apart and print each result:
 
 ```sh
-stamp-suite --remote-addr 192.0.2.20 --count 100 --send-delay 100 -R
+stamp-suite --remote-addr 192.0.2.20 --count 100 --send-delay 100ms -R
 ```
 
-The reflector listens on UDP/862 by default. Senders use randomized dynamic
-source ports. Both endpoints send with TTL/Hop Limit 255.
+Without root, run the reflector on a high port and point the sender at it:
 
-Open mode accepts unsigned traffic. For untrusted networks, restrict access
-and configure [authenticated mode](doc/security.md#enabling-authenticated-mode-on-the-packaged-unit).
+```sh
+stamp-suite --is-reflector --local-port 8620
+stamp-suite --remote-addr 192.0.2.20 --remote-port 8620
+```
 
-## Measurements and protocol support
+The sender prints a summary when it finishes or when you press Ctrl-C. A few
+more examples:
 
-- RTT and probe loss, with cumulative statistics and bounded-memory quantiles.
-- Signed forward/reverse one-way delay. This requires synchronized clocks on
-  compatible timescales; NTP and truncated PTP wire encodings can differ between
-  endpoints. See [clock settings](doc/usage.md#timestamp--clock).
-- RFC 8762 base packets and HMAC authentication; RFC 8972 optional TLVs.
-- RFC 9503 return-path controls, including optional Linux SRv6 forwarding.
-- RFC 9534 numeric Micro-session IDs. Physical LAG member selection is unsupported.
-- RFC 10052 asymmetric replies (Reflected Test Packet Control, Type 12).
-- Draft extensions for header reflection, CoS/ECN response, and residual BER.
-  Experimental codepoints require peer agreement.
-- Text, JSON lines, and CSV output; optional Prometheus, AgentX, and control API.
+```sh
+# Measure two reflectors at once; each report carries a target label
+stamp-suite --remote-addr 192.0.2.20,198.51.100.7 --count 0 --duration 60
 
-See the [conformance matrices](doc/conformance/README.md) for supported profiles
-and gaps, and [measurement semantics](doc/measurements.md) for burst-copy,
-directional-loss, and clock-quality limits.
+# 4000 packets per second, Poisson-spaced, JSON lines on stdout
+stamp-suite --remote-addr 192.0.2.20 --send-delay 250us --send-schedule poisson \
+  --count 0 --duration 600 --output-format json > results.jsonl
+```
+
+The reflector starts in open mode and answers anyone who can reach it. On an
+untrusted network, restrict access and turn on
+[authenticated mode](doc/security.md#enabling-authenticated-mode-on-the-packaged-unit).
+
+## What it supports
+
+- Round-trip time, loss, and forward and reverse one-way delay. One-way delay
+  needs synchronized clocks; see [Timestamps and clocks](doc/usage.md#timestamps-and-clocks).
+- Open and authenticated (HMAC) modes, stateless and stateful reflection, and
+  RFC 8972 TLVs.
+- RFC 9503 return-path control, RFC 9534 Micro-session IDs, and RFC 10052
+  reflected test packet control.
+- Draft extensions for reflected IP headers, CoS/ECN response and residual bit
+  error rate. Their experimental codepoints need agreement with the peer.
+- Text, JSON lines and CSV output. Optional Prometheus metrics, SNMP AgentX
+  sub-agent and reflector control API.
+
+The [conformance matrices](doc/conformance/README.md) list what is supported
+for each RFC and draft, and what is not.
 
 ## Installation
 
 ### Release packages
 
-DEB and RPM packages for x86_64 and aarch64 are published with
-[GitHub releases](https://github.com/asmie/stamp-suite/releases).
-They install `/usr/bin/stamp-suite`, the man page, a systemd service, and the
-`stamp` service account.
+Each [GitHub release](https://github.com/asmie/stamp-suite/releases) has DEB
+and RPM packages for Linux x86_64 and aarch64, built with all Cargo features.
+They install `/usr/bin/stamp-suite`, the man page, the SNMP MIB, a systemd unit
+and the `stamp` service account.
 
 ```sh
-sudo apt install ./stamp-suite_*_amd64.deb  # Debian/Ubuntu
-sudo dnf install ./stamp-suite-*.x86_64.rpm # Fedora/RHEL
+sudo apt install ./stamp-suite_*_amd64.deb    # Debian, Ubuntu
+sudo dnf install ./stamp-suite-*.x86_64.rpm   # Fedora, RHEL
 sudo systemctl enable --now stamp-suite
 ```
 
-The packaged service starts in open mode. Configure authentication before
-exposing it to an untrusted network.
+The packaged service runs a reflector in open mode. Configure authentication
+before exposing it to an untrusted network; see [security](doc/security.md).
 
-### Source
+Releases also include plain binary tarballs for these Linux targets and for
+macOS on Apple silicon, a source tarball and a `cargo vendor` tarball.
+
+### From source
+
+Rust 1.85 or newer is required.
 
 ```sh
-cargo build --release
-# Or install into Cargo's binary directory:
-cargo install --path .
+cargo install stamp-suite                       # from crates.io
+cargo build --release --features metrics,control,hwtstamp   # from a checkout
 ```
 
-Rust 1.85 or newer is required. Build optional features with, for example,
-`cargo build --release --features metrics,control,hwtstamp`.
+Building on Windows needs the Npcap SDK; running needs Npcap.
 
-### Nix and Gentoo
+### Nix, Gentoo and OpenWrt
 
 ```sh
 nix build
 nix run . -- --is-reflector
-nix develop
 ```
 
-The [Gentoo overlay](dist/gentoo/README.md) includes service-account packages,
-systemd/OpenRC integration, and Cargo feature mappings.
+The [Gentoo overlay](dist/gentoo/README.md) maps Cargo features to USE flags
+and installs systemd and OpenRC services. `dist/openwrt/` holds an OpenWrt
+package with a procd init script.
 
-### Platforms and features
+## Platforms and Cargo features
 
-| Platform | Default receiver | Requirements |
+| Platform | Receiver backend | Requirements |
 | --- | --- | --- |
-| Linux | nix UDP socket | No raw-socket privilege; low ports may need bind permission |
+| Linux | nix UDP socket | No raw-socket privilege; ports below 1024 need `CAP_NET_BIND_SERVICE` |
 | macOS | nix UDP socket | No raw-socket privilege |
-| Windows | pnet capture | Npcap; capture tests require a driver-backed environment |
+| Windows | pnet capture | Npcap |
 
-Both backends capture received TTL/Hop Limit. See
-[backend limits](doc/architecture.md#receiver-backends).
+The backend is chosen at build time. Both backends read the received TTL or Hop
+Limit. On Linux the nix backend reflects IPv6 extension headers; reflecting
+fixed IP headers needs the pnet backend. See
+[Networking](doc/usage.md#networking).
 
-| Cargo feature | Purpose |
+No Cargo feature is on by default.
+
+| Cargo feature | Effect |
 | --- | --- |
-| `ttl-nix` | Keep the nix receiver when `ttl-pnet` is also enabled; it is already the default on Linux and macOS |
-| `ttl-pnet` | Select raw packet capture; Linux requires `CAP_NET_RAW` |
-| `metrics` | Prometheus HTTP endpoint |
-| `control` | Reflector session/key/limit API with optional HTTPS |
-| `snmp` | Read-only AgentX sub-agent, Unix only |
-| `hwtstamp` | Kernel timestamps and optional Linux NIC hardware timestamps |
+| `ttl-pnet` | Uses the pnet capture backend on Linux and macOS. On Linux it needs `CAP_NET_RAW` or root. |
+| `ttl-nix` | Matters only together with `ttl-pnet`: it keeps the nix backend, as `--all-features` does. Linux and macOS use nix without it. |
+| `metrics` | Adds `--metrics`, a Prometheus endpoint at `http://127.0.0.1:9090/metrics` by default. |
+| `control` | Adds `--control`, the reflector's HTTP API for keys, sessions, limits, drain and shutdown, with optional HTTPS. |
+| `snmp` | Adds `--snmp`, a read-only AgentX sub-agent (Unix only) for `mibs/STAMP-SUITE-MIB.mib`. |
+| `hwtstamp` | Uses kernel timestamps (Linux receive and transmit, macOS receive) and, with `--hwtstamp on`, Linux NIC hardware timestamps. |
 
-## Configuration
-
-Use `--config PATH` for TOML settings. Explicit CLI values override file values.
-`STAMP_HMAC_KEY` supplies the CLI key field; it conflicts with a configured key
-file or directory. Plaintext `hmac_key` is not a TOML field.
-
-```toml
-is_reflector = true
-local_addr = "192.0.2.20"
-auth_mode = "A"
-hmac_key_file = "/etc/stamp/hmac.key"
-verify_tlv_hmac = true
-stateful_reflector = true
-session_timeout = 300
-```
-
-Protect key files with owner-only permissions. See [key setup](doc/security.md)
-and the [configuration reference](doc/usage.md#configuration-file).
-
-Sessions are separated by both UDP endpoints, SSID, and optional sender
-Micro-session ID. The default `permissive` policy learns sessions from traffic.
-For RFC 8972 provisioned admission:
-
-```sh
-stamp-suite -i --local-addr 192.0.2.20 --session-admission provisioned \
-  --reflector-session '42,192.0.2.10:4862,192.0.2.20:862'
-```
-
-See [session provisioning](doc/usage.md#session-provisioning) and
-[IPv6 interface zones](doc/usage.md#link-local-ipv6-interface-zones).
-
-## Examples
-
-Request CoS and reflector metadata:
-
-```sh
-stamp-suite --remote-addr 192.0.2.20 --cos --dscp 46 \
-  --direct-measurement --location --timestamp-info
-```
-
-Record measurements separately from diagnostics:
-
-```sh
-stamp-suite --remote-addr 192.0.2.20 --output-format json \
-  > measurements.jsonl 2> diagnostics.log
-```
-
-Measure residual BER with one-second windows:
-
-```sh
-stamp-suite --remote-addr 192.0.2.20 --ber --ber-pattern ff00 \
-  --ber-padding-size 128 --send-delay 100 --ber-interval 10
-```
-
-BER measures delivered padding, not raw link errors. Use `--ber-omit-burst` if
-Type 242 means Heartbeat to the peer. See [BER limits](doc/architecture.md#bit-error-rate-tlvs-draft-gandhi-ippm-stamp-ber).
-
-With the `control` feature, `--control` enables a reflector API at
-`127.0.0.1:9091`. It manages keys, sessions, limits, drain, and shutdown. Set a
-bearer token on shared hosts; use HTTPS or a secure tunnel for remote access.
-See the [API reference](doc/control-plane.md).
+`--metrics`, `--control` and `--snmp` fail at startup when the binary was built
+without the feature.
 
 ## Documentation
 
-- [Usage](doc/usage.md): configuration, options, and migration notes.
-- [Architecture](doc/architecture.md): packet processing, backends, and TLVs.
-- [Measurements](doc/measurements.md) and [statistics](doc/statistics.md): definitions and retention.
-- [Security](doc/security.md) and [vulnerability reporting](SECURITY.md).
-- [Benchmarks](doc/benchmarks.md): reproducible throughput and CPU measurements.
-- [Release verification](doc/release-evidence.md): platform and integration gates.
-- [Conformance](doc/conformance/README.md): protocol sources, evidence, and exclusions.
+| Document | Contents |
+| --- | --- |
+| [Protocol overview](doc/protocol.md) | STAMP concepts, the extensions implemented here, glossary |
+| [Usage](doc/usage.md) | Configuration file, sender, reflector, timestamps, networking, observability |
+| [Security](doc/security.md) | Threat model, HMAC keys and rotation, service hardening |
+| [Control API](doc/control-plane.md) | Reflector HTTP API endpoints |
+| [Measurements](doc/measurements.md) | What each reported value means and its limits |
+| [Statistics](doc/statistics.md) | Quantile precision and retention |
+| [Architecture](doc/architecture.md) | Modules, receiver backends, packet processing, TLV reference |
+| [Conformance](doc/conformance/README.md) | Per-clause evidence for each RFC and draft |
+| [Benchmarks](doc/benchmarks.md) | Throughput and CPU measurements |
+| [Release verification](doc/release-evidence.md) | Platform and integration checks run before a release |
+| [Contributing](CONTRIBUTING.md) | Building, testing, linting and submitting changes |
+| [Vulnerability reporting](SECURITY.md) | How to report a security problem |
+| [Changelog](CHANGELOG.md) | Changes in each release |
+
+The man page (`man stamp-suite`) lists every option. `stamp-suite --help`
+prints the same list.
 
 ## Versioning
 
-The 1.x compatibility contract covers CLI behavior, TOML schema, and default wire
-behavior. The internal Rust library API is unsupported and may change in any
-release. Experimental codepoint renumbering and MSRV increases may occur in minor
-releases and are recorded in [CHANGELOG.md](CHANGELOG.md).
+The 1.x compatibility promise covers CLI behavior, the TOML configuration
+schema and default wire behavior. The Rust library API is internal and may
+change in any release. Minor releases may renumber experimental codepoints or
+raise the minimum Rust version; [CHANGELOG.md](CHANGELOG.md) records each such
+change.
 
 ## Contributing
 
-Open an issue before a major change. Before submitting, run:
-
-```sh
-cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
-```
-
-[Independent wire fixtures](doc/testing-interop.md) run separately from Cargo
-and are required by conformance CI.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Open an issue before starting a large
+change.
 
 ## Authors and license
 
 Maintained by [Piotr Olszewski](https://github.com/asmie), with
 [contributors](https://github.com/asmie/stamp-suite/contributors).
-Licensed under [MIT](LICENSE).
+Licensed under the [MIT license](LICENSE).

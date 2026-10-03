@@ -246,7 +246,7 @@ Path to file containing HMAC key
 Directory of per\-SSID HMAC keys. File stems are hexadecimal SSIDs; `default.key` supplies the fallback. Conflicts with `\-\-hmac\-key` and `\-\-hmac\-key\-file`. Send SIGHUP to reload the keys after changing the files
 .TP
 \fB\-\-require\-hmac\fR
-Require HMAC key to be configured (error if missing in auth mode). When an HMAC key is present, verification is always mandatory (RFC 8762 §4.4)
+Reflector: drop authenticated packets for which no HMAC key is configured. Authenticated mode already needs a key source at startup; with a key, verification is always mandatory (RFC 8762 §4.4)
 .TP
 \fB\-\-verify\-tlv\-hmac\fR
 Verify HMAC TLV in incoming packets (RFC 8972). Requires HMAC key

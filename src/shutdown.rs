@@ -1,6 +1,7 @@
 //! Process shutdown. SIGINT and SIGTERM (Ctrl-C on Windows) and the control
-//! API's shutdown endpoint cancel one token; the reflector backends, the
-//! sender and the SNMP sub-agent stop when it is cancelled.
+//! API's shutdown endpoint cancel one token; the reflector backends and the
+//! sender stop when it is cancelled. The SNMP sub-agent, metrics endpoint and
+//! control API stop when the process exits.
 
 pub use tokio_util::sync::CancellationToken;
 

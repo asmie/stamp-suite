@@ -10,11 +10,12 @@ Rules-Requires-Root: no
 Package: stamp-suite
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
-Description: Simple Two-Way Active Measurement Protocol (STAMP)
- stamp-suite is a Rust implementation of the Simple Two-Way Active
- Measurement Protocol (STAMP) as defined in RFC 8762 and RFC 8972.
- It provides a client-server application pair for measuring packet
- loss and network delays.
+Description: STAMP network measurement sender and reflector
+ stamp-suite implements the Simple Two-Way Active Measurement Protocol
+ (STAMP, RFC 8762 and RFC 8972) to measure round-trip time, packet loss
+ and one-way delay between two hosts.
  .
- The package includes both the STAMP sender and reflector (receiver)
- in a single binary, selectable via command-line flags.
+ A single binary runs either as the Session-Sender, which sends test
+ packets and reports results, or with --is-reflector as the
+ Session-Reflector, which answers them. The package installs a systemd
+ unit that runs the reflector as the unprivileged stamp user.

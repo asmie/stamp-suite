@@ -1,9 +1,14 @@
 # Hardware timestamp verification on a two-host testbed
 
-Use two Linux hosts with timestamp-capable NICs and an established clock setup.
-Verify delivered timestamps as well as capability reports; loopback and virtual
-NICs do not establish physical-NIC delivery. See the Linux
-[timestamping interfaces](https://docs.kernel.org/networking/timestamping.html).
+This procedure verifies that NIC hardware timestamps are actually delivered
+and reported. It is for maintainers and testers with two Linux hosts that have
+timestamp-capable NICs and an established clock setup.
+
+Check delivered timestamps, not only capability reports; loopback and virtual
+NICs do not establish physical NIC delivery. See the Linux
+[timestamping interfaces](https://docs.kernel.org/networking/timestamping.html)
+and [Hardware-assisted timestamping](architecture.md#hardware-assisted-timestamping)
+for how stamp-suite uses them.
 
 1. Record the commit, `rustc -Vv`, build features, kernel, NIC model/firmware,
    driver, interface addresses/MTU and route on both hosts. Save `ethtool -i
@@ -16,7 +21,7 @@ NICs do not establish physical-NIC delivery. See the Linux
    discipline; this procedure does not configure or step clocks. Raw NIC T2
    can be in a different domain from software T3. The CLI's synchronization
    declaration is not evidence that these clocks are aligned.
-3. Build `cargo build --locked --release --features ttl-nix,hwtstamp` and retain
+3. Build with `cargo build --locked --release --features hwtstamp` and keep
    the executable SHA-256 on both hosts. Choose concrete local addresses, a
    shared temporary test key file (mode 0600), SSID 42 and unused test ports.
    Start an independent packet capture on the physical link. Preserve both
@@ -68,7 +73,5 @@ NICs do not establish physical-NIC delivery. See the Linux
    record containing requested versus observed RX/TX methods, sample counts,
    failures/fallbacks, synchronization evidence, raw artifacts and their hashes.
 
-Local availability check, 11 September 2026: WSL2 `eth0` advertised only
-software-transmit, software-receive and software-system-clock; PHC and hardware
-filter/transmit modes were absent. Hardware was unavailable; kernel timestamp and Follow-Up regressions provide
-software evidence only.
+Recorded availability checks are listed under
+[Recorded results](release-evidence.md#recorded-results).

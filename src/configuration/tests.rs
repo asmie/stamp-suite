@@ -2728,3 +2728,14 @@ fn several_remote_addresses() {
     }
     assert!(toml::from_str::<FileConfiguration>("remote_addr = 5").is_err());
 }
+
+#[test]
+fn empty_return_segment_lists_from_a_file_are_rejected() {
+    for toml in ["return_srv6_sids = []", "return_sr_mpls_labels = []"] {
+        let file: FileConfiguration = toml::from_str(toml).unwrap();
+        let mut conf = Configuration::parse_from(["test", "--remote-addr", "192.0.2.1"]);
+        conf.return_srv6_sids = file.return_srv6_sids;
+        conf.return_sr_mpls_labels = file.return_sr_mpls_labels;
+        assert!(conf.validate().is_err(), "{toml} accepted");
+    }
+}

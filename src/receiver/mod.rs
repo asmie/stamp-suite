@@ -933,8 +933,8 @@ fn apply_semantic_tlv_processing(
 
     // Process Reflected Fixed / IPv6 Extension Header TLVs
     // (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 6.2). If the backend captured
-    // raw IP bytes, copy the matched header's [4..] into the TLV's Reflected
-    // field; otherwise set the C flag (Conformance) per ext-hdr-15 §4.1/§6.1. A nix
+    // the requested header, copy it into the TLV (a zero Requested field is
+    // filled from it); otherwise set the C flag per ext-hdr-15 §4.1/§6.1. A nix
     // UDP-socket backend has no fixed headers, so those requests get C; on
     // Linux it does supply IPv6 extension headers from ancillary data.
     let (captured_fixed, captured_ext): (Option<&[Vec<u8>]>, Option<&[u8]>) =

@@ -1,5 +1,10 @@
 # Independent protocol-combination fixtures
 
+This document describes the independent wire fixtures that check the reflector
+against a separate implementation of the STAMP wire format, and how to run and
+extend them. It is for contributors and for implementers who want to reuse the
+fixture bytes.
+
 [`scripts/interop_stamp.py`](../scripts/interop_stamp.py) drives a real reflector
 with a separate Python standard-library implementation of the wire layout,
 HMAC coverage, reply checks and UDP metadata collection. It does not import the
@@ -96,7 +101,7 @@ layouts. Draft rows apply to the pinned revision.
 | [RFC 8762 §§4.2–4.4](https://www.rfc-editor.org/rfc/rfc8762.html#section-4.2) | 44/112-byte bases, sequence/echo, timestamp Z bit, truncated base HMAC over the first 96 authenticated bytes |
 | [RFC 8972 §§4.4–4.8](https://www.rfc-editor.org/rfc/rfc8972.html#section-4.4) | CoS, DM, Follow-Up and HMAC TLV; digest covers the reflected sequence followed by preceding TLVs |
 | [RFC 9503 §§3–4](https://www.rfc-editor.org/rfc/rfc9503.html#section-3) | Destination Node Address (Type 9), Return Path (Type 10), SRv6 segment-list sub-TLV (Type 4), fallback flag |
-| [RFC 10052 §§3, 4.3](https://datatracker.ietf.org/doc/html/RFC 10052#section-3) | Type-12 project code point, count/interval/minimum size and composition; no claim of a final IANA allocation |
+| [RFC 10052 §§3, 4.3](https://www.rfc-editor.org/rfc/rfc10052.html#section-3) | Type 12 count, interval, minimum size and composition |
 
 The wire suites below assemble bytes manually and use
 [`common/wire_hmac.rs`](../tests/common/wire_hmac.rs), which calls `hmac`/`sha2`
@@ -110,7 +115,7 @@ directly. Tests may still invoke the production receiver as the system under tes
 | Required micro-session + absent/U/I TLV | `cargo test --locked --test required_micro_session_test`; real sender vs raw peer, independent signing; [RFC 9534 §3.2](https://www.rfc-editor.org/rfc/rfc9534.html#section-3.2), logical identifiers only |
 | Mixed clocks and advertised clock quality | `cargo test --locked --test mixed_clock_test`; independently encoded/signed peer with explicit time offset and synchronization metadata |
 | Source/SRH fallback failures | `cargo test --locked --lib receiver::transmit`; shared finalizer tests inject combined transport failures and verify final signatures; syscall source tests are Linux-specific |
-| Scoped IPv6, real routing/MTU and SRH | `scoped_ipv6_test`, `route_mtu_test`, `netns_conformance`; separate ignored privileged tiers, see [test inventory](../tests/README.md) and [namespace guide](testing-netns.md). Inspect SRH capture versus reported fallback; neither a skip nor fallback is successful SRH evidence. These suites still use some production packet/TLV helpers. |
+| Scoped IPv6, real routing/MTU and SRH | `scoped_ipv6_test`, `route_mtu_test`, `netns_conformance`; separate ignored tiers, see [tests that need privileges](../tests/README.md#tests-that-need-privileges-or-namespaces) and the [namespace guide](testing-netns.md). Inspect SRH capture versus reported fallback; neither a skip nor fallback is successful SRH evidence. These suites still use some production packet/TLV helpers. |
 
 Malformed-input properties, fuzzing, telemetry, and session-identity tests
 cover additional cases; this fixture does not cover every combination.

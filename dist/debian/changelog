@@ -8,4 +8,4 @@ stamp-suite (0.5.0-1) unstable; urgency=medium
 
   * Initial Debian packaging.
 
- -- Piotr Olszewski <asmie@asmie.pl>  Mon, 17 Feb 2026 00:00:00 +0000
+ -- Piotr Olszewski <asmie@asmie.pl>  Tue, 17 Feb 2026 00:00:00 +0000

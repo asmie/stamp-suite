@@ -1,9 +1,13 @@
 # Measuring reflector performance
 
+This document explains how to measure reflector throughput and CPU cost, and
+how to read and record the results. It is for contributors comparing revisions
+and for operators sizing a deployment.
+
 Use both the in-process Criterion benchmarks and the live UDP benchmark.
 Criterion isolates parsing, authentication, TLV processing and assembly. The
-live benchmark includes the receive/send syscalls, session locks and scheduler,
-and measures whether the reflector sleeps after traffic.
+live benchmark adds the receive and send syscalls, session locks and the
+scheduler, and checks that the reflector sleeps after traffic.
 
 ## Live UDP on Linux
 
@@ -26,7 +30,7 @@ workload (44 bytes open, 112 authenticated), with no TLVs or burst requests.
 The fixed sender timestamp is an echo-validation marker; no latency or OWD is
 measured. The HMAC key is a public test fixture.
 
-Options (`--help` lists limits and defaults):
+Options (`live_udp_bench --help` lists limits and defaults):
 
 | Option | Effect |
 | --- | --- |
@@ -40,7 +44,8 @@ Options (`--help` lists limits and defaults):
 | `--repeats N` | Independent trials, 1–100. |
 | `--drain-ms N` | Extra response collection time, 1–10,000 ms. |
 | `--workers N` | Reflector Tokio workers, 1–256; default 2. |
-| `--hwtstamp MODE` | Reflector timestamping mode (`off` by default). `auto` matches the packaged service and adds TX-timestamp work when the binary is built with `hwtstamp`. |
+| `--hwtstamp MODE` | Reflector `--hwtstamp` mode: `off` (default), `auto` or `on`. `auto` is the reflector's own default and adds TX timestamp work when the binary is built with `hwtstamp`. |
+| `--metrics` | Start the reflector with `--metrics` on an ephemeral loopback port, to include the metrics cost. The reflector binary must be built with the `metrics` feature, or it fails at startup. |
 
 The generator sends 1 ms batches, skips missed pacing slots, and drains replies
 on a separate thread. Bookkeeping is bounded by `rate × seconds + 1` slots
@@ -75,8 +80,8 @@ the JSON on stdout. These checks validate benchmark accounting, not conformance.
 - Idle samples report raw ticks and their frequency. Zero observed ticks means
   usage below the accounting resolution, not proof of zero CPU work. Use longer
   idle windows when comparing small changes. `resume_after_idle` confirms that
-  the last probe received a valid reply; existing `idle_cpu_test` regressions
-  separately enforce a CPU ceiling.
+  the last probe received a valid reply. The `idle_cpu_test` integration tests
+  enforce an idle CPU ceiling separately.
 
 JSON also records the command, generator feature flags, debug-build indicator,
 binary SHA-256 hashes, kernel, CPU model and inherited CPU affinity. Record
@@ -95,10 +100,10 @@ performance or an optimization's before/after gain. Shared-host results can be
 limited by either process and by loopback/kernel scheduling.
 
 For pnet, build with `--no-default-features --features ttl-pnet` and run with
-CAP_NET_RAW in an isolated network namespace. Raw capture requires complete UDP
-checksums; offloaded loopback frames can fail validation. Use a controlled veth
-capture setup if the loopback profile cannot provide complete checksums. For example, where unprivileged
-user namespaces are supported:
+`CAP_NET_RAW` in an isolated network namespace. Raw capture requires complete
+UDP checksums, and checksum-offloaded loopback frames can fail validation; use
+a controlled veth setup if loopback cannot provide complete checksums. Where
+unprivileged user namespaces are available:
 
 ```bash
 cargo build --locked --release --no-default-features --features ttl-pnet \
