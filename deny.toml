@@ -43,6 +43,10 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+[[licenses.exceptions]]
+name = "libfuzzer-sys"
+allow = ["NCSA"] # LLVM libFuzzer; only the separate fuzz workspace.
+
 [bans]
 # Report duplicate versions without failing CI.
 multiple-versions = "warn"

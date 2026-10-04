@@ -1,6 +1,6 @@
 # Keep both stages on the same Debian release for glibc compatibility.
 # The builder uses the crate's minimum supported Rust version.
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.86-slim-bookworm AS builder
 
 WORKDIR /usr/src/stamp-suite
 
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG FEATURES="ttl-nix,metrics,snmp,hwtstamp,control"
 
 # Copy manifests first for dependency caching
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 
 # Stub targets let Cargo cache dependencies before copying the source.
 # The declared benchmark needs a file even though this build does not run it.

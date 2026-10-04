@@ -83,6 +83,8 @@ fn lifecycle(mode: &str) {
             let until = Instant::now() + Duration::from_secs(5);
             loop {
                 if let Ok((stream, _)) = listener.accept() {
+                    // BSD sockets inherit O_NONBLOCK from the listener.
+                    stream.set_nonblocking(false).unwrap();
                     return stream;
                 }
                 assert!(Instant::now() < until, "AgentX connect deadline");

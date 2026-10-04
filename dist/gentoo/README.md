@@ -14,8 +14,8 @@ eclasses and layout follow the main tree and can be copied into
    pycargoebuild -i net-analyzer/stamp-suite/stamp-suite-<ver>.ebuild <checkout>
    ```
 
-2. Rename the ebuild to the new version. `SRC_URI` points at the GitHub
-   tag archive (`v<ver>`), so the tag must exist before the next step.
+2. Rename the ebuild to the new version. `SRC_URI` uses the release's
+   source archive, which must be published before the next step.
 
 3. Generate `Manifest` (needs a Gentoo host or container with the
    overlay registered):
@@ -25,8 +25,8 @@ eclasses and layout follow the main tree and can be copied into
    pkgcheck scan            # QA lint expected by GURU reviewers
    ```
 
-`Manifest` is not committed here because it contains the checksum of the
-tag archive, which exists only after the release is tagged.
+Generate `Manifest` from the published archive; its checksum is unavailable
+before publication.
 
 ## USE flags
 

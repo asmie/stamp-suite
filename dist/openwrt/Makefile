@@ -16,7 +16,9 @@ PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=Piotr Olszewski <asmie@asmie.pl>
 
+# Requires a packages feed with Rust 1.86 or newer.
 PKG_BUILD_DEPENDS:=rust/host
+CARGO_FEATURES:=ttl-nix
 
 include $(INCLUDE_DIR)/package.mk
 include ../../lang/rust/rust-package.mk

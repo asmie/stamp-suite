@@ -2,6 +2,7 @@
 name = "stamp-suite-fuzz"
 version = "0.0.0"
 publish = false
+license = "MIT"
 edition = "2021"
 
 # Not part of the main workspace — see the [workspace] exclude in the
@@ -14,6 +15,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 
 [dependencies.stamp-suite]
+version = "1.0.0"
 path = ".."
 # Parsers are backend-independent; snmp exposes the AgentX decoder targets.
 default-features = false

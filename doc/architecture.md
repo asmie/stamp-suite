@@ -613,8 +613,9 @@ connection failure warns without stopping STAMP; later failures trigger
 reconnection and registration with 1–30 s exponential backoff. A supervisor
 logs event-loop panics.
 
-Open and Register validate the complete eight-byte administrative Response,
-error status, packet ID and (after Open) session ID. Administrative transaction
+Open and Register validate the eight-byte Response prefix, error status,
+packet ID and (after Open) session ID. Net-SNMP may append the original
+administrative binding; only the matching OID and value are accepted. Administrative transaction
 IDs have no defined value in RFC 2741 and are not compared. Each handshake read
 and frame write has an absolute 30-second deadline and checks role cancellation.
 Independent master tests cover invalid responses, both byte orders and cancellation.

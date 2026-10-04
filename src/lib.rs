@@ -19,7 +19,7 @@
 //!
 //! The stable 1.x interface is the CLI, configuration schema, and wire behavior.
 //! Library modules are public for integration tests, benchmarks, and fuzzing;
-//! they are internal and may change in any 1.x release. MSRV: Rust 1.85.
+//! they are internal and may change in any 1.x release. MSRV: Rust 1.86.
 
 #[doc(hidden)]
 pub mod ber;

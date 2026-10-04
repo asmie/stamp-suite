@@ -17,7 +17,7 @@
 
         # Shared by the package and lint derivations. After a Cargo.lock change,
         # temporarily use pkgs.lib.fakeHash, build, then copy the reported hash.
-        cargoDepsHash = "sha256-c0baRXgrTGtZINNeIBOi4Wq37jUQKtfjCuIGKhk0Q9k=";
+        cargoDepsHash = "sha256-hxgGBIIz0FiSKbHftMZ5CsZ0yV4Aq4BXpfnwnWlNEu8=";
       in
       {
         packages = {
@@ -33,6 +33,17 @@
             # Honour --all-features for the cargo test phase too so the
             # metrics / snmp feature-gated tests run alongside the rest.
             cargoTestFlags = [ "--all-features" ];
+
+            postInstall = ''
+              install -Dm644 dist/man/stamp-suite.1 $out/share/man/man1/stamp-suite.1
+              install -Dm644 mibs/STAMP-SUITE-MIB.mib $out/share/snmp/mibs/STAMP-SUITE-MIB.mib
+              mkdir -p $out/share/doc/stamp-suite
+              cp README.md CHANGELOG.md SECURITY.md LICENSE doc/usage.md doc/architecture.md doc/security.md $out/share/doc/stamp-suite/
+            '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              install -Dm644 dist/systemd/stamp-suite.service $out/lib/systemd/system/stamp-suite.service
+              substituteInPlace $out/lib/systemd/system/stamp-suite.service \
+                --replace-fail /usr/bin/stamp-suite $out/bin/stamp-suite
+            '';
 
             meta = with pkgs.lib; {
               description = "Simple Two-Way Active Measurement Protocol (STAMP) implementation";
@@ -56,7 +67,7 @@
             buildFeatures = allFeatures;
             nativeBuildInputs = [ pkgs.clippy ];
             buildPhase = ''
-              cargo clippy --all --all-features --tests -- -D warnings
+              cargo clippy --locked --all-features --all-targets -- -D warnings
             '';
             doCheck = false;
             installPhase = "mkdir -p $out";

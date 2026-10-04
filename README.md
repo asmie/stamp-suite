@@ -83,18 +83,22 @@ The packaged service runs a reflector in open mode. Configure authentication
 before exposing it to an untrusted network; see [security](doc/security.md).
 
 The release workflow builds plain binary tarballs for these Linux targets and
-for macOS on Apple silicon and Intel, plus source and `cargo vendor` tarballs.
+for macOS on Apple silicon and Intel, plus a Windows x64 ZIP, source and
+`cargo vendor` tarballs.
 
 ### From source
 
-Rust 1.85 or newer is required.
+Rust 1.86 or newer is required. Debian trixie source builds need a newer
+compiler than the stock Rust 1.85 package. Prebuilt packages need no compiler.
 
 ```sh
 cargo install stamp-suite                       # from crates.io
 cargo build --release --features metrics,control,hwtstamp   # from a checkout
 ```
 
-Building on Windows needs the Npcap SDK; running needs Npcap.
+Building on Windows needs the Npcap SDK; running needs Npcap. The Windows
+release includes metrics and the control API; SNMP and kernel timestamps are
+Unix-only. Windows builds reserve 4 MiB for the main thread stack.
 
 ### Nix, Gentoo and OpenWrt
 

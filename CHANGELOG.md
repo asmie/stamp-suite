@@ -5,1027 +5,116 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [Unreleased]
 
-### Added
+## [1.0.0] - 2026-10-05
 
-- A sender can measure several reflectors at once: repeat `--remote-addr` or
-  give a comma-separated list (a string or an array in TOML). Each target runs
-  its own session concurrently, and reports carry a `target` label.
-- `--count 0` sends until `--duration` ends or the sender is interrupted, and
-  `--count` accepts values up to 2^32 - 1. `--duration SECONDS` limits a run by
-  time. Before this change, `--count 0` sent nothing and reported success.
-- `--send-delay` accepts units (`250us`, `1.5ms`, `2s`; a plain number is
-  milliseconds) and intervals below 1 ms, which are busy-waited for exact
-  spacing. On loopback, 100 µs gives 30,000 probes in 3 s.
-- `--send-schedule poisson` spaces probes with exponential gaps
-  (RFC 2330 §11.1.1).
-- `--interface NAME` binds the sender, the nix reflector and the pnet reply
-  sockets to a device or VRF. The pnet backend also captures on it.
-- A sender stops on Ctrl-C or SIGTERM and prints the statistics collected so
-  far. It used to exit without a summary.
-- SIGHUP reloads the reflector's HMAC keys from the configured key file or
-  directory. It used to terminate the process.
-- The nix reflector on Linux reflects IPv6 extension headers (Type 246) from
-  ancillary data (`IPV6_RECVHOPOPTS`, `IPV6_RECVDSTOPTS`, `IPV6_RECVRTHDR`),
-  without raw capture. Fixed headers (Type 247) still need the pnet backend.
-- `--session-admission provisioned` answers only the exact session identities
-  listed with `--reflector-session`. Permissive admission, which learns
-  incoming sessions, is the default.
-- `--reflector-queue-capacity` (default 1024) bounds processing, capture handoff
-  and queued bursts. `--reflector-shutdown-grace-ms` allows queued work to finish;
-  default 0 cancels immediately. SIGTERM stops idle capture promptly, reply
-  sockets are nonblocking, and workers are cleaned up. Summaries and control
-  status report rejections/cancellations; reflector CSV adds two columns.
-- Bounded sender reply accounting tracks copies, duplicates, late replies,
-  reordering, Direct Measurement windows and Follow-Up delays. Reports use
-  `measurements` in text/JSON and sender CSV column 28. Probe and BER semantics
-  are unchanged; requested copies drain within the final timeout. Tests use
-  independent IPv4/open and IPv6/authenticated peers.
-- The sender reports idle, active and failed session states, with validated
-  recovery, structured logs and a `measurements.session_state` summary field.
-  `--session-loss-threshold` sets how many consecutive unanswered probes mark a
-  session failed.
-- Sender output shows the endpoints' synchronization declarations, the decoded
-  advertised clock errors and counts of invalid or unknown clock quality next
-  to the OWD and Follow-Up delays. They are sender CSV column 29,
-  `owd_clock_quality`. Existing delay samples are unchanged.
-- IPv6 link-local addresses work in both backends: source and destination
-  zones are preserved through session lookup and replies, and
-  `--local-scope-id` and `--remote-scope-id` set numeric zones. Isolated tests
-  cover link-local bursts, alternate addresses and the sender.
-- `--help` and the man page group options into sections (Endpoints, Sender,
-  Authentication, Reflector, and so on).
-- DEB/RPM/Debian packages include the generated man page, checked by
-  `tests/man_page.rs`. Releases include source and vendor tarballs, Sigstore
-  provenance and optional GPG-signed SHA256SUMS.
-- A Gentoo overlay tree under `dist/gentoo/` provides `net-analyzer/stamp-suite`
-  with a USE flag per Cargo feature, OpenRC service files, and `acct-user` and
-  `acct-group` packages.
-- Linux `live_udp_bench` validates replies/loss, records load and idle CPU,
-  probes after idle, repeats trials and records metadata. It covers IPv4/IPv6,
-  open/authenticated and stateful cases, with `--hwtstamp`/`--metrics` options.
-  Criterion adds a populated-session-table case. Documentation states generator
-  limits and removes unsourced speed figures.
-- A weekly standards revision monitor checks for new revisions of the
-  implemented documents, with offline replay and failure reporting.
-- Release test fixtures cover bearer-authenticated HTTP and HTTPS key rotation
-  with live packets and a real Net-SNMP master, including bulk queries and
-  reconnects. A documented hardware timestamp verification procedure has
-  explicit unavailable and fallback outcomes.
-- Independent Python wire fixtures cover key-directory bursts, CoS, source
-  matching, SRv6 fallback and mixed clocks, with frozen payloads and JSON
-  evidence. CI runs them for default and all-features builds and checks the
-  oracle against corrupted replies.
-
-### Changed
-
-- Documentation checked against code and organized by topic. Added
-  CONTRIBUTING.md and the protocol overview/glossary. Conformance matrices
-  share a layout; AgentX/ext-hdr review notes moved into architecture and
-  conformance docs. tests/README.md lists every test file.
-- **Breaking for Type 246:** IPv6 header reflection follows
-  draft-ietf-ippm-stamp-ext-hdr-15. The move from -11 to -13 introduced
-  eight-octet Type 246 selectors, strict request and attachment validation,
-  sender route-MTU checks, and checksum verification before raw-capture
-  admission. Type 247 keeps four-octet selectors. This changes the
-  experimental Type 246 wire format, so upgrade both peers together. Revision
-  -15 does not change the wire format or procedures from -13; citations use
-  the -15 section numbers, and the conformance matrix adds the new data-plane
-  and measurement-type provisioning requirements as Partial rows.
-- draft-ietf-ippm-asymmetrical-pkts was published as RFC 10052. Codepoints are
-  unchanged; citations, the conformance matrix and the standards monitor refer
-  to the RFC.
-- BER follows draft-gandhi-ippm-stamp-ber-07: validate alignment, set C on
-  invalid combinations, repair padding and keep it outside TLV HMAC.
-  Text/JSON/CSV report directional intervals, bursts and optional alarms
-  (`--ber-interval`, `--ber-bit-threshold`, `--ber-packet-threshold`, also in
-  TOML/schema). Unsupported peer reports stop sampling. Linux padding uses
-  route MTU; resized replies are excluded from measurement. Wire, integrity,
-  interval and IPv4/IPv6 tests support the BER matrix.
-- Clock-source declarations are independent of timestamp format and Error
-  Estimate S. `--clock-sync-source` (system) and `--hardware-clock-sync-source`
-  (PHC) default to local. Corrected RFC 8972 codes: SSU/BITS=3, external=4,
-  local=5. Type 3 reports the current software T3 method; Follow-Up records
-  the stored timestamp's method, including fallback and later hardware
-  corrections. Timestamp/method snapshots stay coherent; unrelated error-queue
-  events are rejected. CLI, TOML, schema, ProcessingContext and tests updated.
-- The sender uses a randomized dynamic source port by default, sender and
-  reflector ports must differ, and both endpoints transmit with TTL/Hop Limit
-  255. Lower configured TTL values are rejected; lower received values are
-  still accepted.
-- Reflector sequences, counters, replay windows and Follow-Up state are kept
-  per session identity: both UDP endpoints, the SSID and the sender
-  micro-session ID. Control and shutdown output report the complete identity,
-  and control expiry requires disambiguation when one source has several
-  sessions.
-- At the session limit or during drain, the reflector rejects new session
-  identities. It used to reply with temporary counters and a stateful sequence
-  number that stayed at zero. Existing sessions are kept when the limit
-  shrinks, admission is serialized with runtime control changes, and expiry
-  retires pending transmissions before an identity restarts.
-- On Linux the reflector enforces the actual reply-route MTU for Type 12 and
-  reflected-header replies, including wildcard binds, alternate destinations
-  and SRH overhead. MTU caches are bounded and invalidated on route and
-  interface changes, replies are never fragmented, an MTU race is retried
-  once, and signatures are regenerated after resizing. Replies whose mandatory
-  fields cannot fit, or whose route budget is unavailable, are dropped. Runtime
-  caps report administrative limits. Route MTU lookup is Linux-only.
-- Non-monotonic Type 12 requests get one U-flagged reply on both backends,
-  with requested padding skipped and final flags signed, even with
-  `--drop-replayed`. Ordinary duplicate suppression remains configurable;
-  sequence-wrap bursts are unchanged.
-- With configured sender micro-sessions, a reply must carry exactly one usable
-  Micro-session ID. Missing, flagged, malformed, duplicate or unverifiable IDs
-  are rejected before measurements are consumed, and the reflector ID is
-  learned only from accepted pending replies. Numeric TLV validation does not
-  implement physical LAG steering or ingress-member verification.
-- Diagnostics use stderr in both log formats. `-R` also uses stderr for
-  JSON/CSV output. Reflector startup notices are logged; sender reports share
-  one CSV header. CLI stream tests check routing.
-- Sender RTT and OWD storage is bounded: quantiles are exact through 4096
-  observations, then come from full-run histograms with less than 0.78125%
-  magnitude error. Each snapshot sorts or traverses the RTT data once, and
-  cumulative moments and 64-bit sample counts are kept. Variance uses centered
-  online updates, which fixes overflow and cancellation. Text and JSON output
-  state the precision, and two sender CSV columns before `ber` carry it.
-- BER history retains 1024 completed intervals, 1024 alarms, the current
-  partial interval and omission counts. Lifetime totals and alarm logs remain.
-  Retention/accuracy/output tests cover this. Documentation corrects the RTT
-  jitter metric's RFC 3550 attribution.
-- The minimum supported Rust version is 1.85 (was 1.93), so the crate builds
-  with the rustc shipped by Debian trixie. The only dependency that had to
-  change was `criterion` (0.8 to 0.5, dev-only). The container builder image is
-  pinned to the MSRV (`rust:1.85-slim-bookworm`, runtime `debian:bookworm-slim`).
-
-**Performance**
-
-- Probe TLVs are written directly into the packet buffer instead of being
-  copied into a list and serialized; the static TLVs (including BER padding)
-  are no longer cloned per probe, and the authenticated base packet is
-  serialized once.
-
-Measured with `live_udp_bench` on loopback (Intel Core Ultra 9 275HX, WSL2),
-median of three trials, reflector CPU as a share of one core:
-
-| Load | Before | After |
-| --- | --- | --- |
-| 50 kpps open | 23.0% | 18.7% |
-| 50 kpps authenticated, stateful | 25.7% | 20.3% |
-| 200 kpps open | 84.7%, 1.6% loss | 62.0%, no loss |
-| 200 kpps authenticated, stateful | 95.0%, 1.3% loss | 73.7%, 0.005% loss |
-| 50 kpps open, `--hwtstamp auto` | 28.7% | 22.3% |
-
-- The nix reflector sends the first copy of each reply as soon as it is built;
-  only later burst copies wait in the deadline queue. It handles up to 32
-  datagrams per readiness wakeup.
-- The reflector socket requests a 4 MiB receive buffer (capped by
-  `net.core.rmem_max`). The default absorbed about a millisecond of traffic at
-  200 kpps.
-- Kernel TX-timestamp error queues are read only while a send awaits its
-  timestamp, instead of on every loop iteration.
-- Known sessions are looked up under the session table's read lock.
-  Authenticated session acquisition carries one provisioning decision through,
-  uses one table entry lookup for existing and new sessions, keeps the limit
-  and drain checks under the write lock, and reuses the acquired handle for
-  standalone sequencing and live transmission. Operation-count and
-  admission-race regression tests cover this.
-- `HmacKey` holds the keyed HMAC state and shares it between clones, so the
-  key schedule is computed once and a reply's signing key is a reference
-  count, not a copy. The state is wiped when the last clone is dropped, and the
-  raw key bytes are not retained.
-- Ancillary data for each send is built on the stack, and the last copy of a
-  reply reuses its buffer. TLV error metrics are recorded once per packet with
-  static labels, and only when metrics are enabled.
-- Prometheus handles for per-packet metrics are looked up once. At 200 kpps
-  `--metrics` cost about 7% of a core in registry lookups; with cached handles
-  the reflector's CPU use is close to running without metrics.
-  `live_udp_bench --metrics` measures it.
-- Reflector transport metadata and SRH storage are reused across burst copies.
-  Both backends send through one mutable sender per socket, cache successful
-  PMTU and CoS settings, and reuse bound endpoints for route lookups. Fallback
-  changes stay local to each copy, and incomplete sends are rejected without
-  being counted. Socket-isolation and cache regression tests cover this, and
-  the ownership contract is documented.
-- Each parsed TLV is stored once, with indices that preserve the wire order of
-  malformed TLVs and of legal HMAC and padding TLVs. Mirrored semantic updates
-  are gone, flag and length validation is shared, BER patterns are borrowed,
-  and HMAC input is streamed without concatenation. Reply capacity is reserved
-  before serialization. Duplicate-HMAC partitioning stays linear, and property
-  tests cover malformed tails, mutation and signing.
-- BER bit-error and burst counting processes a byte at a time with a lookup
-  table instead of a bit at a time, about 8× faster on 1400-byte padding.
-- Interim reports are formatted and written on a separate thread instead of
-  inside the sender's send and receive loop. With `--ber` and a full interval
-  history, an interim report held up the loop for 0.3 to 0.8 ms even with
-  stdout redirected to `/dev/null`, which delayed probes and inflated the RTT
-  of replies arriving meanwhile. The loop now pauses only for the snapshot,
-  0.06 to 0.2 ms. With several targets, reports no longer wait for each other
-  behind a lock.
-- The sender verifies a reply's TLV HMAC once, and BER sampling reuses that
-  result. The receive control-message buffer is allocated once per run, and the
-  wall clock is read once per reply.
-
-**Internal**
-
-- `src/receiver/mod.rs` and `src/sender.rs` are split into focused modules,
-  and large inline test modules moved into `tests.rs` files next to the code.
-  Behavior is unchanged.
-- The sender loop moved from one 1300-line function into `sender/run.rs`:
-  `SenderRun::open` does setup, and the send, drain and Access Report phases
-  share one receive helper.
-- Both reflector backends share one ingest path (`receiver/ingest.rs`).
-  Settings are resolved once at startup, and each datagram goes through the
-  same rate limit, queue reservation, processing and reply construction. This
-  replaces two hand-maintained context literals of about 70 lines per packet.
-- Serialized replies are inspected through `tlv::TlvSpan` instead of seven
-  hand-written byte walkers with literal type codes and flag masks, so
-  codepoint changes in `tlv` reach the send path. Two of those walkers
-  allocated a parsed TLV list per reply.
-- Packet layout constants (base sizes, HMAC and SSID offsets) are defined once
-  in `packets.rs`.
-- `ReceiverSharedState::capture_alive` is removed. Nothing outside tests read
-  it, and every path that cleared it ended the process.
-- `wire_packet!` defines each base layout once, generating structs, codecs
-  and lenient parsers with compile-time gap/overlap checks. The four Extended
-  types alias `Extended<B: BasePacket>`; lenient parsing returns the zero-filled
-  base buffer too. Authenticated mbz1a/b/c become `mbz1: [u8; 68]`. Decoding
-  2000 random buffers matched the old implementation.
-- Thirteen per-TLV length errors are one `TlvError::InvalidLength { kind,
-  length }`, and the expected length comes from one table. Fixed and IPv6
-  extension header reflection share one matching function, and Location
-  sub-TLVs use the shared `TlvSpan` header reader.
-- `StartupError` is an enum (`Config`, `Io`, `Key`, `Service`) that keeps the
-  underlying error, and `HmacError` keeps its `io::Error` and hex errors. Key
-  loading moved from `receiver` to `crypto::KeySource`, and
-  `create_shared_state` returns a `Result`.
-- One `CancellationToken` carries shutdown: signals and the control API cancel
-  it, and the reflector backends, the sender and the SNMP sub-agent observe
-  it. The nix reflector does not poll a flag every 250 ms any more.
-  `tokio-util` is a required dependency.
-- Sender metrics and SNMP counters are `SenderObserver` implementations
-  instead of feature-gated calls throughout the send and receive paths.
-  `run_sender(conf)` and `run_sender_with_output(conf, output, observers,
-  shutdown)` replace the feature-dependent signatures. The unused RTT min/max
-  gauge helpers are removed.
-- `Configuration::remote_addr` is a list; `remote_ip()` and `per_target()` give
-  the single-target view. `sender::run_senders` runs every target,
-  `StatsOutput` clones share one stream, and `StatsSnapshot` has a `target`
-  field. `receiver::reload_keys` backs SIGHUP.
-- `Configuration::validate` is split into per-topic checks. `merge_file`
-  destructures the file configuration, so an unmerged key fails to compile,
-  and a test checks that every CLI option has a configuration file key.
-  Configuration errors go through one `invalid()` helper.
-- Typed TLV results drive Access Report, CE and Micro-session decisions.
-  Diagnostics format only for `-R`; control no longer parses status strings
-  or allocates temporary display text. Output schemas/routing are unchanged.
-- DSCP/ECN packing and unpacking go through `tos::Tos`.
-- The reflector skips the CoS fallback retry when the fallback TOS byte is the
-  one that just failed to send.
-- Send-time Direct Measurement and Follow-Up Telemetry refresh covers TLVs
-  before a malformed TLV, matching the RFC 8972 §4 stop rule used during
-  assembly.
-- Accepted sender reply observations are grouped into a named record.
-- Session acquisition helpers return `Option` on rejection.
-  `ReflectedControlBehavior::max_size` holds queued request limits, replacing
-  the startup ceiling helpers and field.
-- Unused library code is removed: `reply_source::send_from`,
-  `srv6::send_with_srh`, `Stats::print_interim`, the TLV-HMAC recompute and
-  isolated-processing helpers in `receiver`, and duplicate metric and
-  pattern-parsing wrappers. Test-only helpers are `#[cfg(test)]`. The library
-  API is internal and not covered by the 1.x contract.
-- `receiver` exports only what the binary, tests and benchmarks use; other
-  helpers there and crate-internal functions elsewhere are `pub(crate)`. This
-  exposed two unused functions, which were removed.
-- The `chrono` dependency is dropped; timestamps come from `SystemTime`. The
-  Prometheus exporter is built without its default HTTP listener and push
-  gateway, which removes hyper-rustls and aws-lc-rs from `metrics` builds.
-- Code comments were checked against the code and the standards. Stale
-  statements and wrong section citations were fixed, every `unsafe` block has a
-  SAFETY comment, magic numbers in the netlink and capture code are explained,
-  and citations use the `RFC NNNN §X` form. Conformance matrix citations name
-  files rather than line ranges, stale conformance source citations are
-  updated, and so is the TLV ownership documentation.
-- The conformance citation checker verifies `path::item` citations and
-  identifiers attributed to a file. It had checked none since line numbers were
-  dropped from citations; six stale citations were fixed.
-- CI runs on pull requests and on pushes to the release branches, with one run
-  per pull request (a newer push cancels the older run). The redundant
-  `ttl-nix` legs and one of the two packaging release builds are removed.
-  Clippy warnings are fixed in default, nix, pnet and all-features builds, and
-  the CI lint gates cover all targets, including an all-features leg.
-- The fuzz job installs a prebuilt cargo-fuzz, caches each target's corpus and
-  adds a `sender_reply` target. `process_stamp_packet` covers keys and captured
-  headers, and the parser targets check round trips.
-- Conformance CI requires successful three-namespace SRv6 forwarding with
-  authenticated wire checks, and keeps the captures. It also runs strict
-  privileged tests with exact artifact and test-count checks, capture readiness
-  and error reporting, SRv6 fallback evidence, matrix and rollup drift checks,
-  and full citation inventories. Conformance limits, totals and the separate
-  fuzz lockfile were refreshed.
-- CI keeps native default and all-features Cargo logs and revision-bound JSON
-  reports, and rejects incomplete or wrong-platform evidence. Native Windows CI
-  runs a bounded runtime suite, the library unit tests and the startup-error
-  tests.
-- The macOS MTU-race test no longer expects Linux-only source pinning. The
-  extension-header (ext-hdr-13) wire tests run on macOS, including mapped IPv4
-  with TTL 255, and key rotation coverage stays active while unsupported
-  size-controlled drops are checked.
-- pnet burst scheduler tests do not depend on platform route-MTU support, and
-  check that unsupported-MTU drops preserve ordinary replies. pnet fixtures
-  require valid authenticated replies and join their workers on shutdown.
-- Five existing combination test suites no longer use production HMAC helpers.
-  CLI stream tests replace JSON parsing workarounds in the wire tests.
-- A non-Linux unreachable-code warning in IPv6 attachment validation is
-  removed, and the deprecated `AtomicUsize::fetch_update` is replaced so clippy
-  passes on current toolchains.
-- `clock_metadata_test` restarts the reflector when another test takes its
-  port, and skips late replies to warm-up probes.
-- `loopback_test` binds its sender sockets to port 0 instead of a port chosen
-  earlier, which another test could take in the meantime.
-
-### Fixed
-
-- SNMP workers stop when their owner exits, including during silent initial or
-  reconnect handshakes. AgentX validates administrative responses and reads
-  both network-order and little-endian PDUs.
-- Senders validate the complete UDP payload before probing and return terminal
-  send failures. Other send errors have an eight-attempt consecutive limit.
-- Prometheus counts successful reflected copies and records drops at the same
-  boundaries as reflector summaries, including queue and rate rejections.
-- Measurement output uses an eight-item queue and a five-second final flush
-  deadline. Slow output skips interim reports and text packet details; broken
-  pipes return errors. Formatting runs in a buffered writer thread.
-- Per-source limiter state is capped at 16,384 entries, with a shared overflow
-  bucket and at most four expiry checks per request.
-- The authenticated full-chain benchmark now verifies its TLV HMAC and reply
-  before timing. A separate benchmark covers missing TLV authentication.
-- Releases require the full reusable CI and conformance gates at the tagged
-  commit. Debian builds require supplied offline vendor inputs; OpenWrt release
-  recipes contain the hash of the exact published source archive.
-
-- The pnet reflector on macOS loopback finds the IP header after pnet's zeroed
-  placeholder instead of assuming 14 octets. pnet_datalink 0.35 inserts 12
-  octets on 64-bit macOS, so every request on `lo0` was misparsed and dropped.
-- A panic in the pnet capture thread makes the reflector exit non-zero. It
-  exited with status 0, so a supervisor configured to restart on failure did
-  not restart it.
-- STAMP-SUITE-MIB has a new REVISION for the clarified object descriptions.
-- RFC8972-3-10 (stop on a zeroed SSID) and RFC8972-4.1-5 (Extra Padding for
-  larger test packets) are scored Compliant. Both are implemented, and the
-  matrices use N-A only for optional behavior that is not.
-- The CHANGELOG has entries for 0.6.1 and 0.9.0, and the 0.1.0 and 0.2.0
-  dates match the version history.
-- T1 and the RTT start are read after the probe's TLVs are built, just before
-  the base packet is written and sent. Building the TLVs (BER padding, Direct
-  Measurement, the TLV HMAC) counted as network delay; on loopback with
-  authenticated BER probes the median RTT dropped by about 3 µs.
-- macOS and Windows builds compile without warnings, and `--features snmp`
-  tests no longer fail to build on Windows. CI now runs clippy on the macOS
-  and Windows jobs.
-- A configuration file with `return_srv6_sids = []` or
-  `return_sr_mpls_labels = []` is rejected at startup. It passed validation
-  and the sender sent a Segment List sub-TLV with Length 0 (RFC 9503 §4.1.3).
-  The command line already rejected empty lists.
-- The text report prints `n/a` for an average with no samples (reply RTT,
-  Follow-Up reverse delay) instead of an empty value.
-- `--require-hmac` help describes what the option does: the reflector drops
-  authenticated packets for which no key is configured.
-- Trailing zero padding is parsed in linear time. A crafted datagram of zeros
-  ending in one non-zero byte cost about 75 ms of reflector CPU at 64 KB.
-- Probes are sent on a fixed schedule. Each send deadline was measured from the
-  end of the previous send, so send time and timer rounding stretched every
-  interval: 2000 probes at `--send-delay 1` took 4.2 s and take 2.2 s with the
-  fix. A probe up to 2 ms late is followed at once by the next; further behind,
-  the schedule restarts from the current time rather than sending a burst.
-- The sender keeps its send schedule when sends fail or the reflector answers
-  with ICMP port unreachable. Repeated send and receive errors are printed on
-  the 1st, 10th, 100th, ... occurrence.
-- A failed per-probe route-MTU lookup does not abort a sender run, and Type
-  246/247 requests are restored when the route MTU grows again.
-- Linux SRv6 replies use the supported sticky routing-header option, preserve
-  transit SIDs and the final UDP destination, and clear the SRH before ordinary
-  replies.
-- macOS IPv6 startup works: the reflector applies Darwin's shared hop policy
-  for IPv6 and mapped IPv4, and decodes received hop metadata by
-  control-message type.
-- The pnet backend validates its bind addresses and keys before starting
-  privileged capture, reports socket and authentication startup failures
-  before capture-interface discovery, and keeps the underlying interface
-  error.
-- On Windows, the sender retries when an automatically selected source port
-  fails with WSAEACCES. Port selection stays bounded and randomized, and an
-  explicitly configured port still fails with an error.
-- The nix reflector and the sender's ECN and kernel-timestamp receive paths
-  clear Tokio socket readiness after a raw `recvmsg` returns `WouldBlock`.
-  They used to consume a CPU core when idle after traffic. Regression tests
-  cover IPv4, IPv6, ancillary metadata and receiving again after idle.
-- `AF_NETLINK` is allowed in the packaged systemd unit. Route-MTU lookups and
-  interface address discovery failed under the previous restriction.
-- `--max-pps` is documented as a per-source-IP limit, which is what it has
-  always enforced. The unused per-SSID limiter API is removed.
-- The pnet backend reflected each loopback request twice, because Linux shows
-  loopback frames to packet sockets both leaving and arriving. The capture
-  socket sets `PACKET_IGNORE_OUTGOING`.
-- A fixed 1600-byte buffer in Apple loopback capture panicked the capture
-  thread on larger IP packets; it is removed.
-- An echoed TLV HMAC is left unchanged when sending. After a failed TLV HMAC
-  check, the reflector re-signed the copied HMAC TLV at send time; RFC 8972
-  §4.8 requires it to be copied.
-- Failure echoes no longer reorder legal padding around the HMAC TLV. Missing
-  HMAC prefix bytes are rejected, and malformed digests and flags are preserved
-  when the reply is regenerated.
-- The received TLV order is kept when Extra Padding precedes the HMAC TLV in a
-  packet that also carries BER TLVs. Serialization moved the padding after the
-  HMAC, so an echoed reply reordered the sender's TLVs. The round-trip fuzz
-  oracle found this.
-- The route-MTU netlink query is nonblocking, so it cannot stall the reflector
-  receive loop.
-- The route-MTU cache subscribes to IPv6 policy-rule changes. It subscribed to
-  the ND user-option group by mistake, so IPv6 rule changes were picked up only
-  when a cache entry expired.
-- The reflector refuses to start when the CoS admission or Location disclosure
-  policy cannot be parsed, instead of falling back to permissive defaults.
-- Warnings that a remote peer can trigger per packet (bad HMAC, strict-mode
-  parse failures, missing keys, capture checksum errors) are throttled. Each
-  call site logs its 1st, 10th, 100th, ... occurrence at warn level.
-- The AgentX connect and registration handshake runs off the async runtime.
-  Each SNMP request reads the session table once and finds successors by
-  binary search; a table walk was quadratic in the number of sessions.
-  Little-endian AgentX responses are rejected, as requests already were.
-- AgentX GETBULK iterates in the correct order, uses the correct end-of-MIB
-  placeholders and handles inclusive starts. Partial request headers and
-  payloads survive timeout checks, the sub-agent stops promptly on
-  cancellation, and master Close requests are acknowledged before teardown.
-  Excess search ranges get an indexed error instead of silently omitting
-  columns. Independent master wire fixtures cover this, and the RFC section
-  citations are corrected.
-- The AgentX session closes with reasonShutdown (5) instead of reasonOther (1)
-  (RFC 2741 §6.2.2).
-- Return Path sub-TLVs are parsed as raw sub-TLVs in wire order. They were
-  parsed as top-level TLVs, so sub-type 8 was moved last as if it were an HMAC
-  TLV.
-- The `ExtraPaddingTlv::from_raw` and `HmacTlv::from_raw` inherent methods,
-  which skipped the TLV type check, are removed; the `TypedTlv` versions check
-  it.
-- Key-file read buffers and rejected keys are wiped from memory.
-- HMAC key load failures are reported with the option, path and OS error at
-  the point of failure. They were logged and followed by a generic "no usable
-  key" error. The sender loads its key before opening sockets.
-- Reflected-TLV telemetry is blocked when an HMAC is present but cannot be
-  verified, and Access Report acknowledgements with an invalid length are
-  rejected. Flags are counted across duplicate HMACs. Mixed flag/integrity and
-  output-mode regression tests cover this, and stale sender citations are
-  updated.
-- The reflector validates base packets and configured HMACs before creating or
-  refreshing a session, so rejected packets cannot consume session slots or
-  change counters, sequence numbers, replay windows or Follow-Up state. Both
-  receive backends count processing rejections as aggregate drops and reuse
-  the validated session handle through the initial send. TLV integrity-failure
-  replies are still sent.
-- The per-SSID key selected during reflector validation is the one used at
-  transmission. Both backends reuse that snapshot for base and TLV signatures,
-  fallback flag changes and queued burst copies. Key-directory, default-key,
-  rotation, revocation and CoS/SRv6 fallback regression tests cover this.
-- Every burst reply gets a fresh transmit timestamp, stateful sequence number
-  and HMACs, and counters and Follow-Up state are updated after each
-  successful send. CoS, source pinning and return-path fallback apply to every
-  copy. Kernel TX correlation is serialized in the nix loop, and pnet burst
-  waits run off the capture thread.
-- A stateful reflector consumes a sequence number only when the reply is sent,
-  so failed sends leave no gap (RFC 8762 §4.3.1).
-- The sender rejects reflected packets whose nonzero SSID differs from the
-  configured session before updating measurements or control state.
-  Zero-SSID compatibility stays configurable. Tests cover open and
-  authenticated replies over IPv4 and IPv6.
-- The sender decodes reflector timestamps using their Error Estimate Z bit
-  before computing one-way delay. NTP and PTP epochs are normalized and wrapped
-  seconds are unfolded, including at the 2036 NTP era boundary.
-  `--reflector-utc-offset` sets an explicitly known remote timescale offset.
-  Invalid PTP fractions omit OWD but keep RTT.
-- TLV processing stops at a malformed TLV instead of skipping the whole packet
-  or ignoring the stop (RFC 8972 §4). TLVs before it are processed, the
-  malformed TLV gets M, and later TLVs are copied with U. A TLV whose Length is
-  wrong for its type also stops processing.
-- Timestamp Information TLVs that carry optional sub-TLVs (RFC 8972 §4.3) are
-  accepted; they were flagged malformed.
-- Content after the base packet that the reflector does not parse is copied
-  instead of zeroed: 1-3 trailing octets in echo mode, and everything in
-  `--tlv-mode ignore`, which behaves like a reflector without TLV support
-  (RFC 8762 §4.3, RFC 8972 §4).
-- A Location Source MAC request is answered with the frame's EUI-48 source
-  address when the pnet backend sees it (RFC 8972 §4.2.2). `--location-disclose`
-  accepts `src-mac`.
-- `--error-multiplier 0` (RFC 4656 §4.1.2) and `--access-report` IDs other
-  than 1 and 2, which reflectors must discard (RFC 8972 §4.6), are rejected.
-- In authenticated mode, only a single Extra Padding TLV is allowed without an
-  HMAC TLV, not several (RFC 8972 §4.8). The sender treats an authenticated
-  reply without the HMAC TLV as an integrity failure.
-- RFC 9503 Control Code 0x1 (reply on the same link) is honored. On Linux the
-  reply is pinned to the arrival interface with `IP_PKTINFO`/`IPV6_PKTINFO`;
-  elsewhere, or when pinning fails, the Return Path TLV gets U. It was treated
-  as a normal reply.
-- A Return Address and an SRv6 Segment List can be used together
-  (RFC 9503 §4.1), and the first segment-list sub-TLV in wire order is the one
-  acted on (§4.1.3).
-- RFC 10052 per-request byte-rate and byte-volume limits apply to Type 12
-  bursts: `--reflected-control-max-rate` (default 12.5 MB/s) and
-  `--reflected-control-max-volume` (default 1.5 MB), also adjustable through
-  the control API. Exceeding either gives one C-flagged reply.
-- With Type 12 disabled (`--reflected-control-max-count 0`), the TLV is treated
-  as unsupported and gets U instead of C.
-- CoS TLV Reserved bits are zeroed in replies, and every processed CoS TLV is
-  marked when the requested DSCP/ECN cannot be applied (RFC 8972 §4.4,
-  cos-ecn-01 §3.1/§3.2).
-- An all-zero Requested field in a reflected Type 246/247 TLV is filled with
-  the matched header's first 8 or 4 octets
-  (draft-ietf-ippm-stamp-ext-hdr-15 §4.2 and §6.2 rule 1). The reflector left
-  it zero.
-- Sender probe counters are 64 bits wide, since a continuous run would
-  overflow 32-bit counters. The Direct Measurement counter on the wire stays 32
-  bits and wraps.
-- `--report-interval` reports keep printing while the sender waits for
-  outstanding replies and Access Report acknowledgements; they used to stop
-  with the last probe.
-- Startup fails with an error when the local Error Estimate cannot be built,
-  instead of panicking.
-- `--metrics` and `--snmp` given to a binary built without that feature stop
-  startup, as `--control` already did. Both used to print a warning and run
-  without the service.
-- macOS release archives are built with the `metrics` feature. It was left out
-  because the exporter's default features did not build there.
-- Log and error text is corrected: header-reflection warnings do not tell nix
-  users to rebuild with pnet for IPv6 extension headers, and a debug message
-  that lost a run of spaces is fixed.
-- Stale RFC 9503 section references in source comments, CLI help and
-  documentation are corrected.
-
-## [1.0.0] - 2026-08-05
-
-First stable release. It closed the last fifteen non-Compliant conformance
-rows. At release, the compliance statement in `doc/conformance/README.md`
-recorded 368 audited clauses: 320 Compliant, 0 Partial and 3 Gap. The three
-Gaps and three Excluded rows were documented, deliberate exclusions.
+First stable release. See [conformance matrices](doc/conformance/README.md)
+for supported profiles and remaining gaps. Experimental extensions can change
+when their drafts or IANA assignments change.
 
 ### Added
 
-- **Runtime control-plane REST API** (cargo feature `control`, reflector only;
-  it uses the already-optional axum and tokio-util, so it adds no
-  dependencies). `--control` starts a localhost HTTP server (default
-  `127.0.0.1:9091`, change it with `--control-addr`) that exposes `/v1`: live
-  status and session table, session expiry, runtime per-SSID HMAC key
-  management, live cap tuning (`max_pps`, `rate_burst`, `max_sessions`, Type 12
-  amplification caps), drain mode (new clients still get replies but no
-  session state accumulates) and graceful shutdown. Key management is
-  write-only: key bytes are never returned or logged, and request strings are
-  zeroized. `--control-token-file` enables bearer-token authentication with
-  constant-time comparison, and non-loopback binds log a loud warning. Unknown
-  JSON fields in requests are rejected. The design is described in
-  `doc/control-plane.md`.
-  - Supporting changes: the per-SSID `HmacKeySet` moved into
-    `ReceiverSharedState` behind `Arc<RwLock<…>>` (packet loops take short read
-    guards that never cross an await). The `RateLimiter` is always constructed
-    with atomically adjustable rate and burst (rate 0 means unlimited and
-    short-circuits without allocating buckets). Type 12 caps live in a shared
-    `RuntimeCaps` struct of atomics, and `SessionManager` gained
-    `expire_session`, drain and a runtime `max_sessions`.
-- **Control-plane TLS:** `--control-tls-cert` and `--control-tls-key` serve the
-  API over HTTPS. TLS requires `--control-token-file` as well, because an
-  unauthenticated key-management and shutdown endpoint should not be reachable,
-  encrypted or not.
-- **Kernel and hardware packet timestamping** (cargo feature `hwtstamp`, no
-  extra dependencies, included in the Debian package build). With the feature
-  enabled and `--hwtstamp auto` (the default mode):
-  - Linux RX: the reflector's T2 and the sender's T4 come from
-    `SO_TIMESTAMPING` kernel timestamps (`SCM_TIMESTAMPING` cmsgs) taken at
-    packet arrival, which removes scheduler wakeup latency from one-way delays.
-    Over loopback, forward OWD dropped from tens of µs to single-digit µs.
-  - Linux TX: transmit timestamps are recovered from the socket error queue
-    (`MSG_ERRQUEUE`, correlated with `SOF_TIMESTAMPING_OPT_ID`). The sender
-    corrects the stored T1 used for forward OWD after the fact, and the
-    reflector corrects its Follow-Up Telemetry record, so the FUT TLV
-    (RFC 8972 §4.7) carries the previous reply's kernel TX time.
-  - macOS: kernel software receive timestamps through `SO_TIMESTAMP`
-    (µs resolution). Windows: compiles to a no-op, because the pnet receiver
-    has no socket to timestamp; `SIO_TIMESTAMPING` support is future work.
-  - `--hwtstamp on` also attempts NIC hardware timestamps: `SIOCSHWTSTAMP`
-    filters (CAP_NET_ADMIN) and the raw-hardware cmsg tier, falling back to
-    kernel software timestamps with a warning on any failure. The Timestamp
-    Information TLV reports `HwAssist` only when both directions are
-    hardware-timestamped. Operators must keep the PHC disciplined
-    (ptp4l/phc2sys) for cross-clock OWD to be meaningful; see the PHC caveat
-    in `doc/architecture.md`.
-  - The startup warning for `--hwtstamp on` is conditional: it is silent when
-    hardware timestamping will be attempted, and names the missing build
-    feature or NIC capability otherwise.
-- **`--hwtstamp` capability probe.** At startup the reflector or sender queries
-  `ETHTOOL_GET_TS_INFO` (through `SIOCETHTOOL`) on the interface that owns
-  `--local-addr` and logs the NIC's timestamping capabilities (`rx_hw`,
-  `tx_hw`, PHC presence). Wildcard binds, unknown interfaces and non-Linux
-  platforms report no capabilities; the probe never fails startup.
-- **`--location-disclose <FIELDS>`** selects which Location TLV fields the
-  reflector reports (RFC 8972 §4.2.2). A withheld field is answered as zeroes,
-  so the reply's size and TLV structure do not change. A withheld IP request
-  keeps its generic sub-TLV type, so the address family is not disclosed
-  either.
-- **CoS admission policy:** `--allowed-dscp`, `--allowed-ecn` and
-  `--allowed-dscp-for PREFIX/LEN=SPEC` implement the policy RFC 8972 §4.4/§6
-  and cos-ecn-01 §3.2 ask for, which separates what is permitted (operator
-  policy) from what the socket can do. A successful `setsockopt` is not taken
-  as evidence that a codepoint is permitted in the operator's domain. A
-  refused DSCP1 reports RPD=0b01 and keeps the received DSCP; a refused EC1
-  forces Not-ECT and reports RPE=0b10.
-- **Replay detection** (asymmetrical-pkts §5) tracks received Sequence Numbers
-  per session and reports `packets_replayed` and `packets_reordered` in the
-  control plane's `/v1/status`. Detection is unconditional; `--drop-replayed`
-  opts in to acting on it. The HMAC TLV does not defend against replay, since
-  a replayed packet carries a valid HMAC. Per-event logging stays at debug
-  level on purpose: the sequence numbers are attacker-controlled, so a warning
-  per event would allow log amplification.
-- **Reply source-address pinning:** a matched Destination Node Address is used
-  as the reply's IP source address (RFC 9503 §3), on both backends.
-- **Layer-2 Address Group sub-TLV filter** (draft-ietf-ippm-asymmetrical-pkts-14
-  §3.1.1). The L2 (MAC-based) Address Group sub-TLV of the Reflected Test
-  Packet Control TLV is evaluated against the reflector's own local MAC
-  addresses, like the L3 (IP-prefix) sub-TLV: a match replies normally, a
-  mismatch drops the packet with no reply. Network namespace evidence:
-  `tests/netns_conformance.rs::scenario_5_address_group_filters`.
-- **IPv6 Extension Header Control sub-TLV** (draft-ietf-ippm-stamp-ext-hdr-08
-  §5.3). The reflector recognizes this presence-only sub-TLV inside a
-  Reflected Test Packet Control TLV as a request for one-way measurement mode
-  (do not attach received IPv6 extension headers to the reply's IPv6 header)
-  and records it in `ReflectedControlBehavior::suppress_reply_ext_headers`.
-  Neither backend attached extension headers to replies at 1.0.0, so the
-  request was honored trivially; the bit is available for a future
-  reply-attachment path. The sender option `--reflected-control-no-ext-hdr`
-  emits the sub-TLV (and therefore the Type 12 TLV, even at count 1);
-  combining it with `--return-path-cc 0` is rejected per asymmetrical-pkts-14
-  §4.3. The sub-TLV codepoint is TBA3 at IANA; until assignment, the
-  implementation uses 240 from the shared STAMP Sub-TLV Types Experimental
-  range, to be renumbered when the RFC is published.
-- **draft-ietf-ippm-stamp-ext-hdr-11 requirements.** `--reflected-ipv6-ext-hdr`
-  and `--reflected-fixed-hdr` are repeatable (`[LEN[:SELECTORHEX]]` per
-  occurrence) and emit one Type 246 or Type 247 TLV each, in order. The
-  single-option form and the standalone `--reflected-ipv6-ext-hdr-selector`
-  and `--reflected-fixed-hdr-selector` options stay backward compatible.
-  - `--attach-ext-hdr hbh|dest[:HEX]` makes the sender attach a real IPv6
-    Hop-by-Hop or Destination Options header to its own packets (sticky
-    `IPV6_HOPOPTS`/`IPV6_DSTOPTS`, Linux and macOS) and emit the matching
-    request TLV.
-  - The reflector's capture walk traverses the full IPv6 extension header
-    chain (Routing, including the Segment Routing Header, and the fixed-size
-    Fragment header) and stops with a C flag at AH or ESP, neither of which
-    can be reflected. It descends IP-in-IP tunnels (protocols 4 and 41, depth
-    capped at 4) to capture stacked outer and inner fixed headers for
-    multi-TLV Type 247 requests.
-  - Both roles are MTU-aware. The sender queries the live route MTU
-    (`IP_MTU`/`IPV6_MTU`, 1280/1500 fallback) and trims header TLVs from the
-    tail (Type 246 before Type 247, BER padding never removed) when the packet
-    would exceed it. The reflector trims reflected-header data to its reply
-    size cap (see the reply-size cap under Changed).
-  - If a Type 246 TLV appears before its Type 247 sibling in the packet, every
-    header TLV is returned with the C flag and no data is copied (§3.3).
-- **AIMD congestion response** (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
-  `src/rate_control.rs` implements multiplicative backoff and linear recovery.
-  A CE-marked reply is detected from the reflected CoS TLV's EC2 field
-  (forward path, integrity-gated like any other reflected TLV value) or from
-  the reply packet's own ECN, read through `recvmsg` with
-  `IP_RECVTOS`/`IPV6_RECVTCLASS` on the sender socket (reverse path, Linux and
-  macOS). On CE the sender's inter-packet interval grows by
-  `--ecn-backoff-factor`, capped at `--ecn-max-delay`, and it decays on clean
-  replies. The controller is always active when `--cos` with `--ecn` requests
-  ECT0 or ECT1, with no way to turn it off, matching the unconditional MUST.
-  Other platforms log a one-time warning and detect congestion on the forward
-  path only.
-- **Access Report retransmission** (RFC 8972 §4.6). A packet carrying the
-  Access Report TLV arms a retransmission timer. The sender retransmits the
-  TLV up to `--access-report-retries` times (default 4) at
-  `--access-report-timeout`-second intervals (default 3 s, per §4.6-13) until
-  a reflected packet with a recognized, integrity-intact Access Report TLV
-  disarms it or the retries are exhausted (`Aborted`). The timer runs to
-  completion independently of `--count` and `--send-delay`, through a wait
-  phase after the send loop, so a run shorter than the retry budget still
-  retransmits and aborts instead of reporting `Pending` forever.
-  `--access-report` rejects an Access ID outside the registry values 1 and 2:
-  `0` is invalid per §4.6, and 3-15 log a warning as forward-compatible but
-  are accepted on the sender side.
-- **RFC 9534 Reflector Micro-session ID validation on the sender.** The sender
-  validates the Reflector Micro-session ID on every reply, not only when
-  `--reflector-member-link-id` is configured. Without a configured value, the
-  first valid reply's ID is latched and expected for the rest of the session;
-  a configured value always takes precedence and is never overridden. A
-  mismatch on either path discards the packet
-  (`TlvRejection::ReflectorMsidMismatch`).
-- **`--on-zero-ssid continue|stop`:** the sender control RFC 8972 §3 requires
-  for a reflector that returns a zeroed SSID. It has no effect unless a
-  non-zero `--ssid` is configured.
-- **`--extra-padding <BYTES>`** adds an Extra Padding TLV independent of
-  `--ber`.
-- **`--ber-omit-burst`** omits the Type 242 TLV, whose Experimental-range
-  codepoint collides with another implementation's incompatible Heartbeat TLV.
-- **`--tlv-hmac auto|on|off`** controls HMAC TLV origination separately from
-  holding a key.
-- **`-v`/`--verbose`** is repeatable (`-v`, `-vv`, `-vvv`, ...) and raises the
-  log level from `info` to `debug` to `trace` (`resolve_log_filter`). An
-  explicit `RUST_LOG` environment variable takes precedence at any count.
-- **`process_stamp_packet` fuzz target.**
-  `fuzz/fuzz_targets/process_stamp_packet.rs` drives the full reflector
-  pipeline (parse, flag re-derivation and HMAC, semantic TLV processing,
-  response assembly) for authenticated and unauthenticated packets. The
-  earlier fuzz targets covered only the low-level parsers in isolation, not
-  the in-place TLV mutators and length arithmetic.
-- **Privileged network namespace conformance tests.**
-  `tests/netns_conformance.rs` (9 scenarios) exercises on-wire behavior that
-  unit and loopback tests cannot reach: IP TOS/ECN/TTL marking, IPv6 extension
-  headers, SRv6 SRH return-path routing (the first live exercise of
-  `send_with_srh()`), Address Group filtering, and Type 12 multi-reply pacing,
-  count and length, over two Linux network namespaces joined by a `veth`
-  link. Every scenario is `#[ignore]`d and also requires
-  `STAMP_NETNS_TESTS=1` and root or `CAP_NET_ADMIN`, so an ordinary
-  `cargo test` never touches the network. Instructions, prerequisites and a
-  rootless (`unshare -Urn`) path are in `doc/testing-netns.md`.
-- **Clause-level conformance matrices and a compliance statement.**
-  `doc/conformance/` carries an independently re-verified clause-by-clause
-  matrix (quote, RFC 2119 level, role, status, code and test evidence) for
-  RFC 8762, RFC 8972 (including errata 8199 and 8339), RFC 9503, RFC 9534,
-  RFC 8545, and the drafts asymmetrical-pkts-14, stamp-cos-ecn-01 and
-  stamp-ext-hdr-11: 368 clauses at 1.0.0. `doc/conformance/README.md` rolls
-  them up into one compliance statement with per-document counts, a
-  maintainer-adjudicated list of documented exclusions (SR-MPLS return-path
-  forwarding, SNMP SET, STAMP YANG, Windows and macOS platform-tier limits,
-  NIC hardware timestamp verification, SSID-based session admission) as
-  opposed to open Partials and Gaps, the experimental-codepoint disclosure,
-  and a summary of the verification tiers.
-- **`scripts/check_conformance_citations.py`** checks the conformance
-  matrices' `file:line` citations and exits non-zero on drift.
-- **Release preflight and gated publishing.** A `release-preflight` CI job runs
-  before packaging or publishing. It checks that the git tag, `Cargo.toml`,
-  `CHANGELOG.md`, the Debian changelog and the OpenWrt Makefile agree on the
-  version, and runs `cargo publish --dry-run --locked` to catch manifest and
-  packaging errors before any build or test time is spent. Packaging jobs also
-  assemble a plain tarball per target (the Linux DEB/RPM targets and two new
-  macOS targets, `aarch64-apple-darwin` and `x86_64-apple-darwin`), and
-  crates.io publishing runs only after the preflight and test jobs pass.
-- **`cargo-deny` CI gate.** `deny.toml` runs `cargo deny check` in CI
-  (advisories, a license allow-list, duplicate-version and wildcard-dependency
-  bans, and a crates.io-only source restriction) across the full
-  `--all-features` dependency graph. The RustSec `audit-check` job runs
-  alongside it on purpose: `audit-check` posts inline PR annotations and can
-  open issues for new advisories, while `cargo-deny` also covers licenses,
-  bans and sources and is the command contributors run locally.
-- **Best-effort Windows CI test job.** `rust.yml` runs the test suite on
-  `windows-2022`. The job does not gate the pipeline (a Windows test failure is
-  reported but does not block it), since Windows is the `pnet`/Npcap fallback
-  tier rather than the primary `nix` backend.
+- Concurrent measurement of several reflectors with per-target reports.
+  Repeat `--remote-addr` or pass a comma-separated list.
+- Continuous and time-limited runs (`--count 0`, `--duration`), sub-millisecond
+  intervals, Poisson scheduling and summaries on Ctrl-C or SIGTERM.
+- Device/VRF binding and scoped IPv6 link-local addresses for both roles.
+- Provisioned session admission, bounded reply queues, configurable shutdown
+  grace, and session failure/recovery monitoring.
+- Sender accounting for requested reply copies, duplicates, late replies,
+  reordering, Direct Measurement windows and Follow-Up delays. Reports include
+  clock quality and structured TLV flag/HMAC validation results.
+- Bearer-authenticated reflector control API with optional HTTPS: session/key
+  management, live limits, drain and graceful shutdown. Keys remain write-only.
+- SIGHUP reload of reflector HMAC key files and directories.
+- Linux kernel RX/TX timestamping, NIC hardware timestamp configuration and
+  capability probing. macOS supports kernel RX timestamps. Hardware results
+  require a disciplined PHC and separate physical-NIC verification.
+- Location disclosure and destination-scoped DSCP/ECN admission policies,
+  replay detection/drop policy, and sender ECN congestion response.
+- Access Report retries, required Micro-session ID validation, zero-SSID
+  handling, extra padding and separate TLV HMAC configuration.
+- Linux socket-backend IPv6 extension-header reflection without raw capture;
+  pnet fixed-header reflection, selectors and tunnel/header-chain inspection.
+- Directional BER intervals, burst counters, alarms and bounded history.
+- Grouped CLI help and generated manual; Gentoo overlay with systemd/OpenRC
+  services; Linux DEB/RPM and macOS/Windows release archives. Source/vendor
+  archives, pinned OpenWrt recipes and provenance accompany releases.
+- Independent wire fixtures, real Net-SNMP/control integration checks,
+  privileged namespace/SRv6 tests, fuzz targets and a standards monitor.
 
 ### Changed
 
-- **The reply-size cap is smaller by default.** The reflector queries the
-  egress interface's MTU, and the reply-size cap is the smaller of
-  `--reflected-control-max-size` and that MTU. With the option at its 1500
-  default on a 1500-byte link, the effective STAMP payload cap is 1472 (1452
-  for IPv6) rather than 1500. The option bounds the STAMP payload while an MTU
-  bounds the whole datagram, so the old default permitted a 1528-byte
-  datagram; the draft's MTU-exceeded C-flag path now fires where it belongs.
-  Raise the option for a jumbo link.
-- **Reflected Test Packet Control (Type 12) processing follows
-  draft-ietf-ippm-asymmetrical-pkts-14 §3.** These reflector changes apply
-  only when asymmetric reflection is enabled
-  (`--reflected-control-max-count > 0`):
-  - A request over the volume limit (`--reflected-control-max-count`) or the
-    rate limit (`--reflected-control-min-interval-ns`) gets the C flag and a
-    single reflected packet, as the draft mandates. The count and interval
-    used to be clamped silently and a reduced burst sent.
-  - A request with `count = 0` suppresses the reply entirely ("MUST NOT send
-    any reflected packets").
-  - Echoed Extra Padding TLVs are stripped before the reply length is computed
-    (§3 rule a), so a sender can request replies shorter than its test packet.
-    The requested length is honored, aligned up to a 4-octet boundary (§3 rule
-    b). The padding target is computed from the actual reflected base size
-    instead of being inferred from whether a TLV-HMAC key is present.
-  - The C flag received from the wire is ignored and re-derived by the
-    reflector (§3); a sender-set C used to leak into the echo.
-  - A Return Path "no reply requested" control code combined with a non-zero
-    Type 12 TLV (a sender error per §4.3) yields a single normal reply with
-    the U flag set on both TLVs, plus a warning log. The sender rejects
-    `--return-path-cc 0` together with `--reflected-control-count > 1` at
-    startup.
-- **Timestamp Information TLV:** the reflector fills all four value octets
-  from its own clocks and reports the ingress (T2) and egress (T3) acquisition
-  methods separately instead of merging them into one conservative value.
-- **An Extra Padding TLV after the HMAC TLV is accepted**, as RFC 8972 §4.8
-  explicitly permits, instead of being marked malformed.
-- **Internal library modules are `#[doc(hidden)]`.** `clock_format`,
-  `configuration`, `crypto`, `error_estimate`, `hwtstamp`, `packets`,
-  `rate_control`, `receiver`, `sender`, `session`, `srv6`, `stats`, `time`,
-  `tlv` and the optional `control`, `metrics` and `snmp` modules stay `pub`
-  for this crate's integration tests, benchmarks and fuzz targets, but do not
-  appear in generated rustdoc. A Stability comment on the crate root states
-  that the stable 1.x surface is the CLI options, the configuration file
-  schema and on-the-wire behavior, not these Rust APIs, which are exempt from
-  semver and may change in any 1.x release.
-- **Experimental and pending-IANA TLV codepoints are centralized.** The six
-  codepoints used ahead of IANA allocation are named constants in
-  `src/tlv/experimental.rs`: the BER Pattern, Count and Max-Burst TLV types
-  (240/241/242, draft-gandhi-ippm-stamp-ber), the Reflected IPv6 Extension
-  Header Data and Reflected Fixed Header Data TLV types (246/247, TBA1/TBA2 in
-  draft-ietf-ippm-stamp-ext-hdr), and the IPv6 Extension Header Control
-  sub-TLV type (240 within Type 12, TBA3 in the same draft). Each constant's
-  documentation states which draft defines the TLV, which IANA action will
-  trigger renumbering, and that the constant is the single place to change.
-  `TlvType`'s discriminants and `from_byte`/`to_byte` use these constants
-  instead of literals. On-the-wire behavior and import paths are unchanged,
-  and there is deliberately no runtime or configuration override.
-- `TlvList`'s `PartialEq`/`Eq` are hand-written, so parse provenance does not
-  affect equality.
+- **Type 246 wire format:** reflected IPv6 headers follow
+  draft-ietf-ippm-stamp-ext-hdr-15, with eight-octet selectors introduced in
+  revision -13. Upgrade both peers together. Type 247 retains four-octet
+  selectors. Pending IANA codepoints remain experimental.
+- Reflected Test Packet Control follows RFC 10052; BER follows
+  draft-gandhi-ippm-stamp-ber-07. Clock-source declarations are independent of
+  timestamp format and synchronization flags.
+- Sender ports default to randomized dynamic ports and must differ from the
+  reflector port. Both roles transmit with TTL/Hop Limit 255.
+- Stateful identities include both UDP endpoints, SSID and sender
+  micro-session ID. New identities are rejected at capacity or during drain;
+  expiry retires pending replies before a session restarts.
+- Linux replies respect the actual reply-route MTU, including SRH overhead.
+  Resized replies are signed again; replies without a usable mandatory-field
+  budget are dropped. Both roles validate configured payload sizes.
+- Sender RTT/OWD quantiles are exact through 4096 samples, then use bounded
+  full-run histograms with less than 0.78125% magnitude error. BER history and
+  output queues are bounded. JSON/CSV expose precision and omission counts.
+- Packet construction, HMAC state, ancillary buffers, session lookup and
+  metrics handles are reused to reduce per-probe work. Interim formatting runs
+  outside the sender loop; reflector receive processing batches ready packets.
+- The minimum Rust version is 1.86; Criterion moves to 0.8.2. Debian trixie
+  source builds need a newer toolchain than the stock compiler. Both lockfiles,
+  CI actions and DEB/RPM packagers are updated, along with Nix inputs and
+  the vendor hash.
+- Tagged releases require CI and conformance gates. Release metadata and the
+  Gentoo crate list are checked before packaging. Debian builds use supplied
+  offline vendor inputs.
 
 ### Fixed
 
-- **CoS TLV (Type 4) wire format was incompatible with RFC 8972.** The encoder
-  packed `DSCP1|ECN` into value byte 0 and `DSCP2|ECN2` into byte 1, while
-  RFC 8972 §4.4 places DSCP1 and DSCP2 next to each other
-  (`| DSCP1 | DSCP2 |ECN|RP|`), so every CoS field except DSCP1 landed in the
-  wrong bits when talking to a conformant peer (for example teaparty or
-  Junos). The TLV uses the correct layout, extended with the EC1/RPE
-  reverse-path ECN fields of draft-ietf-ippm-stamp-cos-ecn-00, which occupy
-  formerly Reserved bits and are backward compatible. EC1 carries the ECN
-  value requested for the reflected packet (the existing `--ecn` option,
-  previously sent in a non-standard byte-0 position). The reflector reports
-  RPE=0b11 when it set the reply's ECN to EC1, or 0b10 when it could not (for
-  example on a setsockopt failure, which also sets RPD=0b01). Earlier
-  stamp-suite peers parse CoS fields from the old positions, so mixed-version
-  CoS measurements misreport DSCP2 and ECN values; upgrade both ends.
-- **`IP_PKTINFO` destination address was byte-reversed on the `nix` backend on
-  little-endian hosts.** `ipv4_addr_from_pktinfo` called
-  `ipi_addr.s_addr.to_be_bytes()` on a value the kernel already fills in
-  network byte order as a raw `u32`. On little-endian hosts (in practice all
-  x86_64 and aarch64 deployments) this reversed the octets, so the Location
-  TLV's captured destination address, and any other consumer of
-  `extract_dst_addr_from_cmsgs`, could report the wrong IP. It uses
-  `to_ne_bytes()`, which copies the byte layout as-is on any host. Test:
-  `ipv4_pktinfo_extraction_preserves_octet_order`.
-- **Reflector replies were truncated when a request's trailing padding was an
-  all-zero run with no TLVs** (RFC 8762 §4.3/§4.6). `TlvList::parse_lenient`
-  correctly drops a trailing all-zero run at a 4-byte-aligned offset, but the
-  echo-mode assembly path did not re-pad to compensate, so a classic
-  TWAMP-Light packet with 50 zero octets of padding and no TLVs came back
-  truncated to the base packet size. The reply is re-padded to the received
-  length after the TLVs are written, except when a Reflected Test Packet
-  Control TLV (Type 12) governs the reply size. Tests:
-  `test_zero_trailer_reply_preserves_symmetric_size_{unauth,auth}`,
-  `test_nonaligned_garbage_trailer_preserves_size_unauth`.
-- **Location TLV sub-TLVs used a non-registry wire format, and the reflector
-  did not preserve the TLV's own length on echo** (RFC 8972 §4.2.1/§4.2.2).
-  Sub-TLVs use the same 4-octet Flags/Type/Length header as top-level TLVs,
-  matching Figure 5 of the RFC. The reflector edits sub-TLV value bytes
-  strictly in place, so the Location TLV's own wire Length never changes.
-- **The Timestamp Information TLV request leaked the sender's clock into
-  reserved fields** (RFC 8972 §4.3). The Session-Sender builds its request TLV
-  with `TimestampInfoTlv::request()`, which zeroes all four value octets as the
-  RFC requires ("MUST NOT fill any information fields... All other fields MUST
-  be filled with zeroes"). The previous constructor wrote the sender's own
-  sync source and timestamp into fields only the reflector should fill.
-- **The Follow-Up Telemetry TLV was not zeroed in stateless mode or when its
-  length was invalid** (RFC 8972 §4.7, erratum 8339). The reflector zeroes the
-  Sequence Number and Follow-Up Timestamp fields when `--stateful-reflector`
-  is off (§4.7-7), and also zeroes them, besides setting the M flag, when the
-  received TLV's Length is invalid (§4.7-6), instead of leaving stale or
-  attacker-echoed bytes in place.
-- **The Access Report TLV value was 2 octets instead of the required 4, and an
-  invalid Access ID was not discarded** (RFC 8972 §4.6-3/§4.6-4).
-  `ACCESS_REPORT_TLV_VALUE_SIZE` is 4 (ID and Resv, Return Code, and the
-  2-octet Reserved tail §4.6 specifies). The reflector marks a well-formed
-  Access Report TLV whose Access ID is not 1 or 2 as unrecognized (U flag)
-  through `discard_invalid_access_report_tlvs`, instead of accepting it.
-- **Type 12 length overshoot.** A keyed reflector appends its own HMAC TLV
-  after the length-padding decision, so a request from a peer that sends no
-  HMAC TLV got a reply exactly 20 octets longer than requested. The test
-  asserted that the reply was at least the requested length, which the
-  overshoot satisfied; it now asserts equality.
-- **Missing control TLV on retransmission.** With the AIMD congestion response
-  active, an Access Report retransmission in the wait phase carried no
-  Reflected Test Packet Control TLV, because that path rebuilt its TLV set
-  from the list the main loop deliberately leaves it out of.
-- **HMAC coverage arithmetic.** The covered prefix was derived from the sum of
-  non-HMAC TLV sizes, which equals the wire prefix only while the HMAC TLV is
-  last. This had to be fixed before trailing Extra Padding could be accepted.
-- **Redundant syscall.** The cos-ecn-01 zero-ECN fallback re-issued the exact
-  TOS byte the kernel had just refused when EC1 was already 0 and DSCP1
-  matched the received DSCP.
-- **SNMP sub-agent reconnects to the AgentX master.** If net-snmpd restarted or
-  closed the session, the sub-agent exited and stayed down for the life of the
-  process. The AgentX event loop runs inside a reconnect loop with capped
-  exponential backoff (1 s to 30 s) that reconnects and re-registers the MIB
-  subtree and honors the shutdown signal during backoff. The initial connect
-  is synchronous, so a misconfigured socket path still fails at startup.
-- **AgentX SET requests are answered and byte order is declared** (RFC 2741).
-  The sub-agent is read-only. It replies to a TestSet with `notWritable`, to
-  Commit and UndoSet with the matching failure code, and ignores CleanupSet,
-  instead of dropping the PDU and leaving the master to time out. Every PDU it
-  sends sets the `NETWORK_BYTE_ORDER` flag to match its big-endian encoding
-  (the flag byte was 0, which declared little-endian), and incoming request
-  PDUs that declare a different byte order are rejected rather than
-  misinterpreted.
-- **The Dockerfile could not be built and produced an image that did not
-  run.** The dependency-caching stub stage created only `src/main.rs`, so
-  cargo could not parse the manifest once the lib target and the
-  `reflector_hotpath` bench were declared; the stage stubs all three target
-  files. The `rust:*-slim` builder tag had moved to Debian trixie (glibc 2.38)
-  while the runtime stage stayed on bookworm (glibc 2.36), so the binary
-  failed to start; both stages are pinned to the same Debian release. The
-  image builds with the production feature set (overridable
-  `ARG FEATURES`: ttl-nix, metrics, snmp, hwtstamp, control) and documents
-  ports 9090 and 9091. A containerized reflector answered a host sender with
-  0% loss. The Nix flake's `cargoHash` was regenerated and its feature list
-  includes `hwtstamp` and `control`; the Debian package includes `control`.
-- **18 incorrect RFC citations.** U/M/I flag semantics were attributed to
-  RFC 8972 §4.4.1, which does not exist; they are defined in §4.
-- Documentation corrections: `TlvList::clear_reflector_flags` claimed to
-  preserve the C bit while the method it delegates to clears it on purpose;
-  `--hmac-key` called 32 or more hex characters "recommended" when shorter keys
-  are rejected; the reflected-header module documentation described an earlier
-  draft round's positional matching.
-- The release workflow's `package` job does not inherit `contents: write`.
+- CoS, Location, Timestamp Information, Access Report and Follow-Up wire
+  layouts and reflected field handling; malformed padding/TLV parsing,
+  integrity coverage, flag ordering and final reply signing.
+- Reply source-address pinning, IPv4 packet-info byte order, IPv6 hop metadata,
+  scope preservation, SRv6 transit and routing-header cleanup.
+- Required session IDs and SSIDs are checked before measurement admission.
+  Mixed NTP/PTP timescales, timestamp error estimates, counter wrap and burst
+  loss/reordering accounting are handled consistently.
+- Send scheduling survives ICMP errors; terminal sends and failed startup
+  return errors. Broken measurement output also exits unsuccessfully.
+- Pnet macOS loopback parsing accounts for its 12-byte placeholder, and capture
+  thread panics cause a non-zero exit so supervisors can restart the process.
+- Windows debug startup no longer overflows its 1 MiB default stack: builds
+  reserve 4 MiB for the executable. Npcap library paths preserve existing SDK
+  paths. Native CI checks the executable reserve and required runtime tests.
+- macOS SNMP test peers explicitly restore blocking mode on accepted sockets.
+  AgentX accepts Net-SNMP's echoed administrative bindings while still rejecting
+  unrelated trailing data, incorrect correlation and error responses.
+- SNMP workers stop with their owner, including during incomplete handshakes,
+  and reconnect after master restarts. AgentX supports both byte orders and
+  bounds request framing, search ranges and GetBulk work.
+- Fuzz CI explicitly uses GNU/Linux for AddressSanitizer instead of selecting
+  a musl target with statically linked libc.
+- DEB systemd maintenance hooks are generated, and the unit installs under
+  `/usr/lib/systemd/system` for merged-/usr systems. Packages include release
+  notes and security guidance.
+- Feature-dependent services fail startup when unavailable; macOS packages
+  include metrics, and Windows packages include metrics and the control API.
+- Documentation, conformance citations, MIB descriptions and manual snapshots
+  match current behavior. Older test reports remain tied to their recorded
+  commits and platforms.
 
 ### Security
 
-- **Reflection and amplification hardening (open mode).** By default the
-  reflector does not redirect replies or amplify reply size for
-  unauthenticated peers:
-  - A Return Path TLV Return Address sub-TLV (RFC 9503 §5) is ignored unless
-    the operator sets `--return-path-allow-alternate`. When it is off (the
-    default), the reflector echoes the sub-TLV with the U flag and replies to
-    the packet source, so an open reflector cannot be used to aim traffic at a
-    third party.
-  - A Reflected Test Packet Control TLV (Type 12) length request pads the
-    single reply only when asymmetric reflection is enabled
-    (`--reflected-control-max-count > 0`, default `0`). The single-reply
-    padding used to run regardless of the count cap, which allowed about 15×
-    amplification. When asymmetric reflection is disabled, the request is
-    refused with the C flag.
-- **Bounded session table.** `--max-sessions` (default `65536`, `0` =
-  unlimited) caps the per-client session table. The reflector used to create
-  an unbounded session entry for every distinct source `IP:port`, so an
-  unauthenticated peer could grow the table until the process was
-  OOM-killed. At the cap, new clients were answered but not tracked, and the
-  periodic cleanup reclaimed stale entries. The "cap reached" warning is
-  logged once per saturation episode instead of once per rejected client,
-  which closes a log-amplification side channel.
-- **Per-packet panic isolation.** Both receive backends run
-  `process_stamp_packet` through `process_stamp_packet_isolated`, which catches
-  any panic, drops the offending packet and continues. A panic in the
-  processing path would otherwise unwind out of the `nix` receive loop and end
-  the process (a remote, single-packet DoS) or permanently stop the `pnet`
-  capture task. No reachable panic is known; this is defense in depth. The
-  caught-panic message is logged once at `error`, then at `debug`, to avoid a
-  log-amplification side channel.
-- **Address Group panic.** `l2_group_matches_any_local` validated only the
-  mask length before indexing both mask and group, so an Address Group
-  sub-TLV whose group was shorter than six octets panicked. The current parser
-  could not reach it, but a panic there is a reflector-wide denial of service,
-  so it is fixed as that class of defect.
-- **Key file permissions are enforced.** `HmacKey::from_file` rejects a key
-  file with any group or other permission bit (`0o077`) instead of logging a
-  warning and using it. In authenticated mode the daemon then refuses to start
-  (fail-closed) rather than running unauthenticated. The check runs on the
-  opened file descriptor (`fstat`), which closes the time-of-check to
-  time-of-use gap and checks the real target's permissions even when the path
-  is a symlink. `O_NOFOLLOW` is deliberately not used, so Kubernetes and
-  systemd-credential secret mounts (which expose secrets as symlinks) keep
-  working. `--hmac-key-dir` rejects a directory that is group- or
-  other-writable (a key-injection risk) and allows the recommended
-  group-readable `0750` layout.
-
-  **Breaking:** a key file that was accepted at `0640` or `0644` (with a
-  warning) is refused. Use `chmod 0400` or `0600` (owner-only). See
-  [doc/security.md](doc/security.md#file-permissions).
-- **CLI and environment HMAC keys are zeroized and redacted.** `--hmac-key` and
-  `STAMP_HMAC_KEY` are parsed into a `SecretString` wrapper instead of a plain
-  `String`. The plaintext key is zeroized on drop, so it cannot be recovered
-  from a core dump or freed heap, and is redacted from `Debug`, so it cannot
-  leak through a `{:?}` of `Configuration`. The decoded `HmacKey` was already
-  zeroized, but the original hex string stayed in memory for the life of the
-  process. `--hmac-key-file` is the recommended source; a command-line key is
-  still visible in `ps` and `/proc/<pid>/cmdline`.
-- **SNMP GETBULK/GETNEXT CPU amplification.** The AgentX sub-agent processes at
-  most 256 SearchRanges per PDU and computes the OID-space snapshot once per
-  PDU instead of rebuilding and re-sorting it for every `get_next` lookup. A
-  single GETBULK could pack about 65k ranges, each multiplied by up to 100
-  repetitions, with every lookup rebuilding the full OID list (sized by the
-  session table), which caused heavy CPU use and lock contention. The master
-  agent is local and semi-trusted, so this is robustness hardening.
-- **A misplaced HMAC TLV is treated as an integrity failure.** It triggers the
-  RFC 8972 §4.8 verification-failure procedure (the I flag on every TLV), not
-  only the parser's M flag on the offending TLV.
-- **Session-Sender reflected-TLV validation order** (RFC 8972 §4-17/18/19,
-  §4.8-16/17). `validate_reflected_tlvs` (`src/sender.rs`) evaluates a
-  reflected packet's U/M/I flags and its TLV-HMAC result before reading any
-  TLV value for effect (the Micro-session ID used for session binding, the
-  Access Report acknowledgement marker, the CoS CE congestion marker). A
-  U-flagged TLV is skipped rather than trusted, an M-flagged TLV stops the scan
-  of the remaining TLVs, and any I-flagged TLV or a failed TLV-HMAC closes the
-  integrity gate for the whole reflected TLV set. A forged Micro-session ID (or
-  other TLV value) could be consumed before its own flag or HMAC failure was
-  accounted for. Tests: `test_forged_msid_with_{u,m,i}_flag_not_consumed`,
-  `test_forged_msid_ignored_when_tlv_hmac_fails` (`src/sender.rs`).
+- Rustls 0.23.45 fixes RUSTSEC-2026-0285, a TLS 1.3 handshake encryption-level
+  validation flaw. The dependency audit passes without advisory exceptions.
+- Reflection/amplification controls, bounded per-source rate-limit state,
+  bounded sessions and packet panic isolation limit hostile-input costs.
+- Key/token files enforce private permissions; secrets are redacted and
+  zeroized. Key rotation preserves signatures on already accepted bursts.
 
 ## [0.9.0] - 2026-06-10
 

@@ -35,21 +35,21 @@ jobs:
           - process_stamp_packet
           - sender_reply
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
       # A prebuilt binary; building cargo-fuzz from source takes minutes per leg.
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.87.24
         with:
           tool: cargo-fuzz
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           workspaces: fuzz
           key: fuzz-${{ matrix.target }}
       # Each run starts from the corpus the previous run grew.
       - name: Restore corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -64,10 +64,11 @@ jobs:
           DURATION: ${{ github.event.inputs.duration_secs || '60' }}
         run: |
           cd fuzz
-          cargo +nightly fuzz run "$FUZZ_TARGET" -- -max_total_time="$DURATION"
+          cargo metadata --locked --format-version 1 > /dev/null
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$FUZZ_TARGET" -- -max_total_time="$DURATION"
       - name: Upload crashes (if any)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         env:
           FUZZ_TARGET: ${{ matrix.target }}
         with:

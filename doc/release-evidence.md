@@ -10,7 +10,7 @@ runtime behavior.
 ## Release gate boundary
 
 The tag workflow calls `rust.yml` and `conformance.yml` as reusable workflows.
-Publication waits for both and for the source, Linux and macOS package jobs.
+Publication waits for both and for the source, Linux, macOS and Windows package jobs.
 This runs backend, native-platform, MSRV, evidence and privileged checks on the
 tagged commit. Platform exclusions still apply; required driver-free Windows
 tests do not establish driver-backed capture behavior.
@@ -128,6 +128,8 @@ Scheduler tests inject a known MTU; a separate test checks that an unavailable
 route MTU drops a size-controlled burst while an ordinary reply still
 succeeds.
 
+The job builds with `ttl-pnet,metrics,control`. Windows executables reserve
+4 MiB for the main stack, checked from the PE header during release builds.
 The job downloads pinned Npcap SDK and runtime files and checks that the staged
 DLLs are x64. Missing DLLs or a failed required test fail the job. The job then
 runs the mixed-clock suite 20 times; any failed run stops the step. A final
@@ -137,7 +139,7 @@ driver is installed. All logs are uploaded.
 To run the required targets yourself:
 
 ```sh
-cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet \
+cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet,metrics,control \
   --lib --test config_file_test --test malformed_input_test --test proptest_tlv \
   --test mixed_clock_test --test required_micro_session_test \
   --test session_ssid_validation_test --test sender_measurement_test \
@@ -199,6 +201,55 @@ result. STAMP YANG and TWAMP-Control are outside the product scope.
 
 Each entry names the date, commit and platform it applies to. Later commits are
 not covered until the procedure is repeated.
+
+### 1.0.0 preparation, 2026-10-05
+
+Local checks cover the working-tree changes based on `614a61f1`, on x86_64
+Linux (WSL2), with Rust 1.99 and a separate Rust 1.86 check. No release was
+tagged or published. The [dependency inventory](release/1.0.0-dependencies.json)
+records all 31 direct dependencies from the main and fuzz manifests; each
+matches its latest non-yanked stable release. Upstream Axum still pins the
+transitive `matchit` dependency to 0.8.4.
+
+| Check | Result |
+|---|---|
+| Linux all-features tests | 1,363 passed; 12 privileged tests ignored |
+| Linux default tests | 1,262 passed; 12 privileged tests ignored |
+| Rust 1.86 | Locked all-features, all-targets compilation passed |
+| Clippy | Default, all-features and pnet profiles passed with warnings denied |
+| Formatting and Rustdoc | Passed; Rustdoc warnings denied |
+| Dependency audits | Main and fuzz manifests passed advisories, bans, licenses and sources |
+| Independent UDP fixtures | All 16 IPv4/IPv6, auth/open, clock and state combinations passed |
+| Control and Net-SNMP | All five HTTP/TLS and reference-master cases passed, including reconnection |
+| Sanitizer fuzzing | All nine targets passed a three-second smoke run each |
+| Nix | x86_64-linux package/tests, Clippy and formatting passed |
+| Windows x64 | `ttl-pnet,metrics,control` cross-link and all-targets Clippy passed; PE stack reserve verified at 4 MiB |
+| macOS Intel | All-targets compilation passed with `ttl-nix,ttl-pnet,metrics,snmp,hwtstamp` |
+| Packaging | crates.io package verification and x86_64 DEB/RPM generation passed |
+| Metadata and workflows | Release versions, Gentoo crate list, Python tests and actionlint passed |
+| Standards | All ten frozen draft/RFC metadata records are current |
+
+The DEB was extracted and its executable reported `stamp-suite 1.0.0`.
+Its control data includes `libc6 (>= 2.34)`, `adduser` and
+`init-system-helpers`; generated scripts maintain the systemd unit. Both Linux
+packages include the manual, MIB, release notes and security guidance.
+
+The preceding [CI run](https://github.com/asmie/stamp-suite/actions/runs/37240020027)
+failed on an obsolete Nix hash, the Rustls advisory, inherited nonblocking
+macOS SNMP test sockets and a Windows CLI stack overflow. These causes are
+addressed. The [integration run](https://github.com/asmie/stamp-suite/actions/runs/37240019965)
+also exposed Net-SNMP's administrative AgentX binding echoes; the sub-agent now
+accepts matching echoes and rejects malformed or unrelated data. Fuzz CI
+explicitly selects GNU/Linux so AddressSanitizer can run.
+
+Before tagging, require a fresh native macOS and Windows CI run on the final
+commit, plus the privileged wire gate. Cross-compilation does not establish
+runtime behavior. This host's Windows application-control policy blocked Cargo
+build-script executables (OS error 4551), and no native Mac was available.
+macOS TLS cross-compilation also needs Apple's SDK. Container, Gentoo, OpenWrt
+and ARM distro builds were not run locally. Generate Gentoo's `Manifest` after
+the source archive is published; the release workflow fills the OpenWrt hash
+from that same archive. Physical NIC timestamp coverage remains outstanding.
 
 ### Net-SNMP reference master, 2026-09-11
 

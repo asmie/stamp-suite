@@ -7,7 +7,7 @@ see [SECURITY.md](SECURITY.md).
 
 ## Build
 
-Rust 1.85 or newer is required (`rust-version` in `Cargo.toml`).
+Rust 1.86 or newer is required (`rust-version` in `Cargo.toml`).
 
 ```sh
 cargo build                     # debug build, default features
@@ -90,7 +90,7 @@ Stable rustfmt, which CI uses, prints a warning and ignores them. Group imports
 by hand in that style (standard library, external crates, then `crate::`).
 
 CI also runs `cargo doc --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings`,
-`cargo check --all-features --all-targets` on the 1.85 toolchain, and
+`cargo check --all-features --all-targets` on the 1.86 toolchain, and
 `cargo deny check` for advisories, licenses and sources.
 
 ## Conformance tooling

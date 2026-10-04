@@ -9,7 +9,7 @@ EAPI=8
 
 CRATES="
 	aho-corasick@1.1.5
-	android_system_properties@0.1.6
+	alloca@0.4.0
 	anes@0.1.6
 	anstream@1.0.0
 	anstyle-parse@1.0.0
@@ -19,63 +19,54 @@ CRATES="
 	arc-swap@1.9.2
 	atomic-waker@1.1.2
 	autocfg@1.5.1
-	aws-lc-rs@1.18.0
-	aws-lc-sys@0.44.0
 	axum-core@0.5.6
 	axum-server@0.8.0
 	axum@0.8.9
 	base64@0.22.1
-	bitflags@2.13.1
+	bitflags@2.13.2
 	block-buffer@0.12.1
 	bumpalo@3.20.3
 	bytes@1.12.1
 	cast@0.3.0
-	cc@1.4.4
-	cfg-if@1.0.4
+	cc@1.6.0
+	cfg-if@1.0.5
 	cfg_aliases@0.2.2
-	chrono@0.4.45
 	ciborium-io@0.2.2
 	ciborium-ll@0.2.2
 	ciborium@0.2.2
-	clap@4.6.6
-	clap_builder@4.6.6
-	clap_derive@4.6.4
-	clap_lex@1.1.0
+	clap@4.6.7
+	clap_builder@4.6.7
+	clap_derive@4.6.7
+	clap_lex@1.1.1
 	clap_mangen@0.3.3
-	cmake@0.1.58
 	cmov@0.5.4
 	colorchoice@1.0.5
 	const-oid@0.10.2
-	core-foundation-sys@0.8.7
-	core-foundation@0.10.1
 	cpufeatures@0.3.1
-	criterion-plot@0.5.0
-	criterion@0.5.1
-	crossbeam-epoch@0.9.20
-	crossbeam-utils@0.8.22
+	criterion-plot@0.8.2
+	criterion@0.8.2
+	crossbeam-epoch@0.9.21
+	crossbeam-utils@0.8.23
 	crunchy@0.2.4
 	crypto-common@0.2.2
 	ctutils@0.4.2
 	digest@0.11.3
-	dunce@1.0.5
 	either@1.18.0
 	equivalent@1.0.2
 	errno@0.3.14
 	evmap@11.0.0
 	fastrand@2.5.0
-	find-msvc-tools@0.1.11
+	find-msvc-tools@0.1.14
 	fnv@1.0.7
 	foldhash@0.2.0
 	form_urlencoded@1.2.2
-	fs-err@3.3.1
-	fs_extra@1.3.0
+	fs-err@3.3.2
 	futures-channel@0.3.34
 	futures-core@0.3.34
-	futures-macro@0.3.34
 	futures-sink@0.3.34
 	futures-task@0.3.34
 	futures-util@0.3.34
-	generator@0.8.9
+	generator@0.8.10
 	getrandom@0.2.17
 	getrandom@0.3.4
 	getrandom@0.4.3
@@ -86,7 +77,6 @@ CRATES="
 	hashbrown@0.16.1
 	hashbrown@0.17.1
 	heck@0.5.0
-	hermit-abi@0.5.3
 	hex@0.4.3
 	hmac@0.13.0
 	http-body-util@0.1.5
@@ -94,24 +84,18 @@ CRATES="
 	http@1.5.0
 	httparse@1.10.1
 	httpdate@1.0.3
-	hybrid-array@0.4.14
-	hyper-rustls@0.27.9
-	hyper-util@0.1.20
+	hybrid-array@0.4.15
+	hyper-util@0.1.21
 	hyper@1.11.1
-	iana-time-zone-haiku@0.1.2
-	iana-time-zone@0.1.65
-	indexmap@2.14.1
-	ipnet@2.12.1
+	indexmap@2.14.2
 	ipnetwork@0.20.0
-	is-terminal@0.4.17
 	is_terminal_polyfill@1.70.2
-	itertools@0.10.5
+	itertools@0.13.0
 	itoa@1.0.18
-	jobserver@0.1.35
-	js-sys@0.3.104
-	lazy_static@1.5.0
+	js-sys@0.3.106
+	lazy_static@1.5.1
 	left-right@0.11.8
-	libc@0.2.189
+	libc@0.2.190
 	linux-raw-sys@0.12.1
 	log@0.4.34
 	loom@0.7.2
@@ -123,7 +107,7 @@ CRATES="
 	metrics-util@0.20.4
 	metrics@0.24.6
 	mime@0.3.17
-	mio@1.2.2
+	mio@1.2.4
 	nix@0.31.3
 	no-std-net@0.6.0
 	nu-ansi-term@0.50.3
@@ -131,10 +115,9 @@ CRATES="
 	once_cell@1.21.4
 	once_cell_polyfill@1.70.2
 	oorandom@11.1.5
-	openssl-probe@0.2.1
+	page_size@0.6.0
 	percent-encoding@2.3.2
 	pin-project-lite@0.2.17
-	pkg-config@0.3.34
 	pnet@0.35.0
 	pnet_base@0.35.0
 	pnet_datalink@0.35.0
@@ -163,18 +146,14 @@ CRATES="
 	regex@1.13.1
 	ring@0.17.14
 	roff@1.1.1
-	rustix@1.1.4
-	rustls-native-certs@0.8.4
+	rustix@1.1.5
 	rustls-pki-types@1.15.1
 	rustls-webpki@0.103.15
-	rustls@0.23.43
+	rustls@0.23.45
 	rustversion@1.0.23
 	ryu@1.0.23
 	same-file@1.0.6
-	schannel@0.1.29
 	scoped-tls@1.0.1
-	security-framework-sys@2.17.0
-	security-framework@3.7.0
 	serde@1.0.229
 	serde_core@1.0.229
 	serde_derive@1.0.229
@@ -188,23 +167,23 @@ CRATES="
 	signal-hook-registry@1.4.8
 	sketches-ddsketch@0.3.1
 	slab@0.4.12
-	smallvec@1.15.2
+	smallvec@1.16.2
 	socket2@0.6.5
 	strsim@0.11.1
 	subtle@2.6.1
 	syn@2.0.119
-	syn@3.0.4
+	syn@3.0.6
 	sync_wrapper@1.0.2
 	tempfile@3.27.0
-	thiserror-impl@2.0.20
-	thiserror@2.0.20
+	thiserror-impl@2.0.21
+	thiserror@2.0.21
 	thread_local@1.1.10
 	tinytemplate@1.2.1
 	tokio-macros@2.7.2
-	tokio-rustls@0.26.4
+	tokio-rustls@0.26.6
 	tokio-util@0.7.19
-	tokio@1.53.1
-	toml@1.1.4+spec-1.1.0
+	tokio@1.53.2
+	toml@1.1.6+spec-1.1.0
 	toml_datetime@1.1.1+spec-1.1.0
 	toml_parser@1.1.3+spec-1.1.0
 	tower-layer@0.3.3
@@ -216,32 +195,26 @@ CRATES="
 	tracing-serde@0.2.0
 	tracing-subscriber@0.3.23
 	tracing@0.1.44
-	try-lock@0.2.5
 	typenum@1.20.1
 	unarray@0.1.4
-	unicode-ident@1.0.24
+	unicode-ident@1.0.26
 	untrusted@0.9.0
 	utf8parse@0.2.2
 	valuable@0.1.1
 	walkdir@2.5.0
-	want@0.3.1
 	wasi@0.11.1+wasi-snapshot-preview1
 	wasip2@1.0.4+wasi-0.2.12
-	wasm-bindgen-macro-support@0.2.127
-	wasm-bindgen-macro@0.2.127
-	wasm-bindgen-shared@0.2.127
-	wasm-bindgen@0.2.127
-	web-sys@0.3.104
+	wasm-bindgen-macro-support@0.2.129
+	wasm-bindgen-macro@0.2.129
+	wasm-bindgen-shared@0.2.129
+	wasm-bindgen@0.2.129
+	web-sys@0.3.106
 	winapi-i686-pc-windows-gnu@0.4.0
 	winapi-util@0.1.11
 	winapi-x86_64-pc-windows-gnu@0.4.0
 	winapi@0.3.9
-	windows-core@0.62.2
-	windows-implement@0.60.2
-	windows-interface@0.59.3
 	windows-link@0.2.1
 	windows-result@0.4.1
-	windows-strings@0.5.1
 	windows-sys@0.52.0
 	windows-sys@0.61.2
 	windows-targets@0.52.6
@@ -255,23 +228,21 @@ CRATES="
 	windows_x86_64_msvc@0.52.6
 	winnow@1.0.4
 	wit-bindgen@0.57.1
-	zerocopy-derive@0.8.56
-	zerocopy@0.8.56
+	zerocopy-derive@0.8.59
+	zerocopy@0.8.59
 	zeroize@1.9.0
 	zmij@1.0.23
 "
 
-# Cargo.toml `rust-version`; the floor is Debian trixie's compiler so every
-# distribution build uses the same MSRV. ring/rustls (USE=control) need only
-# a C toolchain, no system libraries.
-RUST_MIN_VER="1.85.0"
+# Matches Cargo.toml; ring/rustls need a C toolchain, no system libraries.
+RUST_MIN_VER="1.86.0"
 
 inherit cargo systemd
 
 DESCRIPTION="Simple Two-Way Active Measurement Protocol (RFC 8762/8972) sender and reflector"
 HOMEPAGE="https://github.com/asmie/stamp-suite"
 SRC_URI="
-	https://github.com/asmie/${PN}/archive/v${PV}.tar.gz -> ${P}.gh.tar.gz
+	https://github.com/asmie/${PN}/releases/download/v${PV}/${P}.tar.gz
 	${CARGO_CRATE_URIS}
 "
 

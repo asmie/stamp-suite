@@ -642,6 +642,12 @@ impl AgentXSession {
 
         let (header, payload) = self.read_response()?;
         self.validate_response(&header, &payload, pid, true)?;
+        Self::validate_admin_echo(
+            &header,
+            &payload,
+            &Oid(vec![]),
+            Some(description.as_bytes()),
+        )?;
         self.session_id = header.session_id;
         log::info!("AgentX session opened (session_id={})", self.session_id);
         Ok(())
@@ -661,6 +667,7 @@ impl AgentXSession {
 
         let (header, response_payload) = self.read_response()?;
         self.validate_response(&header, &response_payload, pid, false)?;
+        Self::validate_admin_echo(&header, &response_payload, subtree, None)?;
 
         log::info!("Registered OID subtree {}", subtree);
         Ok(())
@@ -748,7 +755,7 @@ impl AgentXSession {
         if header.packet_id != packet_id || (!opening && header.session_id != self.session_id) {
             return Err(AgentXError::Protocol("Uncorrelated AgentX response".into()));
         }
-        if payload.len() != 8 {
+        if payload.len() < 8 {
             return Err(AgentXError::Protocol(
                 "Invalid administrative Response length".into(),
             ));
@@ -762,6 +769,48 @@ impl AgentXSession {
             return Err(AgentXError::Protocol(
                 "Unexpected administrative Response index".into(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Net-SNMP may echo the Open or Register binding in its Response.
+    /// Accept only that binding; arbitrary trailing data is still an error.
+    fn validate_admin_echo(
+        header: &PduHeader,
+        payload: &[u8],
+        expected_oid: &Oid,
+        description: Option<&[u8]>,
+    ) -> Result<(), AgentXError> {
+        let extra = &payload[8..];
+        if extra.is_empty() {
+            return Ok(());
+        }
+        let invalid = || AgentXError::Protocol("Invalid administrative Response binding".into());
+        let order = ByteOrder::from_flags(header.flags);
+        if extra.len() < 8
+            || order.u16([extra[0], extra[1]]) != if description.is_some() { 4 } else { 5 }
+            || extra[2..4] != [0, 0]
+        {
+            return Err(invalid());
+        }
+        let (oid, include, used) = decode_oid_order(&extra[4..], order)?;
+        // Net-SNMP expands the Open null OID to 0.0 when echoing it.
+        let null_open_oid = description.is_some() && expected_oid.is_empty() && oid.0 == [0, 0];
+        if (oid != *expected_oid && !null_open_oid) || include {
+            return Err(invalid());
+        }
+        let value = &extra[4 + used..];
+        if let Some(expected) = description {
+            let padded = (expected.len() + 3) & !3;
+            if value.len() != 4 + padded
+                || order.u32(value[..4].try_into().unwrap()) as usize != expected.len()
+                || value[4..4 + expected.len()] != *expected
+                || value[4 + expected.len()..].iter().any(|b| *b != 0)
+            {
+                return Err(invalid());
+            }
+        } else if !value.is_empty() {
+            return Err(invalid());
         }
         Ok(())
     }

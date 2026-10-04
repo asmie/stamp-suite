@@ -25,14 +25,14 @@ jobs:
     name: Matrix and citation consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Test evidence checkers and independent wire oracle
         run: python3 -m unittest discover -s scripts/tests -v
       - name: Check matrix counts
         run: python3 scripts/check_conformance_counts.py --json
       - name: Check source citations
         run: python3 scripts/check_conformance_citations.py --json --details > citations.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: conformance-citations
@@ -51,13 +51,13 @@ jobs:
           - name: all-features
             flags: '--all-features'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo build --locked ${{ matrix.flags }}
       - name: Require independent protocol combinations
         run: python3 scripts/interop_stamp.py --binary target/debug/stamp-suite --report interop.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: independent-wire-${{ matrix.name }}
@@ -69,9 +69,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Install reference tools without starting a system service
         run: |
           sudo apt-get update
@@ -87,7 +87,7 @@ jobs:
       - run: cargo build --locked --all-features
       - name: Require authenticated control and reference-master exchanges
         run: python3 scripts/release_checks.py --binary target/debug/stamp-suite --report release-integration.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: release-integration
@@ -98,9 +98,9 @@ jobs:
     name: Locked fuzz harness build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo check --locked --manifest-path fuzz/Cargo.toml
 
   privileged:
@@ -108,9 +108,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
       - name: Install wire-test tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 tcpdump util-linux ethtool
       - name: Build pnet fixture and tests without root
@@ -135,7 +135,7 @@ jobs:
           ' 2>&1 | tee netns.log
       - name: Require reply-route MTU tests
         run: python3 scripts/run_privileged_test.py netns-artifacts.json route_mtu_test 1 sudo -n unshare --net --fork env STAMP_REQUIRE_PRIVILEGED=1 STAMP_MTU_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: privileged-test-artifacts

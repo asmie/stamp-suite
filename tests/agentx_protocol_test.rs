@@ -87,6 +87,10 @@ struct Peer {
 }
 impl Peer {
     fn start() -> Self {
+        Self::start_with_echo(false)
+    }
+
+    fn start_with_echo(echo: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("master");
         let listener = UnixListener::bind(&path).unwrap();
@@ -106,10 +110,22 @@ impl Peer {
             .set_write_timeout(Some(Duration::from_secs(4)))
             .unwrap();
         for kind in [1, 3] {
-            let (h, _) = read_pdu(&mut stream);
+            let (h, body) = read_pdu(&mut stream);
             assert_eq!(h[1], kind);
             let id = u32::from_be_bytes(h[12..16].try_into().unwrap());
-            stream.write_all(&pdu(18, 42, 0, id, &[0; 8])).unwrap();
+            let mut payload = vec![0; 8];
+            if echo {
+                payload.extend([0, if kind == 1 { 4 } else { 5 }, 0, 0]);
+                if kind == 1 {
+                    // Net-SNMP canonicalizes the null Open OID to 0.0.
+                    payload.extend([2, 0, 0, 0]);
+                    payload.extend([0; 8]);
+                    payload.extend(&body[8..]);
+                } else {
+                    payload.extend(&body[4..]);
+                }
+            }
+            stream.write_all(&pdu(18, 42, 0, id, &payload)).unwrap();
         }
         Self {
             stream,
@@ -140,6 +156,15 @@ impl Drop for Peer {
             let _ = worker.join();
         }
     }
+}
+
+#[test]
+fn net_snmp_echoed_administrative_bindings_register_and_serve() {
+    let mut peer = Peer::start_with_echo(true);
+    let payload = range(&[1, 1], false, &[]);
+    let response = peer.request(5, &payload);
+    assert_eq!(bindings(&response), vec![(2, vec![1, 1])]);
+    assert_eq!(&response[response.len() - 4..], &1u32.to_be_bytes());
 }
 fn bindings(mut data: &[u8]) -> Vec<(u16, Vec<u32>)> {
     let mut result = vec![];
@@ -347,7 +372,18 @@ fn cancellation_closes_the_session_with_reason_shutdown() {
 #[test]
 fn administrative_responses_require_valid_layout_status_and_correlation() {
     for stage in [1, 3] {
-        for fault in ["short", "error", "packet", "type", "index", "session"] {
+        for fault in [
+            "short",
+            "error",
+            "packet",
+            "type",
+            "index",
+            "session",
+            "trailing",
+            "echo-oid",
+            "echo-value",
+            "echo-short",
+        ] {
             if stage == 1 && fault == "session" {
                 continue;
             }
@@ -364,7 +400,7 @@ fn administrative_responses_require_valid_layout_status_and_correlation() {
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
             for kind in [1, 3] {
-                let (h, _) = read_pdu(&mut stream);
+                let (h, body) = read_pdu(&mut stream);
                 assert_eq!(h[1], kind);
                 let mut packet = u32::from_be_bytes(h[12..16].try_into().unwrap());
                 let mut session = 42;
@@ -378,6 +414,25 @@ fn administrative_responses_require_valid_layout_status_and_correlation() {
                         "type" => response_kind = 7,
                         "index" => payload[7] = 1,
                         "session" => session += 1,
+                        "trailing" => payload.extend([0; 8]),
+                        "echo-oid" | "echo-value" | "echo-short" => {
+                            payload.extend([0, if kind == 1 { 4 } else { 5 }, 0, 0]);
+                            if kind == 1 {
+                                payload.extend(oid(&[0, 0], false));
+                                payload.extend(&body[8..]);
+                            } else {
+                                payload.extend(&body[4..]);
+                            }
+                            match fault {
+                                "echo-oid" => payload[19] ^= 1,
+                                "echo-value" if kind == 1 => payload[28] ^= 1,
+                                "echo-value" => payload.extend([0; 4]),
+                                "echo-short" => {
+                                    payload.pop();
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
                         _ => unreachable!(),
                     }
                 }
