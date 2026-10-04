@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "source": {
+    "report": "doc/interop/2026-10-04/smoke.json.gz",
+    "sha256": "af6c3adafa2597754877560add77a8501623952700c5b1d36c48208966542b3e",
+    "case_ids": [
+      0,
+      1,
+      3
+    ],
+    "note": "Recorded stamp-suite sender/teaparty reflector exchanges; process logs and timing metadata omitted. HMAC key is the public test key in interop_apps.py."
+  },
+  "cases": {
+    "open": {
+      "sender": "stamp",
+      "reflector": "tea",
+      "sender_auth": false,
+      "reflector_auth": false,
+      "extensions": [],
+      "group": "smoke",
+      "wire": [
+        {
+          "direction": "request",
+          "hex": "00000000ee6d329d0549d81d0001002a00000000000000000000000000000000000000000000000000000000",
+          "peer": [
+            "127.0.0.1",
+            37977
+          ],
+          "tos": 0
+        },
+        {
+          "direction": "reply",
+          "hex": "00000001ee6d329d057629700001002aee6d329d055ecdd100000000ee6d329d0549d81d0001000040000000",
+          "peer": [
+            "127.0.0.1",
+            37473
+          ],
+          "tos": 0,
+          "tlvs": []
+        },
+        {
+          "direction": "request",
+          "hex": "00000001ee6d329d0ab426f90001002a00000000000000000000000000000000000000000000000000000000",
+          "peer": [
+            "127.0.0.1",
+            37977
+          ],
+          "tos": 0
+        },
+        {
+          "direction": "reply",
+          "hex": "00000002ee6d329d0ad28b790001002aee6d329d0ac1e4fc00000001ee6d329d0ab426f90001000040000000",
+          "peer": [
+            "127.0.0.1",
+            37473
+          ],
+          "tos": 0,
+          "tlvs": []
+        }
+      ]
+    },
+    "cos": {
+      "sender": "stamp",
+      "reflector": "tea",
+      "sender_auth": false,
+      "reflector_auth": false,
+      "extensions": [
+        "time",
+        "cos"
+      ],
+      "group": "smoke",
+      "wire": [
+        {
+          "direction": "request",
+          "hex": "00000000ee6d329dae04bab60001002a0000000000000000000000000000000000000000000000000000000080040004b80080008003000400000000",
+          "peer": [
+            "127.0.0.1",
+            48038
+          ],
+          "tos": 186
+        },
+        {
+          "direction": "reply",
+          "hex": "00000001ee6d329dae2f84b90001002aee6d329dae13915f00000000ee6d329dae04bab6000100004000000000040004bae890000003000401020102",
+          "peer": [
+            "127.0.0.1",
+            36303
+          ],
+          "tos": 186,
+          "tlvs": [
+            {
+              "type": 4,
+              "flags": 0,
+              "length": 4,
+              "value": "bae89000",
+              "offset": 44,
+              "truncated": false
+            },
+            {
+              "type": 3,
+              "flags": 0,
+              "length": 4,
+              "value": "01020102",
+              "offset": 52,
+              "truncated": false
+            }
+          ]
+        },
+        {
+          "direction": "request",
+          "hex": "00000001ee6d329db37949860001002a0000000000000000000000000000000000000000000000000000000080040004b80080008003000400000000",
+          "peer": [
+            "127.0.0.1",
+            48038
+          ],
+          "tos": 186
+        },
+        {
+          "direction": "reply",
+          "hex": "00000002ee6d329db398d9370001002aee6d329db3876fc200000001ee6d329db3794986000100004000000000040004bae890000003000401020102",
+          "peer": [
+            "127.0.0.1",
+            36303
+          ],
+          "tos": 186,
+          "tlvs": [
+            {
+              "type": 4,
+              "flags": 0,
+              "length": 4,
+              "value": "bae89000",
+              "offset": 44,
+              "truncated": false
+            },
+            {
+              "type": 3,
+              "flags": 0,
+              "length": 4,
+              "value": "01020102",
+              "offset": 52,
+              "truncated": false
+            }
+          ]
+        }
+      ]
+    },
+    "authenticated": {
+      "sender": "stamp",
+      "reflector": "tea",
+      "sender_auth": true,
+      "reflector_auth": true,
+      "extensions": [],
+      "group": "smoke",
+      "wire": [
+        {
+          "direction": "request",
+          "hex": "00000000000000000000000000000000ee6d329f014afa010001002a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000062c721b7528f87c402f959b4f565b579",
+          "peer": [
+            "127.0.0.1",
+            47902
+          ],
+          "tos": 0
+        },
+        {
+          "direction": "reply",
+          "hex": "00000001000000000000000000000000ee6d329f0176311f0001002a00000000ee6d329f015c8130000000000000000000000000000000000000000000000000ee6d329f014afa0100010000000000004000000000000000000000000000000022cb7f6daa95627fcceea368c2c19c04",
+          "peer": [
+            "127.0.0.1",
+            37778
+          ],
+          "tos": 0,
+          "tlvs": []
+        },
+        {
+          "direction": "request",
+          "hex": "00000001000000000000000000000000ee6d329f06ba66020001002a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c9d4a871a481bbd8776cf63015d8b37f",
+          "peer": [
+            "127.0.0.1",
+            47902
+          ],
+          "tos": 0
+        },
+        {
+          "direction": "reply",
+          "hex": "00000002000000000000000000000000ee6d329f06eee8a70001002a00000000ee6d329f06cf3c8b000000000000000000000001000000000000000000000000ee6d329f06ba6602000100000000000040000000000000000000000000000000b43faadd107136db2fcc82c71c88ebfd",
+          "peer": [
+            "127.0.0.1",
+            37778
+          ],
+          "tos": 0,
+          "tlvs": []
+        }
+      ]
+    }
+  }
+}
