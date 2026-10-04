@@ -1,8 +1,6 @@
 # RFC 10052 conformance
 
-This matrix maps each normative clause of RFC 10052 (Reflected Test Packet
-Control TLV, Type 12) to stamp-suite code and tests. It is for contributors and
-reviewers who check what the reflector and sender do with Type 12 requests.
+RFC 10052 Type-12 requirements, implementation and tests.
 
 Revision frozen: RFC 10052, September 2026.
 Source: [RFC 10052](https://www.rfc-editor.org/rfc/rfc10052).

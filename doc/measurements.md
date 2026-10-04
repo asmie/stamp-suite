@@ -1,8 +1,6 @@
 # Sender reply and directional measurements
 
-This document explains the sender's reply-copy counters, Direct Measurement
-and Follow-Up results, clock-quality metadata and session state, for anyone
-reading sender reports.
+Reply counts, Direct Measurement, Follow-Up delays, clock quality and session state.
 
 JSON reports include `measurements` and `ber` objects; text reports print their
 summaries. CSV embeds JSON in the `ber`, `measurements`, and `owd_clock_quality`
@@ -66,6 +64,38 @@ deduplication beyond the retained histories are unavailable. After eviction, an
 old duplicate can appear as an additional reply if its probe is still known.
 Identical stateless burst copies with the same T3 are indistinguishable from
 network duplicates because the wire packet has no separate copy identifier.
+
+## Extension validation diagnostics
+
+Interim and final JSON reports include `measurements.tlv_validation`; CSV
+embeds it in `measurements`. RTT receipt alone does not confirm extension
+processing or TLV integrity.
+
+| Field | Meaning |
+| --- | --- |
+| `evaluated_replies` | Replies whose TLVs were evaluated, including required Micro-session ID checks on an empty list. |
+| `rejected_replies` | Evaluated replies discarded by required Micro-session ID validation. |
+| `observed_tlvs` | All parsed TLV occurrences, including HMAC and duplicate HMAC entries retained by lenient parsing. |
+| `hmac` | Reply counts for `not_requested`, `missing`, `verified`, `unverified` and `failed` TLV HMAC outcomes. |
+| `flags` | TLV occurrence counts for `unrecognized` (U), `malformed` (M), `integrity_failed` (I) and `conformant_reflected` (C). |
+| `by_type` | Occurrence and flag counts grouped by decimal wire type codepoint; for example, `"8"` is HMAC and `"11"` is Micro-session ID. |
+
+Counts precede SSID admission and deduplication, so repeats and later-rejected
+replies are included. Packets dropped before evaluation, such as base HMAC
+failures, are excluded. Base-only reception and empty lists without a required
+Micro-session ID add nothing. Counters survive reply-history eviction.
+
+HMAC outcomes: `not_requested` means no HMAC or key; `missing` means an
+optional/exempt HMAC is absent with a key configured. Missing required HMACs
+count as `failed`. `unverified` means verification was unavailable, for example
+without a key or with unusable flags. `verified` confirms the digest, but I
+can still block values. `failed` blocks TLV values; base timing may remain
+usable unless required session binding fails.
+
+Flags count parsed occurrences, including parser-added M on truncation,
+not every typed-value error. Flags can overlap. Clear flags or C alone do
+not prove usable values: HMAC and preceding M also matter. Missing reply
+TLVs are not counted as unsupported.
 
 ## Direct Measurement counter window
 
@@ -148,7 +178,6 @@ omission counts are in the `ber` object; they are not a per-copy BER metric.
 See [BER history](statistics.md#memory-and-ber-history), the
 [TLV reference](architecture.md#tlv-extensions-reference) and the
 [BER draft conformance](conformance/draft-stamp-ber.md).
-
 
 ## Clock quality accompanying delay
 

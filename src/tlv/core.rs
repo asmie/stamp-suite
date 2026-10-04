@@ -512,17 +512,12 @@ impl RawTlv {
         ))
     }
 
-    /// Parses a single TLV leniently, marking truncated TLVs as malformed.
-    ///
-    /// Unlike `parse()`, this method handles truncated TLVs by:
-    /// - Taking whatever value bytes are available (up to declared length)
-    /// - Setting the M-flag (malformed) on the TLV
-    /// - Consuming all remaining bytes
-    ///
-    /// Returns the parsed TLV, bytes consumed, and whether the TLV was malformed.
+    /// Parse one TLV, retaining available bytes and setting M on truncation.
+    /// A truncated TLV consumes the rest of the buffer.
+    /// Return the TLV, consumed byte count and malformed status.
     ///
     /// # Errors
-    /// Returns an error only if the buffer is too small for even a TLV header.
+    /// Fewer bytes than a TLV header.
     pub fn parse_lenient(buf: &[u8]) -> Result<(Self, usize, bool), TlvError> {
         if buf.len() < TLV_HEADER_SIZE {
             return Err(TlvError::BufferTooSmall(buf.len()));

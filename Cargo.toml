@@ -38,13 +38,9 @@ control = [
     "dep:rustls",
 ]
 snmp = []
-# Kernel/hardware timestamping. Gates the SO_TIMESTAMPING read paths:
-# Linux gets kernel RX timestamps (SCM_TIMESTAMPING cmsgs) and TX timestamps
-# (MSG_ERRQUEUE + OPT_ID correlation) with an optional NIC-hardware tier
-# (--hwtstamp on → SIOCSHWTSTAMP); macOS gets kernel software RX timestamps
-# (SO_TIMESTAMP); other platforms compile to a graceful no-op. The
-# ETHTOOL_GET_TS_INFO capability probe is built unconditionally on Linux.
-# No extra dependencies.
+# Kernel RX timestamps on Linux/macOS; Linux TX and NIC timestamps.
+# `--hwtstamp on` configures the NIC. Other platforms use application timestamps.
+# ETHTOOL_GET_TS_INFO probing is always built. No extra dependencies.
 hwtstamp = []
 
 [dependencies]
@@ -100,14 +96,8 @@ criterion = { version = "0.5", default-features = false, features = ["html_repor
 # Renders dist/man/stamp-suite.1 from the clap definition (tests/man_page.rs).
 clap_mangen = "0.3"
 
-# Linux-only: the privileged netns conformance tier (tests/netns_conformance.rs)
-# needs a handful of raw syscalls the standard library does not expose —
-# geteuid() for the root gate, setns()/CLONE_NEWNET to originate crafted
-# packets from inside the sender namespace (the Address Group filter scenario
-# has no sender-side CLI), and setsockopt(IPV6_DSTOPTS) for the ext-header
-# injection path. `libc` is already a transitive dependency on Linux (via
-# `nix`), so this adds no new crate to the build graph. Not referenced on other
-# platforms — the whole test target is `#![cfg(target_os = "linux")]`.
+# Linux namespace tests use libc for root checks, setns and IPv6 socket options.
+# The test target is Linux-only. libc is already a dependency through nix.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2"
 

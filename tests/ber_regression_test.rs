@@ -1,23 +1,8 @@
-//! Regression tests for the BER (Bit Error Rate) TLV trio per
-//! draft-gandhi-ippm-stamp-ber-07.
-//!
-//! The sender side lives in `SenderRun::open` (`src/sender/run.rs`): it fills
-//! Extra Padding with the configured pattern and attaches BerPattern plus
-//! zero-initialized BerCount and BerBurst. The reflector side is
-//! `TlvList::process_ber` (`src/tlv/list/processing.rs`): it XORs the received
-//! padding against the pattern, writes the popcount into BerCount and the
-//! longest run of error bits into BerBurst.
-//!
-//! These tests pin the on-wire contract end-to-end through
-//! `process_stamp_packet`:
-//!
-//! 1. Clean channel: 0 errors, 0 burst.
-//! 2. Single-bit flip in padding: count == 1, burst == 1.
-//! 3. Three consecutive bit-flips: count == 3, burst == 3.
-//! 4. Burst spanning byte boundary: count == 4, burst == 4 (verifies the
-//!    cross-byte run detector in `xor_popcount_and_max_burst`).
-//! 5. Sender hex-dump: a sender-shaped TLV chain carries the configured
-//!    pattern at the offset the draft specifies, byte-for-byte.
+//! BER wire tests (draft-gandhi-ippm-stamp-ber-07) through
+//! `process_stamp_packet`: clean padding, single-bit errors, three-bit
+//! bursts, bursts across byte boundaries and sender pattern placement.
+//! Sender construction is in sender/run.rs; reflector processing is in
+//! `TlvList::process_ber`.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -199,16 +184,9 @@ fn ber_three_bit_burst_within_byte_reports_three() {
 
 #[test]
 fn ber_burst_spanning_byte_boundary_reports_continuous_run() {
-    // xor_popcount_and_max_burst reads bits MSB-first per byte. To
-    // produce a cross-byte run we need byte3's LSB set + byte4's high bits
-    // set so the MSB-first stream is …,0,0,0,1 | 1,1,1,0,…
-    //
-    // Pattern repeats [0xFF,0x00,0xFF,0x00,…] so:
-    //   padding[3] expected 0x00, choose 0x01 (XOR = 0x01, sets bit 0).
-    //   padding[4] expected 0xFF, choose 0x1F (XOR = 0xE0, sets bits 7,6,5).
-    //
-    // Resulting bit stream across the byte boundary contains one '1' then
-    // three contiguous '1's = a 4-bit run, with no surrounding 1-bits.
+    // MSB-first scan: byte 3 changes 0x00→0x01 and byte 4 changes 0xFF→0x1F.
+    // Their XOR bytes (0x01, 0xE0) form four consecutive error bits across
+    // one byte boundary, with zeros on either side.
     let mut padding = build_padding_from_pattern(&PATTERN, PADDING_SIZE);
     padding[3] = 0x01;
     padding[4] = 0x1F;

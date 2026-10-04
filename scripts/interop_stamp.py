@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""Independent Linux UDP fixture runner; uses only Python's standard library.
-
-Wire layouts and the deliberately narrow test profile are documented in
-doc/testing-interop.md. No stamp-suite encoders, parsers or crypto are imported.
+"""Independent Linux UDP fixtures using Python's standard library.
+Wire layouts and scope: doc/testing-interop.md.
 """
 
 import argparse

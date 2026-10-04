@@ -1,10 +1,8 @@
 # stamp-suite
 
-stamp-suite measures round-trip time, packet loss, one-way delay and residual
-bit errors with the Simple Two-Way Active Measurement Protocol (STAMP, RFC 8762
-and RFC 8972). It is one binary that runs either as a Session-Sender, which
-sends test packets and reports results, or as a Session-Reflector, which
-answers them.
+stamp-suite measures round-trip time, loss, one-way delay and residual bit
+errors using STAMP (RFC 8762 and RFC 8972). One binary sends test packets
+and reports results, or reflects them with `--is-reflector`.
 
 [![CI](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml/badge.svg)](https://github.com/asmie/stamp-suite/actions/workflows/rust.yml)
 [![Latest version](https://img.shields.io/crates/v/stamp-suite.svg)](https://crates.io/crates/stamp-suite)

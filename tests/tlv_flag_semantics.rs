@@ -1,23 +1,10 @@
-//! End-to-end conformance tests for TLV flag semantics.
-//!
-//! Pins the U/M/I/C flag contract against the RFC 8972 and RFC 10052 wire
-//! format. Each test drives `process_stamp_packet`
-//! through the reflector pipeline with a deliberately-shaped TLV chain and
-//! asserts the expected flag is set in the echoed response.
-//!
-//! - **U** (Unrecognized, bit 0, mask 0x80), RFC 8972 §4: the reflector sets
-//!   it when the TLV type is not known to it but still echoes the TLV.
-//! - **M** (Malformed, bit 1, mask 0x40), RFC 8972 §4: set on length
-//!   mismatches and parser-detected structural errors (truncation, TLV after
-//!   HMAC, etc.). Sub-field range violations are *not* spec-mandated to be
-//!   flagged.
-//! - **I** (Integrity failed, bit 2, mask 0x20), RFC 8972 §4.8: set on **all**
-//!   TLVs when HMAC TLV verification fails; the packet is still echoed (not
-//!   dropped).
-//! - **C** (Conformant Reflected, bit 3, mask 0x10), RFC 10052 §3: set by the
-//!   reflector on the Reflected Test Packet Control TLV when the requested
-//!   parameters could not be honoured exactly. draft-ietf-ippm-stamp-ext-hdr-15
-//!   also sets it on Type 246 and on Extension Header Control sub-TLVs.
+//! TLV flag tests through `process_stamp_packet` (RFC 8972, RFC 10052).
+//! - U (0x80): unknown type, echoed unchanged.
+//! - M (0x40): bad length or parser-detected structural error; field range
+//!   violations do not necessarily require M.
+//! - I (0x20): failed TLV HMAC; set on every TLV and echo the packet.
+//! - C (0x10): Type 12 parameters could not be honored. ext-hdr-15 also
+//!   uses C for Type 246 and Extension Header Control sub-TLVs.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

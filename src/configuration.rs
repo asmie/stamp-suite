@@ -575,14 +575,10 @@ pub struct Configuration {
     #[clap(long, value_name = "PREFIX/LEN=SPEC", help_heading = "Reflector")]
     pub allowed_dscp_for: Vec<String>,
 
-    /// Suppress duplicated packets without a handled Type-12 request.
-    ///
-    /// Non-monotonic Type-12 requests always receive a single U-flagged reply
-    /// after validation (RFC 10052 §5), even with this
-    /// flag set. Detection and counting are always active. Off by default:
-    /// restarting a sender can repeat sequence numbers without an attack.
-    ///
-    /// Reflector-side only.
+    /// Reflector: suppress duplicates without a handled Type-12 request.
+    /// Validated non-monotonic Type-12 requests still get one U-flagged reply
+    /// (RFC 10052 §5). Detection and counters are always active.
+    /// Off by default because sender restarts can repeat sequence numbers.
     #[clap(long, help_heading = "Reflector")]
     pub drop_replayed: bool,
 
@@ -617,12 +613,9 @@ pub struct Configuration {
     #[clap(long, help_heading = "Sender")]
     pub ssid: Option<u16>,
 
-    /// What to do when a reflected packet returns a zeroed SSID field
-    /// (RFC 8972 §3): `continue` (default) keeps measuring and logs the
-    /// condition once, `stop` ends the session on the first such reply.
-    ///
-    /// Sender-side only, and only meaningful together with a non-zero
-    /// `--ssid`; without one there is nothing for the reflector to echo.
+    /// Sender: handle a zeroed reflected SSID (RFC 8972 §3).
+    /// `continue` (default) measures and warns once; `stop` ends the session.
+    /// Applies only with a nonzero --ssid.
     #[clap(long, default_value_t = ZeroSsidAction::Continue, value_name = "ACTION", help_heading = "Sender")]
     pub on_zero_ssid: ZeroSsidAction,
 
@@ -670,9 +663,7 @@ pub struct Configuration {
     )]
     pub ecn_max_delay: u32,
 
-    /// Additive recovery step (milliseconds): after each reply that was
-    /// NOT CE-marked, the AIMD-controlled send interval shrinks by this
-    /// amount, down to (never below) `--send-delay`
+    /// AIMD recovery in milliseconds per non-CE reply, down to --send-delay
     /// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
     #[clap(long, default_value_t = 50, help_heading = "Class of Service and ECN")]
     pub ecn_recovery_step: u32,
@@ -853,23 +844,16 @@ pub struct Configuration {
     )]
     pub return_srv6_sids: Option<Vec<std::net::Ipv6Addr>>,
 
-    /// Reflector: attempt best-effort SRv6 return-path forwarding per RFC 9503
-    /// §4 and RFC 8754. When a received Return Path TLV carries an SRv6 Segment
-    /// List and the kernel supports it, the reflector inserts a Segment Routing
-    /// Header on its IPv6 reply. Disabled by default; when off (or on a
-    /// non-Linux/IPv4/unsupported path) the reflector replies normally and sets
-    /// the Return Path U-flag. Linux only.
+    /// Reflector: attach SRH for SRv6 Return Path requests on supported Linux
+    /// IPv6 paths (RFC 9503 §4, RFC 8754). Off by default. Disabled or
+    /// unsupported paths get ordinary replies with Return Path U set.
     #[clap(long, help_heading = "Return Path")]
     pub srv6_return_forwarding: bool,
 
-    /// Reflector: honour a Return Path TLV "Return Address" sub-TLV (RFC 9503
-    /// §4.1.2) by sending the reply to the requested address instead of the packet
-    /// source. Disabled by default: an open reflector that honours arbitrary
-    /// return addresses can be abused as a traffic-redirection / reflection
-    /// gadget aimed at third parties. When off, a Return Address sub-TLV is
-    /// echoed with the U-flag set and the reply goes to the packet source.
-    /// Only enable inside a controlled (and preferably HMAC-authenticated)
-    /// measurement domain.
+    /// Reflector: send Return Address replies to the requested address
+    /// (RFC 9503 §4.1.2). Disabled by default to prevent redirection to third
+    /// parties: the sub-TLV gets U and the reply goes to the packet source.
+    /// Enable only in a controlled measurement domain, preferably with HMAC.
     #[clap(long, help_heading = "Return Path")]
     pub return_path_allow_alternate: bool,
 
@@ -1025,20 +1009,16 @@ pub struct Configuration {
     )]
     pub reflected_control_max_count: u16,
 
-    /// Reflector-side amplification cap for
-    /// RFC 10052 §3: maximum reply packet size (in
-    /// bytes) the reflector will pad up to when honouring a Reflected Test
-    /// Packet Control TLV `length` request. When the requested length exceeds
-    /// the effective cap, a single reflected packet padded to the cap is sent
-    /// with the C flag set on the echoed TLV.
+    /// Reflector: maximum padded reply size in bytes (RFC 10052 §3).
+    /// Requests above the cap get one reply padded to the cap, with C set.
     ///
-    /// Linux checks the actual reply route before each send, including wildcard
-    /// binds and alternate destinations. IP/UDP and SRH overhead reduce the
-    /// payload budget (1472 bytes on a plain 1500-byte IPv4 link, 1452 on IPv6).
-    /// Route/interface notifications and a short cache expiry track changes.
-    /// Replies are dropped if the MTU cannot be determined or mandatory fields
-    /// cannot fit. Non-Linux route MTU lookup is unavailable. Runtime cap updates
-    /// change this administrative limit; they cannot bypass send-time MTU checks.
+    /// Linux also checks the reply route MTU before each send, including
+    /// wildcard binds and alternate destinations. IP/UDP and SRH overhead
+    /// reduce the payload budget (1472 bytes for plain IPv4 at MTU 1500;
+    /// 1452 for IPv6). Route notifications and cache expiry track changes.
+    /// Unknown MTU or mandatory fields that cannot fit cause a drop.
+    /// Non-Linux route MTU lookup is unavailable. Runtime cap updates cannot
+    /// bypass these send-time checks.
     #[clap(
         long,
         default_value_t = 1500,
@@ -1433,10 +1413,8 @@ impl Configuration {
             ));
         }
 
-        // RFC 8972 §4.8: in authenticated mode the sender's TLV-bearing
-        // packets always carry an HMAC TLV. The auth send path cannot honor
-        // `--tlv-hmac off`, and silently originating one anyway would ignore
-        // an explicit interop control. Reject the combination instead.
+        // RFC 8972 §4.8 requires HMAC on authenticated extensions.
+        // Reject --tlv-hmac off rather than silently overriding it.
         if !self.is_reflector
             && self.auth_mode.is_authenticated()
             && self.tlv_hmac == TlvHmacMode::Off
@@ -1732,10 +1710,8 @@ impl Configuration {
                 )));
             }
         }
-        // RFC 8972 §4.6: "An implementation MUST provide control of the
-        // retransmission timer value and the number of retransmissions."
-        // clap's `.range()` only runs on CLI-parsed values; duplicate the
-        // bounds here so a TOML-sourced value is validated too.
+        // Validate timer/retry limits for TOML too; clap ranges check only CLI
+        // input (RFC 8972 §4.6).
         if self.access_report_timeout == 0 {
             return Err(invalid("access_report_timeout must be >= 1 (seconds)"));
         }
@@ -2011,8 +1987,7 @@ impl Configuration {
     fn merge_file(&mut self, file: FileConfiguration, matches: &clap::ArgMatches) {
         use clap::parser::ValueSource;
 
-        // True when clap considers the value to have come from the CLI or an
-        // env var. In those cases the TOML value must NOT override it.
+        // CLI and environment values take precedence over TOML.
         let user_set = |name: &str| {
             matches!(
                 matches.value_source(name),
@@ -2291,14 +2266,9 @@ where
     }))
 }
 
-/// Deserializable mirror of [`Configuration`] used to load defaults from a
-/// TOML file. Every field is optional; missing keys fall through to the
-/// hardcoded clap defaults.
-///
-/// `hmac_key` and `config` are intentionally absent: the former to prevent
-/// plaintext secrets from being stored in config files (use `hmac_key_file`
-/// or the `STAMP_HMAC_KEY` environment variable instead), the latter because
-/// it would be recursive.
+/// Optional TOML settings; omitted fields use clap defaults.
+/// Exclude inline hmac_key (use a key file or STAMP_HMAC_KEY) and config
+/// (which would load files recursively).
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfiguration {

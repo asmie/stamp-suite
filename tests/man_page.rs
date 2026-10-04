@@ -1,17 +1,12 @@
-//! Keeps `dist/man/stamp-suite.1` in sync with the clap definition.
-//!
-//! Distribution packages (cargo-deb, cargo-generate-rpm, `dist/debian/`)
-//! install the committed roff file rather than generating it at build
-//! time, so packagers never need `clap_mangen` and the page cannot drift
-//! from what `stamp-suite --help` actually prints. Regenerate with:
+//! Check the committed man page against the Linux clap definition.
+//! Packages install this file without requiring clap_mangen.
+//! Regenerate after CLI changes:
 //!
 //! ```text
 //! STAMP_UPDATE_MAN=1 cargo test --all-features --test man_page
 //! ```
 //!
-//! The page is rendered from the Linux CLI surface (the one every distro
-//! package ships). Platform `cfg`s elsewhere may shape the clap definition,
-//! so the byte-for-byte check only runs on Linux.
+//! Other platforms may have different cfg-gated options; compare only on Linux.
 
 #![cfg(target_os = "linux")]
 

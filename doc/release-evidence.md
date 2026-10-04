@@ -1,8 +1,6 @@
 # Release verification
 
-This document lists the checks to run before a release and records the results
-of past runs. It is for maintainers and packagers who need to know what has
-been verified, on which platform, and how to repeat it.
+Release checks, reproduction commands and recorded results.
 
 Record the tested revision, features, platform and wire profile with each
 result. The [conformance matrices](conformance/README.md) cover the frozen

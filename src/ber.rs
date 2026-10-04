@@ -1,7 +1,7 @@
-//! Residual BER measurement for draft-gandhi-ippm-stamp-ber-07.
-//! Only the first accepted reply to each pending probe contributes; missing or
-//! invalid metadata never becomes a zero-error sample. Intervals use monotonic
-//! receive time and a fixed multiple of the configured transmit interval.
+//! Residual BER (draft-gandhi-ippm-stamp-ber-07).
+//! Count the first accepted reply per pending probe; unusable metadata adds
+//! no sample. Intervals use monotonic receive time and a fixed multiple of
+//! the configured transmit interval.
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},

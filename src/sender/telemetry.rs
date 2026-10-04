@@ -1,7 +1,79 @@
 //! Sender decisions consume validated fields; display text is diagnostic only.
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
-use crate::tlv::{AccessReportTlv, DirectMeasurementTlv, FollowUpTelemetryTlv, MicroSessionIdTlv};
+use crate::tlv::{
+    AccessReportTlv, DirectMeasurementTlv, FollowUpTelemetryTlv, MicroSessionIdTlv, RawTlv, TlvList,
+};
+
+/// Cumulative TLV HMAC outcomes, counted once per evaluated reply.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TlvHmacSummary {
+    pub not_requested: u64,
+    pub missing: u64,
+    pub verified: u64,
+    pub unverified: u64,
+    pub failed: u64,
+}
+
+/// Flags in parsed reflected TLVs. M includes parser-detected truncation.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TlvFlagSummary {
+    pub unrecognized: u64,
+    pub malformed: u64,
+    pub integrity_failed: u64,
+    pub conformant_reflected: u64,
+}
+
+impl TlvFlagSummary {
+    fn record(&mut self, raw: &RawTlv) {
+        self.unrecognized += u64::from(raw.is_unrecognized());
+        self.malformed += u64::from(raw.is_malformed());
+        self.integrity_failed += u64::from(raw.is_integrity_failed());
+        self.conformant_reflected += u64::from(raw.flags.conformant_reflected);
+    }
+}
+
+/// Observations of one TLV type; clear flags alone do not prove usability.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TlvTypeSummary {
+    pub observed: u64,
+    pub flags: TlvFlagSummary,
+}
+
+/// TLV evaluations before session admission and deduplication, including
+/// required-ID rejections. Excludes packets dropped before evaluation,
+/// such as base HMAC failures.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TlvValidationSummary {
+    pub evaluated_replies: u64,
+    pub rejected_replies: u64,
+    pub observed_tlvs: u64,
+    pub hmac: TlvHmacSummary,
+    pub flags: TlvFlagSummary,
+    /// Decimal wire type codepoints, including unknown types and HMAC.
+    pub by_type: BTreeMap<u8, TlvTypeSummary>,
+}
+
+impl TlvValidationSummary {
+    pub(super) fn record(&mut self, tlvs: &TlvList, info: &TlvTelemetry, rejected: bool) {
+        self.evaluated_replies += 1;
+        self.rejected_replies += u64::from(rejected);
+        self.observed_tlvs += tlvs.len() as u64;
+        match info.hmac {
+            HmacStatus::NotRequested => self.hmac.not_requested += 1,
+            HmacStatus::Missing => self.hmac.missing += 1,
+            HmacStatus::Verified => self.hmac.verified += 1,
+            HmacStatus::Unverified => self.hmac.unverified += 1,
+            HmacStatus::Failed => self.hmac.failed += 1,
+        }
+        for raw in tlvs.all_tlvs() {
+            self.flags.record(raw);
+            let entry = self.by_type.entry(raw.tlv_type.to_byte()).or_default();
+            entry.observed += 1;
+            entry.flags.record(raw);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum HmacStatus {
@@ -36,10 +108,9 @@ pub(super) struct FlagCounts {
     pub integrity_failed: usize,
 }
 
-/// Only usable, requested values enter decision fields. U skips a value;
-/// M stops the remainder; I or failed/unavailable HMAC blocks all values.
-/// Counts and HMAC status remain available when value consumption is blocked.
-/// Micro-session rejection is a separate Result error, not a display marker.
+/// Validated requested values. U skips, M stops the remainder, and I or
+/// unusable HMAC blocks values while retaining diagnostics.
+/// Required Micro-session ID failures return a separate error.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TlvTelemetry {
     pub tlv_count: usize,

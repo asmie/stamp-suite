@@ -1,8 +1,6 @@
 # Security
 
-This document is for operators who deploy a stamp-suite reflector or sender.
-It covers the threat model, HMAC authentication, where keys come from and how
-to rotate them, file permissions, and hardening of the packaged service.
+Deployment risks, HMAC keys, rotation, permissions and service hardening.
 
 ## Threat model
 
@@ -52,12 +50,10 @@ separately bounds accepted requests waiting for replies, including bursts. It
 counts requests, not bytes. See
 [Capacity, drain and shutdown](usage.md#capacity-drain-and-shutdown).
 
-The rate limiter keeps at most 16,384 source-IP buckets, separate from
-`--max-sessions`. Further sources share one overflow bucket at the configured
-rate and burst capacity. Existing sources keep their own budgets. Buckets idle
-for 60 seconds become eligible for expiry; each request scans at most four
-entries during a cleanup pass. This bounds both retained source entries and
-per-request cleanup work. Type 12 count, size and volume caps still apply.
+The rate limiter retains at most 16,384 source-IP buckets, independently of
+`--max-sessions`. New sources beyond that share one overflow budget; existing
+sources keep theirs. Buckets idle for 60 s can expire, with at most four
+entries scanned per request. Type 12 count, size and volume caps still apply.
 
 Replay detection keeps a 31-entry window per session. A Type 12 request whose
 sequence number is not new gets one reply with the U flag.

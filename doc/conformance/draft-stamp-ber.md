@@ -1,8 +1,6 @@
 # draft-gandhi-ippm-stamp-ber conformance
 
-This matrix maps each normative clause of draft-gandhi-ippm-stamp-ber (residual
-bit error rate measurement with STAMP) to the stamp-suite code and tests that
-implement it. It is for contributors and reviewers checking BER support.
+Residual BER requirements, implementation and tests.
 
 Revision frozen: draft-gandhi-ippm-stamp-ber-07, 30 June 2026.
 Source: [draft-gandhi-ippm-stamp-ber](https://datatracker.ietf.org/doc/draft-gandhi-ippm-stamp-ber/).

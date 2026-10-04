@@ -23,10 +23,7 @@ unsound = "all"
 # Yanked crate versions in Cargo.lock: warn, don't fail the build.
 yanked = "warn"
 ignore = [
-    # No advisories are currently ignored. If one needs to be silenced
-    # temporarily, add it here with a `reason` explaining why and a
-    # follow-up plan, e.g.:
-    # { id = "RUSTSEC-0000-0000", reason = "no fix available yet; tracked in #123" },
+    # Temporary exceptions need a reason and a tracking issue.
 ]
 
 [licenses]

@@ -28,14 +28,10 @@ pub(crate) fn unix_now() -> (i64, u32) {
     )
 }
 
-/// Decodes a wire timestamp to nanoseconds since the Unix epoch.
-///
-/// The 32-bit seconds word is unfolded to the era nearest
-/// `reference_unix_seconds` (within about 68 years). The reference must use the
-/// same timescale as the timestamp. PTP's seconds are treated as UTC here;
-/// callers must remove a known remote UTC offset. The Z bit specifies encoding,
-/// not synchronization or a UTC offset. Returns `None` for an invalid PTP
-/// nanoseconds word (>= one second).
+/// Decode to Unix nanoseconds, unfolding 32-bit seconds to the era nearest
+/// `reference_unix_seconds` (within about 68 years). Use the same timescale
+/// for the reference. PTP is treated as UTC; callers remove any known remote
+/// UTC offset. Z selects encoding only. Invalid PTP nanoseconds return None.
 #[must_use]
 pub(crate) fn timestamp_to_unix_nanos(
     value: u64,

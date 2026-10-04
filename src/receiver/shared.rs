@@ -2,10 +2,7 @@
 
 use super::*;
 
-/// Shared state created externally and passed into receiver backends.
-///
-/// This allows the SNMP sub-agent, the control plane, and other
-/// subsystems to access reflector counters and session state concurrently.
+/// Reflector counters and sessions shared by backends, SNMP and control.
 pub struct ReceiverSharedState {
     pub counters: Arc<ReflectorCounters>,
     pub session_manager: Arc<SessionManager>,

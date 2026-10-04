@@ -134,9 +134,8 @@ impl Session {
         Self::replay_step(self.replay_state.load(Ordering::Relaxed), seq).0
     }
 
-    /// Mutating half of [`Self::check_replay`]: records `seq` in the window.
-    /// Backends call this only after the packet passed verification and was
-    /// answered, so the window holds nothing an attacker could plant.
+    /// Record seq in the replay window only after verification and reply
+    /// assembly. See [`Self::check_replay`] for classification.
     pub fn commit_replay(&self, seq: u32) {
         loop {
             let packed = self.replay_state.load(Ordering::Relaxed);
@@ -519,12 +518,9 @@ impl SessionManager {
         self.get_session_and_seq(client).map(|(seq, _session)| seq)
     }
 
-    /// Returns the session for a client without generating a sequence number.
-    ///
-    /// Creates a new session if one doesn't exist. This is useful for accessing
-    /// session state (counters, last reflection) without consuming a sequence number.
-    /// Returns `None` on provisioning, capacity, or drain rejection. No temporary
-    /// session is created, and rejection does not consume an internal session ID.
+    /// Look up or create a session without advancing its sequence.
+    /// Provisioning, capacity or drain rejection returns None without creating
+    /// state or consuming an internal session ID.
     pub fn get_or_create_session(&self, client: impl Into<SessionKey>) -> Option<Arc<Session>> {
         self.admit(client.into())?.acquire()
     }

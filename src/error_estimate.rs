@@ -1,14 +1,8 @@
-//! Error estimate encoding/decoding for STAMP timestamps (RFC 8762 §4.2.1).
+//! STAMP timestamp Error Estimate (RFC 8762 §4.2.1).
 //!
-//! The error estimate is a 16-bit field that indicates the estimated error of the
-//! timestamp. The format is: S (1 bit) | Z (1 bit) | Scale (6 bits) | Multiplier (8 bits)
-//!
-//! - S (bit 15): Synchronization flag. 1 = clock is synchronized.
-//! - Z (bit 14): Timestamp format flag. 0 = NTP format, 1 = PTP format.
-//! - Scale (bits 13-8): Scale factor (0-63).
-//! - Multiplier (bits 7-0): Multiplier value (0-255).
-//!
-//! The error in seconds is calculated as: Multiplier × 2^(-32) × 2^Scale
+//! 16-bit layout: S (1) | Z (1) | Scale (6) | Multiplier (8).
+//! S=1 declares synchronization; Z=0 selects NTP, Z=1 PTP.
+//! Error in seconds: Multiplier × 2^(Scale - 32).
 
 use thiserror::Error;
 

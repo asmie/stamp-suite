@@ -7,7 +7,7 @@ mod run;
 mod schedule;
 pub(crate) mod session_state;
 mod socket;
-mod telemetry;
+pub(crate) mod telemetry;
 mod validate;
 
 pub(crate) use access_report::*;
@@ -96,29 +96,21 @@ struct SenderRecvContext<'a> {
     output: Option<&'a crate::stats::StatsOutput>,
     output_format: crate::stats::OutputFormat,
     hmac_key: Option<&'a HmacKey>,
-    /// Sender's Micro-session ID from the outgoing MSID TLV (RFC 9534 §3.2).
-    /// Used to validate that the reflector echoed the same sender ID back;
-    /// `None` means the sender did not request Micro-session ID measurement.
+    /// Expected echoed sender Micro-session ID (RFC 9534 §3.2).
+    /// None means it was not requested.
     expected_sender_msid: Option<u16>,
-    /// Pre-known reflector member-link identifier (`--reflector-member-link-id`,
-    /// RFC 9534 §3.2). When set, the reflected Reflector Micro-session ID must
-    /// equal it, which validates the reflector's behaviour; a mismatching reply
-    /// is discarded. `None` means the reflector ID is not pre-known.
+    /// Configured reflector Micro-session ID (RFC 9534 §3.2).
+    /// Reject mismatches; None means the ID is not known yet.
     expected_reflector_msid: Option<u16>,
     /// Reflector Micro-session ID learned from the first accepted reply when
     /// no expected ID is configured (RFC 9534 §3.2). Later mismatches are
     /// rejected. Retained for the sender session.
     latched_reflector_msid: &'a mut Option<u16>,
-    /// Access Report TLV retransmission state (RFC 8972 §4.6). `Some` only
-    /// when `--access-report` was set; `process_response` disarms its timer
-    /// when a reflected packet echoes the Access Report TLV (§4.6:
-    /// "This timer MUST be disarmed upon reception of the reflected STAMP
-    /// test packet that includes the Access Report TLV").
+    /// Access Report retries, enabled by --access-report.
+    /// A usable echo disarms the timer (RFC 8972 §4.6).
     access_report_state: Option<&'a mut AccessReportRetransmitState>,
-    /// AIMD congestion-response state (draft-ietf-ippm-stamp-cos-ecn-01
-    /// §3.4). `Some` only when the sender requested ECN measurement;
-    /// `process_response` drives it with `on_ce_observed`/`on_clean_reply`
-    /// based on the reply's forward-path EC2 and/or reverse-path wire ECN.
+    /// AIMD state for requested ECN measurement (cos-ecn-01 §3.4).
+    /// Feedback uses validated forward EC2 or reverse IP ECN.
     congestion: Option<&'a mut CongestionState>,
     /// The non-zero SSID this sender put on the wire, when it set one. RFC 8972
     /// §3 identifies sessions with this value; zero replies use the configured
@@ -128,10 +120,8 @@ struct SenderRecvContext<'a> {
     /// (RFC 8972 §3: "An implementation of a Session-Sender MUST support
     /// control of its behavior in such a scenario").
     on_zero_ssid: ZeroSsidAction,
-    /// Set by `process_response` when a zeroed-SSID reply arrives under
-    /// [`ZeroSsidAction::Stop`]; the send loop and the Access Report wait phase
-    /// both stop once it is set. Also latches "already warned" for the
-    /// `Continue` policy so a long run logs the condition once, not per packet.
+    /// Latch a zero-SSID reply: Stop ends sending and retries; Continue warns
+    /// only on the first occurrence.
     zero_ssid_seen: &'a mut bool,
     observers: &'a SenderObservers,
 }
@@ -155,15 +145,10 @@ pub async fn run_sender(conf: &Configuration) -> Result<StatsSnapshot, crate::St
     .await
 }
 
-/// Runs a sender with shared reporting state. Print the returned final
-/// snapshot with the same output's
-/// [`print_final`](crate::stats::StatsOutput::print_final) so periodic CSV
-/// reports do not repeat the header. Interim reports are written before this
-/// returns.
-///
-/// `observers` see each probe and reply as it happens. Cancelling `shutdown`
-/// stops sending and returns the statistics so far; probes still awaiting a
-/// reply count as lost.
+/// Run with shared output and live observers. Print the returned snapshot
+/// with [`print_final`](crate::stats::StatsOutput::print_final) on the same
+/// output to avoid duplicate CSV headers. Interim reports are queued first.
+/// Cancellation returns current statistics; pending probes count as lost.
 pub async fn run_sender_with_output(
     conf: &Configuration,
     output: &crate::stats::StatsOutput,
@@ -217,10 +202,9 @@ pub async fn run_senders(
     Ok(results.into_iter().flatten().collect())
 }
 
-/// Feeds one reflected packet through reply processing, with measurements,
-/// BER, an Access Report exchange and congestion response active and four
-/// probes awaiting replies. `expect_msid` requires a Micro-session ID. For the
-/// fuzz targets; not a stable API.
+/// Fuzz reply processing with four pending probes, measurements, BER,
+/// Access Report and congestion tracking. expect_msid requires an ID.
+/// Not a stable API.
 #[doc(hidden)]
 pub fn fuzz_reply(
     data: &[u8],
@@ -373,6 +357,9 @@ fn process_response(
                     ctx.congestion.is_some(),
                 ) {
                     Ok(info) => {
+                        if let Some(measurements) = ctx.measurements.as_mut() {
+                            measurements.record_tlv_validation(&ext_packet.tlvs, &info, false);
+                        }
                         ctx.observers.tlv_flags(&info.flags);
                         Some(info)
                     }
@@ -382,6 +369,15 @@ fn process_response(
                             seq_num,
                             reason
                         );
+                        if let Some(measurements) = ctx.measurements.as_mut() {
+                            let info = reflected_tlv_telemetry(
+                                &ext_packet.tlvs,
+                                data,
+                                AUTH_BASE_SIZE,
+                                ctx.hmac_key,
+                            );
+                            measurements.record_tlv_validation(&ext_packet.tlvs, &info, true);
+                        }
                         ctx.observers.reply_rejected();
                         return;
                     }
@@ -464,6 +460,9 @@ fn process_response(
                 ctx.congestion.is_some(),
             ) {
                 Ok(info) => {
+                    if let Some(measurements) = ctx.measurements.as_mut() {
+                        measurements.record_tlv_validation(&ext_packet.tlvs, &info, false);
+                    }
                     ctx.observers.tlv_flags(&info.flags);
                     Some(info)
                 }
@@ -473,6 +472,15 @@ fn process_response(
                         base.sess_sender_seq_number,
                         reason
                     );
+                    if let Some(measurements) = ctx.measurements.as_mut() {
+                        let info = reflected_tlv_telemetry(
+                            &ext_packet.tlvs,
+                            data,
+                            UNAUTH_BASE_SIZE,
+                            ctx.hmac_key,
+                        );
+                        measurements.record_tlv_validation(&ext_packet.tlvs, &info, true);
+                    }
                     ctx.observers.reply_rejected();
                     return;
                 }
@@ -529,10 +537,8 @@ fn process_response(
         return;
     }
 
-    // RFC 8972 §3: a nonzero SSID identifies the session and must match.
-    // Figure 2 has one SSID field, after the reflector's Error Estimate.
-    // Zero is the legacy-peer sentinel and uses the separate operator policy.
-    // Reject other sessions before applying measurement or control state.
+    // Check nonzero SSID before updating measurement or control state
+    // (RFC 8972 §3). Zero uses the configured legacy-peer policy.
     if let Some(expected) = ctx.expected_ssid {
         if reflected_ssid != 0 && reflected_ssid != expected {
             log::debug!(
@@ -593,9 +599,8 @@ fn process_response(
         });
     }
 
-    // RFC 8972 §4.6: a usable Access Report echo disarms its timer. This
-    // typed decision is independent of diagnostics and of pending RTT state.
-    // Session identity was checked above; U/M/I/HMAC gating happened in validation.
+    // Disarm Access Report retries on a usable echo (RFC 8972 §4.6).
+    // Identity and TLV integrity were checked above.
     if let Some(state) = ctx.access_report_state.as_mut() {
         if telemetry
             .as_ref()

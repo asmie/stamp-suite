@@ -1,19 +1,11 @@
-//! Property-based tests for the TLV and packet parsers.
+//! Parser properties run by default cargo test:
 //!
-//! Three flavours:
+//! - Typed TLVs round-trip arbitrary valid values.
+//! - Accepted wire bytes round-trip with reserved flags cleared.
+//! - Raw TLV, lenient TLV list, packet and AgentX parsers do not panic on
+//!   arbitrary bytes.
 //!
-//! 1. **Round-trip properties**: for each typed TLV, generate arbitrary
-//!    valid values and assert `parse(serialize(t)) == Ok(t)`. Catches
-//!    encoder/decoder asymmetries that hand-written tests miss.
-//!
-//! 2. **Wire round-trip properties**: bytes a parser accepts serialize back
-//!    to the same bytes, with reserved flag bits cleared.
-//!
-//! 3. **No-panic properties**: feed `RawTlv::parse` /
-//!    `TlvList::parse_lenient` / `PacketUnauthenticated::from_bytes_lenient`
-//!    / the AgentX decoder arbitrary byte buffers and assert no panic.
-//!    These complement the libfuzzer harnesses under `fuzz/` by exercising
-//!    the same code paths in default `cargo test` runs.
+//! The fuzz targets exercise the same parsers with libFuzzer.
 
 use proptest::prelude::*;
 

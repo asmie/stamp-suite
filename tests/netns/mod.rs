@@ -1,27 +1,11 @@
-//! Support harness for the privileged network-namespace conformance tier
-//! (`tests/netns_conformance.rs`). Linux only: every item here is compiled
-//! out on other platforms by the `#![cfg(target_os = "linux")]` on the parent
-//! test target.
-//!
-//! Design (see `doc/testing-netns.md`):
-//!
-//! * A [`NetnsFixture`] is an RAII object that creates a pair of network
-//!   namespaces joined by a veth link, assigns unique v4/v6 addresses, and
-//!   deletes both namespaces on `Drop` (panic-safe). Names embed the process
-//!   id and a monotonic counter so concurrent fixtures never collide.
-//! * The Session-Reflector under test runs via `ip netns exec` in one
-//!   namespace; the Session-Sender is driven from the other, either as the
-//!   real binary (`ip netns exec … stamp-suite`) or, for scenarios that need
-//!   a packet no CLI can emit, as a crafted UDP datagram sent from a socket
-//!   created *inside* the sender namespace via `setns()`.
-//! * On-wire behaviour (TOS/ECN, TTL/Hop-Limit, IPv6 extension headers,
-//!   Type-12 pacing/count, BER padding) is observed by capturing on the
-//!   reflector-side veth with `tcpdump -w` and parsing the classic pcap file
-//!   with the tiny in-crate parser below (no pcap crate).
-//!
-//! Nothing in this module runs privileged code at collection time: the
-//! namespace/veth calls happen only inside [`NetnsFixture::new`], which the
-//! `#[ignore]`d, root-gated scenarios call explicitly.
+//! Linux network-namespace harness; see `doc/testing-netns.md`.
+//! NetnsFixture creates two namespaces with veth and IPv4/IPv6 addresses,
+//! and deletes them on Drop. PID/counter names prevent fixture collisions.
+//! Run the reflector with `ip netns exec`; drive the sender by binary or
+//! crafted UDP through setns. Capture the reflector veth with tcpdump and
+//! parse classic pcap here for IP metadata, headers, pacing and BER.
+//! Privileged setup occurs only in NetnsFixture::new, called by ignored,
+//! root-gated scenarios; collecting tests performs no privileged operations.
 
 #![cfg(target_os = "linux")]
 

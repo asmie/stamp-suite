@@ -4,7 +4,7 @@ FROM rust:1.85-slim-bookworm AS builder
 
 WORKDIR /usr/src/stamp-suite
 
-# Install build dependencies for nix crate
+# nix build dependency.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -24,14 +24,13 @@ RUN mkdir -p src benches && \
     cargo build --locked --release --features "$FEATURES" && \
     rm -rf src
 
-# Copy actual source code
 COPY src ./src
 
 # Touch the entry points so cargo rebuilds the real code (not the cached stubs)
 RUN touch src/main.rs src/lib.rs && \
     cargo build --locked --release --features "$FEATURES"
 
-# Runtime stage — same Debian release as the builder (see note above).
+# Same Debian release preserves glibc compatibility.
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

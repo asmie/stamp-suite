@@ -1,10 +1,8 @@
 # Usage
 
-This is the operator reference for running stamp-suite as a STAMP
-Session-Sender or Session-Reflector: configuration, options, output and
-runtime behavior. Start with the [README](../README.md). For the complete
-option list and defaults of your build, run `stamp-suite --help` or read the
-[man page](../dist/man/stamp-suite.1).
+Sender and reflector configuration, output and runtime behavior.
+For a quick start, see the [README](../README.md). For all options and defaults
+in your build, use `stamp-suite --help` or the [man page](../dist/man/stamp-suite.1).
 
 ## Configuration file
 
@@ -77,11 +75,9 @@ editors and validators.
 
 ### Validation
 
-Unknown keys, invalid TOML and wrong value types fail startup with a parse
-error that gives the line and column. The merged configuration then goes
-through the same range and combination checks as command-line values, so a
-setting that comes only from the file is checked too. On Unix, a configuration
-file that group or other users can write produces a warning; see
+Unknown keys, invalid TOML and wrong types fail startup with line/column
+errors. Merged settings receive the same range and combination checks as CLI
+values. On Unix, group- or other-writable config files warn; see
 [file permissions](security.md#file-permissions).
 
 ## Sender
@@ -210,6 +206,8 @@ stamp-suite --remote-addr 192.0.2.10 --output-format csv --report-interval 10 > 
 Reports also carry [reply and directional measurements](measurements.md) under
 `measurements`: individual burst copies, duplicates and reordering, Direct
 Measurement counter windows, Follow-Up reverse delays and the session state.
+JSON also exposes TLV HMAC outcomes and per-type U/M/I/C flag counts under
+`measurements.tlv_validation`; see [extension validation diagnostics](measurements.md#extension-validation-diagnostics).
 The `RTT`, `OWD` and probe-loss fields always describe the first reply to each
 probe. Requested reply copies that were never observed include copies the
 reflector declined by policy, so they are not a network-loss count.
@@ -560,13 +558,11 @@ are described in [key sourcing and rotation](security.md#key-sourcing-and-rotati
 
 ### Timestamp formats
 
-`--clock-source NTP|PTP` selects the timestamp encoding the endpoint writes on
-the wire (default NTP). It does not configure clock synchronization. The sender
-decodes its own T1 and T4 with `--clock-source`, and the reflector's T2 and T3
-with the Z bit of the reflector's Error Estimate (0 = NTP, 1 = truncated PTP).
-The two endpoints can use different formats, also in authenticated mode. Both
-formats are converted to a common Unix epoch before the sender computes T2−T1
-and T4−T3.
+`--clock-source NTP|PTP` selects wire encoding (default NTP), not clock
+synchronization. The sender decodes T1/T4 using its setting and T2/T3 using
+the reflector's Error Estimate Z bit (0=NTP, 1=truncated PTP). Formats may
+differ, including in authenticated mode; both convert to Unix time before
+computing T2−T1 and T4−T3.
 
 The 32-bit seconds field is unfolded to the era closest to the local wall
 clock, so the true time must be within about 68 years of the local clock. This
@@ -580,13 +576,11 @@ and unsynchronized NIC hardware clocks need deployment-specific handling.
 
 ### Remote clock offset
 
-`--reflector-utc-offset SECONDS` is a sender setting for a known offset of the
-reflector's clock after epoch conversion. The sender subtracts it from T2 and
-T3; it does not change local timestamps or RTT. The default `0` matches this
-suite's software timestamps, which use UTC (CLOCK_REALTIME) for both wire
-formats. For a TAI-based peer, set the peer's configured TAI−UTC offset. Do not
-derive it from the Z bit, and update it when a leap second changes the offset.
-For example, for a peer configured with a 37-second offset:
+`--reflector-utc-offset SECONDS` subtracts a known clock offset from decoded
+T2/T3; local timestamps and RTT are unchanged. Default 0 matches this suite's
+UTC CLOCK_REALTIME software timestamps in both formats. For a TAI peer, use
+its configured TAI−UTC offset and update it on leap seconds. Z does not encode
+the offset. Example for a peer configured at 37 seconds:
 
 ```bash
 stamp-suite --remote-addr 192.0.2.1 --clock-source NTP --reflector-utc-offset 37
@@ -652,13 +646,11 @@ hardware timestamps where the build and platform support them. See the
 
 ### Ports and TTL
 
-The sender's default local port is 0, which picks a random port from 49152 to
-65535. If that port is busy, or Windows refuses it with WSAEACCES (10013), the
-sender tries another, up to 128 candidates. Other errors, and errors on an
-explicitly requested port, fail at once. A reflector listens on 862 by
-default. An explicit sender local port must differ from the remote port. A
-sender configuration copied from a reflector's file should set
-`local_port = 0`.
+Local port 0 chooses a random sender port from 49152–65535, retrying up to
+128 candidates on busy ports or Windows WSAEACCES (10013). Other errors and
+explicit-port failures stop startup. The reflector defaults to 862; sender
+and remote ports must differ. When reusing a reflector config for a sender,
+set `local_port = 0`.
 
 Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-15
 requires. `--ttl` accepts only 255. Received packets with a lower hop count are
@@ -689,14 +681,12 @@ stamp-suite --local-addr fe80::1 --local-scope-id 2 --local-port 0 \
 stamp-suite -i --local-addr fe80::2 --local-scope-id 2
 ```
 
-The address and its numeric zone are separate options: `%eth0` is not part of
-`--local-addr` or `--remote-addr`. Configuration files use `local_scope_id` and
-`remote_scope_id` (unsigned 32-bit, default 0). An IPv4 endpoint rejects a
-nonzero zone. A link-local bind address or sender destination requires a
-nonzero zone; a missing interface produces the operating system's bind or
-connect error. Zone numbers are local to a host or network namespace and need
-not match between endpoints. See
-[RFC 4007 §11](https://www.rfc-editor.org/rfc/rfc4007.html#section-11).
+Pass numeric zones separately from addresses; `%eth0` is not accepted in
+`--local-addr` or `--remote-addr`. TOML `local_scope_id` and `remote_scope_id`
+are u32, default 0. IPv4 rejects nonzero zones; link-local binds and sender
+destinations require one. Missing interfaces fail at bind/connect. Indices
+are local to each host or namespace and need not match across endpoints.
+See [RFC 4007 §11](https://www.rfc-editor.org/rfc/rfc4007.html#section-11).
 
 The nix backend records the link-local source zone and the arrival interface
 of each packet. A reflector bound to `::` can therefore reply to link-local
@@ -780,10 +770,9 @@ fallback cannot hide a failure.
   (default `127.0.0.1:9091`). Reflector only; requires the `control` feature.
   See the [control API endpoints](control-plane.md#endpoints).
 
-The flags and TOML keys are accepted by every build, but asking for a service
-the binary was built without fails startup with an error that names the
-option. See the [architecture](architecture.md) for the metric and MIB
-contents.
+Every build accepts these flags and TOML keys. Requesting an unbuilt service
+fails startup and names the option. For metrics and MIB contents, see
+[architecture](architecture.md).
 
 ### Failure semantics
 

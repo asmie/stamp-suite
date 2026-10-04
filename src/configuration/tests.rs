@@ -397,10 +397,8 @@ fn ber_padding_size_above_wire_safe_bound_is_rejected() {
     assert!(conf.validate().is_err());
 }
 
-/// `-A A` + `--tlv-hmac off` on the sender is rejected: the auth send
-/// path always originates an HMAC TLV on TLV-bearing packets, so the
-/// explicit interop control cannot be honored and must not be silently
-/// ignored. A reflector config is unaffected (the flag is sender-side).
+/// Authenticated senders must originate TLV HMACs, so reject --tlv-hmac off.
+/// The option is sender-only and does not affect reflector configs.
 #[test]
 fn auth_mode_with_tlv_hmac_off_is_rejected_for_sender() {
     let sender_args = |auth_mode: &str, tlv_hmac: &str| {
@@ -2155,9 +2153,8 @@ fn test_on_zero_ssid_merges_from_file() {
     assert_eq!(conf.on_zero_ssid, ZeroSsidAction::Stop);
 }
 
-/// `--hmac-key-dir` is a reflector concept: `KeySource::load_key` (the
-/// sender's path) does not read directories, so a sender would ignore it
-/// silently, a typo'd path included. Validation rejects it instead.
+/// Sender key loading cannot read directories. Reject --hmac-key-dir
+/// instead of silently ignoring it, including invalid paths.
 #[test]
 fn test_hmac_key_dir_is_reflector_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -2397,9 +2394,7 @@ fn test_resolve_log_filter_rust_log_env_overrides_verbose() {
 
 #[test]
 fn test_resolve_log_filter_empty_rust_log_env_falls_back_to_verbose() {
-    // An empty RUST_LOG (e.g. present in the environment but set to
-    // the empty string) must not be treated as "explicitly set"; it falls
-    // back to the -v/-vv-derived level instead.
+    // Empty RUST_LOG falls back to the -v/-vv log level.
     assert_eq!(resolve_log_filter(0, Some("")), "info");
     assert_eq!(resolve_log_filter(1, Some("")), "debug");
 }

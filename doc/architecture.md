@@ -1,28 +1,19 @@
 # Architecture
 
-This document describes how stamp-suite is built inside: its modules, the two
-reflector backends, the packet paths through sender and reflector, and how each
-TLV is handled. It is for contributors and reviewers. Operator behavior and
-options are in [usage](usage.md); protocol scope is in
+Modules, sender and reflector packet paths, and TLV processing.
+For options, see [usage](usage.md); for protocol coverage, see
 [conformance](conformance/README.md).
-
-One binary runs as a Session-Sender or a Session-Reflector over UDP (default
-port 862). The sender sends probes and records replies. The reflector
-timestamps accepted packets and returns them.
 
 ## Module structure
 
-The main patterns are backend adapters around a shared packet pipeline,
-explicit sender state machines, synchronous monitoring observers, and RAII
-guards for reply capacity and resource cleanup. Codecs share layout templates;
-session management centralizes admission and lifetime rules. The
-[design assessment](review/2026-10-03/README.md#design-patterns-and-trade-offs)
-describes the review findings and subsequent fixes.
+Backends share a packet pipeline. Sender state machines track the session;
+synchronous observers report events; RAII guards release reply capacity and
+resources. Packet layouts and session admission rules each have one owner.
+See the [design assessment](review/2026-10-03/README.md#design-patterns-and-trade-offs).
 
-Paths are relative to `src/`. The library modules are public only so that
-integration tests, benchmarks and fuzz targets can reach them. They are
-internal and are not covered by the CLI, configuration and wire compatibility
-contract.
+Paths below are relative to `src/`. Public library modules support tests,
+benchmarks and fuzzing; they are outside the CLI/configuration/wire
+compatibility contract.
 
 ### Entry points and configuration
 
@@ -259,13 +250,12 @@ when a key is given.
 Probes still unanswered at the end count as lost. The run returns a
 `StatsSnapshot`.
 
-Interim reports (`--report-interval`) are handed to `StatsOutput` for formatting
-and writing on a separate thread. Collecting and copying a snapshot still
-runs on the sender task. All targets share the writer, which preserves queue
-order and prints one CSV header. A run waits for its queued reports before
-returning. The queue holds at most eight reports or packet-detail lines; excess
-interim output is skipped. Final output and flushes have a five-second deadline.
-Text `-R` output shares this queue; JSON/CSV packet diagnostics use stderr. See
+`StatsOutput` formats and writes reports on a shared thread. The sender
+collects snapshots after reserving queue space. The queue holds eight reports
+or detail lines; excess interim output is skipped. Final output and flushes
+have a five-second deadline, and runs wait for queued reports before returning.
+The writer preserves queue order and prints one CSV header. Text `-R` uses
+this queue; JSON/CSV diagnostics use stderr. See
 [report retention](statistics.md#report-output-and-pending-probes).
 
 ### Sender timestamp arithmetic
@@ -617,13 +607,11 @@ The sub-agent is read-only and implements the sub-agent side of
 
 ### Framing and failure handling
 
-`PduReader` keeps partially read headers and payloads across the 200 ms
-read timeout, checks the payload length before allocating, and treats EOF as a
-lost connection. Decoders check lengths before indexing. If the initial
-connection fails, a warning is logged and STAMP keeps running without SNMP.
-After a successful start, a lost connection is retried with exponential backoff
-from 1 s to 30 s, and registration is repeated. A supervisor task logs a panic
-of the blocking event loop.
+`PduReader` retains partial frames across 200 ms read timeouts and checks
+lengths before allocation or indexing. EOF ends the connection. Initial
+connection failure warns without stopping STAMP; later failures trigger
+reconnection and registration with 1–30 s exponential backoff. A supervisor
+logs event-loop panics.
 
 Open and Register validate the complete eight-byte administrative Response,
 error status, packet ID and (after Open) session ID. Administrative transaction

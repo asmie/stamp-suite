@@ -1,11 +1,9 @@
 # Contributing to stamp-suite
 
-This guide is for people who change stamp-suite: how to build it, run the
-tests and linters that CI runs, and what a change should include.
+Build, test and lint commands, and requirements for submitting changes.
 
-Open an issue before starting a large change, so the approach can be agreed
-first. Report security problems privately as described in
-[SECURITY.md](SECURITY.md).
+Discuss large changes in an issue first. Report security problems privately;
+see [SECURITY.md](SECURITY.md).
 
 ## Build
 

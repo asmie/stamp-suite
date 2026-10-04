@@ -1,10 +1,7 @@
 # draft-ietf-ippm-stamp-ext-hdr conformance
 
-This matrix maps each normative clause of draft-ietf-ippm-stamp-ext-hdr
-(reflected IPv6 extension headers and fixed IP headers, Types 246 and 247) to
-the stamp-suite code and tests that implement it. It is for contributors and
-reviewers who need to know what header reflection does, where, and on which
-backend.
+Fixed IP and IPv6 extension header reflection (Types 247/246): requirements,
+implementation, tests and backend limits.
 
 Revision frozen: draft-ietf-ippm-stamp-ext-hdr-15, 30 September 2026.
 Source: [draft-ietf-ippm-stamp-ext-hdr-15](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-15.txt).

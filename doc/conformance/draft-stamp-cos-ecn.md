@@ -1,9 +1,6 @@
 # draft-ietf-ippm-stamp-cos-ecn conformance
 
-This matrix maps each normative clause of draft-ietf-ippm-stamp-cos-ecn (Class
-of Service TLV and ECN congestion signaling for STAMP) to the stamp-suite code
-and tests that implement it. It is for contributors and reviewers checking CoS
-and ECN support.
+CoS and ECN requirements, implementation and tests.
 
 Revision frozen: draft-ietf-ippm-stamp-cos-ecn-01, 20 July 2026.
 Source: [draft-ietf-ippm-stamp-cos-ecn-01](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-01.txt).

@@ -1,13 +1,9 @@
 # Standards conformance
 
-These matrices map clauses from the selected STAMP specifications to code
-and tests. They are for reviewers,
-packagers and contributors who need to know what is supported, what is
-partial and what is out of scope.
+These matrices link STAMP requirements to implementation and test evidence.
 
-The matrices record evidence against frozen revisions of each document. They
-are not a certification. A code citation or a passing test supports only the
-behavior it checks.
+Results apply to the frozen revisions and tested profiles. They do not
+certify untested behavior.
 
 ## Matrices
 
@@ -123,12 +119,9 @@ python3 scripts/check_conformance_counts.py
 python3 scripts/check_conformance_citations.py
 ```
 
-`check_conformance_counts.py` reads every clause row (a row whose first cell
-is a clause ID) in the nine matrices. It checks that IDs are unique, that each
-status is one of the five statuses, that the single `Summary:` line in each
-matrix matches the row counts, and that the [Matrices](#matrices) table here
-matches every matrix and the total. Change a status, and the summary line and
-this table must change with it.
+`check_conformance_counts.py` checks clause-ID uniqueness, the five statuses,
+each matrix's `Summary:` counts and this page's totals. Status changes require
+updates to the summary and [Matrices](#matrices) table.
 
 `check_conformance_citations.py` resolves every citation in
 `doc/conformance/*.md` against the source tree:

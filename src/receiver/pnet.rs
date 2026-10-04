@@ -346,15 +346,10 @@ fn run_capture_loop(
     worker.join();
 }
 
-/// Offset of the IP header in a frame pnet's BPF backend read from a
-/// loopback (DLT_NULL) interface.
-///
-/// pnet replaces the 4-byte DLT_NULL header with a zeroed placeholder whose
-/// length is 14 - 4 rounded up to the alignment of `bpf_hdr`: 12 octets on
-/// 64-bit macOS in pnet_datalink 0.35, not the 14 of an Ethernet header.
-/// IPv4 and IPv6 headers never start with a zero octet, so the first
-/// non-zero octet within the first 16 marks the IP header whatever the
-/// placeholder length. Returns `None` for a frame with no IP header there.
+/// Find the IP header after pnet's loopback DLT_NULL placeholder.
+/// pnet_datalink 0.35 pads to bpf_hdr alignment: 12 bytes on 64-bit macOS,
+/// not an Ethernet header's 14. IPv4/IPv6 start with a nonzero version
+/// byte, so scan the first 16 bytes. Return None if no header is found.
 fn bpf_loopback_ip_offset(frame: &[u8]) -> Option<usize> {
     const MAX_PLACEHOLDER: usize = 16;
     frame
@@ -554,15 +549,13 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
     None
 }
 
-/// Walks IPv6 extension headers after the 40-byte fixed header.
-/// Returns concatenated wire bytes, the final Next Header protocol, and the
-/// upper-layer payload offset (draft-ietf-ippm-stamp-ext-hdr-15 §3.1/§4.1).
-///
-/// Captures Hop-by-Hop (0), Routing (43, including SRH), Fragment (44), and
-/// Destination Options (60). HBH/Routing/DestOpts lengths are `(HdrExtLen + 1) * 8`;
-/// Fragment is always eight bytes. Each record retains its own Next Header byte.
-/// Stops at AH (51), ESP (50), or an upper-layer protocol; AH has a different
-/// length encoding and ESP is encrypted.
+/// Walk IPv6 headers after the 40-byte fixed header; return their wire
+/// bytes, final Next Header protocol and upper-layer payload offset
+/// (ext-hdr-15 §§3.1, 4.1). Capture HBH (0), Routing (43, including SRH),
+/// Fragment (44) and Destination Options (60), keeping each Next Header.
+/// Lengths are (HdrExtLen + 1) * 8, except Fragment (8 bytes).
+/// Stop at AH (51, different length encoding), ESP (50, encrypted), or
+/// an upper-layer protocol.
 fn extract_ipv6_ext_headers(
     header: &Ipv6Packet,
 ) -> (Vec<u8>, pnet::packet::ip::IpNextHeaderProtocol, usize) {

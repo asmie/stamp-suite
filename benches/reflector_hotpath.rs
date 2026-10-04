@@ -245,9 +245,8 @@ fn bench_auth_full_chain(c: &mut Criterion) {
     }
 }
 
-/// Stateful processing through a populated session table. Session admission
-/// and lookup are included; receive counters and replay classification run
-/// only on the live backend path and are not measured here.
+/// Measure stateful session lookup/admission with a populated table.
+/// Live-backend receive counters and replay classification are excluded.
 fn bench_unauth_stateful_sessions(c: &mut Criterion) {
     let manager = std::sync::Arc::new(stamp_suite::session::SessionManager::new(None, None));
     for port in 0..1000u16 {

@@ -6,20 +6,13 @@ Run from the repository root:
     python3 scripts/check_conformance_citations.py          # report + exit code
     python3 scripts/check_conformance_citations.py --json    # machine-readable
 
-Exits non-zero when a citation has drifted, so this can gate CI. Three forms
-are checked:
-
-- `path.rs::item` must name an item defined in that file or in its child
-  modules (`path/` or the directory of a `mod.rs`). `Type::method` checks the
-  method; a derived trait method such as `Type::default` checks the type.
-- `ident` (`path.rs`) attributes an identifier to a file: it must be defined
-  there, or, for a path-qualified name, appear there as a use.
-- Any other `path.rs` must exist. A bare file name must match exactly one file.
-
-Line citations (`path.rs:N` or `path.rs:N-M`) are also checked. One is OK
-when its range intersects the extent of an identifier named before it; it is
-STALE when such identifiers are defined in the file but none of them overlap,
-and unverifiable when none are defined there.
+Exit nonzero for stale citations. Checks:
+- `path.rs::item`: item defined in that file or its child modules. Derived
+  methods such as Type::default check the type.
+- `ident` (`path.rs`): definition, or a qualified name used in that file.
+- Bare file paths: must exist; filenames must resolve uniquely.
+- `path.rs:N[-M]`: range must overlap a preceding named item's extent.
+  No overlap is stale; no matching definition is unverifiable.
 """
 import argparse
 import glob

@@ -1,8 +1,6 @@
 # Runtime control API
 
-This document is the reference for the reflector's HTTP control API: how to
-enable and secure it, and every endpoint with its request and response. It is
-for operators and for authors of tools that manage a running reflector.
+Reflector HTTP API: setup, authentication, endpoints and request/response formats.
 
 The API needs a binary built with the `control` feature and runs only in
 reflector mode. It manages HMAC keys, sessions, rate and session limits,

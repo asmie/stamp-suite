@@ -4240,3 +4240,206 @@ proptest::proptest! {
         proptest::prop_assert_eq!(written, expected.to_bytes());
     }
 }
+
+#[test]
+fn tlv_validation_json_reports_real_reply_outcomes_in_both_modes() {
+    // Independent wire TLVs exercise HMAC verification, parser flags and the
+    // receive path; merely constructing a summary would miss accounting bugs.
+    for auth in [false, true] {
+        for case in [
+            "no_tlvs",
+            "unsigned",
+            "signed",
+            "bad_hmac",
+            "flagged_hmac",
+            "no_key",
+            "flags",
+            "truncated",
+            "duplicate_hmac",
+            "msid_rejected",
+        ] {
+            let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+            let base = if auth {
+                AUTH_BASE_SIZE
+            } else {
+                UNAUTH_BASE_SIZE
+            };
+            let keyed = auth || case != "no_key";
+            let mut wire = ssid_test_reply(auth, false, 42, 0, &key);
+            match case {
+                "no_tlvs" => {}
+                "flags" => {
+                    // Repeated unknown type, U/M/I independently, and C.
+                    wire.extend_from_slice(&[
+                        0x80, 255, 0, 0, 0x40, 255, 0, 0, 0x20, 255, 0, 0, 0x10, 247, 0, 0,
+                    ]);
+                }
+                "truncated" => wire.extend_from_slice(&[0, 255, 0, 8, 1]),
+                "msid_rejected" => {
+                    // Wrong sender ID, even though the TLV HMAC verifies.
+                    wire.extend_from_slice(&[0, 11, 0, 4, 0, 8, 0, 9]);
+                }
+                _ => wire.extend_from_slice(&[0, 2, 0, 4, 0, 0, 0, 0]),
+            }
+            if !matches!(case, "no_tlvs" | "unsigned" | "flags" | "truncated") {
+                let mut covered = wire[..4].to_vec();
+                covered.extend_from_slice(&wire[base..]);
+                wire.extend_from_slice(&[0, 8, 0, 16]);
+                wire.extend_from_slice(&key.compute(&covered));
+                match case {
+                    "bad_hmac" => *wire.last_mut().unwrap() ^= 1,
+                    "flagged_hmac" => wire[base + 8] = 0x80,
+                    "duplicate_hmac" => {
+                        wire.extend_from_slice(&[0, 8, 0, 16]);
+                        wire.extend_from_slice(&[0; 16]);
+                    }
+                    _ => {}
+                }
+            }
+            if auth {
+                let mac = compute_packet_hmac(&key, &wire, AUTH_HMAC_OFFSET);
+                wire[AUTH_HMAC_OFFSET..AUTH_BASE_SIZE].copy_from_slice(&mac);
+            }
+            let mut pending = HashMap::from([(
+                42,
+                PendingPacket {
+                    send_time: Instant::now(),
+                    send_timestamp: 0,
+                },
+            )]);
+            let mut rtt = RttCollector::new();
+            let mut owd = OwdCollector::new();
+            let mut received = 0;
+            let mut latched = None;
+            let mut zero = false;
+            let mut measurements = Measurements::new(1);
+            let mut ctx = congestion_process_response_ctx(
+                &mut pending,
+                &mut rtt,
+                &mut owd,
+                &mut received,
+                &mut latched,
+                None,
+                &mut zero,
+            );
+            ctx.measurements = Some(&mut measurements);
+            ctx.hmac_key = keyed.then_some(&key);
+            ctx.expected_sender_msid = (case == "msid_rejected").then_some(7);
+            // Evaluations include network duplicates. RTT accounting still
+            // counts just the first accepted reply for the pending probe.
+            for _ in 0..2 {
+                process_response(&wire, auth, true, ClockFormat::NTP, None, None, &mut ctx);
+            }
+            let rejected = case == "msid_rejected";
+            assert_eq!(received, u64::from(!rejected), "auth={auth} case={case}");
+            assert_eq!(pending.contains_key(&42), rejected);
+            let summary = measurements.snapshot();
+            let stats = rtt.snapshot(1, 0).with_measurements(summary);
+            for interim in [false, true] {
+                let mut bytes = Vec::new();
+                stats
+                    .write_report(&mut bytes, crate::stats::OutputFormat::Json, interim, false)
+                    .unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(json["type"], if interim { "interim" } else { "summary" });
+                let v = &json["measurements"]["tlv_validation"];
+                let evaluated = if case == "no_tlvs" { 0 } else { 2 };
+                assert_eq!(v["evaluated_replies"], evaluated, "auth={auth} case={case}");
+                assert_eq!(v["rejected_replies"], if rejected { 2 } else { 0 });
+                let expected = match case {
+                    "no_tlvs" => None,
+                    "unsigned" | "flags" | "truncated" => {
+                        Some(if auth { "failed" } else { "missing" })
+                    }
+                    "bad_hmac" | "duplicate_hmac" => Some("failed"),
+                    "flagged_hmac" => Some("unverified"),
+                    "no_key" if !auth => Some("unverified"),
+                    _ => Some("verified"),
+                };
+                for status in [
+                    "not_requested",
+                    "missing",
+                    "verified",
+                    "unverified",
+                    "failed",
+                ] {
+                    assert_eq!(
+                        v["hmac"][status],
+                        if expected == Some(status) {
+                            evaluated
+                        } else {
+                            0
+                        },
+                        "auth={auth} case={case} status={status}"
+                    );
+                }
+                let observed: u64 = v["by_type"]
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .map(|t| t["observed"].as_u64().unwrap())
+                    .sum();
+                assert_eq!(v["observed_tlvs"], observed);
+                if case == "flags" {
+                    assert_eq!(v["by_type"]["255"]["observed"], 6);
+                    for flag in [
+                        "unrecognized",
+                        "malformed",
+                        "integrity_failed",
+                        "conformant_reflected",
+                    ] {
+                        assert_eq!(v["flags"][flag], 2);
+                    }
+                    assert_eq!(v["by_type"]["247"]["flags"]["conformant_reflected"], 2);
+                }
+                if case == "truncated" {
+                    assert_eq!(v["by_type"]["255"]["flags"]["malformed"], 2);
+                }
+                if case == "duplicate_hmac" {
+                    assert_eq!(v["by_type"]["8"]["observed"], 4);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tlv_validation_excludes_base_hmac_failures_and_reports_unsigned_open_replies() {
+    let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+    for auth in [false, true] {
+        let mut wire = ssid_test_reply(auth, true, 42, 0, &key);
+        if auth {
+            wire[AUTH_HMAC_OFFSET] ^= 1;
+        }
+        let mut pending = HashMap::from([(
+            42,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: 0,
+            },
+        )]);
+        let mut rtt = RttCollector::new();
+        let mut owd = OwdCollector::new();
+        let mut received = 0;
+        let mut latched = None;
+        let mut zero = false;
+        let mut measurements = Measurements::new(1);
+        let mut ctx = congestion_process_response_ctx(
+            &mut pending,
+            &mut rtt,
+            &mut owd,
+            &mut received,
+            &mut latched,
+            None,
+            &mut zero,
+        );
+        ctx.measurements = Some(&mut measurements);
+        ctx.hmac_key = auth.then_some(&key);
+        process_response(&wire, auth, true, ClockFormat::NTP, None, None, &mut ctx);
+        let v = measurements.snapshot().tlv_validation;
+        assert_eq!(received, u64::from(!auth));
+        assert_eq!(v.evaluated_replies, u64::from(!auth));
+        assert_eq!(v.hmac.not_requested, u64::from(!auth));
+        assert_eq!(v.observed_tlvs, if auth { 0 } else { 2 });
+    }
+}

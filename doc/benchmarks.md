@@ -1,8 +1,6 @@
 # Measuring reflector performance
 
-This document explains how to measure reflector throughput and CPU cost, and
-how to read and record the results. It is for contributors comparing revisions
-and for operators sizing a deployment.
+Measure reflector throughput and CPU cost with Criterion and live UDP tests.
 
 Use both the in-process Criterion benchmarks and the live UDP benchmark.
 Criterion isolates parsing, authentication, TLV processing and assembly. The
@@ -20,15 +18,12 @@ target/release/examples/live_udp_bench --rate 10000 --ipv6 --authenticated \
   --stateful > live-ipv6-auth-stateful.json
 ```
 
-Each invocation starts three fresh reflector processes in sequence. Each trial
-uses one measured UDP session on loopback, sends a readiness probe, observes two
-seconds of idle time, probes the measured session, sends traffic for three
-seconds, drains replies for 500 ms, observes another two seconds of idle time,
-and verifies another reply. Hardware/kernel timestamping is explicitly off.
-Probe traffic is excluded from load accounting. This is a baseline packet
-workload (44 bytes open, 112 authenticated), with no TLVs or burst requests.
-The fixed sender timestamp is an echo-validation marker; no latency or OWD is
-measured. The HMAC key is a public test fixture.
+Each invocation runs three fresh reflectors, sequentially. Each trial uses
+one loopback session: readiness probe, 2 s idle, probe, 3 s load, 500 ms drain,
+2 s idle, then a final verified probe. Probe traffic is excluded from load
+counts. Packets are 44 bytes open or 112 authenticated, without TLVs, bursts
+or kernel/NIC timestamps. A fixed timestamp checks echoes; delays are not
+measured. The HMAC key is public test data.
 
 Options (`live_udp_bench --help` lists limits and defaults):
 
@@ -90,14 +85,12 @@ describe the generator build; they cannot verify an arbitrary reflector binary.
 Do not rebuild either executable during a run. Use release builds, repeat each
 case, and compare medians and ranges rather than a single best result.
 
-For a small rate sweep, run both families and authentication modes at 5,000,
-25,000 and 100,000 requested packets/sec. Add `--stateful` when studying session
-costs. Keep runtime workers, CPU affinity, feature flags and host load constant
-across revisions. A larger repeat count and a quiet dedicated host improve
-comparability. This is a single-session loopback workload: it does not establish
-NIC throughput, multi-client scaling, latency, TLV/burst costs, hardware timestamp
-performance or an optimization's before/after gain. Shared-host results can be
-limited by either process and by loopback/kernel scheduling.
+Sweep IPv4/IPv6 and both authentication modes at 5,000, 25,000 and 100,000 pps.
+Add `--stateful` to measure session costs. Hold workers, CPU affinity, features
+and host load constant; use more repeats on a quiet host. This single-session
+loopback test can be limited by either process or the kernel. It does not
+measure NIC throughput, multi-client scaling, latency, TLVs, bursts or hardware
+timestamps, and requires matched before/after runs to assess an optimization.
 
 For pnet, build with `--no-default-features --features ttl-pnet` and run with
 `CAP_NET_RAW` in an isolated network namespace. Raw capture requires complete

@@ -1,9 +1,6 @@
 # Privileged network-namespace conformance tests
 
-This document explains how to run the Linux namespace tests that check STAMP
-behavior on real links, and what each scenario proves. It is for contributors
-and release reviewers who need wire-level evidence that unit and loopback tests
-cannot give.
+Run Linux namespace tests and inspect their wire evidence.
 
 `tests/netns_conformance.rs` starts real reflectors and senders in Linux
 network namespaces joined by veth links and records the traffic with tcpdump.

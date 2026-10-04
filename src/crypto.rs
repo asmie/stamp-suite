@@ -473,10 +473,7 @@ impl HmacKeySet {
     }
 }
 
-/// Performs constant-time comparison of two byte slices.
-///
-/// Uses the `subtle` crate for audited constant-time semantics.
-/// This prevents timing attacks by always comparing all bytes in constant time.
+/// Compare byte slices in constant time using subtle.
 fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
@@ -651,9 +648,7 @@ mod tests {
 
     #[test]
     fn test_constant_time_compare() {
-        // This test verifies correctness only. The constant-time property
-        // (resistance to timing attacks) cannot be reliably tested in a unit test
-        // and must be verified by code inspection or specialized timing analysis tools.
+        // Checks results, not timing resistance; that needs separate analysis.
         let a = [1, 2, 3, 4];
         let b = [1, 2, 3, 4];
         let c = [1, 2, 3, 5]; // Different at last byte

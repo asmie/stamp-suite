@@ -1,9 +1,11 @@
 # Independent protocol-combination fixtures
 
-This document describes the independent wire fixtures that check the reflector
-against a separate implementation of the STAMP wire format, and how to run and
-extend them. It is for contributors and for implementers who want to reuse the
-fixture bytes.
+The [4 October 2026 report](interop/2026-10-04/REPORT.md) records 2,609 attempted
+cases against five applications in both roles, including shared-extension
+subsets and authentication failures. Run them with
+[`scripts/interop_apps.py`](../scripts/interop_apps.py).
+
+Independent wire fixtures for testing a reflector and reusing STAMP payloads.
 
 [`scripts/interop_stamp.py`](../scripts/interop_stamp.py) drives a real reflector
 with a separate Python standard-library implementation of the wire layout,

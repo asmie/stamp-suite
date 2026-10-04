@@ -232,23 +232,14 @@ jobs:
     permissions:
       contents: read
 
-  # Publishes to crates.io. Gated by the `crates-io` GitHub Environment
-  # so a human has to click "approve" before this runs.
-  #
-  # ---- ONE-TIME REPO-OWNER SETUP (not performed by this workflow) ----
-  # 1. Settings -> Environments -> New environment -> name it exactly
-  #    `crates-io` -> add yourself (or the release approvers) as a
-  #    required reviewer. This is what makes the publish job wait for a
-  #    manual approval click before it runs.
-  # 2. On crates.io: crate "stamp-suite" -> Settings -> Trusted
-  #    Publishing -> add a GitHub Actions publisher with:
+  # Publish to crates.io after approval through the `crates-io` environment.
+  # Repository setup:
+  # 1. Create the `crates-io` GitHub environment with a required reviewer.
+  # 2. In crates.io Trusted Publishing, add a GitHub Actions publisher:
   #      repository:  asmie/stamp-suite
   #      workflow:    release.yml
   #      environment: crates-io
-  #    This is what lets the OIDC exchange below (via
-  #    rust-lang/crates-io-auth-action) mint a short-lived publish
-  #    token, so no long-lived API token is stored in the repo.
-  # ----------------------------------------------------------------------
+  # The OIDC action obtains a short-lived token; no API token is stored here.
   publish:
     name: Publish to crates.io
     needs: [test-gate, conformance-gate, source, package, package-macos]
@@ -269,20 +260,15 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-      # ---- FALLBACK: only if Trusted Publishing (OIDC) cannot ---------
-      # ---- be enabled for this repo -------------------------------------
-      # Remove the two steps above and the `id-token: write` permission,
-      # then publish with a long-lived token stored as a repo secret:
+      # If Trusted Publishing is unavailable, remove both OIDC steps and
+      # `id-token: write`, then use a repository secret:
       #
       #   - name: cargo publish
       #     run: cargo publish --locked
       #     env:
       #       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       #
-      # Trusted Publishing is strongly preferred: there is no secret to
-      # rotate or leak, and crates.io can attest the token only ever
-      # came from this exact repo/workflow/environment.
-      # -------------------------------------------------------------------
+      # This token needs manual rotation.
 
   release:
     name: Publish GitHub Release
@@ -335,22 +321,14 @@ jobs:
             dist/*.mk
             dist/SHA256SUMS
 
-      # Detached GPG signature over SHA256SUMS, the form Debian/Gentoo/Arch
-      # maintainers usually check (`gpg --verify SHA256SUMS.asc SHA256SUMS`
-      # then `sha256sum -c`). Skipped, not failed, when no key is configured,
-      # so the attestation above is always present and the signature is an
-      # additive extra.
-      #
-      # ---- ONE-TIME REPO-OWNER SETUP (not performed by this workflow) ----
-      # 1. Create (or pick) a signing key and export the private key ASCII-
-      #    armored: `gpg --armor --export-secret-keys <KEYID>`.
-      # 2. Settings -> Secrets and variables -> Actions -> New repository
-      #    secret `RELEASE_GPG_PRIVATE_KEY` with that armored block; add
-      #    `RELEASE_GPG_PASSPHRASE` too if the key has one.
-      # 3. Publish the public key (`gpg --armor --export <KEYID>`) where
-      #    packagers can find it (for example, commit it as dist/RELEASE_KEY.asc
-      #    and upload it to keys.openpgp.org) and note the fingerprint in README.md.
-      # ----------------------------------------------------------------------
+      # Sign SHA256SUMS when a GPG key is configured; otherwise skip signing.
+      # The attestation above is produced in either case.
+      # Repository setup:
+      # 1. Export the private key: `gpg --armor --export-secret-keys <KEYID>`.
+      # 2. Store it in the RELEASE_GPG_PRIVATE_KEY Actions secret. Set
+      #    RELEASE_GPG_PASSPHRASE if the key needs one.
+      # 3. Publish the public key (`gpg --armor --export <KEYID>`) and record its
+      #    fingerprint in README.md so packagers can verify the signature.
       - name: Sign SHA256SUMS (if a release key is configured)
         working-directory: dist
         env:

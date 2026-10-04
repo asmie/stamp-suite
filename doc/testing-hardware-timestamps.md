@@ -1,8 +1,7 @@
 # Hardware timestamp verification on a two-host testbed
 
-This procedure verifies that NIC hardware timestamps are actually delivered
-and reported. It is for maintainers and testers with two Linux hosts that have
-timestamp-capable NICs and an established clock setup.
+Verify delivered NIC timestamps on two Linux hosts with timestamp-capable
+NICs and synchronized clocks.
 
 Check delivered timestamps, not only capability reports; loopback and virtual
 NICs do not establish physical NIC delivery. See the Linux

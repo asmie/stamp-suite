@@ -48,10 +48,7 @@ impl DscpSet {
         for token in spec.split(',') {
             let token = token.trim();
             if token.is_empty() {
-                // A wholly empty spec is reported as an empty list below. An
-                // empty element *inside* a list (`0,,8`, `0,46,`) is a typo, and
-                // skipping it silently would let the policy admit something the
-                // operator never wrote.
+                // Reject empty elements (0,,8 or 0,46,) instead of broadening policy.
                 if spec.trim().is_empty() {
                     continue;
                 }
@@ -141,10 +138,7 @@ impl EcnSet {
         for token in spec.split(',') {
             let token = token.trim();
             if token.is_empty() {
-                // A wholly empty spec is reported as an empty list below. An
-                // empty element *inside* a list (`0,,8`, `0,46,`) is a typo, and
-                // skipping it silently would let the policy admit something the
-                // operator never wrote.
+                // Reject empty elements (0,,8 or 0,46,) instead of broadening policy.
                 if spec.trim().is_empty() {
                     continue;
                 }

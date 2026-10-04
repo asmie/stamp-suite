@@ -777,18 +777,13 @@ impl TlvList {
     }
 
     #[cfg(test)]
-    /// Reflects captured headers into Types 246/247
-    /// (draft-ietf-ippm-stamp-ext-hdr-15 §§4.1, 4.2, 6.1, 6.2).
-    ///
-    /// Preserves Requested (8 bytes for Type 246, 4 for Type 247) and copies only
-    /// the matching header's tail. Match by length and, for nonzero Requested,
-    /// by the header's prefix. Consume each match so later TLVs cannot reuse it.
-    /// On missing capture or no match, set C and leave the value unchanged.
-    ///
-    /// `captured_fixed` holds one IP header; an empty slice has no candidate.
-    /// Use [`Self::process_reflected_headers_multi`] for stacked IP headers.
-    /// `captured_ext_headers` concatenates captured IPv6 headers in wire order,
-    /// including each header's own Next Header byte.
+    /// Reflect captured headers into Types 246/247 (ext-hdr-15 §§4.1–4.2, 6.1–6.2).
+    /// Match by length and nonzero Requested prefix, then copy the tail while
+    /// preserving Requested (8 bytes for 246; 4 for 247). Consume each match.
+    /// No capture or match sets C without changing the value.
+    /// `captured_fixed` is one IP header; use `process_reflected_headers_multi`
+    /// for stacked headers. `captured_ext_headers` holds concatenated IPv6
+    /// headers in wire order, with each header's Next Header byte.
     pub fn process_reflected_headers(
         &mut self,
         captured_fixed: Option<&[u8]>,
@@ -804,15 +799,11 @@ impl TlvList {
         self.process_reflected_headers_multi(fixed_list.as_deref(), captured_ext_headers);
     }
 
-    /// Multi-header entry point (draft-ietf-ippm-stamp-ext-hdr-15 §6.2 rule 3):
-    /// `captured_fixed` is the ordered list of IP fixed headers (outer→inner)
-    /// captured from an IP-in-IP tunnel, one record per stacked IP header.
-    /// `None` means the backend cannot observe the IP layer. Multiple Type-247
-    /// TLVs pair with these records using the same first-fit-with-consumption
-    /// discipline as Type-246: each captured header is reflected by at most one
-    /// TLV, so successive same-length Type-247 TLVs pair 1st↔outer, 2nd↔inner
-    /// (§6.2 rule 3 ordering) while a non-zero Requested field still selects a
-    /// specific header (§6.2 rule 1).
+    /// Reflect multiple fixed IP headers in outer-to-inner order
+    /// (ext-hdr-15 §6.2). None means the backend cannot capture IP headers.
+    /// Each Type-247 TLV consumes the first matching unconsumed header:
+    /// zero Requested matches by length; nonzero also matches its prefix.
+    /// Repeated same-length requests therefore select successive headers.
     pub fn process_reflected_headers_multi(
         &mut self,
         captured_fixed: Option<&[Vec<u8>]>,
@@ -825,18 +816,11 @@ impl TlvList {
         );
     }
 
-    /// Removes Reflected Fixed/IPv6 Extension Header TLVs (Types 247/246) from
-    /// the reply until `base_len + self.wire_size() <= max_reply_bytes`, per
-    /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 ("one or more ... TLVs MUST be
-    /// removed to avoid violating the ... MTU limit"). Type-246 TLVs are removed
-    /// before Type-247 (they sit last in §6.3 wire order, so trimming from the
-    /// tail keeps survivors ordered); only these two types are removed. Applied
-    /// to the canonical owners and updates wire indices. Returns the number removed.
-    ///
-    /// Because the reflector fills the sender-sized TLVs in place (never growing
-    /// them), this is defensive: in normal operation the reply is no larger than
-    /// the request, which already fit the forward-path MTU. `max_reply_bytes` of
-    /// 0 disables the check.
+    /// Remove Types 246/247 until `base_len + self.wire_size() <= max_reply_bytes`
+    /// (ext-hdr-15 §§4.2, 6.2). Remove 246 first to preserve §6.3 ordering;
+    /// leave other types unchanged and repair wire indices. Return the count removed.
+    /// In-place reflection does not grow these TLVs, but the reply MTU may differ
+    /// from the request's. A zero limit disables trimming.
     pub fn trim_reflected_headers_to_size(
         &mut self,
         base_len: usize,
@@ -878,13 +862,8 @@ impl TlvList {
         if !tlvs.iter().any(is_header_tlv) {
             return;
         }
-        // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: the Reflected Fixed Header
-        // Data (247) TLVs MUST precede the Reflected IPv6 Extension Header Data
-        // (246) TLVs. "If ... TLVs are not received in this order, the Session-
-        // Reflector MUST return these TLVs with the Conformant Reflected Packet
-        // STAMP TLV flag set to 1 ... but without copying any data." Detect a
-        // 247 that appears after any 246 and, on violation, C-flag every
-        // header TLV and copy nothing.
+        // ext-hdr-15 §6.3 requires Type 247 before Type 246.
+        // If any 247 follows a 246, set C on all header TLVs and copy no data.
         let mut seen_ext = false;
         let mut out_of_order = false;
         for tlv in tlvs.iter().filter(|tlv| tlv.is_processable()) {
@@ -948,16 +927,10 @@ impl TlvList {
         }
     }
 
-    /// Reflects one Reflected Fixed (Type 247, `N` = 4) or IPv6 Extension
-    /// (Type 246, `N` = 8) Header Data TLV by first-fit-with-consumption.
-    ///
-    /// A nonzero N-octet Requested selector picks the first unconsumed
-    /// captured header of the TLV's length that starts with it; an all-zero
-    /// selector picks the first unconsumed header of that length
-    /// (ext-hdr-15 §4.2/§6.2 rule 1). Marking headers consumed pairs successive
-    /// TLVs with successive headers, as rule 3 requires, so an IP-in-IP
-    /// tunnel's stacked fixed headers or repeated extension headers each go
-    /// to one TLV. Without captured headers or a match the TLV gets C.
+    /// Match a Type-247 (N=4) or Type-246 (N=8) request to the first unconsumed
+    /// capture of the same length (ext-hdr-15 §§4.2, 6.2). Nonzero Requested
+    /// also requires a prefix match. Consume the match so repeated requests
+    /// select successive captures. No match sets C.
     fn apply_reflected_header<const N: usize>(
         tlv: &mut RawTlv,
         records: Option<&[&[u8]]>,

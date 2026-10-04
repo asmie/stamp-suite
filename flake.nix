@@ -44,9 +44,7 @@
           };
         };
 
-        # `nix flake check` exercises the package build (which includes the
-        # cargo test phase) plus a clippy-with-warnings-as-errors gate that
-        # mirrors CI.
+        # Flake checks: build/tests, Clippy and formatting.
         checks = {
           build = self.packages.${system}.default;
 

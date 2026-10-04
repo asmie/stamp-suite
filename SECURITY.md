@@ -1,7 +1,5 @@
 # Security policy
 
-This page explains how to report a security vulnerability in stamp-suite.
-
 Report exploitable vulnerabilities privately to
 [Piotr Olszewski](mailto:asmie@asmie.pl). Include the affected version, a minimal
 reproduction, and the expected impact. Please allow time for a fix before

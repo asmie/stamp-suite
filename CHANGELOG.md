@@ -1,9 +1,7 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [Unreleased]
 
@@ -32,21 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--session-admission provisioned` answers only the exact session identities
   listed with `--reflector-session`. Permissive admission, which learns
   incoming sessions, is the default.
-- `--reflector-queue-capacity` (default 1024) bounds reflector work across
-  processing, capture handoff and queued burst copies.
-  `--reflector-shutdown-grace-ms` sets an optional shutdown grace period; the
-  default cancels immediately. The reflector handles SIGTERM, polls promptly
-  when the pnet capture is idle, uses nonblocking reply sockets and cleans up
-  the workers it owns. Reflector summaries and control status report queue
-  rejections and cancelled copies, and the reflector CSV gains two columns.
-  Overload, recovery and shutdown regression tests cover this.
-- The sender reports reply copies, duplicates, late replies and reordering
-  (with bounded storage), directional Direct Measurement windows and Follow-Up
-  reverse-delay summaries. They appear as `measurements` in JSON and text
-  output and as sender CSV column 28; probe and BER summary semantics are
-  unchanged. The sender drains requested burst copies within the final timeout.
-  Tests cover independent IPv4/open and IPv6/authenticated peers, and the
-  documentation describes the limits.
+- `--reflector-queue-capacity` (default 1024) bounds processing, capture handoff
+  and queued bursts. `--reflector-shutdown-grace-ms` allows queued work to finish;
+  default 0 cancels immediately. SIGTERM stops idle capture promptly, reply
+  sockets are nonblocking, and workers are cleaned up. Summaries and control
+  status report rejections/cancellations; reflector CSV adds two columns.
+- Bounded sender reply accounting tracks copies, duplicates, late replies,
+  reordering, Direct Measurement windows and Follow-Up delays. Reports use
+  `measurements` in text/JSON and sender CSV column 28. Probe and BER semantics
+  are unchanged; requested copies drain within the final timeout. Tests use
+  independent IPv4/open and IPv6/authenticated peers.
 - The sender reports idle, active and failed session states, with validated
   recovery, structured logs and a `measurements.session_state` summary field.
   `--session-loss-threshold` sets how many consecutive unanswered probes mark a
@@ -61,21 +54,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cover link-local bursts, alternate addresses and the sender.
 - `--help` and the man page group options into sections (Endpoints, Sender,
   Authentication, Reflector, and so on).
-- The DEB, RPM and Debian packaging ship a generated man page
-  (`dist/man/stamp-suite.1`, kept in sync by `tests/man_page.rs`). Each release
-  publishes a source tarball, a `cargo vendor` tarball and Sigstore build
-  provenance, plus an optional GPG-signed `SHA256SUMS`, so distribution
-  packagers have stable, verifiable inputs.
+- DEB/RPM/Debian packages include the generated man page, checked by
+  `tests/man_page.rs`. Releases include source and vendor tarballs, Sigstore
+  provenance and optional GPG-signed SHA256SUMS.
 - A Gentoo overlay tree under `dist/gentoo/` provides `net-analyzer/stamp-suite`
   with a USE flag per Cargo feature, OpenRC service files, and `acct-user` and
   `acct-group` packages.
-- A Linux live UDP benchmark (`live_udp_bench`) sends paced traffic, validates
-  reply and loss accounting, samples CPU under load and when idle, sends probes
-  after the idle period, repeats trials and records reproducibility metadata.
-  It covers IPv4 and IPv6, open and authenticated modes, and stateful baseline
-  workloads, and accepts `--hwtstamp` and `--metrics`. The Criterion suite has
-  a stateful case with a populated session table. The documentation describes
-  the generator's limits, and unsourced speed figures were removed.
+- Linux `live_udp_bench` validates replies/loss, records load and idle CPU,
+  probes after idle, repeats trials and records metadata. It covers IPv4/IPv6,
+  open/authenticated and stateful cases, with `--hwtstamp`/`--metrics` options.
+  Criterion adds a populated-session-table case. Documentation states generator
+  limits and removes unsourced speed figures.
 - A weekly standards revision monitor checks for new revisions of the
   implemented documents, with offline replay and failure reporting.
 - Release test fixtures cover bearer-authenticated HTTP and HTTPS key rotation
@@ -89,14 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The documentation was rewritten against the code. `doc/usage.md` is
-  reorganized by task (configuration file, sender, reflector, authentication,
-  timestamps, networking, observability); each topic has one home and other
-  pages link to it. New pages: `CONTRIBUTING.md` and `doc/protocol.md` (a
-  STAMP overview and glossary). The conformance matrices share one layout,
-  and the AgentX and ext-hdr revision-13 review records were folded into
-  `doc/architecture.md` and the ext-hdr matrix. `tests/README.md` lists every
-  test file.
+- Documentation checked against code and organized by topic. Added
+  CONTRIBUTING.md and the protocol overview/glossary. Conformance matrices
+  share a layout; AgentX/ext-hdr review notes moved into architecture and
+  conformance docs. tests/README.md lists every test file.
 - **Breaking for Type 246:** IPv6 header reflection follows
   draft-ietf-ippm-stamp-ext-hdr-15. The move from -11 to -13 introduced
   eight-octet Type 246 selectors, strict request and attachment validation,
@@ -109,25 +94,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - draft-ietf-ippm-asymmetrical-pkts was published as RFC 10052. Codepoints are
   unchanged; citations, the conformance matrix and the standards monitor refer
   to the RFC.
-- BER support follows draft-gandhi-ippm-stamp-ber-07. Pattern alignment is
-  validated, invalid combinations get C, and padding is repaired and kept
-  outside TLV-HMAC coverage. The sender reports directional interval
-  statistics, burst aggregates and optional threshold alarms (`--ber-interval`,
-  `--ber-bit-threshold`, `--ber-packet-threshold`, also in TOML and the schema)
-  in text, JSON and CSV output, and stops BER measurement when the peer
-  reports it unsupported. On Linux, route-MTU budgets apply to BER padding, and resized replies are
-  rejected as measurement inputs. Wire, integrity, interval and IPv4/IPv6
-  regression tests and a BER conformance matrix cover this.
-- Reflector synchronization-source declarations are separate from the NTP/PTP
-  timestamp format and the Error Estimate S bit. `--clock-sync-source` (system
-  clock) and `--hardware-clock-sync-source` (PHC) default to `local`. The
-  RFC 8972 wire codes are corrected: SSU/BITS is 3, external sources 4, local
-  5. Type 3 reports software timestamping for the current T3, and Follow-Up
-  records the method of the timestamp actually stored, including software
-  fallback and later hardware corrections. Timestamp and method snapshots stay
-  coherent, and unrelated error-queue events are rejected. The CLI, TOML,
-  schema, `ProcessingContext` callers, documentation and wire tests are
-  updated.
+- BER follows draft-gandhi-ippm-stamp-ber-07: validate alignment, set C on
+  invalid combinations, repair padding and keep it outside TLV HMAC.
+  Text/JSON/CSV report directional intervals, bursts and optional alarms
+  (`--ber-interval`, `--ber-bit-threshold`, `--ber-packet-threshold`, also in
+  TOML/schema). Unsupported peer reports stop sampling. Linux padding uses
+  route MTU; resized replies are excluded from measurement. Wire, integrity,
+  interval and IPv4/IPv6 tests support the BER matrix.
+- Clock-source declarations are independent of timestamp format and Error
+  Estimate S. `--clock-sync-source` (system) and `--hardware-clock-sync-source`
+  (PHC) default to local. Corrected RFC 8972 codes: SSU/BITS=3, external=4,
+  local=5. Type 3 reports the current software T3 method; Follow-Up records
+  the stored timestamp's method, including fallback and later hardware
+  corrections. Timestamp/method snapshots stay coherent; unrelated error-queue
+  events are rejected. CLI, TOML, schema, ProcessingContext and tests updated.
 - The sender uses a randomized dynamic source port by default, sender and
   reflector ports must differ, and both endpoints transmit with TTL/Hop Limit
   255. Lower configured TTL values are rejected; lower received values are
@@ -149,32 +129,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once, and signatures are regenerated after resizing. Replies whose mandatory
   fields cannot fit, or whose route budget is unavailable, are dropped. Runtime
   caps report administrative limits. Route MTU lookup is Linux-only.
-- A non-monotonic Type 12 request gets one U-flagged reply in both reflector
-  backends. Burst handling after sequence wraparound is unchanged, requested
-  padding is skipped on ordering failures, and the final HMACs cover the flags.
-  This response is required by the draft and stays active with
-  `--drop-replayed`; ordinary duplicate suppression is configurable.
+- Non-monotonic Type 12 requests get one U-flagged reply on both backends,
+  with requested padding skipped and final flags signed, even with
+  `--drop-replayed`. Ordinary duplicate suppression remains configurable;
+  sequence-wrap bursts are unchanged.
 - With configured sender micro-sessions, a reply must carry exactly one usable
   Micro-session ID. Missing, flagged, malformed, duplicate or unverifiable IDs
   are rejected before measurements are consumed, and the reflector ID is
   learned only from accepted pending replies. Numeric TLV validation does not
   implement physical LAG steering or ingress-member verification.
-- Diagnostics go to stderr in both log formats, and `-R` packet details go to
-  stderr when JSON or CSV measurement output is selected. Reflector startup
-  notices are logged, and periodic and final sender reports share one CSV
-  header. CLI stream regression tests cover this, and the documentation
-  describes the output streams and library reporting state.
+- Diagnostics use stderr in both log formats. `-R` also uses stderr for
+  JSON/CSV output. Reflector startup notices are logged; sender reports share
+  one CSV header. CLI stream tests check routing.
 - Sender RTT and OWD storage is bounded: quantiles are exact through 4096
   observations, then come from full-run histograms with less than 0.78125%
   magnitude error. Each snapshot sorts or traverses the RTT data once, and
   cumulative moments and 64-bit sample counts are kept. Variance uses centered
   online updates, which fixes overflow and cancellation. Text and JSON output
   state the precision, and two sender CSV columns before `ber` carry it.
-- The sender keeps at most 1024 completed BER intervals and 1024 alarms, with
-  omission counters and the current partial interval. Lifetime totals and
-  alarm logs are preserved. Full-range, long-run, accuracy and output
-  regression tests cover this. The documentation describes retention and
-  corrects the RTT jitter metric's inaccurate RFC 3550 attribution.
+- BER history retains 1024 completed intervals, 1024 alarms, the current
+  partial interval and omission counts. Lifetime totals and alarm logs remain.
+  Retention/accuracy/output tests cover this. Documentation corrects the RTT
+  jitter metric's RFC 3550 attribution.
 - The minimum supported Rust version is 1.85 (was 1.93), so the crate builds
   with the rustc shipped by Debian trixie. The only dependency that had to
   change was `criterion` (0.8 to 0.5, dev-only). The container builder image is
@@ -268,14 +244,11 @@ median of three trials, reflector CPU as a share of one core:
   in `packets.rs`.
 - `ReceiverSharedState::capture_alive` is removed. Nothing outside tests read
   it, and every path that cleared it ended the process.
-- Each base packet's field layout is declared once with the `wire_packet!`
-  macro, which generates the struct, `to_bytes`, `from_bytes` and the lenient
-  parsers, and fails the build if the field offsets leave a gap or overlap.
-  The four `Extended*` packet types are aliases of one generic
-  `Extended<B: BasePacket>`, whose `from_bytes_lenient` returns the zero-filled
-  base packet with the parsed packet. `PacketAuthenticated`'s
-  `mbz1a`/`mbz1b`/`mbz1c` fields are one `mbz1: [u8; 68]`. Decoding of 2000
-  random buffers was compared before and after and is identical.
+- `wire_packet!` defines each base layout once, generating structs, codecs
+  and lenient parsers with compile-time gap/overlap checks. The four Extended
+  types alias `Extended<B: BasePacket>`; lenient parsing returns the zero-filled
+  base buffer too. Authenticated mbz1a/b/c become `mbz1: [u8; 68]`. Decoding
+  2000 random buffers matched the old implementation.
 - Thirteen per-TLV length errors are one `TlvError::InvalidLength { kind,
   length }`, and the expected length comes from one table. Fixed and IPv6
   extension header reflection share one matching function, and Location
@@ -301,11 +274,9 @@ median of three trials, reflector CPU as a share of one core:
   destructures the file configuration, so an unmerged key fails to compile,
   and a test checks that every CLI option has a configuration file key.
   Configuration errors go through one `invalid()` helper.
-- The sender returns typed TLV telemetry for Access Report acknowledgements,
-  forward congestion and validated micro-session IDs, and formats diagnostics
-  only for `-R`. Control decisions no longer depend on status strings, and
-  transient formatting allocations are gone. Summary schemas and diagnostic
-  stream routing are unchanged.
+- Typed TLV results drive Access Report, CE and Micro-session decisions.
+  Diagnostics format only for `-R`; control no longer parses status strings
+  or allocates temporary display text. Output schemas/routing are unchanged.
 - DSCP/ECN packing and unpacking go through `tos::Tos`.
 - The reflector skips the CoS fallback retry when the fallback TOS byte is the
   one that just failed to send.

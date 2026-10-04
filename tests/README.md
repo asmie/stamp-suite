@@ -1,19 +1,14 @@
 # Integration tests
 
-This directory holds the Cargo integration tests. This file lists every test
-file, says which ones need features, platforms or privileges, and shows how to
-run the tests that ordinary `cargo test` skips. It is for contributors and
-reviewers. General build, test and lint commands are in
+Integration test inventory, feature/platform requirements and commands for
+ignored tests. General build and lint commands are in
 [CONTRIBUTING.md](../CONTRIBUTING.md#tests).
 
-The [3 October 2026 review](../doc/review/2026-10-03/README.md#test-value-and-missing-cases)
-records the original per-test assessment. Statistics tests now capture rendered
-fields; real-process metrics tests replace callable-only smoke tests. AgentX
-handshake and CLI lifetime tests, sender size checks, source-churn tests and
-blocked/closed-output tests cover the reproduced failures.
-Keep helper-based scenarios and parser no-panic properties: their value does
-not depend on a local `assert!` in each wrapper. Consolidate tests only while
-preserving the input boundaries and independent checks they provide.
+The [3 October review](../doc/review/2026-10-03/README.md#test-value-and-missing-cases)
+records the original test assessment. Regression tests now cover rendered
+statistics, process metrics, AgentX lifetime, sender size limits, source churn
+and blocked output. Keep helper-based scenarios and no-panic properties;
+consolidation must preserve their boundary inputs and independent checks.
 
 ## Running the default suite
 

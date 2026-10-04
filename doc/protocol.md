@@ -1,9 +1,7 @@
 # STAMP protocol overview
 
-This page explains the Simple Two-Way Active Measurement Protocol (STAMP) for
-readers who have not used it before, and maps its terms to stamp-suite. It is
-a summary; the RFCs and the [conformance matrices](conformance/README.md) are
-authoritative.
+STAMP concepts and their use in stamp-suite. See the RFCs and
+[conformance matrices](conformance/README.md) for requirements and coverage.
 
 ## What STAMP measures
 

@@ -196,10 +196,8 @@ pub(crate) fn encode_pdu(
     let mut buf = Vec::with_capacity(PDU_HEADER_SIZE + payload.len());
     buf.push(AGENTX_VERSION);
     buf.push(pdu_type);
-    // All multi-byte fields below are big-endian (network byte order), so we
-    // MUST advertise NETWORK_BYTE_ORDER (RFC 2741 §6.1). This is a per-PDU
-    // flag, not a session negotiation. Our outgoing PDUs always use it;
-    // Incoming requests select their byte order independently.
+    // Outgoing fields are big-endian: set NETWORK_BYTE_ORDER per PDU
+    // (RFC 2741 §6.1). Incoming PDUs select their byte order independently.
     buf.push(flags | AGENTX_FLAG_NETWORK_BYTE_ORDER);
     buf.push(0); // reserved
     buf.extend_from_slice(&session_id.to_be_bytes());
@@ -256,10 +254,8 @@ pub(crate) fn encode_oid(oid: &Oid, include: bool) -> Vec<u8> {
             (0u8, 0)
         };
 
-    // `n_subid` is a single octet, so an over-long OID cannot be described
-    // truthfully. Emit only as many sub-identifiers as the count can express
-    // rather than writing a length that disagrees with the body; MAX_OID_SUBIDS
-    // is far above the 128 sub-identifiers an OID is allowed anyway.
+    // Clamp OID sub-identifiers to the one-byte count so body and count agree.
+    // MAX_OID_SUBIDS exceeds the standard 128-sub-identifier limit.
     let emitted = &subs[start_idx..];
     let emitted = &emitted[..emitted.len().min(MAX_OID_SUBIDS)];
     debug_assert!(
@@ -831,10 +827,8 @@ impl AgentXSession {
                     log::info!("Master agent closed session");
                     return Ok(());
                 }
-                // SET sequence (RFC 2741 §6.2.8, §6.2.9). This sub-agent is
-                // read-only, so we reject the request with the appropriate
-                // error instead of silently dropping it. A silent drop leaves
-                // the master waiting for a Response until it times out.
+                // Reject SET phases with a Response error (RFC 2741 §§6.2.8–6.2.9).
+                // The sub-agent is read-only; silence would leave the master waiting.
                 AGENTX_TESTSET_PDU => {
                     log::debug!("Rejecting SET (TestSet): STAMP-SUITE-MIB is read-only");
                     let resp =
@@ -1128,9 +1122,8 @@ mod tests {
 
     #[test]
     fn test_oid_decode_short_buffer_rejected() {
-        // Anything shorter than the 4-octet RFC 2741 §5.1 header must be
-        // rejected rather than panic. Exactly 4 zero octets is the *valid*
-        // null OID (n_subid = 0), so the rejected range stops there.
+        // Reject OIDs shorter than the four-byte header (RFC 2741 §5.1).
+        // Four zero bytes encode a valid null OID.
         for len in 0..OID_HEADER_SIZE {
             let buf = vec![0u8; len];
             assert!(decode_oid(&buf).is_err(), "len {len} must be rejected");
@@ -1141,9 +1134,7 @@ mod tests {
         assert_eq!(consumed, OID_HEADER_SIZE);
     }
 
-    /// Checks the wire layout itself, not just encode/decode agreement. A
-    /// round-trip test would pass even with a wrong-width header, because both
-    /// sides would use our own code.
+    /// Check independent wire bytes; a round trip can hide matching codec bugs.
     #[test]
     fn test_oid_wire_layout_matches_rfc2741_section_5_1() {
         // 1.3.6.1.4.1.65134 with the internet-prefix optimization: 1.3.6.1 is

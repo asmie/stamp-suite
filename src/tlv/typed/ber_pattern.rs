@@ -1,12 +1,7 @@
-//! BER Bit Pattern in Padding TLV (Type 240)
-//! per draft-gandhi-ippm-stamp-ber-07 §5.1.
-//!
-//! Carries the bit pattern the Session-Sender used to fill the companion
-//! RFC 8972 Extra Padding TLV. The Session-Reflector uses it as the expected
-//! pattern when computing the Bit Error Count and Max Burst Size TLVs.
-//!
-//! Omitting this TLV selects the default `0xFF00` pattern. An explicit empty
-//! value is reflected with C=1; it does not select that default on the wire.
+//! BER pattern TLV (Type 240), draft-gandhi-ippm-stamp-ber-07 §5.1.
+//! Describes the repeated Extra Padding pattern used for error counts and
+//! burst sizes. Omission selects 0xFF00; an empty value gets C and does
+//! not select the default.
 
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;

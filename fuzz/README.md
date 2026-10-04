@@ -1,14 +1,10 @@
 # Fuzz targets
 
-This directory holds libFuzzer harnesses for the byte-level parsers and packet
-paths most exposed to hostile input. It is for contributors who change parsing
-or packet processing.
+libFuzzer targets for packet paths and parsers exposed to network input.
 
-The `fuzz` package is excluded from the main workspace (`[workspace] exclude`
-in the top-level `Cargo.toml`), so ordinary `cargo build` and `cargo test` runs
-do not build `libfuzzer-sys` or need a nightly compiler. It depends on
-stamp-suite with default features off and the `snmp` feature on, which exposes
-the AgentX decoders.
+`fuzz` is excluded from the main workspace, so normal Cargo builds/tests
+need neither libfuzzer-sys nor nightly. It enables only `snmp` in stamp-suite
+to expose AgentX decoders.
 
 ## Setup
 

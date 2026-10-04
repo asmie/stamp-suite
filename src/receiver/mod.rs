@@ -918,15 +918,10 @@ fn apply_semantic_tlv_processing(
         };
     tlvs.process_reflected_headers_multi(captured_fixed, captured_ext);
 
-    // draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 MTU rule (reflector half): the
-    // reflected test packet MUST NOT exceed the IP/IPv6 MTU after the Reflected
-    // Fixed/IPv6 Ext Header TLVs; if necessary, one or more of those TLVs MUST
-    // be removed. This assembly-time trim applies the administrative limit;
-    // the shared send path additionally resolves the actual reply route and
-    // enforces its payload budget immediately before each datagram. That
-    // second check also accounts for alternate destinations and attached SRH.
-    // The base + a reserve for the response HMAC TLV (if keyed) is the fixed
-    // part; only complete optional header TLVs are removed here.
+    // Trim complete optional header TLVs to the administrative reply limit
+    // (ext-hdr-15 §§4.2, 6.2), reserving the base and keyed response HMAC.
+    // The send path separately checks the actual route MTU, including
+    // alternate destinations and SRH overhead, before each datagram.
     {
         // HMAC TLV wire size = 4-byte header + 16-byte value.
         let hmac_reserve = if tlv_hmac_key.is_some() {

@@ -2,16 +2,10 @@
 
 use super::*;
 
-/// Removes Reflected Fixed/IPv6 Extension Header TLVs (Types 247/246) from
-/// `extra_tlvs` until the assembled packet fits within `mtu`
-/// (draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2: "one or more ... TLVs MUST be
-/// removed to avoid violating the path MTU limit"). `fixed_overhead` is every
-/// on-wire byte outside `extra_tlvs` (IP + attached ext headers + UDP + STAMP
-/// base + the per-packet HMAC/DM/Access TLVs). Type-246 TLVs are removed before
-/// Type-247: they come last in the ext-hdr-15 §6.3 order, so trimming from the
-/// tail keeps the survivors ordered. Only these two TLV types are ever removed.
-///
-/// Returns how many TLVs were removed.
+/// Remove Types 246/247 until the packet fits `mtu` (ext-hdr-15 §§4.2, 6.2).
+/// `fixed_overhead` includes IP, attached headers, UDP, the STAMP base and
+/// per-packet HMAC/DM/Access TLVs. Remove Type 246 first to preserve §6.3
+/// ordering. Leave other types unchanged; return the number removed.
 pub(super) fn enforce_egress_mtu(
     extra_tlvs: &mut Vec<RawTlv>,
     mtu: usize,
@@ -168,15 +162,10 @@ pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv>
         );
     }
 
-    // draft-ietf-ippm-stamp-ext-hdr-15 §4.2: for every real IPv6 extension
-    // header the sender attaches (`--attach-ext-hdr`), emit a matching Type-246
-    // request TLV so the reflector copies it back. The attached headers appear
-    // on the wire before any externally-supplied ones, and each carries an
-    // all-zeros Requested field: the header's first on-wire octet (Next Header)
-    // is assigned by the kernel and cannot be predicted here, so positional
-    // pairing (§4.2 rule 3), not a selector, disambiguates them.
-    // IPv6 extension headers do not exist for IPv4, so attach-derived request
-    // TLVs are emitted only for IPv6 destinations (matching the send-path gate).
+    // Emit one Type-246 request per attached IPv6 header (ext-hdr-15 §4.2).
+    // These precede user-supplied requests. Requested is zero because the
+    // kernel chooses Next Header; positional pairing selects the capture.
+    // Emit these requests only for IPv6, as the send path does.
     let attach_specs = if conf.remote_ip().is_ipv6() {
         conf.attach_ext_hdrs()
     } else {
@@ -268,12 +257,10 @@ pub(crate) fn finalize_auth_packet(packet: &mut PacketAuthenticated, key: &HmacK
     packet.hmac = compute_packet_hmac(key, &bytes, AUTH_HMAC_OFFSET);
 }
 
-/// Appends `groups` of TLVs to `out` in order, followed by an HMAC TLV when
-/// `tlv_hmac_key` is set (RFC 8972 §4.8). The HMAC covers the Sequence Number
-/// and the TLVs before it. When the probe carries BER TLVs, Extra Padding goes
-/// after the HMAC and outside its coverage, so residual bit errors can be
-/// measured. The layout matches a `TlvList` built from the same TLVs and
-/// signed with `set_hmac`, without copying the TLVs into one.
+/// Append TLV groups, then a keyed HMAC covering the sequence number and
+/// preceding TLVs (RFC 8972 §4.8). BER padding follows HMAC so bit errors
+/// remain measurable. Match the `TlvList::set_hmac` layout without building
+/// an intermediate list.
 pub(super) fn write_probe_tlvs(
     out: &mut Vec<u8>,
     sequence_number: u32,

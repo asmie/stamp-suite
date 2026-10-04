@@ -60,14 +60,10 @@ pub(super) fn apply_egress_ip_options(
     Ok(())
 }
 
-/// Attaches the real IPv6 extension headers requested via `--attach-ext-hdr`
-/// (draft-ietf-ippm-stamp-ext-hdr-15 §4.2) to the sender's egress socket via
-/// the sticky `IPV6_HOPOPTS` / `IPV6_DSTOPTS` socket options, so the headers
-/// ride on every subsequent test packet the kernel emits. Byte 0 (Next Header)
-/// of each buffer is assigned by the kernel; the rest is passed verbatim.
-///
-/// Any attachment failure aborts startup. Configuration permits one HBH header
-/// followed by one Destination Options header, matching sticky socket semantics.
+/// Attach `--attach-ext-hdr` buffers through IPV6_HOPOPTS/IPV6_DSTOPTS
+/// (ext-hdr-15 §4.2). The kernel sets Next Header; other bytes pass unchanged.
+/// Options apply to every probe. Attachment failure aborts startup.
+/// Allow one HBH followed by one Destination Options header.
 #[cfg(target_os = "linux")]
 pub(super) fn apply_attach_ext_hdrs(
     fd: std::os::fd::RawFd,

@@ -1,8 +1,6 @@
 # Statistics precision and retention
 
-This document describes how precise the sender's delay statistics are and how
-much history the delay and BER collectors keep, for anyone relying on long or
-high-rate runs.
+Delay precision and retained history for long or high-rate runs.
 
 RTT and OWD summaries count first replies to pending probes. The
 [reply collector](measurements.md) also tracks burst copies, duplicates, and late
@@ -30,20 +28,17 @@ falls in the 999,424–1,003,519 ns bucket. Its representative is 999,424 ns.
 Signed OWD uses mirrored buckets in signed numerical order, rounding toward
 zero. The same magnitude example for a negative delay yields −999,424 ns.
 
-For an exact selected order statistic `x != 0`, histogram value error is strictly
-less than `abs(x) / 128`, or **0.78125% of its magnitude**. The rank is unchanged;
-only the value is quantized. Zero and the minimum and maximum ranks are exact,
-and representatives are clamped to the observed extrema, so a constant series
-is exact too. This is a deterministic value-error bound, not a confidence
-interval or a bound on timestamp accuracy. JSON floating-point and decimal text/
-CSV formatting can introduce additional rounding at the displayed precision.
+For exact order statistic `x != 0`, histogram value error is less than
+`abs(x) / 128` (**0.78125%**). Rank is unchanged. Zero and extreme ranks
+remain exact; representatives are clamped to observed extrema, so constant
+series are exact. This bounds quantization, not timestamp accuracy or
+statistical uncertainty. Output formatting may add rounding.
 
-`QuantilePrecision` discloses `exact_sample_limit = 4096` and
-`relative_error_bound = 0.0078125` in JSON, including standalone OWD summaries.
-Text prints the same policy. CSV adds `quantile_exact_sample_limit` and
-`quantile_relative_error_bound` before the BER, measurements and OWD
-clock-quality JSON columns. This policy applies independently to each series, even if RTT and usable OWD counts differ. It is a
-conservative bound: it does not imply short series have been approximated.
+JSON exposes `exact_sample_limit = 4096` and
+`relative_error_bound = 0.0078125` in `QuantilePrecision`, including OWD
+summaries. Text prints the policy; CSV includes `quantile_exact_sample_limit`
+and `quantile_relative_error_bound` before the BER, measurements and OWD
+columns. Each series follows this policy independently. Short series are exact.
 
 [Clock-quality metadata](measurements.md#clock-quality-accompanying-delay)
 is independent of quantile precision.

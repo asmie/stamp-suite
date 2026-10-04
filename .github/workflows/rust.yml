@@ -178,23 +178,14 @@ jobs:
           }
           Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-1.88.exe" -OutFile "$env:TEMP/npcap.exe"
           & $sevenZip x "$env:TEMP/npcap.exe" -o"$env:TEMP/npcap-extract" -y | Out-Null
-          # The installer is NOT laid out as "32-bit at the root, 64-bit in a
-          # subdirectory". Npcap 1.88 ships three architectures under a naming
-          # scheme that defeats every path- or name-based heuristic:
-          #
-          #   Packet.dll,       wpcap.dll        (root)             -> ARM64
-          #   Packet_arm64.dll, wpcap_arm64.dll  (root)             -> ARM64
-          #   Packet_x64.dll,   wpcap_x64.dll    (root)             -> x64
-          #   Packet.dll,       wpcap.dll        ($SYSDIR/Npcap/)   -> x64
-          #
-          # There is no x64/ directory anywhere, so matching on one selects
-          # nothing; and an exact-name match for "Packet.dll"/"wpcap.dll"
-          # skips the _x64 copies entirely while picking up the ARM64 ones at
-          # the root. Loading a non-x64 DLL into the x64 test binary aborts it
-          # with STATUS_INVALID_IMAGE_FORMAT (0xc000007b) before a single test
-          # runs. So key on the only thing that cannot drift with installer
-          # layout: the PE header's machine type (0x8664 = x64). The two x64
-          # copies above are byte-identical, so either is a correct pick.
+          # Npcap 1.88 mixes architectures and names:
+          #   Packet.dll / wpcap.dll at the root: ARM64
+          #   Packet_arm64.dll / wpcap_arm64.dll at the root: ARM64
+          #   Packet_x64.dll / wpcap_x64.dll at the root: x64
+          #   Packet.dll / wpcap.dll under $SYSDIR/Npcap/: x64
+          # Select by PE machine type (0x8664 = x64), not path or filename.
+          # Loading ARM64 DLLs aborts x64 tests with 0xc000007b. Both x64 copies
+          # are byte-identical.
           function Get-PeMachine([string]$Path) {
             try {
               $bytes = [System.IO.File]::ReadAllBytes($Path)
@@ -410,15 +401,9 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
-    # Override the workflow-default read-only token so
-    # rustsec/audit-check can post its findings as a check-run
-    # (checks:write) and open issues for new advisories (issues:write).
-    #
-    # `cargo-deny` below also scans the RustSec advisory database, so the
-    # advisory check runs twice on purpose. This job adds the PR-annotated
-    # check-run and issue filing, which `cargo-deny-action` does not do;
-    # `cargo deny check` is the single command contributors run locally
-    # (see deny.toml) and also covers licenses, bans and sources.
+    # audit-check needs checks:write for PR annotations and issues:write for
+    # new advisories. cargo-deny also checks advisories, plus licenses and
+    # sources, but does not file issues or annotate PRs.
     permissions:
       contents: read
       checks: write

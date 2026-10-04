@@ -1,12 +1,8 @@
-//! Experimental TLV and sub-TLV codepoints, centralized for renumbering.
-//!
-//! The STAMP TLV and Sub-TLV registries reserve 240-251 for experimental use
-//! (RFC 8972 §5.1 and §5.3). Peers must agree on these values; unrelated uses can
-//! collide. There are no runtime overrides.
-//!
-//! When IANA assigns a value, update its constant here, bump the minor version,
-//! and document the wire change in the release notes. See the versioning policy
-//! in `CHANGELOG.md` and the disclosure in `doc/conformance/README.md`.
+//! Experimental codepoints, kept together for renumbering.
+//! RFC 8972 §§5.1, 5.3 reserve 240–251. Peers must agree on their meaning;
+//! collisions are possible and runtime overrides are unavailable.
+//! On IANA assignment, update the constant, bump the minor version and
+//! record the wire change in CHANGELOG.md. See doc/conformance/README.md.
 
 /// Bit Pattern in Padding TLV (draft-gandhi-ippm-stamp-ber-07 §5.1).
 /// Experimental Type 240; replace with the IANA assignment when allocated.

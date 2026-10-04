@@ -6,6 +6,9 @@
 pub use crate::sender::measurements::{
     CounterPoint, DelaySummary, DirectSummary, FollowUpSummary, MeasurementSummary,
 };
+pub use crate::sender::telemetry::{
+    TlvFlagSummary, TlvHmacSummary, TlvTypeSummary, TlvValidationSummary,
+};
 
 use std::io::{self, Write};
 
@@ -486,14 +489,9 @@ pub enum AccessReportOutcome {
     /// The reflector echoed the Access Report TLV (disarming the
     /// retransmission timer) before the retry budget was exhausted.
     Acknowledged,
-    /// Still awaiting acknowledgment when the run ended, for example because
-    /// the run reached `--count` or `--duration`, or was interrupted, before
-    /// the timer expired or the retry budget was exhausted.
+    /// The run ended before Access Report acknowledgment or retry exhaustion.
     Pending,
-    /// Retransmission retries were exhausted without acknowledgment; the
-    /// procedure was aborted per RFC 8972 §4.6 ("...SHOULD be repeated up to
-    /// four times before the procedure is aborted"). The measurement itself
-    /// is unaffected; this reflects only the Access Report sub-feature.
+    /// Access Report retries exhausted (RFC 8972 §4.6); measurement continues.
     Aborted,
 }
 
@@ -529,10 +527,8 @@ pub struct AccessReportSummary {
     pub retransmissions: u32,
 }
 
-/// AIMD congestion-response observability summary
-/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4), present in [`StatsSnapshot`]
-/// only when the controller is active (`--cos` with `--ecn` requesting
-/// ECT0/ECT1). Built from `rate_control::AimdStats` by the sender.
+/// AIMD statistics (cos-ecn-01 §3.4), present when --cos requests ECT0/ECT1.
+/// Built from rate_control::AimdStats.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct CongestionSummary {
     /// CE-marked replies observed (forward-path EC2 in the reflected CoS
@@ -553,9 +549,9 @@ pub struct CongestionSummary {
     pub base_interval_ms: f64,
 }
 
-/// Full-run quantile policy. Error is relative to the magnitude of the exact
-/// order statistic; zero and extrema remain exact. This is value error, not a
-/// statistical confidence interval or a bound on timestamp measurement error.
+/// Full-run quantization error relative to the exact order statistic's
+/// magnitude. Zero and extrema stay exact. Clock error and statistical
+/// uncertainty are separate.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct QuantilePrecision {
     pub exact_sample_limit: usize,

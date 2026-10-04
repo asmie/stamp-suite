@@ -633,14 +633,10 @@ impl SenderRun {
             TlvHmacMode::Off => false,
         };
 
-        // draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 MTU rule (sender half): the
-        // resulting test packets MUST NOT exceed the path MTU after adding the
-        // Reflected Fixed/IPv6 Extension Header TLVs; if necessary, one or more of
-        // those TLVs MUST be removed. Compare the worst-case assembled packet size
-        // against the egress route MTU (getsockopt on Linux; header requests fail
-        // closed when it is unknown) and trim Type 246/247 TLVs to fit. Only these
-        // two TLV types are removed, because the draft's rule covers only them;
-        // oversize from other TLVs is out of scope here.
+        // Trim Types 246/247 to the egress MTU using the worst-case packet size
+        // (ext-hdr-15 §§4.2, 6.2). Linux queries the route with getsockopt;
+        // header requests fail if the MTU is unknown. This rule removes only
+        // header TLVs; it does not trim other extensions.
         let header_requests = !conf.attach_ext_hdr.is_empty()
             || !conf.reflected_fixed_hdr.is_empty()
             || !conf.reflected_ipv6_ext_hdr.is_empty();

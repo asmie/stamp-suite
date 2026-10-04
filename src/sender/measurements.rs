@@ -96,6 +96,7 @@ pub struct FollowUpSummary {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct MeasurementSummary {
     pub session_state: super::session_state::Summary,
+    pub tlv_validation: super::telemetry::TlvValidationSummary,
     pub history_limit: usize,
     pub probes_evicted: u64,
     pub replies_evicted: u64,
@@ -266,6 +267,15 @@ pub(super) struct Measurements {
     direct: Direct,
 }
 impl Measurements {
+    pub(super) fn record_tlv_validation(
+        &mut self,
+        tlvs: &crate::tlv::TlvList,
+        info: &super::TlvTelemetry,
+        rejected: bool,
+    ) {
+        self.summary.tlv_validation.record(tlvs, info, rejected);
+    }
+
     pub(super) fn new(copies: u16) -> Self {
         Self {
             monitor: None,

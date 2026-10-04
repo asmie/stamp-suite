@@ -1,15 +1,12 @@
-//! Kernel and hardware timestamping with per-packet provenance.
+//! Kernel and NIC timestamps, with the method used recorded per packet.
 //!
-//! On Linux, `probe` queries `ETHTOOL_GET_TS_INFO` for the bound interface.
-//! The `hwtstamp` feature enables RX timestamps through `SO_TIMESTAMPING` and
-//! TX corrections through `MSG_ERRQUEUE` with `SOF_TIMESTAMPING_OPT_ID`.
-//! `--hwtstamp on` also attempts NIC configuration through `SIOCSHWTSTAMP`.
-//! Failures fall back to software timestamps; explicit hardware requests warn.
-//!
-//! macOS supports software RX timestamps through `SO_TIMESTAMP`; Windows has
-//! no timestamping backend. Hardware timestamps require a synchronized PHC to
-//! compare with peer CLOCK_REALTIME timestamps; see `doc/architecture.md`.
-//! Wire metadata reports the timestamp actually used, not probed capabilities.
+//! Linux always probes ETHTOOL_GET_TS_INFO. The `hwtstamp` feature enables
+//! SO_TIMESTAMPING RX and MSG_ERRQUEUE/OPT_ID TX corrections. `--hwtstamp on`
+//! also configures the NIC through SIOCSHWTSTAMP; failure falls back to
+//! software timestamps and warns for explicit hardware requests.
+//! macOS supports SO_TIMESTAMP RX; Windows has no timestamping backend.
+//! NIC PHC synchronization is required to compare hardware and peer system
+//! clock timestamps; see `doc/architecture.md`.
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};

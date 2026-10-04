@@ -301,13 +301,10 @@ impl RuntimeCaps {
 /// disabled, per RFC 10052 §5).
 pub const REFLECTED_CONTROL_MAX_COUNT: u16 = 16;
 
-/// Default reflector cap on the reply packet size (in octets) the reflector
-/// will pad up to when honouring a Reflected Control TLV `length` request.
-/// This is an administrative payload limit, not an IP MTU. The shared send
-/// path applies the actual route budget, including header overhead, for
-/// RFC 10052 §3. A longer request gets a single
-/// C-flagged reply if its mandatory fields fit. Operators can override the
-/// administrative value via `--reflected-control-max-size` or the control API.
+/// Default padded reply payload cap for Type 12 (RFC 10052 §3).
+/// The send path also applies the route MTU minus header overhead.
+/// Requests above the cap get one C-flagged reply if mandatory fields fit.
+/// Override with `--reflected-control-max-size` or the control API.
 pub(crate) const REFLECTED_CONTROL_MAX_SIZE: u16 = 1500;
 
 /// Default minimum inter-packet gap (nanoseconds): the per-request *rate*

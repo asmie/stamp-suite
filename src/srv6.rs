@@ -1,13 +1,10 @@
-//! SRv6 return-path forwarding (RFC 9503 §4, RFC 8754).
-//!
-//! Linux inserts the SRH through the sticky `IPV6_RTHDR` socket option;
-//! its ancillary parser rejects routing type 4. The reflector's exclusive
-//! `DatagramSender` owns and clears the sticky option.
-//!
-//! Enabled by `--srv6-return-forwarding` and checked by `srh_supported`.
-//! Unsupported routes or failed SRv6 attempts can fall back to a normal reply
-//! with Return Path U set. Unit tests cover encoding; namespace tests cover
-//! forwarding, authenticated replies, and isolation of later ordinary replies.
+//! SRv6 return paths (RFC 9503 §4, RFC 8754), enabled by
+//! `--srv6-return-forwarding` when `srh_supported` permits them.
+//! Linux uses sticky IPV6_RTHDR because ancillary parsing rejects type 4.
+//! DatagramSender owns and clears the option. Unsupported routes or failed
+//! sends can fall back to ordinary replies with Return Path U set.
+//! Unit tests check encoding; namespace tests check forwarding, signed
+//! replies and cleanup before later ordinary replies.
 
 use std::net::Ipv6Addr;
 

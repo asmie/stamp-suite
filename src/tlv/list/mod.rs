@@ -126,6 +126,12 @@ impl TlvList {
         self.non_hmac_tlvs().iter().chain(self.hmac_tlv())
     }
 
+    /// Every retained entry for diagnostics, including duplicate HMAC TLVs
+    /// preserved by lenient parsing. This does not imply processing order.
+    pub(crate) fn all_tlvs(&self) -> impl Iterator<Item = &RawTlv> {
+        self.entries.iter()
+    }
+
     /// Returns a reference to the HMAC TLV if present.
     #[must_use]
     pub fn hmac_tlv(&self) -> Option<&RawTlv> {
@@ -294,17 +300,10 @@ impl TlvList {
         Ok(list)
     }
 
-    /// Parses a TLV list leniently, marking malformed TLVs with M-flag.
-    ///
-    /// Unlike `parse()`, this method:
-    /// - Handles truncated TLVs by marking them as malformed (M-flag)
-    /// - Continues parsing after recoverable errors
-    /// - Does not fail on HMAC length mismatch (marks as malformed instead)
-    /// - Preserves wire order so failure echoes copy the received TLVs
-    ///   (RFC 8972 §4 and §4.8)
-    ///
-    /// # Returns
-    /// A tuple of (TlvList, bool) where the bool indicates if any TLV was malformed.
+    /// Parse leniently, retaining truncated values and marking bad lengths
+    /// with M. Continue after recoverable errors and preserve wire order for
+    /// failure echoes (RFC 8972 §§4, 4.8).
+    /// Return the list and whether any TLV was malformed.
     pub fn parse_lenient(buf: &[u8]) -> (Self, bool) {
         let mut parsed_tlvs: Vec<RawTlv> = Vec::new();
         let mut offset = 0;
@@ -643,15 +642,11 @@ impl TlvList {
         self.hmac_wire_offset = None;
     }
 
-    /// Computes the reflector's HMAC TLV with U=0 (RFC 8972 §4).
-    ///
-    /// A configured key protects the reply independently of the request's HMAC TLV.
-    /// RFC 8972 §4.8 requires TLV authentication in authenticated mode (except a
-    /// sole Extra Padding TLV) and permits it in unauthenticated mode.
-    /// Callers skip this when TLV handling is `Ignore`.
-    ///
-    /// Returns false, leaving the list unchanged, for structurally malformed
-    /// lists: a new HMAC TLV cannot follow a truncated TLV.
+    /// Sign the response TLVs with U=0 (RFC 8972 §§4, 4.8), independently of
+    /// the request's HMAC. Required in authenticated mode except for sole Extra
+    /// Padding; optional in open mode. Skip when TLV handling is Ignore.
+    /// Return false without edits for structurally malformed lists: HMAC cannot
+    /// follow a truncated TLV.
     pub fn set_hmac_response(&mut self, key: &HmacKey, sequence_number_bytes: &[u8]) -> bool {
         if self.malformed_echo {
             return false;
@@ -776,18 +771,9 @@ impl TlvList {
     }
 
     #[cfg(test)]
-    /// Re-derives the M-flag on every TLV held by this list, per RFC 8972 §4.
-    ///
-    /// For each TLV, sets M=1 when **either**:
-    /// - the parser previously detected a structural / positional error and
-    ///   recorded it via `mark_malformed_by_parser` (truncation, TLV after
-    ///   HMAC, bad HMAC length; the marker survives the reflector's
-    ///   flag-clear pass), or
-    /// - the value length doesn't match the type's RFC-defined size for
-    ///   recognized types.
-    ///
-    /// Visits each canonical entry once, including duplicate HMAC entries
-    /// retained in malformed input.
+    /// Set M on parser-detected errors or invalid lengths of recognized types
+    /// (RFC 8972 §4). Parser markers survive reflector flag clearing.
+    /// Visit every retained entry, including duplicate HMACs.
     pub fn validate_known_tlv_lengths(&mut self) {
         Self::validate_known_tlv_lengths_slice(&mut self.entries);
     }

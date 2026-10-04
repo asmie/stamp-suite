@@ -3,25 +3,16 @@
 
 use super::*;
 
-/// Reason a reflected packet is rejected without updating sender state.
-///
-/// Returned as the error variant of [`validate_reflected_tlvs`]. The caller
-/// must log and discard the packet: no RTT sample recorded, no `pending`
-/// entry consumed, no received counter incremented.
+/// TLV rejection: discard without recording RTT, consuming pending state
+/// or incrementing received counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TlvRejection {
-    /// Reflected Micro-session ID echoed a `sender_micro_session_id` that
-    /// does not match what this sender emitted (RFC 9534 §3.2 binding check).
-    /// A legitimate reflector always echoes the sender ID unchanged, so a
-    /// mismatch means the response belongs to a different session, a stale
-    /// packet, or a spoofed reply.
+    /// Echoed sender Micro-session ID differs from the sent ID (RFC 9534 §3.2).
     MsidMismatch { got: u16, expected: u16 },
     /// Reflector ID differs from the configured or first accepted value
     /// (RFC 9534 §3.2). Discard the reply.
     ReflectorMsidMismatch { got: u16, expected: u16 },
-    /// Reflected Micro-session ID TLV could not be parsed. Since the TLV
-    /// carries the session binding, we cannot attribute the response to this
-    /// sender and must drop it.
+    /// Malformed Micro-session ID; session binding cannot be checked.
     MsidMalformed,
     /// Required binding is absent, unusable, or cannot be integrity-validated.
     MsidUnavailable,
@@ -51,22 +42,13 @@ impl std::fmt::Display for TlvRejection {
     }
 }
 
-/// Returns typed decision fields after U/M/I/HMAC and required identifier checks.
-/// Wire bytes start at `base_size` (44 open, 112 authenticated). Diagnostic
-/// formatting is deferred to Display and never drives sender state changes.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn validate_reflected_tlvs(
+/// Initial flag and HMAC diagnostics, also retained when required binding fails.
+pub(super) fn reflected_tlv_telemetry(
     tlvs: &TlvList,
     data: &[u8],
     base_size: usize,
     hmac_key: Option<&HmacKey>,
-    expected_sender_msid: Option<u16>,
-    expected_reflector_msid: Option<u16>,
-    latched_reflector_msid: &mut Option<u16>,
-    // Decode these values only when their respective state machines are active.
-    track_access_report: bool,
-    track_congestion: bool,
-) -> Result<TlvTelemetry, TlvRejection> {
+) -> TlvTelemetry {
     let (unrecognized, malformed, integrity_failed) = tlvs.count_error_flags();
     let hmac = match (hmac_key, tlvs.hmac_tlv()) {
         (_, Some(_)) if tlvs.hmac_misplaced() => HmacStatus::Failed,
@@ -96,7 +78,7 @@ pub(super) fn validate_reflected_tlvs(
         (Some(_), None) => HmacStatus::Missing,
         (None, None) => HmacStatus::NotRequested,
     };
-    let mut telemetry = TlvTelemetry {
+    TlvTelemetry {
         tlv_count: tlvs.len(),
         flags: FlagCounts {
             unrecognized,
@@ -105,10 +87,29 @@ pub(super) fn validate_reflected_tlvs(
         },
         hmac,
         ..TlvTelemetry::default()
-    };
-    // Integrity gates all values before U skips a TLV or M stops the remainder.
-    // Missing optional HMAC retains the legacy-peer policy; required MSID below
-    // still rejects it. A present but unverifiable HMAC never permits values.
+    }
+}
+
+/// Validate flags, HMAC and required IDs before returning usable values.
+/// TLVs start at base_size (44 open, 112 authenticated). Display is diagnostic.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn validate_reflected_tlvs(
+    tlvs: &TlvList,
+    data: &[u8],
+    base_size: usize,
+    hmac_key: Option<&HmacKey>,
+    expected_sender_msid: Option<u16>,
+    expected_reflector_msid: Option<u16>,
+    latched_reflector_msid: &mut Option<u16>,
+    // Decode these values only when their respective state machines are active.
+    track_access_report: bool,
+    track_congestion: bool,
+) -> Result<TlvTelemetry, TlvRejection> {
+    let mut telemetry = reflected_tlv_telemetry(tlvs, data, base_size, hmac_key);
+    let hmac = telemetry.hmac;
+    let integrity_failed = telemetry.flags.integrity_failed;
+    // Check integrity before U/M processing. Missing optional HMAC follows
+    // legacy policy; required MSID still rejects it. Unverifiable HMAC blocks values.
     let integrity_ok = hmac.permits_optional_values() && integrity_failed == 0;
     let want_msid = expected_sender_msid.is_some()
         || expected_reflector_msid.is_some()

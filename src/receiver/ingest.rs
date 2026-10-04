@@ -10,10 +10,7 @@ use crate::{
 };
 use transmit::{QueuedTransmission, ReplyBudget, Transmission};
 
-/// Reflector settings resolved once from the configuration.
-///
-/// Policies that fail to parse stop startup here rather than falling back to
-/// permissive defaults.
+/// Settings resolved at startup. Invalid policies stop startup.
 pub(crate) struct ReflectorSettings {
     pub use_auth: bool,
     pub clock_source: ClockFormat,
@@ -186,11 +183,8 @@ impl ReflectorCore {
         }
     }
 
-    /// Admits one datagram and returns its reply, ready to queue.
-    ///
-    /// The reply holds its queue slot until every copy is sent or dropped.
-    /// `None` means the packet was dropped and already counted: rate limited,
-    /// over the reply queue capacity, or rejected during processing.
+    /// Admit a datagram and reserve its queue slot until all copies finish.
+    /// None means a counted drop: rate limit, full queue or processing rejection.
     pub(super) fn ingest(&self, packet: &ReceivedPacket) -> Option<QueuedTransmission> {
         if !self.rate_limiter.allow(packet.src.ip()) {
             log::debug!("Rate-limited packet from {}", packet.src);

@@ -1,26 +1,17 @@
-//! Privileged network-namespace conformance tier (Linux only).
-//!
-//! These tests exercise the on-wire behaviours that unit and loopback tests
-//! cannot reach: real IP TOS/ECN bytes, TTL/Hop-Limit marking, IPv6 extension
-//! headers, SRv6 SRH routing, Address Group (MAC/IP) filtering, and Type-12
-//! multi-reply pacing. Each is mapped to the conformance-matrix clauses it
-//! evidences (RFC 8762 §4, RFC 8972 §4.4 + erratum 8199, RFC 9503 §4,
-//! RFC 10052, draft-ietf-ippm-stamp-ext-hdr-15,
-//! draft-ietf-ippm-stamp-cos-ecn-01, draft-gandhi-ippm-stamp-ber).
+//! Linux namespace wire tests: TOS/ECN, TTL/Hop Limit, IPv6 headers,
+//! SRv6, Address Group filtering and Type-12 pacing. Tests cite their
+//! RFC/draft conformance clauses; see `doc/testing-netns.md`.
 //!
 //! # Running
 //!
-//! Every scenario is `#[ignore]`d and additionally guarded: it runs only with
-//! `STAMP_NETNS_TESTS=1`, as root (or CAP_NET_ADMIN), and when its per-scenario
-//! kernel/tool prerequisites hold. Set `STAMP_REQUIRE_PRIVILEGED=1` in CI
-//! to fail on every unavailable prerequisite or internal skip. Local optional
-//! runs without that flag print a SKIP notice, which is not wire-test evidence.
+//! Tests are ignored and require STAMP_NETNS_TESTS=1, root (or CAP_NET_ADMIN)
+//! and scenario-specific tools/kernel support. STAMP_REQUIRE_PRIVILEGED=1
+//! turns missing prerequisites or skips into failures. Optional runs may
+//! print SKIP; that provides no wire-test evidence.
 //!
 //! ```bash
 //! sudo -E STAMP_NETNS_TESTS=1 cargo test --test netns_conformance -- --ignored --test-threads=1
 //! ```
-//!
-//! See `doc/testing-netns.md` for prerequisites and troubleshooting.
 
 #![cfg(target_os = "linux")]
 

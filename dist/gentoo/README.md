@@ -1,11 +1,9 @@
 # Gentoo packaging
 
-This directory is an overlay tree for packagers. It holds
-`net-analyzer/stamp-suite` and the `acct-user/stamp` and `acct-group/stamp`
-packages that the systemd unit and OpenRC script run under. Category,
-eclass usage (`cargo`, `systemd`, `acct-*`) and file layout follow the main
-tree, so the directories can be copied into
-[GURU](https://wiki.gentoo.org/wiki/Project:GURU) or `::gentoo` unchanged.
+This overlay provides `net-analyzer/stamp-suite`, `acct-user/stamp` and
+`acct-group/stamp` for the systemd and OpenRC services. Its categories,
+eclasses and layout follow the main tree and can be copied into
+[GURU](https://wiki.gentoo.org/wiki/Project:GURU) or `::gentoo`.
 
 ## Regenerating after a release
 
