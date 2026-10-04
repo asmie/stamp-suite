@@ -2,16 +2,10 @@
 
 use super::*;
 
-/// RFC 8972 §4.6 default retransmission timer value: "The default value of
-/// the retransmission timer for the Access Report TLV SHOULD be three
-/// seconds." Single source of truth for both the state machine's own tests
-/// and the `--access-report-timeout` CLI default (`configuration.rs`).
+/// RFC 8972 §4.6 default timer, also used by `--access-report-timeout`.
 pub(crate) const DEFAULT_ACCESS_REPORT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// RFC 8972 §4.6 default retry budget: "This retransmission SHOULD be
-/// repeated up to four times before the procedure is aborted." Single
-/// source of truth for both the state machine's own tests and the
-/// `--access-report-retries` CLI default (`configuration.rs`).
+/// RFC 8972 §4.6 default retry budget, also used by `--access-report-retries`.
 pub(crate) const DEFAULT_ACCESS_REPORT_RETRIES: u32 = 4;
 
 /// Access Report retransmission state (RFC 8972 §4.6).
@@ -38,18 +32,14 @@ pub(super) enum AccessReportPhase {
     /// The reflector's echo was received before the retry budget was
     /// exhausted; nothing further is sent.
     Acknowledged,
-    /// The retry budget was exhausted without an acknowledgment; the
-    /// procedure is aborted and nothing further is sent (RFC 8972 §4.6:
-    /// "...before the procedure is aborted"). The measurement itself is
-    /// unaffected; only this sub-feature gives up.
+    /// No retries remain. Access Report transmission stops; measurement
+    /// continues (RFC 8972 §4.6).
     Aborted,
 }
 
 impl AccessReportRetransmitState {
-    /// Creates a fresh, not-yet-armed state machine using the given
-    /// retransmission timer and retry budget (RFC 8972 §4.6: "An
-    /// implementation MUST provide control of the retransmission timer
-    /// value and the number of retransmissions").
+    /// Creates an unarmed state machine with the configured timer and retry
+    /// budget (RFC 8972 §4.6).
     pub(super) fn new(timeout: Duration, max_retries: u32) -> Self {
         Self {
             timeout,

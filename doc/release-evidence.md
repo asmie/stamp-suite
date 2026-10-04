@@ -9,6 +9,33 @@ result. The [conformance matrices](conformance/README.md) cover the frozen
 specifications. Compiling a test, or listing it as ignored, does not establish
 runtime behavior.
 
+## Release gate boundary
+
+The tag workflow calls `rust.yml` and `conformance.yml` as reusable workflows.
+Publication waits for both and for the source, Linux and macOS package jobs.
+This runs backend, native-platform, MSRV, evidence and privileged checks on the
+tagged commit. Platform exclusions still apply; required driver-free Windows
+tests do not establish driver-backed capture behavior.
+
+Cargo builds in the release jobs and container enforce the lockfile. Debian
+builds are offline: extract the release vendor archive into `vendor/` beside
+`Cargo.toml` before invoking `debian/rules`. The build fails if that input is
+missing, and cleaning preserves it. For a development source tree, prepare
+that input separately with `cargo vendor --locked vendor`.
+
+The OpenWrt recipe in `dist/openwrt/Makefile` is a template that refuses to
+build with an unset hash. The source job hashes its exact deterministic
+`stamp-suite-VERSION.tar.gz` and publishes a completed
+`stamp-suite-VERSION-openwrt.mk`, included in checksums and attestations. Use
+that asset as the feed's `Makefile`. To render it locally from the same archive:
+
+```sh
+python3 scripts/render_openwrt.py --archive stamp-suite-1.0.0.tar.gz --output Makefile
+```
+
+An unpublished or unavailable archive cannot supply a verified digest. The
+recipe generation step avoids bypassing that check with `PKG_HASH:=skip`.
+
 ## Procedures
 
 ### Authenticated control and a reference SNMP master

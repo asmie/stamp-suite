@@ -58,8 +58,8 @@ pub(super) enum ReflectedControlSubTlv {
 
 /// Parses a chain of Reflected Control sub-TLVs from a raw byte slice. Uses
 /// the standard 4-byte STAMP sub-TLV header (flags + type + length).
-/// Returns an empty vec if the body is empty, malformed, or contains only
-/// the all-zeros placeholder.
+/// Retains valid entries before a truncated tail. Returns an empty vec if the
+/// body is empty or contains only the all-zeros placeholder.
 pub(super) fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedControlSubTlv> {
     let mut out = Vec::new();
     let mut offset = 0;

@@ -5,10 +5,12 @@ PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
-PKG_SOURCE_URL:=https://codeload.github.com/asmie/stamp-suite/tar.gz/v$(PKG_VERSION)?
-# TODO: Replace with real SHA256 before feed submission.
-# Generate with: curl -sL <tarball-url> | sha256sum
-PKG_HASH:=skip
+PKG_SOURCE_URL:=https://github.com/asmie/stamp-suite/releases/download/v$(PKG_VERSION)
+# The release workflow renders this template from the exact source archive.
+PKG_HASH:=@SOURCE_SHA256@
+ifeq ($(PKG_HASH),@SOURCE_SHA256@)
+  $(error Use the checksum-pinned stamp-suite-$(PKG_VERSION)-openwrt.mk release asset as Makefile)
+endif
 
 PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE

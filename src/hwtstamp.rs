@@ -784,7 +784,7 @@ mod tests {
             StartupAction::Continue
         ));
 
-        // `On` without NIC support warns honestly in every build.
+        // `On` without NIC support warns in every build.
         let StartupAction::ContinueWithWarning(msg) = startup_action(HwTsMode::On, &no_hw) else {
             panic!("On without HW caps must warn");
         };

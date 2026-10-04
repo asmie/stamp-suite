@@ -553,8 +553,12 @@ fn test_apply_egress_ip_options_sets_tclass_and_hops_v6() {
 fn test_apply_egress_ip_options_none_is_noop() {
     use std::os::fd::AsRawFd;
     let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind v4");
-    // Passing no options must not error and must leave defaults untouched.
+    sock.set_ttl(73).unwrap();
+    let socket = socket2::SockRef::from(&sock);
+    socket.set_tos_v4(0x28).unwrap();
     apply_egress_ip_options(sock.as_raw_fd(), false, None, None).expect("noop");
+    assert_eq!(sock.ttl().unwrap(), 73);
+    assert_eq!(socket.tos_v4().unwrap(), 0x28);
 }
 
 #[test]
@@ -2134,6 +2138,7 @@ fn test_process_response_acknowledges_access_report_state() {
         owd_collector: &mut owd_collector,
         packets_received: &mut packets_received,
         print_stats: false,
+        output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
         expected_sender_msid: None,
@@ -2200,6 +2205,7 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
         owd_collector: &mut owd_collector,
         packets_received: &mut packets_received,
         print_stats: false,
+        output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
         expected_sender_msid: None,
@@ -2249,6 +2255,7 @@ fn congestion_process_response_ctx<'a>(
         owd_collector,
         packets_received,
         print_stats: false,
+        output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
         expected_sender_msid: None,
@@ -2615,6 +2622,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
         owd_collector: &mut owd_collector,
         packets_received: &mut packets_received,
         print_stats: false,
+        output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
         expected_sender_msid: None,
@@ -3389,6 +3397,7 @@ fn test_process_response_records_forward_one_way_delay() {
         owd_collector: &mut owd_collector,
         packets_received: &mut packets_received,
         print_stats: false,
+        output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
         expected_sender_msid: None,
@@ -3658,6 +3667,7 @@ fn test_zero_ssid_policy_stop_discards_reply_and_latches() {
             owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
+            output: None,
             output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             expected_sender_msid: None,
@@ -3731,6 +3741,7 @@ fn test_zero_ssid_policy_continue_still_accounts_the_reply() {
             owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
+            output: None,
             output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             expected_sender_msid: None,
@@ -3805,6 +3816,7 @@ fn test_zero_ssid_policy_inert_without_a_configured_ssid() {
             owd_collector: &mut owd_collector,
             packets_received: &mut packets_received,
             print_stats: false,
+            output: None,
             output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
             expected_sender_msid: None,
@@ -3879,6 +3891,7 @@ fn test_process_response_drops_packet_on_msid_mismatch() {
         owd_collector: &mut owd_collector,
         packets_received: &mut packets_received,
         print_stats: false,
+        output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
         // Sender transmitted with sender_msid=7777; reflector's response
@@ -3959,6 +3972,7 @@ fn test_process_response_accepts_packet_on_msid_match() {
         owd_collector: &mut owd_collector,
         packets_received: &mut packets_received,
         print_stats: false,
+        output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
         expected_sender_msid: Some(7777),

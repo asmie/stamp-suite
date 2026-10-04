@@ -343,3 +343,146 @@ fn cancellation_closes_the_session_with_reason_shutdown() {
     peer.stream.write_all(&pdu(18, 42, 0, id, &[0; 8])).unwrap();
     assert!(peer.worker.take().unwrap().join().unwrap().is_ok());
 }
+
+#[test]
+fn administrative_responses_require_valid_layout_status_and_correlation() {
+    for stage in [1, 3] {
+        for fault in ["short", "error", "packet", "type", "index", "session"] {
+            if stage == 1 && fault == "session" {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("master");
+            let listener = UnixListener::bind(&path).unwrap();
+            let worker = thread::spawn(move || {
+                let mut session =
+                    AgentXSession::connect(path.to_str().unwrap(), "invalid responses")?;
+                session.register(&Oid(vec![1]))
+            });
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            for kind in [1, 3] {
+                let (h, _) = read_pdu(&mut stream);
+                assert_eq!(h[1], kind);
+                let mut packet = u32::from_be_bytes(h[12..16].try_into().unwrap());
+                let mut session = 42;
+                let mut response_kind = 18;
+                let mut payload = vec![0; 8];
+                if kind == stage {
+                    match fault {
+                        "short" => payload.truncate(4),
+                        "error" => payload[5] = 5,
+                        "packet" => packet += 1,
+                        "type" => response_kind = 7,
+                        "index" => payload[7] = 1,
+                        "session" => session += 1,
+                        _ => unreachable!(),
+                    }
+                }
+                stream
+                    .write_all(&pdu(response_kind, session, 0, packet, &payload))
+                    .unwrap();
+                if kind == stage {
+                    break;
+                }
+            }
+            assert!(
+                worker.join().unwrap().is_err(),
+                "accepted {fault} in stage {stage}"
+            );
+        }
+    }
+}
+
+fn little_pdu(kind: u8, session: u32, transaction: u32, packet: u32, payload: &[u8]) -> Vec<u8> {
+    let mut data = vec![1, kind, 0, 0];
+    for n in [session, transaction, packet, payload.len() as u32] {
+        data.extend(n.to_le_bytes());
+    }
+    data.extend(payload);
+    data
+}
+
+fn little_range(start: &[u32], include: bool, end: &[u32]) -> Vec<u8> {
+    let mut bytes = vec![];
+    for (oid, included) in [(start, include), (end, false)] {
+        bytes.extend([oid.len() as u8, 0, u8::from(included), 0]);
+        for sub in oid {
+            bytes.extend(sub.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+#[test]
+fn little_endian_handshake_and_each_search_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("master");
+    let listener = UnixListener::bind(&path).unwrap();
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let worker = thread::spawn(move || {
+        let mut session = AgentXSession::connect(path.to_str().unwrap(), "little endian").unwrap();
+        session.register(&Oid(vec![1])).unwrap();
+        session.run_loop(&Mib, &stop).unwrap();
+    });
+    let (mut stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    for kind in [1, 3] {
+        let (h, _) = read_pdu(&mut stream);
+        assert_eq!(h[1], kind);
+        let id = u32::from_be_bytes(h[12..16].try_into().unwrap());
+        // Administrative transaction IDs are not defined by AgentX.
+        stream
+            .write_all(&little_pdu(18, 42, 1234, id, &[0; 8]))
+            .unwrap();
+    }
+    for kind in [5, 6, 7] {
+        let mut payload = if kind == 7 { vec![0, 0, 2, 0] } else { vec![] };
+        payload.extend(little_range(&[1, 1], true, &[2, 1]));
+        stream
+            .write_all(&little_pdu(kind, 42, 0x12345678, 0xabcdef01, &payload))
+            .unwrap();
+        let (h, response) = read_pdu(&mut stream);
+        assert_eq!(u32::from_be_bytes(h[8..12].try_into().unwrap()), 0x12345678);
+        assert_eq!(
+            u32::from_be_bytes(h[12..16].try_into().unwrap()),
+            0xabcdef01
+        );
+        assert_eq!(&response[4..8], &[0; 4]);
+        let expected = if kind == 7 {
+            vec![(2, vec![1, 1]), (2, vec![1, 2])]
+        } else {
+            vec![(2, vec![1, 1])]
+        };
+        assert_eq!(bindings(&response[8..]), expected);
+    }
+    cancel.cancel();
+    worker.join().unwrap();
+}
+
+#[test]
+fn silent_handshake_is_cancellable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("master");
+    let listener = UnixListener::bind(&path).unwrap();
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let worker = thread::spawn(move || {
+        AgentXSession::connect_cancellable(path.to_str().unwrap(), "cancel", stop)
+    });
+    let (mut stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let (h, _) = read_pdu(&mut stream);
+    assert_eq!(h[1], 1);
+    let start = std::time::Instant::now();
+    cancel.cancel();
+    assert!(worker.join().unwrap().is_err());
+    assert!(start.elapsed() < Duration::from_secs(2));
+}

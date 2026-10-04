@@ -7,7 +7,7 @@ use std::{
     io::{self, Read, Write},
     os::unix::net::UnixStream,
     sync::atomic::{AtomicU32, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 // --- PDU type constants (RFC 2741 §6.1) ---
@@ -41,6 +41,33 @@ const AGENTX_VERSION: u8 = 1;
 
 // Maximum allowed PDU payload size (1 MB) to prevent unbounded allocation.
 const MAX_PDU_PAYLOAD: u32 = 1_048_576;
+const IO_TICK: Duration = Duration::from_millis(200);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy)]
+struct ByteOrder(bool);
+
+impl ByteOrder {
+    fn from_flags(flags: u8) -> Self {
+        Self(flags & AGENTX_FLAG_NETWORK_BYTE_ORDER != 0)
+    }
+
+    fn u16(self, bytes: [u8; 2]) -> u16 {
+        if self.0 {
+            u16::from_be_bytes(bytes)
+        } else {
+            u16::from_le_bytes(bytes)
+        }
+    }
+
+    fn u32(self, bytes: [u8; 4]) -> u32 {
+        if self.0 {
+            u32::from_be_bytes(bytes)
+        } else {
+            u32::from_le_bytes(bytes)
+        }
+    }
+}
 
 // Cap SearchRanges per GET/GETNEXT/GETBULK PDU to bound lookup work.
 // A 1 MB PDU can contain roughly 131k ranges before GETBULK repetitions.
@@ -172,7 +199,7 @@ pub(crate) fn encode_pdu(
     // All multi-byte fields below are big-endian (network byte order), so we
     // MUST advertise NETWORK_BYTE_ORDER (RFC 2741 §6.1). This is a per-PDU
     // flag, not a session negotiation. Our outgoing PDUs always use it;
-    // little-endian request payloads remain unsupported.
+    // Incoming requests select their byte order independently.
     buf.push(flags | AGENTX_FLAG_NETWORK_BYTE_ORDER);
     buf.push(0); // reserved
     buf.extend_from_slice(&session_id.to_be_bytes());
@@ -197,14 +224,15 @@ pub fn decode_header(buf: &[u8]) -> Result<PduHeader, AgentXError> {
             buf[0], AGENTX_VERSION
         )));
     }
+    let order = ByteOrder::from_flags(buf[2]);
     Ok(PduHeader {
         version: buf[0],
         pdu_type: buf[1],
         flags: buf[2],
-        session_id: u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]),
-        transaction_id: u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]),
-        packet_id: u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]),
-        payload_length: u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]),
+        session_id: order.u32([buf[4], buf[5], buf[6], buf[7]]),
+        transaction_id: order.u32([buf[8], buf[9], buf[10], buf[11]]),
+        packet_id: order.u32([buf[12], buf[13], buf[14], buf[15]]),
+        payload_length: order.u32([buf[16], buf[17], buf[18], buf[19]]),
     })
 }
 
@@ -257,6 +285,10 @@ pub(crate) fn encode_oid(oid: &Oid, include: bool) -> Vec<u8> {
 /// Header layout per RFC 2741 §5.1: `n_subid`(1) `prefix`(1) `include`(1)
 /// `reserved`(1), then `n_subid` sub-identifiers of 4 octets each.
 pub fn decode_oid(buf: &[u8]) -> Result<(Oid, bool, usize), AgentXError> {
+    decode_oid_order(buf, ByteOrder(true))
+}
+
+fn decode_oid_order(buf: &[u8], order: ByteOrder) -> Result<(Oid, bool, usize), AgentXError> {
     if buf.len() < OID_HEADER_SIZE {
         return Err(AgentXError::Protocol("OID header too short".to_string()));
     }
@@ -285,7 +317,7 @@ pub fn decode_oid(buf: &[u8]) -> Result<(Oid, bool, usize), AgentXError> {
 
     let mut offset = OID_HEADER_SIZE;
     for _ in 0..n_subid {
-        subs.push(u32::from_be_bytes([
+        subs.push(order.u32([
             buf[offset],
             buf[offset + 1],
             buf[offset + 2],
@@ -400,15 +432,19 @@ impl SearchRange {
 
 /// Parse complete ranges without silently dropping columns from a bulk walk.
 /// The minimum encoded range is two four-octet null OIDs (8 bytes).
-fn parse_search_ranges(payload: &[u8], max: usize) -> Result<Vec<SearchRange>, AgentXError> {
+fn parse_search_ranges_order(
+    payload: &[u8],
+    max: usize,
+    order: ByteOrder,
+) -> Result<Vec<SearchRange>, AgentXError> {
     let mut ranges = Vec::new();
     let mut offset = 0;
     while offset < payload.len() {
         if ranges.len() == max {
             return Err(AgentXError::SearchRangeLimit);
         }
-        let (start, include, start_len) = decode_oid(&payload[offset..])?;
-        let (end, _, end_len) = decode_oid(&payload[offset + start_len..])?;
+        let (start, include, start_len) = decode_oid_order(&payload[offset..], order)?;
+        let (end, _, end_len) = decode_oid_order(&payload[offset + start_len..], order)?;
         offset += start_len + end_len;
         ranges.push(SearchRange {
             start,
@@ -417,6 +453,11 @@ fn parse_search_ranges(payload: &[u8], max: usize) -> Result<Vec<SearchRange>, A
         });
     }
     Ok(ranges)
+}
+
+#[cfg(test)]
+fn parse_search_ranges(payload: &[u8], max: usize) -> Result<Vec<SearchRange>, AgentXError> {
+    parse_search_ranges_order(payload, max, ByteOrder(true))
 }
 
 /// Encodes an octet string per RFC 2741 §5.3.
@@ -518,13 +559,6 @@ impl PduReader {
                 return Ok(None);
             }
             let header = decode_header(&self.header_bytes)?;
-            // This implementation only decodes network-order payloads. Byte
-            // order is a per-PDU flag, not negotiated by the Open exchange.
-            if header.flags & AGENTX_FLAG_NETWORK_BYTE_ORDER == 0 {
-                return Err(AgentXError::Protocol(
-                    "Little-endian AgentX payloads are unsupported".into(),
-                ));
-            }
             if header.payload_length > MAX_PDU_PAYLOAD {
                 return Err(AgentXError::Protocol(format!(
                     "PDU payload too large: {} bytes (max {})",
@@ -555,19 +589,35 @@ pub struct AgentXSession {
     stream: UnixStream,
     session_id: u32,
     packet_id: AtomicU32,
+    cancel: crate::shutdown::CancellationToken,
 }
 
 impl AgentXSession {
     /// Connects to the master agent via a Unix socket and opens a session.
     pub fn connect(path: &str, description: &str) -> Result<Self, AgentXError> {
-        let stream = UnixStream::connect(path)?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        Self::connect_cancellable(path, description, crate::shutdown::CancellationToken::new())
+    }
+
+    /// Connects and handshakes with bounded I/O and cancellation checks.
+    pub fn connect_cancellable(
+        path: &str,
+        description: &str,
+        cancel: crate::shutdown::CancellationToken,
+    ) -> Result<Self, AgentXError> {
+        if cancel.is_cancelled() {
+            return Err(io::Error::from(io::ErrorKind::Interrupted).into());
+        }
+        let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+        socket.connect_timeout(&socket2::SockAddr::unix(path)?, IO_TICK)?;
+        let stream: UnixStream = socket.into();
+        stream.set_read_timeout(Some(IO_TICK))?;
+        stream.set_write_timeout(Some(IO_TICK))?;
 
         let mut session = AgentXSession {
             stream,
             session_id: 0,
             packet_id: AtomicU32::new(1),
+            cancel,
         };
 
         session.open(description)?;
@@ -592,12 +642,10 @@ impl AgentXSession {
         payload.extend_from_slice(&encode_octet_string(description.as_bytes()));
 
         let pdu = encode_pdu(AGENTX_OPEN_PDU, 0, 0, 0, pid, &payload);
-        self.stream.write_all(&pdu)?;
+        self.write_frame(&pdu)?;
 
-        let (header, _payload) = self.read_response()?;
-        if header.pdu_type != AGENTX_RESPONSE_PDU {
-            return Err(AgentXError::UnexpectedPdu(header.pdu_type));
-        }
+        let (header, payload) = self.read_response()?;
+        self.validate_response(&header, &payload, pid, true)?;
         self.session_id = header.session_id;
         log::info!("AgentX session opened (session_id={})", self.session_id);
         Ok(())
@@ -613,20 +661,10 @@ impl AgentXSession {
         payload.extend_from_slice(&encode_oid(subtree, false));
 
         let pdu = encode_pdu(AGENTX_REGISTER_PDU, 0, self.session_id, 0, pid, &payload);
-        self.stream.write_all(&pdu)?;
+        self.write_frame(&pdu)?;
 
         let (header, response_payload) = self.read_response()?;
-        if header.pdu_type != AGENTX_RESPONSE_PDU {
-            return Err(AgentXError::UnexpectedPdu(header.pdu_type));
-        }
-
-        // Check res.error in response payload
-        if response_payload.len() >= 8 {
-            let res_error = u16::from_be_bytes([response_payload[4], response_payload[5]]);
-            if res_error != 0 {
-                return Err(AgentXError::ResponseError(res_error));
-            }
-        }
+        self.validate_response(&header, &response_payload, pid, false)?;
 
         log::info!("Registered OID subtree {}", subtree);
         Ok(())
@@ -638,36 +676,98 @@ impl AgentXSession {
         let payload = [REASON_SHUTDOWN, 0, 0, 0];
         let pdu = encode_pdu(AGENTX_CLOSE_PDU, 0, self.session_id, 0, pid, &payload);
         self.stream.write_all(&pdu)?;
-        // Best-effort read of response
-        let _ = self.read_response();
+        // Allow a prompt acknowledgment even after cancellation, but never
+        // let a silent master delay shutdown for the full handshake timeout.
+        let _ = self.read_response_until(Instant::now() + IO_TICK, false);
         log::info!("AgentX session closed");
         Ok(())
     }
 
-    /// Reads a complete PDU (header + payload) from the stream.
+    /// Writes one frame with an absolute deadline, even if the peer trickles reads.
+    fn write_frame(&mut self, mut bytes: &[u8]) -> Result<(), AgentXError> {
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        while !bytes.is_empty() {
+            self.check_io_deadline(deadline)?;
+            match self.stream.write(bytes) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
+                Ok(n) => bytes = &bytes[n..],
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
+    fn check_io_deadline(&self, deadline: Instant) -> Result<(), AgentXError> {
+        if self.cancel.is_cancelled() {
+            return Err(io::Error::from(io::ErrorKind::Interrupted).into());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::from(io::ErrorKind::TimedOut).into());
+        }
+        Ok(())
+    }
+
+    /// Handshakes preserve partial frames and have an absolute deadline.
     fn read_response(&mut self) -> Result<(PduHeader, Vec<u8>), AgentXError> {
-        let mut header_buf = [0u8; PDU_HEADER_SIZE];
-        self.stream.read_exact(&mut header_buf)?;
-        let header = decode_header(&header_buf)?;
-        if header.flags & AGENTX_FLAG_NETWORK_BYTE_ORDER == 0 {
+        self.read_response_until(Instant::now() + HANDSHAKE_TIMEOUT, true)
+    }
+
+    fn read_response_until(
+        &mut self,
+        deadline: Instant,
+        cancellable: bool,
+    ) -> Result<(PduHeader, Vec<u8>), AgentXError> {
+        let mut reader = PduReader::default();
+        loop {
+            if cancellable {
+                self.check_io_deadline(deadline)?;
+            } else if Instant::now() >= deadline {
+                return Err(io::Error::from(io::ErrorKind::TimedOut).into());
+            }
+            if let Some(response) = reader.poll(&mut self.stream)? {
+                return Ok(response);
+            }
+        }
+    }
+
+    fn validate_response(
+        &self,
+        header: &PduHeader,
+        payload: &[u8],
+        packet_id: u32,
+        opening: bool,
+    ) -> Result<(), AgentXError> {
+        if header.pdu_type != AGENTX_RESPONSE_PDU {
+            return Err(AgentXError::UnexpectedPdu(header.pdu_type));
+        }
+        // Administrative transaction IDs have no defined value (RFC 2741
+        // section 6.1). Correlate by packet ID and, after Open, session ID.
+        if header.packet_id != packet_id || (!opening && header.session_id != self.session_id) {
+            return Err(AgentXError::Protocol("Uncorrelated AgentX response".into()));
+        }
+        if payload.len() != 8 {
             return Err(AgentXError::Protocol(
-                "Little-endian AgentX payloads are unsupported".into(),
+                "Invalid administrative Response length".into(),
             ));
         }
-
-        if header.payload_length > MAX_PDU_PAYLOAD {
-            return Err(AgentXError::Protocol(format!(
-                "PDU payload too large: {} bytes (max {})",
-                header.payload_length, MAX_PDU_PAYLOAD
-            )));
+        let order = ByteOrder::from_flags(header.flags);
+        let error = order.u16([payload[4], payload[5]]);
+        if error != 0 {
+            return Err(AgentXError::ResponseError(error));
         }
-
-        let mut payload = vec![0u8; header.payload_length as usize];
-        if !payload.is_empty() {
-            self.stream.read_exact(&mut payload)?;
+        if payload[6..8] != [0, 0] {
+            return Err(AgentXError::Protocol(
+                "Unexpected administrative Response index".into(),
+            ));
         }
-
-        Ok((header, payload))
+        Ok(())
     }
 
     /// Runs the AgentX event loop, dispatching requests to the handler.
@@ -680,14 +780,15 @@ impl AgentXSession {
         cancel: &crate::shutdown::CancellationToken,
     ) -> Result<(), AgentXError> {
         // Set a shorter read timeout so we can check for cancellation
-        self.stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+        self.stream.set_read_timeout(Some(IO_TICK))?;
 
         let mut reader = PduReader::default();
         loop {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || self.cancel.is_cancelled() {
                 // An incomplete request cannot be mistaken for the response
                 // to our Close PDU. Abandon that transport on cancellation.
                 if reader.is_empty() {
+                    self.cancel.cancel();
                     let _ = self.close();
                 } else {
                     let _ = self.stream.shutdown(std::net::Shutdown::Both);
@@ -718,7 +819,7 @@ impl AgentXSession {
                         ),
                         Err(error) => return Err(error),
                     };
-                    self.stream.write_all(&response)?;
+                    self.write_frame(&response)?;
                 }
                 AGENTX_CLOSE_PDU => {
                     if payload.len() != 4 {
@@ -726,7 +827,7 @@ impl AgentXSession {
                     }
                     // Acknowledge before teardown, as the master does for a
                     // subagent's Close (RFC 2741 §7.1.8).
-                    self.stream.write_all(&self.build_response(&header, &[]))?;
+                    self.write_frame(&self.build_response(&header, &[]))?;
                     log::info!("Master agent closed session");
                     return Ok(());
                 }
@@ -738,18 +839,18 @@ impl AgentXSession {
                     log::debug!("Rejecting SET (TestSet): STAMP-SUITE-MIB is read-only");
                     let resp =
                         self.build_response_with_status(&header, RES_ERROR_NOT_WRITABLE, 1, &[]);
-                    self.stream.write_all(&resp)?;
+                    self.write_frame(&resp)?;
                 }
                 AGENTX_COMMITSET_PDU => {
                     // Should not occur once TestSet is refused, but answer anyway.
                     let resp =
                         self.build_response_with_status(&header, RES_ERROR_COMMIT_FAILED, 1, &[]);
-                    self.stream.write_all(&resp)?;
+                    self.write_frame(&resp)?;
                 }
                 AGENTX_UNDOSET_PDU => {
                     let resp =
                         self.build_response_with_status(&header, RES_ERROR_UNDO_FAILED, 1, &[]);
-                    self.stream.write_all(&resp)?;
+                    self.write_frame(&resp)?;
                 }
                 AGENTX_CLEANUPSET_PDU => {
                     // RFC 2741 §7.2.4.4: no Response is sent for CleanupSet.
@@ -770,7 +871,11 @@ impl AgentXSession {
         handler: &dyn MibHandler,
     ) -> Result<Vec<u8>, AgentXError> {
         let mut varbinds_buf = Vec::new();
-        let ranges = parse_search_ranges(payload, MAX_SEARCH_RANGES_PER_PDU)?;
+        let ranges = parse_search_ranges_order(
+            payload,
+            MAX_SEARCH_RANGES_PER_PDU,
+            ByteOrder::from_flags(header.flags),
+        )?;
         let view = handler.view();
         for range in &ranges {
             let vb = view.get(&range.start);
@@ -788,7 +893,11 @@ impl AgentXSession {
         handler: &dyn MibHandler,
     ) -> Result<Vec<u8>, AgentXError> {
         let mut varbinds_buf = Vec::new();
-        let ranges = parse_search_ranges(payload, MAX_SEARCH_RANGES_PER_PDU)?;
+        let ranges = parse_search_ranges_order(
+            payload,
+            MAX_SEARCH_RANGES_PER_PDU,
+            ByteOrder::from_flags(header.flags),
+        )?;
 
         let view = handler.view();
         for range in &ranges {
@@ -812,12 +921,17 @@ impl AgentXSession {
             ));
         }
 
-        let non_repeaters = u16::from_be_bytes([payload[0], payload[1]]) as usize;
-        let max_repetitions = u16::from_be_bytes([payload[2], payload[3]]) as usize;
+        let order = ByteOrder::from_flags(header.flags);
+        let non_repeaters = order.u16([payload[0], payload[1]]) as usize;
+        let max_repetitions = order.u16([payload[2], payload[3]]) as usize;
         let max_repetitions = max_repetitions.min(100); // Cap to prevent DoS
 
         let mut varbinds_buf = Vec::new();
-        let mut ranges = parse_search_ranges(&payload[4..], MAX_SEARCH_RANGES_PER_PDU)?;
+        let mut ranges = parse_search_ranges_order(
+            &payload[4..],
+            MAX_SEARCH_RANGES_PER_PDU,
+            ByteOrder::from_flags(header.flags),
+        )?;
         let non_repeaters = non_repeaters.min(ranges.len());
 
         // One view for the whole PDU, not one per (range × repetition) lookup.
@@ -1105,6 +1219,7 @@ mod tests {
             stream: a,
             session_id: 7,
             packet_id: AtomicU32::new(1),
+            cancel: crate::shutdown::CancellationToken::new(),
         };
         let header = PduHeader {
             version: AGENTX_VERSION,

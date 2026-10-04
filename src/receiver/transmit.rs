@@ -147,7 +147,6 @@ impl Transmission {
     }
 
     #[cfg(test)]
-    #[cfg(test)]
     pub fn send_next(
         &mut self,
         counters: &ReflectorCounters,
@@ -167,7 +166,7 @@ impl Transmission {
         mut send: impl FnMut(&[u8], SocketAddr, &SendOptions) -> io::Result<usize>,
     ) -> Option<u32> {
         let Some(_active) = self.session.transmission_guard() else {
-            counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+            counters.record_drop("session_expired");
             self.remaining = 0;
             return None;
         };
@@ -175,7 +174,7 @@ impl Transmission {
             self.response.return_path_action,
             ReturnPathAction::SuppressReply
         ) {
-            counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+            counters.record_drop("suppressed");
             self.remaining = 0;
             return None;
         }
@@ -183,7 +182,7 @@ impl Transmission {
             counters
                 .packets_rate_limited
                 .fetch_add(1, Ordering::Relaxed);
-            counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+            counters.record_drop("rate_limited");
             self.remaining = 0;
             return None;
         }
@@ -275,7 +274,7 @@ impl Transmission {
                     }
                     self.session.record_transmitted();
                     self.session.record_reflection(sequence, timestamp);
-                    counters.packets_reflected.fetch_add(1, Ordering::Relaxed);
+                    counters.record_reflected();
                     self.remaining -= 1;
                     return Some(sequence);
                 }
@@ -335,7 +334,7 @@ impl Transmission {
                 }
             }
         }
-        counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+        counters.record_drop("send_failed");
         self.remaining = 0;
         None
     }
@@ -598,9 +597,7 @@ impl ReplyBudget {
             self.counters
                 .reply_queue_rejected
                 .fetch_add(1, Ordering::Relaxed);
-            self.counters
-                .packets_dropped
-                .fetch_add(1, Ordering::Relaxed);
+            self.counters.record_drop("queue_full");
             return None;
         }
         Some(ReplyReservation(Arc::clone(self)))
@@ -637,7 +634,7 @@ impl Drop for QueuedTransmission {
             counters
                 .queued_replies_cancelled
                 .fetch_add(u64::from(self.transmission.remaining), Ordering::Relaxed);
-            counters.packets_dropped.fetch_add(1, Ordering::Relaxed);
+            counters.record_drop("cancelled");
         }
     }
 }

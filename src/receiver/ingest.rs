@@ -1,9 +1,8 @@
 //! Startup settings and the per-packet ingest path shared by both backends.
 //!
 //! A backend owns its socket or capture handle and extracts a
-//! [`ReceivedPacket`] from each datagram. Everything after that, from rate
-//! limiting to the queued [`Transmission`], happens here, so the backends
-//! cannot drift apart.
+//! [`ReceivedPacket`] from each datagram. Both backends use this module for
+//! rate limiting, processing and reserving a queued [`Transmission`].
 
 use super::*;
 use crate::{
@@ -198,14 +197,10 @@ impl ReflectorCore {
             self.counters
                 .packets_rate_limited
                 .fetch_add(1, Ordering::Relaxed);
-            self.counters
-                .packets_dropped
-                .fetch_add(1, Ordering::Relaxed);
+            self.counters.record_drop("rate_limited");
             return None;
         }
-        self.counters
-            .packets_received
-            .fetch_add(1, Ordering::Relaxed);
+        self.counters.record_received();
         // The budget counts its own rejections.
         let reservation = self.budget.reserve()?;
 
@@ -243,17 +238,16 @@ impl ReflectorCore {
             ))
         });
         if transmission.is_none() {
-            self.counters
-                .packets_dropped
-                .fetch_add(1, Ordering::Relaxed);
+            self.counters.record_drop("processing_rejected");
         }
         transmission
     }
 }
 
 impl<'a> ProcessingContext<'a> {
-    /// Builds the context for one received packet. Runtime caps are read once
-    /// here so a concurrent control-plane change applies to whole packets.
+    /// Builds the context for one received packet. Each runtime cap is loaded
+    /// once. The separate atomic loads can observe different control updates;
+    /// they do not form a transactional snapshot of all caps.
     pub(super) fn for_packet(
         settings: &'a ReflectorSettings,
         packet: &ReceivedPacket<'a>,

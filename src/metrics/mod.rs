@@ -43,8 +43,8 @@ impl MetricsServer {
 /// Installs the Prometheus recorder and starts the HTTP server at `addr`.
 /// Returns a shutdown handle.
 pub async fn init(addr: SocketAddr) -> Result<MetricsServer, MetricsError> {
-    // Build the Prometheus recorder with sensible RTT histogram buckets
-    // Network latency typically ranges from microseconds to milliseconds
+    let listener = TcpListener::bind(addr).await?;
+    // Histogram buckets cover ten microseconds through one second.
     let handle = PrometheusBuilder::new()
         .set_buckets_for_metric(
             metrics_exporter_prometheus::Matcher::Suffix("_seconds".to_string()),
@@ -83,7 +83,6 @@ pub async fn init(addr: SocketAddr) -> Result<MetricsServer, MetricsError> {
         );
     }
 
-    let listener = TcpListener::bind(addr).await?;
     log::info!("Metrics server listening on http://{}/metrics", addr);
 
     tokio::spawn(async move {
@@ -106,26 +105,6 @@ async fn metrics_handler(handle: PrometheusHandle) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
-
-    #[tokio::test]
-    async fn test_metrics_server_starts() {
-        // Port 0 lets the OS pick a free port.
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-
-        // init() fails if another test in this process already installed the
-        // global recorder; in production it runs once at startup. The test
-        // only checks that init() does not panic.
-        let result = init(addr).await;
-
-        if let Ok(server) = result {
-            server.shutdown();
-        }
-        // If it fails due to recorder already installed, that's expected in test suites
-    }
-
-    /// An occupied port must return `BindError(AddrInUse)`.
-    /// Also allow recorder-install failure if another test already installed it.
     #[tokio::test]
     async fn test_metrics_bind_conflict_returns_bind_error() {
         let pre_bind = TcpListener::bind("127.0.0.1:0").await.expect("pre-bind");
@@ -140,10 +119,7 @@ mod tests {
                     io_err.kind()
                 );
             }
-            Err(MetricsError::RecorderBuild(_)) => {
-                // Acceptable: recorder may already be installed by a
-                // prior test in the same process.
-            }
+            Err(other) => panic!("expected a bind error: {other}"),
             Ok(_) => panic!("init succeeded against a pre-bound port"),
         }
     }

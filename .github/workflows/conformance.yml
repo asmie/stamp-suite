@@ -1,6 +1,7 @@
 name: Conformance evidence
 
 on:
+  workflow_call:
   push:
     branches: [master, 1.0-line]
   pull_request:
@@ -8,7 +9,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: conformance-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

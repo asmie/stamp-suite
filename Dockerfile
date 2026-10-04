@@ -1,12 +1,5 @@
-# Builder and runtime MUST share the same Debian release (glibc
-# compatibility) — pin the distro suffix explicitly so a moving `slim`
-# tag can't silently desynchronize them again.
-#
-# The builder is pinned to the crate's MSRV (Cargo.toml `rust-version`) so
-# the image proves the MSRV build, not just CI's `msrv` job. The official
-# rust:1.85 images were published before trixie existed and only come in
-# bookworm/bullseye flavours, which is why both stages are bookworm. When
-# the MSRV moves to a release that has a trixie image, bump both lines.
+# Keep both stages on the same Debian release for glibc compatibility.
+# The builder uses the crate's minimum supported Rust version.
 FROM rust:1.85-slim-bookworm AS builder
 
 WORKDIR /usr/src/stamp-suite
@@ -16,23 +9,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Production feature set for the container image: nix backend (real TTL
-# capture, no privileges needed), Prometheus metrics, SNMP AgentX,
-# kernel/hardware timestamping, and the runtime control-plane REST API.
+# Container features: nix, monitoring, timestamping and the control API.
 ARG FEATURES="ttl-nix,metrics,snmp,hwtstamp,control"
 
 # Copy manifests first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create stub targets to cache dependency builds. The manifest declares a
-# lib, a bin, and the reflector_hotpath bench, so all three files must
-# exist for cargo to parse it (benches are never compiled by
-# `cargo build`, the stub just satisfies the manifest).
+# Stub targets let Cargo cache dependencies before copying the source.
+# The declared benchmark needs a file even though this build does not run it.
 RUN mkdir -p src benches && \
     echo "fn main() {}" > src/main.rs && \
     echo "// stub for the dependency-caching stage" > src/lib.rs && \
     echo "fn main() {}" > benches/reflector_hotpath.rs && \
-    cargo build --release --features "$FEATURES" && \
+    cargo build --locked --release --features "$FEATURES" && \
     rm -rf src
 
 # Copy actual source code
@@ -40,7 +29,7 @@ COPY src ./src
 
 # Touch the entry points so cargo rebuilds the real code (not the cached stubs)
 RUN touch src/main.rs src/lib.rs && \
-    cargo build --release --features "$FEATURES"
+    cargo build --locked --release --features "$FEATURES"
 
 # Runtime stage — same Debian release as the builder (see note above).
 FROM debian:bookworm-slim

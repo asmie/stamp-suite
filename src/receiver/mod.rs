@@ -432,11 +432,6 @@ fn process_stamp_packet_inner(
         None
     };
 
-    #[cfg(feature = "metrics")]
-    if ctx.metrics_enabled {
-        crate::metrics::reflector_metrics::record_packet_received();
-    }
-
     // T2: prefer the backend's kernel receive timestamp (taken when the
     // packet entered the host) over a fresh userspace read, which would
     // include scheduler-wakeup and bookkeeping latency.
@@ -494,10 +489,6 @@ fn process_stamp_packet_inner(
             data.len(),
             src
         );
-        #[cfg(feature = "metrics")]
-        if ctx.metrics_enabled {
-            crate::metrics::reflector_metrics::record_packet_dropped("auth_packet_in_open_mode");
-        }
         return None;
     }
 
@@ -651,9 +642,6 @@ fn process_stamp_packet_inner(
 
     #[cfg(feature = "metrics")]
     if ctx.metrics_enabled {
-        if result.is_some() {
-            crate::metrics::reflector_metrics::record_packet_reflected();
-        }
         if let Some(start) = start_time {
             let elapsed = start.elapsed().as_secs_f64();
             crate::metrics::reflector_metrics::record_processing_time(elapsed);
@@ -696,10 +684,6 @@ fn process_auth_packet(
                     src,
                     e
                 );
-                #[cfg(feature = "metrics")]
-                if ctx.metrics_enabled {
-                    crate::metrics::reflector_metrics::record_packet_dropped("parse_error");
-                }
                 return None;
             }
         }
@@ -717,7 +701,6 @@ fn process_auth_packet(
             #[cfg(feature = "metrics")]
             if ctx.metrics_enabled {
                 crate::metrics::reflector_metrics::record_hmac_failure();
-                crate::metrics::reflector_metrics::record_packet_dropped("hmac_failure");
             }
             return None;
         }
@@ -732,20 +715,12 @@ fn process_auth_packet(
             packet.ssid,
             src
         );
-        #[cfg(feature = "metrics")]
-        if ctx.metrics_enabled {
-            crate::metrics::reflector_metrics::record_packet_dropped("no_key_for_ssid");
-        }
         return None;
     } else if ctx.require_hmac {
         crate::warn_throttled!(
             "HMAC key required but not configured; dropping packet from {}",
             src
         );
-        #[cfg(feature = "metrics")]
-        if ctx.metrics_enabled {
-            crate::metrics::reflector_metrics::record_packet_dropped("hmac_required");
-        }
         return None;
     }
 
@@ -771,10 +746,6 @@ fn process_unauth_packet(
                 src,
                 e
             );
-            #[cfg(feature = "metrics")]
-            if ctx.metrics_enabled {
-                crate::metrics::reflector_metrics::record_packet_dropped("parse_error");
-            }
             None
         }
     }

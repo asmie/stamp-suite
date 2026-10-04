@@ -12,6 +12,13 @@ timestamps accepted packets and returns them.
 
 ## Module structure
 
+The main patterns are backend adapters around a shared packet pipeline,
+explicit sender state machines, synchronous monitoring observers, and RAII
+guards for reply capacity and resource cleanup. Codecs share layout templates;
+session management centralizes admission and lifetime rules. The
+[design assessment](review/2026-10-03/README.md#design-patterns-and-trade-offs)
+describes the review findings and subsequent fixes.
+
 Paths are relative to `src/`. The library modules are public only so that
 integration tests, benchmarks and fuzz targets can reach them. They are
 internal and are not covered by the CLI, configuration and wire compatibility
@@ -157,7 +164,8 @@ kernel or NIC receive timestamp with its method. `ReflectorCore::ingest` then:
 2. Counts the packet and reserves one `ReplyBudget` slot. A full budget rejects
    the packet before any session state changes (`reply_queue_rejected`).
 3. Takes a read guard on the keyset and builds the `ProcessingContext`. Runtime
-   caps are read once here, so a control-plane change applies to whole packets.
+   caps are loaded once per field. Separate atomic loads can observe different
+   control updates; changing several caps is not transactional.
 4. Runs processing inside `catch_unwind`. A panic drops that packet and is
    logged; it does not stop the reflector.
 5. Attaches the reply to the reserved slot and returns it for queuing, or
@@ -233,7 +241,7 @@ when a key is given.
    schedule restarts from now instead of bursting. Between probes the loop
    receives replies. Tokio timers fire on whole milliseconds, so gaps under
    1 ms are busy-waited, which keeps one CPU core busy above 1000 probes per
-   second. The loop ends at `--count` probes (`0` means no limit), at the end
+   second. The loop ends at `--count` successful sends (`0` means no limit), at the end
    of `--duration`, on a zero-SSID stop, or on shutdown.
 
    Each probe is built in two steps. `build_probe` writes the TLVs straight
@@ -250,6 +258,15 @@ when a key is given.
 
 Probes still unanswered at the end count as lost. The run returns a
 `StatsSnapshot`.
+
+Interim reports (`--report-interval`) are handed to `StatsOutput` for formatting
+and writing on a separate thread. Collecting and copying a snapshot still
+runs on the sender task. All targets share the writer, which preserves queue
+order and prints one CSV header. A run waits for its queued reports before
+returning. The queue holds at most eight reports or packet-detail lines; excess
+interim output is skipped. Final output and flushes have a five-second deadline.
+Text `-R` output shares this queue; JSON/CSV packet diagnostics use stderr. See
+[report retention](statistics.md#report-output-and-pending-probes).
 
 ### Sender timestamp arithmetic
 
@@ -304,7 +321,9 @@ it returns, so a signal during the rest of startup is not lost.
 
 SIGHUP on Unix is separate: it reloads the reflector's HMAC keys
 (`receiver::reload_keys`) and keeps the current keys on error. The SNMP
-sub-agent has its own internal token and ends with the process. See
+sub-agent uses a child of the role token. Its handle cancels the worker on
+drop, including early-return paths. Blocking I/O checks cancellation at
+200 ms intervals; Close acknowledgments get a separate 200 ms deadline. See
 [Capacity, drain and shutdown](usage.md#capacity-drain-and-shutdown).
 
 ## Session management
@@ -593,19 +612,24 @@ The sub-agent is read-only and implements the sub-agent side of
   no varbinds (§7.2.3); the next request on the same connection works.
 - Limits: 1 MiB incoming payload, 256 search ranges per PDU, at most 100
   GetBulk repetitions.
-- Only network byte order and the default context are supported. Byte order is
-  a per-PDU flag, not negotiated by Open; a little-endian PDU is a protocol
-  error.
+- Both byte orders are decoded according to each PDU header. Responses use
+  network byte order. Only the default context is supported.
 
 ### Framing and failure handling
 
-`PduReader` keeps partially read headers and payloads across the one-second
+`PduReader` keeps partially read headers and payloads across the 200 ms
 read timeout, checks the payload length before allocating, and treats EOF as a
 lost connection. Decoders check lengths before indexing. If the initial
 connection fails, a warning is logged and STAMP keeps running without SNMP.
 After a successful start, a lost connection is retried with exponential backoff
 from 1 s to 30 s, and registration is repeated. A supervisor task logs a panic
 of the blocking event loop.
+
+Open and Register validate the complete eight-byte administrative Response,
+error status, packet ID and (after Open) session ID. Administrative transaction
+IDs have no defined value in RFC 2741 and are not compared. Each handshake read
+and frame write has an absolute 30-second deadline and checks role cancellation.
+Independent master tests cover invalid responses, both byte orders and cancellation.
 
 ### Tests
 

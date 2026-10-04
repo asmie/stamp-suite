@@ -104,7 +104,8 @@ pub mod metrics;
 #[doc(hidden)]
 pub mod snmp;
 
-/// A startup failure, such as a bind error, refused socket option, or missing key.
+/// A startup or terminal runtime failure, such as a bind error, missing key,
+/// repeated send failure, or broken measurement output.
 ///
 /// Distinct from normal shutdown so `main` exits non-zero and supervisors can
 /// restart the process. `main` prints the diagnostic once.

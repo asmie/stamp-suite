@@ -148,6 +148,7 @@ async fn run_reflector(conf: &Configuration) -> Result<(), StartupError> {
     let _snmp_server = if conf.snmp {
         start_snmp(
             conf,
+            shared.shutdown.clone(),
             stamp_suite::snmp::state::SnmpState {
                 config: stamp_suite::snmp::state::SnmpConfig::from_conf(conf),
                 reflector_counters: Some(Arc::clone(&shared.counters)),
@@ -206,6 +207,7 @@ async fn run_sender(conf: &Configuration) -> Result<(), StartupError> {
         observers.push(stats.clone());
         start_snmp(
             conf,
+            shutdown.clone(),
             stamp_suite::snmp::state::SnmpState {
                 config: stamp_suite::snmp::state::SnmpConfig::from_conf(conf),
                 reflector_counters: None,
@@ -219,9 +221,13 @@ async fn run_sender(conf: &Configuration) -> Result<(), StartupError> {
         None
     };
 
-    let mut output = stamp_suite::stats::StatsOutput::new(conf.output_format);
+    let output = stamp_suite::stats::StatsOutput::new(conf.output_format)
+        .map_err(|e| StartupError::io("Cannot start measurement output", e))?;
     for stats in sender::run_senders(conf, &output, observers, shutdown).await? {
-        output.print(&stats, false);
+        output
+            .print_final(stats)
+            .await
+            .map_err(|e| StartupError::io("Cannot write measurement output", e))?;
     }
     Ok(())
 }
@@ -278,9 +284,12 @@ async fn start_control(
 #[cfg(all(unix, feature = "snmp"))]
 async fn start_snmp(
     conf: &Configuration,
+    shutdown: CancellationToken,
     state: stamp_suite::snmp::state::SnmpState,
 ) -> Option<stamp_suite::snmp::SnmpServer> {
-    match stamp_suite::snmp::init(conf.snmp_socket.clone(), Arc::new(state)).await {
+    match stamp_suite::snmp::init_with_shutdown(conf.snmp_socket.clone(), Arc::new(state), shutdown)
+        .await
+    {
         Ok(server) => {
             info!(
                 "SNMP AgentX sub-agent started (socket: {})",

@@ -262,11 +262,11 @@ async fn sender_stops_on_shutdown_and_reports_what_it_sent() {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         trigger.cancel();
     });
-    let mut output = stamp_suite::stats::StatsOutput::new(conf.output_format);
+    let output = stamp_suite::stats::StatsOutput::new(conf.output_format).unwrap();
     let started = std::time::Instant::now();
     let stats = sender::run_sender_with_output(
         &conf,
-        &mut output,
+        &output,
         sender::SenderObservers::default(),
         shutdown,
     )
@@ -302,4 +302,82 @@ async fn reflector_reports_missing_interface() {
             .contains("Cannot bind to interface nosuchif0"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn combined_tlv_size_is_rejected_before_probing() {
+    for address in ["127.0.0.1", "::1"] {
+        let sink = UdpSocket::bind((address, 0)).await.unwrap();
+        let port = sink.local_addr().unwrap().port().to_string();
+        let conf = Configuration::parse_from([
+            "stamp-suite",
+            "--remote-addr",
+            address,
+            "--local-addr",
+            address,
+            "--remote-port",
+            &port,
+            "--hwtstamp",
+            "off",
+            "--count",
+            "1",
+            "--timeout",
+            "1",
+            "--send-delay",
+            "10",
+            "-A",
+            "A",
+            "--hmac-key",
+            "11111111111111111111111111111111",
+            "--extra-padding",
+            "65347",
+            "--location",
+            "--follow-up-telemetry",
+            "--timestamp-info",
+            "--direct-measurement",
+            "--cos",
+            "--access-report",
+            "1",
+        ]);
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), sender::run_sender(&conf))
+                .await
+                .expect("oversized run must finish");
+        let error = result.err().expect("combined TLV size must be rejected");
+        assert!(error.to_string().contains("UDP payload limit"), "{error}");
+        assert!(
+            sink.try_recv(&mut [0u8; 1]).is_err(),
+            "validation must precede all sends"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn permanent_send_failure_terminates_a_finite_run() {
+    // Linux rejects loopback broadcast without SO_BROADCAST. This reaches
+    // send_to after startup and cannot be confused with a lost reply.
+    let conf = Configuration::parse_from([
+        "stamp-suite",
+        "--local-addr",
+        "127.0.0.1",
+        "--remote-addr",
+        "127.255.255.255",
+        "--remote-port",
+        "38620",
+        "--count",
+        "1",
+        "--send-delay",
+        "1ms",
+        "--hwtstamp",
+        "off",
+    ]);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), sender::run_sender(&conf))
+        .await
+        .expect("a permanent send failure must not retry forever");
+    let error = expect_startup_err(result, "broadcast needs SO_BROADCAST");
+    assert!(matches!(
+        error,
+        StartupError::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied
+    ));
 }

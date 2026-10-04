@@ -84,3 +84,27 @@ still produces a log event. Text reports nonzero omission counts; JSON and the
 quoted CSV BER object always contain them. Save periodic reports and alarm logs
 externally when longer retention is needed; deduplicate interval/alarm identities
 when combining snapshots. `-R` prints per-packet RTT details as replies arrive.
+
+## Report output and pending probes
+
+`StatsOutput` formats and writes reports on a shared thread with a 64 KiB
+buffer, flushed after each report. The sender calculates each snapshot and
+copies its retained history after reserving queue space; skipped interim
+reports do not incur that work.
+The queue holds at most eight pending reports or text packet-detail lines, plus
+one item being written. When it is full, new interim reports and details are
+skipped with a throttled diagnostic. All targets share this capacity. Final
+reports wait for space and are not silently dropped: queueing and flushing
+must complete within five seconds, or the run returns an output error.
+A closed pipe also returns an error instead of panicking. The writer owns a
+separate stdout descriptor so a blocked write does not prevent process exit.
+The thread itself can remain blocked until the reader resumes or the process exits.
+
+Text `-R` lines use the same bounded queue. In JSON/CSV mode those diagnostics
+go to stderr. The final summary retains cumulative measurements even when
+interim reports are skipped, subject to the BER history bounds above.
+
+Pending probes have a separate lifetime. `--timeout 0` disables expiry; in a
+long run with lost replies, the pending table can continue growing. Use a
+finite timeout when running continuously. Collector and reporting limits do
+not bound that table.

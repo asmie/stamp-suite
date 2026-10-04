@@ -45,6 +45,7 @@ pub(super) struct SenderRun {
     /// Labels reports when several targets run at once.
     label: Option<String>,
     socket: UdpSocket,
+    consecutive_send_errors: u8,
     use_auth: bool,
     use_tlvs: bool,
     send_mode: SendMode,
@@ -750,10 +751,11 @@ impl SenderRun {
             tokio::time::interval_at(tokio::time::Instant::now() + period, period)
         });
 
-        Ok(Self {
+        let run = Self {
             conf: Arc::clone(&shared_conf),
             label: None,
             socket,
+            consecutive_send_errors: 0,
             use_auth,
             use_tlvs,
             send_mode,
@@ -795,7 +797,9 @@ impl SenderRun {
             observers,
             shutdown,
             schedule: Schedule::new(conf.send_schedule),
-        })
+        };
+        run.validate_probe_size(run.build_probe(0, true).len())?;
+        Ok(run)
     }
 
     /// Sends probes on schedule until `--count` is reached (`0` means no
@@ -803,7 +807,7 @@ impl SenderRun {
     /// outstanding replies and finishes any Access Report exchange.
     pub(super) async fn run(
         mut self,
-        output: &mut crate::stats::StatsOutput,
+        output: &crate::stats::StatsOutput,
     ) -> Result<StatsSnapshot, crate::StartupError> {
         // Each probe is due one gap after the previous due time, so the time
         // spent building and sending does not stretch the gap. Timer wakeups
@@ -825,7 +829,7 @@ impl SenderRun {
                 .access_report_state
                 .as_mut()
                 .is_some_and(|state| state.tick(Instant::now()));
-            self.send_probe(attach_access_report).await;
+            self.send_probe(attach_access_report).await?;
             let gap = self.schedule.next_gap(self.send_interval());
             due += gap;
             let now = tokio::time::Instant::now();
@@ -835,7 +839,7 @@ impl SenderRun {
             let until = stop_at.map_or(due, |at| due.min(at));
             let spin = gap < TIMER_RESOLUTION;
             self.receive_until(until, Wait::NextSend { spin }, output)
-                .await;
+                .await?;
             self.expire();
             if self.stopping() {
                 break;
@@ -849,7 +853,7 @@ impl SenderRun {
         }
 
         let drain_until = tokio::time::Instant::now() + self.timeout;
-        self.receive_until(drain_until, Wait::Drain, output).await;
+        self.receive_until(drain_until, Wait::Drain, output).await?;
 
         // Access Report retries continue after the last probe (RFC 8972
         // §4.6), including `--count 1` runs, for an exchange the probe loop
@@ -865,7 +869,7 @@ impl SenderRun {
                 .as_mut()
                 .is_some_and(|state| state.tick(Instant::now()))
             {
-                self.send_probe(true).await;
+                self.send_probe(true).await?;
                 continue;
             }
             let Some(deadline) = self
@@ -878,7 +882,7 @@ impl SenderRun {
             let deadline = tokio::time::Instant::from_std(deadline);
             if !self
                 .receive_until(deadline, Wait::AccessReport, output)
-                .await
+                .await?
             {
                 break;
             }
@@ -891,6 +895,8 @@ impl SenderRun {
         if let Some(m) = self.measurements.monitor.as_mut() {
             m.idle();
         }
+        // Interim reports are written before the caller prints the final one.
+        output.flush().await.map_err(output_error)?;
         Ok(self.snapshot())
     }
 
@@ -940,8 +946,8 @@ impl SenderRun {
         &mut self,
         deadline: tokio::time::Instant,
         wait: Wait,
-        output: &mut crate::stats::StatsOutput,
-    ) -> bool {
+        output: &crate::stats::StatsOutput,
+    ) -> Result<bool, crate::StartupError> {
         enum Event {
             Datagram(std::io::Result<(usize, Option<u64>, Option<u8>)>),
             MonitorDue,
@@ -953,11 +959,12 @@ impl SenderRun {
         // between receive polls, so sub-millisecond spacing stays exact.
         let spin = matches!(wait, Wait::NextSend { spin: true });
         loop {
+            output.check().map_err(output_error)?;
             if self.wait_over(wait) {
-                return true;
+                return Ok(true);
             }
             if spin && tokio::time::Instant::now() >= deadline {
-                return true;
+                return Ok(true);
             }
             let monitor_due = self
                 .measurements
@@ -1004,7 +1011,7 @@ impl SenderRun {
                     // Apply kernel TX timestamps first so a corrected T1 is
                     // in place before one-way delay is computed.
                     self.apply_tx_timestamps();
-                    self.on_reply(len, kernel_t4, reply_ecn);
+                    self.on_reply(output, len, kernel_t4, reply_ecn);
                 }
                 Event::Datagram(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // A spurious wake, typically an error-queue event; drain
@@ -1022,9 +1029,9 @@ impl SenderRun {
                         if matches!(wait, Wait::NextSend { .. }) {
                             // Keep the send schedule even if the socket keeps failing.
                             tokio::time::sleep_until(deadline).await;
-                            return true;
+                            return Ok(true);
                         }
-                        return false;
+                        return Ok(false);
                     }
                 }
                 Event::MonitorDue => {
@@ -1032,20 +1039,35 @@ impl SenderRun {
                         m.advance(Instant::now());
                     }
                 }
-                Event::Deadline if !spin => return true,
+                Event::Deadline if !spin => return Ok(true),
                 Event::Deadline => {}
                 Event::Report => {
-                    let interim = self.snapshot();
-                    output.print(&interim, true);
+                    output
+                        .print_interim_with(|| self.snapshot())
+                        .map_err(output_error)?;
                 }
-                Event::Shutdown => return false,
+                Event::Shutdown => return Ok(false),
             }
         }
     }
 
-    /// Builds and sends one probe. A failed send is reported and the
-    /// schedule continues.
-    async fn send_probe(&mut self, attach_access_report: bool) {
+    fn validate_probe_size(&self, size: usize) -> Result<(), crate::StartupError> {
+        let ipv6 = self.conf.remote_ip().is_ipv6();
+        let headers = if ipv6 {
+            self.conf
+                .attach_ext_hdrs()
+                .iter()
+                .map(|h| h.bytes.len())
+                .sum()
+        } else {
+            0
+        };
+        let limit = (if ipv6 { 65_527usize } else { 65_507usize }).saturating_sub(headers);
+        validate_datagram_size(size, limit)
+    }
+
+    /// Builds and sends one probe. Transient errors have a bounded retry budget.
+    async fn send_probe(&mut self, attach_access_report: bool) -> Result<(), crate::StartupError> {
         self.prepare_header_requests();
         if let Some(ber) = self.ber.as_mut() {
             ber.advance(Instant::now());
@@ -1053,6 +1075,7 @@ impl SenderRun {
         }
         let seq = self.sess.generate_sequence_number();
         let mut packet = self.build_probe(seq, attach_access_report);
+        self.validate_probe_size(packet.len())?;
         // T1 and the RTT start are read after the TLVs are built, so build
         // time is not measured as network delay. Only the base packet (and
         // its HMAC, which covers the timestamp) is written after this point.
@@ -1060,9 +1083,28 @@ impl SenderRun {
         let send_timestamp = generate_timestamp(self.conf.clock_source);
         self.stamp_probe(&mut packet, seq, send_timestamp);
         match self.socket.send(&packet).await {
-            Err(e) => crate::eprintln_throttled!("Failed to send packet {seq}: {e}"),
-            Ok(_) => self.record_sent(seq, send_time, send_timestamp),
+            Err(e) => {
+                self.consecutive_send_errors += 1;
+                if !retry_send_error(&e, self.consecutive_send_errors) {
+                    return Err(crate::StartupError::io(
+                        format!("Cannot send probe {seq}"),
+                        e,
+                    ));
+                }
+                crate::eprintln_throttled!("Failed to send packet {seq}: {e}");
+            }
+            Ok(n) if n == packet.len() => {
+                self.consecutive_send_errors = 0;
+                self.record_sent(seq, send_time, send_timestamp);
+            }
+            Ok(_) => {
+                return Err(crate::StartupError::io(
+                    "Cannot send probe",
+                    std::io::Error::from(std::io::ErrorKind::WriteZero),
+                ))
+            }
         }
+        Ok(())
     }
 
     /// Serializes one probe with a zeroed base packet for `stamp_probe` to
@@ -1184,7 +1226,13 @@ impl SenderRun {
         }
     }
 
-    fn on_reply(&mut self, len: usize, kernel_t4: Option<u64>, reply_ecn: Option<u8>) {
+    fn on_reply(
+        &mut self,
+        output: &crate::stats::StatsOutput,
+        len: usize,
+        kernel_t4: Option<u64>,
+        reply_ecn: Option<u8>,
+    ) {
         let conf = Arc::clone(&self.conf);
         let mut ctx = SenderRecvContext {
             local_error_estimate: Some(self.error_estimate),
@@ -1196,6 +1244,7 @@ impl SenderRun {
             owd_collector: &mut self.owd_collector,
             packets_received: &mut self.packets_received,
             print_stats: conf.print_stats,
+            output: Some(output),
             output_format: conf.output_format,
             hmac_key: self.hmac_key.as_ref(),
             expected_sender_msid: conf.micro_session_id,
@@ -1356,4 +1405,54 @@ pub(super) async fn recv_packet(
     let _ = (cs, kernel_rx, want_reply_ecn, cmsg_buf);
     let len = socket.recv(buf).await?;
     Ok((len, None, None))
+}
+
+fn validate_datagram_size(size: usize, limit: usize) -> Result<(), crate::StartupError> {
+    if size > limit {
+        return Err(crate::StartupError::config(format!(
+            "Probe payload is {size} bytes; UDP payload limit is {limit} bytes including all selected TLVs"
+        )));
+    }
+    Ok(())
+}
+
+fn retry_send_error(error: &std::io::Error, failures: u8) -> bool {
+    // Invalid buffers/options and permission failures will not improve on retry.
+    // Other failures (including ICMP errors and queue pressure) get eight tries.
+    failures < 8
+        && !matches!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput
+                | std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::Unsupported
+                | std::io::ErrorKind::WriteZero
+        )
+}
+
+fn output_error(error: std::io::Error) -> crate::StartupError {
+    crate::StartupError::io("Cannot write measurement output", error)
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn datagram_size_boundaries_and_send_retry_budget() {
+        for limit in [65_507, 65_527, 65_527 - 16] {
+            assert!(validate_datagram_size(limit, limit).is_ok());
+            assert!(validate_datagram_size(limit + 1, limit).is_err());
+        }
+        for kind in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::ConnectionRefused,
+        ] {
+            assert!(retry_send_error(&kind.into(), 1));
+            assert!(!retry_send_error(&kind.into(), 8));
+        }
+        assert!(!retry_send_error(
+            &std::io::ErrorKind::InvalidInput.into(),
+            1
+        ));
+    }
 }

@@ -21,8 +21,9 @@ use stamp_suite::crypto::HmacKey;
 use stamp_suite::packets::{PacketAuthenticated, PacketUnauthenticated};
 use stamp_suite::receiver::{process_stamp_packet, ProcessingContext};
 use stamp_suite::tlv::{
-    AccessReportTlv, ClassOfServiceTlv, DirectMeasurementTlv, FollowUpTelemetryTlv, LocationTlv,
-    TimestampInfoTlv, TimestampMethod, TypedTlv,
+    AccessReportTlv, ClassOfServiceTlv, DirectMeasurementTlv, FollowUpTelemetryTlv, LocationSubTlv,
+    LocationSubType, LocationTlv, PacketAddressInfo, TimestampInfoTlv, TimestampMethod, TlvList,
+    TypedTlv,
 };
 
 fn src() -> SocketAddr {
@@ -50,9 +51,15 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         metrics_enabled: false,
         received_dscp: 0,
         received_ecn: 0,
-        reflector_rx_count: None,
-        reflector_tx_count: None,
-        packet_addr_info: None,
+        reflector_rx_count: Some(100),
+        reflector_tx_count: Some(99),
+        packet_addr_info: Some(PacketAddressInfo {
+            src_addr: src().ip(),
+            src_port: src().port(),
+            dst_addr: Ipv4Addr::new(127, 0, 0, 2).into(),
+            dst_port: 862,
+            src_mac: Some([2, 0, 0, 0, 0, 1]),
+        }),
         last_reflection: None,
         location_disclosure: Default::default(),
         cos_policy: stamp_suite::cos_policy::permissive(),
@@ -105,7 +112,14 @@ fn typical_tlv_chain() -> Vec<u8> {
     use stamp_suite::tlv::SyncSource;
     let mut chain = Vec::new();
     chain.extend(ClassOfServiceTlv::new(46, 2).to_raw().to_bytes());
-    chain.extend(LocationTlv::new().to_raw().to_bytes());
+    let mut location = LocationTlv::new();
+    location
+        .sub_tlvs
+        .push(LocationSubTlv::generic_request(LocationSubType::SourceIp));
+    location.sub_tlvs.push(LocationSubTlv::generic_request(
+        LocationSubType::DestinationIp,
+    ));
+    chain.extend(location.to_raw().to_bytes());
     chain.extend(DirectMeasurementTlv::new(0).to_raw().to_bytes());
     chain.extend(FollowUpTelemetryTlv::new().to_raw().to_bytes());
     chain.extend(
@@ -190,22 +204,45 @@ fn bench_auth_no_tlvs(c: &mut Criterion) {
 
 fn bench_auth_full_chain(c: &mut Criterion) {
     let key = HmacKey::new(vec![0xBB; 16]).unwrap();
-    let mut packet = build_auth_base();
-    let hmac = stamp_suite::crypto::compute_packet_hmac(&key, &packet, 96);
-    packet[96..112].copy_from_slice(&hmac);
-    packet.extend(typical_tlv_chain());
+    let mut base = build_auth_base();
+    let hmac = stamp_suite::crypto::compute_packet_hmac(&key, &base, 96);
+    base[96..112].copy_from_slice(&hmac);
     let ctx = make_ctx(Some(&key));
-    c.bench_function("auth_full_chain", |b| {
-        b.iter(|| {
-            let _ = process_stamp_packet(
-                black_box(&packet),
-                black_box(src()),
-                black_box(64),
-                black_box(true),
-                black_box(&ctx),
-            );
+    for (name, signed) in [
+        ("auth_full_chain", true),
+        ("auth_chain_missing_tlv_hmac", false),
+    ] {
+        let mut packet = base.clone();
+        let mut chain = TlvList::parse(&typical_tlv_chain()).unwrap();
+        if signed {
+            chain.set_hmac(&key, &packet[..4]);
+        }
+        packet.extend(chain.to_bytes());
+        let reply = process_stamp_packet(&packet, src(), 64, true, &ctx)
+            .expect("benchmark fixture rejected");
+        let returned = TlvList::parse(&reply.data[112..]).unwrap();
+        assert!(!returned.non_hmac_tlvs().is_empty());
+        assert!(returned
+            .non_hmac_tlvs()
+            .iter()
+            .all(|tlv| tlv.is_integrity_failed() != signed));
+        if signed {
+            returned
+                .verify_hmac(&key, &reply.data[..4], &reply.data[112..])
+                .unwrap();
+        }
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                process_stamp_packet(
+                    black_box(&packet),
+                    black_box(src()),
+                    black_box(64),
+                    black_box(true),
+                    black_box(&ctx),
+                )
+            });
         });
-    });
+    }
 }
 
 /// Stateful processing through a populated session table. Session admission

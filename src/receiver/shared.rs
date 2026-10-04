@@ -77,8 +77,14 @@ pub fn create_shared_state(
         .map_err(crate::StartupError::config)?;
     let hmac_keys = conf.key_source().load_key_set()?;
 
+    #[allow(unused_mut)]
+    let mut counters = ReflectorCounters::new();
+    #[cfg(feature = "metrics")]
+    {
+        counters.metrics_enabled = conf.metrics;
+    }
     Ok(ReceiverSharedState {
-        counters: Arc::new(ReflectorCounters::new()),
+        counters: Arc::new(counters),
         session_manager: Arc::new(SessionManager::with_admission(
             session_timeout,
             max_sessions,
@@ -110,5 +116,7 @@ pub(crate) fn print_reflector_stats(
     );
     stats.reply_queue_rejected = counters.reply_queue_rejected.load(Ordering::Relaxed);
     stats.queued_replies_cancelled = counters.queued_replies_cancelled.load(Ordering::Relaxed);
-    stats.print(output_format);
+    if let Err(error) = stats.write_report(&mut std::io::stdout().lock(), output_format) {
+        log::error!("Cannot write reflector summary: {error}");
+    }
 }

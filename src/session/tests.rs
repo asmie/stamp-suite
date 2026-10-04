@@ -183,7 +183,7 @@ fn test_replay_window_edge_and_beyond() {
     assert_eq!(s.check_replay(edge), ReplayVerdict::Reordered);
     assert_eq!(s.check_replay(edge), ReplayVerdict::Replay);
 
-    // One past the window: honestly reported as unknown rather than
+    // One past the window: reported as unknown rather than
     // guessed at in either direction.
     assert_eq!(s.check_replay(edge - 1), ReplayVerdict::OutOfWindow);
     assert_eq!(s.check_replay(edge - 1), ReplayVerdict::OutOfWindow);

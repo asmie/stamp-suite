@@ -45,11 +45,19 @@ unlimited). An identity is both UDP endpoints, the SSID and the optional
 sender Micro-session ID. At capacity, new identities are dropped and existing
 sessions continue. Idle expiry or explicit expiry frees capacity.
 
-`--max-pps` limits reflected packets per second per source IP address. It
+`--max-pps` charges one token per incoming request before validation and session
+admission, then one for each additional Type 12 reply copy, per source IP. It
 defaults to 0 (unlimited). `--reflector-queue-capacity` (default 1024)
 separately bounds accepted requests waiting for replies, including bursts. It
 counts requests, not bytes. See
 [Capacity, drain and shutdown](usage.md#capacity-drain-and-shutdown).
+
+The rate limiter keeps at most 16,384 source-IP buckets, separate from
+`--max-sessions`. Further sources share one overflow bucket at the configured
+rate and burst capacity. Existing sources keep their own budgets. Buckets idle
+for 60 seconds become eligible for expiry; each request scans at most four
+entries during a cleanup pass. This bounds both retained source entries and
+per-request cleanup work. Type 12 count, size and volume caps still apply.
 
 Replay detection keeps a 31-entry window per session. A Type 12 request whose
 sequence number is not new gets one reply with the U flag.

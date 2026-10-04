@@ -84,8 +84,8 @@ sudo systemctl enable --now stamp-suite
 The packaged service runs a reflector in open mode. Configure authentication
 before exposing it to an untrusted network; see [security](doc/security.md).
 
-Releases also include plain binary tarballs for these Linux targets and for
-macOS on Apple silicon, a source tarball and a `cargo vendor` tarball.
+The release workflow builds plain binary tarballs for these Linux targets and
+for macOS on Apple silicon and Intel, plus source and `cargo vendor` tarballs.
 
 ### From source
 
@@ -107,7 +107,10 @@ nix run . -- --is-reflector
 
 The [Gentoo overlay](dist/gentoo/README.md) maps Cargo features to USE flags
 and installs systemd and OpenRC services. `dist/openwrt/` holds an OpenWrt
-package with a procd init script.
+recipe template and procd init script. Use the release asset
+`stamp-suite-VERSION-openwrt.mk` as its `Makefile`; it pins the checksum of that
+release’s source archive. See [release verification](doc/release-evidence.md)
+for building the recipe from local release inputs.
 
 ## Platforms and Cargo features
 
@@ -141,6 +144,7 @@ without the feature.
 | Document | Contents |
 | --- | --- |
 | [Protocol overview](doc/protocol.md) | STAMP concepts, the extensions implemented here, glossary |
+| [Project review, 2026-10-03](doc/review/2026-10-03/README.md) | Conformance findings, test assessment and file-by-file optimization notes |
 | [Usage](doc/usage.md) | Configuration file, sender, reflector, timestamps, networking, observability |
 | [Security](doc/security.md) | Threat model, HMAC keys and rotation, service hardening |
 | [Control API](doc/control-plane.md) | Reflector HTTP API endpoints |

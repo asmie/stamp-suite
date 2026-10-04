@@ -46,6 +46,12 @@ impl SnmpServer {
     }
 }
 
+impl Drop for SnmpServer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 /// Description string sent to the AgentX master on every (re)connect.
 const AGENTX_DESCRIPTION: &str = "stamp-suite SNMP sub-agent";
 
@@ -59,14 +65,31 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// a blocking event loop. Initial connection errors return to the caller.
 /// Later disconnects retry with capped exponential backoff until shutdown.
 pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServer, SnmpError> {
-    let cancel = CancellationToken::new();
+    init_with_shutdown(socket_path, state, CancellationToken::new()).await
+}
 
-    // Validate connectivity up front (fail-fast on a bad socket path). The
-    // handshake is blocking socket I/O with a read timeout, so it runs off
-    // the async worker threads.
+/// Starts the worker with a child of the role's shutdown token. Dropping the
+/// returned handle, or cancelling initialization, also cancels blocking I/O.
+pub async fn init_with_shutdown(
+    socket_path: String,
+    state: Arc<SnmpState>,
+    shutdown: CancellationToken,
+) -> Result<SnmpServer, SnmpError> {
+    let cancel = shutdown.child_token();
+    let server = SnmpServer {
+        cancel: cancel.clone(),
+    };
+
+    // Complete the cancellable handshake before starting the event loop.
+    // Blocking socket I/O runs outside the async worker threads.
     let path = socket_path.clone();
+    let handshake_cancel = cancel.clone();
     let session = tokio::task::spawn_blocking(move || -> Result<_, SnmpError> {
-        let mut session = agentx::AgentXSession::connect(&path, AGENTX_DESCRIPTION)?;
+        let mut session = agentx::AgentXSession::connect_cancellable(
+            &path,
+            AGENTX_DESCRIPTION,
+            handshake_cancel,
+        )?;
         session.register(&oids::stamp_suite_root())?;
         Ok(session)
     })
@@ -115,7 +138,7 @@ pub async fn init(socket_path: String, state: Arc<SnmpState>) -> Result<SnmpServ
         }
     });
 
-    Ok(SnmpServer { cancel })
+    Ok(server)
 }
 
 /// (Re)connects to the AgentX master and re-registers the subtree, retrying
@@ -129,7 +152,11 @@ fn reconnect(socket_path: &str, cancel: &CancellationToken) -> Option<agentx::Ag
         if cancel.is_cancelled() {
             return None;
         }
-        match agentx::AgentXSession::connect(socket_path, AGENTX_DESCRIPTION) {
+        match agentx::AgentXSession::connect_cancellable(
+            socket_path,
+            AGENTX_DESCRIPTION,
+            cancel.clone(),
+        ) {
             Ok(mut session) => match session.register(&oids::stamp_suite_root()) {
                 Ok(()) => {
                     log::info!("SNMP AgentX sub-agent reconnected to {socket_path}");

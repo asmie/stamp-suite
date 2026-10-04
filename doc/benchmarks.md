@@ -132,6 +132,16 @@ validation and loss/duplicate/reordering accounting without requiring sockets.
 Linux CI runs these accounting tests; it does not enforce throughput thresholds
 on shared runners.
 
+`auth_full_chain` includes valid base and TLV HMACs, Location requests and
+observed address/counter metadata. Setup verifies the response's integrity
+flags and HMAC before timing. `auth_chain_missing_tlv_hmac` separately measures
+the rejection path and checks its I flags. Run fixture checks without a timing
+comparison with:
+
+```sh
+cargo test --locked --all-features --bench reflector_hotpath -- --test
+```
+
 The [2026-09-10 baseline](performance/2026-09-10-live-udp.md) records
 54 live trials on both Linux backends, including the duplicate replies observed
 with pnet loopback. Use its environment and workload limits when comparing results.

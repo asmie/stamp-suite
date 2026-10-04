@@ -1,8 +1,8 @@
-//! TypedTlv trait for zero-cost static dispatch on TLV extensions.
+//! Shared conversion and validation for typed TLV extensions.
 
 use super::core::{RawTlv, TlvError, TlvType};
 
-/// Static, zero-cost trait for typed STAMP TLV extensions.
+/// Statically dispatched conversion between raw and typed TLVs.
 ///
 /// Implementors provide `decode_value` and `encode_value` for the raw byte
 /// payload. The trait supplies default `from_raw` and `to_raw` that handle

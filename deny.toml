@@ -7,36 +7,17 @@
 # CI: the `cargo-deny` job in .github/workflows/rust.yml runs the same
 # checks via EmbarkStudios/cargo-deny-action@v2.
 #
-# Overlap with the `security-audit` job (rustsec/audit-check): both scan
-# the RustSec advisory database for known vulnerabilities in this crate's
-# dependency tree, so on paper they duplicate each other for that one
-# check. Kept side by side deliberately: `audit-check` posts its findings
-# as a GitHub check-run with inline PR annotations and can open issues for
-# newly published advisories, which `cargo-deny-action` does not do;
-# `cargo deny check` is additionally the single command contributors run
-# locally and also covers licenses/bans/sources in the same pass. Small
-# redundancy on the advisories check, not wasted effort.
+# The separate RustSec job reports advisories through GitHub checks.
+# cargo-deny also checks licenses, duplicate versions and dependency sources.
 
 [graph]
-# Check the full dependency graph, including crates only pulled in by
-# optional features (metrics, control, snmp, hwtstamp, ttl-nix, ttl-pnet),
-# so `cargo deny check` with no extra flags matches what CI's
-# --all-features builds actually link.
+# Include dependencies of optional features.
 all-features = true
 
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# As of the cargo-deny 0.16+ config schema, vulnerability advisories are
-# unconditionally treated as errors -- this is no longer a configurable
-# lint level, so there is nothing to set here to get "vulnerability=deny"
-# semantics (and nothing to accidentally weaken either).
-#
-# `unmaintained`/`unsound` also changed meaning: they now select *scope*
-# (which part of the graph is checked), not severity. "all" is the
-# upstream default and matches the intent of the original
-# "unmaintained=warn" requirement: flag unmaintained crates anywhere in
-# the tree, but only as a warning (cargo-deny's own default severity for
-# unmaintained/unsound advisories), never a hard failure.
+# Vulnerability advisories are errors. These fields select the graph scope
+# for unmaintained and unsound advisories, not their severity.
 unmaintained = "all"
 unsound = "all"
 # Yanked crate versions in Cargo.lock: warn, don't fail the build.
@@ -49,11 +30,7 @@ ignore = [
 ]
 
 [licenses]
-# Allow-list derived from the actual resolved dependency tree
-# (`cargo metadata --all-features`, cross-checked with `cargo deny list`)
-# as of Cargo.lock for stamp-suite 0.9.0. Every license expression in the
-# tree resolves against this list; see the comment above each entry for
-# which crate(s) specifically need it.
+# Review this list against `cargo deny list` when dependencies change.
 allow = [
     "MIT",          # the overwhelming majority of the tree, incl. this crate
     "Apache-2.0",   # equally common, usually dual-licensed with MIT
@@ -70,12 +47,9 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
-# The tree has a handful of known, harmless duplicate versions (e.g.
-# transitive deps pulled at different major versions by axum/hyper/rustls
-# vs. older consumers). Warn so it stays visible without failing CI.
+# Report duplicate versions without failing CI.
 multiple-versions = "warn"
-# No dependency should ever pin `*` -- that silently accepts any future
-# (possibly malicious or breaking) release.
+# Reject wildcard version requirements.
 wildcards = "deny"
 
 [sources]

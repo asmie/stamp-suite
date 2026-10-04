@@ -5,6 +5,8 @@ use super::*;
 
 /// Aggregate packet counters for the reflector.
 pub struct ReflectorCounters {
+    #[cfg(feature = "metrics")]
+    pub(crate) metrics_enabled: bool,
     /// Requests refused before processing because all work slots are occupied.
     pub reply_queue_rejected: AtomicU64,
     /// Unsent copies discarded when queued work is cancelled (e.g. shutdown).
@@ -32,6 +34,8 @@ pub struct ReflectorCounters {
 impl ReflectorCounters {
     pub fn new() -> Self {
         ReflectorCounters {
+            #[cfg(feature = "metrics")]
+            metrics_enabled: false,
             reply_queue_rejected: AtomicU64::new(0),
             queued_replies_cancelled: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
@@ -40,6 +44,30 @@ impl ReflectorCounters {
             packets_rate_limited: AtomicU64::new(0),
             packets_replayed: AtomicU64::new(0),
             packets_reordered: AtomicU64::new(0),
+        }
+    }
+
+    pub(super) fn record_received(&self) {
+        self.packets_received.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        if self.metrics_enabled {
+            crate::metrics::reflector_metrics::record_packet_received();
+        }
+    }
+
+    pub(super) fn record_reflected(&self) {
+        self.packets_reflected.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        if self.metrics_enabled {
+            crate::metrics::reflector_metrics::record_packet_reflected();
+        }
+    }
+
+    pub(super) fn record_drop(&self, _reason: &'static str) {
+        self.packets_dropped.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        if self.metrics_enabled {
+            crate::metrics::reflector_metrics::record_packet_dropped(_reason);
         }
     }
 }
@@ -51,7 +79,8 @@ impl Default for ReflectorCounters {
 }
 
 /// Token buckets keyed by source IP. Each refills at `rate` tokens/second up
-/// to `burst`; every reply, including each Type-12 copy, costs one token.
+/// to `burst`. Ingest takes one token before validation and admission; each
+/// additional Type 12 reply copy takes another.
 ///
 /// The SSID is not part of the key: a sender chooses it freely, so keying on
 /// it would let one source multiply its budget.
@@ -62,11 +91,15 @@ pub struct RateLimiter {
     /// Bucket capacity. Kept equal to `rate` when configured as 0.
     burst: AtomicU32,
     state: std::sync::Mutex<RateLimiterState>,
+    capacity: usize,
 }
 
 pub(super) struct RateLimiterState {
     last_cleanup: Instant,
     sources: StdHashMap<std::net::IpAddr, Bucket>,
+    sweep: std::collections::VecDeque<std::net::IpAddr>,
+    cleanup_remaining: usize,
+    overflow: Bucket,
 }
 
 pub(super) struct Bucket {
@@ -78,6 +111,9 @@ pub(super) struct Bucket {
 impl RateLimiter {
     const BUCKET_TTL: Duration = Duration::from_secs(60);
     const CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
+    /// New sources share an overflow budget once this table is full.
+    const MAX_SOURCES: usize = 16_384;
+    const CLEANUP_BATCH: usize = 4;
 
     /// Creates a limiter with `rate` tokens/second and one second of burst capacity.
     pub fn new(rate: u32) -> Self {
@@ -87,6 +123,10 @@ impl RateLimiter {
     /// Creates a limiter with an explicit token-bucket burst capacity.
     /// `burst` of 0 falls back to `rate`.
     pub fn with_burst(rate: u32, burst: u32) -> Self {
+        Self::with_capacity(rate, burst, Self::MAX_SOURCES)
+    }
+
+    fn with_capacity(rate: u32, burst: u32, capacity: usize) -> Self {
         let burst = if burst == 0 { rate } else { burst };
         let now = Instant::now();
         RateLimiter {
@@ -95,7 +135,15 @@ impl RateLimiter {
             state: std::sync::Mutex::new(RateLimiterState {
                 last_cleanup: now,
                 sources: StdHashMap::new(),
+                sweep: std::collections::VecDeque::new(),
+                cleanup_remaining: 0,
+                overflow: Bucket {
+                    tokens: f64::from(burst),
+                    last_refill: now,
+                    last_seen: now,
+                },
             }),
+            capacity,
         }
     }
 
@@ -120,25 +168,38 @@ impl RateLimiter {
         self.burst.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Takes one token from `src`'s bucket. Returns false, leaving the
-    /// bucket unchanged, when it is empty.
+    /// Refills `src`'s bucket and takes one token if available. Denied requests
+    /// still refresh the bucket's activity and refill timestamps.
     pub fn allow(&self, src: std::net::IpAddr) -> bool {
+        self.allow_at(src, Instant::now())
+    }
+
+    fn allow_at(&self, src: std::net::IpAddr, now: Instant) -> bool {
         let rate_now = self.rate();
         if rate_now == 0 {
             // Unlimited: skip the lock and allocate no buckets.
             return true;
         }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let now = Instant::now();
         Self::cleanup_expired_buckets(&mut state, now);
 
         let burst = self.burst() as f64;
         let rate = rate_now as f64;
-        let bucket = state.sources.entry(src).or_insert(Bucket {
-            tokens: burst,
-            last_refill: now,
-            last_seen: now,
-        });
+        if !state.sources.contains_key(&src) && state.sources.len() < self.capacity {
+            state.sources.insert(
+                src,
+                Bucket {
+                    tokens: burst,
+                    last_refill: now,
+                    last_seen: now,
+                },
+            );
+            state.sweep.push_back(src);
+        }
+        let RateLimiterState {
+            sources, overflow, ..
+        } = &mut *state;
+        let bucket = sources.get_mut(&src).unwrap_or(overflow);
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * rate).min(burst);
         bucket.last_refill = now;
@@ -153,14 +214,27 @@ impl RateLimiter {
     }
 
     fn cleanup_expired_buckets(state: &mut RateLimiterState, now: Instant) {
-        if now.duration_since(state.last_cleanup) < Self::CLEANUP_INTERVAL {
-            return;
+        if state.cleanup_remaining == 0
+            && now.duration_since(state.last_cleanup) >= Self::CLEANUP_INTERVAL
+        {
+            state.cleanup_remaining = state.sweep.len();
+            state.last_cleanup = now;
         }
-
-        state
-            .sources
-            .retain(|_, bucket| now.duration_since(bucket.last_seen) < Self::BUCKET_TTL);
-        state.last_cleanup = now;
+        for _ in 0..Self::CLEANUP_BATCH.min(state.cleanup_remaining) {
+            let Some(src) = state.sweep.pop_front() else {
+                break;
+            };
+            state.cleanup_remaining -= 1;
+            if state
+                .sources
+                .get(&src)
+                .is_some_and(|b| now.duration_since(b.last_seen) >= Self::BUCKET_TTL)
+            {
+                state.sources.remove(&src);
+            } else {
+                state.sweep.push_back(src);
+            }
+        }
     }
 }
 
@@ -255,6 +329,41 @@ pub const REFLECTED_CONTROL_MAX_VOLUME: u32 = 1_500_000;
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn source_churn_uses_bounded_overflow_and_incremental_expiry() {
+        let limiter = RateLimiter::with_capacity(1, 2, 8);
+        let now = Instant::now();
+        let ip = |n| IpAddr::V4(Ipv4Addr::from(n));
+        for n in 1..=8 {
+            assert!(limiter.allow_at(ip(n), now));
+        }
+        assert!(limiter.allow_at(ip(9), now));
+        assert!(limiter.allow_at(ip(10), now));
+        for n in 11..10_000 {
+            assert!(!limiter.allow_at(ip(n), now));
+        }
+        assert!(
+            limiter.allow_at(ip(1), now),
+            "existing source keeps its own budget"
+        );
+        assert!(!limiter.allow_at(ip(1), now));
+        {
+            let state = limiter.state.lock().unwrap();
+            assert_eq!(state.sources.len(), 8);
+            assert_eq!(state.sweep.len(), 8);
+        }
+        let expired = now + Duration::from_secs(61);
+        assert!(limiter.allow_at(ip(10_000), expired));
+        assert_eq!(
+            limiter.state.lock().unwrap().sources.len(),
+            5,
+            "one call expires only four entries"
+        );
+        assert!(limiter.allow_at(ip(10_001), expired));
+        assert_eq!(limiter.state.lock().unwrap().sources.len(), 2);
+        assert!(!limiter.state.lock().unwrap().sources.contains_key(&ip(1)));
+    }
 
     #[test]
     fn test_rate_limiter_expires_inactive_buckets() {

@@ -1,11 +1,13 @@
 //! Statistics collection, computation, and formatted output.
 //!
-//! Provides rich sender statistics (RTT percentiles, jitter, standard deviation),
-//! reflector shutdown summaries, and multiple output formats (text, JSON, CSV).
+//! Sender RTT percentiles, jitter and standard deviation, reflector shutdown
+//! summaries, and text, JSON and CSV reports.
 
 pub use crate::sender::measurements::{
     CounterPoint, DelaySummary, DirectSummary, FollowUpSummary, MeasurementSummary,
 };
+
+use std::io::{self, Write};
 
 mod clock_quality;
 pub use clock_quality::{ClockEstimate, ClockQuality};
@@ -39,38 +41,178 @@ pub enum OutputFormat {
     Csv,
 }
 
-/// Output state for one sender reporting stream. Reuse it for interim and final
-/// snapshots so CSV has one header, even when a run produces no interim report.
-///
-/// Clones share the CSV header state and print one report at a time, so
-/// concurrent sender runs can report into one stream.
+/// Shared, bounded sender output. Interim reports and packet details are
+/// best-effort under pressure; final reports wait for space and completion.
 #[derive(Clone)]
 pub struct StatsOutput {
-    format: OutputFormat,
-    /// Whether the CSV header was printed; the lock also serializes reports.
-    csv_header_printed: std::sync::Arc<std::sync::Mutex<bool>>,
+    queue: tokio::sync::mpsc::Sender<Queued>,
+    failure: std::sync::Arc<std::sync::Mutex<Option<(io::ErrorKind, String)>>>,
+    timeout: std::time::Duration,
+}
+
+const REPORT_QUEUE_CAPACITY: usize = 8;
+const OUTPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+enum Queued {
+    Report {
+        stats: Box<StatsSnapshot>,
+        interim: bool,
+    },
+    Detail(String),
+    Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 impl StatsOutput {
-    pub fn new(format: OutputFormat) -> Self {
-        Self {
-            format,
-            csv_header_printed: Default::default(),
+    /// Starts a writer using a separate stdout descriptor, so blocked output
+    /// cannot hold the process's global stdout lock during shutdown.
+    pub fn new(format: OutputFormat) -> io::Result<Self> {
+        #[cfg(unix)]
+        let writer = {
+            use std::os::fd::AsFd;
+            std::fs::File::from(std::io::stdout().as_fd().try_clone_to_owned()?)
+        };
+        #[cfg(windows)]
+        let writer = {
+            use std::os::windows::io::AsHandle;
+            std::fs::File::from(std::io::stdout().as_handle().try_clone_to_owned()?)
+        };
+        Self::with_writer(format, writer, OUTPUT_TIMEOUT)
+    }
+
+    fn with_writer(
+        format: OutputFormat,
+        writer: impl Write + Send + 'static,
+        timeout: std::time::Duration,
+    ) -> io::Result<Self> {
+        let mut writer = io::BufWriter::with_capacity(64 * 1024, writer);
+        let (queue, mut reports) = tokio::sync::mpsc::channel(REPORT_QUEUE_CAPACITY);
+        let failure = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let failed = failure.clone();
+        std::thread::Builder::new()
+            .name("stats-output".into())
+            .spawn(move || {
+                let mut header_printed = false;
+                while let Some(queued) = reports.blocking_recv() {
+                    let result = match queued {
+                        Queued::Report { stats, interim } => {
+                            let result =
+                                stats.write_report(&mut writer, format, interim, !header_printed);
+                            header_printed = true;
+                            result.and_then(|()| writer.flush())
+                        }
+                        Queued::Detail(line) => {
+                            writeln!(writer, "{line}").and_then(|()| writer.flush())
+                        }
+                        Queued::Flush(done) => writer.flush().map(|()| {
+                            let _ = done.send(());
+                        }),
+                    };
+                    if let Err(error) = result {
+                        *failed.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some((error.kind(), error.to_string()));
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            queue,
+            failure,
+            timeout,
+        })
+    }
+
+    fn error(&self) -> io::Error {
+        let failure = self.failure.lock().unwrap_or_else(|e| e.into_inner());
+        match failure.as_ref() {
+            Some((kind, message)) => io::Error::new(*kind, message.clone()),
+            None => io::Error::new(io::ErrorKind::BrokenPipe, "measurement output stopped"),
         }
     }
 
-    /// Prints one snapshot; `interim` selects the JSON type and text prefix.
-    pub fn print(&mut self, stats: &StatsSnapshot, interim: bool) {
-        let mut header_printed = self
-            .csv_header_printed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        match self.format {
-            OutputFormat::Text => stats.print_text(if interim { "[INTERIM] " } else { "" }),
-            OutputFormat::Json => stats.print_json(interim),
-            OutputFormat::Csv => {
-                stats.print_csv(!*header_printed);
-                *header_printed = true;
+    pub(crate) fn check(&self) -> io::Result<()> {
+        if self.queue.is_closed()
+            || self
+                .failure
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        {
+            return Err(self.error());
+        }
+        Ok(())
+    }
+
+    fn try_queue(&self, report: impl FnOnce() -> Queued) -> io::Result<()> {
+        self.check()?;
+        match self.queue.try_reserve() {
+            Ok(permit) => {
+                permit.send(report());
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                crate::eprintln_throttled!(
+                    "Measurement output is slow; skipping an interim report or packet detail"
+                );
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(self.error()),
+        }
+    }
+
+    /// Drops this interim snapshot when the queue is full. Final summaries
+    /// retain cumulative totals, subject to the collector's history bounds.
+    pub fn print_interim(&self, stats: StatsSnapshot) -> io::Result<()> {
+        self.print_interim_with(|| stats)
+    }
+
+    pub(crate) fn print_interim_with(
+        &self,
+        snapshot: impl FnOnce() -> StatsSnapshot,
+    ) -> io::Result<()> {
+        self.try_queue(|| Queued::Report {
+            stats: Box::new(snapshot()),
+            interim: true,
+        })
+    }
+
+    pub(crate) fn print_detail(&self, line: String) -> io::Result<()> {
+        self.try_queue(|| Queued::Detail(line))
+    }
+
+    /// A final report must be queued and flushed within five seconds.
+    pub async fn print_final(&self, stats: StatsSnapshot) -> io::Result<()> {
+        self.complete(Some(Queued::Report {
+            stats: Box::new(stats),
+            interim: false,
+        }))
+        .await
+    }
+
+    pub async fn flush(&self) -> io::Result<()> {
+        self.complete(None).await
+    }
+
+    async fn complete(&self, report: Option<Queued>) -> io::Result<()> {
+        self.check()?;
+        let result = tokio::time::timeout(self.timeout, async {
+            if let Some(report) = report {
+                self.queue.send(report).await.map_err(|_| self.error())?;
+            }
+            let (done, written) = tokio::sync::oneshot::channel();
+            self.queue
+                .send(Queued::Flush(done))
+                .await
+                .map_err(|_| self.error())?;
+            written.await.map_err(|_| self.error())
+        })
+        .await;
+        match result {
+            Ok(result) => result,
+            Err(_) => {
+                let message = "measurement output did not drain before its deadline";
+                *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((io::ErrorKind::TimedOut, message.into()));
+                Err(io::Error::new(io::ErrorKind::TimedOut, message))
             }
         }
     }
@@ -508,137 +650,154 @@ impl StatsSnapshot {
         self
     }
 
-    /// Prints a standalone final summary in the given format, including a CSV header.
-    /// Use [`StatsOutput`] to combine interim and final reports in one stream.
-    pub fn print(&self, format: OutputFormat) {
+    /// Renders one sender report to a caller-owned writer.
+    pub fn write_report(
+        &self,
+        out: &mut impl Write,
+        format: OutputFormat,
+        interim: bool,
+        header: bool,
+    ) -> io::Result<()> {
         match format {
-            OutputFormat::Text => self.print_text(""),
-            OutputFormat::Json => self.print_json(false),
-            OutputFormat::Csv => self.print_csv(true),
+            OutputFormat::Text => self.write_text(out, if interim { "[INTERIM] " } else { "" }),
+            OutputFormat::Json => self.write_json(out, interim),
+            OutputFormat::Csv => self.write_csv(out, header),
         }
     }
 
-    fn print_text(&self, prefix: &str) {
-        println!("\n{}--- STAMP Statistics ---", prefix);
+    fn write_text(&self, out: &mut impl Write, prefix: &str) -> io::Result<()> {
+        writeln!(out, "\n{}--- STAMP Statistics ---", prefix)?;
         if let Some(target) = &self.target {
-            println!("{prefix}Target: {target}");
+            writeln!(out, "{prefix}Target: {target}")?;
         }
-        println!("{}Packets sent: {}", prefix, self.packets_sent);
-        println!("{}Packets received: {}", prefix, self.packets_received);
-        println!(
+        writeln!(out, "{}Packets sent: {}", prefix, self.packets_sent)?;
+        writeln!(out, "{}Packets received: {}", prefix, self.packets_received)?;
+        writeln!(
+            out,
             "{}Packets lost: {} ({:.1}%)",
             prefix, self.packets_lost, self.loss_percent
-        );
-        println!(
+        )?;
+        writeln!(
+            out,
             "{}Quantiles: exact through {} samples per series; otherwise <{:.5}% magnitude error",
             prefix,
             self.quantile_precision.exact_sample_limit,
             self.quantile_precision.relative_error_bound * 100.0,
-        );
+        )?;
         if let Some(m) = &self.measurements {
-            println!("{prefix}Replies: {} unique, {} additional, {} late, {} duplicates, {} reordered, {} unknown",
-                m.unique_replies, m.additional_replies, m.late_replies, m.duplicate_replies, m.reordered_replies, m.unknown_replies);
-            println!("{prefix}Requested replies unobserved: {} (includes policy caps); history evictions: {} probes, {} replies",
-                m.unobserved_requested_replies, m.probes_evicted, m.replies_evicted);
-            println!(
+            writeln!(out,"{prefix}Replies: {} unique, {} additional, {} late, {} duplicates, {} reordered, {} unknown",
+                m.unique_replies, m.additional_replies, m.late_replies, m.duplicate_replies, m.reordered_replies, m.unknown_replies)?;
+            writeln!(out,"{prefix}Requested replies unobserved: {} (includes policy caps); history evictions: {} probes, {} replies",
+                m.unobserved_requested_replies, m.probes_evicted, m.replies_evicted)?;
+            writeln!(
+                out,
                 "{prefix}Reply RTT: {} samples, avg {}",
                 m.reply_rtt.samples,
                 fmt_ms_text(m.reply_rtt.avg_ms)
-            );
-            println!("{prefix}Direct Measurement window: forward missing {}, reverse missing {}; unavailable {}, discontinuities {}",
-                m.direct_measurement.forward_missing.map_or_else(|| "unavailable".into(), |n| n.to_string()), m.direct_measurement.reverse_missing.map_or_else(|| "unavailable".into(), |n| n.to_string()), m.direct_measurement.unavailable, m.direct_measurement.discontinuities);
-            println!("{prefix}Follow-Up: {} matched, {} repeated, {} unmatched, {} ambiguous, {} unavailable; reverse delay avg {}",
-                m.follow_up.matched, m.follow_up.repeated, m.follow_up.unmatched, m.follow_up.ambiguous, m.follow_up.unavailable, fmt_ms_text(m.follow_up.reverse_delay.avg_ms));
+            )?;
+            writeln!(out,"{prefix}Direct Measurement window: forward missing {}, reverse missing {}; unavailable {}, discontinuities {}",
+                m.direct_measurement.forward_missing.map_or_else(|| "unavailable".into(), |n| n.to_string()), m.direct_measurement.reverse_missing.map_or_else(|| "unavailable".into(), |n| n.to_string()), m.direct_measurement.unavailable, m.direct_measurement.discontinuities)?;
+            writeln!(out,"{prefix}Follow-Up: {} matched, {} repeated, {} unmatched, {} ambiguous, {} unavailable; reverse delay avg {}",
+                m.follow_up.matched, m.follow_up.repeated, m.follow_up.unmatched, m.follow_up.ambiguous, m.follow_up.unavailable, fmt_ms_text(m.follow_up.reverse_delay.avg_ms))?;
         }
         if let Some(v) = self.min_rtt_ms {
-            println!("{}Min RTT: {:.3} ms", prefix, v);
+            writeln!(out, "{}Min RTT: {:.3} ms", prefix, v)?;
         }
         if let Some(v) = self.max_rtt_ms {
-            println!("{}Max RTT: {:.3} ms", prefix, v);
+            writeln!(out, "{}Max RTT: {:.3} ms", prefix, v)?;
         }
         if let Some(v) = self.avg_rtt_ms {
-            println!("{}Avg RTT: {:.3} ms", prefix, v);
+            writeln!(out, "{}Avg RTT: {:.3} ms", prefix, v)?;
         }
         if let Some(v) = self.median_rtt_ms {
-            println!("{}Median RTT: {:.3} ms", prefix, v);
+            writeln!(out, "{}Median RTT: {:.3} ms", prefix, v)?;
         }
         if let Some(v) = self.p95_rtt_ms {
-            println!("{}P95 RTT: {:.3} ms", prefix, v);
+            writeln!(out, "{}P95 RTT: {:.3} ms", prefix, v)?;
         }
         if let Some(v) = self.p99_rtt_ms {
-            println!("{}P99 RTT: {:.3} ms", prefix, v);
+            writeln!(out, "{}P99 RTT: {:.3} ms", prefix, v)?;
         }
         if let Some(v) = self.jitter_ms {
-            println!("{}Jitter: {:.3} ms", prefix, v);
+            writeln!(out, "{}Jitter: {:.3} ms", prefix, v)?;
         }
         if let Some(v) = self.std_dev_ms {
-            println!("{}Std Dev: {:.3} ms", prefix, v);
+            writeln!(out, "{}Std Dev: {:.3} ms", prefix, v)?;
         }
         if let Some(owd) = &self.owd {
-            println!("{prefix}OWD clock declarations: {} both synchronized, {} unsynchronized, {} invalid, {} unknown; max advertised combined error {} ms (not verified accuracy)",
+            writeln!(out,"{prefix}OWD clock declarations: {} both synchronized, {} unsynchronized, {} invalid, {} unknown; max advertised combined error {} ms (not verified accuracy)",
                 owd.clock_quality.both_synchronized, owd.clock_quality.unsynchronized,
                 owd.clock_quality.invalid_estimate, owd.clock_quality.unknown,
-                fmt_opt(owd.clock_quality.max_combined_error_ms));
-            println!(
+                fmt_opt(owd.clock_quality.max_combined_error_ms))?;
+            writeln!(
+                out,
                 "{}One-way delay (assumes synchronized clocks, n={}):",
                 prefix, owd.samples
-            );
-            println!(
+            )?;
+            writeln!(
+                out,
                 "{}  Forward (sender→reflector): min {:.3} / avg {:.3} / med {:.3} / max {:.3} ms",
                 prefix,
                 owd.forward_min_ms,
                 owd.forward_avg_ms,
                 owd.forward_median_ms,
                 owd.forward_max_ms
-            );
-            println!(
+            )?;
+            writeln!(
+                out,
                 "{}  Reverse (reflector→sender): min {:.3} / avg {:.3} / med {:.3} / max {:.3} ms",
                 prefix,
                 owd.reverse_min_ms,
                 owd.reverse_avg_ms,
                 owd.reverse_median_ms,
                 owd.reverse_max_ms
-            );
+            )?;
         }
         if let Some(ber) = &self.ber {
-            println!(
+            writeln!(
+                out,
                 "{prefix}BER: interval={}ms padding={} bytes disabled_by_peer={}",
                 ber.interval_ms, ber.padding_bytes, ber.disabled_by_peer
-            );
+            )?;
             if ber.intervals_omitted != 0 || ber.alarms_omitted != 0 {
-                println!(
+                writeln!(
+                    out,
                     "{prefix}  Older BER history omitted: intervals={} alarms={}",
                     ber.intervals_omitted, ber.alarms_omitted
-                );
+                )?;
             }
             for (name, stats) in [("Forward", &ber.forward), ("Reverse", &ber.reverse)] {
-                println!("{prefix}  {name}: packets={} errored={} bits={} errors={} BER={} burst max={} avg={}",
+                writeln!(out,"{prefix}  {name}: packets={} errored={} bits={} errors={} BER={} burst max={} avg={}",
                     stats.packets_received, stats.packets_with_errors, stats.padding_bits, stats.bit_errors,
                     stats.bit_error_ratio.map_or_else(|| "n/a".into(), |v| format!("{v:.6e}")),
                     stats.max_burst_bits.map_or_else(|| "n/a".into(), |v| v.to_string()),
-                    fmt_opt(stats.average_max_burst_bits));
+                    fmt_opt(stats.average_max_burst_bits))?;
             }
             for interval in &ber.intervals {
-                println!(
+                writeln!(
+                    out,
                     "{prefix}  BER interval: {}",
                     serde_json::to_string(interval).unwrap_or_default()
-                );
+                )?;
             }
             for alarm in &ber.alarms {
-                println!(
+                writeln!(
+                    out,
                     "{prefix}  BER alarm: {}",
                     serde_json::to_string(alarm).unwrap_or_default()
-                );
+                )?;
             }
         }
         if let Some(ar) = &self.access_report {
-            println!(
+            writeln!(
+                out,
                 "{}Access Report (RFC 8972 §4.6): {} (retransmissions={})",
                 prefix, ar.outcome, ar.retransmissions
-            );
+            )?;
         }
         if let Some(c) = &self.congestion {
-            println!(
+            writeln!(
+                out,
                 "{}Congestion response (draft-ietf-ippm-stamp-cos-ecn-01 §3.4): \
                  ce_replies={} backoffs_applied={} interval={:.1}ms \
                  (base={:.1}ms, peak={:.1}ms)",
@@ -648,11 +807,12 @@ impl StatsSnapshot {
                 c.current_interval_ms,
                 c.base_interval_ms,
                 c.max_interval_reached_ms
-            );
+            )?;
         }
+        Ok(())
     }
 
-    fn print_json(&self, interim: bool) {
+    fn write_json(&self, out: &mut impl Write, interim: bool) -> io::Result<()> {
         #[derive(serde::Serialize)]
         struct JsonOutput<'a> {
             #[serde(rename = "type")]
@@ -664,19 +824,20 @@ impl StatsSnapshot {
             report_type: if interim { "interim" } else { "summary" },
             stats: self,
         };
-        if let Ok(json) = serde_json::to_string(&output) {
-            println!("{}", json);
-        }
+        serde_json::to_writer(&mut *out, &output)
+            .map_err(|e| io::Error::new(e.io_error_kind().unwrap_or(io::ErrorKind::Other), e))?;
+        writeln!(out)?;
+        Ok(())
     }
 
-    fn print_csv(&self, header: bool) {
+    fn write_csv(&self, out: &mut impl Write, header: bool) -> io::Result<()> {
         // Optional header + data row. OWD, Access Report, and Congestion columns
         // are always present but left empty when no samples were
         // collected / the feature was not enabled.
         // The target column appears only when one sender runs several.
         let target = self.target.as_deref().map(|t| format!("{t},"));
         if header {
-            println!(
+            writeln!(out,
                 "{}packets_sent,packets_received,packets_lost,loss_percent,\
              min_rtt_ms,max_rtt_ms,avg_rtt_ms,median_rtt_ms,\
              p95_rtt_ms,p99_rtt_ms,jitter_ms,std_dev_ms,\
@@ -686,9 +847,9 @@ impl StatsSnapshot {
              congestion_ce_replies,congestion_backoffs_applied,\
              congestion_current_interval_ms,congestion_max_interval_reached_ms,quantile_exact_sample_limit,quantile_relative_error_bound,ber,measurements,owd_clock_quality",
                 if target.is_some() { "target," } else { "" }
-            );
+            )?;
         }
-        println!(
+        writeln!(out,
             "{}{},{},{},{:.2},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             target.unwrap_or_default(),
             self.packets_sent,
@@ -728,7 +889,8 @@ impl StatsSnapshot {
             )),
             self.measurements.as_ref().map_or_else(String::new, |m| format!("\"{}\"", serde_json::to_string(m).unwrap_or_default().replace('"', "\"\""))),
             self.owd.as_ref().map_or_else(String::new, |o| format!("\"{}\"", serde_json::to_string(&o.clock_quality).unwrap_or_default().replace('"', "\"\""))),
-        );
+        )?;
+        Ok(())
     }
 }
 
@@ -766,31 +928,41 @@ pub struct ReflectorStats {
 }
 
 impl ReflectorStats {
-    /// Prints the reflector summary in the given format.
-    pub fn print(&self, format: OutputFormat) {
+    /// Renders a reflector summary to a caller-owned writer.
+    pub fn write_report(&self, out: &mut impl Write, format: OutputFormat) -> io::Result<()> {
         match format {
-            OutputFormat::Text => self.print_text(),
-            OutputFormat::Json => self.print_json(),
-            OutputFormat::Csv => self.print_csv(),
+            OutputFormat::Text => self.write_text(out),
+            OutputFormat::Json => self.write_json(out),
+            OutputFormat::Csv => self.write_csv(out),
         }
     }
 
-    fn print_text(&self) {
-        println!("\n--- STAMP Reflector Statistics ---");
-        println!("Uptime: {:.1} seconds", self.uptime_seconds);
-        println!("Total packets received: {}", self.total_packets_received);
-        println!("Total packets reflected: {}", self.total_packets_reflected);
-        println!("Total packets dropped: {}", self.total_packets_dropped);
-        println!("Reply queue rejections: {}", self.reply_queue_rejected);
-        println!(
+    fn write_text(&self, out: &mut impl Write) -> io::Result<()> {
+        writeln!(out, "\n--- STAMP Reflector Statistics ---")?;
+        writeln!(out, "Uptime: {:.1} seconds", self.uptime_seconds)?;
+        writeln!(
+            out,
+            "Total packets received: {}",
+            self.total_packets_received
+        )?;
+        writeln!(
+            out,
+            "Total packets reflected: {}",
+            self.total_packets_reflected
+        )?;
+        writeln!(out, "Total packets dropped: {}", self.total_packets_dropped)?;
+        writeln!(out, "Reply queue rejections: {}", self.reply_queue_rejected)?;
+        writeln!(
+            out,
             "Queued replies cancelled: {}",
             self.queued_replies_cancelled
-        );
-        println!("Active sessions: {}", self.active_sessions);
+        )?;
+        writeln!(out, "Active sessions: {}", self.active_sessions)?;
         if !self.sessions.is_empty() {
-            println!("Sessions:");
+            writeln!(out, "Sessions:")?;
             for s in &self.sessions {
-                println!(
+                writeln!(
+                    out,
                     "  {} -> {} SSID={} micro={:?} - rx: {}, tx: {}",
                     s.client,
                     s.local,
@@ -798,20 +970,23 @@ impl ReflectorStats {
                     s.sender_micro_session_id,
                     s.packets_received,
                     s.packets_transmitted
-                );
+                )?;
             }
         }
+        Ok(())
     }
 
-    fn print_json(&self) {
-        if let Ok(json) = serde_json::to_string(self) {
-            println!("{}", json);
-        }
+    fn write_json(&self, out: &mut impl Write) -> io::Result<()> {
+        serde_json::to_writer(&mut *out, self)
+            .map_err(|e| io::Error::new(e.io_error_kind().unwrap_or(io::ErrorKind::Other), e))?;
+        writeln!(out)?;
+        Ok(())
     }
 
-    fn print_csv(&self) {
-        println!("total_received,total_reflected,total_dropped,active_sessions,uptime_seconds,reply_queue_rejected,queued_replies_cancelled");
-        println!(
+    fn write_csv(&self, out: &mut impl Write) -> io::Result<()> {
+        writeln!(out,"total_received,total_reflected,total_dropped,active_sessions,uptime_seconds,reply_queue_rejected,queued_replies_cancelled")?;
+        writeln!(
+            out,
             "{},{},{},{},{:.1},{},{}",
             self.total_packets_received,
             self.total_packets_reflected,
@@ -820,7 +995,8 @@ impl ReflectorStats {
             self.uptime_seconds,
             self.reply_queue_rejected,
             self.queued_replies_cancelled,
-        );
+        )?;
+        Ok(())
     }
 }
 

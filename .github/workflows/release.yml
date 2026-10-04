@@ -101,6 +101,8 @@ jobs:
           git archive --format=tar --prefix="stamp-suite-${ver}/" "$GITHUB_REF_NAME" \
             | gzip -9n > "stamp-suite-${ver}.tar.gz"
 
+          python3 scripts/render_openwrt.py --archive "stamp-suite-${ver}.tar.gz" --output "stamp-suite-${ver}-openwrt.mk"
+
           cargo vendor --locked vendor > /dev/null
           tar --sort=name --owner=0 --group=0 --numeric-owner \
               --mtime="@${SOURCE_DATE_EPOCH}" -cf - vendor \
@@ -113,6 +115,7 @@ jobs:
           path: |
             stamp-suite-*.tar.gz
             stamp-suite-*-vendor.tar.xz
+            stamp-suite-*-openwrt.mk
           if-no-files-found: error
 
   # Linux DEB/RPM packages plus a plain tarball per target, in one job
@@ -146,7 +149,7 @@ jobs:
       - name: Install packagers
         run: cargo install cargo-deb cargo-generate-rpm --locked
       - name: Build release binary
-        run: cargo build --release --all-features --target ${{ matrix.target }}
+        run: cargo build --locked --release --all-features --target ${{ matrix.target }}
       - name: Build DEB
         run: cargo deb --no-build --target ${{ matrix.target }}
       - name: Build RPM
@@ -198,7 +201,7 @@ jobs:
         with:
           key: release-${{ matrix.target }}
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ttl-nix,snmp,hwtstamp,control,metrics
+        run: cargo build --locked --release --target ${{ matrix.target }} --no-default-features --features ttl-nix,snmp,hwtstamp,control,metrics
       - name: Assemble tarball
         shell: bash
         run: |
@@ -214,26 +217,20 @@ jobs:
           path: stamp-suite-*.tar.gz
           if-no-files-found: error
 
-  # Full test suite and strict clippy on the tagged commit. Publish depends
-  # on it directly and the GitHub Release through publish.
+  # Reuse the same backend, platform, MSRV and conformance gates on the tag.
   test-gate:
-    name: Test Gate
     needs: [release-preflight]
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/rust.yml
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-test-gate
-      - name: Test (all features)
-        run: cargo test --all-features
-      - name: Clippy (all features)
-        run: cargo clippy --all --all-features --tests -- -D warnings
+      checks: write
+      issues: write
+
+  conformance-gate:
+    needs: [release-preflight]
+    uses: ./.github/workflows/conformance.yml
+    permissions:
+      contents: read
 
   # Publishes to crates.io. Gated by the `crates-io` GitHub Environment
   # so a human has to click "approve" before this runs.
@@ -254,7 +251,7 @@ jobs:
   # ----------------------------------------------------------------------
   publish:
     name: Publish to crates.io
-    needs: [test-gate]
+    needs: [test-gate, conformance-gate, source, package, package-macos]
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -322,7 +319,7 @@ jobs:
           find . -mindepth 2 -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' -o -name '*.tar.xz' \) \
             -exec mv -t . {} +
-          sha256sum *.deb *.rpm *.tar.gz *.tar.xz > SHA256SUMS
+          sha256sum *.deb *.rpm *.tar.gz *.tar.xz *.mk > SHA256SUMS
           cat SHA256SUMS
 
       # Signed build provenance for every asset, keyless via Sigstore. Needs
@@ -335,6 +332,7 @@ jobs:
             dist/*.rpm
             dist/*.tar.gz
             dist/*.tar.xz
+            dist/*.mk
             dist/SHA256SUMS
 
       # Detached GPG signature over SHA256SUMS, the form Debian/Gentoo/Arch
@@ -381,6 +379,7 @@ jobs:
             dist/**/*.rpm
             dist/**/*.tar.gz
             dist/**/*.tar.xz
+            dist/**/*-openwrt.mk
             dist/SHA256SUMS
             dist/SHA256SUMS.asc
           generate_release_notes: true

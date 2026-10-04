@@ -6,6 +6,15 @@ run the tests that ordinary `cargo test` skips. It is for contributors and
 reviewers. General build, test and lint commands are in
 [CONTRIBUTING.md](../CONTRIBUTING.md#tests).
 
+The [3 October 2026 review](../doc/review/2026-10-03/README.md#test-value-and-missing-cases)
+records the original per-test assessment. Statistics tests now capture rendered
+fields; real-process metrics tests replace callable-only smoke tests. AgentX
+handshake and CLI lifetime tests, sender size checks, source-churn tests and
+blocked/closed-output tests cover the reproduced failures.
+Keep helper-based scenarios and parser no-panic properties: their value does
+not depend on a local `assert!` in each wrapper. Consolidate tests only while
+preserving the input boundaries and independent checks they provide.
+
 ## Running the default suite
 
 ```bash
@@ -26,7 +35,8 @@ two ways:
   [Tests that need privileges or namespaces](#tests-that-need-privileges-or-namespaces).
 
 To exercise the pnet backend's library tests (the send worker uses ordinary UDP
-sockets and needs no capture capability):
+sockets and needs no capture capability). This also checks Ethernet source MAC
+propagation through ingest and transmission for IPv4 and IPv6:
 
 ```bash
 cargo test --locked --no-default-features --features ttl-pnet --lib
@@ -39,7 +49,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 
 | File | What it tests | Runs when |
 | --- | --- | --- |
-| `agentx_protocol_test.rs` | Independent AgentX master over a Unix socket: GetBulk order and end-of-MIB positions, search range bounds, fragmented and coalesced frames, cancellation, Close acknowledgment, range-limit error. | Unix, `snmp` |
+| `agentx_protocol_test.rs` | Independent AgentX master over a Unix socket: GetBulk order and end-of-MIB positions, search range bounds, fragmented and coalesced frames, cancellation, Close acknowledgment, range-limit error, invalid handshakes and both byte orders. | Unix, `snmp` |
 | `ber_measurement_test.rs` | End-to-end BER (draft-gandhi-ippm-stamp-ber-07): directional errors, padding repair, HMAC, duplicate exclusion, peers without BER, C-flag cases; IPv4/IPv6, open/authenticated. | always; the real-reflector signing test needs Linux nix |
 | `ber_regression_test.rs` | BER counts and bit error bursts through packet processing. | always |
 | `burst_transmission_test.rs` | Live interleaved burst replies: IPv4/IPv6, open/authenticated, NTP/PTP, stateless/stateful, CoS, Direct Measurement, Follow-Up, HMAC and kernel TX correlation. | Linux, nix |
@@ -55,11 +65,12 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `loopback_test.rs` | Sender and reflector over loopback: single and multiple packets, authentication, timestamp order, stateful multi-client, IPv6, Location TLV. | always |
 | `malformed_input_test.rs` | Malformed base packets and TLV chains through the reflector: base sizes, TLV layouts, HMAC order, Return Path sub-TLVs. | always |
 | `man_page.rs` | `dist/man/stamp-suite.1` matches the clap definition. Regenerate with `STAMP_UPDATE_MAN=1 cargo test --all-features --test man_page`. | Linux |
+| `metrics_accounting_test.rs` | Real Prometheus scrapes match burst copies, suppression, queue rejection and rate limits. | Linux, nix, `metrics` |
 | `mixed_clock_test.rs` | Live sender against an independently encoded NTP/PTP peer in both directions, with a UTC offset and clock quality metadata; IPv4 open, IPv6 authenticated. | always |
 | `multi_key_hmac_test.rs` | Per-SSID HMAC verification and signing: single-key fallback, key selection, rejection without a key. | always |
 | `multi_target_test.rs` | One sender measuring several reflectors, each in its own session. | Linux, nix |
 | `netns_conformance.rs` | Wire behavior across network namespaces (CoS, SRv6, header reflection, Address Groups, BER, Type 12, TTL). | Linux; ignored, see [Namespace conformance tier](#namespace-conformance-tier) |
-| `output_stream_test.rs` | CLI stdout stays parseable with logs, packet details, periodic reports, BER and measurement CSV, reflector shutdown, schema output and validation errors. | Linux, nix |
+| `output_stream_test.rs` | CLI stdout stays parseable with logs, packet details, periodic reports, BER and measurement CSV, reflector shutdown, schema output, validation errors, blocked stdout and broken pipes. | Linux, nix |
 | `pnet_loopback_test.rs` | Real pnet capture on `lo`: open, authenticated and TLV round trips, and that bad UDP checksums get no reply. | Linux, `ttl-pnet` without `ttl-nix`; ignored, see [Raw capture (pnet)](#raw-capture-pnet) |
 | `proptest_tlv.rs` | Property tests: typed TLV and wire round trips, and no panics in TLV, packet and AgentX decoders on arbitrary bytes. | always; AgentX properties need `snmp` |
 | `ptp_e2e_test.rs` | PTP/NTP encoding and the reflector's declared clock metadata in Type 3. | always |
@@ -76,6 +87,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `session_capacity_test.rs` | Session cap rejection keeps sequence state; with `control`, drain and resume, runtime caps, expiry and drop counters. | Linux, nix |
 | `session_identity_test.rs` | Session identity and static admission on real sockets: SSIDs, Micro-session IDs, source ports and wildcard-bind destinations. | Unix, nix |
 | `session_ssid_validation_test.rs` | Sender SSID checks and zero-SSID policies against an independent peer; IPv4/IPv6, open/authenticated. | always |
+| `snmp_lifecycle_test.rs` | CLI exits after finite sends, startup failures, signals and silent initial/reconnect handshakes. | Unix, `snmp`; reflector needs nix |
 | `startup_failure_test.rs` | Startup failures (bind, key file, missing key, bad BER pattern, missing interface) return errors; total loss and shutdown do not. | always; some cases Linux only |
 | `tlv_flag_semantics.rs` | U, M, I and C flag rules (RFC 8972, RFC 10052, draft-ietf-ippm-stamp-ext-hdr-15) through `process_stamp_packet`. | always |
 

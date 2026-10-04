@@ -237,6 +237,13 @@ median of three trials, reflector CPU as a share of one core:
   tests cover malformed tails, mutation and signing.
 - BER bit-error and burst counting processes a byte at a time with a lookup
   table instead of a bit at a time, about 8× faster on 1400-byte padding.
+- Interim reports are formatted and written on a separate thread instead of
+  inside the sender's send and receive loop. With `--ber` and a full interval
+  history, an interim report held up the loop for 0.3 to 0.8 ms even with
+  stdout redirected to `/dev/null`, which delayed probes and inflated the RTT
+  of replies arriving meanwhile. The loop now pauses only for the snapshot,
+  0.06 to 0.2 ms. With several targets, reports no longer wait for each other
+  behind a lock.
 - The sender verifies a reply's TLV HMAC once, and BER sampling reuses that
   result. The receive control-message buffer is allocated once per run, and the
   wall clock is read once per reply.
@@ -365,6 +372,24 @@ median of three trials, reflector CPU as a share of one core:
   earlier, which another test could take in the meantime.
 
 ### Fixed
+
+- SNMP workers stop when their owner exits, including during silent initial or
+  reconnect handshakes. AgentX validates administrative responses and reads
+  both network-order and little-endian PDUs.
+- Senders validate the complete UDP payload before probing and return terminal
+  send failures. Other send errors have an eight-attempt consecutive limit.
+- Prometheus counts successful reflected copies and records drops at the same
+  boundaries as reflector summaries, including queue and rate rejections.
+- Measurement output uses an eight-item queue and a five-second final flush
+  deadline. Slow output skips interim reports and text packet details; broken
+  pipes return errors. Formatting runs in a buffered writer thread.
+- Per-source limiter state is capped at 16,384 entries, with a shared overflow
+  bucket and at most four expiry checks per request.
+- The authenticated full-chain benchmark now verifies its TLV HMAC and reply
+  before timing. A separate benchmark covers missing TLV authentication.
+- Releases require the full reusable CI and conformance gates at the tagged
+  commit. Debian builds require supplied offline vendor inputs; OpenWrt release
+  recipes contain the hash of the exact published source archive.
 
 - The pnet reflector on macOS loopback finds the IP header after pnet's zeroed
   placeholder instead of assuming 14 octets. pnet_datalink 0.35 inserts 12

@@ -50,7 +50,7 @@ async fn sender_measures_each_target_in_its_own_session() {
         "1",
     ]);
     conf.validate().unwrap();
-    let output = StatsOutput::new(conf.output_format);
+    let output = StatsOutput::new(conf.output_format).unwrap();
     let results = sender::run_senders(
         &conf,
         &output,

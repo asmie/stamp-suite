@@ -312,3 +312,59 @@ fn schema_and_invalid_config_output() {
     assert!(stdout.is_empty());
     assert!(stderr.contains("invalid"));
 }
+
+#[test]
+fn blocked_stdout_has_a_bounded_exit_and_closed_pipe_is_an_error() {
+    let (_reflector, port) = reflector("json", "text", true);
+    for closed in [false, true] {
+        let stderr = tempfile::tempfile().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
+            .args([
+                "--remote-addr",
+                "127.0.0.1",
+                "--remote-port",
+                &port.to_string(),
+                "--hwtstamp",
+                "off",
+                "--count",
+                "0",
+                "--duration",
+                "2",
+                "--timeout",
+                "0",
+                "--send-delay",
+                "0.1",
+                "-R",
+                "--output-format",
+                "text",
+            ])
+            .env("RUST_LOG", "off")
+            .env("TOKIO_WORKER_THREADS", "2")
+            .env_remove("STAMP_HMAC_KEY")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(stderr.try_clone().unwrap()))
+            .spawn()
+            .unwrap();
+        let pipe = child.stdout.take().unwrap();
+        let _unread_pipe = if closed {
+            drop(pipe);
+            None
+        } else {
+            Some(pipe)
+        };
+        let mut process = Process {
+            child,
+            stdout: tempfile::tempfile().unwrap(),
+            stderr,
+        };
+        let (_, diagnostic) = process.finish(false);
+        assert!(
+            diagnostic.contains("Cannot write measurement output"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("panicked"), "{diagnostic}");
+        if !closed {
+            assert!(diagnostic.contains("deadline"), "{diagnostic}");
+        }
+    }
+}

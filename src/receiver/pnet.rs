@@ -1215,6 +1215,8 @@ mod tests {
 #[cfg(test)]
 mod revision13_tests {
     use super::*;
+    use crate::receiver::create_shared_state;
+    use clap::Parser;
     // Independent Internet checksum oracle for raw fixture bytes.
     fn checksum(bytes: &[u8]) -> u16 {
         let mut sum = 0u32;
@@ -1225,6 +1227,77 @@ mod revision13_tests {
             sum = (sum & 0xffff) + (sum >> 16);
         }
         !(sum as u16)
+    }
+
+    #[test]
+    fn ethernet_source_mac_reaches_location_reply_in_both_families() {
+        for v6 in [false, true] {
+            let conf = Configuration::parse_from([
+                "stamp-suite",
+                "--is-reflector",
+                "--local-addr",
+                if v6 { "::2" } else { "127.0.0.2" },
+            ]);
+            let shared = create_shared_state(&conf).unwrap();
+            let settings = ReflectorSettings::from_config(&conf, &shared, false).unwrap();
+            let config = CaptureConfig {
+                core: ReflectorCore::new(settings, &shared, 8),
+                interface_index: 0,
+                queue_capacity: 8,
+                shutdown_grace: Duration::ZERO,
+                local_port: 862,
+                cleanup_interval: None,
+                shutdown: CancellationToken::new(),
+            };
+            let mac = [2, 17, 34, 51, 68, 85];
+            let mut probe = vec![0; 44];
+            // Location request: ports plus an eight-byte Source MAC placeholder.
+            probe.extend([0x80, 2, 0, 16, 0, 0, 0, 0, 0x80, 1, 0, 8]);
+            probe.extend([0; 8]);
+            let mut udp = vec![0xc0, 1, 3, 94, 0, 72, 0, 0];
+            udp.extend(probe);
+            let mut ip = packet(v6);
+            ip.truncate(if v6 { 40 } else { 20 });
+            let mut pseudo = if v6 {
+                ip[4..6].copy_from_slice(&72u16.to_be_bytes());
+                let mut pseudo = ip[8..40].to_vec();
+                pseudo.extend([0, 0, 0, 72, 0, 0, 0, 17]);
+                pseudo
+            } else {
+                ip[2..4].copy_from_slice(&92u16.to_be_bytes());
+                ip[10..12].fill(0);
+                let sum = checksum(&ip);
+                ip[10..12].copy_from_slice(&sum.to_be_bytes());
+                let mut pseudo = ip[12..20].to_vec();
+                pseudo.extend([0, 17, 0, 72]);
+                pseudo
+            };
+            pseudo.extend(&udp);
+            udp[6..8].copy_from_slice(&checksum(&pseudo).to_be_bytes());
+            ip.extend(udp);
+            let mut frame = vec![0; 6];
+            frame.extend(mac);
+            frame.extend(if v6 { [0x86, 0xdd] } else { [0x08, 0x00] });
+            frame.extend(ip);
+            let (send, receive) = std::sync::mpsc::sync_channel(8);
+            handle_packet(&EthernetPacket::new(&frame).unwrap(), &config, &send);
+            let mut queued = receive.try_recv().expect("capture must admit the request");
+            let mut reply = Vec::new();
+            assert!(queued
+                .transmission
+                .send_next(&shared.counters, &shared.rate_limiter, |bytes, _, _| {
+                    reply.extend_from_slice(bytes);
+                    Ok(bytes.len())
+                })
+                .is_some());
+            assert_eq!(
+                &reply[52..56],
+                &[0, 2, 0, 8],
+                "Source EUI-48 response header"
+            );
+            assert_eq!(&reply[56..62], &mac);
+            assert_eq!(&reply[62..64], &[0, 0]);
+        }
     }
     fn packet(v6: bool) -> Vec<u8> {
         let mut udp = vec![0xc0, 1, 3, 94, 0, 12, 0, 0, 1, 2, 3, 4];

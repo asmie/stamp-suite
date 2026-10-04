@@ -170,8 +170,7 @@ fn test_stats_text_format() {
         congestion: None,
         ber: None,
     };
-    // Should not panic
-    snap.print(OutputFormat::Text);
+    check_sender_render(&snap, OutputFormat::Text);
 }
 
 #[test]
@@ -197,8 +196,7 @@ fn test_stats_json_format() {
         congestion: None,
         ber: None,
     };
-    // Should not panic
-    snap.print(OutputFormat::Json);
+    check_sender_render(&snap, OutputFormat::Json);
 }
 
 #[test]
@@ -224,8 +222,7 @@ fn test_stats_csv_format() {
         congestion: None,
         ber: None,
     };
-    // Should not panic
-    snap.print(OutputFormat::Csv);
+    check_sender_render(&snap, OutputFormat::Csv);
 }
 
 fn base_snapshot() -> StatsSnapshot {
@@ -284,8 +281,6 @@ fn test_with_access_report_none_is_noop() {
 
 #[test]
 fn test_stats_text_format_includes_access_report() {
-    // Capture behaviour indirectly: printing must not panic when the
-    // Access Report summary is present, for every outcome variant.
     for (outcome, retransmissions) in [
         (AccessReportOutcome::Acknowledged, 0),
         (AccessReportOutcome::Acknowledged, 2),
@@ -296,9 +291,9 @@ fn test_stats_text_format_includes_access_report() {
             outcome,
             retransmissions,
         }));
-        snap.print(OutputFormat::Text);
-        snap.print(OutputFormat::Json);
-        snap.print(OutputFormat::Csv);
+        check_sender_render(&snap, OutputFormat::Text);
+        check_sender_render(&snap, OutputFormat::Json);
+        check_sender_render(&snap, OutputFormat::Csv);
     }
 }
 
@@ -323,14 +318,11 @@ fn test_stats_json_omits_access_report_when_none() {
 
 #[test]
 fn test_stats_csv_includes_access_report_columns() {
-    // Smoke check: CSV printing with an access-report summary attached
-    // must not panic (columns validated via manual inspection since
-    // print_csv writes to stdout, not a capturable buffer here).
     let snap = base_snapshot().with_access_report(Some(AccessReportSummary {
         outcome: AccessReportOutcome::Pending,
         retransmissions: 1,
     }));
-    snap.print(OutputFormat::Csv);
+    check_sender_render(&snap, OutputFormat::Csv);
 }
 
 // ===== Congestion response (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) =====
@@ -363,10 +355,9 @@ fn test_with_congestion_none_is_noop() {
 #[test]
 fn test_stats_text_format_includes_congestion() {
     let snap = base_snapshot().with_congestion(Some(sample_congestion()));
-    // Must not panic in any output format.
-    snap.print(OutputFormat::Text);
-    snap.print(OutputFormat::Json);
-    snap.print(OutputFormat::Csv);
+    check_sender_render(&snap, OutputFormat::Text);
+    check_sender_render(&snap, OutputFormat::Json);
+    check_sender_render(&snap, OutputFormat::Csv);
 }
 
 #[test]
@@ -388,7 +379,7 @@ fn test_stats_json_omits_congestion_when_none() {
 #[test]
 fn test_stats_csv_includes_congestion_columns() {
     let snap = base_snapshot().with_congestion(Some(sample_congestion()));
-    snap.print(OutputFormat::Csv);
+    check_sender_render(&snap, OutputFormat::Csv);
 }
 
 #[test]
@@ -414,7 +405,7 @@ fn test_stats_json_none_fields() {
         congestion: None,
         ber: None,
     };
-    snap.print(OutputFormat::Json);
+    check_sender_render(&snap, OutputFormat::Json);
 }
 
 #[test]
@@ -436,7 +427,7 @@ fn test_reflector_stats_text() {
             packets_transmitted: 98,
         }],
     };
-    stats.print(OutputFormat::Text);
+    check_reflector_render(&stats, OutputFormat::Text);
 }
 
 #[test]
@@ -451,7 +442,7 @@ fn test_reflector_stats_json() {
         uptime_seconds: 60.0,
         sessions: vec![],
     };
-    stats.print(OutputFormat::Json);
+    check_reflector_render(&stats, OutputFormat::Json);
 }
 
 #[test]
@@ -466,7 +457,7 @@ fn test_reflector_stats_csv() {
         uptime_seconds: 60.0,
         sessions: vec![],
     };
-    stats.print(OutputFormat::Csv);
+    check_reflector_render(&stats, OutputFormat::Csv);
 }
 
 #[test]
@@ -744,4 +735,271 @@ fn owd_summary_attaches_to_snapshot() {
         .snapshot(0, 0)
         .with_owd(&OwdCollector::new());
     assert!(empty.owd.is_none());
+}
+
+// Parse quoted CSV fields independently of the renderer, including JSON cells.
+fn csv_fields(line: &str) -> Vec<String> {
+    let mut fields = vec![];
+    let mut field = String::new();
+    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields.push(std::mem::take(&mut field)),
+            _ => field.push(c),
+        }
+    }
+    assert!(!quoted, "unterminated CSV quote");
+    fields.push(field);
+    fields
+}
+
+fn csv_report(text: &str) -> std::collections::HashMap<String, String> {
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 2);
+    let keys = csv_fields(lines[0]);
+    let values = csv_fields(lines[1]);
+    assert_eq!(keys.len(), values.len());
+    keys.into_iter().zip(values).collect()
+}
+
+fn check_sender_render(snap: &StatsSnapshot, format: OutputFormat) {
+    let mut bytes = Vec::new();
+    snap.write_report(&mut bytes, format, false, true).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    match format {
+        OutputFormat::Text => {
+            assert!(text.contains(&format!("Packets sent: {}\n", snap.packets_sent)));
+            assert!(text.contains(&format!("Packets received: {}\n", snap.packets_received)));
+            if let Some(ar) = snap.access_report {
+                assert!(text.contains(&format!(
+                    "{} (retransmissions={})",
+                    ar.outcome, ar.retransmissions
+                )));
+            } else {
+                assert!(!text.contains("Access Report"));
+            }
+            if let Some(c) = snap.congestion {
+                assert!(text.contains(&format!(
+                    "ce_replies={} backoffs_applied={}",
+                    c.ce_replies, c.backoffs_applied
+                )));
+            } else {
+                assert!(!text.contains("Congestion response"));
+            }
+        }
+        OutputFormat::Json => {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["type"], "summary");
+            assert_eq!(value["packets_sent"], snap.packets_sent);
+            assert_eq!(value["packets_received"], snap.packets_received);
+            assert_eq!(value["packets_lost"], snap.packets_lost);
+            if let Some(ar) = snap.access_report {
+                assert_eq!(value["access_report"]["outcome"], ar.outcome.as_str());
+                assert_eq!(
+                    value["access_report"]["retransmissions"],
+                    ar.retransmissions
+                );
+            } else {
+                assert!(value.get("access_report").is_none());
+            }
+            if let Some(c) = snap.congestion {
+                assert_eq!(value["congestion"]["ce_replies"], c.ce_replies);
+                assert_eq!(value["congestion"]["backoffs_applied"], c.backoffs_applied);
+            } else {
+                assert!(value.get("congestion").is_none());
+            }
+            if snap.min_rtt_ms.is_none() {
+                assert!(value["min_rtt_ms"].is_null());
+            }
+        }
+        OutputFormat::Csv => {
+            let cells = csv_report(&text);
+            assert_eq!(cells["packets_sent"], snap.packets_sent.to_string());
+            assert_eq!(cells["packets_lost"], snap.packets_lost.to_string());
+            if let Some(ar) = snap.access_report {
+                assert_eq!(cells["access_report_outcome"], ar.outcome.as_str());
+                assert_eq!(
+                    cells["access_report_retransmissions"],
+                    ar.retransmissions.to_string()
+                );
+            } else {
+                assert!(cells["access_report_outcome"].is_empty());
+            }
+            if let Some(c) = snap.congestion {
+                assert_eq!(cells["congestion_ce_replies"], c.ce_replies.to_string());
+                assert_eq!(
+                    cells["congestion_backoffs_applied"],
+                    c.backoffs_applied.to_string()
+                );
+            } else {
+                assert!(cells["congestion_ce_replies"].is_empty());
+            }
+        }
+    }
+}
+
+fn check_reflector_render(stats: &ReflectorStats, format: OutputFormat) {
+    let mut bytes = Vec::new();
+    stats.write_report(&mut bytes, format).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    match format {
+        OutputFormat::Text => {
+            assert!(text.contains(&format!(
+                "Total packets received: {}\n",
+                stats.total_packets_received
+            )));
+            assert!(text.contains(&format!(
+                "Total packets reflected: {}\n",
+                stats.total_packets_reflected
+            )));
+            assert!(text.contains(&format!("Active sessions: {}\n", stats.active_sessions)));
+        }
+        OutputFormat::Json => {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                value["total_packets_received"],
+                stats.total_packets_received
+            );
+            assert_eq!(
+                value["total_packets_reflected"],
+                stats.total_packets_reflected
+            );
+            assert_eq!(value["active_sessions"], stats.active_sessions);
+            assert_eq!(
+                value["sessions"].as_array().unwrap().len(),
+                stats.sessions.len()
+            );
+        }
+        OutputFormat::Csv => {
+            let cells = csv_report(&text);
+            assert_eq!(
+                cells["total_received"],
+                stats.total_packets_received.to_string()
+            );
+            assert_eq!(
+                cells["total_reflected"],
+                stats.total_packets_reflected.to_string()
+            );
+            assert_eq!(cells["active_sessions"], stats.active_sessions.to_string());
+        }
+    }
+}
+
+#[tokio::test]
+async fn output_pressure_is_bounded_and_flush_has_a_deadline() {
+    struct GatedWriter {
+        started: Option<std::sync::mpsc::Sender<()>>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl std::io::Write for GatedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                started.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let (started, waiting) = std::sync::mpsc::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let output = StatsOutput::with_writer(
+        OutputFormat::Json,
+        GatedWriter {
+            started: Some(started),
+            release: gate,
+        },
+        std::time::Duration::from_millis(30),
+    )
+    .unwrap();
+    output.print_interim(base_snapshot()).unwrap();
+    waiting
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    for _ in 0..100 {
+        output.print_interim(base_snapshot()).unwrap();
+    }
+    assert_eq!(output.queue.capacity(), 0);
+    assert_eq!(output.queue.max_capacity(), 8);
+    output
+        .print_interim_with(|| panic!("a full queue must not construct a snapshot"))
+        .unwrap();
+    let result = output.print_final(base_snapshot()).await;
+    release.send(()).unwrap();
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    assert!(output.print_interim(base_snapshot()).is_err());
+}
+
+#[tokio::test]
+async fn output_failure_is_returned_without_panicking() {
+    struct Closed;
+    impl std::io::Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let output = StatsOutput::with_writer(OutputFormat::Text, Closed, OUTPUT_TIMEOUT).unwrap();
+    assert_eq!(
+        output
+            .print_final(base_snapshot())
+            .await
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert!(output.flush().await.is_err());
+}
+
+#[tokio::test]
+async fn shared_output_preserves_final_order_and_one_csv_header() {
+    #[derive(Clone)]
+    struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer(Default::default());
+    let output =
+        StatsOutput::with_writer(OutputFormat::Csv, buffer.clone(), OUTPUT_TIMEOUT).unwrap();
+    let second = output.clone();
+    output
+        .print_interim(base_snapshot().with_target(Some("first".into())))
+        .unwrap();
+    second
+        .print_interim(base_snapshot().with_target(Some("second".into())))
+        .unwrap();
+    output
+        .print_final(base_snapshot().with_target(Some("first-final".into())))
+        .await
+        .unwrap();
+    second
+        .print_final(base_snapshot().with_target(Some("second-final".into())))
+        .await
+        .unwrap();
+    let text = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 5);
+    assert!(lines[0].starts_with("target,packets_sent,"));
+    for (line, target) in lines[1..]
+        .iter()
+        .zip(["first", "second", "first-final", "second-final"])
+    {
+        assert_eq!(csv_fields(line)[0], target);
+    }
 }

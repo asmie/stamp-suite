@@ -203,7 +203,7 @@ fn route_mtu(key: &RouteKey) -> io::Result<u32> {
     // No destination traffic is generated. RTM_GETROUTE asks the kernel for
     // the UDP flow's actual output route, including source, ports and DSCP.
     // The kernel answers inside sendto(), so the reply is already queued when
-    // the nonblocking receive runs; this never stalls the reflector loop.
+    // the nonblocking receive runs; it does not wait for notifications.
     // SAFETY: plain socket(2) call; the result is checked before use.
     let raw = unsafe {
         libc::socket(

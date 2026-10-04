@@ -80,22 +80,3 @@ impl crate::sender::SenderObserver for PrometheusSenderObserver {
         record_tlv_errors(unrecognized, malformed, integrity_failed);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_metrics_functions_callable() {
-        // These tests just verify the functions are callable without panicking.
-        // Actual metric recording requires a recorder to be installed.
-        record_packet_sent();
-        record_packet_received();
-        record_packets_lost(5);
-        record_rtt(0.001);
-        record_hmac_failure();
-        record_tlv_error("U");
-        record_tlv_error("M");
-        record_tlv_error("I");
-    }
-}

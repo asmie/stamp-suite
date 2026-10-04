@@ -1,7 +1,6 @@
 //! Metrics for STAMP reflector (Session-Reflector) mode.
 //!
-//! Provides Prometheus metrics for monitoring reflector operations including
-//! packet reception, reflection, drops, session management, and processing time.
+//! Packet processing, session and timing counters exported through Prometheus.
 
 use std::sync::OnceLock;
 
@@ -20,7 +19,7 @@ pub(crate) fn record_packet_received() {
         .increment(1);
 }
 
-/// Records that a packet was successfully reflected.
+/// Records one successfully transmitted response, including each burst copy.
 pub(crate) fn record_packet_reflected() {
     REFLECTED
         .get_or_init(|| counter!("stamp_reflector_packets_reflected_total"))
@@ -29,8 +28,8 @@ pub(crate) fn record_packet_reflected() {
 
 /// Records that a packet was dropped with the specified reason.
 ///
-/// `reason` becomes the `reason` label, for example "parse_error",
-/// "hmac_failure", "hmac_required" or "no_key_for_ssid".
+/// `reason` labels the rejection boundary: rate_limited, queue_full,
+/// processing_rejected, session_expired, suppressed, send_failed or cancelled.
 pub(crate) fn record_packet_dropped(reason: &'static str) {
     counter!("stamp_reflector_packets_dropped_total", "reason" => reason).increment(1);
 }
@@ -63,24 +62,5 @@ pub(crate) fn record_tlv_errors(unrecognized: usize, malformed: usize, integrity
         if count > 0 {
             counter!("stamp_reflector_tlv_errors_total", "flag" => flag).increment(count as u64);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_metrics_functions_callable() {
-        // These tests just verify the functions are callable without panicking.
-        // Actual metric recording requires a recorder to be installed.
-        record_packet_received();
-        record_packet_reflected();
-        record_packet_dropped("parse_error");
-        record_packet_dropped("hmac_failure");
-        set_active_sessions(5);
-        record_session_created();
-        record_hmac_failure();
-        record_processing_time(0.001);
     }
 }

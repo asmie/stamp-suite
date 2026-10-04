@@ -793,6 +793,26 @@ connection logs a warning and STAMP keeps running. If an established AgentX
 connection drops, the sub-agent reconnects. Systemd ordering can start `snmpd`
 first, but it does not check that AgentX is ready.
 
+SNMP stops on role shutdown and when its owner exits, including a finite
+sender run or failed startup. A silent initial or reconnect handshake is
+cancellable; each administrative read and write has a 30-second deadline.
+
+`--count` counts successful sends. The sender validates the complete UDP
+payload before probing and again after dynamic TLV changes. Invalid options
+or permission errors stop the run; other send failures stop it after eight
+consecutive failures. Any successful send resets that retry budget.
+
+Prometheus counts each successful reply copy at transmission. Drop reasons
+are `rate_limited`, `queue_full`, `processing_rejected`, `session_expired`,
+`suppressed`, `send_failed` and `cancelled`. Processing rejection includes
+parsing, authentication, admission and replay policy; HMAC failures also have
+their own counter. These totals use the same events as the shutdown summary.
+
+Report output has a bounded queue and a five-second completion deadline. A
+slow reader can cause interim reports or text packet details to be skipped;
+a final-output failure stops the run with an error. See
+[report output](statistics.md#report-output-and-pending-probes).
+
 ## See also
 
 - [Architecture](architecture.md)

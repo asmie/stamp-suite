@@ -93,6 +93,7 @@ struct SenderRecvContext<'a> {
     owd_collector: &'a mut OwdCollector,
     packets_received: &'a mut u64,
     print_stats: bool,
+    output: Option<&'a crate::stats::StatsOutput>,
     output_format: crate::stats::OutputFormat,
     hmac_key: Option<&'a HmacKey>,
     /// Sender's Micro-session ID from the outgoing MSID TLV (RFC 9534 §3.2).
@@ -143,25 +144,29 @@ struct SenderRecvContext<'a> {
 /// final snapshot, use [`run_sender_with_output`] with a shared
 /// [`crate::stats::StatsOutput`].
 pub async fn run_sender(conf: &Configuration) -> Result<StatsSnapshot, crate::StartupError> {
-    let mut output = crate::stats::StatsOutput::new(conf.output_format);
+    let output = crate::stats::StatsOutput::new(conf.output_format)
+        .map_err(|e| crate::StartupError::io("Cannot start measurement output", e))?;
     run_sender_with_output(
         conf,
-        &mut output,
+        &output,
         SenderObservers::default(),
         crate::shutdown::CancellationToken::new(),
     )
     .await
 }
 
-/// Runs a sender with shared reporting state. Use the same `StatsOutput` to print
-/// the returned final snapshot so periodic CSV reports do not repeat the header.
+/// Runs a sender with shared reporting state. Print the returned final
+/// snapshot with the same output's
+/// [`print_final`](crate::stats::StatsOutput::print_final) so periodic CSV
+/// reports do not repeat the header. Interim reports are written before this
+/// returns.
 ///
 /// `observers` see each probe and reply as it happens. Cancelling `shutdown`
 /// stops sending and returns the statistics so far; probes still awaiting a
 /// reply count as lost.
 pub async fn run_sender_with_output(
     conf: &Configuration,
-    output: &mut crate::stats::StatsOutput,
+    output: &crate::stats::StatsOutput,
     observers: SenderObservers,
     shutdown: crate::shutdown::CancellationToken,
 ) -> Result<StatsSnapshot, crate::StartupError> {
@@ -199,8 +204,8 @@ pub async fn run_senders(
     }
     let mut tasks = tokio::task::JoinSet::new();
     for (index, run) in runs.into_iter().enumerate() {
-        let mut output = output.clone();
-        tasks.spawn(async move { (index, run.run(&mut output).await) });
+        let output = output.clone();
+        tasks.spawn(async move { (index, run.run(&output).await) });
     }
     let mut results: Vec<Option<StatsSnapshot>> = Vec::new();
     results.resize_with(tasks.len(), || None);
@@ -267,6 +272,7 @@ pub fn fuzz_reply(
         owd_collector: &mut owd_collector,
         packets_received: &mut packets_received,
         print_stats: false,
+        output: None,
         output_format: crate::stats::OutputFormat::Json,
         hmac_key: key,
         expected_sender_msid: expect_msid.then_some(1),
@@ -678,7 +684,9 @@ fn process_response(
                 tlv_status
             );
             if ctx.output_format == crate::stats::OutputFormat::Text {
-                println!("{detail}");
+                if let Some(output) = ctx.output {
+                    let _ = output.print_detail(detail);
+                }
             } else {
                 // Explicit -R output stays visible even when RUST_LOG=off.
                 eprintln!("{detail}");
