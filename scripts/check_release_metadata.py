@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def check_metadata(root, expected=None):
-    manifest = tomllib.loads((root / 'Cargo.toml').read_text())
+    manifest = tomllib.loads((root / 'Cargo.toml').read_text(encoding='utf-8'))
     version = manifest['package']['version']
     if expected is not None and version != expected:
         raise ValueError(f'Cargo.toml: {version}, expected {expected}')
@@ -21,21 +21,21 @@ def check_metadata(root, expected=None):
         'dist/man/stamp-suite.1': r'^\.TH stamp-suite 1 +"stamp-suite ([0-9.]+)"',
     }
     for path, pattern in sources.items():
-        match = re.search(pattern, (root / path).read_text(), re.MULTILINE)
+        match = re.search(pattern, (root / path).read_text(encoding='utf-8'), re.MULTILINE)
         if match is None or match[1] != version:
             raise ValueError(f'{path}: expected version {version}')
     ebuild = root / f'dist/gentoo/net-analyzer/stamp-suite/stamp-suite-{version}.ebuild'
-    text = ebuild.read_text()
+    text = ebuild.read_text(encoding='utf-8')
     minimum = re.search(r'^RUST_MIN_VER="([^"]+)"', text, re.MULTILINE)
     if minimum is None or minimum[1] != manifest['package']['rust-version']:
         raise ValueError('Gentoo RUST_MIN_VER differs from Cargo.toml')
     crates = re.search(r'^CRATES="(.*?)"', text, re.MULTILINE | re.DOTALL)
-    lock = tomllib.loads((root / 'Cargo.lock').read_text())
+    lock = tomllib.loads((root / 'Cargo.lock').read_text(encoding='utf-8'))
     expected_crates = {f"{p['name']}@{p['version']}" for p in lock['package']
                        if p.get('source', '').startswith('registry+')}
     if crates is None or set(crates[1].split()) != expected_crates:
         raise ValueError('Gentoo CRATES differs from Cargo.lock')
-    fuzz = tomllib.loads((root / "fuzz/Cargo.toml").read_text())
+    fuzz = tomllib.loads((root / "fuzz/Cargo.toml").read_text(encoding='utf-8'))
     if fuzz["dependencies"]["stamp-suite"]["version"] != version:
         raise ValueError("Fuzz path dependency version differs from Cargo.toml")
     package = next(p for p in lock['package'] if p['name'] == 'stamp-suite')
