@@ -12,6 +12,9 @@ New to STAMP? Read the [protocol overview](doc/protocol.md) first.
 
 ## Quick start
 
+`stamp-suite -h` shows everyday options and examples. Use `stamp-suite --help`
+or `man stamp-suite` for the complete option reference.
+
 Start a reflector. It listens on UDP port 862, which on Linux needs root or
 `CAP_NET_BIND_SERVICE`:
 
@@ -43,6 +46,21 @@ stamp-suite --remote-addr 192.0.2.20,198.51.100.7 --count 0 --duration 60
 stamp-suite --remote-addr 192.0.2.20 --send-delay 250us --send-schedule poisson \
   --count 0 --duration 600 --output-format json > results.jsonl
 ```
+
+For repeated runs, use a TOML file and override individual values on the CLI.
+The [sender](examples/sender.toml) and [reflector](examples/reflector.toml)
+examples work together on loopback port 8620:
+
+```sh
+# Run these in separate terminals from the checkout
+stamp-suite --config examples/reflector.toml
+stamp-suite --config examples/sender.toml --count 20
+```
+
+Installed DEB/RPM packages keep these files in
+`/usr/share/doc/stamp-suite/examples/`; binary archives include an `examples/`
+directory. See [configuration files](doc/usage.md#configuration-file) for
+service settings, session provisioning and policies.
 
 The reflector starts in open mode and answers anyone who can reach it. On an
 untrusted network, restrict access and turn on

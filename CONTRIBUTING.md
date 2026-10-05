@@ -138,3 +138,14 @@ STAMP_UPDATE_MAN=1 cargo test --all-features --test man_page
 
 Changes to experimental codepoints follow the policy in
 [doc/conformance/README.md](doc/conformance/README.md#experimental-codepoints).
+
+## Code provenance
+
+stamp-suite is MIT-licensed. Contribute only code you wrote or code under a
+license compatible with MIT, and say where any third-party code comes from.
+
+Other STAMP and TWAMP implementations, such as TeaParty (GPL-3.0), are used
+only as black-box interoperability peers. Do not copy or translate their
+source, tests or comments into this repository, whether by hand or with a
+code-generation tool. Work from the RFCs and drafts, and use packet captures
+or recorded exchanges with those implementations only as test data.

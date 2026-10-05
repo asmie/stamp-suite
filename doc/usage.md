@@ -1,13 +1,17 @@
 # Usage
 
 Sender and reflector configuration, output and runtime behavior.
-For a quick start, see the [README](../README.md). For all options and defaults
+For a quick start, see the [README](../README.md) or `stamp-suite -h`.
+For all options and defaults
 in your build, use `stamp-suite --help` or the [man page](../dist/man/stamp-suite.1).
 
 ## Configuration file
 
 Use `--config <PATH>` to load settings from a TOML file. Settings you omit
 from both the file and the command line use their built-in defaults.
+Keep deployment settings such as provisioned sessions, destination policies,
+resource limits and metrics/SNMP/control settings in the file. CLI flags are
+useful for per-run changes and diagnostics; advanced flags appear in `--help`.
 
 ```bash
 stamp-suite --config /etc/stamp/reflector.toml
@@ -22,7 +26,29 @@ the environment is `STAMP_HMAC_KEY`, which supplies the inline HMAC key when
 combined with a key file or key directory from the TOML file fails startup.
 See [key sourcing and rotation](security.md#key-sourcing-and-rotation).
 
-### Example `reflector.toml`
+### Sender and reflector examples
+
+The [example sender](../examples/sender.toml) and
+[example reflector](../examples/reflector.toml) use loopback port 8620 and need
+no privileged port. Start them in separate terminals:
+
+```sh
+stamp-suite --config examples/reflector.toml
+stamp-suite --config examples/sender.toml
+```
+
+Change the sender's destination for another host, or override a file value:
+
+```sh
+stamp-suite --config examples/sender.toml --remote-addr 192.0.2.10 --count 100
+```
+
+Use `/usr/share/doc/stamp-suite/examples/` for DEB/RPM installations, or the
+`examples/` directory in a binary archive. Copy a template before editing it.
+
+### Reflector deployment settings
+
+Add settings like these to your reflector file as needed:
 
 ```toml
 is_reflector = true

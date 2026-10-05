@@ -122,6 +122,8 @@ jobs:
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/stamp-suite" "$stage/"
           cp LICENSE README.md CHANGELOG.md SECURITY.md "$stage/"
+          mkdir -p "$stage/examples"
+          cp examples/*.toml "$stage/examples/"
           tar -czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@v7.0.1
         with:
@@ -170,6 +172,8 @@ jobs:
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/stamp-suite" "$stage/"
           cp LICENSE README.md CHANGELOG.md SECURITY.md "$stage/"
+          mkdir -p "$stage/examples"
+          cp examples/*.toml "$stage/examples/"
           tar -czf "${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@v7.0.1
         with:
@@ -207,6 +211,8 @@ jobs:
           $stage = "stamp-suite-$env:GITHUB_REF_NAME-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/stamp-suite.exe, LICENSE, README.md, CHANGELOG.md, SECURITY.md -Destination $stage
+          New-Item -ItemType Directory -Path "$stage/examples" | Out-Null
+          Copy-Item examples/*.toml -Destination "$stage/examples"
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
       - uses: actions/upload-artifact@v7.0.1
         with:

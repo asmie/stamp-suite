@@ -331,11 +331,19 @@ pub enum MalformedMode {
 /// This struct defines all configurable parameters for both sender and reflector modes,
 /// parsed from command-line arguments using clap.
 #[derive(Parser, Debug, Clone)]
-#[clap(author = "Piotr Olszewski", version, about, long_about = None)]
+#[clap(
+    author = "Piotr Olszewski",
+    version,
+    about,
+    long_about = None,
+    after_help = "Examples:\n  stamp-suite --remote-addr 192.0.2.10 --count 10\n  stamp-suite --is-reflector --local-addr 127.0.0.1 --local-port 8620\n\nUse --help for all options. Use --config <PATH> for persistent settings.",
+    after_long_help = "Examples:\n  stamp-suite --remote-addr 192.0.2.10 --count 10\n  stamp-suite --is-reflector --local-addr 127.0.0.1 --local-port 8620\n\nUse --config <PATH> for persistent settings."
+)]
 pub struct Configuration {
-    /// Path to a TOML configuration file. Values loaded from the file are used
-    /// as defaults; command-line flags and environment variables always
-    /// override them.
+    /// Load settings from a TOML file.
+    ///
+    /// Values loaded from the file are used as defaults; command-line flags
+    /// and environment variables always override them.
     #[clap(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
@@ -345,10 +353,12 @@ pub struct Configuration {
     ///
     /// Use the schema with an IDE or validator; JSON validators require converting
     /// TOML input to JSON first.
-    #[clap(long, exclusive = true)]
+    #[clap(long, exclusive = true, hide_short_help = true)]
     pub print_config_schema: bool,
-    /// Session-Reflector address. Repeat the option or separate addresses with
-    /// commas to measure several reflectors at once, each in its own session.
+    /// Session-Reflector address.
+    ///
+    /// Repeat the option or separate addresses with commas to measure several
+    /// reflectors at once, each in its own session.
     #[clap(
         short,
         long,
@@ -367,10 +377,20 @@ pub struct Configuration {
     )]
     pub local_addr: std::net::IpAddr,
     /// Numeric IPv6 interface zone for the local bind address (0 = default).
-    #[clap(long, default_value_t = 0, help_heading = "Endpoints")]
+    #[clap(
+        long,
+        default_value_t = 0,
+        help_heading = "Endpoints",
+        hide_short_help = true
+    )]
     pub local_scope_id: u32,
     /// Numeric IPv6 interface zone for the sender destination (0 = default).
-    #[clap(long, default_value_t = 0, help_heading = "Endpoints")]
+    #[clap(
+        long,
+        default_value_t = 0,
+        help_heading = "Endpoints",
+        hide_short_help = true
+    )]
     pub remote_scope_id: u32,
     /// Session-Reflector UDP port that the sender sends test packets to.
     #[clap(short = 'p', long, default_value_t = 862, help_heading = "Endpoints")]
@@ -384,8 +404,9 @@ pub struct Configuration {
         help_heading = "Endpoints"
     )]
     pub local_port: u16,
-    /// Bind the socket to this network interface or VRF device. Linux uses
-    /// SO_BINDTODEVICE and macOS IP_BOUND_IF; the pnet backend captures on it.
+    /// Bind to a network interface or VRF device.
+    ///
+    /// Linux uses SO_BINDTODEVICE and macOS IP_BOUND_IF; the pnet backend captures on it.
     #[clap(long, value_name = "NAME", help_heading = "Endpoints")]
     pub interface: Option<String>,
     /// Timestamp wire encoding (NTP or PTP); does not configure clock synchronization.
@@ -393,7 +414,8 @@ pub struct Configuration {
         short = 'K',
         long,
         default_value = "NTP",
-        help_heading = "Timestamps and clock"
+        help_heading = "Timestamps and clock",
+        hide_short_help = true
     )]
     pub clock_source: ClockFormat,
     /// Reflector: declared synchronization source of the system clock (Type 3 TLV).
@@ -402,7 +424,8 @@ pub struct Configuration {
         long,
         value_enum,
         default_value = "local",
-        help_heading = "Timestamps and clock"
+        help_heading = "Timestamps and clock",
+        hide_short_help = true
     )]
     pub clock_sync_source: ClockSyncSource,
     /// Reflector: declared synchronization source of NIC hardware clocks used for T2.
@@ -412,7 +435,8 @@ pub struct Configuration {
         long,
         value_enum,
         default_value = "local",
-        help_heading = "Timestamps and clock"
+        help_heading = "Timestamps and clock",
+        hide_short_help = true
     )]
     pub hardware_clock_sync_source: ClockSyncSource,
     /// Sender: seconds the reflector clock is ahead of UTC after epoch conversion.
@@ -422,11 +446,13 @@ pub struct Configuration {
         long,
         default_value_t = 0,
         allow_hyphen_values = true,
-        help_heading = "Timestamps and clock"
+        help_heading = "Timestamps and clock",
+        hide_short_help = true
     )]
     pub reflector_utc_offset: i32,
-    /// Interval between probes. A plain number is milliseconds; `us`, `ms`
-    /// and `s` suffixes select the unit (for example `250us` or `1.5ms`).
+    /// Interval between probes (milliseconds, or a value with `us`, `ms`, `s`).
+    ///
+    /// A plain number is milliseconds; for example, `250us` or `1.5ms` selects another unit.
     /// With `--send-schedule poisson` this is the mean interval.
     #[clap(
         short = 'd',
@@ -438,14 +464,17 @@ pub struct Configuration {
     pub send_delay: ProbeInterval,
     /// How probe send times are spaced: `periodic` (RFC 3432) or `poisson`,
     /// with exponentially distributed gaps (RFC 2330 §11.1.1).
-    #[clap(long, value_enum, default_value_t = SendSchedule::Periodic, help_heading = "Sender")]
+    #[clap(long, value_enum, default_value_t = SendSchedule::Periodic, help_heading = "Sender", hide_short_help = true)]
     pub send_schedule: SendSchedule,
-    /// Number of probes to send; 0 sends until `--duration` ends or the
-    /// sender is interrupted.
+    /// Number of probes to send; 0 runs until stopped.
+    ///
+    /// With 0, sends until `--duration` ends or the sender is interrupted.
     #[clap(short = 'c', long, default_value_t = 1000, help_heading = "Sender")]
     pub count: u32,
-    /// Stop sending after this many seconds, even if `--count` probes have
-    /// not all been sent. Replies are still awaited for `--timeout`.
+    /// Stop sending after this many seconds.
+    ///
+    /// Stops even if `--count` probes have not all been sent.
+    /// Replies are still awaited for `--timeout`.
     #[clap(long, value_name = "SECONDS", help_heading = "Sender")]
     pub duration: Option<u32>,
     /// Seconds to wait for a reply before counting the probe as lost.
@@ -453,12 +482,14 @@ pub struct Configuration {
     pub timeout: u8,
     /// Consecutive unanswered probes before an active session is reported failed.
     /// Uses --timeout per probe; 0 timeout disables loss-driven state changes.
-    #[clap(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..), help_heading = "Sender")]
+    #[clap(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..), help_heading = "Sender", hide_short_help = true)]
     pub session_loss_threshold: u16,
     /// Authentication mode: A (authenticated) or O (open, unauthenticated).
     #[clap(short = 'A', long, value_enum, default_value_t = AuthMode::Open, help_heading = "Authentication")]
     pub auth_mode: AuthMode,
-    /// Print individual packet statistics (stderr for JSON/CSV output, stdout for text).
+    /// Print individual packet statistics.
+    ///
+    /// Uses stderr for JSON/CSV output, stdout for text.
     #[clap(short = 'R', help_heading = "Sender")]
     pub print_stats: bool,
     /// Run as Session Reflector instead of Session Sender.
@@ -466,15 +497,25 @@ pub struct Configuration {
     pub is_reflector: bool,
 
     /// Error Estimate scale (0-63).
-    #[clap(long, default_value_t = 0, help_heading = "Timestamps and clock")]
+    #[clap(
+        long,
+        default_value_t = 0,
+        help_heading = "Timestamps and clock",
+        hide_short_help = true
+    )]
     pub error_scale: u8,
 
     /// Error Estimate multiplier (1-255). RFC 4656 §4.1.2 forbids zero.
-    #[clap(long, default_value_t = 1, help_heading = "Timestamps and clock")]
+    #[clap(
+        long,
+        default_value_t = 1,
+        help_heading = "Timestamps and clock",
+        hide_short_help = true
+    )]
     pub error_multiplier: u8,
 
     /// Assert the Error Estimate S bit; independent of wire format and Type 3 source.
-    #[clap(long, help_heading = "Timestamps and clock")]
+    #[clap(long, help_heading = "Timestamps and clock", hide_short_help = true)]
     pub clock_synchronized: bool,
 
     /// HMAC key in hex; requires at least 32 hex chars (16 bytes).
@@ -483,7 +524,12 @@ pub struct Configuration {
     /// CLI keys are visible in process arguments; environment keys are visible to
     /// users who can read the process environment. Prefer `--hmac-key-file` in
     /// production. The stored value is zeroized on drop and redacted from `Debug`.
-    #[clap(long, env = "STAMP_HMAC_KEY", help_heading = "Authentication")]
+    #[clap(
+        long,
+        env = "STAMP_HMAC_KEY",
+        help_heading = "Authentication",
+        hide_short_help = true
+    )]
     pub hmac_key: Option<SecretString>,
 
     /// Path to file containing HMAC key.
@@ -493,22 +539,23 @@ pub struct Configuration {
     /// Directory of per-SSID HMAC keys. File stems are hexadecimal SSIDs;
     /// `default.key` supplies the fallback. Conflicts with `--hmac-key` and
     /// `--hmac-key-file`. Send SIGHUP to reload the keys after changing the files.
-    #[clap(long, conflicts_with_all = ["hmac_key", "hmac_key_file"], help_heading = "Authentication")]
+    #[clap(long, conflicts_with_all = ["hmac_key", "hmac_key_file"], help_heading = "Authentication", hide_short_help = true)]
     pub hmac_key_dir: Option<PathBuf>,
 
     /// Reflector: drop authenticated packets for which no HMAC key is
     /// configured. Authenticated mode already needs a key source at startup;
     /// with a key, verification is always mandatory (RFC 8762 §4.4).
-    #[clap(long, help_heading = "Authentication")]
+    #[clap(long, help_heading = "Authentication", hide_short_help = true)]
     pub require_hmac: bool,
 
     /// Reject short packets instead of zero-filling (RFC 8762 §4.6).
     /// By default, missing bytes are zero-filled for TWAMP-Light interoperability.
-    #[clap(long, help_heading = "Reflector")]
+    #[clap(long, help_heading = "Reflector", hide_short_help = true)]
     pub strict_packets: bool,
 
-    /// Enable stateful reflector mode (RFC 8762 §4). The reflector maintains
-    /// independent sequence counters for each full session identity instead of echoing
+    /// Keep per-session reflector sequence counters (RFC 8762 §4).
+    ///
+    /// The reflector maintains independent sequence counters for each full session identity instead of echoing
     /// the sender's sequence number, allowing clients to detect reflector-side packet loss.
     #[clap(long, help_heading = "Reflector")]
     pub stateful_reflector: bool,
@@ -519,7 +566,8 @@ pub struct Configuration {
         long,
         value_enum,
         default_value = "permissive",
-        help_heading = "Reflector"
+        help_heading = "Reflector",
+        hide_short_help = true
     )]
     pub session_admission: SessionAdmission,
 
@@ -528,13 +576,19 @@ pub struct Configuration {
     #[clap(
         long = "reflector-session",
         value_name = "SSID,SOURCE,DESTINATION[,MICRO_ID]",
-        help_heading = "Reflector"
+        help_heading = "Reflector",
+        hide_short_help = true
     )]
     pub reflector_sessions: Vec<String>,
 
     /// Session timeout in seconds for reflector runtime state. Sessions inactive for
     /// this duration may be cleaned up. Default: 300 (5 minutes). Set to 0 to disable.
-    #[clap(long, default_value_t = 300, help_heading = "Reflector")]
+    #[clap(
+        long,
+        default_value_t = 300,
+        help_heading = "Reflector",
+        hide_short_help = true
+    )]
     pub session_timeout: u64,
 
     /// DSCP codepoints permitted on reflector replies (RFC 8972 §4.4/§6,
@@ -547,7 +601,8 @@ pub struct Configuration {
         long,
         default_value = "all",
         value_name = "SPEC",
-        help_heading = "Reflector"
+        help_heading = "Reflector",
+        hide_short_help = true
     )]
     pub allowed_dscp: String,
 
@@ -563,7 +618,8 @@ pub struct Configuration {
         long,
         default_value = "all",
         value_name = "SPEC",
-        help_heading = "Reflector"
+        help_heading = "Reflector",
+        hide_short_help = true
     )]
     pub allowed_ecn: String,
 
@@ -572,14 +628,19 @@ pub struct Configuration {
     /// The longest matching prefix replaces the global set, regardless of order.
     ///
     /// Reflector-side only.
-    #[clap(long, value_name = "PREFIX/LEN=SPEC", help_heading = "Reflector")]
+    #[clap(
+        long,
+        value_name = "PREFIX/LEN=SPEC",
+        help_heading = "Reflector",
+        hide_short_help = true
+    )]
     pub allowed_dscp_for: Vec<String>,
 
     /// Reflector: suppress duplicates without a handled Type-12 request.
     /// Validated non-monotonic Type-12 requests still get one U-flagged reply
     /// (RFC 10052 §5). Detection and counters are always active.
     /// Off by default because sender restarts can repeat sequence numbers.
-    #[clap(long, help_heading = "Reflector")]
+    #[clap(long, help_heading = "Reflector", hide_short_help = true)]
     pub drop_replayed: bool,
 
     /// Location TLV fields the reflector may report (RFC 8972 §4.2.2).
@@ -592,7 +653,8 @@ pub struct Configuration {
         long,
         default_value = "all",
         value_name = "FIELDS",
-        help_heading = "Reflector"
+        help_heading = "Reflector",
+        hide_short_help = true
     )]
     pub location_disclose: String,
 
@@ -600,56 +662,70 @@ pub struct Configuration {
     /// - echo: process supported TLVs and set U/M/I flags
     /// - ignore: copy everything after the base packet unprocessed, like a
     ///   reflector without TLV support
-    #[clap(long, value_enum, default_value_t = TlvHandlingMode::Echo, help_heading = "Reflector")]
+    #[clap(long, value_enum, default_value_t = TlvHandlingMode::Echo, help_heading = "Reflector", hide_short_help = true)]
     pub tlv_mode: TlvHandlingMode,
 
     /// Verify HMAC TLV in incoming packets (RFC 8972). Requires HMAC key.
-    #[clap(long, help_heading = "Authentication")]
+    #[clap(long, help_heading = "Authentication", hide_short_help = true)]
     pub verify_tlv_hmac: bool,
 
     /// Session-Sender Identifier to include in sender packets (RFC 8972 §3).
     /// Encoded in the two octets of the base STAMP header immediately after
     /// Error Estimate (bytes 14-15 unauth / 26-27 auth).
-    #[clap(long, help_heading = "Sender")]
+    #[clap(long, help_heading = "Sender", hide_short_help = true)]
     pub ssid: Option<u16>,
 
     /// Sender: handle a zeroed reflected SSID (RFC 8972 §3).
     /// `continue` (default) measures and warns once; `stop` ends the session.
     /// Applies only with a nonzero --ssid.
-    #[clap(long, default_value_t = ZeroSsidAction::Continue, value_name = "ACTION", help_heading = "Sender")]
+    #[clap(long, default_value_t = ZeroSsidAction::Continue, value_name = "ACTION", help_heading = "Sender", hide_short_help = true)]
     pub on_zero_ssid: ZeroSsidAction,
 
     /// Enable Prometheus metrics endpoint (requires "metrics" feature).
-    #[clap(long, help_heading = "Services")]
+    #[clap(long, help_heading = "Services", hide_short_help = true)]
     pub metrics: bool,
 
     /// Address to bind the metrics HTTP server.
-    #[clap(long, default_value = "127.0.0.1:9090", help_heading = "Services")]
+    #[clap(
+        long,
+        default_value = "127.0.0.1:9090",
+        help_heading = "Services",
+        hide_short_help = true
+    )]
     pub metrics_addr: SocketAddr,
 
     /// Enable Class of Service TLV for DSCP/ECN measurement (RFC 8972 §4.4).
     /// When enabled, the sender includes a CoS TLV with the requested DSCP/ECN values,
     /// and the reflector reports the received DSCP/ECN values.
-    #[clap(long, help_heading = "Class of Service and ECN")]
+    #[clap(
+        long,
+        help_heading = "Class of Service and ECN",
+        hide_short_help = true
+    )]
     pub cos: bool,
 
     /// DSCP value to request for reflected packets (0-63).
     /// Only used when --cos is enabled. Common values:
     /// 0=Best Effort, 10=AF11, 18=AF21, 26=AF31, 34=AF41, 46=EF
-    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..64), help_heading = "Class of Service and ECN")]
+    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..64), help_heading = "Class of Service and ECN", hide_short_help = true)]
     pub dscp: u8,
 
     /// ECN value to request for reflected packets (0-3).
     /// Only used when --cos is enabled.
     /// 0=Not-ECT, 1=ECT(1), 2=ECT(0), 3=CE (Congestion Experienced)
-    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..4), help_heading = "Class of Service and ECN")]
+    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..4), help_heading = "Class of Service and ECN", hide_short_help = true)]
     pub ecn: u8,
 
     /// Multiply the send interval by this factor on each CE-marked reply,
     /// capped at `--ecn-max-delay` (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
     /// Must exceed 1.0. Active with `--cos` and `--ecn` ECT0 (2) or ECT1 (1).
     /// See `--ecn-recovery-step` for recovery pacing.
-    #[clap(long, default_value_t = 2.0, help_heading = "Class of Service and ECN")]
+    #[clap(
+        long,
+        default_value_t = 2.0,
+        help_heading = "Class of Service and ECN",
+        hide_short_help = true
+    )]
     pub ecn_backoff_factor: f64,
 
     /// Upper bound (milliseconds) on the AIMD-controlled send interval: how
@@ -659,82 +735,98 @@ pub struct Configuration {
     #[clap(
         long,
         default_value_t = 30_000,
-        help_heading = "Class of Service and ECN"
+        help_heading = "Class of Service and ECN",
+        hide_short_help = true
     )]
     pub ecn_max_delay: u32,
 
     /// AIMD recovery in milliseconds per non-CE reply, down to --send-delay
     /// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
-    #[clap(long, default_value_t = 50, help_heading = "Class of Service and ECN")]
+    #[clap(
+        long,
+        default_value_t = 50,
+        help_heading = "Class of Service and ECN",
+        hide_short_help = true
+    )]
     pub ecn_recovery_step: u32,
 
     /// Outgoing TTL / Hop Limit. Draft ext-hdr-15 requires 255 (the default).
-    #[clap(long, value_parser = clap::value_parser!(u8).range(255..=255), help_heading = "Sender")]
+    #[clap(long, value_parser = clap::value_parser!(u8).range(255..=255), help_heading = "Sender", hide_short_help = true)]
     pub ttl: Option<u8>,
 
     /// Diagnostic: append a deliberately malformed TLV to every sent packet to
     /// test a reflector's RFC 8972 §4 handling. `bad-flags` sets reserved
     /// flag bits; `bad-length` declares a TLV length that overruns the packet.
     /// Not for normal measurements.
-    #[clap(long, value_enum, help_heading = "Sender")]
+    #[clap(long, value_enum, help_heading = "Sender", hide_short_help = true)]
     pub malformed: Option<MalformedMode>,
 
     /// Send an Access Report TLV with this Access ID (RFC 8972 §4.6):
     /// 1 = 3GPP Network, 2 = Non-3GPP Network. A reflector discards other IDs.
-    #[clap(long, value_parser = clap::value_parser!(u8).range(1..=2), help_heading = "Sender TLVs")]
+    #[clap(long, value_parser = clap::value_parser!(u8).range(1..=2), help_heading = "Sender TLVs", hide_short_help = true)]
     pub access_report: Option<u8>,
 
     /// Return code for Access Report TLV (default: 1 = available).
     /// Only used when --access-report is enabled.
-    #[clap(long, default_value_t = 1, help_heading = "Sender TLVs")]
+    #[clap(
+        long,
+        default_value_t = 1,
+        help_heading = "Sender TLVs",
+        hide_short_help = true
+    )]
     pub access_return_code: u8,
 
     /// Access Report retransmission timeout in seconds (RFC 8972 §4.6;
     /// default 3). Armed after sending the TLV and disarmed on its reflected
     /// echo. Expiry triggers retransmission. Requires `--access-report`.
-    #[clap(long, default_value_t = crate::sender::DEFAULT_ACCESS_REPORT_TIMEOUT.as_secs() as u32, value_parser = clap::value_parser!(u32).range(1..=3600), help_heading = "Sender TLVs")]
+    #[clap(long, default_value_t = crate::sender::DEFAULT_ACCESS_REPORT_TIMEOUT.as_secs() as u32, value_parser = clap::value_parser!(u32).range(1..=3600), help_heading = "Sender TLVs", hide_short_help = true)]
     pub access_report_timeout: u32,
 
     /// Maximum Access Report retransmissions (RFC 8972 §4.6; default 4).
     /// Zero aborts on the first missed acknowledgment without retransmitting.
     /// Requires `--access-report`.
-    #[clap(long, default_value_t = crate::sender::DEFAULT_ACCESS_REPORT_RETRIES, value_parser = clap::value_parser!(u32).range(0..=255), help_heading = "Sender TLVs")]
+    #[clap(long, default_value_t = crate::sender::DEFAULT_ACCESS_REPORT_RETRIES, value_parser = clap::value_parser!(u32).range(0..=255), help_heading = "Sender TLVs", hide_short_help = true)]
     pub access_report_retries: u32,
 
     /// Enable Timestamp Information TLV (RFC 8972 §4.3).
     /// The sender requests the reflector's synchronization sources and timestamp
     /// methods using zeroed information fields; the reflector fills in its values.
-    #[clap(long, help_heading = "Sender TLVs")]
+    #[clap(long, help_heading = "Sender TLVs", hide_short_help = true)]
     pub timestamp_info: bool,
 
     /// Enable Direct Measurement TLV (RFC 8972 §4.5).
     /// The sender includes its transmit count; the reflector fills
     /// receive and transmit counters.
-    #[clap(long, help_heading = "Sender TLVs")]
+    #[clap(long, help_heading = "Sender TLVs", hide_short_help = true)]
     pub direct_measurement: bool,
 
     /// Enable Location TLV (RFC 8972 §4.2).
     /// The reflector fills in the observed source/destination addresses and ports.
-    #[clap(long, help_heading = "Sender TLVs")]
+    #[clap(long, help_heading = "Sender TLVs", hide_short_help = true)]
     pub location: bool,
 
     /// Enable Follow-Up Telemetry TLV (RFC 8972 §4.7).
     /// The reflector fills in the previous reflection's sequence number
     /// and timestamp.
-    #[clap(long, help_heading = "Sender TLVs")]
+    #[clap(long, help_heading = "Sender TLVs", hide_short_help = true)]
     pub follow_up_telemetry: bool,
 
     /// Enable SNMP AgentX sub-agent (requires "snmp" feature).
-    #[clap(long, help_heading = "Services")]
+    #[clap(long, help_heading = "Services", hide_short_help = true)]
     pub snmp: bool,
 
     /// AgentX master agent socket path.
-    #[clap(long, default_value = "/var/agentx/master", help_heading = "Services")]
+    #[clap(
+        long,
+        default_value = "/var/agentx/master",
+        help_heading = "Services",
+        hide_short_help = true
+    )]
     pub snmp_socket: String,
 
     /// Enable the runtime control-plane REST API (reflector only;
     /// requires the "control" build feature). Design: doc/control-plane.md.
-    #[clap(long, help_heading = "Services")]
+    #[clap(long, help_heading = "Services", hide_short_help = true)]
     pub control: bool,
 
     /// Address to bind the control-plane HTTP server. Keep this on
@@ -743,13 +835,19 @@ pub struct Configuration {
         long,
         default_value = "127.0.0.1:9091",
         value_name = "ADDR",
-        help_heading = "Services"
+        help_heading = "Services",
+        hide_short_help = true
     )]
     pub control_addr: SocketAddr,
 
     /// Path to a file containing a static bearer token. When set, every
     /// control-plane request must carry `Authorization: Bearer <token>`.
-    #[clap(long, value_name = "PATH", help_heading = "Services")]
+    #[clap(
+        long,
+        value_name = "PATH",
+        help_heading = "Services",
+        hide_short_help = true
+    )]
     pub control_token_file: Option<PathBuf>,
 
     /// PEM certificate chain for the control API. Enables HTTPS and requires
@@ -758,7 +856,8 @@ pub struct Configuration {
         long,
         value_name = "PATH",
         requires = "control_tls_key",
-        help_heading = "Services"
+        help_heading = "Services",
+        hide_short_help = true
     )]
     pub control_tls_cert: Option<PathBuf>,
 
@@ -767,7 +866,8 @@ pub struct Configuration {
         long,
         value_name = "PATH",
         requires = "control_tls_cert",
-        help_heading = "Services"
+        help_heading = "Services",
+        hide_short_help = true
     )]
     pub control_tls_key: Option<PathBuf>,
 
@@ -775,14 +875,17 @@ pub struct Configuration {
     #[clap(long, value_enum, default_value_t = OutputFormat::Text, help_heading = "Output")]
     pub output_format: OutputFormat,
 
-    /// Diagnostic log format on stderr: `text` (default) for journalctl-friendly
-    /// human-readable lines, `json` for structured one-line-per-event
+    /// Diagnostic format on stderr: text or JSON.
+    ///
+    /// `text` (default) produces journalctl-friendly human-readable lines,
+    /// `json` produces structured one-line-per-event
     /// output suitable for log aggregators. `RUST_LOG` continues to
     /// control verbosity in both modes.
     #[clap(long, value_enum, default_value_t = LogFormat::Text, help_heading = "Output")]
     pub log_format: LogFormat,
 
     /// Increase log verbosity: `-v` for debug, `-vv` or more for trace.
+    ///
     /// Defaults to info. A non-empty `RUST_LOG` overrides this flag.
     #[clap(short = 'v', long, action = clap::ArgAction::Count, help_heading = "Output")]
     pub verbose: u8,
@@ -795,15 +898,25 @@ pub struct Configuration {
     /// (SIOCSHWTSTAMP + raw-hardware tier; needs CAP_NET_ADMIN and a
     /// synchronized PHC), with a warning and software fallback when unavailable.
     /// `off`: userspace timestamps only.
-    #[clap(long, value_enum, default_value_t = HwTsMode::Auto, help_heading = "Timestamps and clock")]
+    #[clap(long, value_enum, default_value_t = HwTsMode::Auto, help_heading = "Timestamps and clock", hide_short_help = true)]
     pub hwtstamp: HwTsMode,
 
     /// Periodic reporting interval in seconds (0 = disabled, sender only).
-    #[clap(long, default_value_t = 0, help_heading = "Sender")]
+    #[clap(
+        long,
+        default_value_t = 0,
+        help_heading = "Sender",
+        hide_short_help = true
+    )]
     pub report_interval: u32,
 
     /// Destination Node Address for SR networks (RFC 9503 §3). Requires --ssid.
-    #[clap(long, value_name = "IP", help_heading = "Return Path")]
+    #[clap(
+        long,
+        value_name = "IP",
+        help_heading = "Return Path",
+        hide_short_help = true
+    )]
     pub dest_node_addr: Option<std::net::IpAddr>,
 
     /// Return Path control code (RFC 9503 §4): 0=no reply, 1=same link reply.
@@ -812,6 +925,7 @@ pub struct Configuration {
         value_parser = clap::value_parser!(u32),
         conflicts_with_all = ["return_address", "return_sr_mpls_labels", "return_srv6_sids"],
         help_heading = "Return Path",
+        hide_short_help = true
     )]
     pub return_path_cc: Option<u32>,
 
@@ -820,7 +934,8 @@ pub struct Configuration {
         long,
         value_name = "IP",
         conflicts_with = "return_path_cc",
-        help_heading = "Return Path"
+        help_heading = "Return Path",
+        hide_short_help = true
     )]
     pub return_address: Option<std::net::IpAddr>,
 
@@ -831,6 +946,7 @@ pub struct Configuration {
         value_delimiter = ',',
         conflicts_with_all = ["return_path_cc", "return_srv6_sids"],
         help_heading = "Return Path",
+        hide_short_help = true
     )]
     pub return_sr_mpls_labels: Option<Vec<u32>>,
 
@@ -841,53 +957,64 @@ pub struct Configuration {
         value_delimiter = ',',
         conflicts_with_all = ["return_path_cc", "return_sr_mpls_labels"],
         help_heading = "Return Path",
+        hide_short_help = true
     )]
     pub return_srv6_sids: Option<Vec<std::net::Ipv6Addr>>,
 
     /// Reflector: attach SRH for SRv6 Return Path requests on supported Linux
     /// IPv6 paths (RFC 9503 §4, RFC 8754). Off by default. Disabled or
     /// unsupported paths get ordinary replies with Return Path U set.
-    #[clap(long, help_heading = "Return Path")]
+    #[clap(long, help_heading = "Return Path", hide_short_help = true)]
     pub srv6_return_forwarding: bool,
 
     /// Reflector: send Return Address replies to the requested address
     /// (RFC 9503 §4.1.2). Disabled by default to prevent redirection to third
     /// parties: the sub-TLV gets U and the reply goes to the packet source.
     /// Enable only in a controlled measurement domain, preferably with HMAC.
-    #[clap(long, help_heading = "Return Path")]
+    #[clap(long, help_heading = "Return Path", hide_short_help = true)]
     pub return_path_allow_alternate: bool,
 
     /// Sender Micro-session ID for RFC 9534 TLV validation; does not select a physical link.
     /// When set, includes a Micro-session ID TLV in test packets.
     /// Accepts decimal (e.g. `255`) or `0x`-prefixed hex (e.g. `0xff`).
-    #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex, help_heading = "Sender TLVs")]
+    #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex, help_heading = "Sender TLVs", hide_short_help = true)]
     pub micro_session_id: Option<u16>,
 
     /// Configured reflector ID for RFC 9534 TLV validation; no physical-link association.
     /// When set, the reflector fills this ID into reflected Micro-session ID TLVs.
     /// Accepts decimal (e.g. `171`) or `0x`-prefixed hex (e.g. `0xab`).
-    #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex, help_heading = "Sender TLVs")]
+    #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex, help_heading = "Sender TLVs", hide_short_help = true)]
     pub reflector_member_link_id: Option<u16>,
 
     /// Maximum reflected packets per second per source IP address (0 = unlimited).
     /// A token bucket; `--reflector-rate-burst` sets its capacity. Each
     /// Type-12 copy counts as one packet.
-    #[clap(long, default_value_t = 0, help_heading = "Reflector")]
+    #[clap(
+        long,
+        default_value_t = 0,
+        help_heading = "Reflector",
+        hide_short_help = true
+    )]
     pub max_pps: u32,
 
     /// Token-bucket capacity per source IP, in packets. 0 uses the
     /// `--max-pps` value (one second of traffic). Ignored when `--max-pps` is 0.
-    #[clap(long, default_value_t = 0, help_heading = "Reflector")]
+    #[clap(
+        long,
+        default_value_t = 0,
+        help_heading = "Reflector",
+        hide_short_help = true
+    )]
     pub reflector_rate_burst: u32,
 
     /// Maximum pending reflector requests across processing, handoff and bursts.
     /// Full queues drop new requests; slots remain reserved until all copies finish.
-    #[clap(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Reflector")]
+    #[clap(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Reflector", hide_short_help = true)]
     pub reflector_queue_capacity: u32,
 
     /// Stop accepting packets on shutdown, then finish queued replies for at most
     /// this many milliseconds. Zero cancels immediately (the default).
-    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=60_000), help_heading = "Reflector")]
+    #[clap(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=60_000), help_heading = "Reflector", hide_short_help = true)]
     pub reflector_shutdown_grace_ms: u32,
 
     /// Maximum number of tracked session identities (0 = unlimited).
@@ -896,14 +1023,19 @@ pub struct Configuration {
     /// existing sessions continue with their counters and sequence state.
     /// Periodic idle expiry or manual expiry frees slots. Lowering the cap
     /// never evicts active entries. Defaults to 65536.
-    #[clap(long, default_value_t = 65536, help_heading = "Reflector")]
+    #[clap(
+        long,
+        default_value_t = 65536,
+        help_heading = "Reflector",
+        hide_short_help = true
+    )]
     pub max_sessions: u32,
 
     /// Enable the BER TLVs (draft-gandhi-ippm-stamp-ber-07):
     /// Bit Pattern in Padding (Type 240), Bit Error Count (Type 241), and
     /// Max Bit Error Burst Size (Type 242). Sender-side only; the reflector
     /// computes the counts against the incoming Extra Padding.
-    #[clap(long, help_heading = "Bit Error Rate")]
+    #[clap(long, help_heading = "Bit Error Rate", hide_short_help = true)]
     pub ber: bool,
 
     /// Append an Extra Padding TLV with this many value octets (RFC 8972 §4.1).
@@ -913,7 +1045,8 @@ pub struct Configuration {
         long,
         value_name = "BYTES",
         conflicts_with = "ber",
-        help_heading = "Sender TLVs"
+        help_heading = "Sender TLVs",
+        hide_short_help = true
     )]
     pub extra_padding: Option<usize>,
 
@@ -921,36 +1054,51 @@ pub struct Configuration {
     /// This experimental codepoint (RFC 8972 §5.1) conflicts with another
     /// implementation's incompatible Heartbeat TLV. Other BER TLVs are unchanged.
     /// Ignored unless `--ber` is set.
-    #[clap(long, help_heading = "Bit Error Rate")]
+    #[clap(long, help_heading = "Bit Error Rate", hide_short_help = true)]
     pub ber_omit_burst: bool,
 
     /// Whether the sender originates an HMAC TLV (RFC 8972 §4.8):
     /// `auto` (default, originate when a key is configured), `on` (always;
     /// requires a key), `off` (never, even with a key).
-    #[clap(long, default_value_t = TlvHmacMode::Auto, value_name = "MODE", help_heading = "Authentication")]
+    #[clap(long, default_value_t = TlvHmacMode::Auto, value_name = "MODE", help_heading = "Authentication", hide_short_help = true)]
     pub tlv_hmac: TlvHmacMode,
 
     /// Bit pattern used to fill the Extra Padding TLV when `--ber` is set.
     /// Hex string (e.g. "ff00" or "aa55"). Defaults to the draft's recommended
     /// pattern (0xFF00). Ignored unless `--ber` is set.
-    #[clap(long, value_name = "HEX", help_heading = "Bit Error Rate")]
+    #[clap(
+        long,
+        value_name = "HEX",
+        help_heading = "Bit Error Rate",
+        hide_short_help = true
+    )]
     pub ber_pattern: Option<String>,
 
     /// Padding length in bytes for the Extra Padding TLV that accompanies the
     /// BER TLVs. Ignored unless `--ber` is set.
-    #[clap(long, default_value_t = 64, help_heading = "Bit Error Rate")]
+    #[clap(
+        long,
+        default_value_t = 64,
+        help_heading = "Bit Error Rate",
+        hide_short_help = true
+    )]
     pub ber_padding_size: usize,
 
     /// BER computation interval in multiples of --send-delay (must be positive).
-    #[clap(long, default_value_t = 10, help_heading = "Bit Error Rate")]
+    #[clap(
+        long,
+        default_value_t = 10,
+        help_heading = "Bit Error Rate",
+        hide_short_help = true
+    )]
     pub ber_interval: u32,
 
     /// Alarm threshold for bit errors per million padding bits, in either direction.
-    #[clap(long, help_heading = "Bit Error Rate")]
+    #[clap(long, help_heading = "Bit Error Rate", hide_short_help = true)]
     pub ber_bit_threshold: Option<f64>,
 
     /// Alarm threshold for packets with errors per million measured packets.
-    #[clap(long, help_heading = "Bit Error Rate")]
+    #[clap(long, help_heading = "Bit Error Rate", hide_short_help = true)]
     pub ber_packet_threshold: Option<f64>,
 
     /// Request asymmetrical reply traffic (RFC 10052 §3).
@@ -962,6 +1110,7 @@ pub struct Configuration {
         default_value_t = 1,
         value_parser = clap::value_parser!(u16),
         help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
     )]
     pub reflected_control_count: u16,
 
@@ -971,7 +1120,8 @@ pub struct Configuration {
     #[clap(
         long,
         default_value_t = 0,
-        help_heading = "Reflected Test Packet Control"
+        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
     )]
     pub reflected_control_length: u16,
 
@@ -980,7 +1130,8 @@ pub struct Configuration {
     #[clap(
         long,
         default_value_t = 1_000_000,
-        help_heading = "Reflected Test Packet Control"
+        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
     )]
     pub reflected_control_interval_ns: u32,
 
@@ -991,7 +1142,11 @@ pub struct Configuration {
     /// do so returns the sub-TLV with the C flag set in its Sub-TLV Flags.
     /// Implies emitting the Reflected Control TLV even when
     /// `--reflected-control-count` is 1.
-    #[clap(long, help_heading = "Reflected Test Packet Control")]
+    #[clap(
+        long,
+        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
+    )]
     pub reflected_control_no_ext_hdr: bool,
 
     /// Maximum replies per Reflected Test Packet Control request
@@ -1005,7 +1160,8 @@ pub struct Configuration {
     #[clap(
         long,
         default_value_t = 0,
-        help_heading = "Reflected Test Packet Control"
+        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
     )]
     pub reflected_control_max_count: u16,
 
@@ -1022,7 +1178,8 @@ pub struct Configuration {
     #[clap(
         long,
         default_value_t = 1500,
-        help_heading = "Reflected Test Packet Control"
+        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
     )]
     pub reflected_control_max_size: u16,
 
@@ -1034,20 +1191,31 @@ pub struct Configuration {
     #[clap(
         long,
         default_value_t = 1_000,
-        help_heading = "Reflected Test Packet Control"
+        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
     )]
     pub reflected_control_min_interval_ns: u32,
 
     /// Type 12 data-rate limit per request, in bytes per second (RFC 10052 §3):
     /// reply size × 10⁹ / interval. A request above it gets one C-flagged reply.
-    #[clap(long, default_value_t = crate::receiver::REFLECTED_CONTROL_MAX_RATE,
-           value_parser = clap::value_parser!(u64).range(1..))]
+    #[clap(
+        long,
+        default_value_t = crate::receiver::REFLECTED_CONTROL_MAX_RATE,
+        value_parser = clap::value_parser!(u64).range(1..),
+        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
+    )]
     pub reflected_control_max_rate: u64,
 
     /// Type 12 data-volume limit per request, in bytes (RFC 10052 §3):
     /// reply size × count. A request above it gets one C-flagged reply.
-    #[clap(long, default_value_t = crate::receiver::REFLECTED_CONTROL_MAX_VOLUME,
-           value_parser = clap::value_parser!(u32).range(1..))]
+    #[clap(
+        long,
+        default_value_t = crate::receiver::REFLECTED_CONTROL_MAX_VOLUME,
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
+    )]
     pub reflected_control_max_volume: u32,
 
     /// Request the received IP fixed header in Type 247 (draft ext-hdr-15 §§6.2, 6.1).
@@ -1062,8 +1230,7 @@ pub struct Configuration {
         default_missing_value = "",
         action = clap::ArgAction::Append,
         help_heading = "Header reflection",
-        help_heading = "Reflected Test Packet Control",
-        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
     )]
     pub reflected_fixed_hdr: Vec<String>,
 
@@ -1080,6 +1247,7 @@ pub struct Configuration {
         default_missing_value = "",
         action = clap::ArgAction::Append,
         help_heading = "Header reflection",
+        hide_short_help = true
     )]
     pub reflected_ipv6_ext_hdr: Vec<String>,
 
@@ -1089,20 +1257,30 @@ pub struct Configuration {
     /// whose size must match Hdr Ext Len; byte 0 (Next Header) is kernel-assigned.
     /// Default: an eight-byte PadN header. Attachment failure aborts startup.
     /// Explicit --reflected-ipv6-ext-hdr requests replace automatic requests.
-    #[clap(long, value_name = "KIND[:HEX]", action = clap::ArgAction::Append, help_heading = "Header reflection")]
+    #[clap(long, value_name = "KIND[:HEX]", action = clap::ArgAction::Append, help_heading = "Header reflection", hide_short_help = true)]
     pub attach_ext_hdr: Vec<String>,
 
     /// Type 246 eight-octet Requested selector (draft ext-hdr-15 §4.1), e.g.
     /// 1100010400000000. The header's Next Header byte comes first; up to eight
     /// hex-decoded bytes are zero-padded. Requires one --reflected-ipv6-ext-hdr
     /// and a matching attached header. At least one byte must be nonzero.
-    #[clap(long, value_name = "HEX", help_heading = "Header reflection")]
+    #[clap(
+        long,
+        value_name = "HEX",
+        help_heading = "Header reflection",
+        hide_short_help = true
+    )]
     pub reflected_ipv6_ext_hdr_selector: Option<String>,
 
     /// Type 247 four-octet Requested selector (draft ext-hdr-15 §6.1). Up to four
     /// hex-decoded bytes, zero-padded; at least one must be nonzero. Requires one
     /// --reflected-fixed-hdr without an inline selector.
-    #[clap(long, value_name = "HEX", help_heading = "Header reflection")]
+    #[clap(
+        long,
+        value_name = "HEX",
+        help_heading = "Header reflection",
+        hide_short_help = true
+    )]
     pub reflected_fixed_hdr_selector: Option<String>,
 }
 

@@ -7,3 +7,4 @@ SECURITY.md usr/share/doc/stamp-suite
 doc/usage.md usr/share/doc/stamp-suite
 doc/architecture.md usr/share/doc/stamp-suite
 doc/security.md usr/share/doc/stamp-suite
+examples/*.toml usr/share/doc/stamp-suite/examples

@@ -5,6 +5,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Short help (`-h`) shows everyday options and two examples; `--help` and the
+  manual keep every option. Sender and reflector TOML examples are included
+  in packages and binary archives. CLI overrides and existing flags are unchanged.
+
 ## [1.0.0] - 2026-10-05
 
 First stable release. See [conformance matrices](doc/conformance/README.md)

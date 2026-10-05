@@ -1,0 +1,5 @@
+# Loopback reflector on an unprivileged port.
+is_reflector = true
+local_addr = "127.0.0.1"
+local_port = 8620
+stateful_reflector = true

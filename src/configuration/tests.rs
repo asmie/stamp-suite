@@ -40,6 +40,112 @@ use std::net::IpAddr;
 use super::*;
 
 #[test]
+fn short_help_shows_everyday_options_and_examples() {
+    let help = Configuration::command()
+        .color(clap::ColorChoice::Never)
+        .try_get_matches_from(["stamp-suite", "-h"])
+        .unwrap_err();
+    assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+    let text = help.to_string();
+    let options = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with('-'))
+        .count();
+    assert_eq!(options, 20, "{text}");
+    for option in [
+        "--config",
+        "--remote-addr",
+        "--local-port",
+        "--is-reflector",
+        "--count",
+        "--send-delay",
+        "--duration",
+        "--timeout",
+        "--auth-mode",
+        "--hmac-key-file",
+        "--output-format",
+        "--verbose",
+    ] {
+        assert!(text.contains(option), "missing {option}: {text}");
+    }
+    for option in [
+        "--ber-pattern",
+        "--reflected-fixed-hdr",
+        "--clock-sync-source",
+        "--control-addr",
+        "--max-sessions",
+    ] {
+        assert!(
+            !text.contains(option),
+            "advanced option {option} in short help"
+        );
+    }
+    assert!(text.contains("stamp-suite --remote-addr 192.0.2.10 --count 10"));
+    assert!(text.contains("stamp-suite --is-reflector --local-addr 127.0.0.1 --local-port 8620"));
+    assert!(text.contains("Use --help for all options"));
+}
+
+#[test]
+fn full_help_keeps_every_cli_option() {
+    let help = Configuration::command()
+        .color(clap::ColorChoice::Never)
+        .try_get_matches_from(["stamp-suite", "--help"])
+        .unwrap_err();
+    assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+    let text = help.to_string();
+    assert!(text.contains("stamp-suite --remote-addr 192.0.2.10 --count 10"));
+    assert!(!text.contains("Use --help"), "full help refers to itself");
+    let mut command = Configuration::command();
+    command.build();
+    for arg in command.get_arguments() {
+        if let Some(long) = arg.get_long() {
+            assert!(
+                text.contains(&format!("--{long}")),
+                "missing {long} in full help"
+            );
+        }
+    }
+}
+
+#[test]
+fn example_configs_load_and_cli_overrides_file_values() {
+    let sender = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/sender.toml");
+    let reflector = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/reflector.toml");
+    let send = load_from_args(&["stamp-suite", "--config", sender]).unwrap();
+    let reflect = load_from_args(&["stamp-suite", "--config", reflector]).unwrap();
+    assert!(!send.is_reflector);
+    assert!(reflect.is_reflector);
+    assert!(reflect.stateful_reflector);
+    assert_eq!(send.remote_addr, [reflect.local_addr]);
+    assert_eq!(send.remote_port, reflect.local_port);
+    assert_eq!(send.count, 10);
+    let overridden = load_from_args(&[
+        "stamp-suite",
+        "--config",
+        sender,
+        "--remote-port",
+        "9000",
+        "--count",
+        "3",
+    ])
+    .unwrap();
+    assert_eq!(overridden.remote_port, 9000);
+    assert_eq!(overridden.count, 3);
+    let overridden = load_from_args(&[
+        "stamp-suite",
+        "--config",
+        reflector,
+        "--local-port",
+        "9000",
+        "--max-sessions",
+        "5",
+    ])
+    .unwrap();
+    assert_eq!(overridden.local_port, 9000);
+    assert_eq!(overridden.max_sessions, 5);
+}
+
+#[test]
 fn ber_configuration_rejects_invalid_patterns_and_intervals() {
     use clap::Parser;
     for extra in [

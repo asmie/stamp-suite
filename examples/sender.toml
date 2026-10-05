@@ -1,0 +1,7 @@
+# Matches reflector.toml; change the address to measure another host.
+remote_addr = "127.0.0.1"
+remote_port = 8620
+count = 10
+send_delay = "100ms"
+timeout = 1
+output_format = "text"

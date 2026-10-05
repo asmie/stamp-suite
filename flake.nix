@@ -39,6 +39,8 @@
               install -Dm644 mibs/STAMP-SUITE-MIB.mib $out/share/snmp/mibs/STAMP-SUITE-MIB.mib
               mkdir -p $out/share/doc/stamp-suite
               cp README.md CHANGELOG.md SECURITY.md LICENSE doc/usage.md doc/architecture.md doc/security.md $out/share/doc/stamp-suite/
+              mkdir -p $out/share/doc/stamp-suite/examples
+              cp examples/*.toml $out/share/doc/stamp-suite/examples/
             '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
               install -Dm644 dist/systemd/stamp-suite.service $out/lib/systemd/system/stamp-suite.service
               substituteInPlace $out/lib/systemd/system/stamp-suite.service \

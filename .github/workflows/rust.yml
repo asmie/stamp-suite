@@ -378,6 +378,8 @@ jobs:
           dpkg-deb --contents "$DEB" | grep -q usr/bin/stamp-suite
           dpkg-deb --contents "$DEB" | grep -q usr/lib/systemd/system/stamp-suite.service
           dpkg-deb --contents "$DEB" | grep -q usr/share/snmp/mibs/STAMP-SUITE-MIB.mib
+          dpkg-deb --contents "$DEB" | grep -q usr/share/doc/stamp-suite/examples/sender.toml
+          dpkg-deb --contents "$DEB" | grep -q usr/share/doc/stamp-suite/examples/reflector.toml
       - name: Verify RPM package
         run: |
           RPM=$(ls target/generate-rpm/*.rpm)
@@ -386,6 +388,8 @@ jobs:
           rpm -qlp "$RPM" | grep -q /usr/bin/stamp-suite
           rpm -qlp "$RPM" | grep -q stamp-suite.service
           rpm -qlp "$RPM" | grep -q STAMP-SUITE-MIB.mib
+          rpm -qlp "$RPM" | grep -q /usr/share/doc/stamp-suite/examples/sender.toml
+          rpm -qlp "$RPM" | grep -q /usr/share/doc/stamp-suite/examples/reflector.toml
 
   nix-build:
     name: Nix Build

@@ -61,6 +61,13 @@ A status may carry a qualifier in parentheses, such as `Compliant
 - `` `tests/<file>.rs::<test>` `` names an integration test.
 - A bare `` `<file>.rs` `` names a file.
 
+### Quoted text
+
+The Clause column quotes RFCs and Internet-Drafts. That text is Copyright (c)
+IETF Trust and the persons identified as the document authors, and is
+reproduced under BCP 78 and the IETF Trust's Legal Provisions Relating to IETF
+Documents. Each matrix links the source document it quotes.
+
 ## Known limits
 
 - RFC 8972 session-admission rows are Compliant only with

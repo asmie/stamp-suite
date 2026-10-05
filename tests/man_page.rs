@@ -18,7 +18,11 @@ use stamp_suite::configuration::Configuration;
 const MAN_PAGE: &str = "dist/man/stamp-suite.1";
 
 fn render() -> String {
-    let cmd = Configuration::command().name("stamp-suite");
+    // clap_mangen drops the description of a single-paragraph option marked
+    // `hide_short_help`; clear the flag so the manual keeps every description.
+    let cmd = Configuration::command()
+        .name("stamp-suite")
+        .mut_args(|arg| arg.hide_short_help(false));
     let mut buf = Vec::new();
     clap_mangen::Man::new(cmd)
         .render(&mut buf)
@@ -44,4 +48,11 @@ fn committed_man_page_matches_cli_definition() {
         committed, rendered,
         "{MAN_PAGE} is stale; run STAMP_UPDATE_MAN=1 cargo test --all-features --test man_page"
     );
+}
+
+#[test]
+fn man_page_keeps_advanced_option_descriptions() {
+    let rendered = render();
+    assert!(rendered.contains("Kernel/hardware timestamp handling"));
+    assert!(rendered.contains("Bit pattern used to fill the Extra Padding TLV"));
 }

@@ -289,6 +289,8 @@ src_install() {
 
 	dodoc README.md CHANGELOG.md SECURITY.md \
 		doc/usage.md doc/architecture.md doc/security.md
+	docinto examples
+	dodoc examples/sender.toml examples/reflector.toml
 
 	if use snmp; then
 		insinto /usr/share/snmp/mibs
