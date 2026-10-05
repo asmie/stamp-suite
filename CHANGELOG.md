@@ -9,6 +9,8 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 - RPM notice verification uses `rpm2archive`, avoiding RPM 4.18's
   `rpm2cpio` failure on packages without archive-size metadata.
+- Metrics-accounting tests wait for the initial reflection counter to be
+  exported, avoiding a race between UDP delivery and counter updates.
 
 ### Changed
 

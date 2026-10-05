@@ -66,8 +66,22 @@ impl Reflector {
             }
             assert!(Instant::now() < until);
         }
-        let baseline = value(&server.scrape(), "stamp_reflector_packets_reflected_total");
-        assert!(baseline >= 1.0);
+        // The peer can receive the UDP reply before the transmit task records
+        // it. Wait for the exported counter rather than treating receipt as a
+        // barrier for accounting on another thread.
+        let until = Instant::now() + Duration::from_secs(3);
+        let baseline = loop {
+            let text = server.scrape();
+            let baseline = value(&text, "stamp_reflector_packets_reflected_total");
+            if baseline >= 1.0 {
+                break baseline;
+            }
+            assert!(
+                Instant::now() < until,
+                "initial reflection not counted: {text}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
         (server, baseline)
     }
     fn scrape(&self) -> String {
