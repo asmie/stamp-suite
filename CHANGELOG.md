@@ -5,23 +5,7 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [Unreleased]
 
-### Fixed
-
-- RPM notice verification uses `rpm2archive`, avoiding RPM 4.18's
-  `rpm2cpio` failure on packages without archive-size metadata.
-- Metrics-accounting tests wait for the initial reflection counter to be
-  exported, avoiding a race between UDP delivery and counter updates.
-
-### Changed
-
-- Binary packages, release archives and container images include generated
-  third-party copyright notices and license texts; CI verifies dependency
-  freshness and packaged contents.
-- Short help (`-h`) shows everyday options and two examples; `--help` and the
-  manual keep every option. Sender and reflector TOML examples are included
-  in packages and binary archives. CLI overrides and existing flags are unchanged.
-
-## [1.0.0] - 2026-10-05
+## [1.0.0] - 2026-10-06
 
 First stable release. See [conformance matrices](doc/conformance/README.md)
 for supported profiles and remaining gaps. Experimental extensions can change
@@ -60,6 +44,12 @@ when their drafts or IANA assignments change.
 
 ### Changed
 
+- Binary packages, release archives and container images include generated
+  third-party copyright notices and license texts; CI verifies dependency
+  freshness and packaged contents.
+- Short help (`-h`) shows everyday options and two examples; `--help` and the
+  manual keep every option. Sender and reflector TOML examples are included
+  in packages and binary archives. CLI overrides and existing flags are unchanged.
 - **Type 246 wire format:** reflected IPv6 headers follow
   draft-ietf-ippm-stamp-ext-hdr-15, with eight-octet selectors introduced in
   revision -13. Upgrade both peers together. Type 247 retains four-octet
@@ -91,6 +81,10 @@ when their drafts or IANA assignments change.
 
 ### Fixed
 
+- RPM notice verification uses `rpm2archive`, avoiding RPM 4.18's
+  `rpm2cpio` failure on packages without archive-size metadata.
+- Metrics-accounting tests wait for the initial reflection counter to be
+  exported, avoiding a race between UDP delivery and counter updates.
 - CoS, Location, Timestamp Information, Access Report and Follow-Up wire
   layouts and reflected field handling; malformed padding/TLV parsing,
   integrity coverage, flag ordering and final reply signing.
