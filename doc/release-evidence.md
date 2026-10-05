@@ -34,6 +34,60 @@ python3 scripts/render_openwrt.py --archive stamp-suite-1.0.0.tar.gz --output Ma
 An unpublished or unavailable archive cannot supply a verified digest. The
 recipe generation step avoids bypassing that check with `PKG_HASH:=skip`.
 
+## Third-party notices
+
+`THIRD_PARTY_NOTICES.txt` is generated during packaging for that build's target
+and feature set. It is excluded from Git and source-only archives. The generator
+follows normal dependency edges and excludes development/build dependencies,
+procedural macros and their host-only dependencies. It selects one offered
+license for `OR` expressions and preserves mandatory `AND` requirements. Complete
+license terms are shared across crates; copyright and additional attribution
+remain associated with each crate. This is a runtime dependency inventory, not
+an analysis of which functions survive linker optimization. System libraries
+and separately installed drivers are outside its scope.
+
+CI and release preflight validate all release profiles. After changing a
+dependency or release profile, run:
+
+```sh
+python3 scripts/third_party_notices.py --validate-release-profiles
+```
+
+Add `--offline` when all locked dependencies are already fetched. Generate the
+bundle before calling a packager, then verify the resulting archives:
+
+```sh
+python3 scripts/third_party_notices.py --target x86_64-unknown-linux-gnu
+python3 scripts/check_packaged_notices.py 'target/x86_64-unknown-linux-gnu/debian/*.deb' 'target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm' 'stamp-suite-*.tar.gz'
+```
+
+The archive check compares the embedded text byte for byte with the generated
+bundle, allowing gzip compression by packagers. It fails on missing archives,
+missing notices or altered text. RPM inspection requires `rpm2cpio`; DEB
+inspection requires `dpkg-deb`. Tar and ZIP inspection use Python's standard
+library. These checks run before release artifacts are uploaded.
+
+Debian, RPM, Gentoo, OpenWrt, Nix and container recipes install the bundle under
+`/usr/share/doc/stamp-suite/` (or the platform's documentation prefix). Source
+archives retain the generator and reviewed policy; vendor archives preserve
+upstream files.
+There is no combined bundle to commit. Pass `--features` with the exact build
+features for a custom build (`all` selects all features); without it, the generator
+uses that target's release profile. `--check` compares an existing generated
+bundle against the same target and features.
+For custom builds that disable defaults, also pass `--no-default-features`.
+Offline generation requires the locked metadata dependencies to be fetched or
+vendored, including those needed by Cargo to resolve development targets.
+
+The supplemental Apache-2.0 text in `scripts/licenses/Apache-2.0.txt` comes from
+the [Apache Software Foundation](https://www.apache.org/licenses/LICENSE-2.0.txt).
+It supplies complete terms for included components whose source header refers to
+them. Package-specific rules in `scripts/licenses/notice-policy.json` pin reviewed
+versions and input hashes. They cover nested Unicode/third-party notices and
+`ring`'s architecture-selected native sources, exclude BoringSSL's explicitly
+unlinked test/CI licenses, and include the Prometheus schema only if `protobuf`
+is enabled. Updates to those inputs fail validation until the policy is reviewed.
+
 ## Procedures
 
 ### Authenticated control and a reference SNMP master

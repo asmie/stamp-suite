@@ -149,3 +149,20 @@ only as black-box interoperability peers. Do not copy or translate their
 source, tests or comments into this repository, whether by hand or with a
 code-generation tool. Work from the RFCs and drafts, and use packet captures
 or recorded exchanges with those implementations only as test data.
+
+When changing dependencies or release feature profiles, validate the locked
+runtime graphs and their legal inputs (Python 3.9+ and Cargo are required):
+
+```sh
+python3 scripts/third_party_notices.py --validate-release-profiles
+```
+
+The notice bundle is generated during packaging and excluded from Git and the
+crates.io source package. The generator selects one offered alternative license,
+preserves mandatory combinations and additional attribution, and shares repeated
+terms. Missing license text and changes to inputs in
+`scripts/licenses/notice-policy.json` require review; do not replace missing
+attribution with a license identifier. Keep
+`RELEASE_PROFILES` in the generator aligned with the release workflow's targets
+and features. See [release verification](doc/release-evidence.md#third-party-notices)
+for distribution checks.

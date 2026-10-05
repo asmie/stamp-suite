@@ -1,0 +1,50 @@
+{
+  "atomic-waker": {
+    "sha256": {
+      "LICENSE-THIRD-PARTY": "6226d0632e2e1a80c23597e964da9812ae193c535fe058154afb034e94167aa5"
+    },
+    "version": "1.1.2"
+  },
+  "matchit": {
+    "sha256": {
+      "LICENSE.httprouter": "162ce11ad71338d0a0c6ebaf5c48af72c6ae237b468859d3656fe2d9ed3f3a85"
+    },
+    "version": "0.8.4"
+  },
+  "metrics-exporter-prometheus": {
+    "sha256": {
+      "Cargo.toml": "b9e473b6fd88161c734235fd9b273460fd0e09edaa68a2fa27615189161cf29f",
+      "proto/metrics.proto": "5d0c331fb3ec69ec36138a3b3968c042b96e0023774bb06b97a7a17cf1c5266e"
+    },
+    "version": "0.18.3"
+  },
+  "regex-syntax": {
+    "sha256": {
+      "src/unicode_tables/LICENSE-UNICODE": "74db5baf44a41b1000312c673544b3374e4198af5605c7f9080a402cec42cfa3"
+    },
+    "version": "0.8.11"
+  },
+  "ring": {
+    "sha256": {
+      "LICENSE": "b3d734001a94efff3579978d953391aa7115f877657d25eb54037a43875d078a",
+      "LICENSE-BoringSSL": "005fc765ddc5115da796cca915baa9557abae13ff35e0a47c47affc56f6c414d",
+      "LICENSE-other-bits": "f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f",
+      "build.rs": "9d1928ffb1d8e15766c1c1b9ead73e4b81a21703dd25f7c27b87842a2e6e9cee",
+      "src/polyfill/once_cell/LICENSE-MIT": "6ee2ed6c77710de911761acd5fc1ad1da00f476beb1a7ef27e78c2d1858deafc",
+      "third_party/fiat/LICENSE": "9eacbcb81be660840c714a560a9d65ba07913db98dd4baf969f78dd499fdd60f"
+    },
+    "version": "0.17.14"
+  },
+  "rustls-webpki": {
+    "sha256": {
+      "LICENSE": "5b698ca13897be3afdb7174256fa1574f8c6892b8bea1a66dd6469d3fe27885a"
+    },
+    "version": "0.103.15"
+  },
+  "tracing-core": {
+    "sha256": {
+      "src/spin/LICENSE": "58545fed1565e42d687aecec6897d35c6d37ccb71479a137c0deb2203e125c79"
+    },
+    "version": "0.1.36"
+  }
+}

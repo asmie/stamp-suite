@@ -2,6 +2,9 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: stamp-suite
 Upstream-Contact: Piotr Olszewski <asmie@asmie.pl>
 Source: https://github.com/asmie/stamp-suite
+Comment: The binary includes third-party Rust dependencies. Their upstream
+ copyright notices and license texts are installed in
+ /usr/share/doc/stamp-suite/THIRD_PARTY_NOTICES.txt.
 
 Files: *
 Copyright: 2024-2026 Piotr Olszewski <asmie@asmie.pl>

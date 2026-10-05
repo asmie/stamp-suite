@@ -16,3 +16,6 @@ stamp-suite.iml
 /result-*
 # Python evidence-checker bytecode
 __pycache__/
+
+# Generated for the target/features being packaged.
+/THIRD_PARTY_NOTICES.txt

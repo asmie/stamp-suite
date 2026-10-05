@@ -7,6 +7,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Binary packages, release archives and container images include generated
+  third-party copyright notices and license texts; CI verifies dependency
+  freshness and packaged contents.
 - Short help (`-h`) shows everyday options and two examples; `--help` and the
   manual keep every option. Sender and reflector TOML examples are included
   in packages and binary archives. CLI overrides and existing flags are unchanged.

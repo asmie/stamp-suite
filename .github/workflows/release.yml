@@ -25,6 +25,8 @@ jobs:
       - name: Check version consistency
         shell: bash
         run: python3 scripts/check_release_metadata.py --version "${GITHUB_REF_NAME#v}"
+      - name: Check locked dependency notices
+        run: python3 scripts/third_party_notices.py --validate-release-profiles
       - name: Dry-run crates.io packaging
         # Catches packaging errors (missing files, bad manifest metadata,
         # include/exclude mistakes) before any build/test time is spent.
@@ -103,13 +105,15 @@ jobs:
         with:
           key: release-${{ matrix.target }}
       - name: Install RPM tools
-        run: sudo apt-get update && sudo apt-get install -y rpm
+        run: sudo apt-get update && sudo apt-get install -y rpm rpm2cpio
       - name: Install packagers
         run: |
           cargo install cargo-deb --version 3.8.0 --locked
           cargo install cargo-generate-rpm --version 0.21.0 --locked
       - name: Build release binary
         run: cargo build --locked --release --all-features --target ${{ matrix.target }}
+      - name: Generate target dependency notices
+        run: python3 scripts/third_party_notices.py --target ${{ matrix.target }}
       - name: Build DEB
         run: cargo deb --no-build --target ${{ matrix.target }}
       - name: Build RPM
@@ -121,10 +125,12 @@ jobs:
           stage="stamp-suite-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/stamp-suite" "$stage/"
-          cp LICENSE README.md CHANGELOG.md SECURITY.md "$stage/"
+          cp LICENSE THIRD_PARTY_NOTICES.txt README.md CHANGELOG.md SECURITY.md "$stage/"
           mkdir -p "$stage/examples"
           cp examples/*.toml "$stage/examples/"
           tar -czf "${stage}.tar.gz" "$stage"
+      - name: Verify notices in every binary package
+        run: python3 scripts/check_packaged_notices.py "target/${{ matrix.target }}/debian/*.deb" "target/${{ matrix.target }}/generate-rpm/*.rpm" "stamp-suite-*.tar.gz"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: packages-${{ matrix.target }}
@@ -164,6 +170,8 @@ jobs:
           key: release-${{ matrix.target }}
       - name: Build release binary
         run: cargo build --locked --release --target ${{ matrix.target }} --no-default-features --features ttl-nix,snmp,hwtstamp,control,metrics
+      - name: Generate target dependency notices
+        run: python3 scripts/third_party_notices.py --target ${{ matrix.target }}
       - name: Assemble tarball
         shell: bash
         run: |
@@ -171,10 +179,12 @@ jobs:
           stage="stamp-suite-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/stamp-suite" "$stage/"
-          cp LICENSE README.md CHANGELOG.md SECURITY.md "$stage/"
+          cp LICENSE THIRD_PARTY_NOTICES.txt README.md CHANGELOG.md SECURITY.md "$stage/"
           mkdir -p "$stage/examples"
           cp examples/*.toml "$stage/examples/"
           tar -czf "${stage}.tar.gz" "$stage"
+      - name: Verify packaged notices
+        run: python3 scripts/check_packaged_notices.py "stamp-suite-*.tar.gz"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: tarball-${{ matrix.target }}
@@ -203,6 +213,8 @@ jobs:
           "LIB=C:/npcap-sdk/Lib/x64;$env:LIB" >> $env:GITHUB_ENV
       - name: Build release binary
         run: cargo build --locked --release --target x86_64-pc-windows-msvc --no-default-features --features ttl-pnet,metrics,control
+      - name: Generate target dependency notices
+        run: python scripts/third_party_notices.py --target x86_64-pc-windows-msvc
       - name: Check executable stack reserve
         run: python scripts/check_release_metadata.py --windows-binary target/x86_64-pc-windows-msvc/release/stamp-suite.exe
       - name: Assemble archive
@@ -210,10 +222,12 @@ jobs:
         run: |
           $stage = "stamp-suite-$env:GITHUB_REF_NAME-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory -Path $stage | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/stamp-suite.exe, LICENSE, README.md, CHANGELOG.md, SECURITY.md -Destination $stage
+          Copy-Item target/x86_64-pc-windows-msvc/release/stamp-suite.exe, LICENSE, THIRD_PARTY_NOTICES.txt, README.md, CHANGELOG.md, SECURITY.md -Destination $stage
           New-Item -ItemType Directory -Path "$stage/examples" | Out-Null
           Copy-Item examples/*.toml -Destination "$stage/examples"
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+      - name: Verify packaged notices
+        run: python scripts/check_packaged_notices.py "stamp-suite-*.zip"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: tarball-x86_64-pc-windows-msvc

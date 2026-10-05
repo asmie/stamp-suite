@@ -199,3 +199,5 @@ change.
 Maintained by [Piotr Olszewski](https://github.com/asmie), with
 [contributors](https://github.com/asmie/stamp-suite/contributors).
 Licensed under the [MIT license](LICENSE).
+Binary distributions include generated dependency copyright notices and license
+texts in `THIRD_PARTY_NOTICES.txt`. See [release verification](doc/release-evidence.md#third-party-notices).

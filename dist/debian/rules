@@ -14,6 +14,7 @@ override_dh_auto_configure:
 
 override_dh_auto_build:
 	cargo build --locked --release --all-features --offline
+	python3 scripts/third_party_notices.py --features all --offline
 
 override_dh_auto_test:
 	cargo test --locked --all-features --offline

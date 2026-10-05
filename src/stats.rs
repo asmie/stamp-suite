@@ -274,6 +274,9 @@ impl RttCollector {
         self.sum_ns += rtt as u128;
         // Welford population variance, centered on the first integer sample before
         // conversion to f64. This preserves small spreads on a large baseline.
+        // Algorithm: B. P. Welford (1962), "Note on a Method for
+        // Calculating Corrected Sums of Squares and Products",
+        // https://doi.org/10.1080/00401706.1962.10490022.
         let origin = *self.variance_origin.get_or_insert(rtt);
         let centered = (i128::from(rtt) - i128::from(origin)) as f64;
         let delta = centered - self.centered_mean_ns;

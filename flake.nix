@@ -30,6 +30,12 @@
             cargoHash = cargoDepsHash;
 
             buildFeatures = allFeatures;
+            nativeBuildInputs = [ pkgs.python3 ];
+            postBuild = ''
+              python3 scripts/third_party_notices.py --offline \
+                --target ${pkgs.stdenv.hostPlatform.rust.rustcTarget} \
+                --features ${pkgs.lib.concatStringsSep "," allFeatures}
+            '';
             # Honour --all-features for the cargo test phase too so the
             # metrics / snmp feature-gated tests run alongside the rest.
             cargoTestFlags = [ "--all-features" ];
@@ -38,7 +44,7 @@
               install -Dm644 dist/man/stamp-suite.1 $out/share/man/man1/stamp-suite.1
               install -Dm644 mibs/STAMP-SUITE-MIB.mib $out/share/snmp/mibs/STAMP-SUITE-MIB.mib
               mkdir -p $out/share/doc/stamp-suite
-              cp README.md CHANGELOG.md SECURITY.md LICENSE doc/usage.md doc/architecture.md doc/security.md $out/share/doc/stamp-suite/
+              cp README.md CHANGELOG.md SECURITY.md LICENSE THIRD_PARTY_NOTICES.txt doc/usage.md doc/architecture.md doc/security.md $out/share/doc/stamp-suite/
               mkdir -p $out/share/doc/stamp-suite/examples
               cp examples/*.toml $out/share/doc/stamp-suite/examples/
             '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''

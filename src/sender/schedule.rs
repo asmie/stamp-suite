@@ -43,6 +43,8 @@ impl Schedule {
 
     /// Uniform in (0, 1] from xorshift64*. The multiplier is the standard
     /// xorshift64* constant; the top 53 bits fill an f64 mantissa exactly.
+    /// Algorithm: Vigna, "An experimental exploration of Marsaglia's xorshift
+    /// generators, scrambled", Figure 10: https://vigna.di.unimi.it/ftp/papers/xorshift.pdf.
     fn uniform(&mut self) -> f64 {
         self.rng ^= self.rng >> 12;
         self.rng ^= self.rng << 25;

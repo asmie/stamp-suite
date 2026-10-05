@@ -24,7 +24,7 @@ description = "Simple Two-Way Active Measurement Protocol (STAMP)"
 readme = "README.md"
 
 # Local test/review evidence is separate from the crates.io source package.
-exclude = ["doc/interop/**", "doc/review/**", "proptest-regressions/**"]
+exclude = ["doc/interop/**", "doc/review/**", "proptest-regressions/**", "THIRD_PARTY_NOTICES.txt"]
 
 [features]
 default = []
@@ -133,6 +133,7 @@ assets = [
     ["README.md",                                 "usr/share/doc/stamp-suite/README.md",       "644"],
     ["CHANGELOG.md",                              "usr/share/doc/stamp-suite/CHANGELOG.md",    "644"],
     ["SECURITY.md",                               "usr/share/doc/stamp-suite/SECURITY.md",     "644"],
+    ["THIRD_PARTY_NOTICES.txt",                   "usr/share/doc/stamp-suite/THIRD_PARTY_NOTICES.txt", "644"],
     ["doc/usage.md",                              "usr/share/doc/stamp-suite/usage.md",        "644"],
     ["doc/architecture.md",                       "usr/share/doc/stamp-suite/architecture.md", "644"],
     ["doc/security.md",                           "usr/share/doc/stamp-suite/security.md",     "644"],
@@ -156,6 +157,7 @@ assets = [
     { source = "dist/man/stamp-suite.1",           dest = "/usr/share/man/man1/stamp-suite.1",            mode = "644" },
     { source = "mibs/STAMP-SUITE-MIB.mib",         dest = "/usr/share/snmp/mibs/STAMP-SUITE-MIB.mib",     mode = "644" },
     { source = "LICENSE",                          dest = "/usr/share/doc/stamp-suite/LICENSE",           mode = "644", doc = true },
+    { source = "THIRD_PARTY_NOTICES.txt",          dest = "/usr/share/doc/stamp-suite/THIRD_PARTY_NOTICES.txt", mode = "644", doc = true },
     { source = "README.md",                        dest = "/usr/share/doc/stamp-suite/README.md",         mode = "644", doc = true },
     { source = "CHANGELOG.md",                     dest = "/usr/share/doc/stamp-suite/CHANGELOG.md",      mode = "644", doc = true },
     { source = "SECURITY.md",                      dest = "/usr/share/doc/stamp-suite/SECURITY.md",       mode = "644", doc = true },

@@ -4,6 +4,7 @@ mibs/STAMP-SUITE-MIB.mib usr/share/snmp/mibs
 README.md usr/share/doc/stamp-suite
 CHANGELOG.md usr/share/doc/stamp-suite
 SECURITY.md usr/share/doc/stamp-suite
+THIRD_PARTY_NOTICES.txt usr/share/doc/stamp-suite
 doc/usage.md usr/share/doc/stamp-suite
 doc/architecture.md usr/share/doc/stamp-suite
 doc/security.md usr/share/doc/stamp-suite

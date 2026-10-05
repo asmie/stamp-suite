@@ -6,6 +6,7 @@
 #   pycargoebuild -i stamp-suite-<ver>.ebuild <path to checkout>
 
 EAPI=8
+PYTHON_COMPAT=( python3_{11..14} )
 
 CRATES="
 	aho-corasick@1.1.5
@@ -237,7 +238,7 @@ CRATES="
 # Matches Cargo.toml; ring/rustls need a C toolchain, no system libraries.
 RUST_MIN_VER="1.86.0"
 
-inherit cargo systemd
+inherit cargo python-any-r1 systemd
 
 DESCRIPTION="Simple Two-Way Active Measurement Protocol (RFC 8762/8972) sender and reflector"
 HOMEPAGE="https://github.com/asmie/stamp-suite"
@@ -260,6 +261,7 @@ RDEPEND="
 	acct-group/stamp
 	acct-user/stamp
 "
+BDEPEND="${PYTHON_DEPS}"
 
 # Rust binaries: no LDFLAGS/CFLAGS to check.
 QA_FLAGS_IGNORED="usr/bin/${PN}"
@@ -276,6 +278,17 @@ src_configure() {
 		$(usev snmp)
 	)
 	cargo_src_configure --no-default-features
+	# cargo_src_configure rewrites myfeatures; read its final argument array.
+	local feature_args=() index
+	for (( index=0; index<${#ECARGO_ARGS[@]}; index++ )); do
+		if [[ ${ECARGO_ARGS[index]} == --features ]]; then
+			feature_args+=( "${ECARGO_ARGS[index+1]}" )
+		fi
+	done
+	local notice_features
+	printf -v notice_features '%s,' "${feature_args[@]}"
+	cargo_env "${PYTHON}" scripts/third_party_notices.py --offline \
+		--target "$(rust_abi)" --no-default-features --features "${notice_features%,}" || die
 }
 
 src_install() {
@@ -287,7 +300,7 @@ src_install() {
 	newinitd "${FILESDIR}"/${PN}.initd ${PN}
 	newconfd "${FILESDIR}"/${PN}.confd ${PN}
 
-	dodoc README.md CHANGELOG.md SECURITY.md \
+	dodoc README.md CHANGELOG.md SECURITY.md THIRD_PARTY_NOTICES.txt \
 		doc/usage.md doc/architecture.md doc/security.md
 	docinto examples
 	dodoc examples/sender.toml examples/reflector.toml

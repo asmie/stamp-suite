@@ -6,7 +6,7 @@ WORKDIR /usr/src/stamp-suite
 
 # nix build dependency.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
+    pkg-config python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Container features: nix, monitoring, timestamping and the control API.
@@ -25,10 +25,13 @@ RUN mkdir -p src benches && \
     rm -rf src
 
 COPY src ./src
+COPY scripts/third_party_notices.py ./scripts/
+COPY scripts/licenses ./scripts/licenses
 
 # Touch the entry points so cargo rebuilds the real code (not the cached stubs)
 RUN touch src/main.rs src/lib.rs && \
-    cargo build --locked --release --features "$FEATURES"
+    cargo build --locked --release --features "$FEATURES" && \
+    python3 scripts/third_party_notices.py --features "$FEATURES"
 
 # Same Debian release preserves glibc compatibility.
 FROM debian:bookworm-slim
@@ -38,6 +41,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/src/stamp-suite/target/release/stamp-suite /usr/local/bin/stamp-suite
+COPY LICENSE /usr/share/doc/stamp-suite/
+COPY --from=builder /usr/src/stamp-suite/THIRD_PARTY_NOTICES.txt /usr/share/doc/stamp-suite/
 
 RUN setcap cap_net_bind_service=+ep /usr/local/bin/stamp-suite && \
     useradd --system --no-create-home --shell /usr/sbin/nologin stamp

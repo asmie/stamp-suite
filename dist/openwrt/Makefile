@@ -17,8 +17,8 @@ PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=Piotr Olszewski <asmie@asmie.pl>
 
 # Requires a packages feed with Rust 1.86 or newer.
-PKG_BUILD_DEPENDS:=rust/host
-CARGO_FEATURES:=ttl-nix
+PKG_BUILD_DEPENDS:=rust/host python3/host
+RUST_PKG_FEATURES:=ttl-nix
 
 include $(INCLUDE_DIR)/package.mk
 include ../../lang/rust/rust-package.mk
@@ -39,11 +39,19 @@ define Package/stamp-suite/description
   reflector.
 endef
 
+define Build/Compile
+	$(call Build/Compile/Cargo)
+	cd $(PKG_BUILD_DIR) && $(CARGO_PKG_VARS) python3 scripts/third_party_notices.py \
+		--target $(RUSTC_TARGET_ARCH) --features "$(RUST_PKG_FEATURES)"
+endef
+
 define Package/stamp-suite/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/bin/stamp-suite $(1)/usr/bin/
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/stamp-suite.init $(1)/etc/init.d/stamp-suite
+	$(INSTALL_DIR) $(1)/usr/share/doc/stamp-suite
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/THIRD_PARTY_NOTICES.txt $(1)/usr/share/doc/stamp-suite/
 endef
 
 $(eval $(call RustBinPackage,stamp-suite))
