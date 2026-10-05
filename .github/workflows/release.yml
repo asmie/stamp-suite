@@ -105,7 +105,7 @@ jobs:
         with:
           key: release-${{ matrix.target }}
       - name: Install RPM tools
-        run: sudo apt-get update && sudo apt-get install -y rpm rpm2cpio
+        run: sudo apt-get update && sudo apt-get install -y rpm
       - name: Install packagers
         run: |
           cargo install cargo-deb --version 3.8.0 --locked

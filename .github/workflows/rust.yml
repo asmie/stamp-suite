@@ -373,7 +373,7 @@ jobs:
           key: package
       - name: Install packaging tools
         run: |
-          sudo apt-get update && sudo apt-get install -y rpm rpm2cpio
+          sudo apt-get update && sudo apt-get install -y rpm
           cargo install cargo-deb --version 3.8.0 --locked
           cargo install cargo-generate-rpm --version 0.21.0 --locked
       # One release build serves both packages; the DEB metadata enables

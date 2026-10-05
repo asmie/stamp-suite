@@ -37,15 +37,6 @@ def package(directory, name="dependency", version="1.0.0", license="MIT"):
             "targets": [{"kind": ["lib"]}], "enabled_features": []}
 
 
-def cpio_member(name, content):
-    encoded = name.encode() + b"\0"
-    fields = [0, 0o100644, 0, 0, 1, 0, len(content), 0, 0, 0, 0, len(encoded), 0]
-    result = b"070701" + b"".join(f"{value:08x}".encode() for value in fields) + encoded
-    result += b"\0" * (-len(result) % 4)
-    result += content
-    return result + b"\0" * (-len(result) % 4)
-
-
 class NoticeGenerationTests(unittest.TestCase):
     terms = "Permission is hereby granted, free of charge.\nTHE SOFTWARE IS PROVIDED AS IS."
 
@@ -215,7 +206,7 @@ class PackagedNoticeTests(unittest.TestCase):
                 for name, content in members:
                     archive.writestr(name, content)
         else:
-            with tarfile.open(path, "w:gz") as archive:
+            with tarfile.open(path, "w:gz" if path.suffix == ".gz" else "w") as archive:
                 for name, content in members:
                     member = tarfile.TarInfo(name)
                     member.size = len(content)
@@ -254,17 +245,51 @@ class PackagedNoticeTests(unittest.TestCase):
                 self.assertEqual(packaged.check_archive(Path("package.deb"), self.expected), 1)
             self.assertEqual(command.call_args.args[0], ["dpkg-deb", "--fsys-tarfile", "package.deb"])
 
-    def test_rpm_cpio_payload_and_truncation(self):
-        name = "./usr/share/doc/stamp-suite/" + packaged.NOTICE
-        payload = cpio_member("./usr/bin/stamp-suite", b"binary")
-        payload += cpio_member(name, self.expected) + cpio_member("TRAILER!!!", b"")
-        self.assertEqual(list(packaged.cpio_files(payload))[1], (name, self.expected))
-        result = subprocess.CompletedProcess([], 0, stdout=payload)
-        with patch.object(packaged.subprocess, "run", return_value=result):
-            self.assertEqual(packaged.check_archive(Path("package.rpm"), self.expected), 1)
-        for damaged in (payload[:100], payload[:115], payload[:250], payload[:-20], b"bad format"):
-            with self.assertRaises(ValueError):
-                list(packaged.cpio_files(damaged))
+    def test_rpm_tar_payload_rejects_missing_stale_and_conflicting_notices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rpm = root / "package.rpm"
+            rpm.write_bytes(b"RPM input")
+            payload = root / "payload.tar"
+            name = "./usr/share/doc/stamp-suite/" + packaged.NOTICE
+            cases = [
+                ([(name, self.expected)], None),
+                ([(name + ".gz", gzip.compress(self.expected))], None),
+                ([("./usr/bin/stamp-suite", b"binary")], "missing"),
+                ([(name, b"stale")], "stale or altered"),
+                ([(name, self.expected), ("another/" + name, b"stale")], "stale or altered"),
+            ]
+            for members, error in cases:
+                with self.subTest(members=[name for name, _ in members]):
+                    self.write_archive(payload, members)
+                    result = subprocess.CompletedProcess([], 0, stdout=payload.read_bytes())
+
+                    def convert(args, *, stdin, check, stdout):
+                        self.assertEqual(args, ["rpm2archive", "-n", "-"])
+                        self.assertEqual(stdin.read(), rpm.read_bytes())
+                        self.assertTrue(check)
+                        self.assertEqual(stdout, subprocess.PIPE)
+                        return result
+
+                    with patch.object(packaged.subprocess, "run", side_effect=convert):
+                        if error:
+                            with self.assertRaisesRegex(ValueError, error):
+                                packaged.check_archive(rpm, self.expected)
+                        else:
+                            self.assertEqual(packaged.check_archive(rpm, self.expected), 1)
+
+    def test_rpm_conversion_failure_and_invalid_tar_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rpm = Path(directory) / "package.rpm"
+            rpm.touch()
+            with patch.object(packaged.subprocess, "run",
+                              side_effect=subprocess.CalledProcessError(1, ["rpm2archive"])):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    packaged.check_archive(rpm, self.expected)
+            result = subprocess.CompletedProcess([], 0, stdout=b"invalid tar")
+            with patch.object(packaged.subprocess, "run", return_value=result):
+                with self.assertRaises(tarfile.TarError):
+                    packaged.check_archive(rpm, self.expected)
 
     def test_unmatched_archive_pattern_is_an_error(self):
         with tempfile.TemporaryDirectory() as directory:

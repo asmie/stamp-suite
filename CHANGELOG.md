@@ -5,6 +5,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- RPM notice verification uses `rpm2archive`, avoiding RPM 4.18's
+  `rpm2cpio` failure on packages without archive-size metadata.
+
 ### Changed
 
 - Binary packages, release archives and container images include generated

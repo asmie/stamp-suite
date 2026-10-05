@@ -16,31 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 NOTICE = "THIRD_PARTY_NOTICES.txt"
 
 
-def cpio_files(data):
-    """Read the newc format emitted by rpm2cpio without extracting files."""
-    offset = 0
-    while offset < len(data):
-        header = data[offset:offset + 110]
-        if len(header) != 110 or header[:6] not in (b"070701", b"070702"):
-            raise ValueError("invalid RPM cpio header")
-        size = int(header[54:62], 16)
-        name_size = int(header[94:102], 16)
-        start = offset + 110
-        end = start + name_size
-        if not name_size or end > len(data) or data[end - 1] != 0:
-            raise ValueError("invalid RPM cpio filename")
-        name = data[start:end - 1].decode("utf-8")
-        start = (end + 3) & ~3
-        end = start + size
-        if end > len(data):
-            raise ValueError("truncated RPM cpio member")
-        if name == "TRAILER!!!":
-            return
-        yield name, data[start:end]
-        offset = (end + 3) & ~3
-    raise ValueError("missing RPM cpio trailer")
-
-
 def tar_notices(fileobj):
     with tarfile.open(fileobj=fileobj, mode="r:*") as archive:
         for member in archive.getmembers():
@@ -59,9 +34,14 @@ def packaged_notices(path):
                               stdout=subprocess.PIPE).stdout
         yield from tar_notices(io.BytesIO(data))
     elif path.suffix == ".rpm":
-        data = subprocess.run(["rpm2cpio", str(path)], check=True, stdout=subprocess.PIPE).stdout
-        yield from ((name, content) for name, content in cpio_files(data)
-                    if Path(name).name in (NOTICE, NOTICE + ".gz"))
+        # RPM 4.18's rpm2cpio exits with an error when LONGARCHIVESIZE is
+        # absent, even after decoding a complete payload. rpm2archive does
+        # not require that tag. Stdin selects stdout output instead of a
+        # sidecar archive; -n produces an uncompressed tar without extraction.
+        with path.open("rb") as stream:
+            data = subprocess.run(["rpm2archive", "-n", "-"], stdin=stream,
+                                  check=True, stdout=subprocess.PIPE).stdout
+        yield from tar_notices(io.BytesIO(data))
     else:
         with path.open("rb") as stream:
             yield from tar_notices(stream)

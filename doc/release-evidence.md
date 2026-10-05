@@ -63,7 +63,9 @@ python3 scripts/check_packaged_notices.py 'target/x86_64-unknown-linux-gnu/debia
 
 The archive check compares the embedded text byte for byte with the generated
 bundle, allowing gzip compression by packagers. It fails on missing archives,
-missing notices or altered text. RPM inspection requires `rpm2cpio`; DEB
+missing notices or altered text. RPM inspection requires `rpm2archive` (from
+the `rpm` package), which handles packages without the archive-size tag that
+RPM 4.18's `rpm2cpio` requires; DEB
 inspection requires `dpkg-deb`. Tar and ZIP inspection use Python's standard
 library. These checks run before release artifacts are uploaded.
 
