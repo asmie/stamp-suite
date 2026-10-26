@@ -138,6 +138,12 @@ def main():
             for result in results:
                 report["documents"].append(result)
                 print(result["name"], result["status"], flush=True)
+                for problem in result.get("problems", []):
+                    print("  review:", problem, flush=True)
+                for warning in result.get("warnings", []):
+                    print("  warning:", warning, flush=True)
+                if result.get("error"):
+                    print("  error:", result["error"], flush=True)
         report["completed"] = all(r["status"] != "error" for r in report["documents"])
         report["manifest_sha256"] = hashlib.sha256(MANIFEST.read_bytes()).hexdigest()
     except (OSError, ValueError, TypeError, KeyError) as error:

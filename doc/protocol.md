@@ -130,7 +130,7 @@ stamp-suite reflector behaves that way with `--tlv-mode ignore`.
 | RFC 9503 | Destination Node Address and Return Path TLVs, including optional Linux SRv6 return paths | [rfc9503](conformance/rfc9503.md) |
 | RFC 9534 | Micro-session ID TLV (numeric IDs; physical LAG member selection is unsupported) | [rfc9534](conformance/rfc9534.md) |
 | RFC 10052 | Reflected Test Packet Control TLV (Type 12): several or larger replies per test packet | [draft-asymmetrical-pkts](conformance/draft-asymmetrical-pkts.md) |
-| draft-ietf-ippm-stamp-ext-hdr-15 | Reflected IPv6 extension headers (Type 246) and fixed headers (Type 247) | [draft-stamp-ext-hdr](conformance/draft-stamp-ext-hdr.md) |
+| draft-ietf-ippm-stamp-ext-hdr-25 | Reflected IPv6 extension headers (Type 246) and fixed headers (Type 247) | [draft-stamp-ext-hdr](conformance/draft-stamp-ext-hdr.md) |
 | draft-ietf-ippm-stamp-cos-ecn-01 | ECN reporting in the Class of Service TLV and a sender congestion response | [draft-stamp-cos-ecn](conformance/draft-stamp-cos-ecn.md) |
 | draft-gandhi-ippm-stamp-ber-07 | Residual bit error rate in the padding of delivered packets (Types 240 to 242) | [draft-stamp-ber](conformance/draft-stamp-ber.md) |
 

@@ -146,7 +146,7 @@ pub async fn run_receiver(
     }
 
     // IPv6 extension headers arrive as ancillary data, in wire order, for
-    // Type 246 reflection (draft-ietf-ippm-stamp-ext-hdr-15 §4.2). Without
+    // Type 246 reflection (draft-ietf-ippm-stamp-ext-hdr-25 §4.2). Without
     // them those requests get the C flag.
     #[cfg(target_os = "linux")]
     if is_ipv6 {
@@ -562,7 +562,7 @@ pub async fn run_receiver(
                         ingress_ifindex,
                         src_mac: None, // a UDP socket does not see the link layer
                         // A UDP socket cannot read fixed IP headers, so Type 247
-                        // requests get C (draft-ietf-ippm-stamp-ext-hdr-15 §6.1).
+                        // requests get C (draft-ietf-ippm-stamp-ext-hdr-25 §6.1).
                         // Linux supplies IPv6 extension headers for Type 246;
                         // other systems supply none, so those requests get C too.
                         #[cfg(target_os = "linux")]

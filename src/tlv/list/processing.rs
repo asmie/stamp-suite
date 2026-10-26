@@ -777,9 +777,9 @@ impl TlvList {
     }
 
     #[cfg(test)]
-    /// Reflect captured headers into Types 246/247 (ext-hdr-15 §§4.1–4.2, 6.1–6.2).
-    /// Match by length and nonzero Requested prefix, then copy the tail while
-    /// preserving Requested (8 bytes for 246; 4 for 247). Consume each match.
+    /// Reflect captured headers into Types 246/247 (ext-hdr-25 §§4.1–4.2, 6.1–6.2).
+    /// Match by length and nonzero Requested octets (zero is a wildcard), then
+    /// copy the tail while preserving nonzero Requested. Consume unique matches.
     /// No capture or match sets C without changing the value.
     /// `captured_fixed` is one IP header; use `process_reflected_headers_multi`
     /// for stacked headers. `captured_ext_headers` holds concatenated IPv6
@@ -800,24 +800,43 @@ impl TlvList {
     }
 
     /// Reflect multiple fixed IP headers in outer-to-inner order
-    /// (ext-hdr-15 §6.2). None means the backend cannot capture IP headers.
+    /// (ext-hdr-25 §6.2). None means the backend cannot capture IP headers.
     /// Each Type-247 TLV consumes the first matching unconsumed header:
-    /// zero Requested matches by length; nonzero also matches its prefix.
+    /// zero Requested matches by length; nonzero requires a unique wildcard match.
     /// Repeated same-length requests therefore select successive headers.
     pub fn process_reflected_headers_multi(
         &mut self,
         captured_fixed: Option<&[Vec<u8>]>,
         captured_ext_headers: Option<&[u8]>,
     ) {
+        self.process_reflected_headers_with_policy(
+            captured_fixed,
+            captured_ext_headers,
+            true,
+            true,
+        );
+    }
+
+    /// Apply the local reflection policy before accessing captured header data
+    /// (ext-hdr-25 §§4.2, 6.2, 9). Refusal preserves the request and sets C.
+    pub fn process_reflected_headers_with_policy(
+        &mut self,
+        captured_fixed: Option<&[Vec<u8>]>,
+        captured_ext_headers: Option<&[u8]>,
+        allow_fixed: bool,
+        allow_ext: bool,
+    ) {
         Self::apply_reflected_headers(
             self.non_hmac_tlvs_mut(),
             captured_fixed,
             captured_ext_headers,
+            allow_fixed,
+            allow_ext,
         );
     }
 
     /// Remove Types 246/247 until `base_len + self.wire_size() <= max_reply_bytes`
-    /// (ext-hdr-15 §§4.2, 6.2). Remove 246 first to preserve §6.3 ordering;
+    /// (ext-hdr-25 §7.2). Remove complete header TLVs from the end;
     /// leave other types unchanged and repair wire indices. Return the count removed.
     /// In-place reflection does not grow these TLVs, but the reply MTU may differ
     /// from the request's. A zero limit disables trimming.
@@ -851,6 +870,8 @@ impl TlvList {
         tlvs: &mut [RawTlv],
         captured_fixed: Option<&[Vec<u8>]>,
         captured_ext_headers: Option<&[u8]>,
+        allow_fixed: bool,
+        allow_ext: bool,
     ) {
         let is_header_tlv = |tlv: &RawTlv| {
             matches!(
@@ -862,7 +883,7 @@ impl TlvList {
         if !tlvs.iter().any(is_header_tlv) {
             return;
         }
-        // ext-hdr-15 §6.3 requires Type 247 before Type 246.
+        // ext-hdr-25 §7.1 requires Type 247 before Type 246.
         // If any 247 follows a 246, set C on all header TLVs and copy no data.
         let mut seen_ext = false;
         let mut out_of_order = false;
@@ -904,6 +925,14 @@ impl TlvList {
         let mut consumed_fixed: Vec<bool> = Vec::new();
         for tlv in tlvs.iter_mut().filter(|tlv| tlv.is_processable()) {
             match tlv.tlv_type {
+                TlvType::ReflectedFixedHdr if !allow_fixed => {
+                    log::debug!("Header reflection refused by local policy: fixed header");
+                    tlv.set_conformant_reflected();
+                }
+                TlvType::ReflectedIpv6ExtHdr if !allow_ext => {
+                    log::debug!("Header reflection refused by local policy: IPv6 extension header");
+                    tlv.set_conformant_reflected();
+                }
                 TlvType::ReflectedFixedHdr => {
                     Self::apply_reflected_header::<4>(
                         tlv,
@@ -928,9 +957,9 @@ impl TlvList {
     }
 
     /// Match a Type-247 (N=4) or Type-246 (N=8) request to the first unconsumed
-    /// capture of the same length (ext-hdr-15 §§4.2, 6.2). Nonzero Requested
-    /// also requires a prefix match. Consume the match so repeated requests
-    /// select successive captures. No match sets C.
+    /// capture of the same length (ext-hdr-25 §§4.2, 6.2). Nonzero Requested
+    /// requires a unique match of its nonzero octets. Consume only a successful
+    /// match; absent or ambiguous matches set C without copying.
     fn apply_reflected_header<const N: usize>(
         tlv: &mut RawTlv,
         records: Option<&[&[u8]]>,
@@ -947,11 +976,26 @@ impl TlvList {
         }
         let len = tlv.value.len();
         let selector = Self::reflected_hdr_selector::<N>(&tlv.value);
-        let found = records.iter().enumerate().position(|(i, header)| {
-            !consumed[i]
+        let mut matches = records.iter().enumerate().filter(|(i, header)| {
+            !consumed[*i]
                 && header.len() == len
-                && selector.is_none_or(|s| header.get(..N) == Some(&s[..]))
+                && header.len() >= N
+                && selector.is_none_or(|s| {
+                    s.iter()
+                        .zip(header.iter())
+                        .all(|(&want, &actual)| want == 0 || want == actual)
+                })
         });
+        let found = matches.next().map(|(i, _)| i);
+        // Nonzero selectors must identify exactly one unmatched header. An
+        // ambiguous request consumes nothing, so later requests can still match.
+        if selector.is_some() && found.is_some() && matches.next().is_some() {
+            log::debug!(
+                "Header reflection selector is ambiguous; returning C without copying data"
+            );
+            tlv.set_conformant_reflected();
+            return;
+        }
         match found {
             Some(i) => {
                 consumed[i] = true;
@@ -968,15 +1012,15 @@ impl TlvList {
         }
     }
 
-    /// Copies the whole matched header into the TLV value. A nonzero N-octet
-    /// Requested selector already equals the header's first N octets; a zero
-    /// one must be filled with them (ext-hdr-15 §4.2 and §6.2 rule 1). N is
-    /// eight for Type 246 and four for Type 247.
+    /// Preserve a nonzero Requested selector (including zero wildcards); fill
+    /// an all-zero Requested field from the selected header. Always copy the
+    /// header tail into Received (ext-hdr-25 §§4.2, 6.2).
     fn copy_reflected<const N: usize>(value: &mut [u8], header: &[u8]) {
         debug_assert_eq!(value.len(), header.len());
-        debug_assert!(Self::reflected_hdr_selector::<N>(value)
-            .is_none_or(|s| header.get(..N) == Some(&s[..])));
-        value.copy_from_slice(header);
+        if Self::reflected_hdr_selector::<N>(value).is_none() {
+            value[..N].copy_from_slice(&header[..N]);
+        }
+        value[N..].copy_from_slice(&header[N..]);
     }
 
     /// Return a nonzero N-octet Requested selector. All-zero selectors use
@@ -987,7 +1031,7 @@ impl TlvList {
     }
 
     /// Sets C on every IPv6 Extension Header Control sub-TLV in Type 12
-    /// (draft-ietf-ippm-stamp-ext-hdr-15 §5.1).
+    /// (draft-ietf-ippm-stamp-ext-hdr-25 §5.1).
     /// Used for unsupported reply-header attachment and duplicate requests;
     /// the latter require C on every offending copy.
     pub fn set_ipv6_ext_hdr_control_c_flag(&mut self) {
@@ -1009,7 +1053,11 @@ impl TlvList {
             while let Some(sub) = TlvSpan::at(value, offset) {
                 if sub.tlv_type.to_byte() == REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL {
                     // Sub-TLV flags follow the STAMP TLV flag layout.
-                    value[offset] |= TlvFlags::C;
+                    value[offset] |= if sub.end() == offset + TLV_HEADER_SIZE {
+                        TlvFlags::C
+                    } else {
+                        TlvFlags::M
+                    };
                 }
                 offset = sub.end();
             }
@@ -1134,7 +1182,7 @@ fn log_reflected_hdr_unsupported_once() {
         log::warn!(
             "Reflected Fixed/IPv6 Ext Header TLV (Type 247/246) requested, but \
              this backend cannot see those headers; echoing with the C flag \
-             (Conformance) per draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1. \
+             (Conformance) per draft-ietf-ippm-stamp-ext-hdr-25 §4.1/§6.1. \
              The pnet backend sees both; the nix backend sees IPv6 extension \
              headers on Linux only."
         );
@@ -1143,7 +1191,7 @@ fn log_reflected_hdr_unsupported_once() {
 
 /// Emits a one-time warning when a Reflected Fixed or IPv6 Extension Header
 /// Data TLV (Type 247/246) has a Length that matches no captured header (e.g.
-/// 20 bytes requested for an IPv6 packet). Per draft-ietf-ippm-stamp-ext-hdr-15
+/// 20 bytes requested for an IPv6 packet). Per draft-ietf-ippm-stamp-ext-hdr-25
 /// §4.1/§6.1 the reflector sets the C flag in that case rather than reflecting
 /// a mismatched header.
 fn log_reflected_hdr_length_mismatch_once() {
@@ -1154,14 +1202,14 @@ fn log_reflected_hdr_length_mismatch_once() {
             "Reflected Fixed/IPv6 Ext Header TLV (Type 247/246) length matches no \
              received header (for a fixed header, perhaps the wrong address \
              family); echoing with the C flag (Conformance) per \
-             draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1."
+             draft-ietf-ippm-stamp-ext-hdr-25 §4.1/§6.1."
         );
     }
 }
 
 /// Emits a one-time warning when a Reflected Fixed/IPv6 Ext Header Data TLV
 /// (Type 246/247) carries a non-zero Requested field that matches none of the
-/// captured header(s). Per draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1 the
+/// captured header(s). Per draft-ietf-ippm-stamp-ext-hdr-25 §4.1/§6.1 the
 /// reflector then returns the TLV with the C flag (Conformance) set.
 fn log_reflected_hdr_selector_no_match_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1170,7 +1218,7 @@ fn log_reflected_hdr_selector_no_match_once() {
         log::warn!(
             "Reflected Fixed/IPv6 Ext Header TLV (Type 246/247) Requested field matched \
              no captured header; echoing with the C flag (Conformance) per \
-             draft-ietf-ippm-stamp-ext-hdr-15 §4.1/§6.1."
+             draft-ietf-ippm-stamp-ext-hdr-25 §4.1/§6.1."
         );
     }
 }

@@ -1,4 +1,4 @@
-//! Sender session state notifications (draft-ietf-ippm-stamp-ext-hdr-15 §9.2).
+//! Sender session state notifications (draft-ietf-ippm-stamp-ext-hdr-25 §9.2).
 use std::{
     collections::{HashSet, VecDeque},
     time::{Duration, Instant},
@@ -84,7 +84,7 @@ impl Monitor {
         while self.probes.front().is_some_and(|p| p.deadline <= now) {
             let probe = self.probes.pop_front().unwrap();
             self.received.remove(&probe.seq);
-            if self.summary.state != State::Idle {
+            if self.transmitting {
                 self.summary.consecutive_losses = self.summary.consecutive_losses.saturating_add(1);
                 if self.summary.consecutive_losses >= u32::from(self.summary.loss_threshold) {
                     self.transition(State::Failed);
@@ -144,7 +144,7 @@ mod tests {
         let mut m = Monitor::new(2, timeout);
         m.sent(1, now);
         m.advance(now + timeout);
-        assert_eq!(m.summary.state, State::Idle); // No established connectivity yet.
+        assert_eq!(m.summary.state, State::Idle); // Below the configured loss threshold.
         m.sent(2, now + timeout);
         m.reply(2, now + timeout);
         m.sent(3, now + timeout);
@@ -159,6 +159,29 @@ mod tests {
         assert_eq!(m.summary.state, State::Idle);
         assert_eq!(m.summary.idle_notifications, 1);
     }
+    #[test]
+    fn failure_before_first_reply_and_recovery() {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(1);
+        let mut m = Monitor::new(2, timeout);
+        m.sent(1, now);
+        m.advance(now + timeout);
+        assert_eq!(m.summary.failed_notifications, 0);
+        m.sent(2, now + timeout);
+        m.advance(now + timeout * 2);
+        assert_eq!(m.summary.state, State::Failed);
+        assert_eq!(m.summary.failed_notifications, 1);
+        m.sent(3, now + timeout * 2);
+        m.advance(now + timeout * 3);
+        assert_eq!(m.summary.failed_notifications, 1);
+        m.reply(3, now + timeout * 3);
+        assert_eq!(m.summary.state, State::Active);
+        assert_eq!(m.summary.active_notifications, 1);
+        m.idle();
+        assert_eq!(m.summary.state, State::Idle);
+        assert!(m.deadline().is_none());
+    }
+
     #[test]
     fn successful_probe_separates_losses_even_when_reordered() {
         let now = Instant::now();

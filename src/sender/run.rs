@@ -241,7 +241,7 @@ impl SenderRun {
             }
         }
 
-        // draft-ietf-ippm-stamp-ext-hdr-15 §4.2: attach the real IPv6 extension
+        // draft-ietf-ippm-stamp-ext-hdr-25 §4.2: attach the real IPv6 extension
         // headers requested via --attach-ext-hdr. IPv6 destinations only, and
         // Linux only: `libc` does not expose the sticky IPV6_HOPOPTS /
         // IPV6_DSTOPTS options on Darwin (see `apply_attach_ext_hdrs`).
@@ -271,7 +271,7 @@ impl SenderRun {
                 log::warn!(
                     "--attach-ext-hdr (real IPv6 extension header attachment) requires Linux; \
                      the header(s) are not attached on this platform, but the matching Type-246 \
-                     request TLV(s) are still sent (draft-ietf-ippm-stamp-ext-hdr-15 §4.2)"
+                     request TLV(s) are still sent (draft-ietf-ippm-stamp-ext-hdr-25 §4.2)"
                 );
             }
         }
@@ -616,7 +616,7 @@ impl SenderRun {
         }
 
         // Reflected Fixed / IPv6 Extension Header Data TLVs
-        // (draft-ietf-ippm-stamp-ext-hdr-15 §4.2, §6.2). The value is a
+        // (draft-ietf-ippm-stamp-ext-hdr-25 §4.2, §6.2). The value is a
         // Requested field (4 octets for Type 247, 8 for Type 246), zero or a
         // selector, followed by a zeroed Reflected field. The reflector fills
         // the Reflected field when it can see the header, or returns the TLV
@@ -634,7 +634,7 @@ impl SenderRun {
         };
 
         // Trim Types 246/247 to the egress MTU using the worst-case packet size
-        // (ext-hdr-15 §§4.2, 6.2). Linux queries the route with getsockopt;
+        // (ext-hdr-25 §§4.2, 6.2). Linux queries the route with getsockopt;
         // header requests fail if the MTU is unknown. This rule removes only
         // header TLVs; it does not trim other extensions.
         let header_requests = !conf.attach_ext_hdr.is_empty()

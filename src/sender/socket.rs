@@ -61,7 +61,7 @@ pub(super) fn apply_egress_ip_options(
 }
 
 /// Attach `--attach-ext-hdr` buffers through IPV6_HOPOPTS/IPV6_DSTOPTS
-/// (ext-hdr-15 §4.2). The kernel sets Next Header; other bytes pass unchanged.
+/// (ext-hdr-25 §4.2). The kernel sets Next Header; other bytes pass unchanged.
 /// Options apply to every probe. Attachment failure aborts startup.
 /// Allow one HBH followed by one Destination Options header.
 #[cfg(target_os = "linux")]
@@ -95,7 +95,7 @@ pub(super) fn apply_attach_ext_hdrs(
         } else {
             log::info!(
                 "Attached {label} IPv6 extension header ({} bytes) to egress packets \
-                 (draft-ietf-ippm-stamp-ext-hdr-15 §4.2)",
+                 (draft-ietf-ippm-stamp-ext-hdr-25 §4.2)",
                 spec.bytes.len()
             );
         }

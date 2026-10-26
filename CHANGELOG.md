@@ -5,6 +5,24 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Update reflected-header extensions to draft-ietf-ippm-stamp-ext-hdr-25.
+  Header disclosure now requires explicit sender-IP permission through
+  `--reflect-fixed-header-from` or `--reflect-ipv6-ext-header-from` (or their
+  TOML arrays). Unlisted senders receive C without captured header data.
+- Treat zero Requested octets as wildcards and reject ambiguous header
+  selectors. Sender selectors must mask mutable header octets.
+
+### Fixed
+
+- Report session failure after the configured loss threshold even before the
+  first reply, and validate IPv6 Extension Header Control sub-TLV lengths.
+- Use a zero interval when Type 12 only carries the header-control sub-TLV.
+- Trim optional reflected-header TLVs before BER padding when both appear in
+  a reply that exceeds the path MTU.
+- Print the specific review reason in standards-monitor CI logs.
+
 ## [1.0.0] - 2026-10-06
 
 First stable release. See [conformance matrices](doc/conformance/README.md)

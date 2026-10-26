@@ -52,7 +52,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `config_file_test.rs` | TOML configuration file: CLI precedence, parse errors that name the path, unknown keys. | always |
 | `control_api_test.rs` | Control API end to end over raw HTTP/1.1. | `control` |
 | `ext_hdr_nix_test.rs` | Type 246 reflection from ancillary data on the nix backend. | Linux, nix; ignored, see [User-namespace tests](#user-namespace-tests) |
-| `ext_hdr_revision13_test.rs` | draft-ietf-ippm-stamp-ext-hdr-15 sender rules: random source ports, TTL/Hop Limit 255 (including IPv4-mapped), session state notifications and their deadlines. | Linux, macOS |
+| `ext_hdr_revision13_test.rs` | draft-ietf-ippm-stamp-ext-hdr-25 sender rules: random source ports, TTL/Hop Limit 255 (including IPv4-mapped), session state notifications and their deadlines. | Linux, macOS |
 | `idle_cpu_test.rs` | A real reflector process returns to idle after traffic and still receives the next packet; IPv4, IPv6 and kernel timestamps. Reads child CPU time from `/proc`. | Linux, nix |
 | `key_reload_test.rs` | `receiver::reload_keys` (the SIGHUP path) picks up new key files and keeps the current keys on error. | Unix |
 | `keyset_fallback_test.rs` | Per-SSID and default keys through source and SRv6 fallback replies, queued burst rotation and revocation; IPv4/IPv6, open/authenticated. | Unix, nix |
@@ -84,7 +84,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `session_ssid_validation_test.rs` | Sender SSID checks and zero-SSID policies against an independent peer; IPv4/IPv6, open/authenticated. | always |
 | `snmp_lifecycle_test.rs` | CLI exits after finite sends, startup failures, signals and silent initial/reconnect handshakes. | Unix, `snmp`; reflector needs nix |
 | `startup_failure_test.rs` | Startup failures (bind, key file, missing key, bad BER pattern, missing interface) return errors; total loss and shutdown do not. | always; some cases Linux only |
-| `tlv_flag_semantics.rs` | U, M, I and C flag rules (RFC 8972, RFC 10052, draft-ietf-ippm-stamp-ext-hdr-15) through `process_stamp_packet`. | always |
+| `tlv_flag_semantics.rs` | U, M, I and C flag rules (RFC 8972, RFC 10052, draft-ietf-ippm-stamp-ext-hdr-25) through `process_stamp_packet`. | always |
 
 Shared helpers and data:
 

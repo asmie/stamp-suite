@@ -30,6 +30,8 @@ pub(crate) struct ReflectorSettings {
     pub drop_replayed: bool,
     pub location_disclosure: LocationDisclosure,
     pub cos_policy: CosAdmissionPolicy,
+    pub reflect_fixed_header_from: Vec<std::net::IpAddr>,
+    pub reflect_ipv6_ext_header_from: Vec<std::net::IpAddr>,
     pub local_addresses: Vec<std::net::IpAddr>,
     pub local_macs: Vec<[u8; 6]>,
     pub return_path_allow_alternate: bool,
@@ -121,6 +123,16 @@ impl ReflectorSettings {
             drop_replayed: conf.drop_replayed,
             location_disclosure,
             cos_policy,
+            reflect_fixed_header_from: conf
+                .reflect_fixed_header_from
+                .iter()
+                .map(|ip| ip.to_canonical())
+                .collect(),
+            reflect_ipv6_ext_header_from: conf
+                .reflect_ipv6_ext_header_from
+                .iter()
+                .map(|ip| ip.to_canonical())
+                .collect(),
             // RFC 9503 §3 matching uses the bind address, or every interface
             // address for a wildcard bind.
             local_addresses: build_local_addresses(conf.local_addr),
@@ -286,6 +298,12 @@ impl<'a> ProcessingContext<'a> {
             sender_port: packet.src.port(),
             return_path_allow_alternate: settings.return_path_allow_alternate,
             reflector_member_link_id: settings.reflector_member_link_id,
+            reflect_fixed_header: settings
+                .reflect_fixed_header_from
+                .contains(&packet.src.ip().to_canonical()),
+            reflect_ipv6_ext_header: settings
+                .reflect_ipv6_ext_header_from
+                .contains(&packet.src.ip().to_canonical()),
             captured_headers: packet.captured_headers,
             reflected_control_max_count: caps.reflected_control_max_count.load(Ordering::Relaxed),
             reflected_control_max_size: caps.reflected_control_max_size.load(Ordering::Relaxed),
@@ -297,6 +315,63 @@ impl<'a> ProcessingContext<'a> {
             rx_timestamp: packet.rx_timestamp,
             rx_method: packet.rx_method,
             last_reflection_method: TimestampMethod::SwLocal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn header_reflection_policy_is_per_source_and_header_kind() {
+        let conf = Configuration::parse_from([
+            "test",
+            "--is-reflector",
+            "--reflect-fixed-header-from",
+            "192.0.2.1",
+            "--reflect-ipv6-ext-header-from",
+            "2001:db8::1",
+            "--reflect-ipv6-ext-header-from",
+            "::ffff:192.0.2.2",
+        ]);
+        let shared = create_shared_state(&conf).unwrap();
+        let settings = ReflectorSettings::from_config(&conf, &shared, false).unwrap();
+        for (source, fixed, ext) in [
+            ("192.0.2.1:50000", true, false),
+            ("[::ffff:192.0.2.1]:50000", true, false),
+            ("192.0.2.2:50000", false, true),
+            ("[2001:db8::1]:50000", false, true),
+            ("192.0.2.3:50000", false, false),
+            ("[2001:db8::2]:50000", false, false),
+        ] {
+            let packet = ReceivedPacket {
+                data: &[],
+                src: source.parse().unwrap(),
+                dst_addr: conf.local_addr,
+                local: conf.local_socket_addr(),
+                ttl: 64,
+                dscp: 0,
+                ecn: 0,
+                ingress_ifindex: None,
+                src_mac: None,
+                captured_headers: None,
+                rx_timestamp: None,
+                rx_method: TimestampMethod::SwLocal,
+            };
+            let ctx = ProcessingContext::for_packet(
+                &settings,
+                &packet,
+                &shared.caps,
+                None,
+                &shared.session_manager,
+            );
+            assert_eq!(
+                (ctx.reflect_fixed_header, ctx.reflect_ipv6_ext_header),
+                (fixed, ext),
+                "{source}"
+            );
         }
     }
 }

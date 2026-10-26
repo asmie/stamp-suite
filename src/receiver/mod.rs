@@ -274,6 +274,9 @@ pub struct ProcessingContext<'a> {
     pub return_path_allow_alternate: bool,
     /// Reflector member link ID for Micro-session ID TLV (RFC 9534 §3.2).
     pub reflector_member_link_id: Option<u16>,
+    /// Local reflection policy for this source; denied requests return C without copying.
+    pub reflect_fixed_header: bool,
+    pub reflect_ipv6_ext_header: bool,
     /// Raw bytes of the received IP fixed header and IPv6 extension headers,
     /// for draft-ietf-ippm-stamp-ext-hdr Reflected Fixed/Ext Header TLVs
     /// (Types 247/246). `None` on backends that cannot observe the IP layer
@@ -309,7 +312,7 @@ pub struct ProcessingContext<'a> {
 }
 
 /// Raw IP-layer bytes captured at receive time for reflecting back to the
-/// sender via TLV Types 246 and 247 (draft-ietf-ippm-stamp-ext-hdr-15).
+/// sender via TLV Types 246 and 247 (draft-ietf-ippm-stamp-ext-hdr-25).
 ///
 /// The pnet backend, which captures at the datalink layer, fills both fields.
 /// The nix backend on Linux fills only the IPv6 extension headers, from
@@ -320,7 +323,7 @@ pub struct CapturedHeaders {
     /// Raw IP fixed headers (20 bytes for IPv4, 40 bytes for IPv6), ordered
     /// outer→inner. In the common (non-tunneled) case this holds exactly one
     /// header; an IP-in-IP tunnel (IP protocol 4 / next-header 41) contributes
-    /// one record per stacked IP header for draft-ietf-ippm-stamp-ext-hdr-15
+    /// one record per stacked IP header for draft-ietf-ippm-stamp-ext-hdr-25
     /// §6.2 rule 3 positional pairing of multiple Type-247 TLVs. Empty when
     /// the backend cannot observe fixed headers; a captured IP packet always
     /// has at least one.
@@ -903,9 +906,9 @@ fn apply_semantic_tlv_processing(
         .map(|t| t.value.len());
 
     // Process Reflected Fixed / IPv6 Extension Header TLVs
-    // (draft-ietf-ippm-stamp-ext-hdr-15 §§4.2, 6.2). If the backend captured
+    // (draft-ietf-ippm-stamp-ext-hdr-25 §§4.2, 6.2). If the backend captured
     // the requested header, copy it into the TLV (a zero Requested field is
-    // filled from it); otherwise set the C flag per ext-hdr-15 §4.1/§6.1. A nix
+    // filled from it); otherwise set the C flag per ext-hdr-25 §4.1/§6.1. A nix
     // UDP-socket backend has no fixed headers, so those requests get C; on
     // Linux it does supply IPv6 extension headers from ancillary data.
     let (captured_fixed, captured_ext): (Option<&[Vec<u8>]>, Option<&[u8]>) =
@@ -916,10 +919,15 @@ fn apply_semantic_tlv_processing(
             ),
             None => (None, None),
         };
-    tlvs.process_reflected_headers_multi(captured_fixed, captured_ext);
+    tlvs.process_reflected_headers_with_policy(
+        captured_fixed,
+        captured_ext,
+        ctx.reflect_fixed_header,
+        ctx.reflect_ipv6_ext_header,
+    );
 
     // Trim complete optional header TLVs to the administrative reply limit
-    // (ext-hdr-15 §§4.2, 6.2), reserving the base and keyed response HMAC.
+    // (ext-hdr-25 §§4.2, 6.2), reserving the base and keyed response HMAC.
     // The send path separately checks the actual route MTU, including
     // alternate destinations and SRH overhead, before each datagram.
     {
@@ -937,7 +945,7 @@ fn apply_semantic_tlv_processing(
             crate::warn_throttled!(
                 "Removed {removed} Reflected Fixed/IPv6 Ext Header TLV(s) (Type 246/247) from \
                  the reply to stay within the {}-byte reply-size limit \
-                 (draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2)",
+                 (draft-ietf-ippm-stamp-ext-hdr-25 §4.2/§6.2)",
                 ctx.reflected_control_max_size
             );
         }
@@ -991,7 +999,7 @@ fn apply_semantic_tlv_processing(
                 return None;
             }
 
-            // draft-ietf-ippm-stamp-ext-hdr-15 §5.1: reply header attachment is
+            // draft-ietf-ippm-stamp-ext-hdr-25 §5.1: reply header attachment is
             // unsupported, so set C on every control sub-TLV. Duplicates also
             // violate cardinality. Type-246 reflection is handled independently.
             let one_way_ext_headers = ipv6_ext_hdr_control_count == 1;

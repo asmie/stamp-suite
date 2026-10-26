@@ -1107,9 +1107,9 @@ fn test_get_reflected_control_request_none_when_absent() {
     assert!(list.get_reflected_control_request().is_none());
 }
 
-// --- Reflected Fixed/IPv6 Ext Header Data (draft-ietf-ippm-stamp-ext-hdr-15) tests ---
+// --- Reflected Fixed/IPv6 Ext Header Data (draft-ietf-ippm-stamp-ext-hdr-25) tests ---
 
-/// draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§6.2 reflector MTU rule: reflected
+/// draft-ietf-ippm-stamp-ext-hdr-25 §4.2/§6.2 reflector MTU rule: reflected
 /// header TLVs are removed (246 before 247) until the reply fits the size
 /// limit; only Types 246/247 are removed, other TLVs stay.
 #[test]
@@ -1153,7 +1153,7 @@ fn test_trim_reflected_headers_to_size_zero_disables() {
     assert_eq!(list.non_hmac_tlvs().len(), 1);
 }
 
-/// draft-ietf-ippm-stamp-ext-hdr-15 §6.2 rule 3: with an IP-in-IP tunnel's
+/// draft-ietf-ippm-stamp-ext-hdr-25 §6.2 rule 3: with an IP-in-IP tunnel's
 /// two captured fixed headers (outer→inner), two same-length Type-247 TLVs
 /// pair positionally (1st↔outer, 2nd↔inner) via first-fit-with-consumption.
 #[test]
@@ -1241,7 +1241,7 @@ fn test_multi_fixed_hdr_mixed_family_lengths() {
 
 #[test]
 fn test_reflected_fixed_hdr_populated_when_captured() {
-    // ext-hdr-15 §6.2 rule 1: a zero Requested gets the header's first 4
+    // ext-hdr-25 §6.2 rule 1: a zero Requested gets the header's first 4
     // octets; Reflected = captured[4..].
     use crate::tlv::ReflectedFixedHdrTlv;
     let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
@@ -1259,7 +1259,7 @@ fn test_reflected_fixed_hdr_populated_when_captured() {
 
 #[test]
 fn test_reflected_fixed_hdr_c_flag_when_backend_cant_capture() {
-    // ext-hdr-15 §6.1 case (b): backend cannot observe IP layer → C flag, not U.
+    // ext-hdr-25 §6.1 case (b): backend cannot observe IP layer → C flag, not U.
     use crate::tlv::ReflectedFixedHdrTlv;
     let mut list = list_with_cleared(ReflectedFixedHdrTlv::request_with_capacity(20).to_raw());
 
@@ -1275,7 +1275,7 @@ fn test_reflected_fixed_hdr_c_flag_when_backend_cant_capture() {
 
 #[test]
 fn test_reflected_fixed_hdr_length_mismatch_sets_c_flag() {
-    // ext-hdr-15 §6.1 case (a): the sender-advertised Length does not match the
+    // ext-hdr-25 §6.1 case (a): the sender-advertised Length does not match the
     // captured header size (20-byte request but the packet is IPv6 with a
     // 40-byte fixed header) → C flag, value left as received.
     use crate::tlv::ReflectedFixedHdrTlv;
@@ -1308,7 +1308,7 @@ fn test_reflected_fixed_hdr_ipv6_request_with_ipv6_capture_populated() {
 
 #[test]
 fn test_reflected_fixed_hdr_selector_match_populates() {
-    // ext-hdr-15 §6.1: a non-zero Requested field that matches the captured IP
+    // ext-hdr-25 §6.1: a non-zero Requested field that matches the captured IP
     // header's first 4 octets → copy Reflected = captured[4..]. Here the
     // selector equals captured[..4], so the whole header is conveyed.
     use crate::tlv::ReflectedFixedHdrTlv;
@@ -1337,7 +1337,7 @@ fn test_reflected_fixed_hdr_selector_match_populates() {
 
 #[test]
 fn test_reflected_fixed_hdr_selector_mismatch_sets_c_flag() {
-    // ext-hdr-15 §6.1 case (c): length matches but the Requested field does NOT
+    // ext-hdr-25 §6.1 case (c): length matches but the Requested field does NOT
     // match the captured header → C flag, value (incl. Requested) preserved.
     use crate::tlv::ReflectedFixedHdrTlv;
     let mut captured = vec![0u8; 40];
@@ -1368,7 +1368,7 @@ fn test_reflected_fixed_hdr_selector_mismatch_sets_c_flag() {
 
 #[test]
 fn test_reflected_headers_out_of_order_sets_c_flag_no_copy() {
-    // draft-ietf-ippm-stamp-ext-hdr-15 §6.3: Reflected Fixed Header Data
+    // draft-ietf-ippm-stamp-ext-hdr-25 §6.3: Reflected Fixed Header Data
     // (247) TLVs MUST precede Reflected IPv6 Extension Header Data (246)
     // TLVs. "If ... TLVs are not received in this order, the Session-
     // Reflector MUST return these TLVs with the Conformant Reflected Packet
@@ -1432,7 +1432,7 @@ fn test_reflected_headers_in_order_processed_normally() {
 
 #[test]
 fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
-    // ext-hdr-15 §4.2 rule 1: a zero Requested gets the header's first 8
+    // ext-hdr-25 §4.2 rule 1: a zero Requested gets the header's first 8
     // octets; Reflected = captured[8..].
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
     let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
@@ -1457,7 +1457,7 @@ fn test_reflected_ipv6_ext_hdr_populated_when_captured() {
 
 #[test]
 fn test_reflected_ipv6_ext_hdr_empty_capture_sets_c_flag() {
-    // ext-hdr-15 §4.1: IPv4 path or IPv6 without ext headers has no header to
+    // ext-hdr-25 §4.1: IPv4 path or IPv6 without ext headers has no header to
     // reflect, so the reflector "cannot use it to reflect any received IPv6
     // extension header" → C flag.
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
@@ -1517,7 +1517,7 @@ fn test_reflected_ipv6_ext_hdr_length_smaller_than_record_sets_c_flag() {
 
 #[test]
 fn test_reflected_ipv6_ext_hdr_selector_matches_specific_header() {
-    // ext-hdr-15 §4.1 disambiguation: two extension headers of the SAME length
+    // ext-hdr-25 §4.1 disambiguation: two extension headers of the SAME length
     // (both 8 bytes), differing only in body. A non-zero Requested field
     // must pick the matching one. Here the selector equals rec_b's first 8
     // on-wire octets, so the whole rec_b (Requested + Reflected) is conveyed.
@@ -1628,7 +1628,7 @@ fn test_reflected_headers_noop_when_no_tlvs() {
     assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
 }
 
-// --- draft-ietf-ippm-stamp-ext-hdr-15 semantics ---
+// --- draft-ietf-ippm-stamp-ext-hdr-25 semantics ---
 // Type 246 has Requested(8); Type 247 has Requested(4). A matched header is
 // copied whole: a nonzero selector already equals its first octets, and a
 // zero one is filled with them (§4.2 and §6.2 rule 1). Failure is signalled
@@ -1772,7 +1772,7 @@ fn test_v13_ext_hdr_none_capture_sets_c_flag_not_u() {
 fn test_v13_ext_hdr_empty_capture_sets_c_flag() {
     // A Reflected IPv6 Ext Hdr TLV but no ext headers received (IPv4 path or
     // IPv6 without options): the reflector "cannot use it to reflect any
-    // received IPv6 extension header" → C flag (ext-hdr-15 §4.1).
+    // received IPv6 extension header" → C flag (ext-hdr-25 §4.1).
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
     let mut list = list_with_cleared(ReflectedIpv6ExtHdrTlv::request_with_capacity(8).to_raw());
 
@@ -1786,7 +1786,7 @@ fn test_v13_ext_hdr_empty_capture_sets_c_flag() {
 #[test]
 fn test_v13_ext_hdr_zero_selector_first_fit_skips_length_mismatch() {
     // An 8-byte request must match the second captured header in
-    // [16-byte HBH, 8-byte DestOpts] (ext-hdr-15 §4.2 rule 1).
+    // [16-byte HBH, 8-byte DestOpts] (ext-hdr-25 §4.2 rule 1).
     // Selection uses matching length, not the TLV's position alone.
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
     // 16-byte HBH record: NextHeader=0x3C, HdrExtLen=1 → (1+1)*8 = 16 bytes.
@@ -1858,7 +1858,7 @@ fn test_v13_ext_hdr_zero_selector_first_fit_two_tlvs_reorder() {
 
 #[test]
 fn test_v13_ext_hdr_zero_selector_same_length_pairs_in_order() {
-    // ext-hdr-15 §4.2 rule 3: two same-length (8-byte) zero-selector
+    // ext-hdr-25 §4.2 rule 3: two same-length (8-byte) zero-selector
     // TLVs against two same-length but DISTINGUISHABLE headers must pair in
     // wire order (1st↔1st, 2nd↔2nd). First-fit-with-consumption preserves
     // this: TLV[0] consumes header index 0, TLV[1] then finds index 1.
@@ -1886,9 +1886,8 @@ fn test_v13_ext_hdr_zero_selector_same_length_pairs_in_order() {
 }
 
 #[test]
-fn test_v13_ext_hdr_duplicate_nonzero_selector_consumes_successively() {
-    // Identical selectors must consume distinct matching headers.
-    // The replies retain each header's different body.
+fn test_v25_ext_hdr_ambiguous_selector_sets_c_without_consuming() {
+    // A selective request matching two headers is rejected without copying either.
     use crate::tlv::ReflectedIpv6ExtHdrTlv;
     let sel = [0x3Cu8, 0x01, 0xAA, 0xBB, 0, 0, 0, 0];
     let rec0 = [
@@ -1911,16 +1910,11 @@ fn test_v13_ext_hdr_duplicate_nonzero_selector_consumes_successively() {
     list.process_reflected_headers(Some(&[]), Some(&blob));
 
     let tlvs = list.non_hmac_tlvs();
-    assert_eq!(
-        tlvs[0].value, rec0,
-        "1st duplicate TLV consumes the 1st matching header"
-    );
-    assert_eq!(
-        tlvs[1].value, rec1,
-        "2nd duplicate TLV consumes the 2nd matching header"
-    );
-    assert!(!tlvs[0].flags.conformant_reflected);
-    assert!(!tlvs[1].flags.conformant_reflected);
+    for tlv in tlvs {
+        assert_eq!(&tlv.value[..8], &sel);
+        assert_eq!(&tlv.value[8..], &[0; 8]);
+        assert!(tlv.flags.conformant_reflected);
+    }
 }
 
 #[test]

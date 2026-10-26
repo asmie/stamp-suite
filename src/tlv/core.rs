@@ -276,14 +276,14 @@ pub enum TlvType {
     /// implementation; renumbered via `experimental::BER_MAX_BURST_TLV_TYPE`.
     BerBurst = BER_MAX_BURST_TLV_TYPE,
     /// Reflected IPv6 Extension Header Data TLV (246) -
-    /// draft-ietf-ippm-stamp-ext-hdr-15 §§4.1, 4.2. Reflects received IPv6
+    /// draft-ietf-ippm-stamp-ext-hdr-25 §§4.1, 4.2. Reflects received IPv6
     /// extension headers such as Hop-by-Hop and Destination Options. The nix
     /// backend on Linux reads them from ancillary data; elsewhere this needs
     /// the raw-capture backend. Experimental-range stand-in for IANA TBA1,
     /// renumbered via `experimental::REFLECTED_IPV6_EXT_HDR_TLV_TYPE`.
     ReflectedIpv6ExtHdr = REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
     /// Reflected Fixed Header Data TLV (247) -
-    /// draft-ietf-ippm-stamp-ext-hdr-15 §§6.1, 6.2. Reflects the raw IPv4/IPv6
+    /// draft-ietf-ippm-stamp-ext-hdr-25 §§6.1, 6.2. Reflects the raw IPv4/IPv6
     /// fixed header (20/40 bytes); requires the raw-capture backend.
     /// Experimental-range stand-in for IANA TBA2, renumbered via
     /// `experimental::REFLECTED_FIXED_HDR_TLV_TYPE`.

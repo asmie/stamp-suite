@@ -1,7 +1,7 @@
 //! Reflected Fixed Header Data TLV (Type 247) per
-//! draft-ietf-ippm-stamp-ext-hdr-15 §§6.1, 6.2.
+//! draft-ietf-ippm-stamp-ext-hdr-25 §§6.1, 6.2.
 //!
-//! # Wire Format (ext-hdr-15 Figure 5)
+//! # Wire Format (ext-hdr-25 Figure 5)
 //!
 //! ```text
 //!  0                   1                   2                   3
@@ -11,19 +11,20 @@
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! |                  Requested Fixed Header Data                  |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-//! |                  Reflected Fixed Header Data                  |
+//! |                  Received Fixed Header Data                   |
 //! ~                     (Length - 4 octets)                       ~
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! ```
 //!
 //! Length equals the target IP header size: 20 bytes for IPv4, 40 for IPv6.
-//! Requested occupies the first four bytes; Reflected receives `header[4..]`.
-//! The sender zeroes Reflected and sets Requested to zero or a header-prefix
-//! selector. A nonzero selector matches the header's first four bytes; zero
-//! selects the first length match, and the reflector then fills Requested
-//! with that header's first four bytes (ext-hdr-15 §6.2 rule 1).
+//! Requested occupies the first four bytes; Received receives `header[4..]`.
+//! The sender zeroes Received and sets Requested to zero or a header-prefix
+//! selector. Nonzero selector octets must uniquely match an unmatched header;
+//! zero octets are wildcards. An all-zero selector selects the first length
+//! match, and the reflector then fills Requested
+//! with that header's first four bytes (ext-hdr-25 §6.2 rule 1).
 //!
-//! On missing capture, length mismatch, or selector mismatch, set C and
+//! On missing capture, length mismatch, selector mismatch, or ambiguity, set C and
 //! preserve the value. The Version nibble is available only if Requested
 //! includes it. See [`ReflectedFixedHdrTlv::request_with_selector`].
 
@@ -54,7 +55,7 @@ impl ReflectedFixedHdrTlv {
     }
 
     /// Creates a zeroed 20-byte (IPv4) or 40-byte (IPv6) request
-    /// from the destination family (draft-ietf-ippm-stamp-ext-hdr-15 §6.1).
+    /// from the destination family (draft-ietf-ippm-stamp-ext-hdr-25 §6.1).
     #[must_use]
     pub fn request_for(dest: IpAddr) -> Self {
         let bytes = match dest {
@@ -65,8 +66,8 @@ impl ReflectedFixedHdrTlv {
     }
 
     /// Creates a sender request TLV whose first 4 octets carry the Requested
-    /// selector (draft-ietf-ippm-stamp-ext-hdr-15 §6.1), the target IP
-    /// header's first 4 octets, padded with the zero-initialised Reflected
+    /// selector (draft-ietf-ippm-stamp-ext-hdr-25 §6.1), the target IP
+    /// header's first 4 octets, padded with the zero-initialised Received
     /// field to `total_len` (the IP fixed-header length: 20 or 40).
     /// `total_len` is grown to fit `prefix`.
     #[must_use]
@@ -175,7 +176,7 @@ mod tests {
 
     #[test]
     fn test_request_with_selector_fills_prefix_and_pads_to_len() {
-        // ext-hdr-15 §6.1 selector: first 4 bytes carry the match pattern, the rest
+        // ext-hdr-25 §6.1 selector: first 4 bytes carry the match pattern, the rest
         // of the fixed-header length stays zero for the reflector to fill.
         let tlv = ReflectedFixedHdrTlv::request_with_selector(
             &[0x45, 0x00, 0x00, 0x54],

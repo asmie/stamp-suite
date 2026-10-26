@@ -710,6 +710,8 @@ fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext<'static> {
         sender_port: 0,
         return_path_allow_alternate: false,
         reflector_member_link_id: None,
+        reflect_fixed_header: true,
+        reflect_ipv6_ext_header: true,
         captured_headers: None,
         reflected_control_max_count: REFLECTED_CONTROL_MAX_COUNT,
         reflected_control_max_size: REFLECTED_CONTROL_MAX_SIZE,

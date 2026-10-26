@@ -2840,3 +2840,97 @@ fn empty_return_segment_lists_from_a_file_are_rejected() {
         assert!(conf.validate().is_err(), "{toml} accepted");
     }
 }
+
+#[test]
+fn revision25_header_policy_cli_file_and_defaults() {
+    let conf = load_from_args(&["test", "--is-reflector"]).unwrap();
+    assert!(conf.reflect_fixed_header_from.is_empty());
+    assert!(conf.reflect_ipv6_ext_header_from.is_empty());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy.toml");
+    std::fs::write(&path, "is_reflector = true\nreflect_fixed_header_from = ['192.0.2.1']\nreflect_ipv6_ext_header_from = ['2001:db8::1']\n").unwrap();
+    let conf = load_from_args(&[
+        "test",
+        "--config",
+        path.to_str().unwrap(),
+        "--reflect-fixed-header-from",
+        "192.0.2.2",
+        "--reflect-fixed-header-from",
+        "::1",
+    ])
+    .unwrap();
+    assert_eq!(
+        conf.reflect_fixed_header_from,
+        [
+            "192.0.2.2".parse::<std::net::IpAddr>().unwrap(),
+            "::1".parse().unwrap()
+        ]
+    );
+    assert_eq!(
+        conf.reflect_ipv6_ext_header_from,
+        ["2001:db8::1".parse::<std::net::IpAddr>().unwrap()]
+    );
+    assert!(load_from_args(&["test", "--reflect-fixed-header-from", "any"]).is_err());
+}
+
+#[test]
+fn revision25_fixed_selector_masks_mutable_octets() {
+    for (address, valid, invalid) in [
+        ("127.0.0.1", "4500003c", "4501003c"),
+        ("::1", "00000123", "60000123"),
+    ] {
+        assert!(load_from_args(&[
+            "test",
+            "--remote-addr",
+            address,
+            "--reflected-fixed-hdr",
+            valid
+        ])
+        .is_ok());
+        assert!(load_from_args(&[
+            "test",
+            "--remote-addr",
+            address,
+            "--reflected-fixed-hdr",
+            invalid
+        ])
+        .is_err());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn revision25_extension_selector_requires_unique_wildcard_match() {
+    let base = [
+        "test",
+        "--remote-addr",
+        "::1",
+        "--attach-ext-hdr",
+        "hbh",
+        "--attach-ext-hdr",
+        "dest",
+        "--reflected-ipv6-ext-hdr",
+    ];
+    let mut args = base.to_vec();
+    args.push("8:00000104"); // Both attached headers contain PadN: ambiguous.
+    assert!(load_from_args(&args).is_err());
+    *args.last_mut().unwrap() = "8:11000104"; // Next Header=UDP uniquely selects Destination Options.
+    assert!(load_from_args(&args).is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn revision25_extension_selector_masks_mutable_option_data() {
+    for (selector, accepted) in [("8:110020020000", true), ("8:11002002aa00", false)] {
+        let result = load_from_args(&[
+            "test",
+            "--remote-addr",
+            "::1",
+            "--attach-ext-hdr",
+            "dest:11002002aabb0000",
+            "--reflected-ipv6-ext-hdr",
+            selector,
+        ]);
+        assert_eq!(result.is_ok(), accepted, "{selector}: {result:?}");
+    }
+}

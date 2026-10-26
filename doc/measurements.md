@@ -225,14 +225,14 @@ detect clock discipline or discover timescale offsets.
 
 ## Session-state notifications
 
-These notifications follow draft-ietf-ippm-stamp-ext-hdr-15 §9.2.
+These notifications follow draft-ietf-ippm-stamp-ext-hdr-25 §9.2.
 
 The sender logs state changes with target `stamp_suite::session_state` and includes
 `session_state` within `measurements` in summaries. It becomes active after a
 validated reply while transmitting, failed after `--session-loss-threshold`
 consecutive unanswered probes, and active again when replies resume. Each probe's
 `--timeout` supplies its deadline; timeout 0 disables loss-driven failure. A session
-that never received a reply is not falsely declared failed from an active state.
+that never received a reply also becomes failed once its loss threshold is reached.
 The sender reports idle when transmission stops; final draining still contributes
 timing/loss statistics but does not reactivate an idle sender. If an Access Report
 retry originates another probe, monitoring resumes and its own loss deadlines

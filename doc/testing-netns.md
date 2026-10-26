@@ -93,12 +93,12 @@ Set `STAMP_NETNS_CAPTURE_DIR` to a directory to keep each completed pcap (see
 | 1 | `scenario_1_roundtrip_unauth_and_auth` | RFC 8762 §4.2 to §4.5 sender and reflector round trip on a real link, unauthenticated and HMAC-authenticated. |
 | 2 | `scenario_2_cos_dscp_ecn_onwire` | RFC 8972 §4.4 CoS with erratum 8199 and draft-ietf-ippm-stamp-cos-ecn-01 §3.2: the reply carries DSCP=DSCP1, ECN=EC1 and RPE=0b11 on the wire. |
 | 3 | `scenario_3_srv6_return_path` | RFC 9503 §4 and RFC 8754 through a transit router: requires real SRH forwarding (a fallback fails). Covers SID-only and explicit final-SID requests, open and authenticated modes, independent HMACs, CoS, Segments Left 1 to 0 and Hop Limit 255 to 254. Ordinary replies interleaved on the same reflector must carry no SRH. |
-| 4a | `scenario_4a_ext_hdr_nix_ancillary` | draft-ietf-ippm-stamp-ext-hdr-15 §4.2: the nix backend reads the sender's Destination Options header from ancillary data and returns it in the Type 246 value with C clear (checked from offset 8). |
-| 4b | `scenario_4b_ext_hdr_pnet_capture` | draft-ietf-ippm-stamp-ext-hdr-15 §4.1 and §4.2: the pnet backend captures an injected 16-byte Destination Options header and returns it in the Type 246 value with C clear (checked from offset 8). |
+| 4a | `scenario_4a_ext_hdr_nix_ancillary` | draft-ietf-ippm-stamp-ext-hdr-25 §4.2: the nix backend reads the sender's Destination Options header from ancillary data and returns it in the Type 246 value with C clear (checked from offset 8). |
+| 4b | `scenario_4b_ext_hdr_pnet_capture` | draft-ietf-ippm-stamp-ext-hdr-25 §4.1 and §4.2: the pnet backend captures an injected 16-byte Destination Options header and returns it in the Type 246 value with C clear (checked from offset 8). |
 | 5 | `scenario_5_address_group_filters` | RFC 10052 §3.1.1 and §3.1.2: a matching L2 (own MAC) or L3 (own prefix) Address Group gets a reply; a non-matching one drops the packet. |
 | 6 | `scenario_6_type12_multi_reply` | RFC 10052 §3: several reply copies on the wire, within the requested and capped count, spaced about the requested interval, padded beyond the base length. |
 | 7 | `scenario_7_ber_onwire` | draft-gandhi-ippm-stamp-ber-07 §4: the bit pattern (0xFF00) fills the Extra Padding TLV on the wire, and the reflector's Bit Error Count is 0 on a clean link. |
-| 8 | `scenario_8_ttl_egress_marking` | draft-ietf-ippm-stamp-ext-hdr-15 §3.1: outgoing test packets carry IP TTL 255. |
+| 8 | `scenario_8_ttl_egress_marking` | draft-ietf-ippm-stamp-ext-hdr-25 §3.1: outgoing test packets carry IP TTL 255. |
 
 ## Building the pnet reflector for scenario 4b
 

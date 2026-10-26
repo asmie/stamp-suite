@@ -54,7 +54,7 @@ compatibility contract.
 | `sender/measurements.rs` | Reply-copy accounting and the optional counter and Follow-Up measurements. |
 | `sender/access_report.rs` | Access Report retransmission state (RFC 8972 §4.6). |
 | `sender/congestion.rs`, `rate_control.rs` | Response to CE-marked replies (AIMD, draft-ietf-ippm-stamp-cos-ecn-01 §3.4). |
-| `sender/session_state.rs` | Session state notifications (draft-ietf-ippm-stamp-ext-hdr-15 §9.2). |
+| `sender/session_state.rs` | Session state notifications (draft-ietf-ippm-stamp-ext-hdr-25 §9.2). |
 | `sender/observer.rs` | `SenderObserver`: live sender events for metrics, SNMP and library callers. |
 
 ### Reflector
@@ -85,7 +85,7 @@ compatibility contract.
 | --- | --- |
 | `session.rs` | Session table, counters, replay windows, Follow-Up state and lifetime. |
 | `session_identity.rs` | Session identity and static reflector admission (RFC 8972 §3). |
-| `net_policy.rs` | Outgoing TTL/Hop Limit 255, interface binding (`--interface`) and sender port selection (draft-ietf-ippm-stamp-ext-hdr-15 §3.1). |
+| `net_policy.rs` | Outgoing TTL/Hop Limit 255, interface binding (`--interface`) and sender port selection (draft-ietf-ippm-stamp-ext-hdr-25 §3.1). |
 | `net_scope.rs` | Interface zones for IPv6 link-local endpoints. |
 | `hwtstamp.rs` | Kernel and NIC timestamping with per-packet provenance. |
 | `stats.rs`, `stats/` | Statistics collection and text/JSON/CSV output; `stats/quantiles.rs` holds bounded quantiles and `stats/clock_quality.rs` the declared clock quality. |
@@ -527,19 +527,22 @@ changed. Use symmetric replies for BER. UDP checksums and link CRC or FEC may
 discard corrupt packets before delivery, so this measures residual delivered
 errors, not raw link BER.
 
-### Reflected IPv6 Extension and Fixed Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr-15)
+### Reflected IPv6 Extension and Fixed Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr-25)
 
 Type 246 (IPv6 extension header, §4.1 and §4.2) has an 8-octet Requested field;
 Type 247 (IP fixed header, §6.1 and §6.2) has a 4-octet Requested field. The TLV
 length is the complete size of the target header, and a Type 246 length must be
-a multiple of 8. A nonzero Requested field selects the first unconsumed
-captured header of that length whose first octets match it. A zero Requested
+a multiple of 8. Each zero Requested octet is a wildcard; nonzero Requested
+must identify exactly one unconsumed header of matching length. An ambiguous
+selector returns C without copying or consuming data. An all-zero Requested
 field selects the first unconsumed header of that length and is filled with
-that header's first octets. The whole matched header is copied into the value.
+that header's first octets. Nonzero Requested is preserved and the remaining
+header bytes are copied into Received. Local source-IP allowlists separately
+control fixed and extension header disclosure; both default to deny.
 Each captured header is reflected by at most one TLV, so successive TLVs pair
 with successive headers. No captured headers or no match sets C and leaves the
 value unchanged. A Type 247 after a Type 246 sets C on every header TLV and
-copies nothing (§6.3).
+copies nothing (§7.1).
 
 Where headers come from:
 

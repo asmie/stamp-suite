@@ -3,7 +3,7 @@
 //! - M (0x40): bad length or parser-detected structural error; field range
 //!   violations do not necessarily require M.
 //! - I (0x20): failed TLV HMAC; set on every TLV and echo the packet.
-//! - C (0x10): Type 12 parameters could not be honored. ext-hdr-15 also
+//! - C (0x10): Type 12 parameters could not be honored. ext-hdr-25 also
 //!   uses C for Type 246 and Extension Header Control sub-TLVs.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -58,6 +58,8 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         sender_port: 12345,
         return_path_allow_alternate: false,
         reflector_member_link_id: None,
+        reflect_fixed_header: true,
+        reflect_ipv6_ext_header: true,
         captured_headers: None,
         reflected_control_max_count: 16,
         reflected_control_max_size: 1500,
@@ -716,7 +718,7 @@ fn reflected_control_value(length: u16, count: u16, interval_ns: u32) -> Vec<u8>
 }
 
 /// Builds a Type 12 value with `n` IPv6 Extension Header Control sub-TLVs
-/// (draft-ietf-ippm-stamp-ext-hdr-15 §5.1) appended after the fixed fields:
+/// (draft-ietf-ippm-stamp-ext-hdr-25 §5.1) appended after the fixed fields:
 /// each is flags=0, type=240 (experimental stand-in for TBA3), length=0.
 fn reflected_control_value_with_ext_hdr_controls(
     length: u16,
@@ -748,7 +750,7 @@ fn echoed_reflected_control_value(response_data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn reflected_control_single_ext_hdr_control_sets_c_on_subtlv() {
-    // draft-ietf-ippm-stamp-ext-hdr-15 §5.1 rule 4: a single IPv6 Extension
+    // draft-ietf-ippm-stamp-ext-hdr-25 §5.1 rule 4: a single IPv6 Extension
     // Header Control sub-TLV asks the reflector to ADD matching IPv6 extension
     // headers to its OWN reply. Neither backend can, so the C flag MUST be set
     // in the sub-TLV's Sub-TLV Flags (not on the parent Type 12 TLV flags).
@@ -796,7 +798,7 @@ fn reflected_control_single_ext_hdr_control_sets_c_on_subtlv() {
 
 #[test]
 fn reflected_control_duplicate_ext_hdr_control_sets_c_on_all_copies() {
-    // draft-ietf-ippm-stamp-ext-hdr-15 §5.1 cardinality rule: more than one
+    // draft-ietf-ippm-stamp-ext-hdr-25 §5.1 cardinality rule: more than one
     // IPv6 Extension Header Control sub-TLV is a violation; the C flag MUST be
     // set in the Sub-TLV Flags of EVERY offending copy.
     let raw = RawTlv::new(
@@ -827,7 +829,7 @@ fn reflected_control_duplicate_ext_hdr_control_sets_c_on_all_copies() {
 #[test]
 fn reflected_control_one_way_mode_defaults_off() {
     // Without the sub-TLV no Extension Header Control request is recorded
-    // (the default unidirectional type, draft-ietf-ippm-stamp-ext-hdr-15 §5.2).
+    // (the default unidirectional type, draft-ietf-ippm-stamp-ext-hdr-25 §5.2).
     let raw = RawTlv::new(
         TlvType::ReflectedControl,
         reflected_control_value(0, 2, 1_000_000),
@@ -1742,7 +1744,7 @@ fn a1_reflected_control_l2_matches_l3_fails_still_suppresses() {
 }
 
 // ---------------------------------------------------------------------------
-// draft-ietf-ippm-stamp-ext-hdr-15 §4.1 Requested-field selector, end to end
+// draft-ietf-ippm-stamp-ext-hdr-25 §4.1 Requested-field selector, end to end
 // (sender-built request TLV → reflector match against captured headers).
 
 #[test]
@@ -1817,12 +1819,12 @@ fn reflected_ipv6_ext_hdr_selector_no_match_sets_c_flag_end_to_end() {
     assert_eq!(
         echoed.flags.to_byte() & 0x10,
         0x10,
-        "Requested field matching no captured header → C flag per ext-hdr-15 §4.1"
+        "Requested field matching no captured header → C flag per ext-hdr-25 §4.1"
     );
     assert_eq!(
         echoed.flags.to_byte() & 0x80,
         0x00,
-        "must set C, not U, per ext-hdr-15 §4.1"
+        "must set C, not U, per ext-hdr-25 §4.1"
     );
     assert_eq!(
         &echoed.value[..8],
@@ -1851,7 +1853,7 @@ fn revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled() {
         let tlv = &reply.non_hmac_tlvs()[0];
         assert_eq!(tlv.flags.to_byte(), 0);
         // A zero selector matches the first header and is filled with its
-        // first eight octets (ext-hdr-15 §4.2 rule 1).
+        // first eight octets (ext-hdr-25 §4.2 rule 1).
         let expected = if selector.iter().all(|b| *b == 0) {
             &first
         } else {
@@ -1876,4 +1878,97 @@ fn revision13_rejects_requests_shorter_than_eight_octets() {
         let tlv = &reply.non_hmac_tlvs()[0];
         assert!(tlv.flags.conformant_reflected || tlv.is_malformed());
     }
+}
+
+// Independent wire requests for revision 25: wildcard matching, ambiguity,
+// policy refusal, ordered consumption and preservation of Requested.
+#[test]
+fn revision25_wildcards_ambiguity_and_policy() {
+    for (kind, width, first, second) in [
+        (
+            247,
+            4,
+            [vec![0x45, 3, 0, 60], vec![0x11; 16]].concat(),
+            [vec![0x45, 2, 0, 60], vec![0x22; 16]].concat(),
+        ),
+        (
+            246,
+            8,
+            vec![17, 1, 4, 2, 1, 2, 3, 4, 11, 12, 13, 14, 15, 16, 17, 18],
+            vec![17, 1, 4, 0, 1, 2, 3, 4, 21, 22, 23, 24, 25, 26, 27, 28],
+        ),
+    ] {
+        let captured = CapturedHeaders {
+            fixed_headers: if kind == 247 {
+                vec![first.clone(), second.clone()]
+            } else {
+                vec![]
+            },
+            ipv6_ext_headers: if kind == 246 {
+                [first.clone(), second.clone()].concat()
+            } else {
+                vec![]
+            },
+        };
+        let mut ctx = make_ctx(None);
+        ctx.captured_headers = Some(&captured);
+        let request = |selector: &[u8]| {
+            let mut chain = vec![0x80, kind, 0, first.len() as u8];
+            chain.extend_from_slice(selector);
+            chain.resize(first.len() + 4, 0);
+            chain
+        };
+        let mut selector = first[..width].to_vec();
+        // Mask the changed DSCP/ECN or Segments Left octet.
+        selector[if kind == 247 { 1 } else { 3 }] = 0;
+        let selective = request(&selector);
+        let all_zero = request(&vec![0; width]);
+        let reply = reflect_unauth(
+            &build_unauth_packet(&[selective.clone(), all_zero.clone()].concat()),
+            &ctx,
+        );
+        assert_eq!(
+            reply.non_hmac_tlvs()[0].flags.to_byte(),
+            0x10,
+            "ambiguous match must return C"
+        );
+        assert_eq!(
+            reply.non_hmac_tlvs()[0].value,
+            selective[4..],
+            "no header bytes may leak"
+        );
+        assert_eq!(
+            reply.non_hmac_tlvs()[1].value,
+            first,
+            "failed selection must not consume a header"
+        );
+        // Once the first header was consumed, the wildcard selector is unique.
+        let reply = reflect_unauth(
+            &build_unauth_packet(&[all_zero.clone(), selective].concat()),
+            &ctx,
+        );
+        let matched = &reply.non_hmac_tlvs()[1];
+        assert_eq!(matched.flags.to_byte(), 0);
+        assert_eq!(
+            &matched.value[..width],
+            &selector,
+            "preserve nonzero Requested including wildcards"
+        );
+        assert_eq!(&matched.value[width..], &second[width..]);
+        ctx.reflect_fixed_header = false;
+        ctx.reflect_ipv6_ext_header = false;
+        let reply = reflect_unauth(&build_unauth_packet(&all_zero), &ctx);
+        assert_eq!(reply.non_hmac_tlvs()[0].flags.to_byte(), 0x10);
+        assert_eq!(reply.non_hmac_tlvs()[0].value, all_zero[4..]);
+    }
+}
+
+#[test]
+fn revision25_control_sub_tlv_nonzero_length_is_malformed() {
+    // Type 12 fixed fields: length=0, count=1, interval=0, then an invalid
+    // Type 240 control sub-TLV with one data octet.
+    let chain = [0x80, 12, 0, 13, 0, 0, 0, 1, 0, 0, 0, 0, 0, 240, 0, 1, 42];
+    let reply = reflect_unauth(&build_unauth_packet(&chain), &make_ctx(None));
+    assert_eq!(reply.non_hmac_tlvs()[0].value[8], 0x40);
+    assert_eq!(&reply.non_hmac_tlvs()[0].value[9..], &[240, 0, 1, 42]);
 }

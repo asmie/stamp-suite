@@ -20,7 +20,7 @@ pub struct ReflectedControlBehavior {
     /// Nanoseconds between consecutive sends.
     pub interval_ns: u32,
     /// Exactly one IPv6 Extension Header Control sub-TLV was present
-    /// (draft-ietf-ippm-stamp-ext-hdr-15 §5.1). Neither backend attaches reply
+    /// (draft-ietf-ippm-stamp-ext-hdr-25 §5.1). Neither backend attaches reply
     /// headers, so the sub-TLV gets C set. Duplicate requests also get C set
     /// but leave this field false.
     pub suppress_reply_ext_headers: bool,
@@ -42,7 +42,7 @@ pub(super) enum ReflectedControlSubTlv {
     L2Group { mask: Vec<u8>, group: Vec<u8> },
     /// Layer 3 Address Group (sub-TLV type 11, RFC 10052 §3.1.2): IP prefix match.
     L3Group { prefix_len: u8, prefix: Vec<u8> },
-    /// IPv6 Extension Header Control (draft-ietf-ippm-stamp-ext-hdr-15
+    /// IPv6 Extension Header Control (draft-ietf-ippm-stamp-ext-hdr-25
     /// §5.1): presence-only (Sub-TLV Length 0) request to add matching IPv6
     /// extension headers to the reply. This reflector cannot add reply
     /// extension headers, so its presence yields the C flag on the reflected
@@ -92,8 +92,9 @@ pub(super) fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedCont
                     out.push(ReflectedControlSubTlv::L3Group { prefix_len, prefix });
                 }
             }
-            // Presence-only; ext-hdr-15 §5.1 defines no value fields, so any
-            // length is accepted and the value ignored.
+            // The flag pass marks nonzero lengths M (ext-hdr-25 §5.1).
+            // Retain the occurrence here so all malformed control sub-TLVs
+            // are still visited; their data never controls header attachment.
             REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL => {
                 out.push(ReflectedControlSubTlv::Ipv6ExtHdrControl);
             }

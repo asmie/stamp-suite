@@ -142,8 +142,9 @@ for building the recipe from local release inputs.
 
 The backend is chosen at build time. Both backends read the received TTL or Hop
 Limit. On Linux the nix backend reflects IPv6 extension headers; reflecting
-fixed IP headers needs the pnet backend. See
-[Networking](doc/usage.md#networking).
+fixed IP headers needs the pnet backend. Header disclosure requires explicit
+sender-IP permission using `--reflect-ipv6-ext-header-from` or
+`--reflect-fixed-header-from`. See [header reflection](doc/usage.md#ipv6-extension-headers).
 
 No Cargo feature is on by default.
 

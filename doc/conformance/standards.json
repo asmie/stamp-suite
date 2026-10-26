@@ -19,7 +19,7 @@
     {
       "kind": "draft",
       "name": "draft-ietf-ippm-stamp-ext-hdr",
-      "revision": "15",
+      "revision": "25",
       "matrix": "doc/conformance/draft-stamp-ext-hdr.md"
     },
     {

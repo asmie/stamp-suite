@@ -1,7 +1,7 @@
 //! Reflected IPv6 Extension Header Data TLV (Type 246) per
-//! draft-ietf-ippm-stamp-ext-hdr-15 §§4.1, 4.2.
+//! draft-ietf-ippm-stamp-ext-hdr-25 §§4.1, 4.2.
 //!
-//! # Wire Format (ext-hdr-15 Figure 2)
+//! # Wire Format (ext-hdr-25 Figure 2)
 //!
 //! ```text
 //!  0                   1                   2                   3
@@ -12,23 +12,23 @@
 //! |               Requested IPv6 Extension Header Data            |
 //! |                       (8 octets)                              |
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-//! |               Reflected IPv6 Extension Header Data            |
+//! |               Received IPv6 Extension Header Data             |
 //! ~                     (Length - 8 octets)                       ~
 //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 //! ```
 //!
 //! Length equals the target extension header size. Requested occupies eight
-//! bytes; Reflected receives `header[8..]`. The sender zeroes Reflected and
+//! bytes; Received receives `header[8..]`. The sender zeroes Received and
 //! sets Requested to zero or the target header's first eight wire bytes.
 //! A zero Requested is filled with the matched header's first eight bytes
-//! (ext-hdr-15 §4.2 rule 1). On missing capture or no match, the reflector
+//! (ext-hdr-25 §4.2 rule 1). On missing capture or no match, the reflector
 //! sets C and preserves the value.
 //!
-//! Nonzero Requested matches the header's prefix, including its own Next
-//! Header byte (the following protocol, not this header's type). Zero selects
+//! Nonzero Requested matches only its nonzero octets; zero octets are wildcards.
+//! It must uniquely identify an unmatched header. All-zero Requested selects
 //! the first length match. Each captured header is consumed once, so repeated
 //! requests select successive matches. See
-//! [`TlvList::process_reflected_headers`](crate::tlv::TlvList::process_reflected_headers).
+//! [`TlvList::process_reflected_headers_with_policy`](crate::tlv::TlvList::process_reflected_headers_with_policy).
 
 use crate::tlv::core::{TlvError, TlvType};
 use crate::tlv::traits::TypedTlv;
@@ -46,10 +46,10 @@ pub struct ReflectedIpv6ExtHdrTlv {
 impl ReflectedIpv6ExtHdrTlv {
     /// Creates a sender request TLV with `bytes` zero octets of Value.
     ///
-    /// Per draft-ietf-ippm-stamp-ext-hdr-15 §4.1 the sender sets the Length to
+    /// Per draft-ietf-ippm-stamp-ext-hdr-25 §4.1 the sender sets the Length to
     /// the target IPv6 extension-header size (from its Next Header field
     /// onward). The first 8 octets are the all-zeros Requested field and the
-    /// remaining `bytes - 8` octets are the zero-initialised Reflected field.
+    /// remaining `bytes - 8` octets are the zero-initialised Received field.
     #[must_use]
     pub fn request_with_capacity(bytes: usize) -> Self {
         Self {
@@ -58,9 +58,9 @@ impl ReflectedIpv6ExtHdrTlv {
     }
 
     /// Creates a request with up to eight selector bytes and a zeroed tail
-    /// (draft-ietf-ippm-stamp-ext-hdr-15 §4.1). Allocates at least eight bytes.
-    /// The selector matches the target header's wire prefix, including its
-    /// Next Header byte. Longer prefixes are truncated; the CLI rejects them.
+    /// (draft-ietf-ippm-stamp-ext-hdr-25 §4.1). Allocates at least eight bytes.
+    /// Each nonzero selector octet must match; zero is a wildcard. Mutable
+    /// option data must be zeroed. Longer prefixes are truncated; the CLI rejects them.
     #[must_use]
     pub fn request_with_selector(prefix: &[u8], capacity: usize) -> Self {
         let prefix = &prefix[..prefix.len().min(8)];
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn test_request_with_selector_prefixes_then_zero_pads() {
-        // ext-hdr-15 §4.1 selector: first 8 bytes carry the match pattern, the
+        // ext-hdr-25 §4.1 selector: first 8 bytes carry the match pattern, the
         // rest of the requested capacity is zero for the reflector to fill.
         let tlv = ReflectedIpv6ExtHdrTlv::request_with_selector(&[0x3C, 0x00, 0x01, 0x02], 8);
         assert_eq!(tlv.data, vec![0x3C, 0x00, 0x01, 0x02, 0, 0, 0, 0]);

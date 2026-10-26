@@ -551,7 +551,7 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
 
 /// Walk IPv6 headers after the 40-byte fixed header; return their wire
 /// bytes, final Next Header protocol and upper-layer payload offset
-/// (ext-hdr-15 §§3.1, 4.1). Capture HBH (0), Routing (43, including SRH),
+/// (ext-hdr-25 §§3.1, 4.1). Capture HBH (0), Routing (43, including SRH),
 /// Fragment (44) and Destination Options (60), keeping each Next Header.
 /// Lengths are (HdrExtLen + 1) * 8, except Fragment (8 bytes).
 /// Stop at AH (51, different length encoding), ESP (50, encrypted), or
@@ -1086,7 +1086,7 @@ mod tests {
 
     use clap::Parser;
 
-    /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2/§4.1: captured extension headers
+    /// draft-ietf-ippm-stamp-ext-hdr-25 §4.2/§4.1: captured extension headers
     /// must be stored verbatim as on the wire. Byte 0 is the header's OWN Next
     /// Header field (naming what follows), NOT the header's own type (which is
     /// carried in the preceding Next Header pointer). This is what the
@@ -1118,7 +1118,7 @@ mod tests {
         assert_eq!(payload_offset, 48, "40-byte fixed + 8-byte HBH");
     }
 
-    /// draft-ietf-ippm-stamp-ext-hdr-15 §4.2 (rule 3) processes extension
+    /// draft-ietf-ippm-stamp-ext-hdr-25 §4.2 (rule 3) processes extension
     /// headers in order from the outermost. The walk must capture a Routing
     /// Header (type 43, including the Segment Routing Header, routing type 4)
     /// in order and continue to the upper layer.

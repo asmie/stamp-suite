@@ -580,6 +580,8 @@ fn test_location_tlv_ipv4_round_trip() {
         sender_port: 12345,
         return_path_allow_alternate: false,
         reflector_member_link_id: None,
+        reflect_fixed_header: true,
+        reflect_ipv6_ext_header: true,
         captured_headers: None,
         reflected_control_max_count: 16,
         reflected_control_max_size: 1500,

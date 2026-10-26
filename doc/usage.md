@@ -678,7 +678,7 @@ explicit-port failures stop startup. The reflector defaults to 862; sender
 and remote ports must differ. When reusing a reflector config for a sender,
 set `local_port = 0`.
 
-Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-15
+Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-25
 requires. `--ttl` accepts only 255. Received packets with a lower hop count are
 accepted.
 
@@ -737,20 +737,27 @@ arrived on, and multicast sessions, are not supported. The
 ### IPv6 extension headers
 
 The sender can attach IPv6 Hop-by-Hop and Destination Options headers and ask
-the reflector to return them (draft-ietf-ippm-stamp-ext-hdr-15). Type 246
+the reflector to return them (draft-ietf-ippm-stamp-ext-hdr-25). Type 246
 returns IPv6 extension headers and Type 247 the fixed IP header. Both types
-are experimental codepoints, so both endpoints must implement revision 15 of
-the draft.
+are experimental codepoints, so both endpoints must implement revision 25 of
+the draft. Header reflection is denied by default. On the reflector, configure
+`--reflect-ipv6-ext-header-from IP` for extension headers and
+`--reflect-fixed-header-from IP` for fixed headers; repeat a flag for each
+permitted sender. The TOML equivalents are `reflect_ipv6_ext_header_from` and
+`reflect_fixed_header_from` arrays. An unlisted sender receives C without
+header data. Provision both endpoints and their rate/burst limits before sending.
 
 ```bash
-# Attach an eight-byte Hop-by-Hop header and ask for it back.
+# On the reflector, permit extension-header data for this sender.
+stamp-suite --is-reflector --local-addr 2001:db8::20 --reflect-ipv6-ext-header-from 2001:db8::10
+
+# On the sender, attach an eight-byte Hop-by-Hop header and ask for it back.
 stamp-suite --remote-addr 2001:db8::20 --local-addr 2001:db8::10 --attach-ext-hdr hbh
 ```
 
 - `--attach-ext-hdr hbh|dest[:HEX]` attaches a header and requests its
-  reflection. It works on Linux with an IPv6 destination; elsewhere the header
-  is not attached and a warning is logged. If attaching fails on Linux,
-  startup fails.
+  reflection. It requires Linux and an IPv6 destination. Unsupported platforms
+  and attachment failures stop startup.
 - `--reflected-ipv6-ext-hdr LEN[:SELECTORHEX]` replaces the automatic requests.
   Requests must match attached headers in wire order.
 - `--reflected-fixed-hdr [SELECTORHEX]` requests the received fixed IP header.
@@ -759,9 +766,13 @@ stamp-suite --remote-addr 2001:db8::20 --local-addr 2001:db8::10 --attach-ext-hd
   removed from the probe and a warning is logged.
 
 Type 246 has an eight-byte Requested field; Type 247 has a four-byte one. A
-nonzero Requested value selects the header whose first bytes match it and is
-returned unchanged. A zero Requested value selects the first header of the
-requested length and is filled with that header's first bytes in the reply.
+nonzero Requested value matches only its nonzero octets: zero octets are
+wildcards. It must select exactly one unmatched header and is returned
+unchanged; zero or multiple matches return C without copying data. An all-zero
+Requested field selects the first unmatched header of the requested length and
+is filled with its first bytes in the reply. Selectors must zero every octet
+containing mutable fields: IPv4 byte 1, IPv6 bytes 0–1, or mutable IPv6 option
+data. The CLI rejects ambiguous extension-header selectors and mutable matches.
 
 On Linux, the nix reflector reads IPv6 extension headers from the socket's
 ancillary data and reflects them. It cannot read the fixed IP header, so Type

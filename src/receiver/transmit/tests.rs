@@ -839,3 +839,24 @@ fn each_follow_up_copy_reports_its_stored_timestamp_method_and_signature() {
             .is_some());
     }
 }
+
+#[test]
+fn reflected_headers_are_trimmed_before_ber_padding() {
+    let base = 44;
+    let mut data = vec![0; base];
+    // BER Count, Extra Padding, Fixed Header, Extension Header, HMAC.
+    for (kind, len) in [(241, 4), (1, 128), (247, 20), (246, 8), (8, 16)] {
+        data.extend_from_slice(&[0, kind, 0, len]);
+        data.extend(vec![0; usize::from(len)]);
+    }
+    let cap = data.len() - 12;
+    assert!(!fit_reply(&mut data, base, cap, false).unwrap());
+    assert_eq!(data.len(), cap);
+    let list = crate::tlv::TlvList::parse(&data[base..]).unwrap();
+    let kinds: Vec<_> = list.iter().map(|t| t.tlv_type.to_byte()).collect();
+    assert_eq!(kinds, [241, 1, 247, 8]);
+    assert_eq!(list.non_hmac_tlvs()[1].value.len(), 128);
+    // All optional header TLVs gone, but mandatory fields still do not fit:
+    // refuse the packet instead of shrinking its BER padding.
+    assert!(fit_reply(&mut data, base, base + 8 + 132 + 20 - 1, false).is_err());
+}

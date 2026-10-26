@@ -16,9 +16,9 @@ certify untested behavior.
 | [RFC 8545](rfc8545.md): OWAMP/TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [RFC 10052](draft-asymmetrical-pkts.md): Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
-| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -15, 30 September 2026 | 63 | 54 | 2 | 0 | 7 | 0 |
+| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -25, 22 October 2026 | 71 | 62 | 6 | 0 | 3 | 0 |
 | [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md): residual BER (Types 240 to 242) | -07, 30 June 2026 | 30 | 27 | 2 | 0 | 1 | 0 |
-| **Total** | | **421** | **363** | **11** | **1** | **43** | **3** |
+| **Total** | | **429** | **371** | **15** | **1** | **39** | **3** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).
@@ -101,9 +101,9 @@ agree on their meaning; they are not IANA assignments.
 | Type 240 | STAMP TLV Types (Experimental, 240-251) | `BER_PATTERN_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.1 | Type allocation in the draft |
 | Type 241 | STAMP TLV Types (Experimental, 240-251) | `BER_COUNT_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.2 | Type allocation in the draft |
 | Type 242 | STAMP TLV Types (Experimental, 240-251) | `BER_MAX_BURST_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.3 | Type allocation in the draft; **known collision**, see below |
-| Type 246 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_IPV6_EXT_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-15 §4.1, §4.2 | IANA allocation of TBA1 |
-| Type 247 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_FIXED_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-15 §6.1, §6.2 | IANA allocation of TBA2 |
-| Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-15 §5.1 | IANA allocation of TBA3 |
+| Type 246 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_IPV6_EXT_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-25 §4.1, §4.2 | IANA allocation of TBA1 |
+| Type 247 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_FIXED_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-25 §6.1, §6.2 | IANA allocation of TBA2 |
+| Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-25 §5.1 | IANA allocation of TBA3 |
 
 Type 242 conflicts with another implementation's experimental Heartbeat TLV,
 and the formats are incompatible. `--ber-omit-burst` leaves Type 242 out of

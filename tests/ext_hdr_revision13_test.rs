@@ -1,4 +1,4 @@
-//! Independent loopback peer for draft-ietf-ippm-stamp-ext-hdr-15 rules: source
+//! Independent loopback peer for draft-ietf-ippm-stamp-ext-hdr-25 rules: source
 //! ports, TTL/Hop Limit 255 and session state notifications.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 use nix::libc;
