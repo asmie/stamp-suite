@@ -340,7 +340,7 @@ jobs:
       # Pinned to Cargo.toml's rust-version. Every
       # target (tests, benches, examples) must build there, not just the
       # library: distro builds run the test suite with the distro compiler.
-      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: dtolnay/rust-toolchain@1.87.0
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: msrv

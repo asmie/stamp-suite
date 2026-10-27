@@ -50,7 +50,7 @@ CRATES="
 	crossbeam-utils@0.8.23
 	crunchy@0.2.4
 	crypto-common@0.2.2
-	ctutils@0.4.2
+	ctutils@0.4.4
 	digest@0.11.3
 	either@1.18.0
 	equivalent@1.0.2
@@ -149,8 +149,8 @@ CRATES="
 	roff@1.1.1
 	rustix@1.1.5
 	rustls-pki-types@1.15.1
-	rustls-webpki@0.103.15
-	rustls@0.23.45
+	rustls-webpki@0.103.16
+	rustls@0.23.46
 	rustversion@1.0.23
 	ryu@1.0.23
 	same-file@1.0.6
@@ -183,7 +183,7 @@ CRATES="
 	tokio-macros@2.7.2
 	tokio-rustls@0.26.6
 	tokio-util@0.7.19
-	tokio@1.53.2
+	tokio@1.53.3
 	toml@1.1.6+spec-1.1.0
 	toml_datetime@1.1.1+spec-1.1.0
 	toml_parser@1.1.3+spec-1.1.0
@@ -236,7 +236,7 @@ CRATES="
 "
 
 # Matches Cargo.toml; ring/rustls need a C toolchain, no system libraries.
-RUST_MIN_VER="1.86.0"
+RUST_MIN_VER="1.87.0"
 
 inherit cargo python-any-r1 systemd
 

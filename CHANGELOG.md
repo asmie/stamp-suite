@@ -7,6 +7,7 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Raise the minimum Rust version to 1.87 for the patched `ctutils` dependency.
 - Update reflected-header extensions to draft-ietf-ippm-stamp-ext-hdr-25.
   Header disclosure now requires explicit sender-IP permission through
   `--reflect-fixed-header-from` or `--reflect-ipv6-ext-header-from` (or their
@@ -16,6 +17,8 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Update locked `ctutils`, Tokio, rustls and rustls-webpki dependencies to
+  resolve RustSec advisories, and restore the packet-processing fuzz build.
 - Report session failure after the configured loss threshold even before the
   first reply, and validate IPv6 Extension Header Control sub-TLV lengths.
 - Use a zero interval when Type 12 only carries the header-control sub-TLV.

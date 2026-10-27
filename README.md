@@ -106,7 +106,7 @@ for macOS on Apple silicon and Intel, plus a Windows x64 ZIP, source and
 
 ### From source
 
-Rust 1.86 or newer is required. Debian trixie source builds need a newer
+Rust 1.87 or newer is required. Debian trixie source builds need a newer
 compiler than the stock Rust 1.85 package. Prebuilt packages need no compiler.
 
 ```sh

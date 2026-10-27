@@ -1,6 +1,6 @@
 # Keep both stages on the same Debian release for glibc compatibility.
 # The builder uses the crate's minimum supported Rust version.
-FROM rust:1.86-slim-bookworm AS builder
+FROM rust:1.87-slim-bookworm AS builder
 
 WORKDIR /usr/src/stamp-suite
 

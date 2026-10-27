@@ -16,7 +16,7 @@ PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=Piotr Olszewski <asmie@asmie.pl>
 
-# Requires a packages feed with Rust 1.86 or newer.
+# Requires a packages feed with Rust 1.87 or newer.
 PKG_BUILD_DEPENDS:=rust/host python3/host
 RUST_PKG_FEATURES:=ttl-nix
 

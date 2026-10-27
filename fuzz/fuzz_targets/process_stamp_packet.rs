@@ -73,6 +73,8 @@ fuzz_target!(|data: &[u8]| {
         last_reflection_method: TimestampMethod::SwLocal,
         return_path_allow_alternate: true,
         reflector_member_link_id: Some(1),
+        reflect_fixed_header: true,
+        reflect_ipv6_ext_header: true,
         captured_headers: (mode & 32 != 0).then_some(&captured),
         reflected_control_max_count: 16,
         reflected_control_max_size: 1500,

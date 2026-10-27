@@ -3,8 +3,8 @@ authors = ['Piotr Olszewski <asmie@asmie.pl>']
 name = "stamp-suite"
 version = "1.0.0"
 edition = "2021"
-# Criterion 0.8 sets the minimum for tests and distribution builds.
-rust-version = "1.86.0"
+# Patched ctutils sets the minimum through the HMAC/SHA-2 dependencies.
+rust-version = "1.87.0"
 
 categories = [
     "network-programming",
@@ -72,10 +72,10 @@ axum = { version = "0.8", optional = true }
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.18", optional = true, default-features = false }
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"], optional = true }
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
 
 [dependencies.tokio]
-version = "1.53"
+version = "1.53.3"
 features = ["rt-multi-thread", "net", "time", "macros", "signal", "sync"]
 
 # Platform-specific default backends

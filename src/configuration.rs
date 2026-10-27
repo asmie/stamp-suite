@@ -95,7 +95,7 @@ impl std::str::FromStr for ProbeInterval {
 impl fmt::Display for ProbeInterval {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let micros = self.0.as_micros();
-        if micros % 1000 == 0 {
+        if micros.is_multiple_of(1000) {
             write!(f, "{}", micros / 1000)
         } else {
             write!(f, "{micros}us")
@@ -1696,7 +1696,7 @@ impl Configuration {
         if self.ber {
             let pattern = crate::ber::parse_pattern(self.ber_pattern.as_deref().unwrap_or("ff00"))
                 .map_err(|e| invalid(format!("Invalid --ber-pattern: {e}")))?;
-            if self.ber_padding_size == 0 || self.ber_padding_size % pattern.len() != 0 {
+            if self.ber_padding_size == 0 || !self.ber_padding_size.is_multiple_of(pattern.len()) {
                 return Err(invalid(
                     "ber_padding_size must be positive and a multiple of the pattern length",
                 ));
