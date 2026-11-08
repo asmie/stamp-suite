@@ -230,13 +230,30 @@ Linux routing with nix, not a physical SRv6 fabric or hardware.
 ### Standards revision monitor
 
 [`standards.json`](conformance/standards.json) pins three implemented draft
-revisions and seven RFC metadata records. The checker queries the public IETF
-Datatracker document API and the RFC Editor JSON, validates document identity
-and required fields, and saves the source JSON with its SHA-256. Each draft pin
-must also match the "Revision frozen" text in its matrix. A new revision, RFC
-publication, expiry, or a change to an RFC's status, updates or obsolescence
-relationships requests review. Expiry within 14 days is an advisory warning.
-Network failures and malformed or missing evidence never count as unchanged.
+revisions and seven RFC metadata records, and watches the expired STAMP YANG
+draft separately. The checker queries Datatracker's `/doc/<name>/doc.json`
+endpoint for resolved draft states and RFC Editor JSON for RFCs. It validates
+document identity and required fields and saves every source JSON with its
+SHA-256. Each implemented draft pin must also match the "Revision frozen" text
+in its matrix. A new revision, RFC publication, inactive draft state, expiry,
+or a change to an RFC's status, updates or obsolescence relationships requests
+review. Expiry within 14 days is an advisory warning.
+
+For Replaced drafts, the checker resolves `replaces` relationships from
+`/api/v1/doc/relateddocument/` and follows every successor branch. The report
+includes complete replacement paths and successor metadata; the cache includes
+all document and relationship responses. Traversal allows at most eight hops,
+16 documents and 64 visits per tracked draft. Cycles, incomplete relationship
+pages, missing successors and invalid metadata make the check incomplete rather
+than choosing a successor or claiming the pinned document is current.
+
+An entry with `"watch_only": true` reports drift without failing the run. A
+watch-only draft requires an explicit `expected_state` and may omit a matrix
+because it makes no implementation claim. The YANG entry watches revision 12
+and state Expired: renewal, revision changes and replacement paths stay visible
+without making its known expiry a release blocker. Network failures and malformed
+or missing evidence, including for watch-only entries, still make the check
+incomplete.
 
 ```sh
 python3 scripts/check_standards.py --report /tmp/standards.json --cache /tmp/standards-source
@@ -246,12 +263,26 @@ python3 scripts/check_standards.py --offline /tmp/standards-source \
 
 Exit codes: **0** current, **1** specification review needed, **2** incomplete
 check. Offline mode replays saved observations and does not show the latest
-revision. `standards.yml` runs weekly (Mondays) and on demand and uploads
-results even on failure. It does not edit pins, open issues or send messages.
+revision. Use the live report's `as_of` date when comparing replay results.
+Reports use schema version 2 and include a `sources` list with the URL, cache
+filename and digest for each response. Caches from the old document API lack
+resolved draft state and must be refreshed; they cannot establish a current
+result with this checker.
+
+`standards.yml` runs weekly (Mondays) and on demand and uploads results even on
+failure. A failed or incomplete check creates or updates one open GitHub issue
+titled "Standards revision monitor needs review", with a run link and the
+review/error details. The workflow grants `issues: write` and serializes runs
+to avoid duplicate notifications. `scripts/notify_standards.py` identifies its
+issue using a body marker, preserves unrelated issues and sends the body through
+a file to `gh`; notification tests mock `gh` and never write to GitHub. The
+workflow stays failed when review is required. Close the issue manually after
+reconciliation; successful checks do not close it or change pins.
 Only a reviewed change to the implementation and matrix should update a frozen
 draft revision. The monitor does not audit normative text, IANA code points or
 errata; release review should check each RFC's errata page and keep the
-result. STAMP YANG and TWAMP-Control are outside the product scope.
+result. Watching STAMP YANG adds no YANG implementation claim; TWAMP-Control
+remains outside the product scope.
 
 ## Recorded results
 

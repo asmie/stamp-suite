@@ -7,6 +7,12 @@ on:
 
 permissions:
   contents: read
+  issues: write
+
+# Serialize notifications so concurrent checks cannot create duplicate issues.
+concurrency:
+  group: standards-revision-monitor
+  cancel-in-progress: false
 
 jobs:
   revisions:
@@ -15,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Check tracked IETF and RFC Editor metadata
+        id: standards
         run: python3 scripts/check_standards.py --report standards-report.json --cache standards-source
       - uses: actions/upload-artifact@v7.0.1
         if: always()
@@ -24,3 +31,14 @@ jobs:
             standards-report.json
             standards-source/*.json
           if-no-files-found: error
+      - name: Create or update the standards review issue
+        if: ${{ !cancelled() && steps.standards.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STANDARDS_REPOSITORY: ${{ github.repository }}
+          STANDARDS_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python3 scripts/notify_standards.py
+          --repo "$STANDARDS_REPOSITORY"
+          --report standards-report.json
+          --run-url "$STANDARDS_RUN_URL"

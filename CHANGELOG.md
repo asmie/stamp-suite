@@ -17,6 +17,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Detect inactive and replaced standards drafts, follow bounded successor chains,
+  and cache all metadata for offline replay. Add advisory YANG tracking and a
+  reusable GitHub issue notification for failed or incomplete standards checks.
+  Checker reports now use schema version 2; refresh old draft metadata caches.
 - Enforce route-MTU checks for single reflected-header and BER replies without
   Type 12 control. This fixes a bug affecting v1.0.0 that could send oversized
   replies without trimming or fragmentation prevention.

@@ -29,6 +29,13 @@
       "matrix": "doc/conformance/draft-stamp-ber.md"
     },
     {
+      "kind": "draft",
+      "name": "draft-ietf-ippm-stamp-yang",
+      "revision": "12",
+      "watch_only": true,
+      "expected_state": "Expired"
+    },
+    {
       "kind": "rfc",
       "name": "rfc8762",
       "expected": {

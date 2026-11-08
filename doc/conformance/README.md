@@ -146,9 +146,13 @@ semantics: a citation that resolves can still describe the code wrongly, so
 rows need review when the code changes.
 
 `scripts/check_standards.py` compares [`standards.json`](standards.json)
-with the IETF Datatracker and RFC Editor metadata to detect new revisions and
-status changes. For each draft it also checks that the matrix's
-`Revision frozen:` line names the pinned revision. See [Standards revision
+with the IETF Datatracker and RFC Editor metadata to detect new revisions,
+inactive states and replacement chains. For each implemented draft it also
+checks that the matrix's `Revision frozen:` line names the pinned revision.
+Watch-only entries, such as the expired STAMP YANG draft, report changes without
+an implementation claim or blocking on drift; missing evidence still fails the
+check. The scheduled workflow creates or updates a review issue on failure.
+See [Standards revision
 monitor](../release-evidence.md#standards-revision-monitor).
 
 ## Other evidence

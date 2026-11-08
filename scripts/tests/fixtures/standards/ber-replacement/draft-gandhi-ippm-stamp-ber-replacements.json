@@ -1,0 +1,10 @@
+{
+  "meta": {"next": null, "total_count": 1},
+  "objects": [
+    {
+      "relationship": "/api/v1/name/docrelationshipname/replaces/",
+      "source": "/api/v1/doc/document/draft-ietf-ippm-stamp-ber/",
+      "target": "/api/v1/doc/document/draft-gandhi-ippm-stamp-ber/"
+    }
+  ]
+}
