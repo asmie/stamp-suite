@@ -604,6 +604,167 @@ fn check_sized_signature(data: &[u8], auth: bool) {
     }
 }
 
+fn single_header_sample(auth: bool, ipv6: bool, kind: u8) -> Transmission {
+    let mut t = sample(auth, ReturnPathAction::Normal);
+    let base = if auth {
+        AUTH_BASE_SIZE
+    } else {
+        UNAUTH_BASE_SIZE
+    };
+    t.response.data.truncate(base);
+    // Mandatory CoS and Timestamp Information surround the optional header.
+    let header_len = if kind == 246 {
+        16
+    } else if ipv6 {
+        40
+    } else {
+        20
+    };
+    for (tlv_type, len) in [(4, 4), (kind, header_len), (3, 4)] {
+        t.response.data.extend_from_slice(&[0, tlv_type, 0, len]);
+        t.response.data.extend(vec![0; usize::from(len)]);
+    }
+    if auth {
+        t.response.data.extend_from_slice(&[0, 8, 0, 16]);
+        t.response.data.extend_from_slice(&[0; 16]);
+    }
+    t.response.reflected_control = None;
+    t.response.reply_source = None;
+    t.response.cos_request = None;
+    t.source = if ipv6 { "[::1]:4000" } else { "127.0.0.1:4000" }
+        .parse()
+        .unwrap();
+    t.remaining = 1;
+    t
+}
+
+#[test]
+fn single_header_reply_checks_mtu_trims_and_resigns() {
+    for auth in [false, true] {
+        for ipv6 in [false, true] {
+            for kind in [246, 247] {
+                let mut t = single_header_sample(auth, ipv6, kind);
+                let base = if auth {
+                    AUTH_BASE_SIZE
+                } else {
+                    UNAUTH_BASE_SIZE
+                };
+                let cap = base + 16 + if auth { 20 } else { 0 };
+                let counters = ReflectorCounters::new();
+                let mut queries = 0;
+                assert_eq!(
+                    t.send_next_with_mtu(
+                        &counters,
+                        &RateLimiter::new(0),
+                        |target, options, refresh| {
+                            assert_eq!(target.is_ipv6(), ipv6);
+                            assert!(options.dont_fragment);
+                            assert!(!refresh);
+                            queries += 1;
+                            Ok(cap)
+                        },
+                        |data, _, options| {
+                            assert!(options.dont_fragment);
+                            assert_eq!(data.len(), cap);
+                            assert_eq!(&data[base..base + 8], &[0, 4, 0, 4, 0, 0, 0, 0]);
+                            assert_eq!(&data[base + 8..base + 16], &[0, 3, 0, 4, 0, 0, 0, 0]);
+                            check_sized_signature(data, auth);
+                            Ok(data.len())
+                        },
+                    ),
+                    Some(0)
+                );
+                assert_eq!(queries, 1, "Type {kind}, auth={auth}, ipv6={ipv6}");
+                assert_eq!(t.remaining, 0);
+                assert_eq!(t.session.get_transmitted_count(), 1);
+                assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn single_header_reply_refuses_missing_mtu_or_oversized_mandatory_fields() {
+    for auth in [false, true] {
+        for ipv6 in [false, true] {
+            for kind in [246, 247] {
+                for unavailable in [false, true] {
+                    let mut t = single_header_sample(auth, ipv6, kind);
+                    let base = if auth {
+                        AUTH_BASE_SIZE
+                    } else {
+                        UNAUTH_BASE_SIZE
+                    };
+                    let cap = base + 15 + if auth { 20 } else { 0 };
+                    let counters = ReflectorCounters::new();
+                    assert_eq!(
+                        t.send_next_with_mtu(
+                            &counters,
+                            &RateLimiter::new(0),
+                            |_, _, _| {
+                                if unavailable {
+                                    Err(io::Error::new(io::ErrorKind::Unsupported, "no route MTU"))
+                                } else {
+                                    Ok(cap)
+                                }
+                            },
+                            |_, _, _| panic!("single header reply bypassed its MTU budget"),
+                        ),
+                        None
+                    );
+                    assert_eq!(t.remaining, 0);
+                    assert_eq!(t.session.get_transmitted_count(), 0);
+                    assert_eq!(counters.packets_dropped.load(Ordering::Relaxed), 1);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn single_header_reply_refreshes_mtu_and_resigns_after_emsgsize() {
+    for auth in [false, true] {
+        for ipv6 in [false, true] {
+            let mut t = single_header_sample(auth, ipv6, 246);
+            let original_len = t.response.data.len();
+            let mut queries = Vec::new();
+            let mut sends = 0;
+            assert_eq!(
+                t.send_next_with_mtu(
+                    &ReflectorCounters::new(),
+                    &RateLimiter::new(0),
+                    |_, options, refresh| {
+                        assert!(options.dont_fragment);
+                        queries.push(refresh);
+                        Ok(if refresh {
+                            original_len - 20
+                        } else {
+                            original_len
+                        })
+                    },
+                    |data, _, options| {
+                        assert!(options.dont_fragment);
+                        check_sized_signature(data, auth);
+                        sends += 1;
+                        if sends == 1 {
+                            assert_eq!(data.len(), original_len);
+                            Err(io::Error::from_raw_os_error(nix::libc::EMSGSIZE))
+                        } else {
+                            assert_eq!(data.len(), original_len - 20);
+                            Ok(data.len())
+                        }
+                    },
+                ),
+                Some(0)
+            );
+            assert_eq!(queries, [false, true]);
+            assert_eq!(sends, 2);
+            assert_eq!(t.session.get_transmitted_count(), 1);
+        }
+    }
+}
+
 #[test]
 fn mtu_clamps_ipv4_ipv6_bursts_and_resigns_final_packet() {
     for auth in [false, true] {

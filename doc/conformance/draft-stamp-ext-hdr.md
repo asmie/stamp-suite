@@ -163,11 +163,11 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-6.2-request | Add a fixed-header TLV for each header requested for reflection. | MUST | Sender | Compliant | `src/sender/packet.rs::reflected_header_request_tlvs`; the sender originates one fixed IP header. |
 | ext-hdr-6.2-mutable | Zero every Requested octet containing mutable DSCP/ECN bits; never depend on matching a zero-valued octet. | MUST / MUST NOT | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/configuration/tests.rs::revision25_fixed_selector_masks_mutable_octets`. IPv4 byte 1 and IPv6 bytes 0 and 1 must be zero. |
 | ext-hdr-6.2-policy | Explicitly request fixed-header data; enforce reflector policy before copying and return C on refusal. | MUST / MUST NOT | Both | Compliant | `src/sender/packet.rs::reflected_header_request_tlvs`, `src/receiver/ingest.rs::ProcessingContext::for_packet`, `src/tlv/list/processing.rs::process_reflected_headers_with_policy`. |
-| ext-hdr-7.2-1 | Keep the complete transmitted packet within the applicable path MTU. | MUST | Both | Compliant | `src/sender/packet.rs::enforce_egress_mtu`, `src/receiver/transmit.rs::fit_reply`; see [MTU budget](#mtu-budget). |
-| ext-hdr-7.2-2 | Remove complete reflected-header TLVs from the end, skipping HMAC, until the packet fits. | MUST | Both | Compliant | `src/sender/packet.rs::enforce_egress_mtu`, `src/tlv/list/processing.rs::trim_reflected_headers_to_size`; each uses the last header TLV. |
-| ext-hdr-7.2-3 | Update the HMAC digest if a preceding TLV was removed. | MUST | Both | Compliant | `src/receiver/transmit.rs::fit_reply`, `src/receiver/transmit.rs::Transmission`; the send path trims before signing each copy. Sender builds and signs after trimming. |
-| ext-hdr-7.2-4 | Retain the relative order of remaining TLVs, including returned requests. | MUST | Both | Compliant | `src/tlv/list/mod.rs::remove_non_hmac` repairs wire indices; sender removes one vector entry at a time. |
-| ext-hdr-7.2-5 | Do not transmit when removing all optional header TLVs cannot satisfy the MTU. | MUST NOT | Both | Compliant | `src/sender/run.rs`, `src/receiver/transmit.rs::fit_reply`; oversized mandatory packets are refused. |
+| ext-hdr-7.2-1 | Keep the complete transmitted packet within the applicable path MTU. | MUST | Both | Compliant | `src/sender/packet.rs::enforce_egress_mtu`, `src/receiver/transmit.rs::fit_reply`; tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. See [MTU budget](#mtu-budget). |
+| ext-hdr-7.2-2 | Remove complete reflected-header TLVs from the end, skipping HMAC, until the packet fits. | MUST | Both | Compliant | `src/sender/packet.rs::enforce_egress_mtu`, `src/tlv/list/processing.rs::trim_reflected_headers_to_size`; each uses the last header TLV. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. |
+| ext-hdr-7.2-3 | Update the HMAC digest if a preceding TLV was removed. | MUST | Both | Compliant | `src/receiver/transmit.rs::fit_reply`, `src/receiver/transmit.rs::Transmission`; tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `src/receiver/transmit/tests.rs::single_header_reply_refreshes_mtu_and_resigns_after_emsgsize`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. The send path trims before signing each copy. Sender builds and signs after trimming. |
+| ext-hdr-7.2-4 | Retain the relative order of remaining TLVs, including returned requests. | MUST | Both | Compliant | `src/tlv/list/mod.rs::remove_non_hmac` repairs wire indices; sender removes one vector entry at a time. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. |
+| ext-hdr-7.2-5 | Do not transmit when removing all optional header TLVs cannot satisfy the MTU. | MUST NOT | Both | Compliant | `src/sender/run.rs`, `src/receiver/transmit.rs::fit_reply`; test: `src/receiver/transmit/tests.rs::single_header_reply_refuses_missing_mtu_or_oversized_mandatory_fields`. Oversized mandatory packets and unavailable route budgets are refused. |
 | ext-hdr-9-errors | Log each C error condition locally and increment its condition counter. | SHOULD | Reflector | Partial | Header match and policy failures log their reasons; Type 12 rejections are logged. Separate counters for every C error condition are not implemented. |
 | ext-hdr-9.2-0 | Optionally generate session state-change notifications. | MAY | Sender | Compliant | `src/sender/session_state.rs::Monitor` exposes structured logs and report summaries. |
 | ext-hdr-9.2-5 | Report failed after N consecutive losses even before the first reply. | Descriptive | Sender | Compliant | `src/sender/session_state.rs::tests::failure_before_first_reply_and_recovery`. |
@@ -207,6 +207,13 @@ destination route before signing (`src/receiver/mtu.rs`,
 `src/receiver/transmit.rs::fit_reply`); an unknown budget fails closed. Header
 requests need a known route MTU, which only Linux provides. That limits where
 the feature runs; it never permits an oversized packet.
+
+Single replies without Type 12 initialize their transport policy before moving
+the reply buffer. Transmit regressions cover Types 246/247, IPv4/IPv6, open and
+authenticated replies, mandatory TLV order, re-signing, missing budgets and
+EMSGSIZE refresh. The live route test verifies single-reply trimming over a
+smaller reverse route, including C-marked header requests with no captured data.
+The single-reply policy bug affected v1.0.0; these rows describe the fixed code.
 
 ### Control sub-TLV
 

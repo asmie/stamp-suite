@@ -187,16 +187,21 @@ impl Transmission {
             return None;
         }
         self.first = false;
+        let base = if self.auth {
+            AUTH_BASE_SIZE
+        } else {
+            UNAUTH_BASE_SIZE
+        };
+        // Derive the policy while the response still owns its TLVs. Taking
+        // the only copy first would hide header/BER MTU requirements.
+        let plan = self.plan.get_or_insert_with(|| {
+            TransportPlan::new(&self.response, self.source, base, self.srv6)
+        });
         // The last copy can take the buffer; earlier copies need it again.
         let mut data = if self.remaining <= 1 {
             std::mem::take(&mut self.response.data)
         } else {
             self.response.data.clone()
-        };
-        let base = if self.auth {
-            AUTH_BASE_SIZE
-        } else {
-            UNAUTH_BASE_SIZE
         };
         let sequence = if self.stateful {
             self.session.peek_sequence_number()
@@ -205,9 +210,6 @@ impl Transmission {
         };
         data[..4].copy_from_slice(&sequence.to_be_bytes());
         refresh_telemetry(&mut data, base, &self.session, self.stateful);
-        let plan = self.plan.get_or_insert_with(|| {
-            TransportPlan::new(&self.response, self.source, base, self.srv6)
-        });
         let mut target = plan.target;
         let mut options = plan.options.clone();
         if plan.unsupported_srh {

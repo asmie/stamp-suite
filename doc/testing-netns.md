@@ -159,10 +159,15 @@ temporary veth pair, and sends independently built UDP requests. It covers
 IPv4 and IPv6, open and authenticated replies, wildcard and bound reflectors,
 interface MTU decreases and increases, route MTU metrics, and alternate
 destinations. It checks payload lengths, a single C-flagged reply, and the final
-base and TLV HMACs. Cleanup removes the veth and child processes even after an
-assertion failure. These are real UDP and kernel route tests, not packet
-captures or SRv6 transit tests. Report the result of this separate run; an
-ignored test in an ordinary run is not a pass.
+base and TLV HMACs. Requests without Type 12 also exercise single BER replies
+with whole-pattern padding trimming and C-marked metadata, and single header
+replies with optional Types 246/247 removed while mandatory padding stays intact.
+The single header requests have no captured headers and are answered with C
+before MTU fitting; successful header data and send-time refusal/EMSGSIZE paths
+are covered by the transmit unit tests. Cleanup removes the veth and child
+processes even after an assertion failure. These are real UDP and kernel route
+tests, not packet captures or SRv6 transit tests. Report the result of this
+separate run; an ignored test in an ordinary run is not a pass.
 
 ### Retaining successful SRv6 evidence
 

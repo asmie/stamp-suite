@@ -27,7 +27,7 @@ one Maximum Bit Error Burst Size TLV (`src/sender/run.rs::SenderRun::open`).
 
 | ID | Clause | Level | Role | Status | Evidence |
 |---|---|---|---|---|---|
-| ber-3-1 | Sender and reflector adjust the extra padding so test packets do not exceed the path MTU. | MUST | Both | Partial | `src/ber.rs::fit_padding`, `src/sender.rs::run_sender`, `src/receiver/transmit.rs::fit_reply`. See [MTU budget](#mtu-budget). Route MTU enforcement exists only on Linux. |
+| ber-3-1 | Sender and reflector adjust the extra padding so test packets do not exceed the path MTU. | MUST | Both | Partial | `src/ber.rs::fit_padding`, `src/sender.rs::run_sender`, `src/receiver/transmit.rs::fit_reply`. Tests: `src/receiver/transmit/ber_tests.rs::single_ber_reply_checks_mtu_preserves_patterns_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. See [MTU budget](#mtu-budget). Route MTU enforcement exists only on Linux. |
 | ber-4.1-1 | A test packet carries one Bit Error Count TLV and one Extra Padding TLV, and at most one Bit Pattern and one burst TLV. | Descriptive | Sender | Compliant | `src/sender/run.rs::SenderRun::open` builds each TLV once; `tests/ber_measurement_test.rs` inspects production packets. |
 | ber-4.1-2 | Add an Extra Padding TLV whenever a Bit Pattern TLV is added. | MUST | Sender | Compliant | `src/sender.rs::run_sender` sends the pair together. |
 | ber-4.1-3 | The Bit Pattern TLV contains the pattern used in the Extra Padding TLV. | MUST | Sender | Compliant | `src/sender.rs::run_sender` fills the padding by repeating the pattern. CLI and TOML validation reject empty or invalid hex. |
@@ -69,6 +69,12 @@ route MTU of its destination (`src/receiver/mtu.rs`). On other platforms the
 sender cannot read the route MTU and uses a fixed budget (1280 octets for
 IPv6, 1500 for IPv4). This is a route MTU lookup, not path-MTU probing, and no
 physical path-MTU test backs the row.
+
+Single replies without Type 12 also enforce the Linux route budget. Unit and
+live namespace tests cover IPv4/IPv6 and open/authenticated replies, whole-pattern
+trimming, C-marked BER metadata and regenerated HMACs. The single-reply policy
+bug affected v1.0.0; the evidence here describes the fixed code. This row remains
+Partial because route-MTU enforcement is Linux-only.
 
 ### Reporting
 

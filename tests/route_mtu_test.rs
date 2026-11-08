@@ -122,6 +122,80 @@ fn exchange(
     );
 }
 
+fn single_reply_packet(auth: bool, seq: u32, tlvs: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let mut data = packet(auth, seq, 0, None);
+    let base = data.len();
+    for (kind, value) in tlvs {
+        data.extend_from_slice(&[0x80, *kind]);
+        data.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        data.extend_from_slice(value);
+    }
+    if auth {
+        let mut input = data[..4].to_vec();
+        input.extend_from_slice(&data[base..]);
+        data.extend_from_slice(&[0x80, 8, 0, 16]);
+        data.extend_from_slice(&HmacKey::new(vec![0xAB; 16]).unwrap().compute(&input));
+    }
+    data
+}
+
+fn exchange_single_reply(
+    socket: &UdpSocket,
+    destination: SocketAddr,
+    request: &[u8],
+    auth: bool,
+    cap: usize,
+) -> Vec<(u8, u8, Vec<u8>)> {
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    socket.send_to(request, destination).unwrap();
+    let mut bytes = [0; 2048];
+    let (len, source) = socket.recv_from(&mut bytes).unwrap();
+    assert_eq!(source, destination);
+    assert!(
+        len <= cap,
+        "single reply length {len} exceeds route budget {cap}"
+    );
+    let bytes = &bytes[..len];
+    let base = if auth { 112 } else { 44 };
+    let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+    if auth {
+        assert_eq!(&bytes[96..112], &compute_packet_hmac(&key, bytes, 96));
+    }
+    let mut tlvs = Vec::new();
+    let mut hmac_seen = false;
+    let mut pos = base;
+    while pos < len {
+        assert!(pos + 4 <= len);
+        let size = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+        assert!(pos + 4 + size <= len);
+        let kind = bytes[pos + 1];
+        if kind == 8 {
+            assert!(auth && !hmac_seen);
+            assert_eq!(size, 16);
+            let mut input = bytes[..4].to_vec();
+            input.extend_from_slice(&bytes[base..pos]);
+            assert_eq!(&bytes[pos + 4..pos + 4 + size], &key.compute(&input));
+            hmac_seen = true;
+        }
+        tlvs.push((kind, bytes[pos], bytes[pos + 4..pos + 4 + size].to_vec()));
+        pos += 4 + size;
+    }
+    assert_eq!(hmac_seen, auth);
+    socket
+        .set_read_timeout(Some(Duration::from_millis(40)))
+        .unwrap();
+    let error = socket
+        .recv_from(&mut [0; 2048])
+        .expect_err("extra single reply");
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    tlvs
+}
+
 #[test]
 #[ignore = "requires STAMP_MTU_NETNS_TESTS=1 inside unshare -Urn"]
 fn live_route_mtu_changes_and_alternate_destinations() {
@@ -288,9 +362,68 @@ fn live_route_mtu_changes_and_alternate_destinations() {
                     auth,
                     1280 - overhead,
                 );
+                // Requests fit the 1500-byte forward link, while the reflector's
+                // route back to this sender is still limited to 1400 bytes.
+                // Neither request carries Type 12: each must size its only reply.
+                let cap = 1400 - overhead;
+                let base = if auth { 112 } else { 44 };
+                let hmac_size = if auth { 20 } else { 0 };
+                let padding_size = (cap + 40 - base - hmac_size - 26) / 2 * 2;
+                let ber_request = single_reply_packet(
+                    auth,
+                    6,
+                    &[
+                        (240, vec![0xFF, 0]),
+                        (241, vec![0; 4]),
+                        (242, vec![0; 4]),
+                        (1, [0xFF, 0].repeat(padding_size / 2)),
+                    ],
+                );
+                let ber = exchange_single_reply(&socket, destination, &ber_request, auth, cap);
+                let kinds: Vec<_> = ber.iter().map(|(kind, _, _)| *kind).collect();
+                assert_eq!(
+                    kinds
+                        .iter()
+                        .filter(|&&kind| kind != 8)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    [240, 241, 242, 1]
+                );
+                for (kind, flags, value) in &ber {
+                    match kind {
+                        240..=242 => assert_eq!(*flags, 0x10, "trimmed BER metadata needs C"),
+                        1 => {
+                            assert!(!value.is_empty() && value.len() < padding_size);
+                            assert_eq!(value, &[0xFF, 0].repeat(value.len() / 2));
+                        }
+                        _ => {}
+                    }
+                }
+                let padding = vec![0x5A; cap - base - hmac_size - 12];
+                let header_request = single_reply_packet(
+                    auth,
+                    7,
+                    &[
+                        (3, vec![0; 4]),
+                        (1, padding.clone()),
+                        (247, vec![0; 20]),
+                        (246, vec![0; 8]),
+                    ],
+                );
+                let headers =
+                    exchange_single_reply(&socket, destination, &header_request, auth, cap);
+                assert_eq!(
+                    headers
+                        .iter()
+                        .map(|(kind, _, _)| *kind)
+                        .filter(|&kind| kind != 8)
+                        .collect::<Vec<_>>(),
+                    [3, 1]
+                );
+                assert_eq!(headers[1].2, padding, "mandatory padding stays intact");
                 in_ns(&["route", "del", sender, "dev", &remote]);
                 in_ns(&["route", "del", alternate, "dev", &remote]);
-                eprintln!("PASS ipv6={ipv6} auth={auth} bound={bound}: link decrease/increase, route metric, alternate destination, single C response and signatures");
+                eprintln!("PASS ipv6={ipv6} auth={auth} bound={bound}: link decrease/increase, route metric, alternate destination, single C response, single BER/header reply fitting and signatures");
             }
         }
     }

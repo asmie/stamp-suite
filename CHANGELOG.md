@@ -17,6 +17,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Enforce route-MTU checks for single reflected-header and BER replies without
+  Type 12 control. This fixes a bug affecting v1.0.0 that could send oversized
+  replies without trimming or fragmentation prevention.
 - Update locked `ctutils`, Tokio, rustls and rustls-webpki dependencies to
   resolve RustSec advisories, and restore the packet-processing fuzz build.
 - Report session failure after the configured loss threshold even before the
