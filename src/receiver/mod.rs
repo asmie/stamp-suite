@@ -254,7 +254,7 @@ pub struct ProcessingContext<'a> {
     /// Which Location TLV fields this reflector may report (RFC 8972 §4.2.2
     /// field-disclosure policy, `--location-disclose`).
     pub location_disclosure: LocationDisclosure,
-    /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, cos-ecn-01 §3.2): answers
+    /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, cos-ecn-02 §3.2): answers
     /// *permitted*, where the backends' setsockopt answers *capable*.
     pub cos_policy: &'a CosAdmissionPolicy,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §3).
@@ -841,7 +841,7 @@ fn apply_semantic_tlv_processing(
     let requested_cos = tlvs.get_cos_request();
 
     // Check CoS permission before backend socket capability (RFC 8972 §4.4/§6,
-    // cos-ecn-01 §3.2). Run after Return Path processing so destination rules
+    // cos-ecn-02 §3.2). Run after Return Path processing so destination rules
     // use any accepted alternate address (RFC 9503 §4).
     let reply_destination = match &return_path_action {
         ReturnPathAction::AlternateAddress(addr) => Some(addr.ip()),
@@ -860,7 +860,7 @@ fn apply_semantic_tlv_processing(
     // back to the received DSCP (DSCP2), matching the RPD=0b01 the TLV now
     // reports; a refused EC1 forces the reply's ECN bits to 0b00 (Not-ECT)
     // rather than leaving a value the policy rejected, which is the same
-    // treatment cos-ecn-01 §3.2 mandates for the "unable" case.
+    // treatment cos-ecn-02 §3.2 mandates for the "unable" case.
     let cos_request = requested_cos.map(|(dscp1, ec1)| {
         (
             if dscp_permitted {
@@ -886,7 +886,7 @@ fn apply_semantic_tlv_processing(
         }
     }
 
-    // Record the CoS admission decision (RFC 8972 §4.4, cos-ecn-01 §3.2).
+    // Record the CoS admission decision (RFC 8972 §4.4, cos-ecn-02 §3.2).
     // A later socket failure overrides RPD/RPE through `set_cos_policy_rejected`
     // and the IP header through `cos_unable_fallback_tos`.
     tlvs.update_cos_tlvs(

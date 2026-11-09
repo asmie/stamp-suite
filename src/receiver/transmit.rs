@@ -25,6 +25,8 @@ use std::{
 #[derive(Clone, Debug)]
 pub(super) struct SendOptions {
     pub tos: u8,
+    /// False only when marking is unavailable; a processed CoS TLV then carries C.
+    pub apply_tos: bool,
     pub source: Option<IpAddr>,
     /// Egress interface for RFC 9503 same-link replies (Linux only).
     pub egress_ifindex: Option<u32>,
@@ -59,6 +61,7 @@ impl TransportPlan {
             _ => source,
         };
         let mut options = SendOptions {
+            apply_tos: !cfg!(windows) || response.cos_request.is_some(),
             tos: response
                 .cos_request
                 .map_or(0, |(d, e)| crate::tos::Tos::new(d, e).0),
@@ -289,6 +292,23 @@ impl Transmission {
                     refresh_mtu = true;
                     continue;
                 }
+                Err(e) if is_cos_apply_error(&e) && options.apply_tos => {
+                    // Only an option-setting failure establishes inability to
+                    // mark. A datagram/routing failure says nothing about CoS.
+                    let fallback = super::cos_unable_fallback_tos(self.received_dscp);
+                    if self.response.cos_request.is_some() {
+                        super::set_cos_policy_rejected(&mut data, base);
+                        if !cos_fallback && options.tos != fallback {
+                            cos_fallback = true;
+                            options.tos = fallback;
+                            continue;
+                        }
+                        // Neither EC1 nor the Not-ECT fallback can be applied
+                        // (cos-ecn-02 §3.2). Preserve routing and sign C below.
+                        super::reply_bytes::set_cos_marking_unavailable(&mut data, base);
+                    }
+                    options.apply_tos = false;
+                }
                 Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                     log::debug!("reply cannot fit the route MTU: {e}");
                     break;
@@ -319,16 +339,6 @@ impl Transmission {
                             crate::reply_source::supported() && s.is_ipv4() == target.is_ipv4()
                         });
                         super::set_return_path_u_flag_in_response(&mut data, base);
-                    } else if self.response.cos_request.is_some()
-                        && !cos_fallback
-                        && super::cos_unable_fallback_tos(self.received_dscp) != options.tos
-                    {
-                        // Retry once with the received DSCP and Not-ECT
-                        // (cos-ecn-01 §3.2), unless that is the byte that just
-                        // failed.
-                        cos_fallback = true;
-                        options.tos = super::cos_unable_fallback_tos(self.received_dscp);
-                        super::set_cos_policy_rejected(&mut data, base);
                     } else {
                         log::debug!("reflector send to {target} failed: {e}");
                         break;
@@ -726,6 +736,7 @@ pub(super) struct DatagramSender<'a> {
     fd: std::os::fd::BorrowedFd<'a>,
     #[cfg(windows)]
     socket: &'a std::net::UdpSocket,
+    #[cfg(unix)]
     settings: [Option<i32>; 2],
     #[cfg(target_os = "linux")]
     srh: Option<Arc<[u8]>>,
@@ -744,10 +755,7 @@ impl<'a> DatagramSender<'a> {
 
     #[cfg(windows)]
     pub fn new(socket: &'a std::net::UdpSocket) -> Self {
-        Self {
-            socket,
-            settings: [None; 2],
-        }
+        Self { socket }
     }
 
     pub fn send(
@@ -771,16 +779,70 @@ impl<'a> DatagramSender<'a> {
         }
         #[cfg(windows)]
         {
-            update_socket_option(
-                &mut self.settings[usize::from(dst.is_ipv6())],
-                i32::from(options.tos),
-                || set_socket_tos(self.socket, options.tos, dst.is_ipv6()),
-            )?;
+            if options.apply_tos {
+                // Winsock IP_TOS is documented as unsupported for setting
+                // ToS. A successful legacy call cannot prove wire marking;
+                // a QoS-capable backend is needed before reporting RPE=11.
+                return Err(cos_apply_error(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Windows CoS marking requires a QoS-capable backend",
+                )));
+            }
             self.socket.send_to(payload, dst)
         }
     }
 }
 
+#[derive(Debug)]
+struct CosApplyError(io::Error);
+
+impl std::fmt::Display for CosApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot apply reply CoS: {}", self.0)
+    }
+}
+
+impl std::error::Error for CosApplyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+#[cfg(any(not(target_os = "linux"), test))]
+pub(super) fn cos_apply_error(error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), CosApplyError(error))
+}
+
+fn is_cos_apply_error(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|e| e.is::<CosApplyError>())
+}
+
+/// Readback catches ignored sticky options. Invalidate on any failure: a
+/// setter can change the socket even if the requested value did not stick.
+#[cfg(any(all(unix, not(target_os = "linux")), test))]
+fn apply_verified_tos(
+    cached: &mut Option<i32>,
+    requested: i32,
+    set: impl FnOnce() -> io::Result<()>,
+    get: impl FnOnce() -> io::Result<i32>,
+) -> io::Result<()> {
+    if *cached == Some(requested) {
+        return Ok(());
+    }
+    *cached = None;
+    set().map_err(cos_apply_error)?;
+    let actual = get().map_err(cos_apply_error)?;
+    if actual != requested {
+        return Err(cos_apply_error(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "socket ignored the requested DSCP/ECN value",
+        )));
+    }
+    *cached = Some(requested);
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn update_socket_option(
     cached: &mut Option<i32>,
     requested: i32,
@@ -933,20 +995,22 @@ fn send_datagram(
         })?;
         // IP_TOS / IPV6_TCLASS ancillary data is a host-order c_int holding
         // the whole TOS / Traffic Class byte (DSCP and ECN).
-        let tos = options.tos as libc::c_int;
-        control.append(
-            if dst.is_ipv4() {
-                libc::IPPROTO_IP
-            } else {
-                libc::IPPROTO_IPV6
-            },
-            if dst.is_ipv4() {
-                libc::IP_TOS
-            } else {
-                libc::IPV6_TCLASS
-            },
-            &tos.to_ne_bytes(),
-        );
+        if options.apply_tos {
+            let tos = options.tos as libc::c_int;
+            control.append(
+                if dst.is_ipv4() {
+                    libc::IPPROTO_IP
+                } else {
+                    libc::IPPROTO_IPV6
+                },
+                if dst.is_ipv4() {
+                    libc::IP_TOS
+                } else {
+                    libc::IPV6_TCLASS
+                },
+                &tos.to_ne_bytes(),
+            );
+        }
         if options
             .source
             .is_some_and(|source| source.is_ipv4() != dst.is_ipv4())
@@ -1017,34 +1081,59 @@ fn send_datagram(
         msg.msg_controllen = control.used as _;
     }
     #[cfg(not(target_os = "linux"))]
-    {
-        let tos = options.tos as libc::c_int;
-        update_socket_option(&mut settings[usize::from(dst.is_ipv6())], tos, || {
-            // SAFETY: `fd` is the open socket borrowed by the caller; the value
-            // pointer and length describe the live `tos` c_int.
-            let result = unsafe {
-                libc::setsockopt(
-                    fd,
-                    if dst.is_ipv4() {
-                        libc::IPPROTO_IP
-                    } else {
-                        libc::IPPROTO_IPV6
-                    },
-                    if dst.is_ipv4() {
-                        libc::IP_TOS
-                    } else {
-                        libc::IPV6_TCLASS
-                    },
-                    std::ptr::addr_of!(tos).cast(),
-                    std::mem::size_of_val(&tos) as _,
-                )
-            };
-            if result < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        })?;
+    if options.apply_tos {
+        let tos = i32::from(options.tos);
+        let (level, name) = if dst.is_ipv4() {
+            (libc::IPPROTO_IP, libc::IP_TOS)
+        } else {
+            (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+        };
+        apply_verified_tos(
+            &mut settings[usize::from(dst.is_ipv6())],
+            tos,
+            || {
+                // SAFETY: fd is borrowed and the pointer/size describe tos.
+                let result = unsafe {
+                    libc::setsockopt(
+                        fd,
+                        level,
+                        name,
+                        std::ptr::addr_of!(tos).cast(),
+                        std::mem::size_of_val(&tos) as _,
+                    )
+                };
+                if result < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                let mut actual: libc::c_int = 0;
+                let mut len = std::mem::size_of_val(&actual) as libc::socklen_t;
+                // SAFETY: the writable pointer/size describe actual; len is
+                // initialized to its capacity and lives across getsockopt.
+                let result = unsafe {
+                    libc::getsockopt(
+                        fd,
+                        level,
+                        name,
+                        std::ptr::addr_of_mut!(actual).cast(),
+                        &mut len,
+                    )
+                };
+                if result < 0 {
+                    Err(io::Error::last_os_error())
+                } else if len as usize != std::mem::size_of_val(&actual) {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid ToS readback size",
+                    ))
+                } else {
+                    Ok(actual)
+                }
+            },
+        )?;
     }
 
     // SAFETY: `fd` is the open socket borrowed by the caller. Every pointer in
@@ -1056,51 +1145,6 @@ fn send_datagram(
         Err(io::Error::last_os_error())
     } else {
         Ok(sent as usize)
-    }
-}
-
-/// Sets the IP TOS (Type of Service) / IPv6 Traffic Class on a socket.
-///
-/// Windows implementation using Winsock2 `setsockopt`.
-#[cfg(windows)]
-fn set_socket_tos(socket: &std::net::UdpSocket, tos: u8, is_ipv6: bool) -> std::io::Result<()> {
-    use std::os::windows::io::AsRawSocket;
-
-    #[link(name = "ws2_32")]
-    extern "system" {
-        fn setsockopt(s: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
-    }
-
-    // Winsock values from ws2def.h / ws2ipdef.h; they differ from the Unix
-    // values of the same names.
-    const IPPROTO_IP: i32 = 0;
-    const IPPROTO_IPV6: i32 = 41;
-    const IP_TOS: i32 = 3;
-    const IPV6_TCLASS: i32 = 39;
-
-    let raw_socket = socket.as_raw_socket() as usize;
-    let tos_val: i32 = tos as i32;
-    let (level, opt) = if is_ipv6 {
-        (IPPROTO_IPV6, IPV6_TCLASS)
-    } else {
-        (IPPROTO_IP, IP_TOS)
-    };
-
-    // SAFETY: `raw_socket` is the open socket borrowed from `socket` for the
-    // call; the value pointer and length describe the live `tos_val` i32.
-    let result = unsafe {
-        setsockopt(
-            raw_socket,
-            level,
-            opt,
-            &tos_val as *const i32 as *const u8,
-            std::mem::size_of::<i32>() as i32,
-        )
-    };
-    if result != 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
     }
 }
 

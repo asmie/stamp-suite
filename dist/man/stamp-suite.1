@@ -301,19 +301,19 @@ Provision an exact session; repeat for each tuple/SSID/micro\-session ID. SSID 0
 Session timeout in seconds for reflector runtime state. Sessions inactive for this duration may be cleaned up. Default: 300 (5 minutes). Set to 0 to disable
 .TP
 \fB\-\-allowed\-dscp\fR \fI<SPEC>\fR [default: all]
-DSCP codepoints permitted on reflector replies (RFC 8972 §4.4/§6, cos\-ecn\-01 §3.2): `all` (default), `none`, or values and inclusive ranges such as `0,8,10\-14,46`. Rejected DSCP1 requests retain the received DSCP and report RPD=0b01. Permitted values still require socket support.
+DSCP codepoints permitted on reflector replies (RFC 8972 §4.4/§6, cos\-ecn\-02 §3.2): `all` (default), `none`, or values and inclusive ranges such as `0,8,10\-14,46`. Rejected DSCP1 requests retain the received DSCP and report RPD=0b01. Permitted values still require socket support.
 
 Reflector\-side only.
 .TP
 \fB\-\-allowed\-ecn\fR \fI<SPEC>\fR [default: all]
-ECN codepoints the reflector may apply to a reply\*(Aqs IP header when a Class of Service TLV requests them (cos\-ecn\-01 §3.2).
+ECN codepoints the reflector may apply to a reply\*(Aqs IP header when a Class of Service TLV requests them (cos\-ecn\-02 §3.2).
 
 `all` (default), `none`, or a comma\-separated list of 0\-3. A refused EC1 forces the reply\*(Aqs ECN bits to Not\-ECT and the echoed TLV reports RPE=0b10.
 
 Reflector\-side only.
 .TP
 \fB\-\-allowed\-dscp\-for\fR \fI<PREFIX/LEN=SPEC>\fR
-Destination DSCP policy overriding `\-\-allowed\-dscp` (cos\-ecn\-01 §3.2). Repeatable `PREFIX/LEN=SPEC`, e.g. `\-\-allowed\-dscp\-for 192.0.2.0/24=0,46`. The longest matching prefix replaces the global set, regardless of order.
+Destination DSCP policy overriding `\-\-allowed\-dscp` (cos\-ecn\-02 §3.2). Repeatable `PREFIX/LEN=SPEC`, e.g. `\-\-allowed\-dscp\-for 192.0.2.0/24=0,46`. The longest matching prefix replaces the global set, regardless of order.
 
 Reflector\-side only.
 .TP
@@ -392,13 +392,13 @@ DSCP value to request for reflected packets (0\-63). Only used when \-\-cos is e
 ECN value to request for reflected packets (0\-3). Only used when \-\-cos is enabled. 0=Not\-ECT, 1=ECT(1), 2=ECT(0), 3=CE (Congestion Experienced)
 .TP
 \fB\-\-ecn\-backoff\-factor\fR \fI<ECN_BACKOFF_FACTOR>\fR [default: 2]
-Multiply the send interval by this factor on each CE\-marked reply, capped at `\-\-ecn\-max\-delay` (draft\-ietf\-ippm\-stamp\-cos\-ecn\-01 §3.4). Must exceed 1.0. Active with `\-\-cos` and `\-\-ecn` ECT0 (2) or ECT1 (1). See `\-\-ecn\-recovery\-step` for recovery pacing
+Multiply the send interval by this factor on each CE\-marked reply, capped at `\-\-ecn\-max\-delay` (draft\-ietf\-ippm\-stamp\-cos\-ecn\-02 §3.4). Must exceed 1.0. Active with `\-\-cos` and `\-\-ecn` ECT0 (2) or ECT1 (1). See `\-\-ecn\-recovery\-step` for recovery pacing
 .TP
 \fB\-\-ecn\-max\-delay\fR \fI<ECN_MAX_DELAY>\fR [default: 30000]
-Upper bound (milliseconds) on the AIMD\-controlled send interval: how far repeated CE observations can back the sender off (draft\-ietf\-ippm\-stamp\-cos\-ecn\-01 §3.4). Must be >= `\-\-send\-delay` when the controller is active
+Upper bound (milliseconds) on the AIMD\-controlled send interval: how far repeated CE observations can back the sender off (draft\-ietf\-ippm\-stamp\-cos\-ecn\-02 §3.4). Must be >= `\-\-send\-delay` when the controller is active
 .TP
 \fB\-\-ecn\-recovery\-step\fR \fI<ECN_RECOVERY_STEP>\fR [default: 50]
-AIMD recovery in milliseconds per non\-CE reply, down to \-\-send\-delay (draft\-ietf\-ippm\-stamp\-cos\-ecn\-01 §3.4)
+AIMD recovery in milliseconds per non\-CE reply, down to \-\-send\-delay (draft\-ietf\-ippm\-stamp\-cos\-ecn\-02 §3.4)
 .SH "SENDER TLVS"
 .TP
 \fB\-\-access\-report\fR \fI<ACCESS_REPORT>\fR

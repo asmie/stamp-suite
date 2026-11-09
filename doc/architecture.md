@@ -53,7 +53,7 @@ compatibility contract.
 | `sender/telemetry.rs` | Typed results of validation (HMAC status, Access Report, CE, Micro-session ID). |
 | `sender/measurements.rs` | Reply-copy accounting and the optional counter and Follow-Up measurements. |
 | `sender/access_report.rs` | Access Report retransmission state (RFC 8972 §4.6). |
-| `sender/congestion.rs`, `rate_control.rs` | Response to CE-marked replies (AIMD, draft-ietf-ippm-stamp-cos-ecn-01 §3.4). |
+| `sender/congestion.rs`, `rate_control.rs` | Response to CE-marked replies (AIMD, draft-ietf-ippm-stamp-cos-ecn-02 §3.4). |
 | `sender/session_state.rs` | Session state notifications (draft-ietf-ippm-stamp-ext-hdr-26 §9.2). |
 | `sender/observer.rs` | `SenderObserver`: live sender events for metrics, SNMP and library callers. |
 

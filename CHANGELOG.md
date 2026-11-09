@@ -20,6 +20,14 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Reconcile CoS/ECN with draft revision 02: distinguish marking failures from
+  datagram failures, verify sticky ToS options, and return C if requested ECN
+  and Not-ECT cannot be applied. Re-sign every fallback, preserve routing,
+  and report Windows marking as unavailable instead of assuming IP_TOS works.
+  Pace initially zero-gap Type 12 bursts after CE, while retaining zero for
+  control-only requests. Document operator guidance and remaining
+  congestion-control/platform limits.
+
 - Detect inactive and replaced standards drafts, follow bounded successor chains,
   and cache all metadata for offline replay. Add advisory YANG tracking and a
   reusable GitHub issue notification for failed or incomplete standards checks.

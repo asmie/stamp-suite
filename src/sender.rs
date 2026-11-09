@@ -109,7 +109,7 @@ struct SenderRecvContext<'a> {
     /// Access Report retries, enabled by --access-report.
     /// A usable echo disarms the timer (RFC 8972 §4.6).
     access_report_state: Option<&'a mut AccessReportRetransmitState>,
-    /// AIMD state for requested ECN measurement (cos-ecn-01 §3.4).
+    /// AIMD state for requested ECN measurement (cos-ecn-02 §3.4).
     /// Feedback uses validated forward EC2 or reverse IP ECN.
     congestion: Option<&'a mut CongestionState>,
     /// The non-zero SSID this sender put on the wire, when it set one. RFC 8972
@@ -287,7 +287,7 @@ fn process_response(
     clock_source: ClockFormat,
     kernel_t4: Option<u64>,
     // Reply packet's on-wire ECN codepoint (reverse-path detection,
-    // draft-ietf-ippm-stamp-cos-ecn-01 §3.4), from `recv_packet`'s
+    // draft-ietf-ippm-stamp-cos-ecn-02 §3.4), from `recv_packet`'s
     // `extract_reply_ecn_from_cmsgs`. `None` when not requested/available.
     reply_ecn: Option<u8>,
     ctx: &mut SenderRecvContext,
@@ -611,7 +611,7 @@ fn process_response(
     }
 
     // Apply CE feedback from validated forward EC2 or the reply's IP ECN
-    // (cos-ecn-01 §3.4). Reverse ECN is mutable IP metadata outside TLV integrity.
+    // (cos-ecn-02 §3.4). Reverse ECN is mutable IP metadata outside TLV integrity.
     // Congestion feedback does not require a pending RTT sample.
     if let Some(state) = ctx.congestion.as_mut() {
         let forward_ce = telemetry.as_ref().is_some_and(|info| info.forward_ce);
@@ -620,7 +620,7 @@ fn process_response(
             state.controller.on_ce_observed();
             log::info!(
                 "ECN congestion response: CE observed on seq={} (forward={} reverse={}); \
-                 send interval backed off to {:?} (draft-ietf-ippm-stamp-cos-ecn-01 §3.4)",
+                 send interval backed off to {:?} (draft-ietf-ippm-stamp-cos-ecn-02 §3.4)",
                 seq_num,
                 forward_ce,
                 reverse_ce,

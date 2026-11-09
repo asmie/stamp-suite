@@ -294,7 +294,7 @@ fn valid_cos_does_not_set_m_flag() {
 
 #[test]
 fn cos_tlv_reflector_fills_ec2_rpd_rpe_at_draft_positions() {
-    // Byte-exact pin of draft-ietf-ippm-stamp-cos-ecn-01 §3.2 reflector
+    // Byte-exact pin of draft-ietf-ippm-stamp-cos-ecn-02 §3.2 reflector
     // behaviour on the RFC 8972 §4.4 wire layout: DSCP2/EC2 copied from the
     // received IP header, RPD=0b00 (no policy rejection), RPE=0b11 (reply
     // ECN set to EC1). Sender requests DSCP1=46, EC1=2; the reflector
@@ -315,7 +315,7 @@ fn cos_tlv_reflector_fills_ec2_rpd_rpe_at_draft_positions() {
     assert_eq!(
         value,
         &[0xB8, 0xA4, 0xB0, 0x00],
-        "echoed CoS value must follow the RFC 8972 + cos-ecn-01 bit layout"
+        "echoed CoS value must follow the RFC 8972 + cos-ecn-02 bit layout"
     );
 }
 
@@ -394,7 +394,7 @@ fn cos_tlv_refused_ecn_forces_not_ect() {
 }
 
 /// The destination-scoped form: the same request is permitted or refused
-/// depending on where the reply is going (cos-ecn-01 §3.2's "policy ...
+/// depending on where the reply is going (cos-ecn-02 §3.2's "policy ...
 /// configured for specific destination addresses or networks").
 #[test]
 fn cos_tlv_destination_scoped_policy_decides_per_peer() {

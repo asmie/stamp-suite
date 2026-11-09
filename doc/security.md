@@ -75,6 +75,22 @@ configured. `on` requires a key. `off` stops the sender from adding one; the
 key is still used to verify reflected TLV HMACs. Authenticated mode rejects
 `off`.
 
+### ECN measurement integrity
+
+CoS TLV tampering can falsify EC2 or requested reverse marking. Configure a
+shared key, keep the sender's `--tlv-hmac auto` (or use `on`), and enable
+`--verify-tlv-hmac` at the reflector to protect the covered TLVs. The base
+packet HMAC alone does not cover CoS, and the mutable IP ECN bits remain
+outside both HMACs. A key holder can still falsify measurements.
+
+The [CoS/ECN draft §6](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-02.txt)
+also suggests destination UDP ports in the dynamic range (49152–65535) to
+make STAMP less obvious to port-based middleboxes. Configure the reflector's
+`--local-port` and sender's `--remote-port` to the same chosen port, with
+matching firewall/provisioning rules. The application does not randomize the
+destination automatically. Port choice provides no authentication and does
+not prevent a middlebox from identifying or modifying packets.
+
 ## Key sourcing and rotation
 
 ### Key sources

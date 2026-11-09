@@ -1,4 +1,4 @@
-//! Reflector CoS admission policy (RFC 8972 §4.4/§6, cos-ecn-01 §3.2).
+//! Reflector CoS admission policy (RFC 8972 §4.4/§6, cos-ecn-02 §3.2).
 //!
 //! Permission and socket support are separate checks; a reply needs both.
 //! DSCP uses the longest matching destination-prefix rule, falling back to the
@@ -193,7 +193,7 @@ struct DestinationRule {
     dscp: DscpSet,
 }
 
-/// The reflector's CoS admission policy (RFC 8972 §4.4/§6, cos-ecn-01 §3.2).
+/// The reflector's CoS admission policy (RFC 8972 §4.4/§6, cos-ecn-02 §3.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CosAdmissionPolicy {
     dscp: DscpSet,

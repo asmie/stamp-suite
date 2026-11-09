@@ -142,7 +142,7 @@ pub(super) fn egress_mtu(_socket: &UdpSocket) -> Option<u32> {
 }
 
 /// Enables `IP_RECVTOS` / `IPV6_RECVTCLASS` for reverse-path CE detection
-/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+/// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
 ///
 /// Failure disables reverse-path feedback; validated CoS EC2 feedback still works.
 /// See [`extract_reply_ecn_from_cmsgs`].
@@ -179,7 +179,7 @@ pub(super) fn enable_reply_tos_reception(
 }
 
 /// Extracts reply ECN from `recvmsg` metadata. CE (0b11) indicates reverse-path
-/// congestion (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+/// congestion (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
 /// Requires [`enable_reply_tos_reception`] on the socket.
 #[cfg(target_os = "linux")]
 pub(super) fn extract_reply_ecn_from_cmsgs(

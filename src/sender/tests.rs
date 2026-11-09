@@ -1870,7 +1870,7 @@ fn test_validate_reflected_tlvs_access_report_ack_survives_alongside_msid() {
 }
 
 // --- validate_reflected_tlvs: CoS EC2 CE detection
-// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) ------------------------------
+// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4) ------------------------------
 
 #[test]
 fn test_validate_reflected_tlvs_detects_cos_ce() {
@@ -2229,7 +2229,7 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
 }
 
 // --- process_response: AIMD congestion-response wiring
-// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) ---------------------
+// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4) ---------------------
 
 fn congestion_test_params() -> AimdParams {
     AimdParams {
@@ -2888,7 +2888,7 @@ fn access_report_with_scaled_control_config(
 }
 
 /// Wait-phase retries must rebuild the AIMD-scaled control TLV omitted from
-/// `extra_tlvs` (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+/// `extra_tlvs` (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
 #[tokio::test]
 async fn test_wait_phase_retransmit_still_carries_scaled_control_tlv() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -4450,4 +4450,30 @@ fn tlv_validation_excludes_base_hmac_failures_and_reports_unsigned_open_replies(
         assert_eq!(v.hmac.not_requested, u64::from(!auth));
         assert_eq!(v.observed_tlvs, if auth { 0 } else { 2 });
     }
+}
+
+#[test]
+fn ce_backoff_paces_zero_interval_bursts_but_preserves_control_only_zero() {
+    let mut controller = AimdController::new(congestion_test_params());
+    let control = |count, no_ext_hdr, scale| {
+        ReflectedControlTlv::from_raw(
+            &scaled_reflected_control_tlv(0, count, 0, no_ext_hdr, scale).unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        control(3, false, controller.scale_factor()).interval_nanoseconds,
+        0
+    );
+    controller.on_ce_observed();
+    let paced = control(3, false, controller.scale_factor());
+    assert!(
+        paced.interval_nanoseconds > 0,
+        "CE must pace an initially unpaced burst"
+    );
+    assert_eq!(paced.number_of_reflected_packets, 3);
+    assert_eq!(control(3, false, f64::MAX).interval_nanoseconds, u32::MAX);
+    let only = control(1, true, controller.scale_factor());
+    assert_eq!(only.interval_nanoseconds, 0);
+    assert_eq!(only.sub_tlvs, [0, 240, 0, 0]);
 }

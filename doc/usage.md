@@ -315,7 +315,47 @@ comes from the CoS TLV's EC2 field. Reverse feedback reads the reply's IP ECN
 bits, which works on Linux and macOS only; other platforms log a warning and
 use forward feedback alone. The same factor scales the Type-12 interval of
 later requests, including Access Report retries; reply counts do not change.
+A zero burst interval uses a 1 ms floor while backed off, then scales by the
+same factor. Control-only requests retain their required zero interval.
 Reports show CE observations, backoffs, and the current and peak intervals.
+
+### ECN deployment and interpretation
+
+Before measuring ECN, verify that both peers implement the extended CoS TLV
+and capture a short exchange for each address family and codepoint. Confirm
+DSCP, ECN and RPE on the wire: RPE=11 reports EC1 applied, RPE=10 reports
+rejection/inability, and RPE=00 can indicate a legacy peer. C reports that
+marking could not be guaranteed even for the Not-ECT fallback. Windows
+reflectors report C because the current backend cannot verify marking;
+macOS socket-option readback still needs independent wire verification.
+Reverse ECN reception requires Linux or macOS. Restrict interpretation to
+the capabilities actually observed; the tool has no automatic legacy-peer
+or bleaching diagnosis.
+
+Record `--allowed-dscp`, destination overrides and `--allowed-ecn` policies,
+and coordinate them across network domains. Collect EC2, RPE and the reply's
+IP ECN together using packet capture alongside CE counters. Compare sent ECN
+with EC2 to investigate forward bleaching, and EC1/RPE/C with reply ECN for
+reverse behavior. Check policy rejection and platform inability before
+attributing differences to network remarking. Verify that markings survive
+before comparing delay/loss between codepoints. Traceroute-like diagnostics
+and on-path telemetry require separate tools and participating nodes; a CoS
+TLV alone does not locate the device responsible for a change.
+
+Congestion response stays enabled for CoS ECT0/ECT1, including future Type 12
+intervals. The current interval controller provides backoff but has not been
+shown consistent with all RFC 3168/9330 requirements, particularly L4S scalable
+control for ECT(1); see [response limits](conformance/draft-stamp-cos-ecn.md#response-limits).
+Revision 02 allows a fixed traffic pattern despite CE only in a controlled
+environment agreed with the operators of every network under test. This tool
+exposes no override to disable its response. Bound runs with `--duration` or
+`--count`, choose a conservative `--send-delay`, and limit reflected traffic
+with `--reflected-control-max-count`, `--reflected-control-max-rate` and
+`--reflected-control-max-volume`. Isolate tests from traffic outside their
+agreed scope, and include Access Report retries in the operational time budget.
+
+See [ECN security](security.md#ecn-measurement-integrity) for TLV protection
+and destination-port choices.
 
 ## Reflector
 
@@ -547,7 +587,9 @@ prefix replaces the global DSCP policy. The socket must still support the
 value.
 
 A refused DSCP leaves the received DSCP on the reply and reports RPD=0b01. A
-refused ECN sends the reply as Not-ECT and reports RPE=0b10.
+refused ECN sends the reply as Not-ECT and reports RPE=0b10. A backend marking
+failure also retries received DSCP/Not-ECT; if it cannot apply that byte,
+the reply carries C and its actual IP marking must be checked independently.
 
 `--location-disclose` controls which Location TLV fields the reflector reports:
 `all` (default), `none`, or a comma-separated list of `src-port`, `dst-port`,

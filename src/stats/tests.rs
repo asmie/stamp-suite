@@ -325,7 +325,7 @@ fn test_stats_csv_includes_access_report_columns() {
     check_sender_render(&snap, OutputFormat::Csv);
 }
 
-// ===== Congestion response (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) =====
+// ===== Congestion response (draft-ietf-ippm-stamp-cos-ecn-02 §3.4) =====
 
 fn sample_congestion() -> CongestionSummary {
     CongestionSummary {

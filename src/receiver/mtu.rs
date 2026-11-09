@@ -679,6 +679,7 @@ mod tests {
         let local = "[::]:862".parse().unwrap();
         let target = "[2001:db8::9]:5000".parse().unwrap();
         let options = SendOptions {
+            apply_tos: true,
             egress_ifindex: None,
             tos: 0,
             source: Some("2001:db8::2".parse().unwrap()),

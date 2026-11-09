@@ -15,10 +15,10 @@ certify untested behavior.
 | [RFC 9534](rfc9534.md): Micro-session ID (LAG) | RFC 9534, February 2024 | 18 | 9 | 6 | 1 | 2 | 0 |
 | [RFC 8545](rfc8545.md): OWAMP/TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [RFC 10052](draft-asymmetrical-pkts.md): Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
-| [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -01, 20 July 2026 | 16 | 16 | 0 | 0 | 0 | 0 |
+| [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -02, 2 November 2026 | 30 | 17 | 4 | 0 | 9 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 64 | 8 | 0 | 3 | 0 |
 | [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md): residual BER (Types 240 to 242) | -07, 30 June 2026 | 30 | 27 | 2 | 0 | 1 | 0 |
-| **Total** | | **433** | **373** | **17** | **1** | **39** | **3** |
+| **Total** | | **447** | **374** | **21** | **1** | **48** | **3** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).
@@ -93,6 +93,11 @@ Documents. Each matrix links the source document it quotes.
 - NIC timestamping and physical LAG behavior have no physical-testbed
   evidence. macOS has software receive timestamps only. Windows capture and
   hardware limits are covered in [release verification](../release-evidence.md).
+
+- CoS/ECN revision 02 is reconciled, but RFC 3168/9330 controller consistency
+  remains Partial. Reverse ECN feedback is supported only on Linux/macOS;
+  Windows reflector marking is reported unavailable with C. RPE-based peer
+  capability and bleaching diagnostics remain Partial; operators need captures.
 
 ## Experimental codepoints
 

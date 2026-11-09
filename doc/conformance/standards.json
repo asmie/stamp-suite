@@ -13,7 +13,7 @@
     {
       "kind": "draft",
       "name": "draft-ietf-ippm-stamp-cos-ecn",
-      "revision": "01",
+      "revision": "02",
       "matrix": "doc/conformance/draft-stamp-cos-ecn.md"
     },
     {

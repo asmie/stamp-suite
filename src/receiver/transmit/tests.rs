@@ -264,13 +264,16 @@ fn socket_owner_keeps_interleaved_metadata_and_pmtu_policy_isolated() {
         let mut sender = DatagramSender::new(&tx);
         // Repeated and alternating requests on one socket must not inherit
         // source, DSCP/ECN or fragmentation policy from their predecessor.
-        for (index, (tos, controlled, pinned)) in [
-            (185, true, true),
-            (0, false, false),
-            (43, true, false),
-            (43, true, true),
-            (0, false, false),
-            (185, true, true),
+        for (index, (tos, controlled, pinned, apply_tos)) in [
+            (185, true, true, true),
+            (0, false, false, true),
+            (43, true, false, true),
+            (43, true, true, true),
+            // The C fallback omits only marking: source and DF stay set.
+            (185, true, true, false),
+            (43, false, false, false),
+            (0, false, false, true),
+            (185, true, true, true),
         ]
         .into_iter()
         .enumerate()
@@ -281,6 +284,7 @@ fn socket_owner_keeps_interleaved_metadata_and_pmtu_policy_isolated() {
                 None
             };
             let options = SendOptions {
+                apply_tos,
                 tos,
                 source,
                 egress_ifindex: None,
@@ -309,7 +313,7 @@ fn socket_owner_keeps_interleaved_metadata_and_pmtu_policy_isolated() {
                     _ => {}
                 }
             }
-            assert_eq!(actual_tos, Some(tos));
+            assert_eq!(actual_tos, Some(if apply_tos { tos } else { 0 }));
             let address = message.address.unwrap();
             if !ipv6 {
                 assert_eq!(
@@ -483,10 +487,10 @@ fn cos_failure_uses_zero_ecn_fallback_and_resigns() {
         .send_next(&counters, &limiter, |data, _, options| {
             attempts += 1;
             if attempts == 1 {
-                return Err(io::Error::new(
+                return Err(cos_apply_error(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "injected CoS failure",
-                ));
+                )));
             }
             assert_eq!(options.tos, 40);
             assert_eq!(data[117] & 3, 1);
@@ -1020,4 +1024,230 @@ fn reflected_headers_are_trimmed_before_ber_padding() {
     // All optional header TLVs gone, but mandatory fields still do not fit:
     // refuse the packet instead of shrinking its BER padding.
     assert!(fit_reply(&mut data, base, base + 8 + 132 + 20 - 1, false).is_err());
+}
+
+#[test]
+fn ignored_tos_setter_invalidates_cache_before_not_ect_retry() {
+    let mut cached = Some(40);
+    let error = apply_verified_tos(&mut cached, 185, || Ok(()), || Ok(40)).unwrap_err();
+    assert!(is_cos_apply_error(&error));
+    assert_eq!(cached, None);
+    let mut retried = false;
+    apply_verified_tos(
+        &mut cached,
+        40,
+        || {
+            retried = true;
+            Ok(())
+        },
+        || Ok(40),
+    )
+    .unwrap();
+    assert!(retried);
+    assert_eq!(cached, Some(40));
+    apply_verified_tos(
+        &mut cached,
+        40,
+        || panic!("cached setter"),
+        || panic!("cached getter"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn failed_tos_setter_and_readback_are_option_errors_and_never_cached() {
+    for setter_fails in [false, true] {
+        let mut cached = Some(40);
+        let error = apply_verified_tos(
+            &mut cached,
+            185,
+            || {
+                if setter_fails {
+                    Err(io::ErrorKind::PermissionDenied.into())
+                } else {
+                    Ok(())
+                }
+            },
+            || Err(io::ErrorKind::InvalidData.into()),
+        )
+        .unwrap_err();
+        assert!(is_cos_apply_error(&error));
+        assert_eq!(cached, None);
+        assert_eq!(
+            error.kind(),
+            if setter_fails {
+                io::ErrorKind::PermissionDenied
+            } else {
+                io::ErrorKind::InvalidData
+            }
+        );
+    }
+}
+
+#[test]
+fn unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures() {
+    for auth in [false, true] {
+        for ipv6 in [false, true] {
+            let mut transmission = sample(auth, ReturnPathAction::Normal);
+            if ipv6 {
+                transmission.source = "[::1]:4000".parse().unwrap();
+                transmission.response.reply_source = Some("::1".parse().unwrap());
+            }
+            transmission.response.cos_request = Some((46, 1));
+            transmission.received_dscp = 10;
+            let base = if auth { 112 } else { 44 };
+            transmission.response.data[base + 6] = 0x70; // EC1=1, RPE=11.
+            let source = transmission.source;
+            let pinned = transmission.response.reply_source;
+            let counters = ReflectorCounters::new();
+            let mut attempts = 0;
+            for seq in 0..3 {
+                assert_eq!(
+                    transmission.send_next(
+                        &counters,
+                        &RateLimiter::new(0),
+                        |data, dst, options| {
+                            attempts += 1;
+                            assert_eq!(dst, source);
+                            assert_eq!(options.source, pinned);
+                            assert!(options.dont_fragment);
+                            if options.apply_tos {
+                                assert_eq!(options.tos, if attempts % 3 == 1 { 185 } else { 40 });
+                                return Err(cos_apply_error(
+                                    io::ErrorKind::PermissionDenied.into(),
+                                ));
+                            }
+                            assert_ne!(data[base] & TlvFlags::C, 0);
+                            assert_eq!(data[base + 5] & 3, 1); // RPD=01.
+                            assert_eq!((data[base + 6] >> 4) & 3, 2); // RPE=10.
+                            assert_eq!(data[base + 6] >> 6, 1); // EC1 preserved.
+                            assert_eq!(data[base + 8] & TlvFlags::U, 0); // Return path preserved.
+                            if auth {
+                                verify_signatures(data);
+                            }
+                            Ok(data.len())
+                        }
+                    ),
+                    Some(seq)
+                );
+            }
+            assert_eq!(attempts, 9);
+            assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 3);
+        }
+    }
+}
+
+#[test]
+fn failed_not_ect_request_needs_no_identical_marking_retry() {
+    let mut transmission = sample(false, ReturnPathAction::Normal);
+    transmission.response.reply_source = None;
+    transmission.response.cos_request = Some((0, 0));
+    let mut attempts = 0;
+    assert!(transmission
+        .send_next(
+            &ReflectorCounters::new(),
+            &RateLimiter::new(0),
+            |data, _, options| {
+                attempts += 1;
+                if options.apply_tos {
+                    return Err(cos_apply_error(io::ErrorKind::Unsupported.into()));
+                }
+                assert_ne!(data[44] & TlvFlags::C, 0);
+                Ok(data.len())
+            }
+        )
+        .is_some());
+    assert_eq!(attempts, 2);
+}
+
+#[test]
+fn datagram_errors_do_not_trigger_cos_marking_fallback() {
+    for kind in [
+        io::ErrorKind::Unsupported,
+        io::ErrorKind::PermissionDenied,
+        io::ErrorKind::NetworkUnreachable,
+        io::ErrorKind::WouldBlock,
+    ] {
+        let mut transmission = sample(true, ReturnPathAction::Normal);
+        transmission.response.reply_source = None;
+        let mut attempts = 0;
+        assert!(transmission
+            .send_next(
+                &ReflectorCounters::new(),
+                &RateLimiter::new(0),
+                |data, _, options| {
+                    attempts += 1;
+                    assert_eq!(options.tos, 184);
+                    assert!(options.apply_tos);
+                    assert_eq!(data[112] & TlvFlags::C, 0);
+                    verify_signatures(data);
+                    Err(kind.into())
+                }
+            )
+            .is_none());
+        assert_eq!(attempts, 1);
+    }
+}
+
+#[test]
+fn cos_unavailable_preserves_opaque_echoes_and_received_fields() {
+    for flags in [0, TlvFlags::U, TlvFlags::M, TlvFlags::I] {
+        let mut data = vec![flags, 4, 0, 4, 185, 0xA3, 0x70, 0];
+        let before = data.clone();
+        super::super::set_cos_policy_rejected(&mut data, 0);
+        super::super::reply_bytes::set_cos_marking_unavailable(&mut data, 0);
+        if flags == 0 {
+            assert_eq!(data, [TlvFlags::C, 4, 0, 4, 185, 0xA1, 0x60, 0]);
+        } else {
+            assert_eq!(data, before);
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_sender_sends_cos_unavailable_and_ordinary_replies() {
+    use std::net::UdpSocket;
+    for ip in ["127.0.0.1", "::1"] {
+        let receive = UdpSocket::bind((ip, 0)).unwrap();
+        receive
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let socket = UdpSocket::bind((ip, 0)).unwrap();
+        let mut sender = DatagramSender::new(&socket);
+        let destination = receive.local_addr().unwrap();
+        for auth in [false, true] {
+            let mut transmission = sample(auth, ReturnPathAction::Normal);
+            transmission.source = destination;
+            transmission.response.reply_source = None;
+            assert!(transmission
+                .send_next(
+                    &ReflectorCounters::new(),
+                    &RateLimiter::new(0),
+                    |data, dst, options| sender.send(data, dst, options)
+                )
+                .is_some());
+            let mut data = [0; 512];
+            let (size, _) = receive.recv_from(&mut data).unwrap();
+            let base = if auth { 112 } else { 44 };
+            assert_ne!(data[base] & TlvFlags::C, 0);
+            assert_eq!((data[base + 6] >> 4) & 3, 2);
+            if auth {
+                verify_signatures(&data[..size]);
+            }
+        }
+        let mut transmission = sample(false, ReturnPathAction::Normal);
+        transmission.source = destination;
+        transmission.response.reply_source = None;
+        transmission.response.cos_request = None;
+        transmission.response.data.truncate(44);
+        assert!(transmission
+            .send_next(
+                &ReflectorCounters::new(),
+                &RateLimiter::new(0),
+                |data, dst, options| sender.send(data, dst, options)
+            )
+            .is_some());
+        assert_eq!(receive.recv_from(&mut [0; 512]).unwrap().0, 44);
+    }
 }

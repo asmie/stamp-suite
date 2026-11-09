@@ -157,7 +157,7 @@ pub(super) fn validate_reflected_tlvs(
                 }
             }
             if track_congestion && raw.tlv_type == TlvType::ClassOfService {
-                // draft-ietf-ippm-stamp-cos-ecn-01 §3.4: EC2 = 0b11 signals
+                // draft-ietf-ippm-stamp-cos-ecn-02 §3.4: EC2 = 0b11 signals
                 // forward-path (sender→reflector) congestion. Same
                 // U/M-flag-gated, integrity-checked path as every other
                 // reflected value consumed above.

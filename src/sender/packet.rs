@@ -107,7 +107,7 @@ pub(super) fn build_reflected_control_tlv(
 }
 
 /// Builds the control TLV with the current AIMD-scaled interval
-/// (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+/// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
 ///
 /// `SenderRun::build_probe` calls this for every probe, including Access
 /// Report retries, when `scale_reflected_control` is active, since
@@ -119,9 +119,15 @@ pub(super) fn scaled_reflected_control_tlv(
     no_ext_hdr: bool,
     scale: f64,
 ) -> Option<RawTlv> {
-    let scaled_ns = ((interval_ns as f64) * scale)
-        .round()
-        .clamp(0.0, u32::MAX as f64) as u32;
+    // Multiplying an unpaced burst's zero gap would never slow its copies.
+    // Reuse the controller's 1 ms floor only while backed off. Control-only
+    // requests (count <= 1) retain their required zero interval.
+    let interval = if interval_ns == 0 && count > 1 && scale > 1.0 {
+        crate::rate_control::MIN_BACKOFF_FLOOR.as_nanos() as f64
+    } else {
+        f64::from(interval_ns)
+    };
+    let scaled_ns = (interval * scale).round().clamp(0.0, u32::MAX as f64) as u32;
     build_reflected_control_tlv(length, count, scaled_ns, no_ext_hdr).map(|c| c.to_raw())
 }
 

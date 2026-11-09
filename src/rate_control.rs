@@ -1,15 +1,20 @@
-//! Sender congestion response (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+//! Sender congestion response (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
 //!
 //! The send loop reports CE from the CoS EC2 field or reply IP header to
 //! `AimdController::on_ce_observed`, and clean replies to
 //! `AimdController::on_clean_reply`. The controller supplies the next send
 //! interval through `AimdController::current_interval`; it owns no timers.
+//!
+//! This provides CE response capability, not a demonstrated RFC 3168/9330
+//! controller: recovery is per clean reply, without RTT epochs or a congestion
+//! window. ECT(1) marking alone does not implement scalable L4S control. See
+//! doc/conformance/draft-stamp-cos-ecn.md for the remaining consistency limits.
 
 use std::time::Duration;
 
 /// Minimum interval before multiplicative backoff from `--send-delay 0`.
 /// Without this floor, multiplying zero would leave CE feedback ineffective.
-const MIN_BACKOFF_FLOOR: Duration = Duration::from_millis(1);
+pub(crate) const MIN_BACKOFF_FLOOR: Duration = Duration::from_millis(1);
 
 /// AIMD parameters from the send-delay and ECN pacing flags.
 /// The caller validates `backoff_factor > 1.0`, `recovery_step > 0`, and
@@ -86,7 +91,7 @@ impl AimdController {
     }
 
     /// Current/base interval ratio, floored at 1.0, for scaling reflected
-    /// burst gaps (cos-ecn-01 §3.4-3).
+    /// burst gaps (cos-ecn-02 §3.4-3).
     /// Uses [`MIN_BACKOFF_FLOOR`] as the denominator when the base is zero,
     /// avoiding division by zero or a zero multiplier.
     #[must_use]
@@ -101,9 +106,8 @@ impl AimdController {
     }
 
     /// Records a CE-marked reply: multiplicatively grows the interval
-    /// (capped at `params.max_interval`), per draft-ietf-ippm-stamp-cos-ecn-01
-    /// §3.4 ("...it MUST observe the reflected EC2 field and reduce its
-    /// sending rate upon observation of a CE value").
+    /// (capped at `params.max_interval`), per draft-ietf-ippm-stamp-cos-ecn-02
+    /// §3.4 (observe EC2 and be capable of reducing the rate on CE).
     pub fn on_ce_observed(&mut self) {
         self.ce_observations += 1;
         // A zero (or otherwise tiny) current interval can't be grown by a

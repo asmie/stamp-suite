@@ -1,9 +1,9 @@
 //! Sender congestion state driven by CE-marked replies
-//! (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+//! (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
 
 use super::*;
 
-/// CE-driven congestion state (draft-ietf-ippm-stamp-cos-ecn-01 §3.4).
+/// CE-driven congestion state (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
 /// Active with `--cos` and ECT0/ECT1. The send loop separately tracks
 /// `scale_reflected_control` because TLV construction needs it before this state.
 pub(super) struct CongestionState {

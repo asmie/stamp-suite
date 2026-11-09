@@ -1586,7 +1586,7 @@ fn test_validate_rejects_out_of_range_ecn_from_file() {
     assert!(err.to_string().contains("ecn"));
 }
 
-// ===== AIMD congestion-response (draft-ietf-ippm-stamp-cos-ecn-01 §3.4) =====
+// ===== AIMD congestion-response (draft-ietf-ippm-stamp-cos-ecn-02 §3.4) =====
 
 #[test]
 fn test_validate_rejects_ecn_backoff_factor_not_greater_than_one() {
