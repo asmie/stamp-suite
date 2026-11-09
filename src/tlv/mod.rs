@@ -17,6 +17,7 @@
 mod core;
 mod experimental;
 mod list;
+mod residual_ber;
 mod traits;
 mod typed;
 
@@ -24,6 +25,12 @@ mod typed;
 
 // Trait
 pub use traits::TypedTlv;
+
+// Successor BER codec; not registered for endpoint processing yet.
+pub use residual_ber::{
+    ResidualBerError, ResidualBerSubTlv, ResidualBerValue, RESIDUAL_BER_DEFAULT_PATTERN,
+    RESIDUAL_BER_FIXED_VALUE_SIZE, RESIDUAL_BER_MIN_PATTERN_SIZE,
+};
 
 // Core types and constants
 pub use self::core::{

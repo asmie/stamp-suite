@@ -60,6 +60,15 @@ one Maximum Bit Error Burst Size TLV (`src/sender/run.rs::SenderRun::open`).
 
 ## Notes
 
+### Successor migration in progress
+
+The monitored draft has been replaced by `draft-ietf-bpm-stamp-ber-01`.
+The [migration design](../ber-migration.md) records the format comparison,
+planned compatibility boundary and independent-peer findings. The successor
+value codec has tests, but is not enabled in either endpoint yet. This matrix
+and its frozen revision continue to describe the legacy implementation;
+codec coverage alone does not establish successor conformance.
+
 ### MTU budget
 
 On Linux the sender sizes the padding against the connected route MTU, sets

@@ -1,0 +1,61 @@
+{
+  "source": "draft-ietf-bpm-stamp-ber-01 sections 4 and 4.1",
+  "provenance": "Hand-encoded from the draft diagrams, without using an endpoint encoder or third-party implementation. Pattern sub-TLV type 240 is a fixture-local choice, not an IANA assignment.",
+  "pattern_type": 240,
+  "valid": [
+    {
+      "id": "default-request",
+      "value_hex": "0000000000000000",
+      "count": 0,
+      "max_burst": 0,
+      "pattern_hex": null
+    },
+    {
+      "id": "network-order-counters",
+      "value_hex": "0000010200000007",
+      "count": 258,
+      "max_burst": 7,
+      "pattern_hex": null
+    },
+    {
+      "id": "explicit-request",
+      "value_hex": "000000000000000080f00004ff00ff00",
+      "count": 0,
+      "max_burst": 0,
+      "pattern_hex": "ff00ff00"
+    },
+    {
+      "id": "five-byte-pattern",
+      "value_hex": "000000010000000180f00005aa55aabbcc",
+      "count": 1,
+      "max_burst": 1,
+      "pattern_hex": "aa55aabbcc"
+    },
+    {
+      "id": "opaque-flags-and-unknown-sub-tlv",
+      "value_hex": "0000000300000002b7f30003deadbe80f00004aa55aa55",
+      "count": 3,
+      "max_burst": 2,
+      "pattern_hex": "aa55aa55"
+    },
+    {
+      "id": "unavailable-burst-with-errors",
+      "value_hex": "0000000200000000",
+      "count": 2,
+      "max_burst": 0,
+      "pattern_hex": null
+    }
+  ],
+  "invalid": [
+    {"id": "no-fixed-fields", "value_hex": "", "error": "short_value"},
+    {"id": "old-four-byte-fixed-fields", "value_hex": "00000001", "error": "short_value"},
+    {"id": "short-burst-field", "value_hex": "00000001000000", "error": "short_value"},
+    {"id": "one-byte-nested-header", "value_hex": "000000000000000080", "error": "short_header", "offset": 8},
+    {"id": "three-byte-nested-header", "value_hex": "000000000000000080f000", "error": "short_header", "offset": 8},
+    {"id": "truncated-pattern", "value_hex": "000000000000000080f00004aabb", "error": "truncated_sub_tlv", "offset": 8},
+    {"id": "truncated-after-pattern", "value_hex": "000000000000000080f00004ff00ff0080f300ff", "error": "truncated_sub_tlv", "offset": 16},
+    {"id": "no-pattern-value", "value_hex": "000000000000000080f00000", "error": "short_pattern", "index": 0},
+    {"id": "three-byte-pattern", "value_hex": "000000000000000080f00003aabbcc", "error": "short_pattern", "index": 0},
+    {"id": "duplicate-pattern", "value_hex": "000000000000000080f00004ff00ff0080f00004aa55aa55", "error": "duplicate_pattern"}
+  ]
+}

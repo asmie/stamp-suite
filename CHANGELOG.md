@@ -5,6 +5,13 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Add a bounded value codec and fuzz coverage for draft-ietf-bpm-stamp-ber-01,
+  with independent nested-TLV fixtures. This prepares the BER migration;
+  endpoints still use the legacy format until the integration is complete.
+  See [migration design and peer findings](doc/ber-migration.md).
+
 ### Changed
 
 - Raise the minimum Rust version to 1.87 for the patched `ctutils` dependency.

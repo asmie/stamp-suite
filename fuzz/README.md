@@ -39,6 +39,7 @@ These are the `[[bin]]` entries in `fuzz/Cargo.toml`.
 | `tlv_list_parse` | `TlvList::parse`, the strict TLV parser. Accepted input must serialize back to itself, with reserved flag bits cleared. |
 | `tlv_list_parse_lenient` | `TlvList::parse_lenient`, the parser the receive path uses. |
 | `raw_tlv_parse` | `RawTlv::parse`, with the same round-trip check for one TLV. |
+| `residual_ber_value` | Successor BER value codec (draft-ietf-bpm-stamp-ber-01), including nested framing and pattern validation. This does not enable the successor format in the endpoints. |
 | `packet_unauth_parse` | `PacketUnauthenticated::from_bytes` (round trip) and `from_bytes_lenient`. |
 | `packet_auth_parse` | `PacketAuthenticated::from_bytes` (round trip) and `from_bytes_lenient_with_canonical`. |
 | `agentx_decode_header` | AgentX PDU header decoding (RFC 2741 §6). |
@@ -57,6 +58,9 @@ tests contain hand-built boundary inputs that make good seeds:
 - `tests/tlv_flag_semantics.rs`: TLV chains with each U, M, I and C flag set.
 - `tests/proptest_tlv.rs`: property tests that run the same parsers and the
   AgentX decoders on arbitrary bytes in every `cargo test` run.
+- `tests/fixtures/residual-ber/values.json`: independent successor BER values,
+  including truncated nested headers, short patterns and duplicates. CI seeds
+  `residual_ber_value` from these hex values after restoring its cached corpus.
 
 ## CI
 

@@ -1,0 +1,86 @@
+{
+  "peer_commit": "592558a38dbcf9b273acb2a2fe8ab0d8f16d0709",
+  "records": [
+    {
+      "ip": "127.0.0.1",
+      "command": [
+        "/tmp/stamp-t5-teaparty-target/debug/teaparty",
+        "127.0.0.1",
+        "47597",
+        "sender",
+        "tlvs",
+        "bit-error-rate",
+        "--pattern",
+        "ff00ff00",
+        "--size",
+        "64"
+      ],
+      "packet_hex": "00000022ee9c02f85dfb02880001eeff0000000000000000000000000000000000000000000000000000000080010040ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff008009000400000000800a0004ff00ff00",
+      "tlvs": [
+        {
+          "flags": 128,
+          "type": 1,
+          "length": 64,
+          "value_hex": "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00"
+        },
+        {
+          "flags": 128,
+          "type": 9,
+          "length": 4,
+          "value_hex": "00000000"
+        },
+        {
+          "flags": 128,
+          "type": 10,
+          "length": 4,
+          "value_hex": "ff00ff00"
+        }
+      ]
+    },
+    {
+      "ip": "::1",
+      "command": [
+        "/tmp/stamp-t5-teaparty-target/debug/teaparty",
+        "::1",
+        "40062",
+        "sender",
+        "tlvs",
+        "bit-error-rate",
+        "--pattern",
+        "ff00ff00",
+        "--size",
+        "64"
+      ],
+      "packet_hex": "00000022ee9c02f85ed85fec0001eeff0000000000000000000000000000000000000000000000000000000080010040ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff008009000400000000800a0004ff00ff00",
+      "tlvs": [
+        {
+          "flags": 128,
+          "type": 1,
+          "length": 64,
+          "value_hex": "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00"
+        },
+        {
+          "flags": 128,
+          "type": 9,
+          "length": 4,
+          "value_hex": "00000000"
+        },
+        {
+          "flags": 128,
+          "type": 10,
+          "length": 4,
+          "value_hex": "ff00ff00"
+        }
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "captured_on": "2026-11-09",
+  "provenance": "Black-box sender output from the exact draft-listed commit; no peer source, tests or comments copied.",
+  "peer_binary_sha256": "e7c6088059a8c655c193c2b9bb137e61841c97bbaf83476a3979a507d80ca3e5",
+  "peer_lock_sha256": "783c6cf3bdf7bcdf9bd8d7796a56a7b3e7f445e152ac61e2cf8609aad84b7d35",
+  "peer_nix_submodule": "08af3f888a98cde890a1467f436815ba4dbafa40",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "host": "Linux x86_64",
+  "successor_interoperability": "not demonstrated: peer sends separate 4-byte count and pattern TLVs at assigned Types 9 and 10"
+}

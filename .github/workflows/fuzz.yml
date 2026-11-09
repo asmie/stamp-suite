@@ -28,6 +28,7 @@ jobs:
           - tlv_list_parse
           - tlv_list_parse_lenient
           - raw_tlv_parse
+          - residual_ber_value
           - packet_unauth_parse
           - packet_auth_parse
           - agentx_decode_header
@@ -54,6 +55,19 @@ jobs:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Seed successor BER inputs
+        if: matrix.target == 'residual_ber_value'
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          vectors = json.loads(Path('tests/fixtures/residual-ber/values.json').read_text())
+          corpus = Path('fuzz/corpus/residual_ber_value')
+          corpus.mkdir(parents=True, exist_ok=True)
+          for group in ('valid', 'invalid'):
+              for vector in vectors[group]:
+                  (corpus / vector['id']).write_bytes(bytes.fromhex(vector['value_hex']))
+          PY
       - name: Run fuzz target
         env:
           # Use env-var indirection per GitHub security guidance: matrix

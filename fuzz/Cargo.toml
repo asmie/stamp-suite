@@ -43,6 +43,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "residual_ber_value"
+path = "fuzz_targets/residual_ber_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "packet_unauth_parse"
 path = "fuzz_targets/packet_unauth_parse.rs"
 test = false
