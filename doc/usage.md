@@ -344,6 +344,12 @@ rest, and an I flag blocks all values. When the HMAC TLV is absent, the sender
 accepts the optional TLVs from peers that do not send one. Required
 Micro-session IDs, BER, Direct Measurement and Follow-Up have stricter rules.
 
+The sender detects returned TLVs from the received packet length even when its
+probe had no extensions. Known outer-TLV lengths are validated independently
+of which values were requested. A malformed unused value also stops later TLVs;
+the diagnostics include locally detected M errors. Signature verification
+continues to cover the original bytes received from the peer.
+
 With `-R`, the per-packet line shows TLV results in a fixed order: HMAC, Access
 Report, CE, Micro-session ID, then U/M/I counts. Each result appears once even
 when several TLVs support it. `HMAC:unverified` marks a present HMAC that could

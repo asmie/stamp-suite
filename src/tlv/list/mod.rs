@@ -770,11 +770,10 @@ impl TlvList {
         }
     }
 
-    #[cfg(test)]
     /// Set M on parser-detected errors or invalid lengths of recognized types
     /// (RFC 8972 §4). Parser markers survive reflector flag clearing.
     /// Visit every retained entry, including duplicate HMACs.
-    pub fn validate_known_tlv_lengths(&mut self) {
+    pub(crate) fn validate_known_tlv_lengths(&mut self) {
         Self::validate_known_tlv_lengths_slice(&mut self.entries);
     }
 

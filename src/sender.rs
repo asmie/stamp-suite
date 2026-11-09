@@ -304,7 +304,12 @@ fn process_response(
     let want_msid = ctx.expected_sender_msid.is_some()
         || ctx.expected_reflector_msid.is_some()
         || ctx.latched_reflector_msid.is_some();
-    let use_tlvs = use_tlvs || want_msid;
+    let base_size = if use_auth {
+        AUTH_BASE_SIZE
+    } else {
+        UNAUTH_BASE_SIZE
+    };
+    let use_tlvs = use_tlvs || want_msid || data.len() > base_size;
     // Learning is committed only when the entire reply is accepted for a pending probe.
     let mut next_reflector_msid = *ctx.latched_reflector_msid;
     let recv_time = Instant::now();
@@ -330,7 +335,7 @@ fn process_response(
     ) = if use_auth {
         if use_tlvs {
             // Parse as extended packet with TLVs (lenient, returns canonical buffer)
-            let (ext_packet, canonical_buf) =
+            let (mut ext_packet, canonical_buf) =
                 ExtendedReflectedPacketAuthenticated::from_bytes_lenient(data);
             let base = &ext_packet.base;
             let seq_num = base.sess_sender_seq_number;
@@ -352,6 +357,9 @@ fn process_response(
                 }
             }
 
+            // Derive malformed markers for every known type, including values
+            // this run does not consume. HMAC still covers original wire bytes.
+            ext_packet.tlvs.validate_known_tlv_lengths();
             // Validate TLVs if present
             let telemetry = if ext_packet.has_tlvs() || want_msid {
                 match validate_reflected_tlvs(
@@ -451,7 +459,8 @@ fn process_response(
         }
     } else if use_tlvs {
         // Parse as extended packet with TLVs (unauthenticated, lenient)
-        let (ext_packet, _) = ExtendedReflectedPacketUnauthenticated::from_bytes_lenient(data);
+        let (mut ext_packet, _) = ExtendedReflectedPacketUnauthenticated::from_bytes_lenient(data);
+        ext_packet.tlvs.validate_known_tlv_lengths();
         let base = &ext_packet.base;
 
         // Validate TLVs if present

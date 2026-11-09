@@ -144,6 +144,179 @@ fn reply(
     }
     (bytes, t3)
 }
+
+fn reply_with_extensions(request: &[u8], auth: bool, tail: &[u8]) -> Vec<u8> {
+    let (mut bytes, _) = reply(request, auth, 10, [1, 1, 1], None);
+    let base = if auth { 112 } else { 44 };
+    bytes.truncate(base);
+    bytes.extend_from_slice(tail);
+    if auth {
+        let digest = sign(&[&bytes[..4], &bytes[base..]]);
+        bytes.extend_from_slice(&[0, 8, 0, 16]);
+        bytes.extend_from_slice(&digest);
+        let digest = sign(&[&bytes[..96]]);
+        bytes[96..112].copy_from_slice(&digest);
+    }
+    bytes
+}
+
+#[test]
+fn base_only_sender_validates_returned_extensions() {
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            let peer = UdpSocket::bind((ip, 0)).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let sender = Sender::start_profile(&peer, auth, 1, 1, false, &[]);
+            let mut request = [0; 2048];
+            let (len, source) = peer.recv_from(&mut request).unwrap();
+            assert_eq!(
+                len,
+                if auth { 112 } else { 44 },
+                "request must really be base-only"
+            );
+            let reply = reply_with_extensions(&request[..len], auth, &[0, 1, 0, 4, 1, 2, 3, 4]);
+            peer.send_to(&reply, source).unwrap();
+            let stats = sender.finish();
+            assert_eq!(stats["packets_received"], 1);
+            let validation = &stats["measurements"]["tlv_validation"];
+            assert_eq!(
+                validation["evaluated_replies"], 1,
+                "{ip} auth={auth}: {stats}"
+            );
+            assert_eq!(validation["by_type"]["1"]["observed"], 1);
+            if auth {
+                assert_eq!(validation["hmac"]["verified"], 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn sender_validates_unused_tlv_lengths_before_later_measurements() {
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            for extensions in [true, false] {
+                for (value_len, flags) in [(8usize, 0u8), (4, 0x40)] {
+                    let peer = UdpSocket::bind((ip, 0)).unwrap();
+                    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let sender = Sender::start_profile(&peer, auth, 1, 1, extensions, &[]);
+                    let mut request = [0; 2048];
+                    let (len, source) = peer.recv_from(&mut request).unwrap();
+                    // CoS is not requested/consumed by this sender. Invalid
+                    // length or peer M must still stop the following DM TLV;
+                    // signatures cover the original bytes in either case.
+                    let mut tail = vec![flags, 4, 0, value_len as u8];
+                    tail.extend(std::iter::repeat_n(0, value_len));
+                    tail.extend_from_slice(&[0, 5, 0, 12]);
+                    for value in [1u32, 2, 3] {
+                        tail.extend_from_slice(&value.to_be_bytes());
+                    }
+                    peer.send_to(&reply_with_extensions(&request[..len], auth, &tail), source)
+                        .unwrap();
+                    let stats = sender.finish();
+                    assert_eq!(
+                        stats["packets_received"], 1,
+                        "base RTT is independently usable"
+                    );
+                    assert_eq!(
+                        stats["measurements"]["direct_measurement"]["observations"], 0,
+                        "{ip} auth={auth} ext={extensions}: {stats}"
+                    );
+                    let validation = &stats["measurements"]["tlv_validation"];
+                    assert_eq!(validation["flags"]["malformed"], 1);
+                    assert_eq!(validation["by_type"]["4"]["flags"]["malformed"], 1);
+                    if auth {
+                        assert_eq!(
+                            validation["hmac"]["verified"], 1,
+                            "verify original wire bytes"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            let auth = mode == 2;
+            let peer = UdpSocket::bind((ip, 0)).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut extra = vec![
+                "--extra-padding",
+                "260",
+                "--location",
+                "--timestamp-info",
+                "--cos",
+                "--direct-measurement",
+                "--access-report",
+                "1",
+                "--follow-up-telemetry",
+            ];
+            if mode == 1 {
+                extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
+            }
+            let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
+            let mut request = [0; 2048];
+            let (length, source) = peer.recv_from(&mut request).unwrap();
+            let request = &request[..length];
+            let base = if auth { 112 } else { 44 };
+            if auth {
+                assert_eq!(&request[96..112], &sign(&[&request[..96]]));
+            }
+            let mut pos = base;
+            let mut kinds = vec![];
+            let mut echo = vec![];
+            while pos < request.len() {
+                assert!(pos + 4 <= request.len());
+                let size = u16::from_be_bytes([request[pos + 2], request[pos + 3]]) as usize;
+                assert!(pos + 4 + size <= request.len());
+                assert_eq!(request[pos], 0x80, "all sender U/M/I and reserved bits");
+                let kind = request[pos + 1];
+                kinds.push(kind);
+                if kind == 1 {
+                    assert_eq!(&request[pos + 2..pos + 4], &[1, 4], "260-byte value length");
+                }
+                if kind == 5 {
+                    assert_eq!(&request[pos + 4..pos + 8], &[0, 0, 0, 1]);
+                }
+                if kind == 8 {
+                    assert_eq!(size, 16);
+                    assert_eq!(pos + 4 + size, request.len());
+                    assert_eq!(
+                        &request[pos + 4..],
+                        &sign(&[&request[..4], &request[base..pos]])
+                    );
+                } else {
+                    echo.push(0); // recognized response TLV, clear U/M/I
+                    echo.extend_from_slice(&request[pos + 1..pos + 4 + size]);
+                }
+                pos += 4 + size;
+            }
+            kinds.sort_unstable();
+            assert_eq!(
+                kinds,
+                if mode == 0 {
+                    (1..=7).collect::<Vec<_>>()
+                } else {
+                    (1..=8).collect()
+                }
+            );
+            let mut response = reply_with_extensions(request, auth, &echo);
+            if mode == 1 {
+                let digest = sign(&[&response[..4], &response[base..]]);
+                response.extend_from_slice(&[0, 8, 0, 16]);
+                response.extend_from_slice(&digest);
+            }
+            peer.send_to(&response, source).unwrap();
+            let stats = sender.finish();
+            assert_eq!(stats["packets_received"], 1);
+            assert_eq!(stats["access_report"]["outcome"], "acknowledged");
+        }
+    }
+}
 fn peer(auth: bool) -> UdpSocket {
     let socket = UdpSocket::bind((if auth { "::1" } else { "127.0.0.1" }, 0)).unwrap();
     socket

@@ -113,13 +113,21 @@ processing or TLV integrity.
 | `rejected_replies` | Evaluated replies discarded by required Micro-session ID validation. |
 | `observed_tlvs` | All parsed TLV occurrences, including HMAC and duplicate HMAC entries retained by lenient parsing. |
 | `hmac` | Reply counts for `not_requested`, `missing`, `verified`, `unverified` and `failed` TLV HMAC outcomes. |
-| `flags` | TLV occurrence counts for `unrecognized` (U), `malformed` (M), `integrity_failed` (I) and `conformant_reflected` (C). |
+| `flags` | TLV occurrence counts for `unrecognized` (U), `malformed` (M), `integrity_failed` (I) and `conformant_reflected` (C). M includes locally detected truncation and invalid known-type lengths, even if the peer omitted M. |
 | `by_type` | Occurrence and flag counts grouped by decimal wire type codepoint; for example, `"8"` is HMAC and `"11"` is Micro-session ID. |
 
 Counts precede SSID admission and deduplication, so repeats and later-rejected
 replies are included. Packets dropped before evaluation, such as base HMAC
 failures, are excluded. Base-only reception and empty lists without a required
 Micro-session ID add nothing. Counters survive reply-history eviction.
+
+Extension detection follows the received payload length, including when the
+sender originated a base-only probe. All known outer-TLV lengths are checked
+before values are used, including types this run does not consume. The first
+wire or locally derived M stops later values. HMAC verification uses the
+original received bytes, so local diagnostic markers do not change signature
+coverage. A usable base reply can still contribute RTT when extensions are
+unusable; required identity checks retain their existing rejection policy.
 
 HMAC outcomes: `not_requested` means no HMAC or key; `missing` means an
 optional/exempt HMAC is absent with a key configured. Missing required HMACs

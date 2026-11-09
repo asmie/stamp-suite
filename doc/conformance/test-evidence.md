@@ -105,7 +105,7 @@ rerun the checker after edits rather than treating the numbers as certification.
 | Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
 | Type 12 C signaling | Packet-processing and independent wire tests now exercise exact/fractional rate ceilings, volume, count-zero suppression, sender C clearing, incoming C ignoring and protected admission. | Exact timing and conservative first-request selection are Partial. Identity protection is qualified by the authenticated protected profile. See T22b3 below. |
 
-After the reviews below, 116 missing references remain across five
+After the reviews below, 102 missing references remain across five
 matrices. Prioritize the remaining authentication, C-flag and admission claims,
 then work through the rest. The full test-evidence goal and strict CI gate
 remain unfinished.
@@ -312,6 +312,61 @@ logs/reports use `/tmp/t22b3-*`; no remote CI or new fuzz campaign is claimed.
 
 ```sh
 cargo test --locked --all-features --test tlv_flag_semantics --test type12_policy_test
+```
+
+## Core extension review (T22b4)
+
+Review against parent `8052e40` reproduced two sender defects through independent
+binary peers. A reply with extensions after a base-only probe bypassed TLV
+validation. An unused known type with an invalid length but no peer M flag
+could leave later measurement values usable. The sender now detects extensions
+from received length and derives malformed markers for every retained known
+outer type before semantic consumption. Authentication still verifies original
+wire bytes; base RTT acceptance remains independent of unusable extension data.
+
+`tests/sender_measurement_test.rs::base_only_sender_validates_returned_extensions`
+checks actual 44/112-byte requests followed by extended replies in both IP
+families and authentication modes.
+`tests/sender_measurement_test.rs::sender_validates_unused_tlv_lengths_before_later_measurements`
+checks invalid-length CoS without wire M and valid-length CoS with wire M,
+before Direct Measurement, after base-only and extended requests. It verifies
+that later values are ignored while signed original bytes still authenticate.
+Both regressions failed before the fix.
+`tests/sender_measurement_test.rs::sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear`
+captures all eight RFC 8972 outer types, U/M/I flags, big-endian multi-byte
+lengths/counters and signatures in open, keyed-open and authenticated modes.
+
+The three tests in `tests/tlv_extension_wire_test.rs` exercise real reflectors
+in both families and all three key profiles. They check ordered padding and
+unknown opaque values, ignored incoming flag bits, copied values after the
+first malformed known TLV, and integrity-failure value/digest preservation.
+Independent HMAC calculations check the resulting original/final wire bytes.
+Opaque unknown data contains a count-zero Type 12 request that must not execute.
+These semantic malformed-length cases retain complete frames; they do not
+change the existing opaque-trailer compatibility policy. Prefix processing
+before the first malformed TLV is permitted and now described accurately.
+
+Fourteen previously missing RFC 8972 references are resolved; that matrix has
+43 remaining. The inventory is **323 applicable, 221 with references,
+102 missing**. Clause statuses are unchanged: **471 clauses: 391 Compliant,
+27 Partial, two Gap, 48 N-A and three Excluded**. Nested Location and other
+field-specific evidence reviews remain pending, as does strict CI enforcement.
+These are Linux nix software-loopback and shared-parser checks. The pnet frame
+decoder regression ran separately as a unit test; no pnet capture runtime,
+physical clock or native-platform conformance is inferred.
+
+Final local verification passes full default/all-features/pnet suites with
+**1,348/1,450/1,290** tests, respectively (13 privileged ignored in each
+ordinary run). The targeted wire suites pass all eight sender and three
+reflector tests. Both required MTU tests pass separately without a skip, and
+the final all-features BER wire run passes all 60 cases. All three Clippy
+profiles, the fuzz manifest build check, 104 Python tests, root/fuzz rustfmt,
+matrix counts, 1,117 source citations and 438 documentation links pass. Opt-in
+strict checking fails only on the expected 102 missing-reference rows. Logs
+and reports use `/tmp/t22b4-*`; no remote CI or new fuzz campaign is claimed.
+
+```sh
+cargo test --locked --all-features --test sender_measurement_test --test tlv_extension_wire_test
 ```
 
 ## Local validation for T22a

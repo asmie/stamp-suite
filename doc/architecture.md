@@ -229,6 +229,13 @@ probe after sequence reuse. Reply-copy identities include wire T1.
 
 ## Sender run loop
 
+Incoming extension detection follows the received payload length, independent
+of outgoing TLV configuration. After base integrity verification in authenticated
+mode, the sender derives malformed markers for every known outer-TLV length
+before evaluating flags and optional values. Unused types participate in this
+check. The list carries diagnostic markers; HMAC verification retains the
+original wire slice for coverage.
+
 `sender/run.rs` runs one session. `run_senders` (in `sender.rs`) opens one
 `SenderRun` per `--remote-addr` before sending any probe, so a startup error in
 one target stops them all. It then runs them concurrently and labels each

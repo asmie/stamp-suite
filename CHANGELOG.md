@@ -44,6 +44,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Detect incoming TLVs by received payload length even after a base-only probe.
+  Validate every known outer-TLV length before consuming reflected values,
+  including unused types; malformed entries stop later TLV measurements.
+  Preserve original wire bytes for HMAC checks and add independent U/M/I,
+  echo-order, byte-order and padding regressions for both application roles.
+
 - Enforce Type 12 rate ceilings without rounding down fractional excess, and
   preserve every Address Group mismatch when multiple filters are present.
   Add independent sender/reflector wire regressions for C flags, rate/volume

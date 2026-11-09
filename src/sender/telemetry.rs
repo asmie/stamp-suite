@@ -15,7 +15,8 @@ pub struct TlvHmacSummary {
     pub failed: u64,
 }
 
-/// Flags in parsed reflected TLVs. M includes parser-detected truncation.
+/// Flags in parsed reflected TLVs. M includes truncation and known-type
+/// length errors detected locally, even when the peer omitted M.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct TlvFlagSummary {
     pub unrecognized: u64,
