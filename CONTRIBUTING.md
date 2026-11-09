@@ -61,6 +61,28 @@ Other test entry points:
 - The fuzz targets live in `fuzz/` and need a nightly compiler. See
   [fuzz/README.md](fuzz/README.md).
 
+After changing documentation or linked evidence, run:
+
+```sh
+python3 scripts/check_doc_links.py
+python3 scripts/check_conformance_counts.py
+python3 scripts/check_conformance_citations.py
+```
+
+The offline link check scans Git-visible Markdown, including new untracked
+documents and excluding ignored build/planning outputs. It checks local paths,
+Markdown heading fragments and explicit HTML anchors, including inline/reference
+links and images. Code examples and comments are ignored. Non-Markdown fragments
+are reported as unverified; external URLs are classified without fetching them.
+This checker supports the repository's Markdown conventions, not every extension
+of Markdown. Keep checked-in evidence with the change that links to it: a local
+untracked file can pass here but will be missing from a clean CI checkout.
+
+Link release-only assets using their external release URL; write generated local
+paths as code when documenting a command. Missing relative artifacts are errors,
+with no blanket exemption for generated or historical evidence. A passing link
+check establishes reachability in the checkout, not the truth of a linked claim.
+
 ### Privileged and namespace tests
 
 Some tests need root, `CAP_NET_RAW` or network namespaces. They are marked

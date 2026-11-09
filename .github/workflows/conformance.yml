@@ -22,7 +22,7 @@ env:
 
 jobs:
   evidence:
-    name: Matrix and citation consistency
+    name: Documentation and matrix consistency
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -30,13 +30,17 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -v
       - name: Check matrix counts
         run: python3 scripts/check_conformance_counts.py --json
+      - name: Check local documentation links
+        run: python3 scripts/check_doc_links.py --json > doc-links.json
       - name: Check source citations
         run: python3 scripts/check_conformance_citations.py --json --details > citations.json
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: conformance-citations
-          path: citations.json
+          path: |
+            citations.json
+            doc-links.json
 
   independent-wire:
     name: Independent UDP fixtures (${{ matrix.name }})

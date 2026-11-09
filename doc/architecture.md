@@ -9,7 +9,8 @@ For options, see [usage](usage.md); for protocol coverage, see
 Backends share a packet pipeline. Sender state machines track the session;
 synchronous observers report events; RAII guards release reply capacity and
 resources. Packet layouts and session admission rules each have one owner.
-See the [design assessment](review/2026-10-03/README.md#design-patterns-and-trade-offs).
+The sections below describe the current implementation. Supported behavior is
+qualified by the [profile limits](conformance/README.md#known-limits).
 
 Paths below are relative to `src/`. Public library modules support tests,
 benchmarks and fuzzing; they are outside the CLI/configuration/wire
@@ -131,6 +132,13 @@ address, or a wildcard address together with `--interface`.
 Nix `recvmsg` calls run inside `UdpSocket::try_io`. `WouldBlock` clears the
 cached readiness; bypassing this wrapper can make an idle loop spin. The sender
 uses the same pattern for ECN and kernel timestamps.
+
+The nix embedding API `receiver::run_receiver_with_socket` takes ownership of
+an already bound, unconnected UDP socket. Its endpoint must match the configured
+bind endpoint; configured port zero accepts the kernel-assigned port. It applies
+the same socket options and receive loop as `run_receiver`, without releasing
+the port. Shared-state and provisioned-session fixtures use this API to remove
+the port handoff race. See [startup fixtures](testing-startup.md).
 
 ## Reflector packet path
 

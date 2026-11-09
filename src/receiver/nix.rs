@@ -40,8 +40,6 @@ pub async fn run_receiver(
     shared: &ReceiverSharedState,
 ) -> Result<(), crate::StartupError> {
     let local_addr: SocketAddr = conf.local_socket_addr();
-    let is_ipv6 = conf.local_addr.is_ipv6();
-
     let std_socket = match std::net::UdpSocket::bind(local_addr) {
         Ok(s) => s,
         Err(e) => {
@@ -52,6 +50,33 @@ pub async fn run_receiver(
         }
     };
 
+    run_receiver_with_socket(conf, shared, std_socket).await
+}
+
+/// Runs the nix reflector with an already bound, unconnected UDP socket.
+///
+/// Ownership transfers to the receiver without releasing its port. The bound
+/// endpoint must match the configuration (port zero accepts the assigned port).
+/// Socket options and nonblocking mode are configured as for [`run_receiver`].
+pub async fn run_receiver_with_socket(
+    conf: &Configuration,
+    shared: &ReceiverSharedState,
+    std_socket: std::net::UdpSocket,
+) -> Result<(), crate::StartupError> {
+    let bound = std_socket
+        .local_addr()
+        .map_err(|e| crate::StartupError::io("Cannot get bound address", e))?;
+    let mut expected = conf.local_socket_addr();
+    if expected.port() == 0 {
+        expected.set_port(bound.port());
+    }
+    if bound != expected || std_socket.peer_addr().is_ok() {
+        return Err(crate::StartupError::config(
+            "reflector socket must be unconnected and match the configured bind endpoint",
+        ));
+    }
+    let is_ipv6 = bound.is_ipv6();
+
     crate::net_policy::set_hops(&std_socket)
         .map_err(|e| crate::StartupError::io("Cannot set reply TTL/Hop Limit 255", e))?;
     if let Some(name) = conf.interface.as_deref() {
@@ -59,9 +84,7 @@ pub async fn run_receiver(
             .map_err(|e| crate::StartupError::io(format!("Cannot bind to interface {name}"), e))?;
     }
 
-    let local_addr = std_socket
-        .local_addr()
-        .map_err(|e| crate::StartupError::io("Cannot get bound address", e))?;
+    let local_addr = bound;
 
     // The default buffer holds about a millisecond of traffic at high packet
     // rates, so a short scheduling delay drops requests. The kernel caps the

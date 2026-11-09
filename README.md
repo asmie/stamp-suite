@@ -72,15 +72,19 @@ untrusted network, restrict access and turn on
   needs synchronized clocks; see [Timestamps and clocks](doc/usage.md#timestamps-and-clocks).
 - Open and authenticated (HMAC) modes, stateless and stateful reflection, and
   RFC 8972 TLVs.
-- RFC 9503 return-path control, RFC 9534 Micro-session IDs, and RFC 10052
-  reflected test packet control.
+- RFC 9503 return-path control, numeric RFC 9534 Micro-session IDs, and
+  RFC 10052 reflected test packet control. Physical LAG member association
+  and steering are not implemented; SR-MPLS return paths receive U.
 - Draft extensions for reflected IP headers, CoS/ECN response and residual bit
-  error rate. Their experimental codepoints need agreement with the peer.
+  error rate. Header and BER experimental codepoints need peer agreement.
 - Text, JSON lines and CSV output. Optional Prometheus metrics, SNMP AgentX
   sub-agent and reflector control API.
 
-The [conformance matrices](doc/conformance/README.md) list what is supported
-for each RFC and draft, and what is not.
+The [supported profiles and limits](doc/conformance/README.md#known-limits)
+qualify these features: provisioned admission, backend-dependent header
+reflection, Linux route-MTU sizing and read-only AgentX. The matrices link
+each frozen requirement to implementation and test evidence; feature support
+does not mean every requirement or platform is covered.
 
 ## Installation
 
@@ -165,7 +169,6 @@ without the feature.
 | Document | Contents |
 | --- | --- |
 | [Protocol overview](doc/protocol.md) | STAMP concepts, the extensions implemented here, glossary |
-| [Project review, 2026-10-03](doc/review/2026-10-03/README.md) | Conformance findings, test assessment and file-by-file optimization notes |
 | [Usage](doc/usage.md) | Configuration file, sender, reflector, timestamps, networking, observability |
 | [Security](doc/security.md) | Threat model, HMAC keys and rotation, service hardening |
 | [Control API](doc/control-plane.md) | Reflector HTTP API endpoints |

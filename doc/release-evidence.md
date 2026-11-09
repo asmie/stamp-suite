@@ -6,6 +6,9 @@ Record the tested revision, features, platform and wire profile with each
 result. The [conformance matrices](conformance/README.md) cover the frozen
 specifications. Compiling a test, or listing it as ignored, does not establish
 runtime behavior.
+The [supported profiles and limits](conformance/README.md#known-limits) also
+apply to release claims; a build or green job cannot establish an untested
+physical LAG, NIC timestamp, capture-driver or PMTU-discovery capability.
 
 ## Release gate boundary
 
@@ -299,10 +302,11 @@ not covered until the procedure is repeated.
 
 Local checks cover the working-tree changes based on `614a61f1`, on x86_64
 Linux (WSL2), with Rust 1.99 and a separate Rust 1.86 check. No release was
-tagged or published. The [dependency inventory](release/1.0.0-dependencies.json)
-records all 31 direct dependencies from the main and fuzz manifests; each
-matches its latest non-yanked stable release. Upstream Axum still pins the
-transitive `matchit` dependency to 0.8.4.
+tagged or published. The dependency inventory previously cited here was never
+checked in and is unavailable. Raw local logs for the table below are also
+not archived in the repository: these are historical preparation notes, not
+current release evidence or a claim that dependencies are current. Repeat the
+procedures above on the intended release commit and retain their artifacts.
 
 | Check | Result |
 |---|---|

@@ -12,13 +12,13 @@ certify untested behavior.
 | [RFC 8762](rfc8762.md): STAMP base protocol | RFC 8762, March 2020 | 62 | 52 | 0 | 0 | 9 | 1 |
 | [RFC 8972](rfc8972.md): STAMP optional extensions | RFC 8972, January 2021 | 151 | 144 | 0 | 0 | 7 | 0 |
 | [RFC 9503](rfc9503.md): Destination Node Address and Return Path | RFC 9503, November 2023 | 26 | 22 | 0 | 0 | 3 | 1 |
-| [RFC 9534](rfc9534.md): Micro-session ID (LAG) | RFC 9534, February 2024 | 18 | 9 | 6 | 1 | 2 | 0 |
+| [RFC 9534](rfc9534.md): Micro-session ID (LAG) | RFC 9534, February 2024 | 18 | 7 | 8 | 1 | 2 | 0 |
 | [RFC 8545](rfc8545.md): OWAMP/TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [RFC 10052](draft-asymmetrical-pkts.md): Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -02, 2 November 2026 | 30 | 17 | 4 | 0 | 9 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 64 | 8 | 0 | 3 | 0 |
 | [draft-ietf-bpm-stamp-ber](draft-stamp-ber.md): Residual BER | -01, 2 November 2026 | 54 | 48 | 4 | 1 | 1 | 0 |
-| **Total** | | **471** | **395** | **23** | **2** | **48** | **3** |
+| **Total** | | **471** | **393** | **25** | **2** | **48** | **3** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).
@@ -70,38 +70,22 @@ Documents. Each matrix links the source document it quotes.
 
 ## Known limits
 
-- RFC 8972 session-admission rows are Compliant only with
-  `--session-admission provisioned`. The permissive default does not enforce
-  the provisioning and discard requirements.
-- RFC 9534 has six Partial rows and one Gap. Numeric Micro-session IDs work,
-  but the tool does not associate them with physical LAG members, steer
-  packets onto a member link, or verify the ingress member.
-- Type 12 reply sizing and BER padding fit use the route MTU on Linux. This
-  is a route lookup, not path-MTU probing. On other platforms the sender uses
-  a fixed budget, and the reflector cannot size replies to an accepted Type 12
-  request and drops them; see [RFC 10052](draft-asymmetrical-pkts.md).
-- Extension-header reflection depends on the backend: the nix backend on
-  Linux reflects Type 246 from ancillary data; Type 247 needs the pnet
-  backend. See [backend support](draft-stamp-ext-hdr.md#backend-support).
-- Revision 26's repeated nonzero identical-prefix examples conflict with its
-  explicit ambiguity rules. Those examples remain Partial; all-zero requests
-  can reflect every header in order. See [interpretation](draft-stamp-ext-hdr.md#revision-26-interpretation).
-- SR-MPLS return paths are Excluded; the reflector answers them with U. YANG
-  management is not implemented.
-- AgentX (SNMP subagent) support is read-only and is not scored in these
-  matrices.
-- BER has four Partial rows (zero-checksum validation, route MTU across platforms,
-  physical LAG and automatic link-MTU filling) and one Gap: specific
-  conformance-error logging and counters. Its independent wire tests cover both roles; they do not
-  establish physical-link BER or interoperability with another application.
-- NIC timestamping and physical LAG behavior have no physical-testbed
-  evidence. macOS has software receive timestamps only. Windows capture and
-  hardware limits are covered in [release verification](../release-evidence.md).
+This table is the shared profile reference for the README, architecture, test
+inventory, interoperability guide and release checks. A Compliant row applies
+only within its stated profile; an ignored test or successful compilation is
+not runtime evidence. Historical reports remain tied to their recorded commit.
 
-- CoS/ECN revision 02 is reconciled, but RFC 3168/9330 controller consistency
-  remains Partial. Reverse ECN feedback is supported only on Linux/macOS;
-  Windows reflector marking is reported unavailable with C. RPE-based peer
-  capability and bleaching diagnostics remain Partial; operators need captures.
+| Area | Supported profile and boundary | Evidence/details |
+|---|---|---|
+| Session admission | The default is permissive. RFC 8972 admission/provisioning rows are Compliant only with `--session-admission provisioned`; installing a key does not provision a session. | [RFC 8972 scope](rfc8972.md#scope), [provisioning](../usage.md#session-provisioning) |
+| Micro-sessions and LAG | Numeric IDs are encoded, checked and learned. Physical member association, egress steering and ingress-member validation are absent. Sender port-pair sharing is not demonstrated by reflector demultiplexing. Eight rows remain Partial and one Gap. | [RFC 9534](rfc9534.md), [sender reply validation](rfc9534.md#sender-reply-validation) |
+| Header reflection | Both header types require explicit sender-IP disclosure permission. Linux nix can reflect Type 246 ancillary headers; fixed/nested headers (Type 247) need pnet. macOS nix and reverse-path header attachment return C. All-features selects nix. Revision 26's conflicting repeated-selector examples remain Partial. | [Backend support](draft-stamp-ext-hdr.md#backend-support), [revision interpretation](draft-stamp-ext-hdr.md#revision-26-interpretation) |
+| MTU | Linux sender/reflector sizing uses a kernel route lookup, not end-to-end PMTU probing. Other platforms have fixed sender budgets; size-controlled/header replies needing a route budget are dropped. BER platform sizing remains Partial. | [RFC 10052 sizing](draft-asymmetrical-pkts.md#reply-size-and-route-mtu), [BER matrix](draft-stamp-ber.md) |
+| Return paths | IP/SRv6 support has explicit backend/route constraints. SR-MPLS is Excluded and receives U. A fallback reply is not evidence of successful SRH transit. | [RFC 9503 scope](rfc9503.md#scope), [privileged tests](../testing-netns.md) |
+| Management | AgentX is a read-only subagent and is not scored in these protocol matrices; SET is unsupported. A separate master is required. YANG management is not implemented and its expired draft is watch-only. | [Observability](../usage.md#observability), [AgentX](../architecture.md#snmp-agentx-sub-agent) |
+| BER | Four Partial rows cover zero-checksum validation, platform MTU, physical LAG and link-MTU filling; specific conformance-error logs/counters remain a SHOULD Gap. Wire tests use delivered software-loopback data with valid checksums, not raw-link/FEC error capture. A compatible maintained application peer remains unverified. | [BER matrix](draft-stamp-ber.md), [migration evidence](../interop/2026-11-09-ber/REPORT.md) |
+| CoS/ECN | Revision 02 is reconciled within the scored profile; RFC 3168/9330 controller consistency and capability/bleaching diagnostics remain Partial. Reverse feedback is supported on Linux/macOS; Windows marking returns C. | [CoS/ECN scope](draft-stamp-cos-ecn.md#scope) |
+| Platforms and hardware | Physical LAG/NIC timestamp evidence is absent. macOS has software receive timestamps; Windows driver-free checks do not establish driver-backed capture. A cross-build is not a native runtime test. | [Release verification](../release-evidence.md), [hardware timestamps](../testing-hardware-timestamps.md) |
 
 ## Experimental codepoints
 
@@ -129,14 +113,16 @@ project's draft-feature policy. There is no runtime codepoint override.
 
 ## Checks
 
-Three scripts keep the matrices consistent with themselves and with the
-code. The `Conformance evidence` workflow (`.github/workflows/conformance.yml`)
-runs the first two, and the script unit tests in `scripts/tests/`, on
+Local checks keep the matrices consistent with themselves and with the
+code and verify documentation targets. The `Conformance evidence` workflow
+(`.github/workflows/conformance.yml`) runs these checks and the script unit
+tests in `scripts/tests/` on
 pushes and pull requests to `master` and `1.0-line`.
 
 ```sh
 python3 scripts/check_conformance_counts.py
 python3 scripts/check_conformance_citations.py
+python3 scripts/check_doc_links.py
 ```
 
 `check_conformance_counts.py` checks clause-ID uniqueness, the five statuses,
@@ -157,6 +143,11 @@ updates to the summary and [Matrices](#matrices) table.
 Use `--json` for machine-readable output. Neither script checks protocol
 semantics: a citation that resolves can still describe the code wrongly, so
 rows need review when the code changes.
+
+`check_doc_links.py` checks repository Markdown paths and heading/HTML anchors
+offline. External release URLs are classified separately; a missing local
+artifact is an error. Non-Markdown fragments are unverified. It checks neither
+external availability nor the evidence's meaning. See [documentation checks](../../CONTRIBUTING.md#tests).
 
 `scripts/check_standards.py` compares [`standards.json`](standards.json)
 with the IETF Datatracker and RFC Editor metadata to detect new revisions,

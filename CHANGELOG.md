@@ -7,6 +7,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Expose `receiver::run_receiver_with_socket` on the nix backend for embedding
+  with an owned bound UDP socket; validate its endpoint and connection state.
+
 - Add a bounded value codec and fuzz coverage for draft-ietf-bpm-stamp-ber-01,
   with independent nested-TLV fixtures. This prepares the BER migration;
   the endpoint cutover is described below.
@@ -35,6 +38,16 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   CLI/TOML subset validation and authenticated header-consumption behavior.
 
 ### Fixed
+
+- Remove unavailable review/interoperability/dependency evidence links and
+  qualify historical claims. Add offline documentation link checks to CI,
+  consolidate supported-profile limits, and correct two LAG conformance rows
+  to Partial where numeric/reflector evidence does not establish the requirement.
+
+- Remove UDP port reservation gaps from nine live test suites. Child fixtures
+  discover kernel-selected ports and retain bounded startup stderr/exit status;
+  in-process fixtures keep their bound socket through startup. Bound worker
+  resources and join/reap fixtures on teardown without automatic retries.
 
 - Re-sign generated BER error replies with their actual stateful sequence,
   including well-framed M-marked metadata before nonzero padding. Preserve

@@ -1,11 +1,13 @@
 # Independent protocol-combination fixtures
 
-The [4 October 2026 report](interop/2026-10-04/REPORT.md) records 2,609 attempted
-cases against five applications in both roles, including shared-extension
-subsets and authentication failures. Run them with
-[`scripts/interop_apps.py`](../scripts/interop_apps.py).
+[`scripts/interop_apps.py`](../scripts/interop_apps.py) can compare separately
+built applications in compatible roles and modes. The previously cited October
+report is unavailable, so this page makes no claim about that run's case totals
+or results. Record peer revisions, profiles and wire reports for a new run.
 
 Independent wire fixtures for testing a reflector and reusing STAMP payloads.
+See the [profile limits](conformance/README.md#known-limits) before interpreting
+an exchange as evidence for another backend, platform or physical link.
 
 [`scripts/interop_stamp.py`](../scripts/interop_stamp.py) drives a real reflector
 with a separate Python standard-library implementation of the wire layout,

@@ -38,7 +38,7 @@ pub use shared::*;
 #[cfg(feature = "ttl-nix")]
 mod nix;
 #[cfg(feature = "ttl-nix")]
-pub use nix::run_receiver;
+pub use nix::{run_receiver, run_receiver_with_socket};
 
 #[cfg(all(feature = "ttl-pnet", not(feature = "ttl-nix")))]
 mod pnet;
@@ -57,7 +57,7 @@ mod nix;
     not(feature = "ttl-nix"),
     not(feature = "ttl-pnet")
 ))]
-pub use nix::run_receiver;
+pub use nix::{run_receiver, run_receiver_with_socket};
 
 #[cfg(all(
     target_os = "windows",

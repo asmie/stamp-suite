@@ -4,11 +4,12 @@ Integration test inventory, feature/platform requirements and commands for
 ignored tests. General build and lint commands are in
 [CONTRIBUTING.md](../CONTRIBUTING.md#tests).
 
-The [3 October review](../doc/review/2026-10-03/README.md#test-value-and-missing-cases)
-records the original test assessment. Regression tests now cover rendered
+Regression tests cover rendered
 statistics, process metrics, AgentX lifetime, sender size limits, source churn
 and blocked output. Keep helper-based scenarios and no-panic properties;
 consolidation must preserve their boundary inputs and independent checks.
+The [profile limits](../doc/conformance/README.md#known-limits) distinguish
+software fixtures, backend coverage and missing physical testbed evidence.
 
 ## Running the default suite
 
