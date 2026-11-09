@@ -7,6 +7,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in `--max-pending-probes` / TOML `max_pending_probes` per-target
+  retention. Retire oldest unanswered records at capacity without changing
+  scheduling or retry budgets; disclose limit, retained/peak counts and
+  retirements in measurement reports. Zero keeps unlimited retention.
+
 - Expose `receiver::run_receiver_with_socket` on the nix backend for embedding
   with an owned bound UDP socket; validate its endpoint and connection state.
 
@@ -38,6 +43,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   CLI/TOML subset validation and authenticated header-consumption behavior.
 
 ### Fixed
+
+- Count outstanding sequence-reuse retirements once and ignore stale expiry
+  entries for older generations, preserving packet-loss accounting at wrap.
 
 - Remove unavailable review/interoperability/dependency evidence links and
   qualify historical claims. Add offline documentation link checks to CI,

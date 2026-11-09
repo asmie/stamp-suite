@@ -1,7 +1,7 @@
 //! One sender run: setup, the probe schedule, the final reply drain, and
 //! Access Report retransmissions (RFC 8972 §4.6).
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use super::schedule::Schedule;
 use super::*;
@@ -67,6 +67,13 @@ pub(super) struct SenderRun {
     hmac_key: Option<HmacKey>,
     sess: Session,
     pending: HashMap<u32, PendingPacket>,
+    /// Only enabled for bounded retention. Successful-send ordinals preserve
+    /// age across timestamp ties and sequence wrap. Both indexes contain
+    /// exactly the live pending generations and are bounded by the same cap.
+    pending_order: BTreeMap<u64, (Instant, u32)>,
+    pending_generation: HashMap<u32, u64>,
+    pending_high_watermark: usize,
+    pending_evictions: u64,
     measurements: Measurements,
     /// `(deadline, seq)` in send order, for O(1) loss expiry with lazy
     /// deletion of answered probes.
@@ -745,6 +752,10 @@ impl SenderRun {
             hmac_key,
             sess,
             pending,
+            pending_order: BTreeMap::new(),
+            pending_generation: HashMap::new(),
+            pending_high_watermark: 0,
+            pending_evictions: 0,
             measurements,
             expiry_queue,
             rtt_collector,
@@ -1167,7 +1178,42 @@ impl SenderRun {
             send_time,
             send_timestamp,
         };
+        // A reused sequence cannot represent both generations. Disclose its
+        // retirement even with an unlimited cap rather than silently dropping
+        // the older probe from final loss accounting.
+        if self.pending.remove(&seq).is_some() {
+            if self.conf.max_pending_probes != 0 {
+                let generation = self
+                    .pending_generation
+                    .remove(&seq)
+                    .expect("indexed generation");
+                self.pending_order
+                    .remove(&generation)
+                    .expect("indexed pending probe");
+            }
+            self.retire_pending("sequence reused");
+        }
+        if self.conf.max_pending_probes != 0 {
+            if self.pending.len() >= self.conf.max_pending_probes as usize {
+                let (generation, (old_time, old_seq)) = self
+                    .pending_order
+                    .pop_first()
+                    .expect("indexed pending probe");
+                let old = self
+                    .pending
+                    .remove(&old_seq)
+                    .expect("indexed pending probe");
+                debug_assert_eq!(old.send_time, old_time);
+                let indexed = self.pending_generation.remove(&old_seq);
+                debug_assert_eq!(indexed, Some(generation));
+                self.retire_pending("limit reached");
+            }
+            self.pending_order
+                .insert(self.packets_sent, (send_time, seq));
+            self.pending_generation.insert(seq, self.packets_sent);
+        }
         self.pending.insert(seq, probe);
+        self.pending_high_watermark = self.pending_high_watermark.max(self.pending.len());
         // The ordinal follows the 32-bit Direct Measurement counter.
         self.measurements.sent(seq, probe, self.packets_sent as u32);
         // Pair this send's kernel OPT_ID with the sequence number so a later
@@ -1181,8 +1227,22 @@ impl SenderRun {
                 self.tx_id_to_seq.clear();
             }
         }
-        if !self.timeout.is_zero() {
+        if !self.timeout.is_zero() && self.conf.max_pending_probes == 0 {
             self.expiry_queue.push_back((send_time + self.timeout, seq));
+        }
+    }
+
+    fn retire_pending(&mut self, reason: &str) {
+        self.pending_evictions += 1;
+        self.packets_lost += 1;
+        self.observers.probes_lost(1);
+        if self.pending_evictions == 1 {
+            log::warn!(
+                "Pending probe retired as lost for {} ({reason}; limit {}, 0 means unlimited). \
+                 See measurements.pending_evictions; send timing is unchanged.",
+                self.conf.remote_socket_addr(),
+                self.conf.max_pending_probes
+            );
         }
     }
 
@@ -1207,6 +1267,25 @@ impl SenderRun {
         reply_ecn: Option<u8>,
     ) {
         let conf = Arc::clone(&self.conf);
+        // Reply processing removes a pending record only after admission.
+        // Remember its generation so the bounded index never keeps answered
+        // records or accidentally removes another generation after wrap.
+        let echoed = if self.use_auth { 48 } else { 24 };
+        let candidate = if conf.max_pending_probes != 0 {
+            // Match the base parser's zero-fill policy for short replies;
+            // never read old bytes left beyond the received datagram.
+            let mut sequence = [0; 4];
+            if let Some(bytes) = self.recv_buf[..len].get(echoed..) {
+                let count = bytes.len().min(4);
+                sequence[..count].copy_from_slice(&bytes[..count]);
+            }
+            let seq = u32::from_be_bytes(sequence);
+            self.pending_generation
+                .get(&seq)
+                .map(|&generation| (generation, seq))
+        } else {
+            None
+        };
         let mut ctx = SenderRecvContext {
             local_error_estimate: Some(self.error_estimate),
             measurements: Some(&mut self.measurements),
@@ -1239,19 +1318,49 @@ impl SenderRun {
             reply_ecn,
             &mut ctx,
         );
+        if let Some((generation, seq)) = candidate {
+            if !self.pending.contains_key(&seq) {
+                self.pending_order.remove(&generation);
+                self.pending_generation.remove(&seq);
+            }
+        }
     }
 
     /// Counts probes whose reply timeout has passed as lost. The queue is in
     /// send order, so this stops at the first probe still within its timeout.
     fn expire(&mut self) {
-        let now = Instant::now();
+        self.expire_at(Instant::now());
+    }
+
+    fn expire_at(&mut self, now: Instant) {
+        if self.conf.max_pending_probes != 0 {
+            if !self.timeout.is_zero() {
+                while let Some((&generation, &(sent, seq))) = self.pending_order.first_key_value() {
+                    if sent + self.timeout > now {
+                        break;
+                    }
+                    self.pending_order.pop_first();
+                    let indexed = self.pending_generation.remove(&seq);
+                    debug_assert_eq!(indexed, Some(generation));
+                    self.pending.remove(&seq).expect("indexed pending probe");
+                    self.packets_lost += 1;
+                    self.observers.probes_lost(1);
+                }
+            }
+            return;
+        }
         while let Some(&(deadline, seq)) = self.expiry_queue.front() {
             if deadline > now {
                 break;
             }
             self.expiry_queue.pop_front();
             // Answered probes were already removed from `pending`.
-            if self.pending.remove(&seq).is_some() {
+            if self
+                .pending
+                .get(&seq)
+                .is_some_and(|p| p.send_time + self.timeout == deadline)
+            {
+                self.pending.remove(&seq);
                 self.packets_lost += 1;
                 self.observers.probes_lost(1);
             }
@@ -1286,9 +1395,14 @@ impl SenderRun {
     }
 
     fn snapshot(&mut self) -> StatsSnapshot {
+        let mut measurements = self.measurements.snapshot();
+        measurements.pending_limit = self.conf.max_pending_probes;
+        measurements.pending_probes = self.pending.len();
+        measurements.pending_high_watermark = self.pending_high_watermark;
+        measurements.pending_evictions = self.pending_evictions;
         self.rtt_collector
             .snapshot(self.packets_sent, self.packets_lost)
-            .with_measurements(self.measurements.snapshot())
+            .with_measurements(measurements)
             .with_ber(self.ber.as_mut().map(|b| b.snapshot(Instant::now())))
             .with_owd(&self.owd_collector)
             .with_access_report(
@@ -1429,3 +1543,7 @@ mod failure_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "run/pending_tests.rs"]
+mod pending_tests;

@@ -47,6 +47,12 @@ stamp-suite --remote-addr 192.0.2.20 --send-delay 250us --send-schedule poisson 
   --count 0 --duration 600 --output-format json > results.jsonl
 ```
 
+For continuous runs with timed expiry disabled, opt into bounded pending
+retention with `--timeout 0 --max-pending-probes 4096`. At capacity the oldest
+unanswered probe is retired as lost; reports disclose these retirements
+separately. The default limit is zero (unlimited), and send timing is unchanged.
+See [pending-probe retention](doc/usage.md#pending-probe-retention).
+
 For repeated runs, use a TOML file and override individual values on the CLI.
 The [sender](examples/sender.toml) and [reflector](examples/reflector.toml)
 examples work together on loopback port 8620:

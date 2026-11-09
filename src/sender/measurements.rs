@@ -95,6 +95,13 @@ pub struct FollowUpSummary {
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct MeasurementSummary {
+    /// Per-target pending limit; zero preserves unlimited retention.
+    pub pending_limit: u32,
+    /// Unanswered records retained, including records finalized as lost at shutdown.
+    pub pending_probes: usize,
+    pub pending_high_watermark: usize,
+    /// Resource/sequence-reuse retirements, separate from timed loss and history eviction.
+    pub pending_evictions: u64,
     pub session_state: super::session_state::Summary,
     pub tlv_validation: super::telemetry::TlvValidationSummary,
     pub history_limit: usize,

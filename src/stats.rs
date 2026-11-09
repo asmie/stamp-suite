@@ -684,6 +684,10 @@ impl StatsSnapshot {
             self.quantile_precision.relative_error_bound * 100.0,
         )?;
         if let Some(m) = &self.measurements {
+            if m.pending_limit != 0 || m.pending_evictions != 0 {
+                writeln!(out, "{prefix}Pending probes: {} retained, limit {}, peak {}; {} retired as lost (not timed expiry)",
+                    m.pending_probes, m.pending_limit, m.pending_high_watermark, m.pending_evictions)?;
+            }
             writeln!(out,"{prefix}Replies: {} unique, {} additional, {} late, {} duplicates, {} reordered, {} unknown",
                 m.unique_replies, m.additional_replies, m.late_replies, m.duplicate_replies, m.reordered_replies, m.unknown_replies)?;
             writeln!(out,"{prefix}Requested replies unobserved: {} (includes policy caps); history evictions: {} probes, {} replies",

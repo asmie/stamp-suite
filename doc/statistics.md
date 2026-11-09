@@ -99,7 +99,28 @@ Text `-R` lines use the same bounded queue. In JSON/CSV mode those diagnostics
 go to stderr. The final summary retains cumulative measurements even when
 interim reports are skipped, subject to the BER history bounds above.
 
-Pending probes have a separate lifetime. `--timeout 0` disables expiry; in a
-long run with lost replies, the pending table can continue growing. Use a
-finite timeout when running continuously. Collector and reporting limits do
-not bound that table.
+Pending probes have a separate lifetime. `--timeout 0` disables timed expiry;
+with the default `--max-pending-probes 0`, lost replies can grow the pending
+table indefinitely. Opt into `--max-pending-probes N` for at most N unanswered
+records per target. Both the ordered live-record index and its generation lookup
+also have at most N entries; successful-send ordinals preserve age through tied
+timestamps and 32-bit sequence wrap. In bounded mode answered/retired generations
+are removed immediately, with no lazily retained expiry queue. The unlimited
+path keeps neither additional index and uses the existing time-based queue.
+Hash-map allocation overhead, allocator bookkeeping
+and tree nodes are additional to each record's send time and timestamp.
+
+This does not pause sends or invent timed expirations. The oldest record is
+retired as lost when a successful send needs space; reuse of an outstanding
+sequence similarly retires its old generation. `measurements.pending_evictions`
+reports these separately from timed loss and history eviction. The other
+`pending_*` fields report the limit, current retained count and peak. Text and
+the existing JSON-in-CSV measurement column carry the same diagnostics. Final
+retained records count as end-of-run loss once. Late-reply handling follows
+[measurement semantics](measurements.md#probes-reply-copies-and-duplicates).
+
+For timeout zero the failure monitor keeps no per-probe timeout window, so
+this closes the indefinite pending-table growth path. With a nonzero timeout,
+the monitor's separate window remains bounded by send rate × timeout to preserve
+failure/recovery semantics. This limit is not a whole-process memory or RSS
+ceiling; collector, reporting, kernel and per-target resources remain separate.

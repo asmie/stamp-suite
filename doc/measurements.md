@@ -21,9 +21,18 @@ directional bit and packet error totals under the separate `ber` object.
 ## Probes, reply copies, and duplicates
 
 `packets_received`, RTT and OWD fields count the first accepted reply
-for each pending probe. Timeout-based `packets_lost` and loss percentage
-count expired probes. A late first reply does not undo an expired probe's loss.
+for each pending probe. `packets_lost` and loss percentage count timed expiry,
+pending-record retirement and unanswered records at run end. A late first
+reply does not undo a finalized probe's loss or add a top-level delay sample.
 Prometheus and SNMP counters and `-R` details also count probes this way.
+
+Pending retention is optional (`--max-pending-probes`, default 0/unlimited).
+The `measurements` fields `pending_limit`, `pending_probes`,
+`pending_high_watermark` and `pending_evictions` disclose local capacity
+pressure. Sequence reuse also retires the old unanswered generation rather
+than silently replacing its accounting. These retirements are not evidence
+of physical network loss, and do not change send timing or reply denominators.
+See [retention policy](usage.md#pending-probe-retention).
 
 The reply collector runs after base authentication, TLV validation and session
 admission. Its counters distinguish individual reflected packets:

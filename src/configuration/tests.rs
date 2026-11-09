@@ -709,6 +709,39 @@ fn test_timeout_values() {
 }
 
 #[test]
+fn pending_probe_limit_defaults_cli_toml_precedence_and_per_target_copy() {
+    assert_eq!(Configuration::parse_from(["test"]).max_pending_probes, 0);
+    for bad in ["-1", "4294967296"] {
+        assert!(Configuration::try_parse_from(["test", "--max-pending-probes", bad]).is_err());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pending.toml");
+    std::fs::write(
+        &file,
+        "max_pending_probes = 7\nremote_addr = [\"127.0.0.1\", \"127.0.0.2\"]\n",
+    )
+    .unwrap();
+    let conf = load_from_args(&["test", "--config", file.to_str().unwrap()]).unwrap();
+    assert!(conf.per_target().iter().all(|c| c.max_pending_probes == 7));
+    for value in ["0", "2"] {
+        let conf = load_from_args(&[
+            "test",
+            "--config",
+            file.to_str().unwrap(),
+            "--max-pending-probes",
+            value,
+        ])
+        .unwrap();
+        assert_eq!(conf.max_pending_probes.to_string(), value);
+    }
+    let schema: serde_json::Value = serde_json::from_str(CONFIG_JSON_SCHEMA).unwrap();
+    assert_eq!(
+        schema["properties"]["max_pending_probes"]["maximum"],
+        u32::MAX
+    );
+}
+
+#[test]
 fn test_send_delay_values() {
     let args = vec!["test", "--send-delay", "0"];
     let conf = Configuration::parse_from(args);

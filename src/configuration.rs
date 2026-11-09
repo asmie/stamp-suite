@@ -480,6 +480,16 @@ pub struct Configuration {
     /// Seconds to wait for a reply before counting the probe as lost.
     #[clap(short = 'L', long, default_value_t = 5, help_heading = "Sender")]
     pub timeout: u8,
+    /// Maximum unanswered probes retained per target; 0 keeps the existing unlimited policy.
+    /// At capacity the oldest pending probe counts as lost, with a separate eviction counter.
+    /// Sending and Access Report retries continue; --timeout 0 still disables timed expiry.
+    #[clap(
+        long,
+        default_value_t = 0,
+        help_heading = "Sender",
+        hide_short_help = true
+    )]
+    pub max_pending_probes: u32,
     /// Consecutive unanswered probes before a transmitting session is reported failed, including before its first reply.
     /// Uses --timeout per probe; 0 timeout disables loss-driven state changes.
     #[clap(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..), help_heading = "Sender", hide_short_help = true)]
@@ -2259,6 +2269,7 @@ impl Configuration {
             count,
             duration,
             timeout,
+            max_pending_probes,
             session_loss_threshold,
             auth_mode,
             print_stats,
@@ -2386,6 +2397,7 @@ impl Configuration {
         merge!(count);
         merge_opt!(duration);
         merge!(timeout);
+        merge!(max_pending_probes);
         merge!(session_loss_threshold);
         merge!(auth_mode);
         merge!(print_stats);
@@ -2539,6 +2551,7 @@ pub struct FileConfiguration {
     pub count: Option<u32>,
     pub duration: Option<u32>,
     pub timeout: Option<u8>,
+    pub max_pending_probes: Option<u32>,
     pub session_loss_threshold: Option<u16>,
     pub auth_mode: Option<AuthMode>,
     pub print_stats: Option<bool>,
@@ -2668,6 +2681,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "duration":    { "type": "integer", "minimum": 1, "maximum": 4294967295 },
     "session_loss_threshold": { "type": "integer", "minimum": 1, "maximum": 65535 },
     "timeout":     { "type": "integer", "minimum": 0, "maximum": 255 },
+    "max_pending_probes": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "auth_mode":   { "enum": ["A", "O"] },
     "print_stats": { "type": "boolean" },
     "is_reflector": { "type": "boolean" },

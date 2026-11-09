@@ -4,4 +4,6 @@ remote_port = 8620
 count = 10
 send_delay = "100ms"
 timeout = 1
+# Optional per-target retention cap (0 = unlimited); retirement counts as lost.
+# max_pending_probes = 4096
 output_format = "text"

@@ -127,6 +127,7 @@ control a run:
 | `-c`, `--count` | probes | `1000` | Probes to send. `0` sends until `--duration` ends or the sender is interrupted. |
 | `--duration` | seconds | none | Stop sending after this time, even if `--count` probes have not all been sent. Must be at least 1. |
 | `-L`, `--timeout` | seconds (0 to 255) | `5` | How long to wait for a reply before the probe counts as lost. |
+| `--max-pending-probes` | probes per target | `0` (unlimited) | Bound unanswered records by retiring the oldest as lost when a new successful send needs a slot; report `pending_evictions`. |
 
 With the defaults a run sends 1000 probes at one per second, so it takes about
 17 minutes. After the last probe the sender waits up to `--timeout` seconds for
@@ -164,6 +165,45 @@ other reply-copy lines are explained in
 
 Ctrl-C or SIGTERM stops sending at once. The sender then prints the statistics
 collected so far and exits 0; probes still awaiting a reply count as lost.
+
+### Pending-probe retention
+
+`--max-pending-probes N` enables an opt-in per-target retention limit. It does
+not pause sends, skip scheduled probes, or alter the count, interval or Access
+Report retry budget. When a successful send needs a slot, the oldest unanswered
+record is retired and counted as lost. A sequence number reused while its old
+record is still pending also retires the old generation, even with limit zero;
+it cannot silently overwrite that probe's loss accounting.
+
+The default limit zero preserves unlimited retention. In particular,
+`--timeout 0` still disables timed expiry and loss-driven session failure,
+so continuous loss can grow the default pending table indefinitely. For example:
+
+```sh
+stamp-suite --remote-addr 192.0.2.10 --count 0 --duration 600 \
+  --timeout 0 --max-pending-probes 4096 --report-interval 60 --output-format json
+```
+
+JSON `measurements` and the existing CSV `measurements` object expose
+`pending_limit`, `pending_probes` (records retained), `pending_high_watermark`
+and cumulative `pending_evictions`. Text prints these when retention is enabled
+or a sequence-reuse retirement occurred. A first-retirement warning identifies
+the target. With multiple targets each has its own budget: N permits up to
+N × target-count pending records.
+
+Retirement is a local accounting boundary, not proof of network loss. It counts
+once toward packet loss and observer counters. A late reply within retained
+measurement history can increment `late_replies`, but does not restore an RTT/
+OWD/BER probe sample or undo that loss, matching timed-expiry behavior. History
+evictions (`probes_evicted`) are separate. At shutdown, only the records still
+pending add final loss; earlier retirements are not counted twice. Final
+`pending_probes` discloses those retained unresolved records even though the run
+has finished. See [measurement semantics](measurements.md).
+
+The limit bounds the pending map and its ordered index, not total process RSS.
+With a nonzero timeout the failure monitor still retains its time-based window
+to preserve notification semantics; collector, history, report and platform
+buffers have separate bounds. See [memory limits](statistics.md#report-output-and-pending-probes).
 
 ### Send schedule
 
