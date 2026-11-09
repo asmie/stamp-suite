@@ -1199,6 +1199,144 @@ fn reflected_control_rate_and_volume_limits_set_c() {
     assert_eq!(big.reflected_control.unwrap().extra_copies, 0);
 }
 
+#[test]
+fn reflected_control_rate_boundary_does_not_round_down_excess_traffic() {
+    let key = HmacKey::new(vec![0xab; 16]).unwrap();
+    for (auth, keyed) in [(false, false), (false, true), (true, true)] {
+        for (interval, excessive) in [
+            (100_000_001u32, false),
+            (100_000_000, false),
+            (99_999_999, true),
+        ] {
+            let mut value = Vec::from(500u16.to_be_bytes());
+            value.extend_from_slice(&2u16.to_be_bytes());
+            value.extend_from_slice(&interval.to_be_bytes());
+            value.extend_from_slice(&[0; 4]);
+            let tlvs = [RawTlv::new(TlvType::ReflectedControl, value)];
+            let data = if auth {
+                stamp_suite::sender::build_auth_packet_with_tlvs(
+                    1,
+                    0,
+                    1,
+                    &key,
+                    None,
+                    &tlvs,
+                    Some(&key),
+                )
+            } else {
+                stamp_suite::sender::build_unauth_packet_with_tlvs(
+                    1,
+                    0,
+                    1,
+                    None,
+                    &tlvs,
+                    keyed.then_some(&key),
+                )
+            };
+            let mut ctx = make_ctx(keyed.then_some(&key));
+            ctx.reflected_control_max_rate = 5_000;
+            ctx.reflected_control_max_volume = 1_000;
+            let result = process_stamp_packet(&data, src(), 255, auth, &ctx).unwrap();
+            let base = if auth {
+                stamp_suite::packets::AUTH_BASE_SIZE
+            } else {
+                UNAUTH_BASE_SIZE
+            };
+            assert_eq!(result.data.len(), 500);
+            assert_eq!(
+                result.data[base] & 0x10 != 0,
+                excessive,
+                "auth={auth} keyed={keyed} interval={interval}"
+            );
+            assert_eq!(
+                result.reflected_control.unwrap().extra_copies,
+                u16::from(!excessive)
+            );
+            // Compare products in a wide type; a maximum u64 ceiling must not overflow.
+            ctx.reflected_control_max_rate = u64::MAX;
+            let result = process_stamp_packet(&data, src(), 255, auth, &ctx).unwrap();
+            assert_eq!(result.data[base] & 0x10, 0);
+            assert_eq!(result.reflected_control.unwrap().extra_copies, 1);
+        }
+    }
+}
+
+#[test]
+fn reflected_control_malformed_l3_lengths_do_not_filter_or_hide_later_groups() {
+    // Each invalid shape contains a nonmatching prefix if misinterpreted.
+    // A later valid group must still decide whether this reflector responds.
+    for length in [0u16, 4, 7, 9, 12, 16, 19, 21, 24] {
+        for suffix in [None, Some(true), Some(false)] {
+            let mut value = vec![0, 0, 0, 1, 0, 0, 0, 0];
+            value.extend_from_slice(&[0, 11]);
+            value.extend_from_slice(&length.to_be_bytes());
+            value.extend(std::iter::repeat_n(0xff, usize::from(length)));
+            if let Some(matches) = suffix {
+                value.extend_from_slice(&[0, 11, 0, 8, 32, 0, 0, 0]);
+                value.extend_from_slice(if matches {
+                    &[127, 0, 0, 1]
+                } else {
+                    &[192, 0, 2, 1]
+                });
+            }
+            let raw = RawTlv::new(TlvType::ReflectedControl, value.clone());
+            let mut ctx = make_ctx(None);
+            let locals = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
+            ctx.local_addresses = &locals;
+            let data = build_unauth_packet(&raw.to_bytes());
+            let response = process_stamp_packet(&data, src(), 255, false, &ctx).unwrap();
+            assert_eq!(
+                response.return_path_action,
+                if suffix == Some(false) {
+                    ReturnPathAction::SuppressReply
+                } else {
+                    ReturnPathAction::Normal
+                },
+                "length={length} later-group={suffix:?}"
+            );
+            if suffix != Some(false) {
+                let tlvs = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).unwrap();
+                assert_eq!(tlvs.non_hmac_tlvs()[0].value, value);
+                assert_eq!(response.reflected_control.unwrap().extra_copies, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn repeated_address_groups_cannot_overwrite_an_earlier_mismatch() {
+    let mac = [0, 1, 2, 3, 4, 5];
+    let locals = [IpAddr::V4(Ipv4Addr::LOCALHOST)];
+    let l2_good = l2_group_sub_tlv([0xff; 6], mac).to_vec();
+    let l2_bad = l2_group_sub_tlv([0xff; 6], [0; 6]).to_vec();
+    let l3_good = vec![0, 11, 0, 8, 32, 0, 0, 0, 127, 0, 0, 1];
+    let l3_bad = vec![0, 11, 0, 8, 32, 0, 0, 0, 0, 0, 0, 0];
+    for (good, bad) in [(l2_good, l2_bad), (l3_good, l3_bad)] {
+        for (groups, accepted) in [
+            ([bad.clone(), good.clone()].concat(), false),
+            ([good.clone(), bad].concat(), false),
+            ([good.clone(), good].concat(), true),
+        ] {
+            let value = reflected_control_value_with_sub_tlv(&groups);
+            let data =
+                build_unauth_packet(&RawTlv::new(TlvType::ReflectedControl, value).to_bytes());
+            let mut ctx = make_ctx(None);
+            let macs = [mac];
+            ctx.local_addresses = &locals;
+            ctx.local_macs = &macs;
+            let response = process_stamp_packet(&data, src(), 255, false, &ctx).unwrap();
+            assert_eq!(
+                response.return_path_action,
+                if accepted {
+                    ReturnPathAction::Normal
+                } else {
+                    ReturnPathAction::SuppressReply
+                }
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Independence: U/M/I bits must not bleed into each other.
 

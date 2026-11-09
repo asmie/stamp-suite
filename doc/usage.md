@@ -564,6 +564,21 @@ and pair it with `--max-pps` to limit amplification. Requests above
 `--reflected-control-max-volume` or below `--reflected-control-min-interval-ns`
 get one reply with the C flag set.
 
+Fractional rate excess also gets C: a 500-byte reply every 99,999,999 ns exceeds
+a 5,000 B/s ceiling. A rate or volume exactly equal to its ceiling is admitted.
+Each well-formed Address Group filter must match a local address; any mismatch
+suppresses the reply even if a later filter matches.
+
+For the authenticated protected profile, configure a key source, `--auth-mode A`
+and `--verify-tlv-hmac` on the reflector before enabling Type 12. Base integrity
+failure is dropped; missing or failed extension integrity prevents burst
+execution. In open mode HMAC remains optional even with `--verify-tlv-hmac`,
+so a key plus that switch does not require signed incoming requests.
+
+An explicit sender burst uses its configured count in the first request.
+Choose conservative first-request parameters for the deployment; the sender
+does not perform an automatic count-one preflight/load-estimation exchange.
+
 Every copy gets its own T3 and, in stateful mode, a sequence number assigned in
 transmission order. T2 and the echoed sender fields identify the original
 request. Direct Measurement and Follow-Up fields describe the session at the

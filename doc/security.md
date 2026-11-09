@@ -19,6 +19,11 @@ coverage.
 An open reflector can reply to spoofed source addresses. Limit access with
 network policy, and use authenticated mode on untrusted networks.
 
+The Type 12 authenticated protected profile also enables `--verify-tlv-hmac`
+with the key source, protecting the extension that controls amplification.
+An open reflector with optional-HMAC verification still accepts an absent
+HMAC TLV. Such a setup is outside the matrix's protected-profile claim.
+
 The defaults limit additional amplification:
 
 - `--return-path-allow-alternate` is off. Return Address requests get the U

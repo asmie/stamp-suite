@@ -44,6 +44,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Enforce Type 12 rate ceilings without rounding down fractional excess, and
+  preserve every Address Group mismatch when multiple filters are present.
+  Add independent sender/reflector wire regressions for C flags, rate/volume
+  boundaries, zero count and protected admission. Qualify identity protection
+  by profile and score exact timing/conservative first-request claims Partial.
+
 - Match replies against their complete echoed sender timestamp before consuming
   a pending probe or applying SSID policy, learned IDs, Access Report or ECN
   feedback. Preserve wire T1 across kernel corrections, include it in reply

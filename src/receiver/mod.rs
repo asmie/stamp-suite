@@ -967,14 +967,13 @@ fn apply_semantic_tlv_processing(
             for sub in &sub_chain {
                 match sub {
                     ReflectedControlSubTlv::L2Group { mask, group } => {
-                        l2_matches = Some(l2_group_matches_any_local(mask, group, ctx.local_macs));
+                        let matched = l2_group_matches_any_local(mask, group, ctx.local_macs);
+                        l2_matches = Some(l2_matches.unwrap_or(true) && matched);
                     }
                     ReflectedControlSubTlv::L3Group { prefix_len, prefix } => {
-                        l3_matches = Some(l3_group_matches_any_local(
-                            *prefix_len,
-                            prefix,
-                            ctx.local_addresses,
-                        ));
+                        let matched =
+                            l3_group_matches_any_local(*prefix_len, prefix, ctx.local_addresses);
+                        l3_matches = Some(l3_matches.unwrap_or(true) && matched);
                     }
                     ReflectedControlSubTlv::Ipv6ExtHdrControl => ipv6_ext_hdr_control_count += 1,
                     ReflectedControlSubTlv::Unknown { .. } => {}
@@ -1114,8 +1113,11 @@ fn apply_semantic_tlv_processing(
                 }
                 if requested_count > 1 {
                     let interval = u128::from(req.interval_nanoseconds.max(1));
-                    let rate = reply_len * 1_000_000_000 / interval;
-                    if rate > u128::from(ctx.reflected_control_max_rate) {
+                    // Compare the rational rate without rounding: integer
+                    // division can hide a fractional byte/s over the ceiling.
+                    if reply_len * 1_000_000_000
+                        > u128::from(ctx.reflected_control_max_rate) * interval
+                    {
                         non_conformant = true;
                     }
                 }

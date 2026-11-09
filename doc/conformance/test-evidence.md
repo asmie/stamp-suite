@@ -103,9 +103,9 @@ rerun the checker after edits rather than treating the numbers as certification.
 | RFC 8972 HMAC rows 4.8-1, 6, 7, 8, 11, 13, 14 | A new production Rust signer/verifier known-answer test uses RFC 4231 case 1, truncated to 128 bits. Independent wire roles check actual HMAC type/length/coverage; a malformed-length parser test checks M. Failed extension-HMAC echoes preserve all copied values and the failed digest with I. | Primitive/equivalence tests supplement the wire driver; they do not replace send-path checks. The copied failure digest is not regenerated into a successful one. |
 | RFC 8972 admission rows 3-6 to 3-8 | Named IPv4 open/authenticated and IPv6 identity tests run the nix receiver with exact provisioned endpoints, SSIDs and micro IDs. Authentication tests verify invalid bases cannot allocate or refresh state. | Provisioned profile only. Shared-core tests are distinct from pnet capture runtime or physical ingress validation. |
 | Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
-| Type 12 C signaling | The existing flag-semantics suite exercises packet processing with requests within and above administrative caps. | This is distinct from the unreviewed exact-timing claim and from physical transmission scheduling guarantees. |
+| Type 12 C signaling | Packet-processing and independent wire tests now exercise exact/fractional rate ceilings, volume, count-zero suppression, sender C clearing, incoming C ignoring and protected admission. | Exact timing and conservative first-request selection are Partial. Identity protection is qualified by the authenticated protected profile. See T22b3 below. |
 
-After the sender reviews below, 123 missing references remain across six
+After the reviews below, 116 missing references remain across five
 matrices. Prioritize the remaining authentication, C-flag and admission claims,
 then work through the rest. The full test-evidence goal and strict CI gate
 remain unfinished.
@@ -243,6 +243,76 @@ The BER/MTU commands below also apply to the final all-features binary. Strict
 test-evidence checking fails only on the expected 123 remaining missing rows;
 the default/CI report remains advisory. Logs/reports are under `/tmp/t22b2-*`.
 No remote CI, new native-platform or physical timestamp pass is claimed.
+
+## Type 12 policy and admission review (T22b3)
+
+Review against parent `a40f264` reproduced two defects through production
+packet processing: the integer rate quotient admitted fractional excess, and a
+later matching Address Group could overwrite an earlier mismatch. Rate
+admission now compares wide integer products, including the maximum u64 rate
+ceiling without overflow. L2/L3 group decisions retain every valid mismatch.
+
+`tests/tlv_flag_semantics.rs::reflected_control_rate_boundary_does_not_round_down_excess_traffic`
+checks just below, exactly at and just above a 5,000 B/s ceiling in open,
+keyed-open and authenticated packet processing. At 500 bytes, 100,000,000 ns
+is admitted while 99,999,999 ns receives C and no extra copy. The regression
+failed before the change. The maximum-u64 cases check wide multiplication.
+`tests/tlv_flag_semantics.rs::repeated_address_groups_cannot_overwrite_an_earlier_mismatch`
+also failed before the fix and now checks L2/L3 mismatches in both orders and
+all-matching groups. Malformed L3 lengths and continuation to later valid
+groups are covered by
+`tests/tlv_flag_semantics.rs::reflected_control_malformed_l3_lengths_do_not_filter_or_hide_later_groups`.
+
+Four independent UDP tests run the actual Linux nix sender/reflector binaries:
+
+- `tests/type12_policy_test.rs::exact_rate_volume_and_zero_count_decisions_reach_the_wire`
+  covers both families and open/keyed-open/authenticated modes. It checks C
+  clearing/setting, received-C ignoring, exact rate/volume admission, fractional
+  rate/volume rejection as one correctly sized signed reply, count-zero
+  suppression and a bound node-local reply source.
+- `tests/type12_policy_test.rs::every_l3_group_must_match_before_wire_reflection`
+  checks repeated IPv4/IPv6 groups in both orders, with valid HMACs when keyed.
+  All-matching groups reply; either mismatch order emits no datagram.
+- `tests/type12_policy_test.rs::protected_type12_profile_rejects_unverified_amplification`
+  checks authenticated mode plus extension-HMAC verification: invalid base HMAC
+  drops, missing/bad extension HMAC produces one I failure echo without burst
+  shaping, and a valid request produces its admitted burst. It also confirms
+  that an optional-HMAC open profile still accepts a missing HMAC.
+- `tests/type12_policy_test.rs::sender_control_defaults_and_static_or_scaled_requests_clear_c`
+  captures real requests in both families/authentication modes, including the
+  AIMD-scaled path. Sender C stays clear; defaults omit Type 12, and an explicit
+  burst starts immediately with its configured count/interval.
+
+Five missing references are resolved. Exact nanosecond wire timing
+(asym-3-11) and conservative selection of an explicit first request
+(asym-5-05) are now Partial: software pacing/default omission do not establish
+those general claims. Identity protection (asym-5-01) is Compliant only for
+the tested authenticated protected profile; enabling optional verification
+with a key in open mode alone does not require signed requests. The Type 12
+matrix is **47 clauses: 36 Compliant, three Partial, seven N-A, one Excluded**.
+The full rollup is **471 clauses: 391 Compliant, 27 Partial, two Gap, 48 N-A,
+three Excluded**. The inventory is **323 applicable, 207 with references,
+116 missing**; no normative Compliant Type 12 row remains without a reference.
+
+These results are software-loopback/packet-processing evidence, not exact wire
+timing, a multicast topology, native-platform or pnet capture certification.
+The conservative-first-request and timing work remain explicit follow-ups;
+the strict whole-backlog CI gate is still pending.
+
+Final local verification passes full default/all-features/pnet suites with
+**1,342/1,444/1,287** tests, respectively (13 privileged ignored in each
+ordinary run). The new wire target contains four passing tests; pnet builds
+exercise the shared packet-processing regressions without claiming capture
+runtime. Both required MTU tests pass separately without a skip, and all 60
+BER wire cases pass against the final all-features binary. All three Clippy
+profiles, the fuzz manifest build check, 104 Python tests, rustfmt, matrix
+counts, 1,083 source citations and 438 documentation links pass. Opt-in strict
+checking fails only on the expected 116 missing-reference rows. Temporary
+logs/reports use `/tmp/t22b3-*`; no remote CI or new fuzz campaign is claimed.
+
+```sh
+cargo test --locked --all-features --test tlv_flag_semantics --test type12_policy_test
+```
 
 ## Local validation for T22a
 
