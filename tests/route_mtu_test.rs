@@ -368,15 +368,16 @@ fn live_route_mtu_changes_and_alternate_destinations() {
                 let cap = 1400 - overhead;
                 let base = if auth { 112 } else { 44 };
                 let hmac_size = if auth { 20 } else { 0 };
-                let padding_size = (cap + 40 - base - hmac_size - 26) / 2 * 2;
+                let padding_size = (cap + 40 - base - hmac_size - 24) / 4 * 4;
                 let ber_request = single_reply_packet(
                     auth,
                     6,
                     &[
-                        (240, vec![0xFF, 0]),
-                        (241, vec![0; 4]),
-                        (242, vec![0; 4]),
-                        (1, [0xFF, 0].repeat(padding_size / 2)),
+                        (
+                            243,
+                            vec![0, 0, 0, 0, 0, 0, 0, 0, 0x80, 241, 0, 4, 255, 0, 255, 0],
+                        ),
+                        (1, [0xFF, 0, 0xFF, 0].repeat(padding_size / 4)),
                     ],
                 );
                 let ber = exchange_single_reply(&socket, destination, &ber_request, auth, cap);
@@ -387,13 +388,13 @@ fn live_route_mtu_changes_and_alternate_destinations() {
                         .filter(|&&kind| kind != 8)
                         .copied()
                         .collect::<Vec<_>>(),
-                    [240, 241, 242, 1]
+                    [243, 1]
                 );
                 for (kind, flags, value) in &ber {
                     match kind {
-                        240..=242 => assert_eq!(*flags, 0x10, "trimmed BER metadata needs C"),
+                        243 => assert_eq!(*flags, 0x10, "trimmed BER metadata needs C"),
                         1 => {
-                            assert!(!value.is_empty() && value.len() < padding_size);
+                            assert!(!value.is_empty() && value.len() < padding_size && value.len().is_multiple_of(4));
                             assert_eq!(value, &[0xFF, 0].repeat(value.len() / 2));
                         }
                         _ => {}

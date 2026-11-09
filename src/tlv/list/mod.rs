@@ -781,11 +781,11 @@ impl TlvList {
     /// Validates known TLV lengths on a single slice and sets M-flag on mismatches.
     fn validate_known_tlv_lengths_slice(tlvs: &mut [RawTlv]) {
         use crate::tlv::core::{
-            ACCESS_REPORT_TLV_VALUE_SIZE, BER_BURST_TLV_VALUE_SIZE, BER_COUNT_TLV_VALUE_SIZE,
-            COS_TLV_VALUE_SIZE, DEST_NODE_ADDR_IPV4_SIZE, DEST_NODE_ADDR_IPV6_SIZE,
-            DIRECT_MEASUREMENT_TLV_VALUE_SIZE, FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE,
-            LOCATION_TLV_MIN_VALUE_SIZE, MICRO_SESSION_ID_TLV_VALUE_SIZE,
-            REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE, TIMESTAMP_INFO_TLV_VALUE_SIZE,
+            ACCESS_REPORT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE, DEST_NODE_ADDR_IPV4_SIZE,
+            DEST_NODE_ADDR_IPV6_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
+            FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE, LOCATION_TLV_MIN_VALUE_SIZE,
+            MICRO_SESSION_ID_TLV_VALUE_SIZE, REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,
+            TIMESTAMP_INFO_TLV_VALUE_SIZE,
         };
 
         for tlv in tlvs {
@@ -811,8 +811,11 @@ impl TlvList {
                 TlvType::BerPattern | TlvType::ReflectedIpv6ExtHdr | TlvType::ReflectedFixedHdr => {
                     false
                 }
-                TlvType::BerCount => tlv.value.len() != BER_COUNT_TLV_VALUE_SIZE,
-                TlvType::BerBurst => tlv.value.len() != BER_BURST_TLV_VALUE_SIZE,
+                TlvType::ResidualBer if tlv.value.len() < 8 => {
+                    // BPM BER-01 §§4, 5.2.1 require both M and C.
+                    tlv.set_conformant_reflected();
+                    true
+                }
                 _ => false,
             };
             if tlv.is_parser_marked_malformed() || bad_length {

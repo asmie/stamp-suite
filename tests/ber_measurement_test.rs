@@ -1,4 +1,4 @@
-//! End-to-end BER measurement (draft-gandhi-ippm-stamp-ber-07): padding repair and
+//! End-to-end BER measurement (draft-ietf-bpm-stamp-ber-01): padding repair and
 //! peer compatibility.
 use clap::Parser;
 use stamp_suite::{
@@ -116,7 +116,7 @@ async fn measurement(ip: &str, auth: bool, unsupported: bool) {
             let has_count = list
                 .non_hmac_tlvs()
                 .iter()
-                .any(|t| t.tlv_type == TlvType::BerCount);
+                .any(|t| t.tlv_type == TlvType::ResidualBer);
             assert_eq!(has_count, !unsupported || i == 0);
             let padding = offset(&data, base, 1);
             if !unsupported {
@@ -132,13 +132,13 @@ async fn measurement(ip: &str, auth: bool, unsupported: bool) {
                 .unwrap()
                 .data;
             if unsupported && i == 0 {
-                let count = offset(&reflected, base, 241);
+                let count = offset(&reflected, base, 243);
                 reflected[count] |= 0x80;
             }
             if !unsupported {
                 let padding = offset(&reflected, base, 1);
                 assert_eq!(&reflected[padding + 4..padding + 20], &[0xff, 0].repeat(8));
-                let count = offset(&reflected, base, 241);
+                let count = offset(&reflected, base, 243);
                 assert_eq!(reflected[count], 0);
                 assert_eq!(&reflected[count + 4..count + 8], &4u32.to_be_bytes());
                 // One independent reverse error; HMAC must remain valid.
@@ -202,75 +202,127 @@ async fn unsupported_peer_disables_ber_only() {
 
 #[test]
 fn reflector_reports_conformance_errors_and_repairs_both_serializations() {
-    use stamp_suite::tlv::{BerBurstTlv, BerCountTlv, BerPatternTlv, ExtraPaddingTlv, TypedTlv};
-    for (pads, patterns, counts, bursts, size) in [
-        (0, 1, 1, 1, 4),
-        (2, 1, 1, 1, 4),
-        (1, 2, 1, 1, 4),
-        (1, 1, 2, 1, 4),
-        (1, 1, 1, 2, 4),
-        (1, 1, 1, 1, 3),
+    // Missing/duplicate padding, duplicate combined BER, duplicate patterns,
+    // and a nonintegral number of repetitions require C on the outer TLV.
+    for (pads, bers, patterns, size) in [
+        (0, 1, 1, 4),
+        (2, 1, 1, 4),
+        (1, 2, 1, 4),
+        (1, 1, 2, 4),
+        (1, 1, 1, 3),
     ] {
-        let mut data = vec![0; 44];
-        for _ in 0..pads {
-            data.extend_from_slice(
-                &ExtraPaddingTlv {
-                    padding: vec![0xff; size],
-                }
-                .to_raw()
-                .to_bytes(),
-            );
-        }
+        let mut value = vec![0; 8];
         for _ in 0..patterns {
-            data.extend_from_slice(&BerPatternTlv::new(vec![0xff, 0]).to_raw().to_bytes());
+            value.extend_from_slice(&[0x80, 241, 0, 4, 255, 0, 255, 0]);
         }
-        for _ in 0..counts {
-            data.extend_from_slice(&BerCountTlv::default().to_raw().to_bytes());
+        let mut fields = vec![(243, value); bers];
+        for _ in 0..pads {
+            fields.push((1, vec![0; size]));
         }
-        for _ in 0..bursts {
-            data.extend_from_slice(&BerBurstTlv::default().to_raw().to_bytes());
-        }
-        let reflected = process_stamp_packet(
-            &data,
-            "127.0.0.1:12345".parse().unwrap(),
-            64,
-            false,
-            &make_ctx(),
-        )
-        .unwrap();
-        let list = TlvList::parse(&reflected.data[44..]).unwrap();
-        for t in list.non_hmac_tlvs().iter().filter(|t| {
-            matches!(
-                t.tlv_type,
-                TlvType::BerPattern | TlvType::BerCount | TlvType::BerBurst
-            )
-        }) {
-            assert!(!t.is_unrecognized(), "recognized invalid BER is C, not U");
-            if size != 3 || t.tlv_type == TlvType::BerPattern {
-                assert!(t.flags.conformant_reflected);
-            }
+        let reply = reflect_fields(&fields);
+        for tlv in reply.iter().filter(|t| t.tlv_type == TlvType::ResidualBer) {
+            assert!(!tlv.is_unrecognized());
+            assert!(tlv.flags.conformant_reflected);
         }
     }
-    // A default pattern is selected by omitting Type 240.
-    let mut data = vec![0; 44];
-    data.extend_from_slice(
-        &ExtraPaddingTlv {
-            padding: vec![0, 0],
-        }
-        .to_raw()
-        .to_bytes(),
+    let reply = reflect_fields(&[(243, vec![0; 8]), (1, vec![0; 4])]);
+    assert_eq!(
+        reply
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ExtraPadding)
+            .unwrap()
+            .value,
+        [255, 0, 255, 0]
     );
-    data.extend_from_slice(&BerCountTlv::default().to_raw().to_bytes());
-    let reflected = process_stamp_packet(
-        &data,
+}
+
+fn reflect_fields(fields: &[(u8, Vec<u8>)]) -> TlvList {
+    let mut packet = vec![0; 44];
+    for (kind, value) in fields {
+        packet.extend_from_slice(&[0x80, *kind]);
+        packet.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        packet.extend_from_slice(value);
+    }
+    let response = process_stamp_packet(
+        &packet,
         "127.0.0.1:12345".parse().unwrap(),
         64,
         false,
         &make_ctx(),
     )
     .unwrap();
-    let pad = offset(&reflected.data, 44, 1);
-    assert_eq!(&reflected.data[pad + 4..pad + 6], &[0xff, 0]);
+    TlvList::parse(&response.data[44..]).unwrap()
+}
+
+#[test]
+fn nested_unknown_and_short_patterns_preserve_values_and_stop_at_m() {
+    let mut value = vec![0; 8];
+    value.extend_from_slice(&[0xf0, 245, 0, 3, 1, 2, 3, 0x80, 241, 0, 4, 255, 0, 255, 0]);
+    let reply = reflect_fields(&[(243, value), (1, vec![255, 0, 255, 0])]);
+    let value = &reply.non_hmac_tlvs()[0].value;
+    assert_eq!(&value[8..15], &[0x80, 245, 0, 3, 1, 2, 3]);
+    assert_eq!(value[15], 0);
+    let mut short = vec![0; 8];
+    short.extend_from_slice(&[0x80, 241, 0, 3, 1, 2, 3, 0xb7, 245, 0, 0]);
+    let reply = reflect_fields(&[(243, short), (1, vec![7; 4])]);
+    assert_eq!(reply.non_hmac_tlvs()[0].value[8], 0x40);
+    assert_eq!(
+        reply.non_hmac_tlvs()[0].value[15],
+        0xb7,
+        "opaque remainder after nested M"
+    );
+    assert_eq!(reply.non_hmac_tlvs()[1].value, [7; 4]);
+}
+
+#[test]
+fn malformed_outer_and_nested_framing_preserve_the_outer_stop_boundary() {
+    let reply = reflect_fields(&[(243, vec![0; 7]), (4, vec![184, 0, 0, 0])]);
+    assert!(reply.non_hmac_tlvs()[0].is_malformed());
+    assert!(reply.non_hmac_tlvs()[0].flags.conformant_reflected);
+    assert!(reply.non_hmac_tlvs()[1].is_unrecognized());
+    let mut truncated = vec![0; 8];
+    truncated.extend_from_slice(&[0x80, 241, 0, 4, 1, 2]);
+    let reply = reflect_fields(&[(243, truncated), (4, vec![184, 0, 0, 0]), (1, vec![0; 4])]);
+    assert!(reply.non_hmac_tlvs()[0].is_malformed());
+    assert_eq!(reply.non_hmac_tlvs()[0].value[8], 0x40);
+    assert!(reply.non_hmac_tlvs()[1].is_unrecognized());
+    assert_eq!(reply.non_hmac_tlvs()[1].value, [184, 0, 0, 0]);
+}
+
+#[test]
+fn retired_legacy_types_are_unknown_and_do_not_repair_padding() {
+    let reply = reflect_fields(&[
+        (240, vec![255, 0]),
+        (241, vec![0; 4]),
+        (242, vec![0; 4]),
+        (1, vec![7; 4]),
+    ]);
+    for tlv in reply.iter().filter(|t| t.tlv_type != TlvType::ExtraPadding) {
+        assert!(tlv.is_unrecognized());
+        assert!(!tlv.flags.conformant_reflected);
+    }
+    assert_eq!(reply.non_hmac_tlvs()[3].value, [7; 4]);
+}
+
+#[test]
+fn invalid_hmac_does_not_rewrite_nested_flags_or_padding() {
+    let mut value = vec![0; 8];
+    value.extend_from_slice(&[0xf0, 241, 0, 4, 255, 0, 255, 0]);
+    let mut packet = vec![0; 44];
+    packet.extend_from_slice(&[0x80, 243, 0, 16]);
+    packet.extend_from_slice(&value);
+    packet.extend_from_slice(&[0x80, 1, 0, 4, 1, 2, 3, 4, 0x80, 8, 0, 16]);
+    packet.extend_from_slice(&[0; 16]);
+    let key = HmacKey::new(vec![0xab; 16]).unwrap();
+    let mut ctx = make_ctx();
+    ctx.hmac_key = Some(&key);
+    ctx.verify_tlv_hmac = true;
+    let reply =
+        process_stamp_packet(&packet, "127.0.0.1:12345".parse().unwrap(), 64, false, &ctx).unwrap();
+    let list = TlvList::parse(&reply.data[44..]).unwrap();
+    assert!(list.non_hmac_tlvs()[0].is_integrity_failed());
+    assert_eq!(list.non_hmac_tlvs()[0].value, value);
+    assert_eq!(list.non_hmac_tlvs()[1].value, [1, 2, 3, 4]);
 }
 
 /// Exercise the shared final send path: it must regenerate the metadata HMAC
@@ -283,7 +335,7 @@ fn reflector_reports_conformance_errors_and_repairs_both_serializations() {
 fn real_reflector_signs_repaired_ber_padding() {
     use stamp_suite::{
         sender::{build_auth_packet_with_tlvs, build_unauth_packet_with_tlvs},
-        tlv::{BerBurstTlv, BerCountTlv, BerPatternTlv, ExtraPaddingTlv, TypedTlv},
+        tlv::{ExtraPaddingTlv, ResidualBerValue, TypedTlv, RESIDUAL_BER_PATTERN_SUBTLV_TYPE},
     };
     use std::{
         net::UdpSocket,
@@ -327,9 +379,13 @@ fn real_reflector_signs_repaired_ber_padding() {
                 .unwrap();
             let key = HmacKey::new(vec![0xab; 16]).unwrap();
             let tlvs = [
-                BerPatternTlv::new(vec![0xff, 0]).to_raw(),
-                BerCountTlv::default().to_raw(),
-                BerBurstTlv::default().to_raw(),
+                ResidualBerValue::request(
+                    RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
+                    Some(&[255, 0, 255, 0]),
+                )
+                .unwrap()
+                .to_raw()
+                .unwrap(),
                 ExtraPaddingTlv {
                     padding: [0xff, 0].repeat(8),
                 }
@@ -359,11 +415,63 @@ fn real_reflector_signs_repaired_ber_padding() {
             let list = TlvList::parse(&buf[base..len]).unwrap();
             assert!(list.verify_hmac(&key, &buf[..4], &buf[base..len]).is_ok());
             assert!(list.iter().all(|t| !t.is_integrity_failed()));
-            let count = offset(&buf[..len], base, 241);
+            let count = offset(&buf[..len], base, 243);
             assert_eq!(&buf[count + 4..count + 8], &2u32.to_be_bytes());
             let pad = offset(&buf[..len], base, 1);
             assert_eq!(&buf[pad + 4..len], &[0xff, 0].repeat(8));
             assert!(offset(&buf[..len], base, 8) < pad);
         }
     }
+}
+
+#[test]
+fn successor_fixed_counters_and_nested_pattern_are_processed() {
+    // Independent wire bytes: outer Type 243, eight fixed bytes, then
+    // pattern sub-TLV Type 241 with a four-byte FF00FF00 value.
+    let mut packet = vec![0; 44];
+    packet.extend_from_slice(&[
+        0x80, 243, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 241, 0, 4, 255, 0, 255, 0,
+    ]);
+    packet.extend_from_slice(&[0x80, 1, 0, 4, 0xfc, 0xc0, 255, 0]);
+    let reply = process_stamp_packet(
+        &packet,
+        "127.0.0.1:12345".parse().unwrap(),
+        64,
+        false,
+        &make_ctx(),
+    )
+    .unwrap();
+    let at = offset(&reply.data, 44, 243);
+    assert_eq!(
+        reply.data[at], 0,
+        "successor BER must be recognized and conformant"
+    );
+    assert_eq!(&reply.data[at + 4..at + 12], &[0, 0, 0, 4, 0, 0, 0, 4]);
+    assert_eq!(reply.data[at + 12], 0, "known pattern must be acknowledged");
+    let pad = offset(&reply.data, 44, 1);
+    assert_eq!(&reply.data[pad + 4..pad + 8], &[255, 0, 255, 0]);
+}
+
+#[test]
+fn nested_framing_keeps_the_acknowledged_prefix_and_opaque_remainder() {
+    let mut value = vec![0; 8];
+    value.extend_from_slice(&[0x80, 241, 0, 4, 255, 0, 255, 0, 0x80, 245, 0, 5, 1]);
+    let reply = reflect_fields(&[(243, value), (1, vec![0; 4])]);
+    let raw = &reply.non_hmac_tlvs()[0];
+    assert!(raw.is_malformed());
+    assert_eq!(
+        raw.value[8], 0,
+        "valid prefix acknowledged before truncation"
+    );
+    assert_eq!(raw.value[16], 0xc0, "unknown truncated child gets U+M");
+    let mut value = vec![0; 8];
+    value.extend_from_slice(&[0x80, 241, 0, 3, 1, 2, 3, 0xb7, 245, 0, 5, 1]);
+    let reply = reflect_fields(&[(243, value), (1, vec![7; 4])]);
+    let raw = &reply.non_hmac_tlvs()[0];
+    assert!(
+        !raw.is_malformed(),
+        "nested semantic M stops before the opaque remainder"
+    );
+    assert_eq!(raw.value[8], 0x40);
+    assert_eq!(raw.value[15], 0xb7);
 }

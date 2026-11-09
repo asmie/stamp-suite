@@ -17,8 +17,8 @@ certify untested behavior.
 | [RFC 10052](draft-asymmetrical-pkts.md): Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -02, 2 November 2026 | 30 | 17 | 4 | 0 | 9 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 64 | 8 | 0 | 3 | 0 |
-| [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md): residual BER (Types 240 to 242) | -07, 30 June 2026 | 30 | 27 | 2 | 0 | 1 | 0 |
-| **Total** | | **447** | **374** | **21** | **1** | **48** | **3** |
+| [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md): retired legacy BER profile | -07, 30 June 2026 | 30 | 0 | 0 | 0 | 1 | 29 |
+| **Total** | | **447** | **347** | **19** | **1** | **48** | **32** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).
@@ -106,17 +106,17 @@ agree on their meaning; they are not IANA assignments.
 
 | Codepoint | Registry | Constant | Specification | Needs |
 |---|---|---|---|---|
-| Type 240 | STAMP TLV Types (Experimental, 240-251) | `BER_PATTERN_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.1 | Type allocation in the draft |
-| Type 241 | STAMP TLV Types (Experimental, 240-251) | `BER_COUNT_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.2 | Type allocation in the draft |
-| Type 242 | STAMP TLV Types (Experimental, 240-251) | `BER_MAX_BURST_TLV_TYPE` | draft-gandhi-ippm-stamp-ber-07 §5.3 | Type allocation in the draft; **known collision**, see below |
+| Type 243 | STAMP TLV Types (Experimental, 240-251) | `RESIDUAL_BER_TLV_TYPE` | draft-ietf-bpm-stamp-ber-01 §4 | IANA allocation of TBA1; explicit peer agreement |
+| Sub-TLV Type 241 (of Type 243) | STAMP Sub-TLV Types (Experimental, 240-251) | `RESIDUAL_BER_PATTERN_SUBTLV_TYPE` | draft-ietf-bpm-stamp-ber-01 §4.1 | IANA allocation of TBA2; explicit peer agreement |
 | Type 246 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_IPV6_EXT_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-26 §4.1, §4.2 | IANA allocation of TBA1 |
 | Type 247 | STAMP TLV Types (Experimental, 240-251) | `REFLECTED_FIXED_HDR_TLV_TYPE` | draft-ietf-ippm-stamp-ext-hdr-26 §6.1, §6.2 | IANA allocation of TBA2 |
 | Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-26 §5.1 | IANA allocation of TBA3 |
 
-Type 242 conflicts with another implementation's experimental Heartbeat TLV,
-and the formats are incompatible. `--ber-omit-burst` leaves Type 242 out of
-BER probes. Types 240 and 241 follow the experimental values reported in the
-BER draft; 242 is this project's choice.
+Legacy outer Types 240–242 are retired and return U. Type 242 previously
+collided with another implementation's Heartbeat TLV. The successor always
+carries the burst field, so `--ber-omit-burst` is now a migration error. The
+retired profile's rows are Excluded pending T5c's successor matrix and live
+wire evidence; the standards monitor still reports the legacy replacement.
 
 When a final allocation changes a wire identifier, update its constant,
 record the change in `CHANGELOG.md`, and bump the minor version under the

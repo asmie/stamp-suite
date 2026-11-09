@@ -11,8 +11,8 @@ fn canonical_mutation_visits_each_wire_tlv_once() {
 use super::*;
 use crate::tlv::core::RawTlv;
 use crate::tlv::{
-    AccessReportTlv, BerBurstTlv, BerCountTlv, BerPatternTlv, DirectMeasurementTlv,
-    ExtraPaddingTlv, FollowUpTelemetryTlv, LocationTlv, ReflectedControlTlv, TimestampInfoTlv,
+    AccessReportTlv, DirectMeasurementTlv, ExtraPaddingTlv, FollowUpTelemetryTlv, LocationTlv,
+    ReflectedControlTlv, ResidualBerValue, TimestampInfoTlv,
 };
 
 /// Builds a single-TLV list and runs the reflector clear pass on it,
@@ -932,156 +932,80 @@ fn test_ber_xor_helper_isolated_bits() {
     assert_eq!(burst, 1);
 }
 
-#[test]
-fn test_process_ber_happy_path() {
+fn successor_list(pattern: Option<&[u8]>, padding: &[u8]) -> TlvList {
     let mut list = TlvList::new();
-    // Padding differs from pattern on every bit of first byte.
+    list.push(
+        ResidualBerValue::request(RESIDUAL_BER_PATTERN_SUBTLV_TYPE, pattern)
+            .unwrap()
+            .to_raw()
+            .unwrap(),
+    )
+    .unwrap();
     list.push(
         ExtraPaddingTlv {
-            padding: vec![0xAA, 0x55],
+            padding: padding.to_vec(),
         }
         .to_raw(),
     )
     .unwrap();
-    list.push(BerPatternTlv::new(vec![0xAA, 0x55]).to_raw())
-        .unwrap();
-    list.push(BerCountTlv::default().to_raw()).unwrap();
-    list.push(BerBurstTlv::default().to_raw()).unwrap();
+    list.clear_reflector_flags();
+    list
+}
 
+#[test]
+fn test_process_ber_happy_path() {
+    let mut list = successor_list(Some(&[0xaa, 0x55, 0xaa, 0x55]), &[0xaa, 0x55, 0xaa, 0x55]);
     list.process_ber();
-
-    // 0xAA ^ 0xAA = 0, 0x55 ^ 0x55 = 0, so 0 errors.
-    let tlvs = list.non_hmac_tlvs();
-    let count_tlv = tlvs
-        .iter()
-        .find(|t| t.tlv_type == TlvType::BerCount)
-        .unwrap();
-    assert_eq!(
-        BerCountTlv::from_raw(count_tlv).unwrap().count,
-        0,
-        "identical padding and pattern → 0 errors"
-    );
+    let value = ResidualBerValue::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!((value.count, value.max_burst), (0, 0));
+    assert_eq!(value.sub_tlvs[0].flags, 0);
 }
 
 #[test]
 fn test_process_ber_computes_count_and_burst() {
-    let mut list = TlvList::new();
-    // Padding 0xFF, pattern 0x00 → 8 errors, max burst 8.
-    list.push(
-        ExtraPaddingTlv {
-            padding: vec![0xFF],
-        }
-        .to_raw(),
-    )
-    .unwrap();
-    list.push(BerPatternTlv::new(vec![0x00]).to_raw()).unwrap();
-    list.push(BerCountTlv::default().to_raw()).unwrap();
-    list.push(BerBurstTlv::default().to_raw()).unwrap();
-
-    list.clear_reflector_flags();
+    let mut list = successor_list(Some(&[0; 4]), &[0xff, 0, 0, 0]);
     list.process_ber();
-
-    let tlvs = list.non_hmac_tlvs();
-    let count = BerCountTlv::from_raw(
-        tlvs.iter()
-            .find(|t| t.tlv_type == TlvType::BerCount)
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(count.count, 8);
-    let burst = BerBurstTlv::from_raw(
-        tlvs.iter()
-            .find(|t| t.tlv_type == TlvType::BerBurst)
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(burst.max_burst, 8);
+    let value = ResidualBerValue::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!((value.count, value.max_burst), (8, 8));
+    assert_eq!(list.non_hmac_tlvs()[1].value, [0; 4]);
 }
 
 #[test]
 fn test_process_ber_uses_default_pattern_when_empty() {
-    // No explicit Bit Pattern TLV; padding matches the 0xFF00 default.
-    let mut list = TlvList::new();
-    list.push(
-        ExtraPaddingTlv {
-            padding: vec![0xFF, 0x00, 0xFF, 0x00],
-        }
-        .to_raw(),
-    )
-    .unwrap();
-    list.push(BerCountTlv::default().to_raw()).unwrap();
-    list.push(BerBurstTlv::default().to_raw()).unwrap();
-
+    let mut list = successor_list(None, &[0; 4]);
     list.process_ber();
-
-    let tlvs = list.non_hmac_tlvs();
-    let count = BerCountTlv::from_raw(
-        tlvs.iter()
-            .find(|t| t.tlv_type == TlvType::BerCount)
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(count.count, 0);
+    let value = ResidualBerValue::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!((value.count, value.max_burst), (16, 8));
+    assert_eq!(list.non_hmac_tlvs()[1].value, RESIDUAL_BER_DEFAULT_PATTERN);
 }
 
 #[test]
 fn test_process_ber_missing_extra_padding_flags_c() {
-    // BER TLVs without a companion Extra Padding TLV → all three get C-flag.
-    let mut list = TlvList::new();
-    list.push(BerPatternTlv::new(vec![0xFF]).to_raw()).unwrap();
-    list.push(BerCountTlv::default().to_raw()).unwrap();
-    list.push(BerBurstTlv::default().to_raw()).unwrap();
-
-    list.clear_reflector_flags();
+    let mut list = list_with_cleared(ResidualBerValue::default().to_raw().unwrap());
     list.process_ber();
-
-    for tlv in list.non_hmac_tlvs() {
-        assert!(
-            tlv.flags.conformant_reflected,
-            "missing Extra Padding should mark all BER TLVs nonconformant"
-        );
-    }
+    assert!(list.non_hmac_tlvs()[0].flags.conformant_reflected);
 }
 
 #[test]
 fn test_process_ber_duplicate_count_tlvs_flag_c() {
-    let mut list = TlvList::new();
-    list.push(
-        ExtraPaddingTlv {
-            padding: vec![0xAA],
-        }
-        .to_raw(),
-    )
-    .unwrap();
-    list.push(BerPatternTlv::new(vec![0xAA]).to_raw()).unwrap();
-    list.push(BerCountTlv::default().to_raw()).unwrap();
-    list.push(BerCountTlv::default().to_raw()).unwrap();
-
-    list.clear_reflector_flags();
+    let mut list = successor_list(None, &RESIDUAL_BER_DEFAULT_PATTERN);
+    let mut duplicate = ResidualBerValue::default().to_raw().unwrap();
+    duplicate.clear_reflector_flags();
+    list.push(duplicate).unwrap();
     list.process_ber();
-
-    let tlvs = list.non_hmac_tlvs();
-    let ber_tlvs: Vec<_> = tlvs
+    assert!(list
+        .non_hmac_tlvs()
         .iter()
-        .filter(|t| {
-            matches!(
-                t.tlv_type,
-                TlvType::BerPattern | TlvType::BerCount | TlvType::BerBurst
-            )
-        })
-        .collect();
-    assert!(ber_tlvs.iter().all(|t| t.flags.conformant_reflected));
+        .filter(|t| t.tlv_type == TlvType::ResidualBer)
+        .all(|t| t.flags.conformant_reflected));
 }
 
 #[test]
 fn test_process_ber_no_ber_tlvs_noop() {
-    // Packet without any BER TLVs: process_ber should be a no-op.
     let mut list = list_with_cleared(ExtraPaddingTlv::new_zeros(8).to_raw());
-
+    let before = list.clone();
     list.process_ber();
-
-    // No panics, no flags set.
-    assert!(!list.non_hmac_tlvs()[0].is_unrecognized());
+    assert_eq!(list, before);
 }
 
 // --- Reflected Test Packet Control (RFC 10052) tests ---

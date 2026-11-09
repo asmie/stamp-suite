@@ -2791,27 +2791,21 @@ async fn test_extra_padding_flag_emits_a_padding_tlv() {
 }
 
 #[tokio::test]
-async fn test_ber_omit_burst_drops_only_type_242() {
-    // Baseline: --ber emits pattern, count and burst, plus its padding.
+async fn test_ber_emits_one_successor_tlv_and_rejects_legacy_omit_flag() {
     let types = first_packet_tlv_types(wire_test_config(0, &["--ber"])).await;
-    assert!(types.contains(&TlvType::BerBurst), "got {types:?}");
-    assert!(types.contains(&TlvType::BerPattern), "got {types:?}");
-    assert!(types.contains(&TlvType::BerCount), "got {types:?}");
-
-    // With the flag, Type 242 is gone and the rest of the exchange stands.
-    let types = first_packet_tlv_types(wire_test_config(0, &["--ber", "--ber-omit-burst"])).await;
-    assert!(
-        !types.contains(&TlvType::BerBurst),
-        "Type 242 must be omitted; got {types:?}"
+    assert_eq!(
+        types
+            .iter()
+            .filter(|&&kind| kind == TlvType::ResidualBer)
+            .count(),
+        1
     );
-    assert!(
-        types.contains(&TlvType::BerPattern) && types.contains(&TlvType::BerCount),
-        "the rest of the BER TLVs must remain; got {types:?}"
-    );
-    assert!(
-        types.contains(&TlvType::ExtraPadding),
-        "BER's pattern-filled padding must remain; got {types:?}"
-    );
+    assert!(types.contains(&TlvType::ExtraPadding));
+    assert!(types
+        .iter()
+        .all(|kind| ![240, 241, 242].contains(&kind.to_byte())));
+    let conf = wire_test_config(0, &["--ber", "--ber-omit-burst"]);
+    assert!(conf.validate().unwrap_err().to_string().contains("retired"));
 }
 
 #[tokio::test]
@@ -4222,7 +4216,7 @@ proptest::proptest! {
     ) {
         let kinds = [
             TlvType::ExtraPadding,
-            TlvType::BerPattern,
+            TlvType::ResidualBer,
             TlvType::ClassOfService,
             TlvType::DirectMeasurement,
             TlvType::Location,

@@ -775,6 +775,9 @@ fn apply_semantic_tlv_processing(
     tlv_hmac_key: Option<&HmacKey>,
     base_bytes: &[u8],
 ) -> Option<SemanticResult> {
+    // Validate BER/nested framing before other semantic mutations. Integrity
+    // failures already carry I, so this leaves their opaque values untouched.
+    tlvs.process_ber();
     // Sources describe clock discipline, never the selected wire encoding or S
     // bit. T2 may come from a separately disciplined PHC; current T3 is always
     // generated in software before send, even when hardware TX is requested.
@@ -896,9 +899,6 @@ fn apply_semantic_tlv_processing(
         ecn_permitted,
     );
 
-    // Process BER TLVs (draft-gandhi-ippm-stamp-ber-07 §4):
-    // compute Bit Error Count and Max Burst against the companion Extra Padding.
-    tlvs.process_ber();
     let ber_padding_len = tlvs
         .non_hmac_tlvs()
         .iter()

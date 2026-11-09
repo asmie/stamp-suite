@@ -1,14 +1,13 @@
 //! Value codec for draft-ietf-bpm-stamp-ber-01 §§4–4.1.
 //!
-//! This codec does not register a top-level type or enable endpoint processing.
-//! Codepoints remain caller-supplied until the wire migration is integrated.
-//! Successful decoding does not identify the peer's draft revision.
+//! The endpoint adapter uses the documented experimental outer/sub-TLV types.
+//! Successful value decoding alone does not identify a peer's draft revision.
 //! Structural decoding preserves unknown sub-TLVs and their flag octets;
-//! endpoint code must apply flag, HMAC and session-admission checks separately.
+//! endpoint code applies flag, HMAC and session-admission checks separately.
 
 use thiserror::Error;
 
-use super::{TlvFlags, TLV_HEADER_SIZE};
+use super::{RawTlv, TlvError, TlvFlags, TlvType, TLV_HEADER_SIZE};
 
 /// Count and maximum burst occupy the first eight value octets (§4).
 pub const RESIDUAL_BER_FIXED_VALUE_SIZE: usize = 8;
@@ -56,6 +55,24 @@ pub enum ResidualBerError {
 }
 
 impl ResidualBerValue {
+    /// Serialize a successor outer TLV after validating the aggregate length.
+    pub fn to_raw(&self) -> Result<RawTlv, ResidualBerError> {
+        let mut value = Vec::new();
+        self.encode_value(&mut value)?;
+        Ok(RawTlv::new(TlvType::ResidualBer, value))
+    }
+
+    /// Decode a successor outer TLV; this does not validate its reply flags.
+    pub fn from_raw(raw: &RawTlv) -> Result<Self, TlvError> {
+        if raw.tlv_type != TlvType::ResidualBer {
+            return Err(TlvError::TypeMismatch {
+                expected: TlvType::ResidualBer,
+                actual: raw.tlv_type,
+            });
+        }
+        Ok(Self::decode_value(&raw.value)?)
+    }
+
     /// Build a sender value, with U=1 on an optional explicit pattern. The
     /// pattern codepoint is supplied independently of the outer TLV type.
     pub fn request(pattern_type: u8, pattern: Option<&[u8]>) -> Result<Self, ResidualBerError> {

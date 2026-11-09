@@ -2,8 +2,8 @@ use super::*;
 use crate::{
     crypto::HmacKey,
     tlv::{
-        BerBurstTlv, BerCountTlv, BerPatternTlv, ExtraPaddingTlv, TlvFlags, TlvList, TlvType,
-        TypedTlv,
+        ExtraPaddingTlv, ResidualBerValue, TlvFlags, TlvList, TlvType, TypedTlv,
+        RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
     },
 };
 
@@ -20,11 +20,9 @@ fn single_ber_reply_checks_mtu_preserves_patterns_and_resigns() {
             };
             let mut list = TlvList::new();
             for mut tlv in [
-                BerPatternTlv::new(vec![1, 2, 3]).to_raw(),
-                BerCountTlv::new(6).to_raw(),
-                BerBurstTlv::new(3).to_raw(),
+                metadata(),
                 ExtraPaddingTlv {
-                    padding: [1, 2, 3].repeat(534),
+                    padding: [1, 2, 3, 4, 5].repeat(321),
                 }
                 .to_raw(),
             ] {
@@ -73,27 +71,27 @@ fn single_ber_reply_checks_mtu_preserves_patterns_and_resigns() {
                         assert!(options.dont_fragment);
                         assert!(data.len() <= cap);
                         assert!(
-                            cap - data.len() < 3,
+                            cap - data.len() < 5,
                             "retain every complete pattern that fits"
                         );
                         let list = TlvList::parse(&data[base..]).unwrap();
                         let kinds: Vec<_> = list.iter().map(|tlv| tlv.tlv_type.to_byte()).collect();
-                        assert_eq!(&kinds[..4], &[240, 241, 242, 1]);
+                        assert_eq!(&kinds[..2], &[243, 1]);
                         for tlv in list.non_hmac_tlvs() {
                             if crate::ber::is_ber(tlv.tlv_type) {
                                 assert!(tlv.flags.conformant_reflected);
                             } else {
-                                assert_eq!(tlv.value, [1, 2, 3].repeat(tlv.value.len() / 3));
+                                assert_eq!(tlv.value, [1, 2, 3, 4, 5].repeat(tlv.value.len() / 5));
                             }
                         }
                         assert_eq!(
-                            BerCountTlv::from_raw(&list.non_hmac_tlvs()[1])
+                            ResidualBerValue::from_raw(&list.non_hmac_tlvs()[0])
                                 .unwrap()
                                 .count,
                             6
                         );
                         assert_eq!(
-                            BerBurstTlv::from_raw(&list.non_hmac_tlvs()[2])
+                            ResidualBerValue::from_raw(&list.non_hmac_tlvs()[0])
                                 .unwrap()
                                 .max_burst,
                             3
@@ -123,11 +121,9 @@ fn ber_route_budget_keeps_whole_patterns_and_resigns_c_metadata() {
     for base in [44, 112] {
         let mut list = TlvList::new();
         for mut t in [
-            BerPatternTlv::new(vec![1, 2, 3]).to_raw(),
-            BerCountTlv::new(6).to_raw(),
-            BerBurstTlv::new(3).to_raw(),
+            metadata(),
             ExtraPaddingTlv {
-                padding: [1, 2, 3].repeat(534),
+                padding: [1, 2, 3, 4, 5].repeat(321),
             }
             .to_raw(),
         ] {
@@ -156,9 +152,49 @@ fn ber_route_budget_keeps_whole_patterns_and_resigns_c_metadata() {
             }
             if t.tlv_type == TlvType::ExtraPadding {
                 assert!(!t.value.is_empty());
-                assert_eq!(t.value, [1, 2, 3].repeat(t.value.len() / 3));
+                assert_eq!(t.value, [1, 2, 3, 4, 5].repeat(t.value.len() / 5));
             }
         }
         assert!(fit_reply(&mut data, base, base + 10, false).is_err());
     }
+}
+
+fn metadata() -> crate::tlv::RawTlv {
+    let mut value =
+        ResidualBerValue::request(RESIDUAL_BER_PATTERN_SUBTLV_TYPE, Some(&[1, 2, 3, 4, 5]))
+            .unwrap();
+    value.count = 6;
+    value.max_burst = 3;
+    value.sub_tlvs[0].flags = 0;
+    value.to_raw().unwrap()
+}
+
+#[test]
+fn header_trimming_precedes_successor_ber_padding_and_preserves_signatures() {
+    let key = HmacKey::new(vec![0xab; 16]).unwrap();
+    let mut list = TlvList::new();
+    for mut raw in [
+        metadata(),
+        ExtraPaddingTlv {
+            padding: [1, 2, 3, 4, 5].repeat(321),
+        }
+        .to_raw(),
+        crate::tlv::RawTlv::new(TlvType::ReflectedFixedHdr, vec![0; 20]),
+    ] {
+        raw.clear_reflector_flags();
+        list.push(raw).unwrap();
+    }
+    list.set_hmac_response(&key, &[0; 4]);
+    let mut data = vec![0; 44];
+    data.extend_from_slice(&list.to_bytes());
+    assert!(fit_reply(&mut data, 44, 1500, false).is_ok());
+    sign_tlvs(&mut data, 44, &key);
+    let list = TlvList::parse(&data[44..]).unwrap();
+    assert!(data.len() <= 1500);
+    assert!(list
+        .iter()
+        .all(|t| t.tlv_type != TlvType::ReflectedFixedHdr));
+    assert!(list.non_hmac_tlvs()[0].flags.conformant_reflected);
+    assert_eq!(list.non_hmac_tlvs()[1].value.len() % 5, 0);
+    list.verify_hmac(&key, &data[..4], &data[44..]).unwrap();
 }

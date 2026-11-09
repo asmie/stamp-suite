@@ -89,7 +89,7 @@ compatibility contract.
 | `net_scope.rs` | Interface zones for IPv6 link-local endpoints. |
 | `hwtstamp.rs` | Kernel and NIC timestamping with per-packet provenance. |
 | `stats.rs`, `stats/` | Statistics collection and text/JSON/CSV output; `stats/quantiles.rs` holds bounded quantiles and `stats/clock_quality.rs` the declared clock quality. |
-| `ber.rs` | Residual bit error measurement (draft-gandhi-ippm-stamp-ber-07). |
+| `ber.rs` | Residual bit error measurement (draft-ietf-bpm-stamp-ber-01). |
 | `log_throttle.rs` | Throttled logging for events a remote peer can trigger on every packet. |
 
 ### Monitoring and control (optional features)
@@ -363,7 +363,7 @@ retirement.
 | 10 | Return Path | Suppression, opt-in alternate address or SRv6; SR-MPLS unsupported |
 | 11 | Micro-session ID | Numeric validation; no physical LAG member association |
 | 12 | Reflected Test Packet Control | Opt-in asymmetric replies and address group filters |
-| 240 to 242 | BER pattern, count and burst | Experimental; Type 242 conflicts with some Heartbeat implementations |
+| 243 | Residual BER count, burst and optional nested pattern (sub-TLV 241) | Experimental; legacy outer Types 240–242 are retired |
 | 246, 247 | Reflected IPv6 extension and fixed header data | Experimental; pnet reflects both, nix on Linux reflects Type 246 and sets C on Type 247 |
 
 See [experimental codepoints](conformance/README.md#experimental-codepoints)
@@ -500,20 +500,22 @@ rest. `reply_queue_rejected` counts refused requests and
 `queued_replies_cancelled` counts unsent copies. Aggregate drops count one per
 rejected request or per cancelled request remainder.
 
-### Bit Error Rate TLVs (draft-gandhi-ippm-stamp-ber)
+### Residual BER TLV (draft-ietf-bpm-stamp-ber-01)
 
-Types 240, 241 and 242 carry the pattern, the error count and the maximum error
-burst (draft-gandhi-ippm-stamp-ber-07). The reflector compares the delivered
-Extra Padding with the repeated pattern, records errors, and repairs the
-padding for reverse-path measurement. A missing Type 240 means pattern `ff00`;
-an explicit empty pattern is invalid. Duplicate or missing padding, duplicate
-BER TLVs and lengths not divisible by the pattern get C set.
+Experimental outer Type 243 carries count and maximum burst in eight fixed
+bytes and an optional pattern sub-TLV (experimental Type 241). Without it,
+use `ff00ff00`; an explicit pattern needs at least four bytes. The reflector
+checks delivered padding, reports forward errors and repairs it for reverse
+measurement. Missing/duplicate padding or BER, duplicate patterns and
+misalignment get outer C. Short outer values get M+C; short known pattern
+values get nested M. Unknown nested values are echoed with U.
 
-BER padding follows HMAC so that corruption stays measurable outside the
-metadata coverage. Each accepted pending probe contributes once. Missing,
-flagged or unverifiable metadata contributes no sample. A U flag on a BER TLV
-disables later BER requests. `--ber-omit-burst` avoids the Type 242 Heartbeat
-collision and reports forward burst statistics as unavailable.
+BER padding follows HMAC so corruption stays measurable outside metadata
+coverage. Parent and nested flags and integrity gate sender observations.
+U disables later BER requests; delay/loss measurements continue. Count with
+zero burst can mean burst unavailable and does not become a clean burst
+sample. Legacy Types 240–242 get U; `--ber-omit-burst` is a migration error.
+See [migration and peer compatibility](ber-migration.md).
 
 A BER interval lasts `--ber-interval` × `--send-delay`, fixed at startup even
 under ECN backoff. Thresholds are per million; only completed intervals that

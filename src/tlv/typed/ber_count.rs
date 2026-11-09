@@ -1,3 +1,6 @@
+//! Retired legacy serialization helper. Endpoints do not recognize this wire type.
+//! Active BER uses `ResidualBerValue` (BPM BER-01).
+//!
 //! BER Bit Error Count in Padding TLV (Type 241)
 //! per draft-gandhi-ippm-stamp-ber-07 §5.2.
 //!

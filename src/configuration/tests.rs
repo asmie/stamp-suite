@@ -154,6 +154,8 @@ fn ber_configuration_rejects_invalid_patterns_and_intervals() {
         vec!["--ber-pattern", ""],
         vec!["--ber-pattern", "fg"],
         vec!["--ber-pattern", "fff"],
+        vec!["--ber-pattern", "aa55"],
+        vec!["--ber-omit-burst"],
         vec!["--ber-interval", "0"],
         vec!["--send-delay", "0"],
         vec!["--ber-bit-threshold", "NaN"],
@@ -167,9 +169,9 @@ fn ber_configuration_rejects_invalid_patterns_and_intervals() {
         "test",
         "--ber",
         "--ber-pattern",
-        "0xaaff",
+        "0xaaff00ffee",
         "--ber-padding-size",
-        "6",
+        "10",
     ])
     .unwrap();
     assert!(conf.validate().is_ok());
@@ -179,12 +181,12 @@ fn ber_configuration_rejects_invalid_patterns_and_intervals() {
 fn ber_config_file_merges_and_validates_measurement_settings() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stamp.toml");
-    std::fs::write(&path, "ber = true\nber_pattern = \"0xaa55\"\nber_padding_size = 6\nber_interval = 3\nber_bit_threshold = 12.5\nber_packet_threshold = 250.0\n").unwrap();
+    std::fs::write(&path, "ber = true\nber_pattern = \"0xaa55aa55\"\nber_padding_size = 8\nber_interval = 3\nber_bit_threshold = 12.5\nber_packet_threshold = 250.0\n").unwrap();
     let conf = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap();
     assert_eq!(conf.ber_interval, 3);
     assert_eq!(conf.ber_bit_threshold, Some(12.5));
     assert_eq!(conf.ber_packet_threshold, Some(250.0));
-    assert_eq!(conf.ber_pattern.as_deref(), Some("0xaa55"));
+    assert_eq!(conf.ber_pattern.as_deref(), Some("0xaa55aa55"));
     let cli = load_from_args(&[
         "test",
         "--config",
@@ -2053,13 +2055,13 @@ fn test_interop_flags_merge_from_file() {
     let path = dir.path().join("stamp.toml");
     std::fs::write(
         &path,
-        "extra_padding = 128\nber_omit_burst = true\ntlv_hmac = \"off\"\n",
+        "extra_padding = 128\nber_omit_burst = false\ntlv_hmac = \"off\"\n",
     )
     .unwrap();
     let conf = load_from_args(&["test", "--config", path.to_str().unwrap()])
         .expect("file-configured interop flags must load");
     assert_eq!(conf.extra_padding, Some(128));
-    assert!(conf.ber_omit_burst);
+    assert!(!conf.ber_omit_burst);
     assert_eq!(conf.tlv_hmac, TlvHmacMode::Off);
 }
 
@@ -3032,4 +3034,13 @@ fn revision26_sender_rejects_profiles_with_indistinguishable_originated_headers(
                 .contains("at most one hbh and one dest")
         );
     }
+}
+
+#[test]
+fn retired_ber_workaround_is_rejected_in_toml_even_without_ber_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.toml");
+    std::fs::write(&path, "ber_omit_burst = true\n").unwrap();
+    let error = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap_err();
+    assert!(error.to_string().contains("retired"));
 }

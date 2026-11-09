@@ -56,17 +56,34 @@ jobs:
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: Seed successor BER inputs
-        if: matrix.target == 'residual_ber_value'
+        if: matrix.target == 'residual_ber_value' || matrix.target == 'process_stamp_packet'
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
         run: |
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
           vectors = json.loads(Path('tests/fixtures/residual-ber/values.json').read_text())
-          corpus = Path('fuzz/corpus/residual_ber_value')
+          target = os.environ['FUZZ_TARGET']
+          corpus = Path('fuzz/corpus') / target
           corpus.mkdir(parents=True, exist_ok=True)
           for group in ('valid', 'invalid'):
               for vector in vectors[group]:
-                  (corpus / vector['id']).write_bytes(bytes.fromhex(vector['value_hex']))
+                  value = bytearray.fromhex(vector['value_hex'])
+                  if target == 'process_stamp_packet':
+                      # Convert the fixture-local pattern type to the active
+                      # sub-TLV type, including malformed length cases.
+                      offset = 8
+                      while offset + 4 <= len(value):
+                          if value[offset + 1] == vectors['pattern_type']:
+                              value[offset + 1] = 241
+                          offset += 4 + int.from_bytes(value[offset + 2:offset + 4], 'big')
+                      outer = bytes([128, 243]) + len(value).to_bytes(2, 'big') + value
+                      padding = bytes([128, 1, 0, 64]) + bytes.fromhex('ff00ff00') * 16
+                      # Harness selector, unauthenticated base, BER, padding.
+                      value = bytes(45) + outer + padding
+                  (corpus / ('successor-ber-' + vector['id'])).write_bytes(value)
           PY
       - name: Run fuzz target
         env:

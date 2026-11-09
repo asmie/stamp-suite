@@ -895,3 +895,27 @@ a final-output failure stops the run with an error. See
 - [Measurement semantics](measurements.md) and [statistics precision](statistics.md)
 - [Security](security.md) and [runtime control API](control-plane.md)
 - [Standards conformance](conformance/README.md)
+
+## Residual bit error rate
+
+`--ber` uses the combined Residual BER in Padding TLV from
+`draft-ietf-bpm-stamp-ber-01`: experimental outer Type 243 and optional
+pattern sub-TLV Type 241. Both peers must agree on these local allocations.
+Legacy outer Types 240–242 receive U; a peer that returns U for the new TLV
+or one of its sub-TLVs disables BER while delay/loss measurements continue.
+
+The default padding pattern is `ff00ff00`, with no explicit pattern sub-TLV.
+Use `--ber-pattern aa55aa55 --ber-padding-size 64` for a custom pattern.
+Explicit patterns need at least four bytes and padding must contain whole
+repetitions; five-byte patterns also work with an appropriate size. Replace
+legacy two-byte patterns by explicitly repeating them. Remove
+`--ber-omit-burst` or `ber_omit_burst = true`: the successor's fixed burst
+field cannot be omitted and that obsolete request now fails validation.
+
+The JSON/CSV/text BER fields retain their names. Nonzero errors with a zero
+burst field mean burst unavailable, so the count remains usable while burst
+statistics exclude that sample. Invalid parent/nested flags, integrity,
+patterns or resized padding never become clean samples. See
+[measurement semantics](measurements.md#integrity-and-ber) and
+[migration details](ber-migration.md). This wire change targets the next
+minor release, 1.1.0; it is incompatible with the 1.0.x BER profile.

@@ -9,10 +9,19 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 - Add a bounded value codec and fuzz coverage for draft-ietf-bpm-stamp-ber-01,
   with independent nested-TLV fixtures. This prepares the BER migration;
-  endpoints still use the legacy format until the integration is complete.
+  the endpoint cutover is described below.
   See [migration design and peer findings](doc/ber-migration.md).
 
 ### Changed
+
+- Switch both BER endpoints to draft-ietf-bpm-stamp-ber-01 using local
+  experimental outer Type 243 and pattern sub-TLV Type 241. Retire legacy
+  Types 240–242 with U; do not infer format negotiation. Peers must agree on
+  the new profile. This wire change requires a minor release (planned 1.1.0).
+- Use four-byte default BER pattern FF00FF00 and require explicit patterns of
+  at least four bytes. Reject obsolete `--ber-omit-burst` / TOML requests;
+  the combined BER value always includes the burst field. A zero burst with
+  a nonzero count is unavailable, contributing no burst statistic.
 
 - Raise the minimum Rust version to 1.87 for the patched `ctutils` dependency.
 - Update reflected-header extensions to draft-ietf-ippm-stamp-ext-hdr-26.
@@ -26,6 +35,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   CLI/TOML subset validation and authenticated header-consumption behavior.
 
 ### Fixed
+
+- Preserve nested BER flag/integrity boundaries, repair padding before signing,
+  and size the combined metadata against the MTU. Trim optional reflected
+  headers before reducing BER padding in whole pattern repetitions.
 
 - Reconcile CoS/ECN with draft revision 02: distinguish marking failures from
   datagram failures, verify sticky ToS options, and return C if requested ECN

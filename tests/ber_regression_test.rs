@@ -1,4 +1,4 @@
-//! BER wire tests (draft-gandhi-ippm-stamp-ber-07) through
+//! BER wire tests (draft-ietf-bpm-stamp-ber-01) through
 //! `process_stamp_packet`: clean padding, single-bit errors, three-bit
 //! bursts, bursts across byte boundaries and sender pattern placement.
 //! Sender construction is in sender/run.rs; reflector processing is in
@@ -10,10 +10,10 @@ use stamp_suite::configuration::{ClockFormat, TlvHandlingMode};
 use stamp_suite::packets::PacketUnauthenticated;
 use stamp_suite::receiver::{process_stamp_packet, ProcessingContext, UNAUTH_BASE_SIZE};
 use stamp_suite::tlv::{
-    BerBurstTlv, BerCountTlv, BerPatternTlv, ExtraPaddingTlv, TlvList, TlvType, TypedTlv,
+    ExtraPaddingTlv, ResidualBerValue, TlvList, TlvType, TypedTlv, RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
 };
 
-const PATTERN: [u8; 2] = [0xFF, 0x00];
+const PATTERN: [u8; 4] = [0xFF, 0x00, 0xFF, 0x00];
 const PADDING_SIZE: usize = 64;
 
 fn src() -> SocketAddr {
@@ -77,8 +77,8 @@ fn build_padding_from_pattern(pattern: &[u8], size: usize) -> Vec<u8> {
 }
 
 /// Builds a BER-enabled unauthenticated STAMP packet exactly like the sender
-/// path does: ExtraPadding (filled with pattern), then BerPattern, BerCount(0),
-/// BerBurst(0). The caller may then corrupt the returned bytes anywhere in
+/// path does: ExtraPadding (filled with pattern), then combined BER with zero counters
+/// and a nested pattern. The caller may then corrupt the returned bytes anywhere in
 /// the padding region before reflecting.
 fn build_ber_packet(padding: Vec<u8>) -> Vec<u8> {
     let base = PacketUnauthenticated {
@@ -90,19 +90,18 @@ fn build_ber_packet(padding: Vec<u8>) -> Vec<u8> {
     };
 
     let extra_padding = ExtraPaddingTlv { padding }.to_raw();
-    let ber_pattern = BerPatternTlv::new(PATTERN.to_vec()).to_raw();
-    let ber_count = BerCountTlv::default().to_raw();
-    let ber_burst = BerBurstTlv::default().to_raw();
+    let ber = ResidualBerValue::request(RESIDUAL_BER_PATTERN_SUBTLV_TYPE, Some(&PATTERN))
+        .unwrap()
+        .to_raw()
+        .unwrap();
 
     let mut data = base.to_bytes().to_vec();
     data.extend_from_slice(&extra_padding.to_bytes());
-    data.extend_from_slice(&ber_pattern.to_bytes());
-    data.extend_from_slice(&ber_count.to_bytes());
-    data.extend_from_slice(&ber_burst.to_bytes());
+    data.extend_from_slice(&ber.to_bytes());
     data
 }
 
-/// Reflects `packet` and returns the parsed BerCount + BerBurst values from
+/// Reflects `packet` and returns the parsed combined count and maximum burst from
 /// the response.
 fn reflect_and_extract_ber(packet: &[u8]) -> (u32, u32) {
     let ctx = make_ctx();
@@ -110,20 +109,14 @@ fn reflect_and_extract_ber(packet: &[u8]) -> (u32, u32) {
         process_stamp_packet(packet, src(), 64, false, &ctx).expect("must reflect packet");
     let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).expect("response must parse");
 
-    let count_raw = parsed
+    let raw = parsed
         .non_hmac_tlvs()
         .iter()
-        .find(|t| t.tlv_type == TlvType::BerCount)
-        .expect("BerCount TLV must be echoed");
-    let burst_raw = parsed
-        .non_hmac_tlvs()
-        .iter()
-        .find(|t| t.tlv_type == TlvType::BerBurst)
-        .expect("BerBurst TLV must be echoed");
-
-    let count = BerCountTlv::from_raw(count_raw).expect("BerCount decode");
-    let burst = BerBurstTlv::from_raw(burst_raw).expect("BerBurst decode");
-    (count.count, burst.max_burst)
+        .find(|t| t.tlv_type == TlvType::ResidualBer)
+        .expect("combined BER reply");
+    assert!(!raw.is_unrecognized() && !raw.is_malformed() && !raw.flags.conformant_reflected);
+    let value = ResidualBerValue::from_raw(raw).unwrap();
+    (value.count, value.max_burst)
 }
 
 /// Find the offset of the ExtraPadding TLV's value bytes within a built
@@ -224,17 +217,17 @@ fn ber_sender_padding_carries_pattern_at_expected_offset() {
 }
 
 // ---------------------------------------------------------------------------
-// Custom pattern: a non-default pattern exercises the BerPattern TLV path
+// Custom pattern: a non-default pattern exercises the nested pattern path
 
 #[test]
 fn ber_custom_pattern_clean_channel_zero_errors() {
-    let pattern: [u8; 2] = [0xAA, 0x55];
+    let pattern: [u8; 4] = [0xAA, 0x55, 0xAA, 0x55];
     let mut padding = Vec::with_capacity(PADDING_SIZE);
     for i in 0..PADDING_SIZE {
         padding.push(pattern[i % pattern.len()]);
     }
 
-    // Build packet with the *custom* pattern carried in BerPattern TLV.
+    // Build packet with the *custom* pattern carried in the pattern sub-TLV.
     let base = PacketUnauthenticated {
         sequence_number: 1,
         timestamp: 0,
@@ -243,15 +236,14 @@ fn ber_custom_pattern_clean_channel_zero_errors() {
         mbz: [0; 28],
     };
     let extra_padding = ExtraPaddingTlv { padding }.to_raw();
-    let ber_pattern = BerPatternTlv::new(pattern.to_vec()).to_raw();
-    let ber_count = BerCountTlv::default().to_raw();
-    let ber_burst = BerBurstTlv::default().to_raw();
+    let ber = ResidualBerValue::request(RESIDUAL_BER_PATTERN_SUBTLV_TYPE, Some(&pattern))
+        .unwrap()
+        .to_raw()
+        .unwrap();
 
     let mut data = base.to_bytes().to_vec();
     data.extend_from_slice(&extra_padding.to_bytes());
-    data.extend_from_slice(&ber_pattern.to_bytes());
-    data.extend_from_slice(&ber_count.to_bytes());
-    data.extend_from_slice(&ber_burst.to_bytes());
+    data.extend_from_slice(&ber.to_bytes());
 
     let (count, burst) = reflect_and_extract_ber(&data);
     assert_eq!(count, 0, "custom-pattern clean channel: count = 0");

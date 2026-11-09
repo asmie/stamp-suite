@@ -1,4 +1,4 @@
-//! Residual BER (draft-gandhi-ippm-stamp-ber-07).
+//! Residual BER (draft-ietf-bpm-stamp-ber-01).
 //! Count the first accepted reply per pending probe; unusable metadata adds
 //! no sample. Intervals use monotonic receive time and a fixed multiple of
 //! the configured transmit interval.
@@ -11,13 +11,13 @@ use std::{
 /// direction totals and live alarm logging are unaffected by history eviction.
 pub(crate) const BER_HISTORY_LIMIT: usize = 1024;
 
-use crate::tlv::{BerBurstTlv, BerCountTlv, RawTlv, TlvList, TlvType, TypedTlv};
+use crate::tlv::{
+    RawTlv, ResidualBerValue, TlvFlags, TlvList, TlvType, RESIDUAL_BER_DEFAULT_PATTERN,
+    RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
+};
 
 pub(crate) fn is_ber(kind: TlvType) -> bool {
-    matches!(
-        kind,
-        TlvType::BerPattern | TlvType::BerCount | TlvType::BerBurst
-    )
+    kind == TlvType::ResidualBer
 }
 
 pub(crate) fn parse_pattern(hex_pattern: &str) -> Result<Vec<u8>, String> {
@@ -50,74 +50,79 @@ pub(crate) fn observation(
     integrity_ok: bool,
     pattern: &[u8],
     padding_size: usize,
-    want_burst: bool,
 ) -> Option<Observation> {
     if !integrity_ok || tlvs.iter().any(|t| t.is_integrity_failed()) {
         return None;
     }
     let mut padding = None;
-    let mut count = None;
-    let mut burst = None;
-    let mut pattern_seen = false;
+    let mut metadata = None;
     for tlv in tlvs.non_hmac_tlvs() {
         if tlv.is_malformed() {
             break;
         }
-        if is_ber(tlv.tlv_type) && tlv.is_unrecognized() {
-            return Some(Observation::Unsupported);
-        }
         if !is_ber(tlv.tlv_type) && tlv.tlv_type != TlvType::ExtraPadding {
             continue;
+        }
+        if is_ber(tlv.tlv_type) && tlv.is_unrecognized() {
+            return Some(Observation::Unsupported);
         }
         if tlv.is_unrecognized() || tlv.flags.conformant_reflected {
             return None;
         }
-        match tlv.tlv_type {
-            TlvType::BerPattern => {
-                if pattern_seen || tlv.value != pattern {
-                    return None;
-                }
-                pattern_seen = true;
-            }
-            TlvType::ExtraPadding if padding.replace(tlv.value.as_slice()).is_some() => {
-                return None;
-            }
-            TlvType::BerCount
-                if count
-                    .replace(BerCountTlv::from_raw(tlv).ok()?.count)
-                    .is_some() =>
+        if is_ber(tlv.tlv_type) {
+            if metadata
+                .replace(ResidualBerValue::decode_value(&tlv.value).ok()?)
+                .is_some()
             {
                 return None;
             }
-            TlvType::BerBurst
-                if burst
-                    .replace(BerBurstTlv::from_raw(tlv).ok()?.max_burst)
-                    .is_some() =>
-            {
-                return None;
-            }
-            _ => {}
+        } else if padding.replace(tlv.value.as_slice()).is_some() {
+            return None;
         }
     }
-    let padding = padding?;
-    // Asymmetric resizing cannot preserve the forward denominator. Do not
-    // invent a measurement from a changed or absent padding field.
-    if padding.len() != padding_size || pattern.is_empty() {
-        return None;
-    }
-    let bits = padding.len() as u64 * 8;
-    let count = count?;
-    if u64::from(count) > bits
-        || (want_burst && burst.is_none())
-        || burst.is_some_and(|n| n > count || (n == 0) != (count == 0))
+    let value = metadata?;
+    // U on any nested TLV disables BER; malformed/integrity/nonconformant
+    // metadata is unusable, never a clean observation.
+    if value
+        .sub_tlvs
+        .iter()
+        .any(|s| s.flags & (TlvFlags::M | TlvFlags::I | TlvFlags::C) != 0)
     {
         return None;
     }
+    if value.sub_tlvs.iter().any(|s| s.flags & TlvFlags::U != 0) {
+        return Some(Observation::Unsupported);
+    }
+    if value
+        .sub_tlvs
+        .iter()
+        .any(|s| s.kind != RESIDUAL_BER_PATTERN_SUBTLV_TYPE)
+    {
+        return None;
+    }
+    let actual_pattern = value
+        .explicit_pattern(RESIDUAL_BER_PATTERN_SUBTLV_TYPE)
+        .ok()?
+        .unwrap_or(&RESIDUAL_BER_DEFAULT_PATTERN);
+    if actual_pattern != pattern || pattern.len() < 4 {
+        return None;
+    }
+    let padding = padding?;
+    if padding.len() != padding_size || !padding.len().is_multiple_of(pattern.len()) {
+        return None;
+    }
+    let bits = padding.len() as u64 * 8;
+    if u64::from(value.count) > bits || value.max_burst > value.count {
+        return None;
+    }
+    // A zero burst with a nonzero count explicitly permits "cannot compute".
+    // Preserve the count sample and omit that burst from aggregate statistics.
+    let forward_burst = (value.count == 0 || value.max_burst != 0).then_some(value.max_burst);
     let (reverse_errors, reverse_burst) = xor_popcount_and_max_burst(padding, pattern);
     Some(Observation::Sample {
         bits,
-        forward_errors: count,
-        forward_burst: burst,
+        forward_errors: value.count,
+        forward_burst,
         reverse_errors,
         reverse_burst,
     })
@@ -188,7 +193,6 @@ pub struct BerSummary {
 
 pub(crate) struct BerCollector {
     pub pattern: Vec<u8>,
-    pub want_burst: bool,
     pub summary: BerSummary,
     start: Instant,
     interval: Duration,
@@ -203,14 +207,12 @@ impl BerCollector {
     pub fn new(
         pattern: Vec<u8>,
         padding: usize,
-        want_burst: bool,
         interval: Duration,
         start: Instant,
         thresholds: [Option<f64>; 2],
     ) -> Self {
         Self {
             pattern,
-            want_burst,
             start,
             interval,
             thresholds,
@@ -407,14 +409,16 @@ pub(crate) fn fit_padding(
             "BER metadata and one pattern exceed the MTU",
         )
     };
-    // Without a pattern TLV, assume the 2-octet default pattern (0xFF00).
-    let pattern_len = tlvs
-        .iter()
-        .find(|t| t.tlv_type == TlvType::BerPattern)
-        .map_or(2, |t| t.value.len());
-    if pattern_len == 0 {
+    let metadata: Vec<_> = tlvs.iter().filter(|t| is_ber(t.tlv_type)).collect();
+    if metadata.len() != 1 {
         return Err(fail());
     }
+    let value = ResidualBerValue::decode_value(&metadata[0].value).map_err(|_| fail())?;
+    let pattern_len = value
+        .explicit_pattern(RESIDUAL_BER_PATTERN_SUBTLV_TYPE)
+        .map_err(|_| fail())?
+        .unwrap_or(&RESIDUAL_BER_DEFAULT_PATTERN)
+        .len();
     let padding = tlvs
         .iter_mut()
         .find(|t| t.tlv_type == TlvType::ExtraPadding)
@@ -436,14 +440,8 @@ mod tests {
     #[test]
     fn long_run_bounds_history_and_preserves_totals_and_alarm_transitions() {
         let start = Instant::now();
-        let mut collector = BerCollector::new(
-            vec![0],
-            1,
-            true,
-            Duration::from_millis(1),
-            start,
-            [Some(0.0); 2],
-        );
+        let mut collector =
+            BerCollector::new(vec![0], 1, Duration::from_millis(1), start, [Some(0.0); 2]);
         let intervals = (BER_HISTORY_LIMIT * 2 + 20) as u64;
         for index in 0..intervals {
             let errors = if index % 2 == 0 { 1 } else { 0 };
@@ -494,14 +492,20 @@ mod tests {
     }
 
     use super::*;
-    use crate::tlv::{BerPatternTlv, ExtraPaddingTlv, TlvFlags};
+    use crate::tlv::{ExtraPaddingTlv, TypedTlv};
 
     fn reply(flags: u8, count: u32, burst: u32, padding: Vec<u8>) -> TlvList {
         let mut list = TlvList::new();
+        let mut metadata = ResidualBerValue::request(
+            RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
+            Some(&RESIDUAL_BER_DEFAULT_PATTERN),
+        )
+        .unwrap();
+        metadata.count = count;
+        metadata.max_burst = burst;
+        metadata.sub_tlvs[0].flags = 0;
         for mut t in [
-            BerPatternTlv::new(vec![0xff, 0]).to_raw(),
-            BerCountTlv::new(count).to_raw(),
-            BerBurstTlv::new(burst).to_raw(),
+            metadata.to_raw().unwrap(),
             ExtraPaddingTlv { padding }.to_raw(),
         ] {
             t.flags = TlvFlags::from_byte(flags);
@@ -515,7 +519,6 @@ mod tests {
         let mut c = BerCollector::new(
             vec![0xff, 0],
             2,
-            true,
             Duration::from_secs(1),
             start,
             [Some(100.0), Some(100.0)],
@@ -569,14 +572,7 @@ mod tests {
     #[test]
     fn incomplete_and_empty_windows_and_omitted_burst_are_honest() {
         let start = Instant::now();
-        let mut c = BerCollector::new(
-            vec![0xff, 0],
-            2,
-            false,
-            Duration::from_secs(1),
-            start,
-            [None; 2],
-        );
+        let mut c = BerCollector::new(vec![0xff, 0], 2, Duration::from_secs(1), start, [None; 2]);
         assert!(c.snapshot(start).forward.bit_error_ratio.is_none());
         c.record(
             Observation::Sample {
@@ -599,20 +595,28 @@ mod tests {
     #[test]
     fn invalid_metadata_never_becomes_a_zero_error_sample() {
         for (flags, count, burst, pad) in [
-            (0x10, 0, 0, vec![0xff, 0]),
-            (0x20, 0, 0, vec![0xff, 0]),
-            (0x40, 0, 0, vec![0xff, 0]),
-            (0, 17, 1, vec![0xff, 0]),
-            (0, 1, 2, vec![0xff, 0]),
-            (0, 1, 0, vec![0xff, 0]),
+            (0x10, 0, 0, RESIDUAL_BER_DEFAULT_PATTERN.to_vec()),
+            (0x20, 0, 0, RESIDUAL_BER_DEFAULT_PATTERN.to_vec()),
+            (0x40, 0, 0, RESIDUAL_BER_DEFAULT_PATTERN.to_vec()),
+            (0, 33, 1, RESIDUAL_BER_DEFAULT_PATTERN.to_vec()),
+            (0, 1, 2, RESIDUAL_BER_DEFAULT_PATTERN.to_vec()),
             (0, 0, 0, vec![0xff]),
         ] {
-            assert!(
-                observation(&reply(flags, count, burst, pad), true, &[0xff, 0], 2, true).is_none()
-            );
+            assert!(observation(
+                &reply(flags, count, burst, pad),
+                true,
+                &RESIDUAL_BER_DEFAULT_PATTERN,
+                4
+            )
+            .is_none());
         }
-        let sample =
-            observation(&reply(0, 4, 2, vec![0xfe, 0]), true, &[0xff, 0], 2, true).unwrap();
+        let sample = observation(
+            &reply(0, 4, 2, vec![0xfe, 0, 0xff, 0]),
+            true,
+            &RESIDUAL_BER_DEFAULT_PATTERN,
+            4,
+        )
+        .unwrap();
         assert!(matches!(
             sample,
             Observation::Sample {
@@ -621,37 +625,39 @@ mod tests {
                 ..
             }
         ));
-        let mut duplicate = reply(0, 0, 0, vec![0xff, 0]);
-        let mut t = BerCountTlv::default().to_raw();
+        let mut duplicate = reply(0, 0, 0, RESIDUAL_BER_DEFAULT_PATTERN.to_vec());
+        let mut t = ResidualBerValue::default().to_raw().unwrap();
         t.flags = TlvFlags::default();
         duplicate.push(t).unwrap();
-        assert!(observation(&duplicate, true, &[0xff, 0], 2, true).is_none());
+        assert!(observation(&duplicate, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4).is_none());
     }
     #[test]
     fn unsupported_and_integrity_gate() {
-        let list = reply(0x80, 0, 0, vec![0xff, 0]);
+        let list = reply(0x80, 0, 0, RESIDUAL_BER_DEFAULT_PATTERN.to_vec());
         assert!(matches!(
-            observation(&list, true, &[0xff, 0], 2, true),
+            observation(&list, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4),
             Some(Observation::Unsupported)
         ));
-        assert!(observation(&list, false, &[0xff, 0], 2, true).is_none());
-        let mut flagged = reply(0, 4, 2, vec![0xfe, 0]);
-        assert!(observation(&flagged, true, &[0xff, 0], 2, true).is_some());
+        assert!(observation(&list, false, &RESIDUAL_BER_DEFAULT_PATTERN, 4).is_none());
+        let mut flagged = reply(0, 4, 2, vec![0xfe, 0, 0xff, 0]);
+        assert!(observation(&flagged, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4).is_some());
         flagged.mark_all_integrity_failed();
-        assert!(observation(&flagged, true, &[0xff, 0], 2, true).is_none());
+        assert!(observation(&flagged, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4).is_none());
     }
     #[test]
     fn padding_budget_preserves_whole_pattern_and_mandatory_fields() {
         let mut tlvs = vec![
-            BerPatternTlv::new(vec![1, 2, 3]).to_raw(),
-            BerCountTlv::default().to_raw(),
+            ResidualBerValue::request(RESIDUAL_BER_PATTERN_SUBTLV_TYPE, Some(&[1, 2, 3, 4, 5]))
+                .unwrap()
+                .to_raw()
+                .unwrap(),
             ExtraPaddingTlv {
-                padding: [1, 2, 3].repeat(10),
+                padding: [1, 2, 3, 4, 5].repeat(10),
             }
             .to_raw(),
         ];
         assert!(fit_padding(&mut tlvs, 80, 44).unwrap());
-        assert_eq!(tlvs[2].value.len(), 15);
+        assert_eq!(tlvs[1].value.len(), 10);
         assert!(fit_padding(&mut tlvs, 65, 44).is_err());
     }
 
@@ -687,5 +693,68 @@ mod tests {
             }
         }
         assert_eq!(super::xor_popcount_and_max_burst(&[1, 2], &[]), (0, 0));
+    }
+    #[test]
+    fn unavailable_burst_keeps_count_without_inventing_a_clean_burst() {
+        let list = reply(0, 2, 0, RESIDUAL_BER_DEFAULT_PATTERN.to_vec());
+        assert!(matches!(
+            observation(&list, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4),
+            Some(Observation::Sample {
+                forward_errors: 2,
+                forward_burst: None,
+                ..
+            })
+        ));
+        let list = reply(0, 0, 0, RESIDUAL_BER_DEFAULT_PATTERN.to_vec());
+        assert!(matches!(
+            observation(&list, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4),
+            Some(Observation::Sample {
+                forward_errors: 0,
+                forward_burst: Some(0),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn nested_flags_and_duplicate_patterns_gate_sender_observations() {
+        for flags in [
+            TlvFlags::U,
+            TlvFlags::M,
+            TlvFlags::I,
+            TlvFlags::C,
+            TlvFlags::U | TlvFlags::I,
+        ] {
+            let list = edited_reply(|value| value[8] = flags);
+            let result = observation(&list, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4);
+            if flags == TlvFlags::U {
+                assert!(matches!(result, Some(Observation::Unsupported)));
+            } else {
+                assert!(result.is_none());
+            }
+        }
+        let list = edited_reply(|value| value.extend_from_slice(&[0, 241, 0, 4, 255, 0, 255, 0]));
+        assert!(observation(&list, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4).is_none());
+        for flags in [0, TlvFlags::U] {
+            let list = edited_reply(|value| value.extend_from_slice(&[flags, 245, 0, 0]));
+            let result = observation(&list, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4);
+            if flags == TlvFlags::U {
+                assert!(matches!(result, Some(Observation::Unsupported)));
+            } else {
+                assert!(result.is_none());
+            }
+        }
+    }
+    fn edited_reply(edit: impl FnOnce(&mut Vec<u8>)) -> TlvList {
+        let mut entries: Vec<_> = reply(0, 0, 0, RESIDUAL_BER_DEFAULT_PATTERN.to_vec())
+            .iter()
+            .cloned()
+            .collect();
+        edit(&mut entries[0].value);
+        let mut list = TlvList::new();
+        for raw in entries {
+            list.push(raw).unwrap();
+        }
+        list
     }
 }

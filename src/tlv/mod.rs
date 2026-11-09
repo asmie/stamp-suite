@@ -24,9 +24,10 @@ mod typed;
 // Public API. These re-exports are the module's only external surface.
 
 // Trait
+pub use self::core::{RESIDUAL_BER_PATTERN_SUBTLV_TYPE, RESIDUAL_BER_TLV_TYPE};
 pub use traits::TypedTlv;
 
-// Successor BER codec; not registered for endpoint processing yet.
+// Successor BER value codec and endpoint allocations.
 pub use residual_ber::{
     ResidualBerError, ResidualBerSubTlv, ResidualBerValue, RESIDUAL_BER_DEFAULT_PATTERN,
     RESIDUAL_BER_FIXED_VALUE_SIZE, RESIDUAL_BER_MIN_PATTERN_SIZE,

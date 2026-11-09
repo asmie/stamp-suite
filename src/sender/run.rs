@@ -564,55 +564,33 @@ impl SenderRun {
             log::info!("Extra Padding TLV enabled ({bytes} value octets)");
         }
 
-        // Build BER TLVs (draft-gandhi-ippm-stamp-ber-07 §4). All three are emitted
-        // together, paired with an Extra Padding TLV filled with the repeated pattern.
+        // BPM BER-01: one combined TLV and known-pattern Extra Padding.
         let mut ber_pattern = None;
         if conf.ber {
-            let pattern_bytes: Vec<u8> = if let Some(hex) = conf.ber_pattern.as_deref() {
-                match crate::ber::parse_pattern(hex) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        return Err(crate::StartupError::config(format!(
-                            "Invalid --ber-pattern ({hex}): {e}"
-                        )));
-                    }
-                }
-            } else {
-                // Default 0xFF00 per BER-07 §4.1.1.
-                vec![0xFF, 0x00]
-            };
-
-            // Extra Padding TLV filled with the repeated pattern so the reflector
-            // can XOR-compare it. Use deterministic bytes (not the pseudorandom
-            // default) because the BER computation requires a known pattern.
-            let mut padding_bytes = Vec::with_capacity(conf.ber_padding_size);
-            for i in 0..conf.ber_padding_size {
-                padding_bytes.push(pattern_bytes[i % pattern_bytes.len()]);
-            }
-            let padding_tlv = ExtraPaddingTlv {
-                padding: padding_bytes,
-            };
-            extra_tlvs.push(padding_tlv.to_raw());
-            extra_tlvs.push(BerPatternTlv::new(pattern_bytes.clone()).to_raw());
-            ber_pattern = Some(pattern_bytes);
-            extra_tlvs.push(BerCountTlv::default().to_raw());
-            // Type 242 collides with another implementation's incompatible
-            // experimental "Heartbeat" TLV (RFC 8972 §5.1 Experimental Use range);
-            // --ber-omit-burst drops it so the rest of the BER exchange still works
-            // against such a peer.
-            if conf.ber_omit_burst {
-                log::info!(
-                    "BER: omitting the Max Bit Error Burst Size TLV (Type 242) per \
-                     --ber-omit-burst"
-                );
-            } else {
-                extra_tlvs.push(BerBurstTlv::default().to_raw());
-            }
+            let pattern =
+                crate::ber::parse_pattern(conf.ber_pattern.as_deref().unwrap_or("ff00ff00"))
+                    .map_err(|e| {
+                        crate::StartupError::config(format!("Invalid --ber-pattern: {e}"))
+                    })?;
+            let padding = (0..conf.ber_padding_size)
+                .map(|i| pattern[i % pattern.len()])
+                .collect();
+            extra_tlvs.push(ExtraPaddingTlv { padding }.to_raw());
+            // Omit the default pattern sub-TLV, as §5.1.2 permits. Explicit
+            // overrides carry their exact four-or-more-byte representation.
+            let value = ResidualBerValue::request(
+                RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
+                conf.ber_pattern.as_ref().map(|_| pattern.as_slice()),
+            )
+            .and_then(|v| v.to_raw())
+            .map_err(|e| crate::StartupError::config(format!("Invalid BER value: {e}")))?;
+            extra_tlvs.push(value);
             log::info!(
-                "BER TLVs enabled (padding_size={}, pattern={})",
+                "Residual BER enabled (experimental Type 243, padding_size={}, pattern={})",
                 conf.ber_padding_size,
-                conf.ber_pattern.as_deref().unwrap_or("ff00")
+                hex::encode(&pattern)
             );
+            ber_pattern = Some(pattern);
         }
 
         // Reflected Fixed / IPv6 Extension Header Data TLVs
@@ -704,7 +682,6 @@ impl SenderRun {
                     .iter()
                     .find(|t| t.tlv_type == TlvType::ExtraPadding)
                     .map_or(0, |t| t.value.len()),
-                !conf.ber_omit_burst,
                 conf.send_delay.duration() * conf.ber_interval,
                 Instant::now(),
                 [conf.ber_bit_threshold, conf.ber_packet_threshold],

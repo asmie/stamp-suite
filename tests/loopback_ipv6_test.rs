@@ -11,8 +11,9 @@ use stamp_suite::receiver::{
     process_stamp_packet, ProcessingContext, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE,
 };
 use stamp_suite::tlv::{
-    BerBurstTlv, BerCountTlv, BerPatternTlv, ClassOfServiceTlv, DestinationNodeAddressTlv,
-    ExtraPaddingTlv, MicroSessionIdTlv, PacketAddressInfo, RawTlv, TlvList, TlvType, TypedTlv,
+    ClassOfServiceTlv, DestinationNodeAddressTlv, ExtraPaddingTlv, MicroSessionIdTlv,
+    PacketAddressInfo, RawTlv, ResidualBerValue, TlvList, TlvType, TypedTlv,
+    RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
 };
 
 fn ipv6_src() -> SocketAddr {
@@ -281,22 +282,21 @@ fn ipv6_micro_session_id_round_trip() {
 
 #[test]
 fn ipv6_ber_clean_channel_zero_errors() {
-    const PATTERN: [u8; 2] = [0xFF, 0x00];
+    const PATTERN: [u8; 4] = [0xFF, 0, 0xFF, 0];
     let mut padding = Vec::with_capacity(64);
     for i in 0..64 {
         padding.push(PATTERN[i % PATTERN.len()]);
     }
 
     let extra_padding = ExtraPaddingTlv { padding }.to_raw();
-    let ber_pattern = BerPatternTlv::new(PATTERN.to_vec()).to_raw();
-    let ber_count = BerCountTlv::default().to_raw();
-    let ber_burst = BerBurstTlv::default().to_raw();
+    let ber = ResidualBerValue::request(RESIDUAL_BER_PATTERN_SUBTLV_TYPE, Some(&PATTERN))
+        .unwrap()
+        .to_raw()
+        .unwrap();
 
     let mut tlvs = Vec::new();
     tlvs.extend_from_slice(&extra_padding.to_bytes());
-    tlvs.extend_from_slice(&ber_pattern.to_bytes());
-    tlvs.extend_from_slice(&ber_count.to_bytes());
-    tlvs.extend_from_slice(&ber_burst.to_bytes());
+    tlvs.extend_from_slice(&ber.to_bytes());
 
     let packet = build_unauth_packet(&tlvs);
     let ctx = make_ctx(None, &[], None);
@@ -304,18 +304,14 @@ fn ipv6_ber_clean_channel_zero_errors() {
         process_stamp_packet(&packet, ipv6_src(), 64, false, &ctx).expect("reflector responds");
     let parsed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).expect("parse response");
 
-    let count_raw = parsed
+    let raw = parsed
         .non_hmac_tlvs()
         .iter()
-        .find(|t| t.tlv_type == TlvType::BerCount)
-        .expect("BerCount echoed");
-    let burst_raw = parsed
-        .non_hmac_tlvs()
-        .iter()
-        .find(|t| t.tlv_type == TlvType::BerBurst)
-        .expect("BerBurst echoed");
-    assert_eq!(BerCountTlv::from_raw(count_raw).unwrap().count, 0);
-    assert_eq!(BerBurstTlv::from_raw(burst_raw).unwrap().max_burst, 0);
+        .find(|t| t.tlv_type == TlvType::ResidualBer)
+        .unwrap();
+    let value = ResidualBerValue::from_raw(raw).unwrap();
+    assert_eq!(value.count, 0);
+    assert_eq!(value.max_burst, 0);
 }
 
 // ---------------------------------------------------------------------------

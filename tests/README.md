@@ -45,7 +45,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | File | What it tests | Runs when |
 | --- | --- | --- |
 | `agentx_protocol_test.rs` | Independent AgentX master over a Unix socket: GetBulk order and end-of-MIB positions, search range bounds, fragmented and coalesced frames, cancellation, Close acknowledgment, range-limit error, invalid handshakes and both byte orders. | Unix, `snmp` |
-| `ber_measurement_test.rs` | End-to-end BER (draft-gandhi-ippm-stamp-ber-07): directional errors, padding repair, HMAC, duplicate exclusion, peers without BER, C-flag cases; IPv4/IPv6, open/authenticated. | always; the real-reflector signing test needs Linux nix |
+| `ber_measurement_test.rs` | End-to-end BER (draft-ietf-bpm-stamp-ber-01): directional errors, padding repair, HMAC, duplicate exclusion, peers without BER, C-flag cases; IPv4/IPv6, open/authenticated. | always; the real-reflector signing test needs Linux nix |
 | `ber_regression_test.rs` | BER counts and bit error bursts through packet processing. | always |
 | `burst_transmission_test.rs` | Live interleaved burst replies: IPv4/IPv6, open/authenticated, NTP/PTP, stateless/stateful, CoS, Direct Measurement, Follow-Up, HMAC and kernel TX correlation. | Linux, nix |
 | `clock_metadata_test.rs` | Clock discipline, timestamp encoding and TX provenance on the wire, for IPv4/IPv6, open/authenticated and stateless/stateful. | Linux, nix |

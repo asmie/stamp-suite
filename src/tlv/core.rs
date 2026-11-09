@@ -8,7 +8,7 @@ use thiserror::Error;
 pub use super::experimental::{
     BER_COUNT_TLV_TYPE, BER_MAX_BURST_TLV_TYPE, BER_PATTERN_TLV_TYPE,
     REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, REFLECTED_FIXED_HDR_TLV_TYPE,
-    REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
+    REFLECTED_IPV6_EXT_HDR_TLV_TYPE, RESIDUAL_BER_PATTERN_SUBTLV_TYPE, RESIDUAL_BER_TLV_TYPE,
 };
 
 /// TLV header size in bytes (1 byte flags, 1 byte type, 2 bytes length).
@@ -92,6 +92,10 @@ pub enum TlvError {
     #[error("{kind:?} TLV has invalid length {length}, expected {}", expected_length(*kind))]
     InvalidLength { kind: TlvType, length: usize },
 
+    /// Invalid successor BER value framing.
+    #[error("{0}")]
+    ResidualBer(#[from] super::ResidualBerError),
+
     /// TLV type mismatch when parsing a typed TLV.
     #[error("TLV type mismatch: expected {expected:?}, got {actual:?}")]
     TypeMismatch {
@@ -118,6 +122,7 @@ fn expected_length(kind: TlvType) -> String {
         TlvType::ReflectedControl => format!("at least {REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE}"),
         TlvType::BerCount => BER_COUNT_TLV_VALUE_SIZE.to_string(),
         TlvType::BerBurst => BER_BURST_TLV_VALUE_SIZE.to_string(),
+        TlvType::ResidualBer => "at least 8".to_string(),
         _ => "a different length".to_string(),
     }
 }
@@ -134,7 +139,8 @@ fn expected_length(kind: TlvType) -> String {
 ///
 /// Bit 3 (C) is defined by RFC 10052 §3 as the
 /// Conformant-Reflected-Packet flag used with the Reflected Test Packet
-/// Control TLV (Type 12). It MUST be 0 in all other contexts.
+/// Control TLV (Type 12) and extensions that explicitly reuse it, including
+/// successor Residual BER, CoS/ECN and reflected headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TlvFlags {
     /// Unrecognized TLV type (bit 0, set by receiver when type is unknown).
@@ -265,16 +271,21 @@ pub enum TlvType {
     MicroSessionId = 11,
     /// Reflected Test Packet Control TLV (12) - RFC 10052 §3.
     ReflectedControl = 12,
+    /// Retired legacy serialization only; endpoints return U.
     /// BER Bit Pattern in Padding TLV (240) - draft-gandhi-ippm-stamp-ber-07 §5.1.
     /// Experimental-range stand-in, renumbered via `experimental::BER_PATTERN_TLV_TYPE`.
     BerPattern = BER_PATTERN_TLV_TYPE,
+    /// Retired legacy serialization only; endpoints return U.
     /// BER Bit Error Count in Padding TLV (241) - draft-gandhi-ippm-stamp-ber-07 §5.2.
     /// Experimental-range stand-in, renumbered via `experimental::BER_COUNT_TLV_TYPE`.
     BerCount = BER_COUNT_TLV_TYPE,
+    /// Retired legacy serialization only; endpoints return U.
     /// BER Max Bit Error Burst Size TLV (242) - draft-gandhi-ippm-stamp-ber-07 §5.3.
     /// Experimental-range stand-in that collides with an unrelated TLV in another
     /// implementation; renumbered via `experimental::BER_MAX_BURST_TLV_TYPE`.
     BerBurst = BER_MAX_BURST_TLV_TYPE,
+    /// Residual BER in Padding (experimental Type 243), BPM BER revision 01.
+    ResidualBer = RESIDUAL_BER_TLV_TYPE,
     /// Reflected IPv6 Extension Header Data TLV (246) -
     /// draft-ietf-ippm-stamp-ext-hdr-26 §§4.1, 4.2. Reflects received IPv6
     /// extension headers such as Hop-by-Hop and Destination Options. The nix
@@ -310,9 +321,7 @@ impl TlvType {
             10 => Self::ReturnPath,
             11 => Self::MicroSessionId,
             12 => Self::ReflectedControl,
-            BER_PATTERN_TLV_TYPE => Self::BerPattern,
-            BER_COUNT_TLV_TYPE => Self::BerCount,
-            BER_MAX_BURST_TLV_TYPE => Self::BerBurst,
+            RESIDUAL_BER_TLV_TYPE => Self::ResidualBer,
             REFLECTED_IPV6_EXT_HDR_TLV_TYPE => Self::ReflectedIpv6ExtHdr,
             REFLECTED_FIXED_HDR_TLV_TYPE => Self::ReflectedFixedHdr,
             n => Self::Unknown(n),
@@ -339,6 +348,7 @@ impl TlvType {
             Self::BerPattern => BER_PATTERN_TLV_TYPE,
             Self::BerCount => BER_COUNT_TLV_TYPE,
             Self::BerBurst => BER_MAX_BURST_TLV_TYPE,
+            Self::ResidualBer => RESIDUAL_BER_TLV_TYPE,
             Self::ReflectedIpv6ExtHdr => REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
             Self::ReflectedFixedHdr => REFLECTED_FIXED_HDR_TLV_TYPE,
             Self::Unknown(n) => n,
@@ -354,7 +364,10 @@ impl TlvType {
     /// Returns true if this is a known/recognized type.
     #[must_use]
     pub fn is_recognized(self) -> bool {
-        !matches!(self, Self::Unknown(_) | Self::Reserved)
+        !matches!(
+            self,
+            Self::Unknown(_) | Self::Reserved | Self::BerPattern | Self::BerCount | Self::BerBurst
+        )
     }
 }
 

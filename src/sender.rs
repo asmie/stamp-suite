@@ -51,11 +51,11 @@ use crate::{
     },
     time::{generate_timestamp, timestamp_to_unix_nanos},
     tlv::{
-        AccessReportTlv, BerBurstTlv, BerCountTlv, BerPatternTlv, ClassOfServiceTlv,
-        DestinationNodeAddressTlv, DirectMeasurementTlv, ExtraPaddingTlv, FollowUpTelemetryTlv,
-        LocationTlv, MicroSessionIdTlv, RawTlv, ReflectedControlTlv, ReflectedFixedHdrTlv,
-        ReflectedIpv6ExtHdrTlv, ReturnPathTlv, TimestampInfoTlv, TlvList, TlvType, TypedTlv,
-        IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE,
+        AccessReportTlv, ClassOfServiceTlv, DestinationNodeAddressTlv, DirectMeasurementTlv,
+        ExtraPaddingTlv, FollowUpTelemetryTlv, LocationTlv, MicroSessionIdTlv, RawTlv,
+        ReflectedControlTlv, ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv, ResidualBerValue,
+        ReturnPathTlv, TimestampInfoTlv, TlvList, TlvType, TypedTlv, IPV4_FIXED_HEADER_SIZE,
+        IPV6_FIXED_HEADER_SIZE, RESIDUAL_BER_DEFAULT_PATTERN, RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
     },
 };
 
@@ -225,9 +225,8 @@ pub fn fuzz_reply(
         measurements.sent(seq, probe, seq + 1);
     }
     let mut ber = BerCollector::new(
-        vec![0xff, 0],
+        RESIDUAL_BER_DEFAULT_PATTERN.to_vec(),
         64,
-        true,
         Duration::from_secs(1),
         now,
         [Some(1.0), Some(1.0)],
@@ -394,7 +393,6 @@ fn process_response(
                         .is_some_and(|t| t.hmac.permits_measurements()),
                     &ber.pattern,
                     ber.summary.padding_bytes,
-                    ber.want_burst,
                 );
             }
 
@@ -497,7 +495,6 @@ fn process_response(
                     .is_some_and(|t| t.hmac.permits_measurements()),
                 &ber.pattern,
                 ber.summary.padding_bytes,
-                ber.want_burst,
             );
         }
 

@@ -494,13 +494,13 @@ Reflector: send Return Address replies to the requested address (RFC 9503 §4.1.
 .SH "BIT ERROR RATE"
 .TP
 \fB\-\-ber\fR
-Enable the BER TLVs (draft\-gandhi\-ippm\-stamp\-ber\-07): Bit Pattern in Padding (Type 240), Bit Error Count (Type 241), and Max Bit Error Burst Size (Type 242). Sender\-side only; the reflector computes the counts against the incoming Extra Padding
+Enable successor Residual BER in Padding (draft\-ietf\-bpm\-stamp\-ber\-01). Uses experimental outer Type 243 and optional pattern sub\-TLV Type 241. Both peers must agree on this format; legacy Types 240–242 are retired. Sender\-side only; the reflector measures and repairs Extra Padding
 .TP
 \fB\-\-ber\-omit\-burst\fR
-Omit Max Bit Error Burst Size TLV (Type 242) from `\-\-ber` packets. This experimental codepoint (RFC 8972 §5.1) conflicts with another implementation\*(Aqs incompatible Heartbeat TLV. Other BER TLVs are unchanged. Ignored unless `\-\-ber` is set
+Retired legacy BER workaround. Remove this option: the successor always carries a maximum\-burst field inside its combined TLV. Supplying this option is a configuration error
 .TP
 \fB\-\-ber\-pattern\fR \fI<HEX>\fR
-Bit pattern used to fill the Extra Padding TLV when `\-\-ber` is set. Hex string (e.g. "ff00" or "aa55"). Defaults to the draft\*(Aqs recommended pattern (0xFF00). Ignored unless `\-\-ber` is set
+Bit pattern used to fill the Extra Padding TLV when `\-\-ber` is set. Hex string of at least four bytes (e.g. "ff00ff00" or "aa55aa55"). Defaults to 0xFF00FF00; omission uses no explicit pattern sub\-TLV. Ignored unless `\-\-ber` is set
 .TP
 \fB\-\-ber\-padding\-size\fR \fI<BER_PADDING_SIZE>\fR [default: 64]
 Padding length in bytes for the Extra Padding TLV that accompanies the BER TLVs. Ignored unless `\-\-ber` is set

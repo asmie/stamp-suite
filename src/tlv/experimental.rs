@@ -21,6 +21,15 @@ pub const BER_COUNT_TLV_TYPE: u8 = 241;
 /// Replace this constant when IANA assigns the TLV's codepoint.
 pub const BER_MAX_BURST_TLV_TYPE: u8 = 242;
 
+/// Residual BER in Padding, draft-ietf-bpm-stamp-ber-01 §4 (TBA1).
+/// Local experimental outer type; peers must agree on this revision/allocation.
+/// Legacy outer Types 240–242 are retired, never reinterpreted as this format.
+pub const RESIDUAL_BER_TLV_TYPE: u8 = 243;
+
+/// Bit Pattern in Padding sub-TLV, draft-ietf-bpm-stamp-ber-01 §4.1 (TBA2).
+/// This is in the separate sub-TLV registry, not the retired outer Type 241.
+pub const RESIDUAL_BER_PATTERN_SUBTLV_TYPE: u8 = 241;
+
 /// Reflected IPv6 Extension Header Data TLV
 /// (draft-ietf-ippm-stamp-ext-hdr-26 §§4.1, 4.2).
 /// Experimental Type 246 stands in for TBA1. Replace when IANA assigns it;

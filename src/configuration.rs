@@ -1031,10 +1031,10 @@ pub struct Configuration {
     )]
     pub max_sessions: u32,
 
-    /// Enable the BER TLVs (draft-gandhi-ippm-stamp-ber-07):
-    /// Bit Pattern in Padding (Type 240), Bit Error Count (Type 241), and
-    /// Max Bit Error Burst Size (Type 242). Sender-side only; the reflector
-    /// computes the counts against the incoming Extra Padding.
+    /// Enable successor Residual BER in Padding (draft-ietf-bpm-stamp-ber-01).
+    /// Uses experimental outer Type 243 and optional pattern sub-TLV Type 241.
+    /// Both peers must agree on this format; legacy Types 240–242 are retired.
+    /// Sender-side only; the reflector measures and repairs Extra Padding.
     #[clap(long, help_heading = "Bit Error Rate", hide_short_help = true)]
     pub ber: bool,
 
@@ -1050,10 +1050,9 @@ pub struct Configuration {
     )]
     pub extra_padding: Option<usize>,
 
-    /// Omit Max Bit Error Burst Size TLV (Type 242) from `--ber` packets.
-    /// This experimental codepoint (RFC 8972 §5.1) conflicts with another
-    /// implementation's incompatible Heartbeat TLV. Other BER TLVs are unchanged.
-    /// Ignored unless `--ber` is set.
+    /// Retired legacy BER workaround. Remove this option: the successor
+    /// always carries a maximum-burst field inside its combined TLV.
+    /// Supplying this option is a configuration error.
     #[clap(long, help_heading = "Bit Error Rate", hide_short_help = true)]
     pub ber_omit_burst: bool,
 
@@ -1064,8 +1063,8 @@ pub struct Configuration {
     pub tlv_hmac: TlvHmacMode,
 
     /// Bit pattern used to fill the Extra Padding TLV when `--ber` is set.
-    /// Hex string (e.g. "ff00" or "aa55"). Defaults to the draft's recommended
-    /// pattern (0xFF00). Ignored unless `--ber` is set.
+    /// Hex string of at least four bytes (e.g. "ff00ff00" or "aa55aa55").
+    /// Defaults to 0xFF00FF00; omission uses no explicit pattern sub-TLV. Ignored unless `--ber` is set.
     #[clap(
         long,
         value_name = "HEX",
@@ -1695,9 +1694,19 @@ impl Configuration {
             )));
         }
 
+        if self.ber_omit_burst {
+            return Err(invalid("ber_omit_burst is retired: remove --ber-omit-burst / ber_omit_burst; successor BER always carries the burst field"));
+        }
         if self.ber {
-            let pattern = crate::ber::parse_pattern(self.ber_pattern.as_deref().unwrap_or("ff00"))
-                .map_err(|e| invalid(format!("Invalid --ber-pattern: {e}")))?;
+            let pattern =
+                crate::ber::parse_pattern(self.ber_pattern.as_deref().unwrap_or("ff00ff00"))
+                    .map_err(|e| invalid(format!("Invalid --ber-pattern: {e}")))?;
+            if pattern.len() < 4 {
+                return Err(invalid("successor BER requires a pattern of at least four bytes; repeat a legacy pattern explicitly (for example aa55aa55)"));
+            }
+            if pattern.len() > usize::from(u16::MAX) - 12 {
+                return Err(invalid("BER pattern exceeds the combined TLV length field"));
+            }
             if self.ber_padding_size == 0 || !self.ber_padding_size.is_multiple_of(pattern.len()) {
                 return Err(invalid(
                     "ber_padding_size must be positive and a multiple of the pattern length",
@@ -2726,13 +2735,13 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "reflector_shutdown_grace_ms": { "type": "integer", "minimum": 0, "maximum": 60000 },
     "max_sessions": { "type": "integer", "minimum": 0 },
     "ber": { "type": "boolean" },
-    "ber_pattern": { "type": "string", "pattern": "^(0x)?([0-9a-fA-F]{2})+$" },
+    "ber_pattern": { "type": "string", "pattern": "^(0x)?([0-9a-fA-F]{2}){4,}$" },
     "ber_padding_size": { "type": "integer", "minimum": 0, "maximum": 65347 },
     "extra_padding": { "type": "integer", "minimum": 0, "maximum": 65347 },
     "ber_interval": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
     "ber_bit_threshold": { "type": "number", "minimum": 0, "maximum": 1000000 },
     "ber_packet_threshold": { "type": "number", "minimum": 0, "maximum": 1000000 },
-    "ber_omit_burst": { "type": "boolean" },
+    "ber_omit_burst": { "type": "boolean", "const": false },
     "tlv_hmac": { "type": "string", "enum": ["auto", "on", "off"] },
     "reflected_control_count": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "reflected_control_length": { "type": "integer", "minimum": 0, "maximum": 65535 },

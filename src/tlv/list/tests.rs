@@ -79,10 +79,10 @@ proptest::proptest! {
         let mut list = TlvList::new();
         list.push(RawTlv::new(TlvType::ExtraPadding, padding)).unwrap();
         list.push(RawTlv::new(TlvType::ClassOfService, vec![0; 4])).unwrap();
-        if ber { list.push(RawTlv::new(TlvType::BerCount, vec![0; 4])).unwrap(); }
+        if ber { list.push(RawTlv::new(TlvType::ResidualBer, vec![0; 8])).unwrap(); }
         list.set_hmac(&key, &seq);
         let bytes = list.to_bytes();
-        let prefix = if ber { 16 } else { bytes.len() - 20 };
+        let prefix = if ber { 20 } else { bytes.len() - 20 };
         let expected = key.compute(&[seq.as_slice(), &bytes[..prefix]].concat());
         proptest::prop_assert_eq!(&list.hmac_tlv().unwrap().value, &expected.to_vec());
         let mut parsed = TlvList::parse(&bytes).unwrap();
@@ -1350,7 +1350,7 @@ fn test_micro_session_id_tlv_type_recognized() {
 fn padding_before_hmac_keeps_received_order_with_ber() {
     let mut wire = Vec::new();
     for (kind, value) in [
-        (TlvType::BerPattern.to_byte(), vec![0xff, 0]),
+        (TlvType::ResidualBer.to_byte(), vec![0; 8]),
         (TlvType::ExtraPadding.to_byte(), vec![0xff, 0]),
         (TlvType::Hmac.to_byte(), vec![7; 16]),
     ] {

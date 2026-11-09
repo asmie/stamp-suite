@@ -74,7 +74,7 @@ def extensions(app, names, ip, p):
         'destination': ['--dest-node-addr', ip], 'return': ['--return-address', ip],
         'dm': ['--direct-measurement'], 'micro': ['--micro-session-id', '7'],
         'control': ['--reflected-control-count', '3', '--reflected-control-interval-ns', '20000000'],
-        'ber': ['--ber', '--ber-pattern', 'aa55', '--ber-padding-size', '64'],
+        'ber': ['--ber', '--ber-pattern', 'aa55aa55', '--ber-padding-size', '64'],
         'fixed': ['--reflected-fixed-hdr'], 'hmac': ['--tlv-hmac', 'on'],
         'badflags': ['--malformed', 'bad-flags'], 'badlength': ['--malformed', 'bad-length'],
         'alternate': ['--return-address', '127.0.0.2'],

@@ -97,7 +97,7 @@ Set `STAMP_NETNS_CAPTURE_DIR` to a directory to keep each completed pcap (see
 | 4b | `scenario_4b_ext_hdr_pnet_capture` | draft-ietf-ippm-stamp-ext-hdr-26 §4.1 and §4.2: the pnet backend captures an injected 16-byte Destination Options header and returns it in the Type 246 value with C clear (checked from offset 8). |
 | 5 | `scenario_5_address_group_filters` | RFC 10052 §3.1.1 and §3.1.2: a matching L2 (own MAC) or L3 (own prefix) Address Group gets a reply; a non-matching one drops the packet. |
 | 6 | `scenario_6_type12_multi_reply` | RFC 10052 §3: several reply copies on the wire, within the requested and capped count, spaced about the requested interval, padded beyond the base length. |
-| 7 | `scenario_7_ber_onwire` | draft-gandhi-ippm-stamp-ber-07 §4: the bit pattern (0xFF00) fills the Extra Padding TLV on the wire, and the reflector's Bit Error Count is 0 on a clean link. |
+| 7 | `scenario_7_ber_onwire` | draft-ietf-bpm-stamp-ber-01 §5: the bit pattern (0xFF00FF00) fills the Extra Padding TLV on the wire, and the reflector's Bit Error Count is 0 on a clean link. |
 | 8 | `scenario_8_ttl_egress_marking` | draft-ietf-ippm-stamp-ext-hdr-26 §3.1: outgoing test packets carry IP TTL 255. |
 
 ## Building the pnet reflector for scenario 4b

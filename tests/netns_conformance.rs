@@ -766,7 +766,7 @@ fn scenario_7_ber_onwire() {
         "2",
         "--ber",
         "--ber-pattern",
-        "ff00",
+        "ff00ff00",
         "--ber-padding-size",
         "64",
     ];
@@ -804,8 +804,13 @@ fn scenario_7_ber_onwire() {
         .first()
         .expect("a reflected reply on the wire");
     let reply_tlvs = reply_tlvs(&reply.payload).expect("parse reflected TLVs");
-    let count = find_tlv(&reply_tlvs, TlvType::BerCount).expect("BER Count TLV present in reply");
-    assert_eq!(count.value.len(), 4, "BER Count TLV value is a u32");
+    let count =
+        find_tlv(&reply_tlvs, TlvType::ResidualBer).expect("BER Count TLV present in reply");
+    assert_eq!(
+        count.value.len(),
+        16,
+        "combined fixed fields and pattern sub-TLV"
+    );
     let errors = u32::from_be_bytes([
         count.value[0],
         count.value[1],

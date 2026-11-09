@@ -1,3 +1,6 @@
+//! Retired legacy serialization helper. Endpoints do not recognize this wire type.
+//! Active BER uses `ResidualBerValue` (BPM BER-01).
+//!
 //! BER pattern TLV (Type 240), draft-gandhi-ippm-stamp-ber-07 §5.1.
 //! Describes the repeated Extra Padding pattern used for error counts and
 //! burst sizes. Omission selects 0xFF00; an empty value gets C and does

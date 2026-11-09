@@ -2,16 +2,16 @@
 
 use crate::ber::xor_popcount_and_max_burst;
 use crate::tlv::core::{
-    RawTlv, TlvFlags, TlvSpan, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE, BER_BURST_TLV_VALUE_SIZE,
-    BER_COUNT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
-    FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE, LOCATION_TLV_MIN_VALUE_SIZE,
-    REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE,
-    TIMESTAMP_INFO_TLV_VALUE_SIZE, TLV_HEADER_SIZE,
+    RawTlv, TlvFlags, TlvSpan, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE,
+    DIRECT_MEASUREMENT_TLV_VALUE_SIZE, FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE,
+    LOCATION_TLV_MIN_VALUE_SIZE, REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL,
+    REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE, TIMESTAMP_INFO_TLV_VALUE_SIZE, TLV_HEADER_SIZE,
 };
 use crate::tlv::{
     ClassOfServiceTlv, DestinationNodeAddressTlv, LocationDisclosure, LocationSubType,
-    MicroSessionIdTlv, PacketAddressInfo, ReflectedControlTlv, ReturnPathAction, ReturnPathTlv,
-    SegmentList, SyncSource, TimestampMethod, TypedTlv, BER_DEFAULT_PATTERN,
+    MicroSessionIdTlv, PacketAddressInfo, ReflectedControlTlv, ResidualBerValue, ReturnPathAction,
+    ReturnPathTlv, SegmentList, SyncSource, TimestampMethod, TypedTlv,
+    RESIDUAL_BER_DEFAULT_PATTERN, RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
 };
 
 use super::TlvList;
@@ -622,157 +622,163 @@ impl TlvList {
         }
     }
 
-    /// Measures and repairs BER padding (draft-gandhi-ippm-stamp-ber-07 §4.2).
-    /// Invalid multiplicity or pattern alignment is reflected with C=1.
+    /// Measure and repair successor BER padding (BPM BER-01 §§4–5.2.1).
+    /// This runs after HMAC admission, before other semantic TLV processing.
     pub fn process_ber(&mut self) {
-        // Locate indices in self.non_hmac_tlvs()
-        let mut padding_count = 0usize;
-        let mut padding_idx: Option<usize> = None;
-        let mut pattern_count = 0usize;
-        let mut pattern_idx: Option<usize> = None;
-        let mut count_count = 0usize;
-        let mut count_idx: Option<usize> = None;
-        let mut burst_count = 0usize;
-        let mut burst_idx: Option<usize> = None;
-
-        for (i, tlv) in self.non_hmac_tlvs().iter().enumerate() {
-            if !tlv.is_processable() {
-                continue;
-            }
-            match tlv.tlv_type {
-                TlvType::ExtraPadding => {
-                    padding_count += 1;
-                    if padding_idx.is_none() {
-                        padding_idx = Some(i);
-                    }
-                }
-                TlvType::BerPattern => {
-                    pattern_count += 1;
-                    if pattern_idx.is_none() {
-                        pattern_idx = Some(i);
-                    }
-                }
-                TlvType::BerCount => {
-                    count_count += 1;
-                    if count_idx.is_none() {
-                        count_idx = Some(i);
-                    }
-                }
-                TlvType::BerBurst => {
-                    burst_count += 1;
-                    if burst_idx.is_none() {
-                        burst_idx = Some(i);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // No BER TLVs at all → nothing to do.
-        if count_idx.is_none() && burst_idx.is_none() && pattern_idx.is_none() {
+        let ber_indices: Vec<_> = self
+            .non_hmac_tlvs()
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.tlv_type == TlvType::ResidualBer)
+            .map(|(i, _)| i)
+            .collect();
+        if !ber_indices
+            .iter()
+            .any(|&i| self.non_hmac_tlvs()[i].is_processable())
+        {
             return;
         }
-
-        // draft-gandhi-ippm-stamp-ber-07 §4.2.1: invalid multiplicity is a
-        // conformance error.
-        let has_duplicate = pattern_count > 1 || count_count > 1 || burst_count > 1;
-
-        // draft-gandhi-ippm-stamp-ber-07 §4.2.1 requires exactly one Extra Padding TLV.
-        // Treat missing-or-duplicate Extra Padding as a protocol error too.
-        let padding_invalid = padding_count != 1;
-
-        if has_duplicate || padding_invalid {
+        let padding_indices: Vec<_> = self
+            .non_hmac_tlvs()
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.tlv_type == TlvType::ExtraPadding)
+            .map(|(i, _)| i)
+            .collect();
+        if ber_indices.len() != 1 || padding_indices.len() != 1 {
             Self::mark_ber_tlvs_nonconformant(self.non_hmac_tlvs_mut());
-
             return;
         }
-
-        // Borrow distinct owners directly: scan and repair without cloning the pattern.
-        let (count, max_burst, aligned) = {
-            let (pattern, padding) = self.ber_padding_slices(padding_idx.unwrap(), pattern_idx);
-            let aligned = !pattern.is_empty() && padding.len() % pattern.len() == 0;
-            if aligned {
-                let (count, burst) = xor_popcount_and_max_burst(padding, pattern);
-                for (i, byte) in padding.iter_mut().enumerate() {
-                    *byte = pattern[i % pattern.len()];
+        let ber = ber_indices[0];
+        let padding = padding_indices[0];
+        if !self.non_hmac_tlvs()[padding].is_processable() {
+            return;
+        }
+        // Normalize only complete nested TLVs up to the first malformed
+        // boundary. Whole-value decoding alone would lose the processed prefix
+        // when a later sub-TLV is truncated.
+        let mut pattern_count = 0;
+        let mut malformed = false;
+        let mut framing_error = false;
+        {
+            let raw = &mut self.non_hmac_tlvs_mut()[ber];
+            if raw.value.len() < 8 || raw.value.len() > usize::from(u16::MAX) {
+                if raw.value.len() < 8 {
+                    raw.set_conformant_reflected();
                 }
-                (count, burst, true)
+                raw.set_malformed();
+                framing_error = true;
             } else {
-                (0, 0, false)
-            }
-        };
-        if !aligned {
-            if pattern_idx.is_none() {
-                Self::mark_ber_tlvs_nonconformant(self.non_hmac_tlvs_mut());
-            }
-            for tlv in self.non_hmac_tlvs_mut() {
-                if tlv.tlv_type == TlvType::BerPattern && tlv.is_processable() {
-                    tlv.set_conformant_reflected();
+                let mut offset = 8;
+                while offset < raw.value.len() {
+                    if raw.value.len() - offset < TLV_HEADER_SIZE {
+                        raw.set_malformed();
+                        framing_error = true;
+                        break;
+                    }
+                    let known = raw.value[offset + 1] == RESIDUAL_BER_PATTERN_SUBTLV_TYPE;
+                    let length = usize::from(u16::from_be_bytes([
+                        raw.value[offset + 2],
+                        raw.value[offset + 3],
+                    ]));
+                    let flags = if known { 0 } else { TlvFlags::U };
+                    if length > raw.value.len() - offset - TLV_HEADER_SIZE {
+                        raw.value[offset] = flags | TlvFlags::M;
+                        raw.set_malformed();
+                        framing_error = true;
+                        break;
+                    }
+                    if known {
+                        pattern_count += 1;
+                        if length < 4 {
+                            raw.value[offset] = TlvFlags::M;
+                            malformed = true;
+                            break;
+                        }
+                    }
+                    raw.value[offset] = flags;
+                    offset += TLV_HEADER_SIZE + length;
                 }
             }
+            if pattern_count > 1 {
+                raw.set_conformant_reflected();
+            }
+        }
+        if framing_error {
+            self.mark_unprocessed_after_malformed();
             return;
         }
-
-        if let Some(i) = count_idx {
-            Self::write_ber_count(&mut self.non_hmac_tlvs_mut()[i], count);
+        if malformed || pattern_count > 1 {
+            return;
         }
-        if let Some(i) = burst_idx {
-            Self::write_ber_burst(&mut self.non_hmac_tlvs_mut()[i], max_burst);
+        let value = ResidualBerValue::decode_value(&self.non_hmac_tlvs()[ber].value)
+            .expect("nested framing validated above");
+        let pattern = value
+            .explicit_pattern(RESIDUAL_BER_PATTERN_SUBTLV_TYPE)
+            .expect("pattern size and multiplicity checked")
+            .unwrap_or(&RESIDUAL_BER_DEFAULT_PATTERN);
+        let pad = &mut self.non_hmac_tlvs_mut()[padding].value;
+        if !pad.len().is_multiple_of(pattern.len()) {
+            self.non_hmac_tlvs_mut()[ber].set_conformant_reflected();
+            return;
         }
+        let (count, burst) = xor_popcount_and_max_burst(pad, pattern);
+        for (i, byte) in pad.iter_mut().enumerate() {
+            *byte = pattern[i % pattern.len()];
+        }
+        let raw = &mut self.non_hmac_tlvs_mut()[ber];
+        raw.value[..4].copy_from_slice(&count.to_be_bytes());
+        raw.value[4..8].copy_from_slice(&burst.to_be_bytes());
     }
 
-    /// Keep repaired BER padding after another extension resizes the reply.
-    /// Changed lengths invalidate the forward count's denominator.
+    /// Reapply the validated pattern after another extension resizes padding.
+    /// A changed denominator invalidates the forward sample with C.
     pub fn finish_ber_padding(&mut self, original_len: Option<usize>) {
-        if !self.has_ber {
-            return;
-        }
-        if self.non_hmac_tlvs().iter().any(|t| {
-            crate::ber::is_ber(t.tlv_type)
-                && (t.flags.conformant_reflected
-                    || t.is_unrecognized()
-                    || t.is_malformed()
-                    || t.is_integrity_failed())
-        }) {
-            return;
-        }
-        let pattern_idx = self
+        let Some(ber) = self
             .non_hmac_tlvs()
             .iter()
-            .position(|t| t.tlv_type == TlvType::BerPattern);
-        if pattern_idx.is_some_and(|i| self.non_hmac_tlvs()[i].value.is_empty()) {
+            .position(|t| t.tlv_type == TlvType::ResidualBer)
+        else {
+            return;
+        };
+        let raw = &self.non_hmac_tlvs()[ber];
+        if !raw.is_processable() || raw.flags.conformant_reflected {
             return;
         }
-        let length = self
+        let Ok(value) = ResidualBerValue::decode_value(&raw.value) else {
+            return;
+        };
+        if value
+            .sub_tlvs
+            .iter()
+            .any(|s| s.flags & (TlvFlags::M | TlvFlags::I | TlvFlags::C) != 0)
+        {
+            return;
+        }
+        let Ok(pattern) = value.explicit_pattern(RESIDUAL_BER_PATTERN_SUBTLV_TYPE) else {
+            return;
+        };
+        let pattern = pattern.unwrap_or(&RESIDUAL_BER_DEFAULT_PATTERN);
+        let Some(padding) = self
             .non_hmac_tlvs()
             .iter()
-            .find(|t| t.tlv_type == TlvType::ExtraPadding)
-            .map(|t| t.value.len());
-        if length != original_len {
-            Self::mark_ber_tlvs_nonconformant(self.non_hmac_tlvs_mut());
+            .position(|t| t.tlv_type == TlvType::ExtraPadding)
+        else {
+            self.non_hmac_tlvs_mut()[ber].set_conformant_reflected();
+            return;
+        };
+        if !self.non_hmac_tlvs()[padding].is_processable() {
+            return;
         }
-        for index in 0..self.non_hmac_len {
-            if self.non_hmac_tlvs()[index].tlv_type == TlvType::ExtraPadding {
-                let (pattern, padding) = self.ber_padding_slices(index, pattern_idx);
-                for (i, byte) in padding.iter_mut().enumerate() {
-                    *byte = pattern[i % pattern.len()];
-                }
-            }
+        if Some(self.non_hmac_tlvs()[padding].value.len()) != original_len {
+            self.non_hmac_tlvs_mut()[ber].set_conformant_reflected();
         }
-    }
-
-    fn ber_padding_slices(&mut self, padding: usize, pattern: Option<usize>) -> (&[u8], &mut [u8]) {
-        let tlvs = self.non_hmac_tlvs_mut();
-        match pattern {
-            None => (BER_DEFAULT_PATTERN.as_slice(), &mut tlvs[padding].value),
-            Some(pattern) if pattern < padding => {
-                let (left, right) = tlvs.split_at_mut(padding);
-                (&left[pattern].value, &mut right[0].value)
-            }
-            Some(pattern) => {
-                let (left, right) = tlvs.split_at_mut(pattern);
-                (&right[0].value, &mut left[padding].value)
-            }
+        for (i, byte) in self.non_hmac_tlvs_mut()[padding]
+            .value
+            .iter_mut()
+            .enumerate()
+        {
+            *byte = pattern[i % pattern.len()];
         }
     }
 
@@ -1068,25 +1074,11 @@ impl TlvList {
     }
 
     fn mark_ber_tlvs_nonconformant(tlvs: &mut [RawTlv]) {
-        for tlv in tlvs.iter_mut().filter(|tlv| tlv.is_processable()) {
-            if matches!(
-                tlv.tlv_type,
-                TlvType::BerPattern | TlvType::BerCount | TlvType::BerBurst
-            ) {
-                tlv.set_conformant_reflected();
-            }
-        }
-    }
-
-    fn write_ber_count(tlv: &mut RawTlv, count: u32) {
-        if tlv.value.len() == BER_COUNT_TLV_VALUE_SIZE {
-            tlv.value.copy_from_slice(&count.to_be_bytes());
-        }
-    }
-
-    fn write_ber_burst(tlv: &mut RawTlv, burst: u32) {
-        if tlv.value.len() == BER_BURST_TLV_VALUE_SIZE {
-            tlv.value.copy_from_slice(&burst.to_be_bytes());
+        for tlv in tlvs
+            .iter_mut()
+            .filter(|t| t.is_processable() && t.tlv_type == TlvType::ResidualBer)
+        {
+            tlv.set_conformant_reflected();
         }
     }
 

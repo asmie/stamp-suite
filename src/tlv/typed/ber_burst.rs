@@ -1,3 +1,6 @@
+//! Retired legacy serialization helper. Endpoints do not recognize this wire type.
+//! Active BER uses `ResidualBerValue` (BPM BER-01).
+//!
 //! BER Max Bit Error Burst Size TLV (Type 242)
 //! per draft-gandhi-ippm-stamp-ber-07 §5.3.
 //!

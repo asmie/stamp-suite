@@ -164,6 +164,13 @@ than the original timestamp. Follow-Up does not replace the original OWD summary
 
 ## Integrity and BER
 
+Active BER uses the combined successor TLV (experimental Type 243) and its
+optional pattern sub-TLV (Type 241), with a default four-byte FF00FF00 pattern.
+Parent and nested U/M/I/C checks apply before observations. A nonzero error
+count with zero maximum burst retains its bit/packet error sample but records
+no burst sample; unavailable burst maxima/averages remain null. Legacy outer
+Types 240–242 are not interpreted. See [migration guidance](ber-migration.md).
+
 DM and Follow-Up require a unique usable TLV of their type. U skips a value,
 M stops processing the remainder, and any I flag blocks all values. Bad lengths
 stop subsequent value processing. If a key is configured, a verified HMAC TLV

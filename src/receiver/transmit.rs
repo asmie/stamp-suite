@@ -454,6 +454,16 @@ fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> i
             .iter()
             .rposition(|(tlv, _)| is_reflected_header(tlv) && tlv.flags.processed())
         else {
+            // After exhausting optional header TLVs, BER can still fit by
+            // reducing padding in whole repetitions. Re-enter once with no
+            // processed header TLVs, preserving mandatory/opaque fields.
+            if !controlled && has_ber(data, base) {
+                data.truncate(base);
+                for (_, bytes) in tlvs {
+                    data.extend_from_slice(&bytes);
+                }
+                return fit_reply(data, base, cap, false);
+            }
             return Err(cannot_fit());
         };
         size -= tlvs.remove(index).1.len();
