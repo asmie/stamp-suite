@@ -13,6 +13,10 @@ Exit nonzero for stale citations. Checks:
 - Bare file paths: must exist; filenames must resolve uniquely.
 - `path.rs:N[-M]`: range must overlap a preceding named item's extent.
   No overlap is stale; no matching definition is unverifiable.
+
+Also inventories explicit test references on normative Compliant clauses.
+Missing test references are advisory until --require-test-evidence is enabled.
+Source presence does not establish semantic coverage, execution or a pass.
 """
 import argparse
 import glob
@@ -22,10 +26,13 @@ import re
 import sys
 from collections import Counter
 
+from conformance_test_evidence import inventory
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 parser.add_argument("--json", action="store_true")
 parser.add_argument("--details", action="store_true", help="include all citations, including unverified evidence")
+parser.add_argument("--require-test-evidence", action="store_true", help="fail on normative Compliant rows without explicit test references (advisory by default)")
 args = parser.parse_args()
 ROOT = os.path.abspath(args.root)
 CITE = re.compile(r'([A-Za-z0-9_./-]+\.rs):(\d+)(?:-(\d+))?')
@@ -228,17 +235,30 @@ for md in sorted(glob.glob(os.path.join(ROOT, "doc/conformance/*.md"))):
                 rec["suggest"] = list(ex) if hi != lo else [d, d]
             rows.append(rec)
 
+test_evidence = inventory(ROOT, paths, resolve, scope,
+                          sorted(glob.glob(os.path.join(ROOT, "doc/conformance/*.md"))))
+rows.extend(test_evidence['invalid_references'])
 c = Counter(r["status"] for r in rows)
-FAILING = ("STALE", "OUT-OF-RANGE", "unresolved", "missing-item", "misattributed")
+FAILING = ("STALE", "OUT-OF-RANGE", "unresolved", "missing-item", "misattributed", "invalid-test-reference")
 stale = [r for r in rows if r["status"] in FAILING]
+test_evidence['required'] = args.require_test_evidence
+test_problems = [dict(md=r['md'], md_line=r['md_line'], cite=r['clause'],
+                      status='missing-test-evidence') for r in test_evidence['missing']] if args.require_test_evidence else []
+problems = stale + test_problems
 
 if args.json:
-    report = {"counts": dict(c), "problems": stale}
+    report = {"counts": dict(c), "problems": problems, "test_evidence": test_evidence}
     if args.details:
         report["citations"] = rows
+    else:
+        test_evidence.pop('clauses')
     print(json.dumps(report, indent=1))
 else:
     print(f"citations examined: {len(rows)}")
+    print(f"normative Compliant rows: {test_evidence['counts']}")
+    print("test references establish source presence only; execution/semantic coverage is not checked")
+    for clause in test_evidence['missing']:
+        print(f"  MISSING TEST {clause['md']}:{clause['md_line']} {clause['clause']}")
     for k in ("ok", "unverifiable") + FAILING:
         if c.get(k):
             print(f"  {c[k]:4d}  {k}")
@@ -246,9 +266,11 @@ else:
         detail = f" (anchor `{r['anchor']}` is at {r.get('anchor_def')})" if r.get("anchor") else ""
         if r.get("defined_in") is not None:
             detail = f" (defined in {', '.join(r['defined_in']) or 'no source file'})"
+        if r.get("reason"):
+            detail += f" ({r['reason']})"
         print(f"\n{r['status'].upper()} {r['md']}:{r['md_line']}  {r['cite']}{detail}")
         if r.get("suggest"):
             print(f"        suggested: {r['cite'].split(':')[0]}:"
                   f"{r['suggest'][0]}-{r['suggest'][1]}")
 
-sys.exit(1 if stale else 0)
+sys.exit(1 if problems else 0)

@@ -127,9 +127,19 @@ python3 scripts/check_conformance_citations.py --json --details
 
 `check_conformance_counts.py` checks that each matrix's summary and the
 README totals match its clause rows. `check_conformance_citations.py` checks
-that every cited file, item and line range still exists in the source. Run
+that every cited file, item and line range still exists in the source. It also
+reports normative Compliant rows lacking explicit test references. That backlog
+is advisory while it is reviewed; stale references still fail. Run
 both after renaming or moving code that a matrix cites, and after changing a
 clause row.
+
+Use a named annotated test or a dedicated test suite, and identify wire drivers
+with `Wire test:` followed by their qualified Python function. A helper or data
+file alone is not test evidence. Source recognition does not prove execution,
+correct assertions or the claimed production path; review those separately.
+See [test-evidence policy and rollout](doc/conformance/test-evidence.md).
+`--require-test-evidence` enables whole-backlog enforcement for an audit; CI
+will enable it only after the remaining rows have been reviewed and resolved.
 
 `scripts/check_standards.py` compares the frozen RFC and draft revisions with
 the published ones. [doc/release-evidence.md](doc/release-evidence.md)

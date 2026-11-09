@@ -44,6 +44,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Report missing test references for normative Compliant conformance rows,
+  with an explicit policy and optional strict enforcement. Review BER, HMAC
+  and admission evidence; score three header-MTU Both-role claims Partial
+  until sender dispatch coverage matches the tested reflector paths.
+
 - Count outstanding sequence-reuse retirements once and ignore stale expiry
   entries for older generations, preserving packet-loss accounting at wrap.
 

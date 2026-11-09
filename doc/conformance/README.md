@@ -16,9 +16,9 @@ certify untested behavior.
 | [RFC 8545](rfc8545.md): OWAMP/TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [RFC 10052](draft-asymmetrical-pkts.md): Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -02, 2 November 2026 | 30 | 17 | 4 | 0 | 9 | 0 |
-| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 64 | 8 | 0 | 3 | 0 |
+| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 61 | 11 | 0 | 3 | 0 |
 | [draft-ietf-bpm-stamp-ber](draft-stamp-ber.md): Residual BER | -01, 2 November 2026 | 54 | 48 | 4 | 1 | 1 | 0 |
-| **Total** | | **471** | **393** | **25** | **2** | **48** | **3** |
+| **Total** | | **471** | **390** | **28** | **2** | **48** | **3** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).
@@ -80,7 +80,7 @@ not runtime evidence. Historical reports remain tied to their recorded commit.
 | Session admission | The default is permissive. RFC 8972 admission/provisioning rows are Compliant only with `--session-admission provisioned`; installing a key does not provision a session. | [RFC 8972 scope](rfc8972.md#scope), [provisioning](../usage.md#session-provisioning) |
 | Micro-sessions and LAG | Numeric IDs are encoded, checked and learned. Physical member association, egress steering and ingress-member validation are absent. Sender port-pair sharing is not demonstrated by reflector demultiplexing. Eight rows remain Partial and one Gap. | [RFC 9534](rfc9534.md), [sender reply validation](rfc9534.md#sender-reply-validation) |
 | Header reflection | Both header types require explicit sender-IP disclosure permission. Linux nix can reflect Type 246 ancillary headers; fixed/nested headers (Type 247) need pnet. macOS nix and reverse-path header attachment return C. All-features selects nix. Revision 26's conflicting repeated-selector examples remain Partial. | [Backend support](draft-stamp-ext-hdr.md#backend-support), [revision interpretation](draft-stamp-ext-hdr.md#revision-26-interpretation) |
-| MTU | Linux sender/reflector sizing uses a kernel route lookup, not end-to-end PMTU probing. Other platforms have fixed sender budgets; size-controlled/header replies needing a route budget are dropped. BER platform sizing remains Partial. | [RFC 10052 sizing](draft-asymmetrical-pkts.md#reply-size-and-route-mtu), [BER matrix](draft-stamp-ber.md) |
+| MTU | Linux sender/reflector sizing uses a kernel route lookup, not end-to-end PMTU probing. Other platforms have fixed sender budgets; size-controlled/header replies needing a route budget are dropped. Three reflected-header MTU rows remain Partial because sender dispatch coverage is still at helper level. BER platform sizing remains Partial. | [RFC 10052 sizing](draft-asymmetrical-pkts.md#reply-size-and-route-mtu), [BER matrix](draft-stamp-ber.md), [test-evidence review](test-evidence.md) |
 | Return paths | IP/SRv6 support has explicit backend/route constraints. SR-MPLS is Excluded and receives U. A fallback reply is not evidence of successful SRH transit. | [RFC 9503 scope](rfc9503.md#scope), [privileged tests](../testing-netns.md) |
 | Management | AgentX is a read-only subagent and is not scored in these protocol matrices; SET is unsupported. A separate master is required. YANG management is not implemented and its expired draft is watch-only. | [Observability](../usage.md#observability), [AgentX](../architecture.md#snmp-agentx-sub-agent) |
 | BER | Four Partial rows cover zero-checksum validation, platform MTU, physical LAG and link-MTU filling; specific conformance-error logs/counters remain a SHOULD Gap. Wire tests use delivered software-loopback data with valid checksums, not raw-link/FEC error capture. A compatible maintained application peer remains unverified. | [BER matrix](draft-stamp-ber.md), [migration evidence](../interop/2026-11-09-ber/REPORT.md) |
@@ -143,6 +143,12 @@ updates to the summary and [Matrices](#matrices) table.
 Use `--json` for machine-readable output. Neither script checks protocol
 semantics: a citation that resolves can still describe the code wrongly, so
 rows need review when the code changes.
+
+The same checker inventories explicit test references on normative Compliant
+rows. Missing references are advisory during backlog review; invalid citations
+still fail. Recognizing a test declaration, including an ignored or gated test,
+does not establish runtime or semantic coverage. See the
+[policy, reviewed paths and remaining backlog](test-evidence.md).
 
 `check_doc_links.py` checks repository Markdown paths and heading/HTML anchors
 offline. External release URLs are classified separately; a missing local

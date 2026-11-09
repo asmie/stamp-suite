@@ -1,0 +1,981 @@
+{
+  "schema_version": 1,
+  "parent_commit": "3783462",
+  "working_tree": "Uncommitted T5c signing fix and regression fixtures; no commit made by the agent.",
+  "runs": [
+    {
+      "schema_version": 1,
+      "profile": "successor-ber-v1",
+      "started_utc": "2026-11-09T10:00:16.361581+00:00",
+      "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+      "python": "3.14.4",
+      "binary": "/home/asmie/projects/stamp-suite/target/debug/stamp-suite",
+      "binary_sha256": "8b99358bfc5f718f9fed592e36590e06ee2ad25935ab2efa84718ef47a2030d6",
+      "runner_sha256": "93e9af2841f41d1ebebc6cbecfbccad10f10919fee71023d65d9478a582acfd0",
+      "fixtures_sha256": "a2721f69b0baf9e9b86ef23cc543c041be5523733cbc07ae19021148d537dc01",
+      "expected_cases": 60,
+      "completed": true,
+      "passed": 60,
+      "failed": 0,
+      "build_features": "default",
+      "full_report_sha256": "dbe1dee60712750cf3e930d83d13e79e515ec223dd14b53fced75fcc918d8d5b",
+      "cases": [
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "open",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "open",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "keyed",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "keyed",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "auth",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "auth",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "profile": "successor-ber-v1",
+      "started_utc": "2026-11-09T10:02:09.466926+00:00",
+      "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+      "python": "3.14.4",
+      "binary": "/home/asmie/projects/stamp-suite/target/debug/stamp-suite",
+      "binary_sha256": "2d524e0c01b348d4d791a47e3564cdf517d9b557aa0ce1454a9afee8689fdb55",
+      "runner_sha256": "93e9af2841f41d1ebebc6cbecfbccad10f10919fee71023d65d9478a582acfd0",
+      "fixtures_sha256": "a2721f69b0baf9e9b86ef23cc543c041be5523733cbc07ae19021148d537dc01",
+      "expected_cases": 60,
+      "completed": true,
+      "passed": 60,
+      "failed": 0,
+      "build_features": "all",
+      "full_report_sha256": "ba9ca4c0c4dcc465ba1c3f3ad9fc39e80f418dbefcbf3c9dc988477cc7aed5fe",
+      "cases": [
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "127.0.0.1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "open",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "open",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "open",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "keyed",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "keyed",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "keyed",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "auth",
+          "stateful": false,
+          "passed": true
+        },
+        {
+          "role": "reflector",
+          "ip": "::1",
+          "mode": "auth",
+          "stateful": true,
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": false,
+          "behavior": "child-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "baseline",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "gates",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "parent-u",
+          "passed": true
+        },
+        {
+          "role": "sender",
+          "ip": "::1",
+          "mode": "auth",
+          "explicit": true,
+          "behavior": "child-u",
+          "passed": true
+        }
+      ]
+    }
+  ]
+}

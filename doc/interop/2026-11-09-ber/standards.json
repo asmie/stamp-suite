@@ -1,0 +1,120 @@
+{
+  "schema_version": 2,
+  "as_of": "2026-11-09",
+  "completed": true,
+  "mode": "live",
+  "checker_sha256": "b89373243e62ef599b94862e0a1518963798268f502fde8464b32e48868df4bd",
+  "manifest_sha256": "93800d6d25b694caad656ddbd62444f36d3dd6bdeb33116685a4b5b1f4771a61",
+  "documents": [
+    {
+      "name": "rfc10052",
+      "source": "https://www.rfc-editor.org/rfc/rfc10052.json",
+      "watch_only": false,
+      "sha256": "acce1d06aacdab590a6dd7bebdaba485b339abeaf2b45096b1a1ada2b1a872a2",
+      "status": "current",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "name": "draft-ietf-ippm-stamp-cos-ecn",
+      "source": "https://datatracker.ietf.org/doc/draft-ietf-ippm-stamp-cos-ecn/doc.json",
+      "watch_only": false,
+      "sha256": "693ea7ab025dec587c262680f1ac413d95395624755465ff5d111d44e4395b8b",
+      "status": "current",
+      "problems": [],
+      "warnings": [],
+      "successors": [],
+      "replacement_paths": []
+    },
+    {
+      "name": "draft-ietf-ippm-stamp-ext-hdr",
+      "source": "https://datatracker.ietf.org/doc/draft-ietf-ippm-stamp-ext-hdr/doc.json",
+      "watch_only": false,
+      "sha256": "b123e74ccdc931235b742e5b15e669b954fafe5dec613b5a160edead56582061",
+      "status": "current",
+      "problems": [],
+      "warnings": [],
+      "successors": [],
+      "replacement_paths": []
+    },
+    {
+      "name": "draft-ietf-bpm-stamp-ber",
+      "source": "https://datatracker.ietf.org/doc/draft-ietf-bpm-stamp-ber/doc.json",
+      "watch_only": false,
+      "sha256": "efe48e9fe15cadf92b019c813f666cf44a642ff5a8150f8a0c6ec74deb430d38",
+      "status": "current",
+      "problems": [],
+      "warnings": [],
+      "successors": [],
+      "replacement_paths": []
+    },
+    {
+      "name": "draft-ietf-ippm-stamp-yang",
+      "source": "https://datatracker.ietf.org/doc/draft-ietf-ippm-stamp-yang/doc.json",
+      "watch_only": true,
+      "sha256": "cd10e3c98aacc565b6f14ec7f5854e94d34ff07d1c9eeb5ddf7cf5c117a64eb2",
+      "status": "review",
+      "problems": [
+        "draft metadata expired on 2024-05-08"
+      ],
+      "warnings": [],
+      "successors": [],
+      "replacement_paths": []
+    },
+    {
+      "name": "rfc8762",
+      "source": "https://www.rfc-editor.org/rfc/rfc8762.json",
+      "watch_only": false,
+      "sha256": "8bc659835af5edecb06546a66f57a83002749cf71108ef9a0eacbff2c989a043",
+      "status": "current",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "name": "rfc8972",
+      "source": "https://www.rfc-editor.org/rfc/rfc8972.json",
+      "watch_only": false,
+      "sha256": "b57745b23c0b92987466ed15f2443347ca09cd55eab844269507e2d2582f556f",
+      "status": "current",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "name": "rfc9503",
+      "source": "https://www.rfc-editor.org/rfc/rfc9503.json",
+      "watch_only": false,
+      "sha256": "12173945f7c0e0905380561ec9228049ccef2b9398e83d1b6d2e94e6155d4ca1",
+      "status": "current",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "name": "rfc9534",
+      "source": "https://www.rfc-editor.org/rfc/rfc9534.json",
+      "watch_only": false,
+      "sha256": "c8eb639d3d2b77c530a3c97a56ce7b6fe9068d794996b51c93aeda5cccd476d8",
+      "status": "current",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "name": "rfc8545",
+      "source": "https://www.rfc-editor.org/rfc/rfc8545.json",
+      "watch_only": false,
+      "sha256": "1d9084646626490d594bd518674819e1ae4f63909e8c92d264787c7a8c446786",
+      "status": "current",
+      "problems": [],
+      "warnings": []
+    },
+    {
+      "name": "rfc2741",
+      "source": "https://www.rfc-editor.org/rfc/rfc2741.json",
+      "watch_only": false,
+      "sha256": "630eb91d0249b5c1b6cb033876f2d8e004084a0718a11fede41e1a7e021f671d",
+      "status": "current",
+      "problems": [],
+      "warnings": []
+    }
+  ],
+  "full_report_sha256": "5177bbef51285709139676bce61966d2e0c640b1d0fbb7c4094573efe576da40"
+}

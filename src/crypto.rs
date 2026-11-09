@@ -537,6 +537,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hmac_sha256_matches_rfc4231_case_1_truncated_to_128_bits() {
+        // RFC 4231 section 4.2, independent known answer (also used by the
+        // Python wire oracle). Exercise the production signer and verifier.
+        let key = HmacKey::new(vec![0x0b; 20]).unwrap();
+        let expected: [u8; 16] = hex::decode("b0344c61d8db38535ca8afceaf0bf12b")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(key.compute(b"Hi There"), expected);
+        assert!(key.verify(b"Hi There", &expected));
+    }
+
+    #[test]
     fn test_keyset_remove_and_introspect() {
         let mut set = HmacKeySet::new();
         assert!(!set.has_default());
