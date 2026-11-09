@@ -44,10 +44,15 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Refuse header-reflection probes before sending when their mandatory fields
+  exceed the current route MTU or the budget cannot be read. Reserve dynamic
+  control and diagnostic bytes during trimming, and restore header requests
+  after MTU growth even when none survived startup. Add required Linux sender
+  wire tests for IPv4/IPv6 and keyed modes, closing the three MTU evidence gaps.
+
 - Report missing test references for normative Compliant conformance rows,
   with an explicit policy and optional strict enforcement. Review BER, HMAC
-  and admission evidence; score three header-MTU Both-role claims Partial
-  until sender dispatch coverage matches the tested reflector paths.
+  and admission evidence; require production-path tests for header-MTU claims.
 
 - Count outstanding sequence-reuse retirements once and ignore stale expiry
   entries for older generations, preserving packet-loss accounting at wrap.

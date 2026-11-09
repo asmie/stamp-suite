@@ -657,9 +657,9 @@ impl SenderRun {
             } else {
                 UNAUTH_BASE_SIZE
             };
-            // Worst-case per-packet extras: HMAC TLV (20), Direct Measurement (16),
-            // Access Report (8), included when they can appear. The HMAC TLV
-            // reserve follows the origination decision, not mere key possession:
+            // Reserve all per-probe fields, including the AIMD-scaled control
+            // and diagnostic trailer, before deciding which requests fit.
+            // The HMAC TLV reserve follows the origination decision, not key possession:
             // with --tlv-hmac off no HMAC TLV is sent, and reserving for one
             // would trim Type 246/247 requests that actually fit on the wire.
             let hmac_tlv = if hmac_key.is_some() && (use_auth || originate_tlv_hmac) {
@@ -669,8 +669,30 @@ impl SenderRun {
             };
             let dm = if conf.direct_measurement { 16 } else { 0 };
             let access = if access_report_state.is_some() { 8 } else { 0 };
+            let control = if scale_reflected_control {
+                build_reflected_control_tlv(
+                    conf.reflected_control_length,
+                    conf.reflected_control_count,
+                    conf.reflected_control_interval_ns,
+                    conf.reflected_control_no_ext_hdr,
+                )
+                .map_or(0, |tlv| tlv.to_raw().wire_size())
+            } else {
+                0
+            };
+            let malformed = conf
+                .malformed
+                .map_or(0, |mode| malformed_tlv_bytes(mode).len());
             const UDP_HEADER: usize = 8;
-            let fixed_overhead = ip_hdr + attached_ext + UDP_HEADER + base + hmac_tlv + dm + access;
+            let fixed_overhead = ip_hdr
+                + attached_ext
+                + UDP_HEADER
+                + base
+                + hmac_tlv
+                + dm
+                + access
+                + control
+                + malformed;
             header_fixed_overhead = fixed_overhead;
             if conf.ber {
                 crate::ber::fit_padding(&mut extra_tlvs, mtu, fixed_overhead)
@@ -697,7 +719,10 @@ impl SenderRun {
 
         // Check if we need to include TLV extensions.
         // SSID lives in the base header per RFC 8972 §3, so it alone does not force TLV mode.
+        // Header requests can return after a route increase even when the
+        // initial budget removed every static TLV.
         let use_tlvs = !extra_tlvs.is_empty()
+            || header_requests
             || conf.direct_measurement
             || access_report_state.is_some()
             || scale_reflected_control;
@@ -731,7 +756,7 @@ impl SenderRun {
             tokio::time::interval_at(tokio::time::Instant::now() + period, period)
         });
 
-        let run = Self {
+        let mut run = Self {
             conf: Arc::clone(&shared_conf),
             label: None,
             socket,
@@ -782,7 +807,8 @@ impl SenderRun {
             shutdown,
             schedule: Schedule::new(conf.send_schedule),
         };
-        run.validate_probe_size(run.build_probe(0, true).len())?;
+        let route_mtu = run.prepare_header_requests()?;
+        run.validate_probe_size(run.build_probe(0, true).len(), route_mtu)?;
         Ok(run)
     }
 
@@ -1035,7 +1061,11 @@ impl SenderRun {
         }
     }
 
-    fn validate_probe_size(&self, size: usize) -> Result<(), crate::StartupError> {
+    fn validate_probe_size(
+        &self,
+        size: usize,
+        route_mtu: Option<usize>,
+    ) -> Result<(), crate::StartupError> {
         let ipv6 = self.conf.remote_ip().is_ipv6();
         let headers = if ipv6 {
             self.conf
@@ -1047,19 +1077,28 @@ impl SenderRun {
             0
         };
         let limit = (if ipv6 { 65_527usize } else { 65_507usize }).saturating_sub(headers);
-        validate_datagram_size(size, limit)
+        validate_datagram_size(size, limit)?;
+        if let Some(mtu) = route_mtu {
+            let full_size = size + headers + if ipv6 { 48 } else { 28 };
+            if full_size > mtu {
+                return Err(crate::StartupError::config(format!(
+                    "Probe is {full_size} bytes including IP/UDP headers; route MTU is {mtu} bytes after removing optional header TLVs"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Builds and sends one probe. Transient errors have a bounded retry budget.
     async fn send_probe(&mut self, attach_access_report: bool) -> Result<(), crate::StartupError> {
-        self.prepare_header_requests();
+        let route_mtu = self.prepare_header_requests()?;
         if let Some(ber) = self.ber.as_mut() {
             ber.advance(Instant::now());
             ber.filter_requests(&mut self.extra_tlvs);
         }
         let seq = self.sess.generate_sequence_number();
         let mut packet = self.build_probe(seq, attach_access_report);
-        self.validate_probe_size(packet.len())?;
+        self.validate_probe_size(packet.len(), route_mtu)?;
         // T1 and the RTT start are read after the TLVs are built, so build
         // time is not measured as network delay. Only the base packet (and
         // its HMAC, which covers the timestamp) is written after this point.
@@ -1370,10 +1409,10 @@ impl SenderRun {
     /// Re-trims Type 246/247 requests for the current route MTU, which can
     /// change during a run. Each probe starts from the untrimmed set, so a
     /// temporary MTU drop does not remove requests for the rest of the run.
-    /// A failed lookup keeps the previous set.
-    fn prepare_header_requests(&mut self) {
+    /// A failed lookup refuses the probe; a stale budget cannot authorize it.
+    fn prepare_header_requests(&mut self) -> Result<Option<usize>, crate::StartupError> {
         let Some(template) = &self.header_template else {
-            return;
+            return Ok(None);
         };
         match egress_mtu(&self.socket) {
             Some(mtu) => {
@@ -1387,10 +1426,11 @@ impl SenderRun {
                     log_header_trim(removed, mtu as usize);
                     self.header_trimmed = removed;
                 }
+                Ok(Some(mtu as usize))
             }
-            None => crate::eprintln_throttled!(
-                "Cannot read the route MTU; keeping the previous header-reflection requests"
-            ),
+            None => Err(crate::StartupError::config(
+                "Cannot read the route MTU for header-reflection requests",
+            )),
         }
     }
 
@@ -1547,3 +1587,7 @@ mod failure_tests {
 #[cfg(test)]
 #[path = "run/pending_tests.rs"]
 mod pending_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "run/mtu_tests.rs"]
+mod mtu_tests;

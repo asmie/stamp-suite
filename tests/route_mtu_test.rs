@@ -4,13 +4,24 @@
     target_os = "linux",
     any(feature = "ttl-nix", not(feature = "ttl-pnet"))
 ))]
+use clap::Parser;
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use stamp_suite::{
+    configuration::Configuration,
     crypto::{compute_packet_hmac, HmacKey},
+    sender::{self, SenderObserver, SenderObservers},
+    shutdown::CancellationToken,
+    stats::{OutputFormat, StatsOutput},
     tlv::{ReturnPathTlv, TypedTlv},
 };
 use std::{
     net::{IpAddr, SocketAddr, UdpSocket},
     process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -432,4 +443,273 @@ fn live_route_mtu_changes_and_alternate_destinations() {
             }
         }
     }
+}
+
+// The observer changes the real interface budget synchronously after a
+// successful send. This orders each MTU change before the next probe without
+// relying on a race between a timer and a receiving test task.
+struct SenderMtuSteps {
+    next: Vec<usize>,
+    sent: AtomicUsize,
+}
+impl SenderObserver for SenderMtuSteps {
+    fn probe_sent(&self) {
+        let index = self.sent.fetch_add(1, Ordering::SeqCst);
+        if let Some(mtu) = self.next.get(index) {
+            loopback_mtu(*mtu);
+        }
+    }
+}
+
+fn loopback_mtu(mtu: usize) {
+    run(Command::new("ip").args(["link", "set", "lo", "mtu", &mtu.to_string(), "up"]));
+}
+
+fn sender_mtu_conf(address: SocketAddr, mode: u8, padding: usize, count: u32) -> Configuration {
+    let mut conf = Configuration::parse_from([
+        "test",
+        "--hwtstamp",
+        "off",
+        "--send-delay",
+        "2ms",
+        "--timeout",
+        "0",
+    ]);
+    conf.remote_addr = vec![address.ip()];
+    conf.remote_port = address.port();
+    conf.local_addr = address.ip();
+    conf.local_port = 0;
+    conf.count = count;
+    conf.reflected_fixed_hdr = vec![String::new()];
+    if address.is_ipv6() {
+        // The actual Hop-by-Hop header remains on the packet even when its
+        // reflection request has been removed. Use the default PadN header.
+        conf.attach_ext_hdr = vec!["hbh".into()];
+    }
+    conf.extra_padding = Some(padding);
+    conf.direct_measurement = true;
+    conf.cos = true;
+    conf.ecn = 2;
+    conf.reflected_control_count = 2; // AIMD rebuilds Type 12 per probe.
+    conf.reflected_control_interval_ns = 1_000_000;
+    if mode != 0 {
+        conf.hmac_key = Some("abababababababababababababababab".parse().unwrap());
+    }
+    if mode == 2 {
+        conf.tlv_hmac = stamp_suite::configuration::TlvHmacMode::Off;
+    }
+    if mode == 3 {
+        conf.auth_mode = stamp_suite::configuration::AuthMode::Authenticated;
+    }
+    conf.validate().unwrap();
+    conf
+}
+
+fn independent_mac(input: &[u8]) -> Vec<u8> {
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&[0xab; 16]).unwrap();
+    mac.update(input);
+    mac.finalize().into_bytes()[..16].to_vec()
+}
+
+fn sender_wire_tlvs(bytes: &[u8], mode: u8, seq: u32) -> Vec<(u8, Vec<u8>)> {
+    assert_eq!(&bytes[..4], &seq.to_be_bytes());
+    let base = if mode == 3 { 112 } else { 44 };
+    if mode == 3 {
+        assert_eq!(&bytes[96..112], independent_mac(&bytes[..96]));
+    }
+    let mut pos = base;
+    let mut tlvs = Vec::new();
+    while pos < bytes.len() {
+        assert!(pos + 4 <= bytes.len());
+        let size = u16::from_be_bytes([bytes[pos + 2], bytes[pos + 3]]) as usize;
+        assert!(pos + 4 + size <= bytes.len());
+        assert_eq!(bytes[pos], 0x80, "sender flags must be U only");
+        let kind = bytes[pos + 1];
+        let value = &bytes[pos + 4..pos + 4 + size];
+        if kind == 8 {
+            assert!(mode == 1 || mode == 3);
+            assert_eq!(pos + 4 + size, bytes.len(), "HMAC must stay last");
+            let mut covered = bytes[..4].to_vec();
+            covered.extend_from_slice(&bytes[base..pos]);
+            assert_eq!(value, independent_mac(&covered));
+        }
+        tlvs.push((kind, value.to_vec()));
+        pos += 4 + size;
+    }
+    assert_eq!(
+        tlvs.iter().filter(|t| t.0 == 8).count(),
+        usize::from(mode == 1 || mode == 3)
+    );
+    tlvs
+}
+
+#[tokio::test]
+#[ignore = "requires STAMP_MTU_NETNS_TESTS=1 inside unshare -Urn"]
+async fn live_sender_trims_restores_and_refuses_oversized_probes() {
+    assert_eq!(std::env::var("STAMP_MTU_NETNS_TESTS").as_deref(), Ok("1"));
+    // SAFETY: geteuid takes no arguments and writes no caller memory.
+    assert_eq!(unsafe { libc::geteuid() }, 0, "run inside unshare -Urn");
+    loopback_mtu(1500);
+    let output = StatsOutput::new(OutputFormat::Json).unwrap();
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..4 {
+            let peer = tokio::net::UdpSocket::bind((ip, 0)).await.unwrap();
+            let address = peer.local_addr().unwrap();
+            let ipv6 = address.is_ipv6();
+            let base = if mode == 3 { 112 } else { 44 };
+            let hmac = if mode == 1 || mode == 3 { 20 } else { 0 };
+            let ip_udp_ext = if ipv6 { 40 + 8 + 8 } else { 20 + 8 };
+            // Non-header TLVs: CoS(8), padding header(4), DM(16), control(16).
+            let padding = 1280 - ip_udp_ext - base - hmac - 8 - 4 - 16 - 16;
+            let first_header = if ipv6 { 44 } else { 24 };
+            let budgets = [1280, 1500, 1280 + first_header, 1280, 1500];
+            loopback_mtu(budgets[0]);
+            let conf = sender_mtu_conf(address, mode, padding, budgets.len() as u32);
+            let changes = Arc::new(SenderMtuSteps {
+                next: budgets[1..].to_vec(),
+                sent: AtomicUsize::new(0),
+            });
+            let mut observers = SenderObservers::new();
+            observers.push(changes.clone());
+            let out = output.clone();
+            let task = tokio::spawn(async move {
+                sender::run_sender_with_output(&conf, &out, observers, CancellationToken::new())
+                    .await
+            });
+            let mut original_padding = None;
+            for (seq, budget) in budgets.into_iter().enumerate() {
+                let mut bytes = [0; 2048];
+                let (size, _) =
+                    tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut bytes))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert!(
+                    size + ip_udp_ext <= budget,
+                    "sender exceeded {budget}-byte budget"
+                );
+                let tlvs = sender_wire_tlvs(&bytes[..size], mode, seq as u32);
+                let mut expected = vec![4, 1];
+                if budget > 1280 {
+                    expected.push(247);
+                    if ipv6 && budget == 1500 {
+                        expected.push(246);
+                    }
+                }
+                expected.extend([5, 12]);
+                if hmac != 0 {
+                    expected.push(8);
+                }
+                assert_eq!(
+                    tlvs.iter().map(|t| t.0).collect::<Vec<_>>(),
+                    expected,
+                    "ip={ip} mode={mode} probe={seq}"
+                );
+                let padding_value = &tlvs.iter().find(|t| t.0 == 1).unwrap().1;
+                assert_eq!(padding_value.len(), padding);
+                if let Some(original) = &original_padding {
+                    assert_eq!(padding_value, original);
+                } else {
+                    original_padding = Some(padding_value.clone());
+                }
+                for (_, value) in tlvs.iter().filter(|t| t.0 == 246 || t.0 == 247) {
+                    assert!(value.iter().all(|&b| b == 0));
+                }
+                let dm = &tlvs.iter().find(|t| t.0 == 5).unwrap().1;
+                assert_eq!(&dm[..4], &(seq as u32 + 1).to_be_bytes());
+            }
+            let stats = tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(stats.packets_sent, 5);
+            assert_eq!(changes.sent.load(Ordering::SeqCst), 5);
+
+            // One mandatory octet over budget must fail before the first send,
+            // and also after a previously successful probe on a larger route.
+            for shrink in [false, true] {
+                loopback_mtu(if shrink { 1500 } else { 1280 });
+                let conf = sender_mtu_conf(address, mode, padding + 1, 2);
+                let changes = Arc::new(SenderMtuSteps {
+                    next: vec![1280],
+                    sent: AtomicUsize::new(0),
+                });
+                let mut observers = SenderObservers::new();
+                observers.push(changes.clone());
+                let error = sender::run_sender_with_output(
+                    &conf,
+                    &output,
+                    observers,
+                    CancellationToken::new(),
+                )
+                .await
+                .err()
+                .expect("oversized mandatory packet accepted");
+                assert!(error.to_string().contains("route MTU"), "{error}");
+                assert_eq!(changes.sent.load(Ordering::SeqCst), usize::from(shrink));
+                if shrink {
+                    let mut bytes = [0; 2048];
+                    let (size, _) = peer.recv_from(&mut bytes).await.unwrap();
+                    assert!(size + ip_udp_ext <= 1500);
+                    sender_wire_tlvs(&bytes[..size], mode, 0);
+                }
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), peer.recv_from(&mut [0; 2048]))
+                        .await
+                        .is_err(),
+                    "an oversized probe was transmitted"
+                );
+            }
+            eprintln!("PASS sender ip={ip} mode={mode}: trim/restore, order, signatures, mandatory oversize at startup and route decrease");
+        }
+    }
+    // With only header requests, startup trimming can leave no static TLVs.
+    // Keep the TLV send mode so those requests can return on a larger route.
+    // IPv4 allows a small enough interface MTU to remove the only request.
+    for mode in 0..4 {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = peer.local_addr().unwrap();
+        let mut conf = sender_mtu_conf(address, mode, 0, 2);
+        conf.extra_padding = None;
+        conf.direct_measurement = false;
+        conf.cos = false;
+        conf.reflected_control_count = 1;
+        conf.validate().unwrap();
+        let hmac = if mode == 1 || mode == 3 { 20 } else { 0 };
+        loopback_mtu(28 + if mode == 3 { 112 } else { 44 } + hmac);
+        let changes = Arc::new(SenderMtuSteps {
+            next: vec![1500],
+            sent: AtomicUsize::new(0),
+        });
+        let mut observers = SenderObservers::new();
+        observers.push(changes);
+        let out = output.clone();
+        let task = tokio::spawn(async move {
+            sender::run_sender_with_output(&conf, &out, observers, CancellationToken::new()).await
+        });
+        for seq in 0..2 {
+            let mut bytes = [0; 256];
+            let (size, _) =
+                tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut bytes))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let tlvs = sender_wire_tlvs(&bytes[..size], mode, seq);
+            let mut kinds = if seq == 0 { vec![] } else { vec![247] };
+            if hmac != 0 {
+                kinds.push(8);
+            }
+            assert_eq!(tlvs.iter().map(|t| t.0).collect::<Vec<_>>(), kinds);
+        }
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        eprintln!(
+            "PASS sender minimal mode={mode}: restore requests after startup removed all headers"
+        );
+    }
+    loopback_mtu(65_536);
 }

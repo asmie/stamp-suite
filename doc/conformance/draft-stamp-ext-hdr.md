@@ -6,7 +6,7 @@ implementation, tests and backend limits.
 Revision frozen: draft-ietf-ippm-stamp-ext-hdr-26, 27 October 2026.
 Source: [draft-ietf-ippm-stamp-ext-hdr-26](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-26.txt).
 
-Summary: 75 clauses: 61 Compliant, 11 Partial, 0 Gap, 3 N-A, 0 Excluded.
+Summary: 75 clauses: 64 Compliant, 8 Partial, 0 Gap, 3 N-A, 0 Excluded.
 
 The Clause column paraphrases the draft. Existing row IDs remain stable where
 possible; ordering and MTU clauses use their revision-26 section numbers.
@@ -171,11 +171,11 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-6.2-request | Add a fixed-header TLV for each header requested for reflection. | MUST | Sender | Compliant | `src/sender/packet.rs::reflected_header_request_tlvs`; the sender originates one fixed IP header. |
 | ext-hdr-6.2-mutable | Zero every Requested octet containing mutable DSCP/ECN bits; never depend on matching a zero-valued octet. | MUST / MUST NOT | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/configuration/tests.rs::revision25_fixed_selector_masks_mutable_octets`. IPv4 byte 1 and IPv6 bytes 0 and 1 must be zero. |
 | ext-hdr-6.2-policy | Explicitly request fixed-header data; enforce reflector policy before copying and return C on refusal. | MUST / MUST NOT | Both | Compliant | `src/sender/packet.rs::reflected_header_request_tlvs`, `src/receiver/ingest.rs::ProcessingContext::for_packet`, `src/tlv/list/processing.rs::process_reflected_headers_with_policy`. |
-| ext-hdr-7.2-1 | Keep the complete transmitted packet within the applicable path MTU. | MUST | Both | Partial | `src/sender/packet.rs::enforce_egress_mtu`, `src/receiver/transmit.rs::fit_reply`; tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. See [MTU budget](#mtu-budget). Reflector dispatch is exercised; sender route-budget/dispatch coverage remains at helper level and needs a production-path regression before this Both-role claim is fully verified. |
-| ext-hdr-7.2-2 | Remove complete reflected-header TLVs from the end, skipping HMAC, until the packet fits. | MUST | Both | Compliant | `src/sender/packet.rs::enforce_egress_mtu`, `src/tlv/list/processing.rs::trim_reflected_headers_to_size`; each uses the last header TLV. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. |
-| ext-hdr-7.2-3 | Update the HMAC digest if a preceding TLV was removed. | MUST | Both | Partial | `src/receiver/transmit.rs::fit_reply`, `src/receiver/transmit.rs::Transmission`; tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `src/receiver/transmit/tests.rs::single_header_reply_refreshes_mtu_and_resigns_after_emsgsize`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. The send path trims before signing each copy. Sender builds and signs after trimming. Reflector dispatch is exercised; sender route-budget/dispatch coverage remains at helper level and needs a production-path regression before this Both-role claim is fully verified. |
-| ext-hdr-7.2-4 | Retain the relative order of remaining TLVs, including returned requests. | MUST | Both | Compliant | `src/tlv/list/mod.rs::remove_non_hmac` repairs wire indices; sender removes one vector entry at a time. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. |
-| ext-hdr-7.2-5 | Do not transmit when removing all optional header TLVs cannot satisfy the MTU. | MUST NOT | Both | Partial | `src/sender/run.rs`, `src/receiver/transmit.rs::fit_reply`; test: `src/receiver/transmit/tests.rs::single_header_reply_refuses_missing_mtu_or_oversized_mandatory_fields`. Oversized mandatory packets and unavailable route budgets are refused. Reflector dispatch is exercised; sender route-budget/dispatch coverage remains at helper level and needs a production-path regression before this Both-role claim is fully verified. |
+| ext-hdr-7.2-1 | Keep the complete transmitted packet within the applicable path MTU. | MUST | Both | Compliant | `src/sender/packet.rs::enforce_egress_mtu`, `src/receiver/transmit.rs::fit_reply`; tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. See [MTU budget](#mtu-budget). Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. |
+| ext-hdr-7.2-2 | Remove complete reflected-header TLVs from the end, skipping HMAC, until the packet fits. | MUST | Both | Compliant | `src/sender/packet.rs::enforce_egress_mtu`, `src/tlv/list/processing.rs::trim_reflected_headers_to_size`; each uses the last header TLV. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. |
+| ext-hdr-7.2-3 | Update the HMAC digest if a preceding TLV was removed. | MUST | Both | Compliant | `src/receiver/transmit.rs::fit_reply`, `src/receiver/transmit.rs::Transmission`; tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `src/receiver/transmit/tests.rs::single_header_reply_refreshes_mtu_and_resigns_after_emsgsize`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. The send path trims before signing each copy. Sender builds and signs after trimming. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. |
+| ext-hdr-7.2-4 | Retain the relative order of remaining TLVs, including returned requests. | MUST | Both | Compliant | `src/tlv/list/mod.rs::remove_non_hmac` repairs wire indices; sender removes one vector entry at a time. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. |
+| ext-hdr-7.2-5 | Do not transmit when removing all optional header TLVs cannot satisfy the MTU. | MUST NOT | Both | Compliant | `src/sender/run.rs`, `src/receiver/transmit.rs::fit_reply`; test: `src/receiver/transmit/tests.rs::single_header_reply_refuses_missing_mtu_or_oversized_mandatory_fields`. Oversized mandatory packets and unavailable route budgets are refused. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. `src/sender/run/mtu_tests.rs::missing_route_budget_refuses_send_without_mutating_pending_state` checks failed route lookup before sending; the live test checks mandatory oversize at startup and after a route decrease. |
 | ext-hdr-9-errors | Log each C error condition locally and increment its condition counter. | SHOULD | Reflector | Partial | Header match and policy failures log their reasons; Type 12 rejections are logged. Separate counters for every C error condition are not implemented. |
 | ext-hdr-9.2-0 | Optionally generate session state-change notifications. | MAY | Sender | Compliant | `src/sender/session_state.rs::Monitor` exposes structured logs and report summaries. |
 | ext-hdr-9.2-5 | Report failed after N consecutive losses even before the first reply. | Descriptive | Sender | Compliant | `src/sender/session_state.rs::tests::failure_before_first_reply_and_recovery`. |
@@ -238,8 +238,12 @@ authors; maintainer submission and an authoritative answer remain pending.
 
 The sender rechecks the connected route MTU before each normal send and each
 Access Report retry, removes optional Type 246/247 TLVs to fit, and refuses an
-oversized mandatory packet. On Linux it sets Don't Fragment, so a route change
-cannot fragment a probe. The reflector sizes each reply against the actual
+oversized mandatory packet before attempting a send. A failed route lookup
+also refuses the probe; it does not reuse the previous budget. Dynamic control,
+Direct Measurement, Access Report, diagnostic bytes and the originated HMAC
+are reserved before trimming. Header requests can return after the MTU grows,
+even if startup removed every request. On Linux it sets Don't Fragment, so a
+route change cannot fragment a probe. The reflector sizes each reply against the actual
 destination route before signing (`src/receiver/mtu.rs`,
 `src/receiver/transmit.rs::fit_reply`); an unknown budget fails closed. Header
 requests need a known route MTU, which only Linux provides. That limits where
@@ -250,7 +254,15 @@ the reply buffer. Transmit regressions cover Types 246/247, IPv4/IPv6, open and
 authenticated replies, mandatory TLV order, re-signing, missing budgets and
 EMSGSIZE refresh. The live route test verifies single-reply trimming over a
 smaller reverse route, including C-marked header requests with no captured data.
-The single-reply policy bug affected v1.0.0; these rows describe the fixed code.
+The sender namespace regression uses the public sender loop with an independent
+UDP peer and HMAC assertions. It covers IPv4/IPv6, open, keyed open (HMAC
+origination on/off) and authenticated modes, including a real IPv6 Hop-by-Hop
+header. It verifies mandatory-packet refusal at startup and after a route
+decrease, and restoration when no header request survived startup. A separate
+shared-sender regression disconnects the socket to exercise a real failed route
+lookup. These tests establish Linux kernel-route behavior, not end-to-end PMTU
+discovery or physical-link behavior. The single-reply policy bug affected
+v1.0.0; these rows describe the fixed code.
 
 ### Control sub-TLV
 

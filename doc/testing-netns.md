@@ -36,7 +36,7 @@ passing with an empty suite. Effective root can be host root or mapped root
 with the capabilities the namespace operations need.
 
 The `privileged` job in `.github/workflows/conformance.yml` runs this tier, the
-three raw pnet tests and the route MTU test this way, inside private mount and
+three raw pnet tests and the two route MTU tests this way, inside private mount and
 network namespaces.
 
 ### Running without sudo (user namespaces)
@@ -144,16 +144,16 @@ raw capture sees complete UDP checksums. No host NIC settings change.
 
 ## Reply-route MTU regression
 
-`tests/route_mtu_test.rs` is a separate ignored test. It needs `ip`, `unshare`
+`tests/route_mtu_test.rs` contains two separate ignored tests. It needs `ip`, `unshare`
 and `nsenter`, but not tcpdump or host root. Run it in a user and network
 namespace (Linux with unprivileged user namespaces):
 
 ```sh
 STAMP_MTU_NETNS_TESTS=1 unshare -Urn \
-  cargo test --locked --test route_mtu_test -- --ignored --nocapture
+  cargo test --locked --test route_mtu_test -- --ignored --nocapture --test-threads=1
 ```
 
-Without `STAMP_MTU_NETNS_TESTS=1` the test fails rather than skips. It starts
+Without `STAMP_MTU_NETNS_TESTS=1` the tests fail rather than skip. The reflector test starts
 a reflector in a second network namespace, connects it with a
 temporary veth pair, and sends independently built UDP requests. It covers
 IPv4 and IPv6, open and authenticated replies, wildcard and bound reflectors,
@@ -168,6 +168,20 @@ are covered by the transmit unit tests. Cleanup removes the veth and child
 processes even after an assertion failure. These are real UDP and kernel route
 tests, not packet captures or SRv6 transit tests. Report the result of this
 separate run; an ignored test in an ordinary run is not a pass.
+
+The sender test runs the public sender loop against an independent UDP peer.
+An observer changes the isolated loopback MTU synchronously after successful
+sends, before the next probe, without timer races. IPv4/IPv6 and open, keyed
+open (HMAC origination on/off) and authenticated modes cover exact budgets,
+ordered removal and restoration of Types 246/247, preserved mandatory padding,
+dynamic Direct Measurement/Type 12 fields and final base/TLV signatures. IPv6
+attaches a real default Hop-by-Hop header and includes it in the full packet
+budget. Additional IPv4 cases remove every request at startup and check that
+requests return when the MTU increases. Mandatory fields one byte over budget
+are refused at startup and after a route decrease, with no oversized datagram
+received. Run the target serially because both tests change their namespace's
+network state; CI requires exactly two ignored tests. This is kernel-route and
+software-loopback evidence, not a packet capture or physical-link guarantee.
 
 ### Retaining successful SRv6 evidence
 

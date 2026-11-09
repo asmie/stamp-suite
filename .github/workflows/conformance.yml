@@ -143,8 +143,8 @@ jobs:
             sysctl -w net.ipv6.conf.all.seg6_enabled=1
             STAMP_NETNS_CAPTURE_DIR="$PWD/netns-captures" STAMP_REQUIRE_PRIVILEGED=1 STAMP_NETNS_TESTS=1 STAMP_NETNS_PNET_BIN="$PWD/target/pnet/debug/stamp-suite" TOKIO_WORKER_THREADS=2 python3 scripts/run_privileged_test.py netns-artifacts.json netns_conformance 9
           ' 2>&1 | tee netns.log
-      - name: Require reply-route MTU tests
-        run: python3 scripts/run_privileged_test.py netns-artifacts.json route_mtu_test 1 sudo -n unshare --net --fork env STAMP_REQUIRE_PRIVILEGED=1 STAMP_MTU_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
+      - name: Require sender and reply-route MTU tests
+        run: python3 scripts/run_privileged_test.py netns-artifacts.json route_mtu_test 2 sudo -n unshare --net --fork env STAMP_REQUIRE_PRIVILEGED=1 STAMP_MTU_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:

@@ -844,8 +844,10 @@ stamp-suite --remote-addr 2001:db8::20 --local-addr 2001:db8::10 --attach-ext-hd
   Requests must match attached headers in wire order.
 - `--reflected-fixed-hdr [SELECTORHEX]` requests the received fixed IP header.
 - Header requests need a known egress route MTU, which the sender reads on
-  Linux. Without it, startup fails. Header TLVs that do not fit the MTU are
-  removed from the probe and a warning is logged.
+  Linux before startup and each send. An unknown budget or oversized mandatory
+  packet ends the run with an error before sending. Header TLVs that do not fit
+  are removed from the probe and a warning is logged. Each probe starts from
+  the configured requests, so they return when the MTU increases.
 
 Type 246 has an eight-byte Requested field; Type 247 has a four-byte one. A
 nonzero Requested value matches only its nonzero octets: zero octets are

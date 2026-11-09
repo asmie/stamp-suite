@@ -102,13 +102,68 @@ rerun the checker after edits rather than treating the numbers as certification.
 | 39 normative Compliant BER rows | Explicit role-specific wire drivers now appear on every applicable BER row. Seventeen reflector vectors and sender baseline/gating/U scenarios check counters, flags, repaired padding, unknown/malformed children, configuration and directional statistics. | Linux nix software-loopback profile using agreed experimental types; no zero-checksum, physical-link or maintained-peer certification. Existing Partial/Gap rows remain. |
 | RFC 8972 HMAC rows 4.8-1, 6, 7, 8, 11, 13, 14 | A new production Rust signer/verifier known-answer test uses RFC 4231 case 1, truncated to 128 bits. Independent wire roles check actual HMAC type/length/coverage; a malformed-length parser test checks M. Failed extension-HMAC echoes preserve all copied values and the failed digest with I. | Primitive/equivalence tests supplement the wire driver; they do not replace send-path checks. The copied failure digest is not regenerated into a successful one. |
 | RFC 8972 admission rows 3-6 to 3-8 | Named IPv4 open/authenticated and IPv6 identity tests run the nix receiver with exact provisioned endpoints, SSIDs and micro IDs. Authentication tests verify invalid bases cannot allocate or refresh state. | Provisioned profile only. Shared-core tests are distinct from pnet capture runtime or physical ingress validation. |
-| Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace test exercises real route budgets. | These test reflection. Sender trimming is implemented but currently has helper-level evidence here; all three Both-role claims are now Partial pending sender production-path tests. |
+| Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
 | Type 12 C signaling | The existing flag-semantics suite exercises packet processing with requests within and above administrative caps. | This is distinct from the unreviewed exact-timing claim and from physical transmission scheduling guarantees. |
 
-The remaining 126 missing references span six matrices. The next batch must
-prioritize sender MTU dispatch and the remaining authentication, C-flag and
-admission claims, then work through the rest. The full test-evidence goal and
-strict CI gate remain unfinished.
+The remaining 126 missing references span six matrices. After the sender MTU
+chunk below, prioritize the remaining authentication, C-flag and admission
+claims, then work through the rest. Full echoed-T1/generation admission at wire
+sequence reuse also needs review. The full test-evidence goal and strict CI
+gate remain unfinished.
+
+## Sender MTU dispatch review (T22b1)
+
+The review against parent `a70328d` found that an unreadable route budget kept
+the previous request set, oversized mandatory packets reached the kernel's
+send/retry path, and startup trimming could choose a base-only send mode that
+never restored header requests. Per-probe AIMD control and diagnostic trailers
+also needed a reserve before optional-header trimming.
+
+The sender now refuses an unknown budget and checks the actual built packet,
+including IP/UDP and attached IPv6 header bytes, against the current route MTU
+before sending. Trimming reserves all possible per-probe fields. The TLV send
+mode survives an initially empty request set, allowing requests to return after
+MTU growth. Changes apply to header-reflection probes; other packet-size
+policies keep their existing scope.
+
+`tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes`
+runs the public sender loop with independent received-byte/HMAC assertions.
+Eight IPv4/IPv6 and key-mode combinations exercise 1280 → 1500 → partial-header
+budget → 1280 → 1500, mandatory non-header preservation, dynamic Direct
+Measurement/Type 12 fields, ordered removal/restoration and final signatures.
+The modes are open, keyed open with TLV-HMAC origination on or off, and
+authenticated. IPv6 attaches the default eight-byte Hop-by-Hop header; this
+test does not establish exact-boundary delivery for every Destination Options
+layout. Four additional IPv4 cases check restoration after startup removed
+every request. Each of the eight combinations also checks a mandatory packet
+one octet too large, both at startup and after a successful send and MTU drop.
+An observer changes only the isolated namespace's loopback MTU after each
+successful send, before the next, avoiding timer-dependent ordering.
+
+`src/sender/run/mtu_tests.rs::missing_route_budget_refuses_send_without_mutating_pending_state`
+disconnects real IPv4/IPv6 open/authenticated UDP sockets, making the kernel
+route lookup fail. It verifies a configuration error before the send/retry path,
+without pending-state changes or a received probe. The shared sender regression
+is distinct from reflector backend capture evidence.
+
+Both required namespace tests pass with no skip: the existing eight reflector
+combinations and the sender cases above. The three MTU rows return to Compliant
+within their Linux sender scope. The inventory is now **325 applicable, 199
+with references, 126 missing**; the rollup is **471 clauses: 393 Compliant,
+25 Partial, two Gap, 48 N-A and three Excluded**. No missing-reference row was
+cleared merely by restoring these three reviewed claims. CI now requires two
+ignored tests in the MTU artifact, while whole-backlog strict checking remains
+advisory.
+
+Local T22b1 verification passes full default/all-features/pnet Rust suites
+(1,330/1,431/1,279 tests; 13 privileged tests ignored in each ordinary run).
+Both required MTU tests were executed separately and passed without a skip.
+The final all-features BER wire run passes 60/60 cases. Clippy passes all three
+profiles; all 104 Python tests, rustfmt, 1,047 source citations, matrix counts
+and 431 documentation links pass. The shared failed-budget regression runs in
+each Rust profile; pnet-feature success here is shared sender evidence, not
+pnet reflector capture evidence. Logs and reports are under `/tmp/t22b-*`;
+no remote CI or physical/native-platform result is claimed.
 
 ## Local validation for this batch
 
@@ -134,5 +189,5 @@ cargo test --locked --all-features --test session_identity_test --test session_a
 cargo build --locked --all-features
 python3 scripts/interop_ber.py --binary target/debug/stamp-suite --report /tmp/t22-ber-wire.json
 cargo test --locked --all-features --test route_mtu_test --no-run --message-format=json > /tmp/t22-mtu-artifacts.json
-python3 scripts/run_privileged_test.py /tmp/t22-mtu-artifacts.json route_mtu_test 1 unshare -Urn env STAMP_MTU_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
+python3 scripts/run_privileged_test.py /tmp/t22-mtu-artifacts.json route_mtu_test 2 unshare -Urn env STAMP_MTU_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
 ```
