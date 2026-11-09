@@ -406,7 +406,7 @@ fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> i
     if base > cap {
         return Err(cannot_fit());
     }
-    // Header-reflection packets follow ext-hdr-25 §7.2: remove complete
+    // Header-reflection packets follow ext-hdr-26 §7.2: remove complete
     // reflected-header TLVs before considering any other resizing policy.
     if has_ber(data, base) && !controlled && !has_reflected_headers(data, base) {
         let list = crate::tlv::TlvList::parse(&data[base..]).map_err(|_| cannot_fit())?;

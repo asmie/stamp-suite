@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Remove Types 246/247 until the packet fits `mtu` (ext-hdr-25 §7.2).
+/// Remove Types 246/247 until the packet fits `mtu` (ext-hdr-26 §7.2).
 /// `fixed_overhead` includes IP, attached headers, UDP, the STAMP base and
 /// per-packet HMAC/DM/Access TLVs. Remove complete header TLVs from the end
 /// (§7.2), preserving every remaining TLV's relative order. Return the count removed.
@@ -37,7 +37,7 @@ pub(super) fn log_header_trim(removed: usize, mtu: usize) {
     if removed > 0 {
         log::warn!(
             "Removed {removed} Reflected Fixed/IPv6 Ext Header TLV(s) (Type 246/247) to keep the \
-             test packet within the {mtu}-byte MTU (draft-ietf-ippm-stamp-ext-hdr-25 §4.2/§6.2)"
+             test packet within the {mtu}-byte MTU (draft-ietf-ippm-stamp-ext-hdr-26 §4.2/§6.2)"
         );
     }
 }
@@ -71,7 +71,7 @@ pub(super) fn micro_session_request_tlv(sender_id: u16, reflector_id: Option<u16
 ///
 /// It is needed when the configuration requests asymmetric replies
 /// (count > 1) and/or attaches an IPv6 Extension Header Control sub-TLV
-/// (draft-ietf-ippm-stamp-ext-hdr-25 §5.1). Returns `None` for plain
+/// (draft-ietf-ippm-stamp-ext-hdr-26 §5.1). Returns `None` for plain
 /// symmetric measurements so trivial sessions are not amplified.
 pub(super) fn build_reflected_control_tlv(
     length: u16,
@@ -126,14 +126,14 @@ pub(super) fn scaled_reflected_control_tlv(
 }
 
 /// Builds the Reflected Fixed / IPv6 Extension Header request TLVs
-/// (draft-ietf-ippm-stamp-ext-hdr-25 §4.2, §6.2) for the outgoing packet,
+/// (draft-ietf-ippm-stamp-ext-hdr-26 §4.2, §6.2) for the outgoing packet,
 /// honoring the optional Requested-field selectors (§4.1, §6.1). Assumes `conf`
 /// has passed `validate()` (so any selector decodes and fits); a stray decode
 /// error degrades to the zero-filled request rather than panicking.
 pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv> {
     let mut out = Vec::new();
 
-    // draft-ietf-ippm-stamp-ext-hdr-25 §7.1: the Reflected Fixed Header Data
+    // draft-ietf-ippm-stamp-ext-hdr-26 §7.1: the Reflected Fixed Header Data
     // (Type 247) TLVs MUST be added before the Reflected IPv6 Extension Header
     // Data (Type 246) TLVs, so emit every 247 first.
     let fixed_family_len = if conf.remote_ip().is_ipv4() {
@@ -167,9 +167,9 @@ pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv>
         );
     }
 
-    // Emit one Type-246 request per attached IPv6 header (ext-hdr-25 §4.2).
-    // These precede user-supplied requests. Requested is zero because the
-    // kernel chooses Next Header; positional pairing selects the capture.
+    // Emit one Type-246 request per attached IPv6 header (ext-hdr-26 §4.2).
+    // Explicit requests replace these automatic requests. Requested is zero
+    // because the kernel chooses Next Header; ordered pairing selects capture.
     // Emit these requests only for IPv6, as the send path does.
     let attach_specs = if conf.remote_ip().is_ipv6() {
         conf.attach_ext_hdrs()
@@ -184,7 +184,7 @@ pub(super) fn reflected_header_request_tlvs(conf: &Configuration) -> Vec<RawTlv>
     if !attach_specs.is_empty() {
         log::info!(
             "Attaching {} real IPv6 extension header(s) with matching Type-246 request TLV(s) \
-             (draft-ietf-ippm-stamp-ext-hdr-25 §4.2)",
+             (draft-ietf-ippm-stamp-ext-hdr-26 §4.2)",
             attach_specs.len()
         );
     }

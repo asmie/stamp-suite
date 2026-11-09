@@ -3,13 +3,13 @@
 Fixed IP and IPv6 extension header reflection (Types 247/246): requirements,
 implementation, tests and backend limits.
 
-Revision frozen: draft-ietf-ippm-stamp-ext-hdr-25, 22 October 2026.
-Source: [draft-ietf-ippm-stamp-ext-hdr-25](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-25.txt).
+Revision frozen: draft-ietf-ippm-stamp-ext-hdr-26, 27 October 2026.
+Source: [draft-ietf-ippm-stamp-ext-hdr-26](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-26.txt).
 
-Summary: 71 clauses: 62 Compliant, 6 Partial, 0 Gap, 3 N-A, 0 Excluded.
+Summary: 75 clauses: 64 Compliant, 8 Partial, 0 Gap, 3 N-A, 0 Excluded.
 
 The Clause column paraphrases the draft. Existing row IDs remain stable where
-possible; moved ordering and MTU clauses use their revision-25 section numbers.
+possible; ordering and MTU clauses use their revision-26 section numbers.
 
 ## Scope
 
@@ -29,6 +29,10 @@ first eight (Type 246) or four (Type 247) octets. The remaining bytes are copied
 into the Received field (`copy_reflected` in `src/tlv/list/processing.rs`). An
 eight-octet header has no Received tail, so a successful reply to an
 all-zero eight-octet request carries the header in its Requested field.
+
+Revision 26's repeated nonzero identical-prefix example conflicts with its
+explicit ambiguity-rejection rules. This implementation retains those rules;
+the example is scored Partial. See [revision 26 interpretation](#revision-26-interpretation).
 
 ### Interoperability
 
@@ -109,7 +113,7 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-3.1-4 | Set outgoing IPv4 TTL and IPv6 Hop Limit to 255. | MUST | Both | Compliant | `src/net_policy.rs::set_hops` runs before sending in both reflector backends and the sender; failure aborts startup. CLI and TOML reject other TTL values. Independent IPv4/IPv6 wire tests check 255. |
 | ext-hdr-4.1-A | Packets may contain multiple Type 246 TLVs. | MAY | Both | Compliant | `src/sender/packet.rs::reflected_header_request_tlvs`, `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled`. See [request construction](#request-construction). |
 | ext-hdr-4.1-B | Select extension headers by nonzero Requested octets; zero octets are wildcards. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision25_wildcards_ambiguity_and_policy`. |
-| ext-hdr-4.1-C | An all-zero Requested field selects the first matching-length extension header, and the reflector fills Requested with its first eight octets. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled`. See [header matching](#header-matching). |
+| ext-hdr-4.1-C | An all-zero Requested field selects the first unmatched extension header of the requested length, and the reflector fills Requested with its first eight octets. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision26_identical_headers_use_strict_unmatched_selection`. See [header matching](#header-matching). |
 | ext-hdr-4.1-D | Initialize the Received field to zero in requests. | MUST | Sender | Compliant | `src/tlv/typed/reflected_ipv6_ext_hdr.rs::ReflectedIpv6ExtHdrTlv::request_with_selector` writes only the eight-octet selector and zero-fills the rest. The CLI rejects selectors longer than eight octets. |
 | ext-hdr-4.1-E | Return C without copying data when extension-header reflection cannot be fulfilled, including ambiguous selection. | MUST / MUST NOT | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision25_wildcards_ambiguity_and_policy`. No match, multiple matches, unsupported capture and invalid length preserve the request. |
 | ext-hdr-4.2-1 | Add a matching Type 246 request for each attached extension header whose reflection is required. | MUST | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs`. Request Length equals the attached header size; attachment failure aborts startup. |
@@ -120,6 +124,8 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-4.2-6 | Process received extension headers in outer-to-inner order. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled`. See [header matching](#header-matching). |
 | ext-hdr-4.2-7 | Use the first eight on-wire octets as the selector when a same-length subset is ambiguous. | MUST | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs`. The kernel-assigned Next Header octet is derived from the attached header chain; selector bytes must match the attached header. |
 | ext-hdr-4.2-8 | Match each nonzero Requested octet exactly, and select only a unique unmatched header. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision25_wildcards_ambiguity_and_policy`. An ambiguous request consumes no header. |
+| ext-hdr-4.2-subset | Do not use identical first-eight-octet prefixes to select only some equal-length extension headers. | MUST NOT | Sender | Compliant (originated profile) | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/configuration/tests.rs::revision26_sender_subset_rules_apply_to_cli_and_toml`, `src/configuration/tests.rs::revision26_sender_rejects_profiles_with_indistinguishable_originated_headers`. The supported hbh/dest chain has distinct kernel-assigned Next Header octets; masking away that distinction cannot select an ambiguous subset. |
+| ext-hdr-4.2-identical | Allow all equal-length extension headers with identical prefixes to be reflected using repeated nonzero requests in packet order. | Descriptive | Reflector | Partial | `tests/tlv_flag_semantics.rs::revision26_identical_headers_use_strict_unmatched_selection`. Repeated nonzero selectors get C under explicit rule 1; all-zero requests reflect every header in order. See [revision 26 interpretation](#revision-26-interpretation). |
 | ext-hdr-4.3-1 | The reflector's data plane provides received IPv6 extension headers to the reflector. | MUST | Reflector | Partial | `src/receiver/pnet.rs::checked_udp`, `src/receiver/nix.rs::extract_ipv6_ext_headers`, `tests/netns_conformance.rs::scenario_4a_ext_hdr_nix_ancillary`. The nix backend on macOS and on Fragment headers cannot supply them. See [backend support](#backend-support). |
 | ext-hdr-4.3-2 | The sender's data plane provides reply extension headers to the sender for bidirectional measurement. | MUST | Sender | N-A | Bidirectional measurement is not supported (ext-hdr-5.2-1). |
 | ext-hdr-5-1 | In unidirectional mode omit matching reverse-path headers in response to received headers. | MUST | Reflector | Compliant | Neither backend adds matching reverse-path headers. Independent SRv6 Return Path requests remain separate. |
@@ -141,6 +147,8 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-6.2-5 | Process encapsulated fixed headers in outer-to-inner order. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `src/receiver/pnet.rs::checked_udp` (captures nested IP headers in order and rejects excessive nesting). |
 | ext-hdr-6.2-6 | Use a four-octet selector for ambiguous same-length fixed headers. | MUST | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs`. The CLI accepts up to four selector octets and zero-pads the rest. |
 | ext-hdr-6.2-7 | Match each nonzero Requested fixed-header octet exactly, and select only a unique unmatched header. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision25_wildcards_ambiguity_and_policy`. |
+| ext-hdr-6.2-subset | Do not use identical first-four-octet prefixes to select only some equal-length fixed headers. | MUST NOT | Sender | Compliant (originated profile) | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/configuration/tests.rs::revision26_sender_rejects_profiles_with_indistinguishable_originated_headers`. The sender originates one fixed IP header and rejects multiple fixed-header requests through both CLI and TOML. |
+| ext-hdr-6.2-identical | Allow all equal-length fixed headers with identical prefixes to be reflected using repeated nonzero requests in packet order. | Descriptive | Reflector | Partial | `tests/tlv_flag_semantics.rs::revision26_identical_headers_use_strict_unmatched_selection`. The same explicit rule 1 and all-zero workaround apply as for Type 246. See [revision 26 interpretation](#revision-26-interpretation). |
 | ext-hdr-7.1-1 | Place Type 247 TLVs before Type 246 TLVs. | MUST | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs` emits fixed-header requests first. |
 | ext-hdr-7.1-2 | Return out-of-order reflected-header TLVs with C set. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_headers` checks the global order before copying. Combined-header wire and unit tests cover both orders. |
 | ext-hdr-7-1 | Omit Type 246 reflection requests for IOAM Direct Exporting. | MUST | Sender | N-A | No IOAM DEX processor or exporter is implemented. Arbitrary operator-supplied IPv6 options are outside an IOAM implementation claim. |
@@ -197,6 +205,35 @@ fields remain unchanged; all-zero Requested fields are filled from capture. The 
 `revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled`
 (`tests/tlv_flag_semantics.rs`) builds raw bytes independently of the encoder.
 
+### Revision 26 interpretation
+
+Sections 4.2 and 6.2 describe reflecting all identical-prefix headers with
+successive requests, while their numbered rule 1 and the inability cases in
+Sections 4.1 and 6.1 require C for a nonzero selector matching multiple
+unselected headers. Apply the explicit ambiguity rule until this conflict is
+clarified: repeating the same nonzero selector does not resolve ambiguity and
+does not consume a capture. Ordered all-zero requests do reflect every header.
+After a successful request consumes one header, later selectors consider only
+the remaining captures.
+
+`tests/tlv_flag_semantics.rs::revision26_identical_headers_use_strict_unmatched_selection`
+uses independently encoded requests for Types 246 and 247 in open and authenticated
+mode, including both HMACs. It verifies ambiguous requests preserve data, all-zero
+requests consume captures once in order, and a subsequent nonzero selector can
+match the remaining unique header. This tests packet processing with supplied
+capture metadata, not physical headers on the wire.
+
+The sender's current profile already enforces the new subset restriction:
+it originates one fixed IP header and at most one hbh followed by one dest header.
+The latter two have distinct Next Header octets. Requests that mask away their
+distinguishing octets must still match a unique remaining header; ambiguous
+subsets and duplicate selections are rejected. CLI and TOML tests cover these
+limits. Supporting additional originated header chains will require revisiting
+the restriction before extending the profile.
+
+A [clarification request](ext-hdr-26-clarification.md) is prepared for the draft
+authors; maintainer submission and an authoritative answer remain pending.
+
 ### MTU budget
 
 The sender rechecks the connected route MTU before each normal send and each
@@ -240,7 +277,7 @@ recovery and invalid-session replies.
 The table lists the draft's uppercase normative clauses and structural field
 requirements, with the §9.2 MAY expanded into its five descriptive state outcomes.
 Stable clause IDs are retained where possible; control procedure rows reference
-§5.1 in revision 25, and the combined-header ordering rows now reference §7.1.
+§5.1 in revision 26, and the combined-header ordering rows reference §7.1.
 Figures 6 and 7 are covered by the field width and length rows. Keyword boilerplate, topology examples, IOAM
 descriptions, implementation-status text and IANA procedures add no runtime
 requirement. Revision 25 removes revision 15's zero-checksum section. Checksums
@@ -249,6 +286,22 @@ mode. Requirements of referenced RFCs are covered by their own matrices.
 
 See the [namespace tests](../testing-netns.md), [measurement
 semantics](../measurements.md) and [release verification](../release-evidence.md).
+
+## Revision 26 review 2026-11-09
+
+Compared the complete archived revision 25 and 26 texts. The field lengths and
+wire layout are unchanged: Length is the selected header's complete size, with
+its Requested prefix included once. The revised matching text explicitly excludes
+previously selected headers. Existing ordered consumption already implements
+that rule. The new sender restrictions are covered within the supported originated
+profile; the conflicting repeated-nonzero examples add two Partial rows.
+No reflector matching change or experimental codepoint change is made.
+
+The current Datatracker document still identifies revision 26 as Active.
+Archived source SHA-256 values verified for this review:
+
+- Revision 25: `cbb4b1682184ba6ff49b64f7e562cd74a5f0074df04b4ccd0ff00d01da70bb16`.
+- Revision 26: `75f9d776a3c7f9ed4637a7240dae62922158d28ca34444287e17311587fc6a3e`.
 
 ## Revision 25 review (2026-10-26)
 

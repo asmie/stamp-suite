@@ -54,7 +54,7 @@ compatibility contract.
 | `sender/measurements.rs` | Reply-copy accounting and the optional counter and Follow-Up measurements. |
 | `sender/access_report.rs` | Access Report retransmission state (RFC 8972 §4.6). |
 | `sender/congestion.rs`, `rate_control.rs` | Response to CE-marked replies (AIMD, draft-ietf-ippm-stamp-cos-ecn-01 §3.4). |
-| `sender/session_state.rs` | Session state notifications (draft-ietf-ippm-stamp-ext-hdr-25 §9.2). |
+| `sender/session_state.rs` | Session state notifications (draft-ietf-ippm-stamp-ext-hdr-26 §9.2). |
 | `sender/observer.rs` | `SenderObserver`: live sender events for metrics, SNMP and library callers. |
 
 ### Reflector
@@ -85,7 +85,7 @@ compatibility contract.
 | --- | --- |
 | `session.rs` | Session table, counters, replay windows, Follow-Up state and lifetime. |
 | `session_identity.rs` | Session identity and static reflector admission (RFC 8972 §3). |
-| `net_policy.rs` | Outgoing TTL/Hop Limit 255, interface binding (`--interface`) and sender port selection (draft-ietf-ippm-stamp-ext-hdr-25 §3.1). |
+| `net_policy.rs` | Outgoing TTL/Hop Limit 255, interface binding (`--interface`) and sender port selection (draft-ietf-ippm-stamp-ext-hdr-26 §3.1). |
 | `net_scope.rs` | Interface zones for IPv6 link-local endpoints. |
 | `hwtstamp.rs` | Kernel and NIC timestamping with per-packet provenance. |
 | `stats.rs`, `stats/` | Statistics collection and text/JSON/CSV output; `stats/quantiles.rs` holds bounded quantiles and `stats/clock_quality.rs` the declared clock quality. |
@@ -527,7 +527,7 @@ changed. Use symmetric replies for BER. UDP checksums and link CRC or FEC may
 discard corrupt packets before delivery, so this measures residual delivered
 errors, not raw link BER.
 
-### Reflected IPv6 Extension and Fixed Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr-25)
+### Reflected IPv6 Extension and Fixed Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr-26)
 
 Type 246 (IPv6 extension header, §4.1 and §4.2) has an 8-octet Requested field;
 Type 247 (IP fixed header, §6.1 and §6.2) has a 4-octet Requested field. The TLV
@@ -543,6 +543,11 @@ Each captured header is reflected by at most one TLV, so successive TLVs pair
 with successive headers. No captured headers or no match sets C and leaves the
 value unchanged. A Type 247 after a Type 246 sets C on every header TLV and
 copies nothing (§7.1).
+
+Revision 26's identical-prefix example conflicts with its explicit ambiguity
+rules. The shared processor retains the latter: repeated ambiguous nonzero
+selectors get C without consuming a header; all-zero requests select each
+capture once in order. See the [conformance interpretation](conformance/draft-stamp-ext-hdr.md#revision-26-interpretation).
 
 Where headers come from:
 

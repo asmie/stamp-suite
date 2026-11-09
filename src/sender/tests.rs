@@ -7,7 +7,7 @@ use crate::packets::{ExtendedPacketAuthenticated, ExtendedPacketUnauthenticated}
 
 static NO_OBSERVERS: SenderObservers = SenderObservers::new();
 
-// --- draft-ietf-ippm-stamp-ext-hdr-25 header-reflection request TLVs ----
+// --- draft-ietf-ippm-stamp-ext-hdr-26 header-reflection request TLVs ----
 
 #[cfg(target_os = "linux")]
 fn ext_hdr_conf(extra: &[&str]) -> crate::configuration::Configuration {
@@ -30,7 +30,7 @@ fn tlvs_of(tlvs: &[RawTlv], ty: TlvType) -> Vec<&RawTlv> {
 #[test]
 #[cfg(target_os = "linux")]
 fn ext_hdr_multi_requests_emit_multiple_type246_tlvs_in_order() {
-    // ext-hdr-25 §4.2: multiple occurrences → multiple Type-246 TLVs with
+    // ext-hdr-26 §4.2: multiple occurrences → multiple Type-246 TLVs with
     // matching lengths, in order. The inline `LEN:SELECTORHEX` form carries
     // a per-occurrence Requested-field selector (§4.1).
     let conf = ext_hdr_conf(&[
@@ -90,7 +90,7 @@ fn fixed_hdr_multi_requests_are_rejected_without_multiple_originated_headers() {
 #[test]
 #[cfg(target_os = "linux")]
 fn fixed_hdr_before_ext_hdr_per_section_3_4() {
-    // ext-hdr-25 §6.3: every Type-247 TLV MUST precede every Type-246 TLV.
+    // ext-hdr-26 §7.1: every Type-247 TLV MUST precede every Type-246 TLV.
     let conf = ext_hdr_conf(&[
         "--attach-ext-hdr",
         "dest",
@@ -110,7 +110,7 @@ fn fixed_hdr_before_ext_hdr_per_section_3_4() {
 #[test]
 #[cfg(target_os = "linux")]
 fn attach_ext_hdr_emits_matching_type246_request() {
-    // ext-hdr-25 §4.2: attaching a real header MUST add a corresponding
+    // ext-hdr-26 §4.2: attaching a real header MUST add a corresponding
     // Type-246 TLV.
     // Default (no HEX) is an 8-octet header ⇒ Length 8, all-zeros Requested.
     let conf = ext_hdr_conf(&["--attach-ext-hdr", "dest"]);
@@ -132,7 +132,7 @@ fn attach_ext_hdr_custom_hex_sizes_the_request_tlv() {
     assert_eq!(ext[0].value.len(), 16);
 }
 
-// --- Sender MTU enforcement (draft-ietf-ippm-stamp-ext-hdr-25 §4.2/§6.2) --
+// --- Sender MTU enforcement (draft-ietf-ippm-stamp-ext-hdr-26 §4.2/§6.2) --
 
 #[test]
 fn enforce_egress_mtu_trims_header_tlvs_to_fit() {
@@ -476,7 +476,7 @@ fn build_reflected_control_tlv_only_when_requested() {
 
     // Ext-hdr control requested → TLV emitted even at count 1, carrying the
     // presence-only IPv6 Extension Header Control sub-TLV
-    // (draft-ietf-ippm-stamp-ext-hdr-25 §5.1; experimental type 240).
+    // (draft-ietf-ippm-stamp-ext-hdr-26 §5.1; experimental type 240).
     let tlv = build_reflected_control_tlv(0, 1, 1_000_000, true).expect("TLV for one-way mode");
     assert_eq!(
         tlv.interval_nanoseconds, 0,

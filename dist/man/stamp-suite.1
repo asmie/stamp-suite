@@ -208,7 +208,7 @@ stop: Stop the session on the first zeroed\-SSID reply. For an operator who requ
 .RE
 .TP
 \fB\-\-ttl\fR \fI<TTL>\fR
-Outgoing TTL / Hop Limit. Draft ext\-hdr\-25 requires 255 (the default)
+Outgoing TTL / Hop Limit. Draft ext\-hdr\-26 requires 255 (the default)
 .TP
 \fB\-\-malformed\fR \fI<MALFORMED>\fR
 Diagnostic: append a deliberately malformed TLV to every sent packet to test a reflector\*(Aqs RFC 8972 §4 handling. `bad\-flags` sets reserved flag bits; `bad\-length` declares a TLV length that overruns the packet. Not for normal measurements
@@ -525,7 +525,7 @@ Requested reply packet length for the Reflected Test Packet Control TLV. 0 means
 Inter\-packet gap in nanoseconds for the Reflected Test Packet Control TLV. Ignored unless `\-\-reflected\-control\-count` > 1
 .TP
 \fB\-\-reflected\-control\-no\-ext\-hdr\fR
-Append the IPv6 Extension Header Control sub\-TLV (draft\-ietf\-ippm\-stamp\-ext\-hdr\-25 §5.1) to the Reflected Test Packet Control TLV. The sub\-TLV asks the reflector to add matching IPv6 extension headers to its own reply packets; a reflector that cannot do so returns the sub\-TLV with the C flag set in its Sub\-TLV Flags. Implies emitting the Reflected Control TLV even when `\-\-reflected\-control\-count` is 1
+Append the IPv6 Extension Header Control sub\-TLV (draft\-ietf\-ippm\-stamp\-ext\-hdr\-26 §5.1) to the Reflected Test Packet Control TLV. The sub\-TLV asks the reflector to add matching IPv6 extension headers to its own reply packets; a reflector that cannot do so returns the sub\-TLV with the C flag set in its Sub\-TLV Flags. Implies emitting the Reflected Control TLV even when `\-\-reflected\-control\-count` is 1
 .TP
 \fB\-\-reflected\-control\-max\-count\fR \fI<REFLECTED_CONTROL_MAX_COUNT>\fR [default: 0]
 Maximum replies per Reflected Test Packet Control request (RFC 10052 §3). Requests above the cap receive one C\-flagged reply.
@@ -554,19 +554,19 @@ Permit fixed IP header reflection (Type 247) to this sender IP. Repeat for each 
 Permit IPv6 extension header reflection (Type 246) to this sender IP. Repeat for each permitted sender. Default: deny all header reflection
 .TP
 \fB\-\-reflected\-fixed\-hdr\fR [\fI<[SELECTORHEX]>\fR]
-Request the received IP fixed header in Type 247 (draft ext\-hdr\-25 §§6.2, 6.1). The sender originates one IP header and permits one request. The optional hex selector is at most four bytes, zero\-padded to the four\-octet Requested field. Zero octets are wildcards; mutable DSCP/ECN octets must be zero (IPv4 byte 1, IPv6 bytes 0 and 1). A nonzero selector must match a unique header. The nix reflector cannot read fixed headers and returns C. Header requests require a known Linux egress route MTU
+Request the received IP fixed header in Type 247 (draft ext\-hdr\-26 §§6.2, 6.1). The sender originates one IP header and permits one request. The optional hex selector is at most four bytes, zero\-padded to the four\-octet Requested field. Zero octets are wildcards; mutable DSCP/ECN octets must be zero (IPv4 byte 1, IPv6 bytes 0 and 1). A nonzero selector must match a unique header. The nix reflector cannot read fixed headers and returns C. Header requests require a known Linux egress route MTU
 .TP
 \fB\-\-reflected\-ipv6\-ext\-hdr\fR [\fI<[LEN[:SELECTORHEX]]>\fR]
-Select attached IPv6 headers for Type 246 reflection (draft ext\-hdr\-25 §§4.2, 4.1). Repeatable `LEN[:SELECTORHEX]` values replace the automatic \-\-attach\-ext\-hdr requests. LEN is a multiple of eight (8..2048); the selector is at most eight bytes, zero\-padded to the eight\-octet Requested field. Requests must match attached headers in wire order. Zero selector octets are wildcards; mutable option data must be zeroed. A nonzero selector must match a unique header. The nix reflector reads these headers on Linux only; elsewhere it returns C
+Select attached IPv6 headers for Type 246 reflection (draft ext\-hdr\-26 §§4.2, 4.1). Repeatable `LEN[:SELECTORHEX]` values replace the automatic \-\-attach\-ext\-hdr requests. LEN is a multiple of eight (8..2048); the selector is at most eight bytes, zero\-padded to the eight\-octet Requested field. Requests must match attached headers in wire order. Zero selector octets are wildcards; mutable option data must be zeroed. A nonzero selector must match a unique header. Selecting a same\-length subset requires a unique nonzero selector; ambiguous subsets are rejected. The nix reflector reads these headers on Linux only; elsewhere it returns C
 .TP
 \fB\-\-attach\-ext\-hdr\fR \fI<KIND[:HEX]>\fR
-Attach an IPv6 Hop\-by\-Hop (hbh) or Destination Options (dest) header and request its reflection (draft ext\-hdr\-25 §4.2). Linux/IPv6 only. At most one of each kind, in hbh then dest order. Optional HEX supplies the entire header whose size must match Hdr Ext Len; byte 0 (Next Header) is kernel\-assigned. Default: an eight\-byte PadN header. Attachment failure aborts startup. Explicit \-\-reflected\-ipv6\-ext\-hdr requests replace automatic requests
+Attach an IPv6 Hop\-by\-Hop (hbh) or Destination Options (dest) header and request its reflection (draft ext\-hdr\-26 §4.2). Linux/IPv6 only. At most one of each kind, in hbh then dest order. Optional HEX supplies the entire header whose size must match Hdr Ext Len; byte 0 (Next Header) is kernel\-assigned. Default: an eight\-byte PadN header. Attachment failure aborts startup. Explicit \-\-reflected\-ipv6\-ext\-hdr requests replace automatic requests
 .TP
 \fB\-\-reflected\-ipv6\-ext\-hdr\-selector\fR \fI<HEX>\fR
-Type 246 eight\-octet Requested selector (draft ext\-hdr\-25 §4.1), e.g. 1100010400000000. The header\*(Aqs Next Header byte comes first; up to eight hex\-decoded bytes are zero\-padded. Requires one \-\-reflected\-ipv6\-ext\-hdr and a matching attached header. At least one byte must be nonzero
+Type 246 eight\-octet Requested selector (draft ext\-hdr\-26 §4.1), e.g. 1100010400000000. The header\*(Aqs Next Header byte comes first; up to eight hex\-decoded bytes are zero\-padded. Requires one \-\-reflected\-ipv6\-ext\-hdr and a matching attached header. At least one byte must be nonzero
 .TP
 \fB\-\-reflected\-fixed\-hdr\-selector\fR \fI<HEX>\fR
-Type 247 four\-octet Requested selector (draft ext\-hdr\-25 §6.1). Up to four hex\-decoded bytes, zero\-padded; at least one must be nonzero. Requires one \-\-reflected\-fixed\-hdr without an inline selector
+Type 247 four\-octet Requested selector (draft ext\-hdr\-26 §6.1). Up to four hex\-decoded bytes, zero\-padded; at least one must be nonzero. Requires one \-\-reflected\-fixed\-hdr without an inline selector
 .SH EXTRA
 Examples:
   stamp\-suite \-\-remote\-addr 192.0.2.10 \-\-count 10

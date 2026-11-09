@@ -678,7 +678,7 @@ explicit-port failures stop startup. The reflector defaults to 862; sender
 and remote ports must differ. When reusing a reflector config for a sender,
 set `local_port = 0`.
 
-Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-25
+Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-26
 requires. `--ttl` accepts only 255. Received packets with a lower hop count are
 accepted.
 
@@ -737,9 +737,9 @@ arrived on, and multicast sessions, are not supported. The
 ### IPv6 extension headers
 
 The sender can attach IPv6 Hop-by-Hop and Destination Options headers and ask
-the reflector to return them (draft-ietf-ippm-stamp-ext-hdr-25). Type 246
+the reflector to return them (draft-ietf-ippm-stamp-ext-hdr-26). Type 246
 returns IPv6 extension headers and Type 247 the fixed IP header. Both types
-are experimental codepoints, so both endpoints must implement revision 25 of
+are experimental codepoints, so both endpoints must implement revision 26 of
 the draft. Header reflection is denied by default. On the reflector, configure
 `--reflect-ipv6-ext-header-from IP` for extension headers and
 `--reflect-fixed-header-from IP` for fixed headers; repeat a flag for each
@@ -773,6 +773,14 @@ Requested field selects the first unmatched header of the requested length and
 is filled with its first bytes in the reply. Selectors must zero every octet
 containing mutable fields: IPv4 byte 1, IPv6 bytes 0–1, or mutable IPv6 option
 data. The CLI rejects ambiguous extension-header selectors and mutable matches.
+
+Requests must not select only part of an indistinguishable equal-length header
+group. This sender originates one fixed header and at most one hbh followed by
+one dest header; CLI and TOML validation enforce that profile and reject ambiguous
+subsets. For captured identical-prefix groups, use one all-zero request per header
+in wire order. Repeating a nonzero selector still returns C under revision 26's
+explicit ambiguity rule; its conflicting example is documented in the
+[conformance interpretation](conformance/draft-stamp-ext-hdr.md#revision-26-interpretation).
 
 On Linux, the nix reflector reads IPv6 extension headers from the socket's
 ancillary data and reflects them. It cannot read the fixed IP header, so Type

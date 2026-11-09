@@ -2934,3 +2934,102 @@ fn revision25_extension_selector_masks_mutable_option_data() {
         assert_eq!(result.is_ok(), accepted, "{selector}: {result:?}");
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn revision26_sender_subset_rules_apply_to_cli_and_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("headers.toml");
+    // The supported hbh/dest chain has different on-wire Next Header bytes.
+    // Masking that byte can make an otherwise distinguishable subset ambiguous.
+    for (requests, accepted) in [
+        (vec!["8:00000104"], false),
+        (vec!["8"], false),
+        (vec!["8:11000104"], true),
+        (vec!["8", "8"], true),
+        (vec!["8", "8:00000104"], true),
+        (vec!["8:11000104", "8:11000104"], false),
+    ] {
+        let mut args = vec![
+            "test",
+            "--remote-addr",
+            "::1",
+            "--attach-ext-hdr",
+            "hbh",
+            "--attach-ext-hdr",
+            "dest",
+        ];
+        for request in &requests {
+            args.extend(["--reflected-ipv6-ext-hdr", request]);
+        }
+        assert_eq!(load_from_args(&args).is_ok(), accepted, "CLI {requests:?}");
+        let values = requests
+            .iter()
+            .map(|value| format!("{value:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::write(&file, format!(
+            "remote_addr = '::1'\nattach_ext_hdr = ['hbh', 'dest']\nreflected_ipv6_ext_hdr = [{values}]\n"
+        )).unwrap();
+        assert_eq!(
+            load_from_args(&["test", "--config", file.to_str().unwrap()]).is_ok(),
+            accepted,
+            "TOML {requests:?}"
+        );
+    }
+}
+
+#[test]
+fn revision26_sender_rejects_profiles_with_indistinguishable_originated_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("headers.toml");
+    for address in ["127.0.0.1", "::1"] {
+        let error = load_from_args(&[
+            "test",
+            "--remote-addr",
+            address,
+            "--reflected-fixed-hdr",
+            "--reflected-fixed-hdr",
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("only one fixed IP header"));
+        std::fs::write(
+            &file,
+            format!("remote_addr = '{address}'\nreflected_fixed_hdr = ['', '']\n"),
+        )
+        .unwrap();
+        assert!(
+            load_from_args(&["test", "--config", file.to_str().unwrap()])
+                .unwrap_err()
+                .to_string()
+                .contains("only one fixed IP header")
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        assert!(load_from_args(&[
+            "test",
+            "--remote-addr",
+            "::1",
+            "--attach-ext-hdr",
+            "dest",
+            "--attach-ext-hdr",
+            "dest"
+        ])
+        .unwrap_err()
+        .to_string()
+        .contains("at most one hbh and one dest"));
+        std::fs::write(
+            &file,
+            "remote_addr = '::1'\nattach_ext_hdr = ['dest', 'dest']\n",
+        )
+        .unwrap();
+        assert!(
+            load_from_args(&["test", "--config", file.to_str().unwrap()])
+                .unwrap_err()
+                .to_string()
+                .contains("at most one hbh and one dest")
+        );
+    }
+}

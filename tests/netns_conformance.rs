@@ -383,7 +383,7 @@ fn verify_srv6_reply(payload: &[u8], auth: bool, expect_path: bool) {
 
 // ==========================================================================
 // Scenario 4a: ext-hdr on the nix backend. The Destination Options header
-// arrives as ancillary data and is reflected (draft-ietf-ippm-stamp-ext-hdr-25
+// arrives as ancillary data and is reflected (draft-ietf-ippm-stamp-ext-hdr-26
 // §4.2). A UDP socket cannot see fixed headers, so Type 247 would get C.
 // ==========================================================================
 #[test]
@@ -456,7 +456,7 @@ fn scenario_4a_ext_hdr_nix_ancillary() {
 
 // ==========================================================================
 // Scenario 4b: real ext-hdr capture + reflection on the pnet backend
-// (draft-ietf-ippm-stamp-ext-hdr-25 §4.1, §4.2). Requires a pnet-feature
+// (draft-ietf-ippm-stamp-ext-hdr-26 §4.1, §4.2). Requires a pnet-feature
 // reflector binary (STAMP_NETNS_PNET_BIN) and kernel IPV6_DSTOPTS injection.
 // ==========================================================================
 #[test]
@@ -542,7 +542,7 @@ fn scenario_4b_ext_hdr_pnet_capture() {
     let ext =
         find_tlv(&rtlvs, TlvType::ReflectedIpv6ExtHdr).expect("reflected Type-246 TLV present");
     // Success path: C flag clear, and the Reflected field (value[8..]) equals
-    // the captured header's bytes from offset 8 (ext-hdr-25 §4.1: Requested(8)
+    // the captured header's bytes from offset 8 (ext-hdr-26 §4.1: Requested(8)
     // + Reflected).
     assert!(
         !ext.flags.conformant_reflected,
@@ -822,7 +822,7 @@ fn scenario_7_ber_onwire() {
 
 // ==========================================================================
 // Scenario 8: TTL / Hop Limit 255 on the wire (`--ttl 255`; the sender
-// socket is set to 255 by `net_policy::set_hops`, ext-hdr-25 §3.1).
+// socket is set to 255 by `net_policy::set_hops`, ext-hdr-26 §3.1).
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]

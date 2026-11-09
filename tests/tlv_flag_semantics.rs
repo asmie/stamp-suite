@@ -3,7 +3,7 @@
 //! - M (0x40): bad length or parser-detected structural error; field range
 //!   violations do not necessarily require M.
 //! - I (0x20): failed TLV HMAC; set on every TLV and echo the packet.
-//! - C (0x10): Type 12 parameters could not be honored. ext-hdr-25 also
+//! - C (0x10): Type 12 parameters could not be honored. ext-hdr-26 also
 //!   uses C for Type 246 and Extension Header Control sub-TLVs.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -718,7 +718,7 @@ fn reflected_control_value(length: u16, count: u16, interval_ns: u32) -> Vec<u8>
 }
 
 /// Builds a Type 12 value with `n` IPv6 Extension Header Control sub-TLVs
-/// (draft-ietf-ippm-stamp-ext-hdr-25 §5.1) appended after the fixed fields:
+/// (draft-ietf-ippm-stamp-ext-hdr-26 §5.1) appended after the fixed fields:
 /// each is flags=0, type=240 (experimental stand-in for TBA3), length=0.
 fn reflected_control_value_with_ext_hdr_controls(
     length: u16,
@@ -750,7 +750,7 @@ fn echoed_reflected_control_value(response_data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn reflected_control_single_ext_hdr_control_sets_c_on_subtlv() {
-    // draft-ietf-ippm-stamp-ext-hdr-25 §5.1 rule 4: a single IPv6 Extension
+    // draft-ietf-ippm-stamp-ext-hdr-26 §5.1 rule 4: a single IPv6 Extension
     // Header Control sub-TLV asks the reflector to ADD matching IPv6 extension
     // headers to its OWN reply. Neither backend can, so the C flag MUST be set
     // in the sub-TLV's Sub-TLV Flags (not on the parent Type 12 TLV flags).
@@ -798,7 +798,7 @@ fn reflected_control_single_ext_hdr_control_sets_c_on_subtlv() {
 
 #[test]
 fn reflected_control_duplicate_ext_hdr_control_sets_c_on_all_copies() {
-    // draft-ietf-ippm-stamp-ext-hdr-25 §5.1 cardinality rule: more than one
+    // draft-ietf-ippm-stamp-ext-hdr-26 §5.1 cardinality rule: more than one
     // IPv6 Extension Header Control sub-TLV is a violation; the C flag MUST be
     // set in the Sub-TLV Flags of EVERY offending copy.
     let raw = RawTlv::new(
@@ -829,7 +829,7 @@ fn reflected_control_duplicate_ext_hdr_control_sets_c_on_all_copies() {
 #[test]
 fn reflected_control_one_way_mode_defaults_off() {
     // Without the sub-TLV no Extension Header Control request is recorded
-    // (the default unidirectional type, draft-ietf-ippm-stamp-ext-hdr-25 §5.2).
+    // (the default unidirectional type, draft-ietf-ippm-stamp-ext-hdr-26 §5.2).
     let raw = RawTlv::new(
         TlvType::ReflectedControl,
         reflected_control_value(0, 2, 1_000_000),
@@ -1744,7 +1744,7 @@ fn a1_reflected_control_l2_matches_l3_fails_still_suppresses() {
 }
 
 // ---------------------------------------------------------------------------
-// draft-ietf-ippm-stamp-ext-hdr-25 §4.1 Requested-field selector, end to end
+// draft-ietf-ippm-stamp-ext-hdr-26 §4.1 Requested-field selector, end to end
 // (sender-built request TLV → reflector match against captured headers).
 
 #[test]
@@ -1819,12 +1819,12 @@ fn reflected_ipv6_ext_hdr_selector_no_match_sets_c_flag_end_to_end() {
     assert_eq!(
         echoed.flags.to_byte() & 0x10,
         0x10,
-        "Requested field matching no captured header → C flag per ext-hdr-25 §4.1"
+        "Requested field matching no captured header → C flag per ext-hdr-26 §4.1"
     );
     assert_eq!(
         echoed.flags.to_byte() & 0x80,
         0x00,
-        "must set C, not U, per ext-hdr-25 §4.1"
+        "must set C, not U, per ext-hdr-26 §4.1"
     );
     assert_eq!(
         &echoed.value[..8],
@@ -1853,7 +1853,7 @@ fn revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled() {
         let tlv = &reply.non_hmac_tlvs()[0];
         assert_eq!(tlv.flags.to_byte(), 0);
         // A zero selector matches the first header and is filled with its
-        // first eight octets (ext-hdr-25 §4.2 rule 1).
+        // first eight octets (ext-hdr-26 §4.2 rule 1).
         let expected = if selector.iter().all(|b| *b == 0) {
             &first
         } else {
@@ -1960,6 +1960,111 @@ fn revision25_wildcards_ambiguity_and_policy() {
         let reply = reflect_unauth(&build_unauth_packet(&all_zero), &ctx);
         assert_eq!(reply.non_hmac_tlvs()[0].flags.to_byte(), 0x10);
         assert_eq!(reply.non_hmac_tlvs()[0].value, all_zero[4..]);
+    }
+}
+
+#[test]
+fn revision26_identical_headers_use_strict_unmatched_selection() {
+    let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+    for (kind, width, prefix, length) in [
+        (247, 4, vec![0x45, 0, 0, 60], 20),
+        (246, 8, vec![17, 1, 4, 2, 1, 2, 0, 0], 16),
+    ] {
+        let mut first = prefix.clone();
+        first.resize(length, 0x11);
+        let mut second = prefix.clone();
+        second.resize(length, 0x22);
+        let captured = CapturedHeaders {
+            fixed_headers: if kind == 247 {
+                vec![first.clone(), second.clone()]
+            } else {
+                vec![]
+            },
+            ipv6_ext_headers: if kind == 246 {
+                [first.clone(), second.clone()].concat()
+            } else {
+                vec![]
+            },
+        };
+        let request = |selector: &[u8]| {
+            let mut value = selector.to_vec();
+            value.resize(length, 0);
+            let mut raw = vec![0x80, kind, 0, length as u8];
+            raw.extend_from_slice(&value);
+            raw
+        };
+        let nonzero = request(&prefix);
+        let zero = request(&vec![0; width]);
+        for auth in [false, true] {
+            for all_zero in [false, true] {
+                let chain = if all_zero {
+                    [zero.clone(), zero.clone(), zero.clone()].concat()
+                } else {
+                    // Repeating a nonzero selector cannot disambiguate two
+                    // identical prefixes under revision 26's explicit rule 1.
+                    [
+                        nonzero.clone(),
+                        nonzero.clone(),
+                        zero.clone(),
+                        nonzero.clone(),
+                        zero.clone(),
+                    ]
+                    .concat()
+                };
+                let base = if auth { 112 } else { 44 };
+                let mut packet = vec![0; base];
+                packet[..4].copy_from_slice(&1u32.to_be_bytes());
+                if auth {
+                    let mac = key.compute(&packet[..96]);
+                    packet[96..112].copy_from_slice(&mac);
+                }
+                packet.extend_from_slice(&chain);
+                if auth {
+                    let mut covered = packet[..4].to_vec();
+                    covered.extend_from_slice(&chain);
+                    packet.extend_from_slice(&[0x80, 8, 0, 16]);
+                    packet.extend_from_slice(&key.compute(&covered));
+                }
+                let mut ctx = make_ctx(auth.then_some(&key));
+                ctx.captured_headers = Some(&captured);
+                let response = process_stamp_packet(&packet, src(), 64, auth, &ctx).unwrap();
+                let tlvs = TlvList::parse(&response.data[base..]).unwrap();
+                let returned = tlvs.non_hmac_tlvs();
+                let start = if all_zero { 0 } else { 2 };
+                if !all_zero {
+                    for tlv in &returned[..2] {
+                        assert_eq!(tlv.flags.to_byte(), 0x10);
+                        assert_eq!(
+                            tlv.value,
+                            nonzero[4..],
+                            "ambiguous requests preserve data and consume nothing"
+                        );
+                    }
+                }
+                assert_eq!(returned[start].flags.to_byte(), 0);
+                assert_eq!(returned[start].value, first);
+                assert_eq!(returned[start + 1].flags.to_byte(), 0);
+                assert_eq!(
+                    returned[start + 1].value,
+                    second,
+                    "only the unmatched header remains eligible"
+                );
+                assert_eq!(returned[start + 2].flags.to_byte(), 0x10);
+                assert_eq!(
+                    returned[start + 2].value,
+                    zero[4..],
+                    "each capture is consumed once"
+                );
+                if auth {
+                    assert_eq!(&response.data[96..112], &key.compute(&response.data[..96]));
+                    let hmac_at = response.data.len() - 20;
+                    assert_eq!(&response.data[hmac_at..hmac_at + 4], &[0, 8, 0, 16]);
+                    let mut covered = response.data[..4].to_vec();
+                    covered.extend_from_slice(&response.data[base..hmac_at]);
+                    assert_eq!(&response.data[hmac_at + 4..], &key.compute(&covered));
+                }
+            }
+        }
     }
 }
 

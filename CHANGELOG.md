@@ -8,12 +8,15 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 ### Changed
 
 - Raise the minimum Rust version to 1.87 for the patched `ctutils` dependency.
-- Update reflected-header extensions to draft-ietf-ippm-stamp-ext-hdr-25.
+- Update reflected-header extensions to draft-ietf-ippm-stamp-ext-hdr-26.
   Header disclosure now requires explicit sender-IP permission through
   `--reflect-fixed-header-from` or `--reflect-ipv6-ext-header-from` (or their
   TOML arrays). Unlisted senders receive C without captured header data.
 - Treat zero Requested octets as wildcards and reject ambiguous header
   selectors. Sender selectors must mask mutable header octets.
+- Retain revision 26's explicit ambiguity-rejection rule for repeated nonzero
+  selectors. Document its conflicting all-header example as Partial and verify
+  CLI/TOML subset validation and authenticated header-consumption behavior.
 
 ### Fixed
 

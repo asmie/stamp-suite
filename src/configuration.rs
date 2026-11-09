@@ -750,7 +750,7 @@ pub struct Configuration {
     )]
     pub ecn_recovery_step: u32,
 
-    /// Outgoing TTL / Hop Limit. Draft ext-hdr-25 requires 255 (the default).
+    /// Outgoing TTL / Hop Limit. Draft ext-hdr-26 requires 255 (the default).
     #[clap(long, value_parser = clap::value_parser!(u8).range(255..=255), help_heading = "Sender", hide_short_help = true)]
     pub ttl: Option<u8>,
 
@@ -1136,7 +1136,7 @@ pub struct Configuration {
     pub reflected_control_interval_ns: u32,
 
     /// Append the IPv6 Extension Header Control sub-TLV
-    /// (draft-ietf-ippm-stamp-ext-hdr-25 §5.1) to the Reflected Test Packet
+    /// (draft-ietf-ippm-stamp-ext-hdr-26 §5.1) to the Reflected Test Packet
     /// Control TLV. The sub-TLV asks the reflector to add matching
     /// IPv6 extension headers to its own reply packets; a reflector that cannot
     /// do so returns the sub-TLV with the C flag set in its Sub-TLV Flags.
@@ -1228,7 +1228,7 @@ pub struct Configuration {
     #[clap(long, value_name = "IP", action = clap::ArgAction::Append, help_heading = "Header reflection", hide_short_help = true)]
     pub reflect_ipv6_ext_header_from: Vec<std::net::IpAddr>,
 
-    /// Request the received IP fixed header in Type 247 (draft ext-hdr-25 §§6.2, 6.1).
+    /// Request the received IP fixed header in Type 247 (draft ext-hdr-26 §§6.2, 6.1).
     /// The sender originates one IP header and permits one request. The optional hex
     /// selector is at most four bytes, zero-padded to the four-octet Requested field.
     /// Zero octets are wildcards; mutable DSCP/ECN octets must be zero (IPv4 byte 1,
@@ -1246,12 +1246,14 @@ pub struct Configuration {
     )]
     pub reflected_fixed_hdr: Vec<String>,
 
-    /// Select attached IPv6 headers for Type 246 reflection (draft ext-hdr-25 §§4.2, 4.1).
+    /// Select attached IPv6 headers for Type 246 reflection (draft ext-hdr-26 §§4.2, 4.1).
     /// Repeatable `LEN[:SELECTORHEX]` values replace the automatic --attach-ext-hdr
     /// requests. LEN is a multiple of eight (8..2048); the selector is at most eight
     /// bytes, zero-padded to the eight-octet Requested field. Requests must match
     /// attached headers in wire order. Zero selector octets are wildcards; mutable
     /// option data must be zeroed. A nonzero selector must match a unique header.
+    /// Selecting a same-length subset requires a unique nonzero selector;
+    /// ambiguous subsets are rejected.
     /// The nix reflector reads these headers on Linux only; elsewhere it returns C.
     #[clap(
         long,
@@ -1265,7 +1267,7 @@ pub struct Configuration {
     pub reflected_ipv6_ext_hdr: Vec<String>,
 
     /// Attach an IPv6 Hop-by-Hop (hbh) or Destination Options (dest) header and
-    /// request its reflection (draft ext-hdr-25 §4.2). Linux/IPv6 only. At most one
+    /// request its reflection (draft ext-hdr-26 §4.2). Linux/IPv6 only. At most one
     /// of each kind, in hbh then dest order. Optional HEX supplies the entire header
     /// whose size must match Hdr Ext Len; byte 0 (Next Header) is kernel-assigned.
     /// Default: an eight-byte PadN header. Attachment failure aborts startup.
@@ -1273,7 +1275,7 @@ pub struct Configuration {
     #[clap(long, value_name = "KIND[:HEX]", action = clap::ArgAction::Append, help_heading = "Header reflection", hide_short_help = true)]
     pub attach_ext_hdr: Vec<String>,
 
-    /// Type 246 eight-octet Requested selector (draft ext-hdr-25 §4.1), e.g.
+    /// Type 246 eight-octet Requested selector (draft ext-hdr-26 §4.1), e.g.
     /// 1100010400000000. The header's Next Header byte comes first; up to eight
     /// hex-decoded bytes are zero-padded. Requires one --reflected-ipv6-ext-hdr
     /// and a matching attached header. At least one byte must be nonzero.
@@ -1285,7 +1287,7 @@ pub struct Configuration {
     )]
     pub reflected_ipv6_ext_hdr_selector: Option<String>,
 
-    /// Type 247 four-octet Requested selector (draft ext-hdr-25 §6.1). Up to four
+    /// Type 247 four-octet Requested selector (draft ext-hdr-26 §6.1). Up to four
     /// hex-decoded bytes, zero-padded; at least one must be nonzero. Requires one
     /// --reflected-fixed-hdr without an inline selector.
     #[clap(
@@ -1489,7 +1491,7 @@ impl Configuration {
         self.validate_cos()?;
         self.validate_access_report()?;
         self.validate_micro_session()?;
-        // draft-ietf-ippm-stamp-ext-hdr-25 §§4.2/6.2/4.1/6.1 header-reflection
+        // draft-ietf-ippm-stamp-ext-hdr-26 §§4.2/6.2/4.1/6.1 header-reflection
         // request flags (repeatable) plus the §4.2 header attachment flag.
         self.validate_ext_hdr_flags()
     }
@@ -1563,7 +1565,7 @@ impl Configuration {
         }
 
         if self.ttl.is_some_and(|ttl| ttl != 255) {
-            return Err(invalid("ttl must be 255 for draft ext-hdr-25"));
+            return Err(invalid("ttl must be 255 for draft ext-hdr-26"));
         }
         Ok(())
     }
@@ -1946,7 +1948,7 @@ impl Configuration {
     }
 
     /// Validates header-reflection requests and attachments before sending
-    /// (draft-ietf-ippm-stamp-ext-hdr-25). Uses the sender's wire-TLV parsers,
+    /// (draft-ietf-ippm-stamp-ext-hdr-26). Uses the sender's wire-TLV parsers,
     /// including those for standalone selector flags.
     fn validate_ext_hdr_flags(&self) -> Result<(), ConfigurationError> {
         // Parse each repeatable occurrence (fails fast on bad hex/length).
@@ -1974,6 +1976,10 @@ impl Configuration {
         }
 
         if !self.is_reflector {
+            // Revision 26 forbids selecting only part of an indistinguishable
+            // header group. This sender originates one fixed IP header and at
+            // most hbh/dest: their kernel-assigned Next Header bytes differ.
+            // Matching below also rejects selectors that mask that distinction.
             if self.reflected_fixed_hdr.len() > 1 {
                 return Err(invalid("only one fixed IP header is originated; at most one fixed-header request is allowed"));
             }
@@ -2779,11 +2785,11 @@ pub fn resolve_log_filter(verbose: u8, env: Option<&str>) -> String {
 /// Validate before allocation to reject oversized input.
 pub(crate) const MAX_PADDING_BYTES: usize = 65_507 - 112 - 4 - 20 - 16 - 8;
 
-/// Type 246 Requested field width (draft-ietf-ippm-stamp-ext-hdr-25 §4.1).
+/// Type 246 Requested field width (draft-ietf-ippm-stamp-ext-hdr-26 §4.1).
 pub(crate) const MAX_IPV6_EXT_HDR_SELECTOR_BYTES: usize = 8;
 
 /// Decodes a hex selector string (optional `0x` prefix) into bytes for the
-/// draft-ietf-ippm-stamp-ext-hdr-25 §4.1/§6.1 Requested-field request TLVs.
+/// draft-ietf-ippm-stamp-ext-hdr-26 §4.1/§6.1 Requested-field request TLVs.
 /// Requires non-empty input with at least one non-zero byte, because an all-zero
 /// Requested field would be indistinguishable from "no selector requested".
 pub(crate) fn decode_selector(s: &str) -> Result<Vec<u8>, String> {
@@ -2802,7 +2808,7 @@ pub(crate) fn decode_selector(s: &str) -> Result<Vec<u8>, String> {
 }
 
 /// A parsed `--reflected-ipv6-ext-hdr` occurrence
-/// (draft-ietf-ippm-stamp-ext-hdr-25 §§4.2, 4.1). Each occurrence becomes one
+/// (draft-ietf-ippm-stamp-ext-hdr-26 §§4.2, 4.1). Each occurrence becomes one
 /// Type-246 request TLV of Length `length`, with an optional inline §4.1
 /// selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2815,7 +2821,7 @@ pub struct ExtHdrRequestSpec {
 }
 
 /// A parsed `--reflected-fixed-hdr` occurrence
-/// (draft-ietf-ippm-stamp-ext-hdr-25 §§6.2, 6.1). Each occurrence becomes one
+/// (draft-ietf-ippm-stamp-ext-hdr-26 §§6.2, 6.1). Each occurrence becomes one
 /// Type-247 request TLV (Length is the destination family's IP fixed-header
 /// size), with an optional inline §6.1 selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2834,7 +2840,7 @@ pub enum AttachExtHdrKind {
 }
 
 /// A parsed `--attach-ext-hdr` occurrence: a real IPv6 extension header the
-/// sender attaches to its own egress packets (draft-ietf-ippm-stamp-ext-hdr-25
+/// sender attaches to its own egress packets (draft-ietf-ippm-stamp-ext-hdr-26
 /// §4.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachExtHdrSpec {

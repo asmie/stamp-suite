@@ -225,7 +225,7 @@ detect clock discipline or discover timescale offsets.
 
 ## Session-state notifications
 
-These notifications follow draft-ietf-ippm-stamp-ext-hdr-25 §9.2.
+These notifications follow draft-ietf-ippm-stamp-ext-hdr-26 §9.2.
 
 The sender logs state changes with target `stamp_suite::session_state` and includes
 `session_state` within `measurements` in summaries. It becomes active after a
