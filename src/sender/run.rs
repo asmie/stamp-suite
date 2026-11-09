@@ -59,9 +59,10 @@ pub(super) struct SenderRun {
     /// only send site.
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
     tx_counter: u32,
-    /// OPT_ID to sequence number, for TX timestamps still to arrive.
+    /// OPT_ID to (sequence, monotonic send time, wire T1) for TX reports still
+    /// to arrive. Reused sequences must not inherit an older send's correction.
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-    tx_id_to_seq: HashMap<u32, u32>,
+    tx_id_to_seq: HashMap<u32, (u32, Instant, u64)>,
     error_estimate: ErrorEstimate,
     error_estimate_wire: u16,
     hmac_key: Option<HmacKey>,
@@ -358,7 +359,7 @@ impl SenderRun {
         #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
         let sender_tx_counter: u32 = 0;
         #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
-        let tx_id_to_seq: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let tx_id_to_seq = HashMap::new();
 
         // Build error estimate from configuration with Z flag set based on clock source
         let error_estimate = ErrorEstimate::with_clock_format(
@@ -1216,6 +1217,7 @@ impl SenderRun {
         let probe = PendingPacket {
             send_time,
             send_timestamp,
+            wire_timestamp: send_timestamp,
         };
         // A reused sequence cannot represent both generations. Disclose its
         // retirement even with an unlimited cap rather than silently dropping
@@ -1259,7 +1261,8 @@ impl SenderRun {
         // TX timestamp can correct the stored T1.
         #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
         if self.kernel_ts.tx_kernel {
-            self.tx_id_to_seq.insert(self.tx_counter, seq);
+            self.tx_id_to_seq
+                .insert(self.tx_counter, (seq, send_time, send_timestamp));
             self.tx_counter = self.tx_counter.wrapping_add(1);
             if self.tx_id_to_seq.len() > 4096 {
                 // TX timestamps stopped arriving; do not grow without bound.
@@ -1311,17 +1314,16 @@ impl SenderRun {
         // records or accidentally removes another generation after wrap.
         let echoed = if self.use_auth { 48 } else { 24 };
         let candidate = if conf.max_pending_probes != 0 {
-            // Match the base parser's zero-fill policy for short replies;
-            // never read old bytes left beyond the received datagram.
-            let mut sequence = [0; 4];
-            if let Some(bytes) = self.recv_buf[..len].get(echoed..) {
-                let count = bytes.len().min(4);
-                sequence[..count].copy_from_slice(&bytes[..count]);
-            }
-            let seq = u32::from_be_bytes(sequence);
-            self.pending_generation
-                .get(&seq)
-                .map(|&generation| (generation, seq))
+            // Admission requires the full echo; never inspect stale buffer
+            // bytes or invent a sequence from a missing field.
+            self.recv_buf[..len]
+                .get(echoed..echoed + 4)
+                .and_then(|bytes| {
+                    let seq = u32::from_be_bytes(bytes.try_into().unwrap());
+                    self.pending_generation
+                        .get(&seq)
+                        .map(|&generation| (generation, seq))
+                })
         } else {
             None
         };
@@ -1465,15 +1467,17 @@ impl SenderRun {
 #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
 pub(super) fn apply_tx_corrections(
     reports: &[crate::hwtstamp::TxTimestampReport],
-    tx_id_to_seq: &mut HashMap<u32, u32>,
+    tx_id_to_seq: &mut HashMap<u32, (u32, Instant, u64)>,
     pending: &mut HashMap<u32, PendingPacket>,
 ) -> usize {
     let mut applied = 0;
     for report in reports {
-        if let Some(seq) = tx_id_to_seq.remove(&report.opt_id) {
+        if let Some((seq, sent, wire_t1)) = tx_id_to_seq.remove(&report.opt_id) {
             if let Some(probe) = pending.get_mut(&seq) {
-                probe.send_timestamp = report.timestamp;
-                applied += 1;
+                if probe.send_time == sent && probe.wire_timestamp == wire_t1 {
+                    probe.send_timestamp = report.timestamp;
+                    applied += 1;
+                }
             }
         }
     }
@@ -1591,3 +1595,7 @@ mod pending_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "run/mtu_tests.rs"]
 mod mtu_tests;
+
+#[cfg(test)]
+#[path = "run/admission_tests.rs"]
+mod admission_tests;

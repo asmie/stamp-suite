@@ -35,7 +35,11 @@ of physical network loss, and do not change send timing or reply denominators.
 See [retention policy](usage.md#pending-probe-retention).
 
 The reply collector runs after base authentication, TLV validation and session
-admission. Its counters distinguish individual reflected packets:
+admission. It matches the complete echoed sender sequence and all eight wire
+timestamp (T1) bytes against a pending probe or retained history before applying
+SSID policy, learning IDs, acknowledging Access Reports or using CE feedback.
+A known sequence with a missing or different T1 is rejected. Its counters
+distinguish individual reflected packets:
 
 | Field | Meaning |
 | --- | --- |
@@ -44,8 +48,9 @@ admission. Its counters distinguish individual reflected packets:
 | `answered_probes` | Retained probes with at least one accepted reply, including late first replies. |
 | `additional_replies` | Distinct replies after a probe's first reply. These include requested burst copies. |
 | `late_replies` | First replies for retained probes that are no longer pending. |
-| `duplicate_replies` | Repeated recent `(echoed sender sequence, reflector sequence, T3)` identities. |
+| `duplicate_replies` | Repeated recent `(echoed sender sequence, echoed T1, reflector sequence, T3)` identities. |
 | `unknown_replies` | Replies with neither a retained probe nor a pending probe. |
+| `mismatched_replies` | Known sequences with a missing or mismatched echoed T1; these do not consume a pending probe or update measurements/control state. |
 | `reordered_replies` | Reflector sequence behind the highest observed sequence using 32-bit serial arithmetic. |
 | `unobserved_requested_replies` | Requested copies less observed copies, capped separately per probe. |
 | `reply_rtt` | Count and cumulative minimum/mean/maximum RTT for all unique replies. |
@@ -55,6 +60,28 @@ admission. Its counters distinguish individual reflected packets:
 echoed sender sequence. Neither proves which sequencing mode the peer uses.
 Counter resets can resemble reordering. No directional loss is inferred from
 sequence gaps alone.
+
+Wire T1 stays immutable when a kernel TX timestamp corrects T1 for delay
+calculation. Delayed TX reports also have to match the local send context before
+correcting a pending probe. These checks distinguish reused sequences with
+different wire timestamps; they are not cryptographic replay protection. If a
+peer repeats the same sequence and wire T1, or a clock reset recreates that pair,
+those bytes alone cannot establish freshness. Unauthenticated traffic still
+depends on the deployment's trust boundary.
+
+The session-state monitor replaces an older outstanding deadline when its
+sequence is reused, so that deadline cannot expire the newer probe or remain
+after the newer probe is answered.
+
+Lenient reply parsing can zero-fill unused trailing fields, but cannot invent
+identity bytes. Unauthenticated replies need at least the complete echoed T1
+(36 bytes through its last octet); a 41-byte TWAMP Light reply includes it.
+Authenticated replies must also pass the existing base HMAC check. Short
+reflector requests keep their separate parsing policy. TLV diagnostics are
+counted before this identity check, so a rejected stale reply can still add
+diagnostic observations. Required micro-session binding retains its existing
+rule for accepting first replies to live pending probes or additional copies
+of already answered retained probes.
 
 Requested-but-unobserved replies include policy caps, unsupported requests,
 validation rejection, timeout and network loss. **They are not a network-loss

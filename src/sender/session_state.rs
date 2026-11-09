@@ -52,11 +52,15 @@ impl Monitor {
     pub(super) fn sent(&mut self, seq: u32, now: Instant) {
         self.transmitting = true;
         if !self.timeout.is_zero() {
+            // A reused wire sequence now names the new probe. Keeping its old
+            // deadline could expire it early or survive its successful reply.
+            if !self.received.insert(seq) {
+                self.probes.retain(|probe| probe.seq != seq);
+            }
             self.probes.push_back(Probe {
                 seq,
                 deadline: now + self.timeout,
             });
-            self.received.insert(seq);
         }
     }
     pub(super) fn reply(&mut self, seq: u32, _now: Instant) {
@@ -195,6 +199,35 @@ mod tests {
         m.reply(2, now);
         m.advance(now + timeout);
         assert_eq!(m.summary.failed_notifications, 0);
+        assert_eq!(m.summary.consecutive_losses, 1);
+    }
+
+    #[test]
+    fn reused_sequence_replaces_the_old_deadline_and_clears_on_current_reply() {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(1);
+        let mut m = Monitor::new(1, timeout);
+        m.sent(0, now);
+        m.sent(0, now + timeout / 2);
+        m.advance(now + timeout);
+        assert_eq!(
+            m.summary.state,
+            State::Idle,
+            "old deadline expired the new probe"
+        );
+        assert_eq!(m.probes.len(), 1);
+        m.reply(0, now + timeout);
+        m.advance(now + timeout * 2);
+        assert_eq!(m.summary.state, State::Active);
+        assert_eq!(m.summary.failed_notifications, 0);
+        assert!(m.probes.is_empty() && m.received.is_empty());
+        // A genuine timeout still counts once at the reused probe's deadline.
+        m.sent(1, now + timeout * 3);
+        m.sent(1, now + timeout * 3 + timeout / 2);
+        m.advance(now + timeout * 4);
+        assert_eq!(m.summary.consecutive_losses, 0);
+        m.advance(now + timeout * 5);
+        assert_eq!(m.summary.state, State::Failed);
         assert_eq!(m.summary.consecutive_losses, 1);
     }
 }

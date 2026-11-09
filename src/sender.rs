@@ -62,11 +62,13 @@ use crate::{
 /// Internal structure to track packets awaiting responses.
 #[derive(Clone, Copy)]
 struct PendingPacket {
-    /// Wall-clock time when the packet was sent.
+    /// Monotonic time when the packet was sent.
     send_time: Instant,
-    /// STAMP timestamp (T1) embedded in the sent packet, used to compute the
-    /// forward one-way delay against the reflector's receive timestamp (T2).
+    /// T1 used for forward OWD, corrected by kernel TX timestamps when available.
     send_timestamp: u64,
+    /// Immutable timestamp serialized into the probe. Kernel TX corrections
+    /// update `send_timestamp` for OWD, never the echoed identity.
+    wire_timestamp: u64,
 }
 
 /// Errors a connected UDP socket reports for ICMP feedback on an earlier
@@ -216,10 +218,18 @@ pub fn fuzz_reply(
     let now = Instant::now();
     let mut pending = HashMap::new();
     let mut measurements = Measurements::new(3);
+    // Seed a matching echo so fuzzing can reach measurement/control paths;
+    // real admission (including mismatches/reuse) is covered by regressions.
+    let echo = if use_auth { 64 } else { 28 };
+    let wire_timestamp = data
+        .get(echo..echo + 8)
+        .map_or(0, |bytes| u64::from_be_bytes(bytes.try_into().unwrap()));
     for seq in 0..4u32 {
+        let timestamp = generate_timestamp(ClockFormat::NTP);
         let probe = PendingPacket {
             send_time: now,
-            send_timestamp: generate_timestamp(ClockFormat::NTP),
+            send_timestamp: timestamp,
+            wire_timestamp,
         };
         pending.insert(seq, probe);
         measurements.sent(seq, probe, seq + 1);
@@ -306,8 +316,8 @@ fn process_response(
     let mut ber_observation = None;
 
     // Parse the reply and, in extension mode, validate its TLVs. Lenient
-    // parsing accepts short replies, such as a TWAMP Light reflector's
-    // (RFC 8762 §4.6).
+    // parsing permits missing trailing fields, but admission still requires
+    // the complete echoed sequence and timestamp (also present in TWAMP Light).
     let (
         seq_num,
         reflector_recv_ts,
@@ -523,6 +533,30 @@ fn process_response(
         )
     };
 
+    // Match the original wire T1 before deduplication, SSID policy, learning or
+    // control feedback. A sequence number alone can name a newer probe after
+    // wrap/reuse. Retained history permits valid late replies and burst copies.
+    let probe = ctx
+        .pending
+        .get(&seq_num)
+        .copied()
+        .or_else(|| ctx.measurements.as_ref().and_then(|m| m.probe(seq_num)));
+    let Some(probe) = probe else {
+        if let Some(m) = ctx.measurements.as_mut() {
+            m.unknown_reply();
+        }
+        ctx.observers.reply_rejected();
+        return;
+    };
+    let echo = if use_auth { 64 } else { 28 };
+    if data.get(echo..echo + 8) != Some(probe.wire_timestamp.to_be_bytes().as_slice()) {
+        log::debug!("Discarding reflected packet seq={seq_num}: missing or mismatched echoed sender timestamp");
+        if let Some(m) = ctx.measurements.as_mut() {
+            m.mismatched_reply();
+        }
+        ctx.observers.reply_rejected();
+        return;
+    }
     if want_msid
         && !ctx.pending.contains_key(&seq_num)
         && !ctx
@@ -530,7 +564,7 @@ fn process_response(
             .as_ref()
             .is_some_and(|m| m.answered(seq_num))
     {
-        log::debug!("Discarding micro-session reply for unknown sequence {seq_num}");
+        log::debug!("Discarding micro-session reply for unaccepted sequence {seq_num}");
         return;
     }
 
@@ -574,6 +608,7 @@ fn process_response(
     if let Some(measurements) = ctx.measurements.as_mut() {
         let key = ReplyKey {
             sender: seq_num,
+            t1: probe.wire_timestamp,
             reflector: reflector_seq,
             t3: reflector_send_ts,
         };

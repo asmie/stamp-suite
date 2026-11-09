@@ -688,8 +688,8 @@ impl StatsSnapshot {
                 writeln!(out, "{prefix}Pending probes: {} retained, limit {}, peak {}; {} retired as lost (not timed expiry)",
                     m.pending_probes, m.pending_limit, m.pending_high_watermark, m.pending_evictions)?;
             }
-            writeln!(out,"{prefix}Replies: {} unique, {} additional, {} late, {} duplicates, {} reordered, {} unknown",
-                m.unique_replies, m.additional_replies, m.late_replies, m.duplicate_replies, m.reordered_replies, m.unknown_replies)?;
+            writeln!(out,"{prefix}Replies: {} unique, {} additional, {} late, {} duplicates, {} reordered, {} unknown, {} mismatched echoes",
+                m.unique_replies, m.additional_replies, m.late_replies, m.duplicate_replies, m.reordered_replies, m.unknown_replies, m.mismatched_replies)?;
             writeln!(out,"{prefix}Requested replies unobserved: {} (includes policy caps); history evictions: {} probes, {} replies",
                 m.unobserved_requested_replies, m.probes_evicted, m.replies_evicted)?;
             writeln!(

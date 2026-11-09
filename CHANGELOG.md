@@ -44,6 +44,14 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Match replies against their complete echoed sender timestamp before consuming
+  a pending probe or applying SSID policy, learned IDs, Access Report or ECN
+  feedback. Preserve wire T1 across kernel corrections, include it in reply
+  deduplication, and reject delayed TX corrections for reused send contexts.
+  Replace stale session-state deadlines on sequence reuse. Report missing or
+  mismatched echoes as `measurements.mismatched_replies`; lenient replies must
+  contain the full echo even when unused trailing fields are omitted.
+
 - Refuse header-reflection probes before sending when their mandatory fields
   exceed the current route MTU or the budget cannot be read. Reserve dynamic
   control and diagnostic bytes during trimming, and restore header requests

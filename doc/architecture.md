@@ -218,6 +218,15 @@ verification (RFC 8762 §4.6). `--strict-packets` rejects it instead.
 Authentication checks are independent of this setting, and received MBZ fields
 are ignored in both modes.
 
+This reflector request policy is separate from sender reply admission. A
+sender needs the complete echoed sequence and eight-byte wire T1, even when a
+reply's unused trailing fields are zero-filled. It checks this identity against
+pending/retained history before deduplication, SSID policy and semantic state
+changes. Pending probes retain immutable wire T1 separately from the corrected
+T1 used for OWD. TX error-queue mappings carry the monotonic send time and wire
+T1 with the sequence, preventing an older send's report from correcting a newer
+probe after sequence reuse. Reply-copy identities include wire T1.
+
 ## Sender run loop
 
 `sender/run.rs` runs one session. `run_senders` (in `sender.rs`) opens one

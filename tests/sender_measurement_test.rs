@@ -18,6 +18,16 @@ impl Drop for Sender {
 }
 impl Sender {
     fn start(peer: &UdpSocket, auth: bool, count: u32, copies: u16) -> Self {
+        Self::start_profile(peer, auth, count, copies, true, &[])
+    }
+    fn start_profile(
+        peer: &UdpSocket,
+        auth: bool,
+        count: u32,
+        copies: u16,
+        extensions: bool,
+        extra: &[&str],
+    ) -> Self {
         let ip = peer.local_addr().unwrap().ip().to_string();
         let mut command = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
         command
@@ -40,14 +50,16 @@ impl Sender {
                 "off",
                 "--output-format",
                 "json",
-                "--direct-measurement",
-                "--follow-up-telemetry",
                 "--reflected-control-count",
                 &copies.to_string(),
             ])
             .env_remove("STAMP_HMAC_KEY")
             .env("RUST_LOG", "off")
             .env("TOKIO_WORKER_THREADS", "2");
+        if extensions {
+            command.args(["--direct-measurement", "--follow-up-telemetry"]);
+        }
+        command.args(extra);
         if auth {
             command.args([
                 "--auth-mode",
@@ -108,6 +120,7 @@ fn reply(
     bytes[..4].copy_from_slice(&reflected.to_be_bytes());
     bytes[ts..ts + 8].copy_from_slice(&t3.to_be_bytes());
     bytes[err..err + 2].copy_from_slice(&0x4001u16.to_be_bytes());
+    bytes[err + 2..err + 4].copy_from_slice(&request[err + 2..err + 4]);
     bytes[rx..rx + 8].copy_from_slice(&t3.to_be_bytes());
     bytes[seq..seq + 4].copy_from_slice(&request[..4]);
     bytes[echo..echo + 8].copy_from_slice(&request[ts..ts + 8]);
@@ -208,6 +221,69 @@ fn loss(auth: bool) {
 #[test]
 fn ipv4_open_burst_and_duplicate() {
     burst(false);
+}
+
+#[test]
+fn sender_matches_every_echoed_timestamp_octet_before_consuming_a_probe() {
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            for extensions in [false, true] {
+                for clock in ["NTP", "PTP"] {
+                    let peer = UdpSocket::bind((ip, 0)).unwrap();
+                    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let sender = Sender::start_profile(
+                        &peer,
+                        auth,
+                        1,
+                        1,
+                        extensions,
+                        &[
+                            "--clock-source",
+                            clock,
+                            "--ssid",
+                            "42",
+                            "--on-zero-ssid",
+                            "stop",
+                        ],
+                    );
+                    let mut request = [0; 2048];
+                    let (size, source) = peer.recv_from(&mut request).unwrap();
+                    let request = &request[..size];
+                    let (timestamp, ssid, base) = if auth { (16, 26, 112) } else { (4, 14, 44) };
+                    assert!(request.len() >= base);
+                    let transmit = |input: &[u8]| {
+                        let (mut packet, _) = reply(input, auth, 10, [1, 1, 1], None);
+                        if !extensions {
+                            packet.truncate(base);
+                        }
+                        peer.send_to(&packet, source).unwrap();
+                    };
+                    let mut unknown = request.to_vec();
+                    unknown[..4].copy_from_slice(&99u32.to_be_bytes());
+                    unknown[ssid..ssid + 2].fill(0);
+                    transmit(&unknown);
+                    for byte in 0..8 {
+                        let mut wrong = request.to_vec();
+                        wrong[timestamp + byte] ^= 1;
+                        // If the stale echo gets past identity validation,
+                        // zero-SSID stop would end the run before the good one.
+                        wrong[ssid..ssid + 2].fill(0);
+                        transmit(&wrong);
+                    }
+                    transmit(request);
+                    let stats = sender.finish();
+                    assert_eq!(
+                        stats["packets_received"], 1,
+                        "{ip} auth={auth} ext={extensions} {clock}: {stats}"
+                    );
+                    assert_eq!(stats["packets_lost"], 0);
+                    assert_eq!(stats["measurements"]["mismatched_replies"], 8);
+                    assert_eq!(stats["measurements"]["unknown_replies"], 1);
+                    assert_eq!(stats["measurements"]["unique_replies"], 1);
+                }
+            }
+        }
+    }
 }
 #[test]
 fn ipv6_authenticated_burst_and_duplicate() {

@@ -114,6 +114,8 @@ pub struct MeasurementSummary {
     pub late_replies: u64,
     pub duplicate_replies: u64,
     pub unknown_replies: u64,
+    /// Known sequence with a missing or different echoed wire T1.
+    pub mismatched_replies: u64,
     pub reordered_replies: u64,
     /// Includes policy caps/unsupported burst requests; not a network-loss total.
     pub unobserved_requested_replies: u64,
@@ -127,6 +129,7 @@ pub struct MeasurementSummary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ReplyKey {
     pub sender: u32,
+    pub t1: u64,
     pub reflector: u32,
     pub t3: u64,
 }
@@ -335,6 +338,15 @@ impl Measurements {
     pub(super) fn answered(&self, seq: u32) -> bool {
         self.probes.get(&seq).is_some_and(|p| p.answered)
     }
+    pub(super) fn probe(&self, seq: u32) -> Option<PendingPacket> {
+        self.probes.get(&seq).map(|p| p.packet)
+    }
+    pub(super) fn unknown_reply(&mut self) {
+        self.summary.unknown_replies += 1;
+    }
+    pub(super) fn mismatched_reply(&mut self) {
+        self.summary.mismatched_replies += 1;
+    }
     pub(super) fn needs_burst_wait(&self) -> bool {
         self.copies > 1 && self.satisfied < self.summary.requested_replies
     }
@@ -511,11 +523,13 @@ mod tests {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         }
     }
     fn key(sender: u32, reflector: u32, t3: u64) -> ReplyKey {
         ReplyKey {
             sender,
+            t1: 0,
             reflector,
             t3,
         }

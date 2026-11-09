@@ -317,6 +317,15 @@ not supported. See the [RFC 9534 scope and gaps](conformance/rfc9534.md).
 
 ### TLV-driven sender features
 
+**Probe identity.** The sender first matches the complete echoed sequence and
+eight-byte sender timestamp against a pending or retained probe. Unknown,
+missing or mismatched echoes cannot complete a probe, affect SSID stop policy,
+acknowledge an Access Report or apply congestion feedback. Reports distinguish
+`measurements.unknown_replies` and `measurements.mismatched_replies`.
+Kernel TX timing corrections never change the original timestamp used for this
+match. Replies may omit trailing fields, but must contain the complete echo.
+See [reply accounting and limits](measurements.md#probes-reply-copies-and-duplicates).
+
 **SSID checks.** With a nonzero `--ssid`, the sender rejects a reply that
 carries a different nonzero SSID before it records RTT or OWD, completes a
 pending probe, learns a reflector micro-session ID, acknowledges an Access

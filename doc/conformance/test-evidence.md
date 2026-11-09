@@ -105,11 +105,10 @@ rerun the checker after edits rather than treating the numbers as certification.
 | Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
 | Type 12 C signaling | The existing flag-semantics suite exercises packet processing with requests within and above administrative caps. | This is distinct from the unreviewed exact-timing claim and from physical transmission scheduling guarantees. |
 
-The remaining 126 missing references span six matrices. After the sender MTU
-chunk below, prioritize the remaining authentication, C-flag and admission
-claims, then work through the rest. Full echoed-T1/generation admission at wire
-sequence reuse also needs review. The full test-evidence goal and strict CI
-gate remain unfinished.
+After the sender reviews below, 123 missing references remain across six
+matrices. Prioritize the remaining authentication, C-flag and admission claims,
+then work through the rest. The full test-evidence goal and strict CI gate
+remain unfinished.
 
 ## Sender MTU dispatch review (T22b1)
 
@@ -165,7 +164,87 @@ each Rust profile; pnet-feature success here is shared sender evidence, not
 pnet reflector capture evidence. Logs and reports are under `/tmp/t22b-*`;
 no remote CI or physical/native-platform result is claimed.
 
-## Local validation for this batch
+## Sender echoed-identity review (T22b2)
+
+Review against parent `a825b6b` found that a correctly signed delayed reply
+could consume a newer pending probe with the same sequence, because echoed T1
+was not checked. A regression reproduced this through actual sends and the
+sender's receive path before the fix. Another regression reproduced the
+session-state monitor expiring a newer probe at the retired sequence's old
+deadline.
+
+The sender now matches the full echoed sequence and all eight original wire
+T1 bytes before deduplication, SSID policy, measurement acceptance and semantic
+control/ID updates. Unknown/mismatched replies leave pending state intact.
+`measurements.mismatched_replies` reports a known sequence with a missing or
+different echo; `unknown_replies` retains the no-history distinction. TLV
+diagnostic evaluations precede this check and can still count rejected input.
+Reply identities now include wire T1, allowing a legitimate newer generation
+when the peer reuses its own sequence/T3. Kernel corrections keep wire identity
+immutable and require the original local send context. The failure monitor
+replaces the retired sequence's deadline when a new generation is sent.
+
+Direct production-path evidence:
+
+- `src/sender/run/admission_tests.rs::reused_sequence_rejects_old_signed_echo_before_measurement_or_control_state`
+  forces sequence reuse across real probes in both families, NTP/PTP,
+  authenticated/keyed-open modes and bounded/unlimited retention. A signed
+  old echo cannot consume pending state, learn an ID, acknowledge Access Report,
+  apply CE or change delay/DM/session-state samples. A correct echo succeeds;
+  a later legitimate generation with the same reflector sequence/T3 also succeeds.
+- `tests/sender_measurement_test.rs::sender_matches_every_echoed_timestamp_octet_before_consuming_a_probe`
+  uses a separately encoded peer against the binary in 16 family/auth/parser/clock
+  combinations. It changes each echoed T1 octet and sends an unknown sequence
+  with zero SSID before the valid reply, proving these cannot trigger SSID stop
+  policy or complete the probe.
+- `src/sender/run/admission_tests.rs::retained_late_and_additional_copies_require_the_original_echo`
+  checks valid late copies, duplicates and additional replies after expiry.
+  `src/sender/run/admission_tests.rs::short_replies_need_full_echo_but_may_omit_trailing_fields`
+  rejects missing/partial identity while accepting complete echoes in 36- and
+  41-byte unauthenticated replies. Reflector short-request handling is unchanged.
+- `src/sender/tests.rs::delayed_tx_reports_do_not_correct_a_reused_sequence`
+  rejects older send metadata, including tied monotonic times with different
+  wire T1. Existing mixed-clock tests now exercise both original and corrected
+  OWD T1 while echoing the original wire value through all four parsers.
+- `src/sender/session_state.rs::tests::reused_sequence_replaces_the_old_deadline_and_clears_on_current_reply`
+  checks the current deadline, successful cleanup and exactly one genuine
+  timeout after reuse.
+
+The fuzz adapter seeds matching echo context so existing fuzz targets can still
+reach measurement/control logic; the separate regressions test stale identity.
+These checks do not establish physical TX timestamp behavior or cryptographic
+replay protection. Repeated sequence/T1 pairs cannot themselves prove freshness.
+Required micro-session late-reply restrictions retain their existing policy.
+See [sender identity and compatibility](rfc8762.md#sender-reply-identity).
+
+Three previously missing RFC 8762 references are resolved: eight-byte timestamp
+encoding (4.2.1-2), HMAC algorithm/truncation (4.4-1) and 96-byte base coverage
+(4.4-2). The latter two cite the independent BER wire drivers for both application
+roles, supplemented by the production known-answer test. No clause status is
+raised: the rollup remains **471 clauses: 393 Compliant, 25 Partial, two Gap,
+48 N-A and three Excluded**. The inventory is **325 applicable, 202 with
+references, 123 missing**. Strict CI enforcement remains pending.
+
+Final local checks pass full default/all-features/pnet suites with
+**1,335/1,437/1,284** passed tests, respectively (13 privileged ignored in each
+ordinary run). The two required MTU tests ran separately without a skip, and
+the final all-features BER wire run passes all 60 cases. All three Clippy
+profiles, the fuzz manifest build check, all 104 Python tests, rustfmt, matrix
+counts and source/link checks pass. This is a fuzz build check, not a new fuzz
+campaign. Reproduction includes:
+
+```sh
+cargo test --locked --all-features --lib sender::
+cargo test --locked --all-features --test sender_measurement_test --test pending_probe_limit_test
+cargo check --locked --manifest-path fuzz/Cargo.toml
+```
+
+The BER/MTU commands below also apply to the final all-features binary. Strict
+test-evidence checking fails only on the expected 123 remaining missing rows;
+the default/CI report remains advisory. Logs/reports are under `/tmp/t22b2-*`.
+No remote CI, new native-platform or physical timestamp pass is claimed.
+
+## Local validation for T22a
 
 The all-features focused runs exercise 90 HMAC tests (including the new known
 answer), 12 tests selected by the single-reply filter, one tracked-admission

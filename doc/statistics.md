@@ -108,7 +108,8 @@ timestamps and 32-bit sequence wrap. In bounded mode answered/retired generation
 are removed immediately, with no lazily retained expiry queue. The unlimited
 path keeps neither additional index and uses the existing time-based queue.
 Hash-map allocation overhead, allocator bookkeeping
-and tree nodes are additional to each record's send time and timestamp.
+and tree nodes are additional to each record's send time, immutable wire T1 and
+measurement T1 (which kernel TX timestamping can correct).
 
 This does not pause sends or invent timed expirations. The oldest record is
 retired as lost when a successful send needs space; reuse of an outstanding

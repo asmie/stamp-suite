@@ -48,8 +48,13 @@ fn reply(run: &mut SenderRun, seq: u32, valid_ssid: bool) {
     bytes[16..24].copy_from_slice(&now.to_be_bytes());
     bytes[24..28].copy_from_slice(&seq.to_be_bytes());
     bytes[37] = 1;
-    if let Some(packet) = run.pending.get(&seq) {
-        bytes[28..36].copy_from_slice(&packet.send_timestamp.to_be_bytes());
+    if let Some(packet) = run
+        .pending
+        .get(&seq)
+        .copied()
+        .or_else(|| run.measurements.probe(seq))
+    {
+        bytes[28..36].copy_from_slice(&packet.wire_timestamp.to_be_bytes());
     }
     run.recv_buf[..44].copy_from_slice(&bytes);
     let out = crate::stats::StatsOutput::new(crate::stats::OutputFormat::Json).unwrap();
@@ -131,13 +136,17 @@ async fn replies_release_slots_but_invalid_and_late_or_duplicate_replies_do_not(
 }
 
 #[tokio::test]
-async fn short_reply_index_uses_canonical_zero_fill_not_previous_buffer_bytes() {
+async fn short_reply_cannot_consume_pending_state_or_read_previous_buffer_bytes() {
     let (mut sender, _peer) = run(2, 0).await;
     record(&mut sender, 0, Instant::now());
     record(&mut sender, 99, Instant::now());
     sender.recv_buf[24..28].copy_from_slice(&99u32.to_be_bytes());
     let out = crate::stats::StatsOutput::new(crate::stats::OutputFormat::Json).unwrap();
     sender.on_reply(&out, 0, None, None);
+    assert!(sender.pending.contains_key(&0) && sender.pending.contains_key(&99));
+    assert_eq!(sender.pending_order.len(), 2);
+    assert_eq!(sender.measurements.snapshot().mismatched_replies, 1);
+    reply(&mut sender, 0, true);
     assert!(!sender.pending.contains_key(&0));
     assert_eq!(sender.pending_order.len(), 1);
     assert_eq!(sender.pending_order.first_key_value().unwrap().1 .1, 99);

@@ -423,15 +423,17 @@ fn apply_tx_corrections_updates_pending_t1() {
     use crate::hwtstamp::TxTimestampReport;
 
     let mut tx_map = std::collections::HashMap::new();
-    tx_map.insert(0u32, 5u32); // OPT_ID 0 → seq 5, still pending
-    tx_map.insert(1u32, 6u32); // OPT_ID 1 → seq 6, already answered
+    let sent = Instant::now();
+    tx_map.insert(0u32, (5u32, sent, 111)); // still pending
+    tx_map.insert(1u32, (6u32, sent, 111)); // already answered
 
     let mut pending = std::collections::HashMap::new();
     pending.insert(
         5u32,
         PendingPacket {
-            send_time: Instant::now(),
+            send_time: sent,
             send_timestamp: 111,
+            wire_timestamp: 111,
         },
     );
 
@@ -458,10 +460,54 @@ fn apply_tx_corrections_updates_pending_t1() {
         pending[&5].send_timestamp, 999,
         "kernel T1 replaces the userspace T1 used for forward OWD"
     );
+    assert_eq!(
+        pending[&5].wire_timestamp, 111,
+        "echoed identity must stay immutable"
+    );
     assert!(
         !tx_map.contains_key(&0) && !tx_map.contains_key(&1),
         "matched ids are consumed"
     );
+}
+
+#[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+#[test]
+fn delayed_tx_reports_do_not_correct_a_reused_sequence() {
+    use crate::hwtstamp::TxTimestampReport;
+    let sent = Instant::now();
+    let newer = sent + Duration::from_nanos(1);
+    let mut pending = HashMap::from([(
+        7,
+        PendingPacket {
+            send_time: newer,
+            send_timestamp: 222,
+            wire_timestamp: 222,
+        },
+    )]);
+    let mut reports = vec![];
+    let mut ids = HashMap::new();
+    // A retired generation, a tied monotonic time with a different wire T1,
+    // and the matching current generation. Only the last may correct OWD.
+    for (id, time, wire_t1) in [(1, sent, 111), (2, newer, 111), (3, newer, 222)] {
+        ids.insert(id, (7, time, wire_t1));
+        reports.push(TxTimestampReport {
+            opt_id: id,
+            timestamp: 900 + u64::from(id),
+            hardware: false,
+        });
+    }
+    assert_eq!(
+        apply_tx_corrections(&reports[..2], &mut ids, &mut pending),
+        0
+    );
+    assert_eq!(pending[&7].send_timestamp, 222);
+    assert_eq!(
+        apply_tx_corrections(&reports[2..], &mut ids, &mut pending),
+        1
+    );
+    assert_eq!(pending[&7].send_timestamp, 903);
+    assert_eq!(pending[&7].wire_timestamp, 222);
+    assert!(ids.is_empty());
 }
 
 #[test]
@@ -793,6 +839,7 @@ fn unsolicited_msid_cannot_seed_the_reflector_latch() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     )]);
     let mut rtt = RttCollector::new();
@@ -881,6 +928,7 @@ fn required_msid_rejects_unusable_reply_without_consuming_state() {
                     PendingPacket {
                         send_time: Instant::now(),
                         send_timestamp: 0,
+                        wire_timestamp: 0,
                     },
                 )]);
                 let mut rtt = RttCollector::new();
@@ -1653,6 +1701,7 @@ fn telemetry_control_decisions_do_not_depend_on_formatting() {
                 PendingPacket {
                     send_time: Instant::now(),
                     send_timestamp: 0,
+                    wire_timestamp: 0,
                 },
             );
             let mut rtt = RttCollector::new();
@@ -2124,6 +2173,7 @@ fn test_process_response_acknowledges_access_report_state() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -2191,6 +2241,7 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -2312,6 +2363,7 @@ fn test_process_response_forward_path_ce_backs_off_congestion_controller() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -2369,6 +2421,7 @@ fn test_process_response_reverse_path_ce_backs_off_congestion_controller() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -2431,6 +2484,7 @@ fn test_process_response_clean_reply_recovers_congestion_controller() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -2491,6 +2545,7 @@ fn test_process_response_no_panic_when_congestion_inactive() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -2612,6 +2667,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
         PendingPacket {
             send_time,
             send_timestamp,
+            wire_timestamp: send_timestamp,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -3244,48 +3300,55 @@ fn check_clock_pair(
         let hmac = crate::crypto::compute_packet_hmac(&key, &data, 96);
         data[96..112].copy_from_slice(&hmac);
     }
-    let mut pending = HashMap::from([(
-        7,
-        PendingPacket {
-            send_time: Instant::now(),
-            send_timestamp: t1,
-        },
-    )]);
-    let mut rtt = RttCollector::new();
-    let mut owd = OwdCollector::new();
-    let mut received = 0;
-    let mut latched = None;
-    let mut zero = false;
-    let mut ctx = congestion_process_response_ctx(
-        &mut pending,
-        &mut rtt,
-        &mut owd,
-        &mut received,
-        &mut latched,
-        None,
-        &mut zero,
-    );
-    ctx.hmac_key = auth.then_some(&key);
-    ctx.reflector_utc_offset = remote_offset;
-    process_response(&data, auth, extensions, local, Some(t4), None, &mut ctx);
-    assert_eq!(received, 1);
-    assert!(pending.is_empty());
-    if invalid_ptp {
-        assert!(owd.summary().is_none());
-        assert!(rtt.percentile_ns(50.0).is_some());
-        return;
+    for corrected in [false, true] {
+        let mut pending = HashMap::from([(
+            7,
+            PendingPacket {
+                send_time: Instant::now(),
+                send_timestamp: if corrected {
+                    wire(seconds, 999_000_000, local)
+                } else {
+                    t1
+                },
+                wire_timestamp: t1,
+            },
+        )]);
+        let mut rtt = RttCollector::new();
+        let mut owd = OwdCollector::new();
+        let mut received = 0;
+        let mut latched = None;
+        let mut zero = false;
+        let mut ctx = congestion_process_response_ctx(
+            &mut pending,
+            &mut rtt,
+            &mut owd,
+            &mut received,
+            &mut latched,
+            None,
+            &mut zero,
+        );
+        ctx.hmac_key = auth.then_some(&key);
+        ctx.reflector_utc_offset = remote_offset;
+        process_response(&data, auth, extensions, local, Some(t4), None, &mut ctx);
+        assert_eq!(received, 1);
+        assert!(pending.is_empty());
+        if invalid_ptp {
+            assert!(owd.summary().is_none());
+            assert!(rtt.percentile_ns(50.0).is_some());
+            continue;
+        }
+        let summary = owd.summary().unwrap();
+        assert!(
+            (summary.forward_avg_ms - if corrected { 2.0 } else { 3.0 }).abs() <= 0.0000011,
+            "{local:?}/{remote:?} auth={auth} extensions={extensions}: forward {}",
+            summary.forward_avg_ms
+        );
+        assert!(
+            (summary.reverse_avg_ms - 5.0).abs() <= 0.0000011,
+            "{local:?}/{remote:?} auth={auth} extensions={extensions}: reverse {}",
+            summary.reverse_avg_ms
+        );
     }
-    let summary = owd.summary().unwrap();
-    assert!(
-        (summary.forward_avg_ms - 3.0).abs() <= 0.0000011,
-        "{local:?}/{remote:?} auth={auth} extensions={extensions}: forward {}",
-        summary.forward_avg_ms
-    );
-    assert!(
-        (summary.reverse_avg_ms - 5.0).abs() <= 0.0000011,
-        "{local:?}/{remote:?} auth={auth} extensions={extensions}: reverse {}",
-        summary.reverse_avg_ms
-    );
 }
 
 #[test]
@@ -3383,6 +3446,7 @@ fn test_process_response_records_forward_one_way_delay() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: t1,
+            wire_timestamp: t1,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -3438,6 +3502,7 @@ fn mismatched_ssid_preserves_measurement_and_control_state() {
                     PendingPacket {
                         send_time: Instant::now(),
                         send_timestamp: t1,
+                        wire_timestamp: t1,
                     },
                 )]);
                 let mut rtt = RttCollector::new();
@@ -3518,6 +3583,7 @@ fn zero_ssid_policy_applies_in_every_reply_parser() {
                     PendingPacket {
                         send_time: Instant::now(),
                         send_timestamp: 0,
+                        wire_timestamp: 0,
                     },
                 )]);
                 let mut rtt = RttCollector::new();
@@ -3557,6 +3623,7 @@ fn zero_ssid_policy_applies_in_every_reply_parser() {
                     PendingPacket {
                         send_time: Instant::now(),
                         send_timestamp: 0,
+                        wire_timestamp: 0,
                     },
                 );
                 let mut wrong = ssid_test_reply(auth, extensions, 99, 0, &key);
@@ -3651,6 +3718,7 @@ fn test_zero_ssid_policy_stop_discards_reply_and_latches() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -3725,6 +3793,7 @@ fn test_zero_ssid_policy_continue_still_accounts_the_reply() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -3800,6 +3869,7 @@ fn test_zero_ssid_policy_inert_without_a_configured_ssid() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -3877,6 +3947,7 @@ fn test_process_response_drops_packet_on_msid_mismatch() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -3958,6 +4029,7 @@ fn test_process_response_accepts_packet_on_msid_match() {
         PendingPacket {
             send_time: Instant::now(),
             send_timestamp: 0,
+            wire_timestamp: 0,
         },
     );
     let mut rtt_collector = RttCollector::new();
@@ -4307,6 +4379,7 @@ fn tlv_validation_json_reports_real_reply_outcomes_in_both_modes() {
                 PendingPacket {
                     send_time: Instant::now(),
                     send_timestamp: 0,
+                    wire_timestamp: 0,
                 },
             )]);
             let mut rtt = RttCollector::new();
@@ -4418,6 +4491,7 @@ fn tlv_validation_excludes_base_hmac_failures_and_reports_unsigned_open_replies(
             PendingPacket {
                 send_time: Instant::now(),
                 send_timestamp: 0,
+                wire_timestamp: 0,
             },
         )]);
         let mut rtt = RttCollector::new();
