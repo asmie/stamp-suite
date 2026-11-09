@@ -1,5 +1,12 @@
 //! End-to-end BER measurement (draft-ietf-bpm-stamp-ber-01): padding repair and
 //! peer compatibility.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "ttl-nix", not(feature = "ttl-pnet"))
+))]
+#[path = "common/reflector.rs"]
+mod reflector;
+
 use clap::Parser;
 use stamp_suite::{
     configuration::{ClockFormat, Configuration, TlvHandlingMode},
@@ -337,46 +344,23 @@ fn real_reflector_signs_repaired_ber_padding() {
         sender::{build_auth_packet_with_tlvs, build_unauth_packet_with_tlvs},
         tlv::{ExtraPaddingTlv, ResidualBerValue, TypedTlv, RESIDUAL_BER_PATTERN_SUBTLV_TYPE},
     };
-    use std::{
-        net::UdpSocket,
-        process::{Child, Command, Stdio},
-        time::Instant,
-    };
-    struct ChildGuard(Child);
-    impl Drop for ChildGuard {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
+    use std::net::UdpSocket;
     for ip in ["127.0.0.1", "::1"] {
         for auth in [false, true] {
-            let reserve = UdpSocket::bind((ip, 0)).unwrap();
-            let addr = reserve.local_addr().unwrap();
-            drop(reserve);
-            let mut command = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
+            let mut command = reflector::Reflector::command(ip);
             command.args([
-                "--is-reflector",
-                "--local-addr",
-                ip,
-                "--local-port",
-                &addr.port().to_string(),
+                "--hwtstamp",
+                "off",
                 "--hmac-key",
                 "abababababababababababababababab",
             ]);
             if auth {
                 command.args(["--auth-mode", "A"]);
             }
-            let mut child = ChildGuard(
-                command
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .unwrap(),
-            );
+            let child = reflector::Reflector::spawn(command).unwrap();
+            let addr = child.address;
             let sock = UdpSocket::bind((ip, 0)).unwrap();
-            sock.set_read_timeout(Some(Duration::from_millis(40)))
-                .unwrap();
+            sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let key = HmacKey::new(vec![0xab; 16]).unwrap();
             let tlvs = [
                 ResidualBerValue::request(
@@ -399,19 +383,9 @@ fn real_reflector_signs_repaired_ber_padding() {
             };
             let pad = offset(&request, base, 1);
             request[pad + 4] ^= 0x03;
-            let started = Instant::now();
             let mut buf = [0; 4096];
-            let len = loop {
-                assert!(child.0.try_wait().unwrap().is_none());
-                sock.send_to(&request, addr).unwrap();
-                if let Ok((len, _)) = sock.recv_from(&mut buf) {
-                    break len;
-                }
-                assert!(
-                    started.elapsed() < Duration::from_secs(5),
-                    "reflector did not reply"
-                );
-            };
+            sock.send_to(&request, addr).unwrap();
+            let (len, _) = sock.recv_from(&mut buf).unwrap();
             let list = TlvList::parse(&buf[base..len]).unwrap();
             assert!(list.verify_hmac(&key, &buf[..4], &buf[base..len]).is_ok());
             assert!(list.iter().all(|t| !t.is_integrity_failed()));

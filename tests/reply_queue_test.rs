@@ -8,17 +8,13 @@ use stamp_suite::crypto::HmacKey;
 use std::{
     io::Read,
     net::UdpSocket,
-    process::{Child, Command, Stdio},
+    process::Stdio,
     time::{Duration, Instant},
 };
 
-struct Reflector(Child);
-impl Drop for Reflector {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+#[path = "common/reflector.rs"]
+mod reflector;
+use reflector::Reflector;
 
 fn request(auth: bool, seq: u32, interval: Option<u32>) -> Vec<u8> {
     let base = if auth { 112 } else { 44 };
@@ -78,16 +74,8 @@ fn receive(socket: &UdpSocket, auth: bool) -> Option<(u32, u32)> {
 }
 
 fn start(ip: &str, auth: bool, grace: u32) -> (Reflector, UdpSocket) {
-    let reserve = UdpSocket::bind((ip, 0)).unwrap();
-    let address = reserve.local_addr().unwrap();
-    drop(reserve);
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
+    let mut cmd = Reflector::command(ip);
     cmd.args([
-        "--is-reflector",
-        "--local-addr",
-        ip,
-        "--local-port",
-        &address.port().to_string(),
         "--stateful-reflector",
         "--hwtstamp",
         "off",
@@ -103,31 +91,12 @@ fn start(ip: &str, auth: bool, grace: u32) -> (Reflector, UdpSocket) {
         "0",
     ])
     .env_remove("STAMP_HMAC_KEY")
-    .env("RUST_LOG", "error")
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    .stdout(Stdio::piped());
     if auth {
         cmd.args(["-A", "A", "--hmac-key", "abababababababababababababababab"]);
     }
-    let mut child = Reflector(cmd.spawn().unwrap());
-    let warmup = UdpSocket::bind((ip, 0)).unwrap();
-    warmup.connect(address).unwrap();
-    warmup
-        .set_read_timeout(Some(Duration::from_millis(30)))
-        .unwrap();
-    let start = Instant::now();
-    loop {
-        assert!(
-            child.0.try_wait().unwrap().is_none(),
-            "reflector exited at startup"
-        );
-        warmup.send(&request(auth, 0, None)).unwrap();
-        if receive(&warmup, auth).is_some() {
-            break;
-        }
-        assert!(start.elapsed() < Duration::from_secs(5));
-    }
-    std::thread::sleep(Duration::from_millis(25));
+    let child = Reflector::spawn(cmd).unwrap();
+    let address = child.address;
     let socket = UdpSocket::bind((ip, 0)).unwrap();
     socket.connect(address).unwrap();
     socket
@@ -148,12 +117,12 @@ fn next(socket: &UdpSocket, auth: bool) -> (u32, u32) {
 fn signal(child: &Reflector, signal: i32) {
     // SAFETY: kill(2) accesses no memory. The PID is our child, which is not
     // reaped until `finish`, so it cannot name another process.
-    assert_eq!(unsafe { libc::kill(child.0.id() as i32, signal) }, 0);
+    assert_eq!(unsafe { libc::kill(child.child.id() as i32, signal) }, 0);
 }
 fn finish(child: &mut Reflector) -> serde_json::Value {
     let start = Instant::now();
     loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
+        if let Some(status) = child.child.try_wait().unwrap() {
             assert!(status.success());
             break;
         }
@@ -165,7 +134,7 @@ fn finish(child: &mut Reflector) -> serde_json::Value {
     }
     let mut output = String::new();
     child
-        .0
+        .child
         .stdout
         .take()
         .unwrap()

@@ -1,0 +1,68 @@
+//! Retain the UDP port across startup for fixtures that inspect shared state
+//! or configure exact provisioned endpoints. One current-thread runtime owns
+//! the receiver; teardown cancels, bounds draining, and joins that thread.
+#![allow(dead_code)] // Integration targets use different helper fields/methods.
+
+use stamp_suite::{configuration::Configuration, receiver};
+use std::{
+    cell::RefCell,
+    net::{SocketAddr, UdpSocket},
+    sync::Arc,
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+pub struct Receiver {
+    pub shared: Arc<receiver::ReceiverSharedState>,
+    pub address: SocketAddr,
+    task: RefCell<Option<JoinHandle<Result<(), String>>>>,
+}
+
+impl Receiver {
+    pub fn start(bind: SocketAddr, configure: impl FnOnce(SocketAddr) -> Configuration) -> Self {
+        let socket = UdpSocket::bind(bind).expect("bind fixture receiver");
+        let address = socket.local_addr().unwrap();
+        let conf = configure(address);
+        conf.validate().expect("validate fixture receiver");
+        let shared = Arc::new(receiver::create_shared_state(&conf).expect("create fixture state"));
+        let task_shared = Arc::clone(&shared);
+        let task = thread::Builder::new().name("fixture-receiver".into()).spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all()
+                .build().map_err(|e| format!("receiver runtime: {e}"))?;
+            runtime.block_on(async {
+                let receive = receiver::run_receiver_with_socket(&conf, &task_shared, socket);
+                tokio::pin!(receive);
+                tokio::select! {
+                    result = &mut receive => result.map_err(|e| e.to_string()),
+                    _ = task_shared.shutdown.cancelled() => {
+                        tokio::time::timeout(Duration::from_secs(2), receive).await
+                            .map_err(|_| "fixture receiver did not stop within two seconds".to_string())?
+                            .map_err(|e| e.to_string())
+                    }
+                }
+            })
+        }).expect("spawn fixture receiver thread");
+        Self {
+            shared,
+            address,
+            task: RefCell::new(Some(task)),
+        }
+    }
+
+    pub fn assert_running(&self) {
+        let finished = self.task.borrow().as_ref().unwrap().is_finished();
+        if finished {
+            let task = self.task.borrow_mut().take().unwrap();
+            panic!("fixture receiver exited: {:?}", task.join());
+        }
+    }
+}
+
+impl Drop for Receiver {
+    fn drop(&mut self) {
+        self.shared.shutdown.cancel();
+        if let Some(task) = self.task.get_mut().take() {
+            let _ = task.join();
+        }
+    }
+}

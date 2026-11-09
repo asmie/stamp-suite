@@ -1,6 +1,9 @@
 //! Rejected base packets must not allocate or refresh reflector session state.
 #![cfg(all(unix, any(feature = "ttl-nix", not(feature = "ttl-pnet"))))]
 
+#[path = "common/receiver.rs"]
+mod receiver_fixture;
+
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
 use clap::Parser;
@@ -17,64 +20,52 @@ use std::{
 };
 use tokio::{
     net::UdpSocket,
-    task::JoinHandle,
     time::{sleep, timeout},
 };
 
 struct Reflector {
     shared: Arc<receiver::ReceiverSharedState>,
     destination: SocketAddr,
-    task: JoinHandle<Result<(), stamp_suite::StartupError>>,
-}
-
-impl Drop for Reflector {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
+    server: receiver_fixture::Receiver,
 }
 
 impl Reflector {
     async fn start(ip: &str, auth: bool, strict: bool, stateful: bool) -> Self {
-        let reserve = UdpSocket::bind((ip, 0)).await.unwrap();
-        let destination = reserve.local_addr().unwrap();
-        drop(reserve);
-        let mut args = vec![
-            "stamp-suite".to_string(),
-            "--is-reflector".into(),
-            "--local-addr".into(),
-            ip.into(),
-            "--local-port".into(),
-            destination.port().to_string(),
-            "--max-sessions".into(),
-            "1".into(),
-            "--drop-replayed".into(),
-        ];
-        if stateful {
-            args.push("--stateful-reflector".into());
-        }
-        if auth {
-            args.extend([
-                "--auth-mode".into(),
-                "A".into(),
-                "--hmac-key".into(),
-                "abababababababababababababababab".into(),
-            ]);
-        }
-        if strict {
-            args.push("--strict-packets".into());
-        }
-        let conf = Configuration::parse_from(args);
-        conf.validate().unwrap();
-        let shared = Arc::new(receiver::create_shared_state(&conf).unwrap());
-        let task_shared = Arc::clone(&shared);
-        let task =
-            tokio::task::spawn_local(
-                async move { receiver::run_receiver(&conf, &task_shared).await },
-            );
+        let server = receiver_fixture::Receiver::start(
+            SocketAddr::new(ip.parse().unwrap(), 0),
+            |destination| {
+                let mut args = vec![
+                    "stamp-suite".to_string(),
+                    "--is-reflector".into(),
+                    "--local-addr".into(),
+                    ip.into(),
+                    "--local-port".into(),
+                    destination.port().to_string(),
+                    "--max-sessions".into(),
+                    "1".into(),
+                    "--drop-replayed".into(),
+                ];
+                if stateful {
+                    args.push("--stateful-reflector".into());
+                }
+                if auth {
+                    args.extend([
+                        "--auth-mode".into(),
+                        "A".into(),
+                        "--hmac-key".into(),
+                        "abababababababababababababababab".into(),
+                    ]);
+                }
+                if strict {
+                    args.push("--strict-packets".into());
+                }
+                Configuration::parse_from(args)
+            },
+        );
         Self {
-            shared,
-            destination,
-            task,
+            shared: Arc::clone(&server.shared),
+            destination: server.address,
+            server,
         }
     }
 
@@ -87,10 +78,10 @@ impl Reflector {
             .counters
             .packets_received
             .load(Ordering::Relaxed);
+        socket.send_to(data, self.destination).await.unwrap();
         timeout(Duration::from_secs(5), async {
             loop {
-                assert!(!self.task.is_finished(), "reflector exited");
-                socket.send_to(data, self.destination).await.unwrap();
+                self.server.assert_running();
                 sleep(Duration::from_millis(10)).await;
                 if self
                     .shared
@@ -98,6 +89,7 @@ impl Reflector {
                     .packets_received
                     .load(Ordering::Relaxed)
                     > before
+                    && self.shared.counters.packets_dropped.load(Ordering::Relaxed) > drops_before
                 {
                     break;
                 }

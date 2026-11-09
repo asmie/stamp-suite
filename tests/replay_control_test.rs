@@ -5,19 +5,11 @@
 ))]
 
 use stamp_suite::crypto::{compute_packet_hmac, HmacKey};
-use std::{
-    net::UdpSocket,
-    process::{Child, Command, Stdio},
-    time::{Duration, Instant},
-};
+use std::{net::UdpSocket, time::Duration};
 
-struct Reflector(Child);
-impl Drop for Reflector {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+#[path = "common/reflector.rs"]
+mod reflector;
+use reflector::Reflector;
 
 fn packet(seq: u32, ssid: u16, auth: bool, control: bool) -> Vec<u8> {
     let base = if auth { 112 } else { 44 };
@@ -47,20 +39,8 @@ fn packet(seq: u32, ssid: u16, auth: bool, control: bool) -> Vec<u8> {
 }
 
 fn check(ip: &str, auth: bool, stateful: bool, drop_replayed: bool) {
-    let reserve = UdpSocket::bind((ip, 0)).unwrap();
-    let destination = reserve.local_addr().unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
-    cmd.args([
-        "--is-reflector",
-        "--local-addr",
-        ip,
-        "--local-port",
-        &destination.port().to_string(),
-        "--hwtstamp",
-        "off",
-        "--reflected-control-max-count",
-        "3",
-    ]);
+    let mut cmd = Reflector::command(ip);
+    cmd.args(["--hwtstamp", "off", "--reflected-control-max-count", "3"]);
     if auth {
         cmd.args([
             "--auth-mode",
@@ -75,34 +55,8 @@ fn check(ip: &str, auth: bool, stateful: bool, drop_replayed: bool) {
     if drop_replayed {
         cmd.arg("--drop-replayed");
     }
-    drop(reserve);
-    let mut reflector = Reflector(
-        cmd.stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let warmup = UdpSocket::bind((ip, 0)).unwrap();
-    warmup
-        .set_read_timeout(Some(Duration::from_millis(40)))
-        .unwrap();
-    let start = Instant::now();
-    for seq in 0.. {
-        assert!(
-            reflector.0.try_wait().unwrap().is_none(),
-            "reflector exited"
-        );
-        warmup
-            .send_to(&packet(seq, 0, auth, false), destination)
-            .unwrap();
-        if warmup.recv_from(&mut [0; 256]).is_ok() {
-            break;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "reflector readiness"
-        );
-    }
+    let reflector = Reflector::spawn(cmd).unwrap();
+    let destination = reflector.address;
     let socket = UdpSocket::bind((ip, 0)).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(2)))

@@ -81,6 +81,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `session_auth_admission_test.rs` | Rejected base packets do not create or refresh sessions: bad HMACs, unknown SSIDs, key rotation, strict short packets; an invalid TLV HMAC still gets an I-flagged reply. | Unix, nix |
 | `session_capacity_test.rs` | Session cap rejection keeps sequence state; with `control`, drain and resume, runtime caps, expiry and drop counters. | Linux, nix |
 | `session_identity_test.rs` | Session identity and static admission on real sockets: SSIDs, Micro-session IDs, source ports and wildcard-bind destinations. | Unix, nix |
+| `reflector_launcher_test.rs` | Deterministic port contention, kernel-selected ports, retained socket ownership, startup stderr/status bounds, timeout cleanup and child reaping. | Unix, nix |
 | `session_ssid_validation_test.rs` | Sender SSID checks and zero-SSID policies against an independent peer; IPv4/IPv6, open/authenticated. | always |
 | `snmp_lifecycle_test.rs` | CLI exits after finite sends, startup failures, signals and silent initial/reconnect handshakes. | Unix, `snmp`; reflector needs nix |
 | `startup_failure_test.rs` | Startup failures (bind, key file, missing key, bad BER pattern, missing interface) return errors; total loss and shutdown do not. | always; some cases Linux only |
@@ -91,10 +92,27 @@ Shared helpers and data:
 | Path | Purpose |
 | --- | --- |
 | `common/wire_hmac.rs` | HMAC-SHA-256 computed directly with `hmac` and `sha2`, so wire tests do not use the production HMAC or coverage code. |
+| `common/reflector.rs` | Child reflector lifecycle: port 0, JSON readiness, bounded stderr draining and kill/wait cleanup. |
+| `common/receiver.rs` | In-process fixtures retain a bound socket and shared state on a dedicated current-thread runtime; cancel and join on teardown. |
 | `netns/mod.rs` | Namespace fixture for `netns_conformance.rs`: namespaces, veth links, tcpdump capture and pcap parsing. |
 | `privileged/mod.rs` | Shared skip policy: with `STAMP_REQUIRE_PRIVILEGED=1` an unavailable prerequisite fails instead of skipping. |
 | `fixtures/interop/` | Request and reply bytes for the Python wire fixtures; see [testing-interop.md](../doc/testing-interop.md). |
 | `proptest_tlv.proptest-regressions` | Saved proptest failure seeds, replayed on every run. |
+
+## Reflector startup
+
+Nine live suites share the lifecycle helpers above. Child reflectors bind port
+zero and report their assigned address; in-process fixtures pass an owned
+socket to the nix backend. Neither releases a reserved UDP port before binding.
+Startup failures include status/PID and the last 64 KiB of stderr; stderr is
+continuously drained. A timeout kills and reaps the child. There are no automatic
+startup retries or warmup send loops. Tests that need a first packet send it
+once after obtaining the bound endpoint.
+
+Child fixtures explicitly use two Tokio workers. This bounds test resources
+independently of host CPU count; it does not establish resource pressure as the
+cause of a past failure. See [startup diagnosis and reproduction](../doc/testing-startup.md).
+The tests run in the existing Linux default/all-features and native macOS gates.
 
 ## Tests that need privileges or namespaces
 

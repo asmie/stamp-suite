@@ -1,20 +1,16 @@
 //! Real socket coverage of session identity and static admission.
 #![cfg(all(unix, any(feature = "ttl-nix", not(feature = "ttl-pnet"))))]
 
+use clap::Parser;
+use stamp_suite::configuration::Configuration;
 use stamp_suite::crypto::{compute_packet_hmac, HmacKey};
 use std::{
-    net::UdpSocket,
-    process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    net::{SocketAddr, UdpSocket},
+    time::Duration,
 };
 
-struct Reflector(Child);
-impl Drop for Reflector {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+#[path = "common/receiver.rs"]
+mod receiver_fixture;
 
 fn packet(auth: bool, ssid: u16, micro: Option<u16>, seq: u32) -> Vec<u8> {
     let mut data = vec![0; if auth { 112 } else { 44 }];
@@ -44,55 +40,55 @@ fn exercise(ip: &str, auth: bool, provisioned: bool, stateful: bool) {
     other
         .set_read_timeout(Some(Duration::from_millis(100)))
         .unwrap();
-    let reserve = UdpSocket::bind((ip, 0)).unwrap();
-    let dest = reserve.local_addr().unwrap();
-    drop(reserve);
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
-    cmd.args([
-        "--is-reflector",
-        "--local-addr",
-        if ip == "::1" { "::" } else { "0.0.0.0" },
-        "--local-port",
-        &dest.port().to_string(),
-    ]);
-    if stateful {
-        cmd.arg("--stateful-reflector");
-    }
-    if auth {
-        cmd.args([
-            "--auth-mode",
-            "A",
-            "--hmac-key",
-            "abababababababababababababababab",
-        ]);
-    }
-    if provisioned {
-        cmd.args(["--session-admission", "provisioned"]);
-        for suffix in ["", ",1", ",2"] {
-            cmd.args([
-                "--reflector-session",
-                &format!("42,{},{dest}{suffix}", socket.local_addr().unwrap()),
-            ]);
-        }
-    }
-    let mut child = Reflector(
-        cmd.stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let bind_ip = if ip == "::1" { "::" } else { "0.0.0.0" };
+    let child =
+        receiver_fixture::Receiver::start(SocketAddr::new(bind_ip.parse().unwrap(), 0), |bound| {
+            let dest = SocketAddr::new(ip.parse().unwrap(), bound.port());
+            let mut args = vec![
+                "stamp-suite".to_string(),
+                "--is-reflector".into(),
+                "--local-addr".into(),
+                bind_ip.into(),
+                "--local-port".into(),
+                bound.port().to_string(),
+                "--hwtstamp".into(),
+                "off".into(),
+            ];
+            if stateful {
+                args.push("--stateful-reflector".into());
+            }
+            if auth {
+                args.extend([
+                    "--auth-mode".into(),
+                    "A".into(),
+                    "--hmac-key".into(),
+                    "abababababababababababababababab".into(),
+                ]);
+            }
+            if provisioned {
+                args.extend(["--session-admission".into(), "provisioned".into()]);
+                for suffix in ["", ",1", ",2"] {
+                    args.extend([
+                        "--reflector-session".into(),
+                        format!("42,{},{dest}{suffix}", socket.local_addr().unwrap()),
+                    ]);
+                }
+            }
+            Configuration::parse_from(args)
+        });
+    let dest = SocketAddr::new(ip.parse().unwrap(), child.address.port());
     let mut response = [0; 512];
-    // Use the base session to establish readiness; micro-session sequences
-    // must still start at zero after any number of these startup attempts.
-    let startup = Instant::now();
-    loop {
-        assert!(child.0.try_wait().unwrap().is_none(), "reflector exited");
-        socket.send_to(&packet(auth, 42, None, 900), dest).unwrap();
-        if socket.recv_from(&mut response).is_ok() {
-            break;
-        }
-        assert!(startup.elapsed() < Duration::from_secs(5));
-    }
+    // Use the base session; micro-session sequences must still start at zero.
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    socket.send_to(&packet(auth, 42, None, 900), dest).unwrap();
+    let ready = socket.recv_from(&mut response);
+    child.assert_running();
+    ready.unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
     // A malformed TLV cannot supply a micro ID, but an admitted base session
     // must retain RFC 8972's malformed-TLV echo behavior.
     let mut malformed = packet(auth, 42, None, 901);

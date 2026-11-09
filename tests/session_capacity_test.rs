@@ -6,16 +6,12 @@
 use stamp_suite::crypto::{compute_packet_hmac, HmacKey};
 use std::{
     net::{SocketAddr, UdpSocket},
-    process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
-struct Reflector(Child);
-impl Drop for Reflector {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+#[path = "common/reflector.rs"]
+mod reflector;
+use reflector::Reflector;
+
 fn packet(seq: u32, auth: bool) -> Vec<u8> {
     let mut data = vec![0; if auth { 112 } else { 44 }];
     data[..4].copy_from_slice(&seq.to_be_bytes());
@@ -81,20 +77,8 @@ fn http(addr: SocketAddr, method: &str, path: &str, body: &str) -> serde_json::V
     }
 }
 fn check(ip: &str, auth: bool, stateful: bool) {
-    let reserve = UdpSocket::bind((ip, 0)).unwrap();
-    let target = reserve.local_addr().unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
-    cmd.args([
-        "--is-reflector",
-        "--local-addr",
-        ip,
-        "--local-port",
-        &target.port().to_string(),
-        "--max-sessions",
-        "1",
-        "--hwtstamp",
-        "off",
-    ]);
+    let mut cmd = Reflector::command(ip);
+    cmd.args(["--max-sessions", "1", "--hwtstamp", "off"]);
     if stateful {
         cmd.arg("--stateful-reflector");
     }
@@ -107,38 +91,19 @@ fn check(ip: &str, auth: bool, stateful: bool) {
         ]);
     }
     #[cfg(feature = "control")]
-    let control = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        cmd.args(["--control", "--control-addr", &addr.to_string()]);
-        addr
-    };
-    drop(reserve);
-    let mut reflector = Reflector(
-        cmd.stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    cmd.args(["--control", "--control-addr", "127.0.0.1:0"]);
+    let reflector = Reflector::spawn(cmd).unwrap();
+    let target = reflector.address;
+    #[cfg(feature = "control")]
+    let control = reflector.control_address();
     let known = UdpSocket::bind((ip, 0)).unwrap();
     known
-        .set_read_timeout(Some(Duration::from_millis(40)))
+        .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    let start = Instant::now();
-    let mut seq = 0;
-    let initial = loop {
-        assert!(
-            reflector.0.try_wait().unwrap().is_none(),
-            "reflector exited"
-        );
-        known.send_to(&packet(seq, auth), target).unwrap();
-        seq += 1;
-        let mut bytes = [0; 256];
-        if known.recv_from(&mut bytes).is_ok() {
-            break u32::from_be_bytes(bytes[..4].try_into().unwrap());
-        }
-        assert!(start.elapsed() < Duration::from_secs(5));
-    };
+    known.send_to(&packet(0, auth), target).unwrap();
+    let mut bytes = [0; 256];
+    known.recv_from(&mut bytes).unwrap();
+    let initial = u32::from_be_bytes(bytes[..4].try_into().unwrap());
     let other = UdpSocket::bind((ip, 0)).unwrap();
     for seq in 0..3 {
         exchange(&other, target, seq, auth, None);

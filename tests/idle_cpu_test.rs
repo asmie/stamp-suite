@@ -7,17 +7,12 @@
 ))]
 
 use std::net::UdpSocket;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Child;
+use std::time::Duration;
 
-struct Reflector(Child);
-
-impl Drop for Reflector {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+#[path = "common/reflector.rs"]
+mod reflector;
+use reflector::Reflector;
 
 fn cpu_ticks(child: &Child) -> u64 {
     let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
@@ -33,54 +28,26 @@ fn cpu_ticks(child: &Child) -> u64 {
 }
 
 fn reflector_sleeps_after_traffic(ip: &str, mode: &str) {
-    let reserve = UdpSocket::bind((ip, 0)).unwrap();
-    let destination = reserve.local_addr().unwrap();
-    drop(reserve);
-    let mut child = Reflector(
-        Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
-            .args([
-                "--is-reflector",
-                "--local-addr",
-                ip,
-                "--local-port",
-                &destination.port().to_string(),
-                "--hwtstamp",
-                mode,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut command = Reflector::command(ip);
+    command.args(["--hwtstamp", mode]);
+    let child = Reflector::spawn(command).unwrap();
+    let destination = child.address;
     let socket = UdpSocket::bind((ip, 0)).unwrap();
     socket
-        .set_read_timeout(Some(Duration::from_millis(50)))
+        .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     let mut packet = [0u8; 44];
-    packet[13] = 1; // Nonzero Error Estimate multiplier.
+    packet[13] = 1;
     let mut response = [0u8; 256];
-    let startup = Instant::now();
-    loop {
-        assert!(
-            child.0.try_wait().unwrap().is_none(),
-            "reflector exited during startup"
-        );
-        socket.send_to(&packet, destination).unwrap();
-        if socket.recv_from(&mut response).is_ok() {
-            break;
-        }
-        assert!(
-            startup.elapsed() < Duration::from_secs(5),
-            "reflector did not start"
-        );
-    }
+    socket.send_to(&packet, destination).unwrap();
+    socket.recv_from(&mut response).unwrap();
 
     // Let startup/queued replies settle, then observe an otherwise idle child.
     std::thread::sleep(Duration::from_millis(100));
-    let before = cpu_ticks(&child.0);
+    let before = cpu_ticks(&child.child);
     let window = Duration::from_millis(600);
     std::thread::sleep(window);
-    let used = cpu_ticks(&child.0) - before;
+    let used = cpu_ticks(&child.child) - before;
     // SAFETY: sysconf with _SC_CLK_TCK has no pointer or memory arguments.
     let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     assert!(ticks_per_second > 0);

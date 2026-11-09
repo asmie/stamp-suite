@@ -1,5 +1,8 @@
 //! Per-SSID signing survives final fallback mutations and in-flight key rotation.
 #![cfg(all(unix, any(feature = "ttl-nix", not(feature = "ttl-pnet"))))]
+#[path = "common/receiver.rs"]
+mod receiver_fixture;
+
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
 use clap::Parser;
@@ -9,7 +12,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
-use tokio::{net::UdpSocket, task::JoinHandle, time::timeout};
+use tokio::{net::UdpSocket, time::timeout};
 
 fn key(value: u8) -> HmacKey {
     HmacKey::new(vec![value; 16]).unwrap()
@@ -89,13 +92,8 @@ fn verify(data: &[u8], auth: bool, value: u8, fallback: bool) {
 struct Reflector {
     shared: Arc<receiver::ReceiverSharedState>,
     target: SocketAddr,
-    task: JoinHandle<Result<(), stamp_suite::StartupError>>,
+    server: receiver_fixture::Receiver,
     _keys: tempfile::TempDir,
-}
-impl Drop for Reflector {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 impl Reflector {
     async fn start(ip: &str, auth: bool) -> Self {
@@ -110,58 +108,42 @@ impl Reflector {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
-        let reserve = UdpSocket::bind((ip, 0)).await.unwrap();
-        let target = reserve.local_addr().unwrap();
-        drop(reserve);
-        let conf = Configuration::parse_from([
-            "stamp-suite",
-            "--is-reflector",
-            "--local-addr",
-            ip,
-            "--local-port",
-            &target.port().to_string(),
-            "--auth-mode",
-            if auth { "A" } else { "O" },
-            "--hmac-key-dir",
-            keys.path().to_str().unwrap(),
-            "--stateful-reflector",
-            "--reflected-control-max-count",
-            "3",
-            "--hwtstamp",
-            "off",
-        ]);
-        conf.validate().unwrap();
-        let shared = Arc::new(receiver::create_shared_state(&conf).unwrap());
-        let task_shared = Arc::clone(&shared);
-        let task =
-            tokio::task::spawn_local(
-                async move { receiver::run_receiver(&conf, &task_shared).await },
-            );
+        let server =
+            receiver_fixture::Receiver::start(SocketAddr::new(ip.parse().unwrap(), 0), |target| {
+                Configuration::parse_from([
+                    "stamp-suite",
+                    "--is-reflector",
+                    "--local-addr",
+                    ip,
+                    "--local-port",
+                    &target.port().to_string(),
+                    "--auth-mode",
+                    if auth { "A" } else { "O" },
+                    "--hmac-key-dir",
+                    keys.path().to_str().unwrap(),
+                    "--stateful-reflector",
+                    "--reflected-control-max-count",
+                    "3",
+                    "--hwtstamp",
+                    "off",
+                ])
+            });
+        let target = server.address;
         let reflector = Self {
-            shared,
+            shared: Arc::clone(&server.shared),
             target,
-            task,
+            server,
             _keys: keys,
         };
         let warmup = UdpSocket::bind((ip, 0)).await.unwrap();
-        timeout(Duration::from_secs(3), async {
-            loop {
-                assert!(!reflector.task.is_finished());
-                warmup
-                    .send_to(&request(auth, 42, 0xAB, 0, false, false), target)
-                    .await
-                    .unwrap();
-                let mut data = [0; 1024];
-                if timeout(Duration::from_millis(30), warmup.recv_from(&mut data))
-                    .await
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap();
+        warmup
+            .send_to(&request(auth, 42, 0xAB, 0, false, false), target)
+            .await
+            .unwrap();
+        let mut data = [0; 1024];
+        let ready = timeout(Duration::from_secs(3), warmup.recv_from(&mut data)).await;
+        reflector.server.assert_running();
+        ready.unwrap().unwrap();
         reflector
     }
     async fn recv(&self, socket: &UdpSocket) -> Vec<u8> {
