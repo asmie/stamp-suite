@@ -24,8 +24,8 @@
     },
     {
       "kind": "draft",
-      "name": "draft-gandhi-ippm-stamp-ber",
-      "revision": "07",
+      "name": "draft-ietf-bpm-stamp-ber",
+      "revision": "01",
       "matrix": "doc/conformance/draft-stamp-ber.md"
     },
     {

@@ -199,7 +199,9 @@ Extra Padding may follow HMAC, and it is outside that coverage. New signatures
 use the outgoing order, with BER padding after HMAC. Failure echoes keep the
 received order and digest bytes and set the required flags. Malformed lists are
 not re-signed by normal TLV regeneration. Final signing at send time operates
-on the reply buffer.
+on the reply buffer. It traverses complete frames even past semantic M to
+find a generated HMAC before nonzero BER padding. The ownership flag prevents
+that final step from changing copied digests in I-marked failure echoes.
 
 ### Short packets and `--strict-packets`
 
@@ -528,6 +530,11 @@ MTU. A resized reply marks the BER metadata with C because the denominator
 changed. Use symmetric replies for BER. UDP checksums and link CRC or FEC may
 discard corrupt packets before delivery, so this measures residual delivered
 errors, not raw link BER.
+
+BER conformance-error flags are reflected, but specific error-reason logs and
+counters remain absent. The [matrix](conformance/draft-stamp-ber.md) records
+that SHOULD as a Gap and keeps zero-checksum validation, platform MTU and
+physical LAG limitations explicit.
 
 ### Reflected IPv6 Extension and Fixed Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr-26)
 

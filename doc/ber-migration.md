@@ -16,6 +16,7 @@ minor release, planned as 1.1.0; it must not enter a 1.0.x compatibility patch.
 2. **T5b, endpoint integration:** switch both roles, observation validation,
    HMAC signing, padding correction, MTU fitting and configuration together.
    Retire the legacy wire profile explicitly and test the migration boundary.
+   Committed as `3783462`.
 3. **T5c, evidence:** complete independent live wire checks for IPv4/IPv6,
    open/keyed/authenticated modes and malformed nested TLVs. Rebuild the
    conformance matrix and change the standards identity/pin only once the
@@ -101,8 +102,16 @@ show Extra Padding Type 1 followed by separate four-byte Types 9 (count) and
 10 (pattern). These are not the successor's combined value; Types 9 and 10
 are assigned to RFC 9503 extensions. The capture is incompatibility evidence,
 not a successful successor exchange or a reason to adopt those codepoints.
-Check a newer independent implementation before making an interoperability
-claim. Cisco IOS XR 26.1.1 is another implementation named by the draft;
+
+Current Teaparty main was also fetched and built on 9 November 2026 at
+[`7fb2bdea48d42875e3237b97718f3c2149995b40`](https://github.com/cerfcast/teaparty/commit/7fb2bdea48d42875e3237b97718f3c2149995b40).
+Its [IPv4/IPv6 captures](../tests/fixtures/residual-ber/teaparty-7fb2bde.json)
+contain separate outer Type 241 (four-byte count) and Type 240 (pattern),
+with Extra Padding Type 1. It still does not send the combined successor
+layout. These black-box captures and binary/lock hashes establish the
+compatibility boundary; no peer implementation, tests or comments were copied.
+Successful BER interoperability with another maintained application remains
+unverified. Cisco IOS XR 26.1.1 is another implementation named by the draft;
 no Cisco device was available for this check.
 
 ## Test evidence
@@ -115,10 +124,26 @@ limits. Property tests exercise arbitrary bytes and generated nested values.
 The `residual_ber_value` fuzz target uses the same framing/semantic boundary;
 its CI corpus is seeded from these independent hex vectors.
 
-The [BER matrix](conformance/draft-stamp-ber.md) now records the retired
-legacy profile as Excluded. T5c will replace it with successor requirements
-and independent live evidence, then move the monitored identity/pin. The
-replaced-draft standards finding remains open until that evidence is complete.
+The [BER matrix](conformance/draft-stamp-ber.md) now evaluates 54 successor
+clauses: 48 Compliant, four Partial, one Gap and one N-A. The standards
+manifest tracks `draft-ietf-bpm-stamp-ber-01`; the legacy replacement finding
+is resolved. This records current revision tracking, not full conformance:
+zero-checksum validation, MTU/platform and physical LAG limits remain. The
+draft's SHOULD for per-condition error logs/counters is an explicit Gap.
+
+T5c's [wire report](interop/2026-11-09-ber/REPORT.md) records 60 independently
+validated cases in each of the default and all-features builds. The Python
+peer exercises both roles and verifies three integrity profiles, default and
+five-byte patterns, malformed nested values, known bit errors, support fallback,
+sample admission and interval statistics. Frozen observations and mutation
+tests validate the oracle separately. CI requires both build profiles.
+
+The live stateful checks found a final-signing bug: M-marked BER replies with
+nonzero padding retained an assembly-time sequence-zero TLV digest. A failing
+regression now passes after the signer was changed to walk structurally complete
+frames past semantic M. Failed incoming TLV HMACs still retain their original
+values/digest with I; RFC 8972 requires copying them rather than regenerating
+a digest for the failure echo.
 
 T5a local validation: eight codec tests and the complete all-feature suite
 pass (1,398 tests, 12 privileged tests ignored). Rust 1.87 checks the production

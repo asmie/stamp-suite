@@ -553,19 +553,16 @@ fn sign_tlvs(data: &mut [u8], base: usize, key: &HmacKey) {
         let digest = key.compute_parts([&data[..4], &data[base..hmac_at]]);
         data[hmac_at + TLV_HEADER_SIZE..hmac_at + HMAC_TLV_SIZE].copy_from_slice(&digest);
     };
-    // BER replies may carry Extra Padding after the HMAC, so walk the chain.
-    if has_ber(data, base) {
-        let mut pos = base;
-        while let Some(tlv) = TlvSpan::at(data, pos) {
-            if tlv.flags.malformed {
-                break;
-            }
-            if tlv.tlv_type.is_hmac() && tlv.len == HMAC_TLV_VALUE_SIZE {
-                sign(data, tlv.start);
-                return;
-            }
-            pos = tlv.end();
+    // BER replies may carry nonzero Extra Padding after the HMAC. Walk
+    // structural frames even past semantic M: assembly owns this generated
+    // HMAC, and a well-framed error TLV still belongs in its signed prefix.
+    let mut pos = base;
+    while let Some(tlv) = TlvSpan::at(data, pos) {
+        if tlv.tlv_type.is_hmac() && tlv.len == HMAC_TLV_VALUE_SIZE {
+            sign(data, tlv.start);
+            return;
         }
+        pos = tlv.end();
     }
     // Otherwise the HMAC is the last TLV, followed only by zero padding. Match
     // its header after the flags byte: type, then the u16 length 16.

@@ -198,3 +198,29 @@ fn header_trimming_precedes_successor_ber_padding_and_preserves_signatures() {
     assert_eq!(list.non_hmac_tlvs()[1].value.len() % 5, 0);
     list.verify_hmac(&key, &data[..4], &data[44..]).unwrap();
 }
+
+#[test]
+fn generated_hmac_after_malformed_ber_uses_actual_stateful_sequence() {
+    let key = HmacKey::new(vec![0xab; 16]).unwrap();
+    for auth in [false, true] {
+        let base = if auth { 112 } else { 44 };
+        let mut data = vec![0; base];
+        // Complete framing, but BER's known value is short: M+C. Padding
+        // follows the generated HMAC and is opaque after the M boundary.
+        data.extend_from_slice(&[0x50, 243, 0, 7]);
+        data.extend_from_slice(&[0; 7]);
+        let at = data.len();
+        let digest = key.compute_parts([&data[..4], &data[base..at]]);
+        data.extend_from_slice(&[0, 8, 0, 16]);
+        data.extend_from_slice(&digest);
+        data.extend_from_slice(&[0x80, 1, 0, 4, 255, 0, 255, 0]);
+        let original = data.clone();
+        data[..4].copy_from_slice(&42u32.to_be_bytes());
+        sign_tlvs(&mut data, base, &key);
+        let expected = key.compute_parts([&data[..4], &data[base..at]]);
+        assert_eq!(&data[at + 4..at + 20], &expected);
+        assert_ne!(&data[at + 4..at + 20], &original[at + 4..at + 20]);
+        assert_eq!(&data[base..at], &original[base..at]);
+        assert_eq!(&data[at + 20..], &original[at + 20..]);
+    }
+}

@@ -36,6 +36,14 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Re-sign generated BER error replies with their actual stateful sequence,
+  including well-framed M-marked metadata before nonzero padding. Preserve
+  original digests on incoming HMAC-failure echoes.
+- Gate both roles with an independent 60-case successor BER wire suite on
+  default/all-features CI builds. Rebuild the conformance matrix and move the
+  standards pin to draft-ietf-bpm-stamp-ber-01, documenting remaining gaps
+  and incompatible Teaparty layouts.
+
 - Preserve nested BER flag/integrity boundaries, repair padding before signing,
   and size the combined metadata against the MTU. Trim optional reflected
   headers before reducing BER padding in whole pattern repetitions.

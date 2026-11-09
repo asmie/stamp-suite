@@ -132,7 +132,7 @@ stamp-suite reflector behaves that way with `--tlv-mode ignore`.
 | RFC 10052 | Reflected Test Packet Control TLV (Type 12): several or larger replies per test packet | [draft-asymmetrical-pkts](conformance/draft-asymmetrical-pkts.md) |
 | draft-ietf-ippm-stamp-ext-hdr-26 | Reflected IPv6 extension headers (Type 246) and fixed headers (Type 247) | [draft-stamp-ext-hdr](conformance/draft-stamp-ext-hdr.md) |
 | draft-ietf-ippm-stamp-cos-ecn-02 | ECN reporting in the Class of Service TLV and a sender congestion response | [draft-stamp-cos-ecn](conformance/draft-stamp-cos-ecn.md) |
-| draft-ietf-bpm-stamp-ber-01 | Residual BER count/burst with nested pattern (experimental Type 243 / sub-TLV 241) | [migration and pending evidence](ber-migration.md) |
+| draft-ietf-bpm-stamp-ber-01 | Residual BER count/burst with nested pattern (experimental Type 243 / sub-TLV 241) | [matrix and evidence](conformance/draft-stamp-ber.md) |
 
 Types 240 to 251 are experimental codepoints. Both ends must agree on their
 meaning. See [experimental codepoints](conformance/README.md#experimental-codepoints).

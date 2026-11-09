@@ -93,6 +93,67 @@ preflight before a case report is created. Reports are rewritten after every
 case. Temporary key paths and UDP ports are recorded for diagnosis, not replayed
 verbatim.
 
+## Independent successor BER profile
+
+[`scripts/interop_ber.py`](../scripts/interop_ber.py) is a separate Python
+standard-library sender and reflector for `draft-ietf-bpm-stamp-ber-01`.
+It uses agreed experimental outer Type 243 and pattern sub-TLV Type 241;
+neither value is an IANA assignment. It imports no Rust code or other peer
+implementation. Run it after each build, sequentially with other live suites:
+
+```sh
+python3 scripts/interop_ber.py --binary target/debug/stamp-suite --report /tmp/ber-interop.json
+```
+
+The `successor-ber-v1` profile requires **60 cases**: both families × three
+integrity profiles (open, keyed open, authenticated) × ten configurations.
+Each group includes stateful/stateless reflector tests and eight sender tests
+(default/explicit five-byte patterns × baseline, invalid observations, parent U
+and child U). Missing capabilities fail rather than skip. Both default and
+all-features builds run this profile in `conformance.yml` and upload reports
+even when a case fails. All-features still selects nix.
+
+The [17 request/expected-field vectors](../tests/fixtures/residual-ber/requests.json)
+cover clean/default errors, explicit four/five-byte patterns, unknown children,
+missing/duplicate padding, duplicate BER/pattern, misalignment, short outer and
+nested values, truncated nested headers, acknowledged prefixes, opaque remainders
+and retired legacy outer types. The reference bit counter constructs an XOR bit
+string; deliberate four-bit runs cross byte and pattern boundaries. Keyed cases
+verify HMAC over the actual reflected sequence and metadata prefix, leaving
+padding outside coverage. Invalid extension HMACs must be copied with I and
+their failed digest unchanged (RFC 8972 §4.8); invalid authenticated bases must
+receive no reply.
+
+Sender cases independently decode emitted requests and return crafted replies.
+Baseline sends same-sequence duplicates. The gates scenario returns signed
+M/C/I, duplicate fields, incorrect patterns, impossible counts and resized padding,
+plus a failed digest in keyed modes. These must add no BER samples. A nonzero
+count with burst zero remains a count sample without a burst sample. Reverse
+errors are introduced independently. Summary checks cover directional counts,
+denominators, error totals, burst maximum/average, rates and interval sums.
+After parent or child U, subsequent requests omit BER and delay/loss continues.
+
+[`replies.json`](../tests/fixtures/residual-ber/replies.json) freezes all 12
+reflector observations and 48 sender request/summary records from the documented
+default build. Provenance includes binary, runner and vector hashes. These are
+application regression observations, not independent certification. The
+[`oracle tests`](../scripts/tests/test_interop_ber.py) replay them, alter signed
+semantics/digests/echoes/padding and summaries, and check failure-report bookkeeping.
+The HMAC primitive has an RFC 4231 known-answer test. Regeneration of requests
+is explicit (`--write-vectors`) and live preflight rejects unexpected changes.
+
+Reports contain commands, process outcomes, stdout/stderr, UDP bytes/endpoints,
+expected silence, platform/tool versions, UTC time and hashes. A retained warmup
+socket is separate from measurements; reflectors bind a kernel-selected port
+and expose readiness in their startup log. Every case is attempted, reports are
+rewritten after each, and any failure produces a nonzero exit. A report with
+`completed=false` is incomplete evidence. Keys are public fixture values only.
+
+These are software-loopback tests with valid UDP checksums. They do not prove
+physical error capture or PMTU discovery. The [9 November report](interop/2026-11-09-ber/REPORT.md)
+also records route-MTU tests and incompatible Teaparty black-box captures; no
+successor exchange with another maintained application has been demonstrated.
+
 ## Protocol sources and complementary coverage
 
 The encoder/checker uses the following frozen sources, not generated Rust

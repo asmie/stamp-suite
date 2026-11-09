@@ -17,8 +17,8 @@ certify untested behavior.
 | [RFC 10052](draft-asymmetrical-pkts.md): Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 38 | 1 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -02, 2 November 2026 | 30 | 17 | 4 | 0 | 9 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 64 | 8 | 0 | 3 | 0 |
-| [draft-gandhi-ippm-stamp-ber](draft-stamp-ber.md): retired legacy BER profile | -07, 30 June 2026 | 30 | 0 | 0 | 0 | 1 | 29 |
-| **Total** | | **447** | **347** | **19** | **1** | **48** | **32** |
+| [draft-ietf-bpm-stamp-ber](draft-stamp-ber.md): Residual BER | -01, 2 November 2026 | 54 | 48 | 4 | 1 | 1 | 0 |
+| **Total** | | **471** | **395** | **23** | **2** | **48** | **3** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).
@@ -90,6 +90,10 @@ Documents. Each matrix links the source document it quotes.
   management is not implemented.
 - AgentX (SNMP subagent) support is read-only and is not scored in these
   matrices.
+- BER has four Partial rows (zero-checksum validation, route MTU across platforms,
+  physical LAG and automatic link-MTU filling) and one Gap: specific
+  conformance-error logging and counters. Its independent wire tests cover both roles; they do not
+  establish physical-link BER or interoperability with another application.
 - NIC timestamping and physical LAG behavior have no physical-testbed
   evidence. macOS has software receive timestamps only. Windows capture and
   hardware limits are covered in [release verification](../release-evidence.md).
@@ -115,8 +119,9 @@ agree on their meaning; they are not IANA assignments.
 Legacy outer Types 240–242 are retired and return U. Type 242 previously
 collided with another implementation's Heartbeat TLV. The successor always
 carries the burst field, so `--ber-omit-burst` is now a migration error. The
-retired profile's rows are Excluded pending T5c's successor matrix and live
-wire evidence; the standards monitor still reports the legacy replacement.
+successor matrix and standards pin now track BPM revision 01. The
+[migration report](../interop/2026-11-09-ber/REPORT.md) records independent
+wire evidence and the incompatible layouts observed from Teaparty.
 
 When a final allocation changes a wire identifier, update its constant,
 record the change in `CHANGELOG.md`, and bump the minor version under the

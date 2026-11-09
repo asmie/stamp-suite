@@ -394,7 +394,11 @@ fn live_route_mtu_changes_and_alternate_destinations() {
                     match kind {
                         243 => assert_eq!(*flags, 0x10, "trimmed BER metadata needs C"),
                         1 => {
-                            assert!(!value.is_empty() && value.len() < padding_size && value.len().is_multiple_of(4));
+                            assert!(
+                                !value.is_empty()
+                                    && value.len() < padding_size
+                                    && value.len().is_multiple_of(4)
+                            );
                             assert_eq!(value, &[0xFF, 0].repeat(value.len() / 2));
                         }
                         _ => {}

@@ -15,6 +15,12 @@ This runs backend, native-platform, MSRV, evidence and privileged checks on the
 tagged commit. Platform exclusions still apply; required driver-free Windows
 tests do not establish driver-backed capture behavior.
 
+Independent UDP gates include the [successor BER profile](testing-interop.md#independent-successor-ber-profile)
+in both roles: 60 required cases for each default/all-features build, alongside
+the existing protocol-combination fixtures. Both reports are uploaded even on
+case failures. The [migration evidence](interop/2026-11-09-ber/REPORT.md) separates
+local execution from remote CI and records known conformance/peer limitations.
+
 Cargo builds in the release jobs and container enforce the lockfile. Debian
 builds are offline: extract the release vendor archive into `vendor/` beside
 `Cargo.toml` before invoking `debian/rules`. The build fails if that input is

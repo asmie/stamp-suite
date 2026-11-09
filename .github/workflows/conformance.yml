@@ -54,14 +54,20 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.2
-      - run: cargo build --locked ${{ matrix.flags }}
+      - id: build
+        run: cargo build --locked ${{ matrix.flags }}
       - name: Require independent protocol combinations
         run: python3 scripts/interop_stamp.py --binary target/debug/stamp-suite --report interop.json
+      - name: Require independent successor BER exchanges in both roles
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 scripts/interop_ber.py --binary target/debug/stamp-suite --report ber-interop.json
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: independent-wire-${{ matrix.name }}
-          path: interop.json
+          path: |
+            interop.json
+            ber-interop.json
           if-no-files-found: error
 
   release-integration:

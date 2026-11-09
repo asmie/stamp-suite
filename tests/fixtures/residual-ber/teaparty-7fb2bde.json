@@ -1,0 +1,83 @@
+{
+  "peer_commit": "7fb2bdea48d42875e3237b97718f3c2149995b40",
+  "records": [
+    {
+      "ip": "127.0.0.1",
+      "command": [
+        "/tmp/stamp-t5c-teaparty-target/debug/teaparty",
+        "sender",
+        "127.0.0.1",
+        "57817",
+        "tlvs",
+        "bit-error-rate",
+        "--pattern",
+        "ff00ff00",
+        "-s",
+        "64"
+      ],
+      "packet_hex": "00000022ee9c158d1a0d970a000100000000000000000000000000000000000000000000000000000000000080f100040000000080010040ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff0080f00004ff00ff00",
+      "tlvs": [
+        {
+          "flags": 128,
+          "type": 241,
+          "length": 4,
+          "value_hex": "00000000"
+        },
+        {
+          "flags": 128,
+          "type": 1,
+          "length": 64,
+          "value_hex": "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00"
+        },
+        {
+          "flags": 128,
+          "type": 240,
+          "length": 4,
+          "value_hex": "ff00ff00"
+        }
+      ]
+    },
+    {
+      "ip": "::1",
+      "command": [
+        "/tmp/stamp-t5c-teaparty-target/debug/teaparty",
+        "sender",
+        "::1",
+        "54912",
+        "tlvs",
+        "bit-error-rate",
+        "--pattern",
+        "ff00ff00",
+        "-s",
+        "64"
+      ],
+      "packet_hex": "00000022ee9c158d1aff51a2000100000000000000000000000000000000000000000000000000000000000080f100040000000080010040ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff0080f00004ff00ff00",
+      "tlvs": [
+        {
+          "flags": 128,
+          "type": 241,
+          "length": 4,
+          "value_hex": "00000000"
+        },
+        {
+          "flags": 128,
+          "type": 1,
+          "length": 64,
+          "value_hex": "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00"
+        },
+        {
+          "flags": 128,
+          "type": 240,
+          "length": 4,
+          "value_hex": "ff00ff00"
+        }
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "captured_on": "2026-11-09",
+  "provenance": "Black-box sender output from current origin/main fetched 2026-11-09; no peer source, tests or comments copied.",
+  "peer_binary_sha256": "69560d27596c75ecff5b5d7a22617380e524cdcc6bbe8ae7844b3444ad4bac45",
+  "peer_lock_sha256": "153625f915fe13da023f9dd28e5d537ca5a68228f59343d50b434e07a66b987c",
+  "successor_interoperability": "not demonstrated: separate outer count Type 241 and pattern Type 240; no combined successor Type 243"
+}
