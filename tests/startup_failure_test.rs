@@ -8,29 +8,30 @@ use tokio::net::UdpSocket;
 
 #[tokio::test]
 async fn reflector_reports_bind_failure() {
-    // Occupy the exact wildcard address the reflector will bind. A socket
-    // bound only to loopback does not establish this conflict on Windows.
-    let _squatter = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-    let port = _squatter.local_addr().unwrap().port();
+    // Retain an owner of the exact configured endpoint in both families.
+    // IPv4 uses a wildcard bind to exercise Windows exclusivity semantics.
+    for ip in ["0.0.0.0", "::1"] {
+        let _squatter = UdpSocket::bind((ip, 0)).await.unwrap();
+        let port = _squatter.local_addr().unwrap().port();
 
-    // Wildcard binds work without an interface carrying the unspecified IP.
-    // Socket/key errors must be reported before capture interface discovery.
-    let conf = Configuration::parse_from([
-        "stamp-suite",
-        "--is-reflector",
-        "--local-addr",
-        "0.0.0.0",
-        "--local-port",
-        &port.to_string(),
-    ]);
-    let shared = receiver::create_shared_state(&conf).unwrap();
-    let err = receiver::run_receiver(&conf, &shared)
-        .await
-        .expect_err("binding an occupied port is a startup failure");
-    assert!(
-        err.to_string().contains("Cannot bind to address"),
-        "unexpected error: {err}"
-    );
+        // Bind errors must be reported before capture interface discovery.
+        let conf = Configuration::parse_from([
+            "stamp-suite",
+            "--is-reflector",
+            "--local-addr",
+            ip,
+            "--local-port",
+            &port.to_string(),
+        ]);
+        let shared = receiver::create_shared_state(&conf).unwrap();
+        let err = receiver::run_receiver(&conf, &shared)
+            .await
+            .expect_err("binding an occupied port is a startup failure");
+        assert!(
+            err.to_string().contains("Cannot bind to address"),
+            "unexpected error: {err}"
+        );
+    }
 }
 
 #[tokio::test]

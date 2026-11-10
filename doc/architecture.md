@@ -129,6 +129,13 @@ Pnet replies use UDP sockets bound to the STAMP port, so connected senders
 accept the source port. Pnet captures one interface: it needs a concrete local
 address, or a wildcard address together with `--interface`.
 
+Pnet binds the configured address family first. Port zero selects a kernel
+port that is then used for readiness, capture filtering, received endpoint
+metadata and both reply sockets. The other family binds the same port when
+available; its absence does not stop the configured family. A failure in the
+configured family stops startup before capture. IPv6 reply sockets are
+IPv6-only so IPv4/IPv6 wildcard sockets can coexist without a port handoff.
+
 Nix `recvmsg` calls run inside `UdpSocket::try_io`. `WouldBlock` clears the
 cached readiness; bypassing this wrapper can make an idle loop spin. The sender
 uses the same pattern for ECN and kernel timestamps.

@@ -147,24 +147,10 @@ async fn reflector_disclosure_order_and_control_use_actual_headers_without_rever
     for policy in 0..5 {
         for mode in 0..3 {
             for strict in [false, true] {
-                let mut command = if PNET {
-                    // Port zero is not supported by the current pnet capture
-                    // filter. This sole reflector owns a fixed port inside the
-                    // fresh private network namespace, before the peer binds.
-                    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
-                    command.args([
-                        "--is-reflector",
-                        "--local-addr",
-                        "::1",
-                        "--local-port",
-                        "19862",
-                        "--log-format",
-                        "json",
-                    ]);
-                    command
-                } else {
-                    reflector::Reflector::command("::1")
-                };
+                let mut command = reflector::Reflector::command("::1");
+                if PNET {
+                    command.args(["--interface", "lo"]);
+                }
                 command.args(["--hwtstamp", "off", "--reflected-control-max-count", "1"]);
                 match policy {
                     0 => {} // Default deny.
@@ -184,9 +170,6 @@ async fn reflector_disclosure_order_and_control_use_actual_headers_without_rever
                             "--reflect-ipv6-ext-header-from",
                             "::1",
                         ]);
-                        if PNET {
-                            command.args(["--interface", "lo"]);
-                        }
                     }
                 }
                 if mode != 0 {

@@ -126,13 +126,18 @@ jobs:
       - name: Build pnet fixture and tests without root
         run: |
           cargo build --locked --no-default-features --features ttl-pnet --target-dir target/pnet
-          cargo test --locked --no-default-features --features ttl-pnet --target-dir target/pnet --test pnet_loopback_test --test header_request_wire_test --test header_reflection_wire_test --no-run --message-format=json > pnet-artifacts.json
+          cargo test --locked --no-default-features --features ttl-pnet --target-dir target/pnet --test pnet_loopback_test --test header_request_wire_test --test header_reflection_wire_test --test pnet_endpoint_test --no-run --message-format=json > pnet-artifacts.json
       - name: Require pnet wire tests
         run: python3 scripts/run_privileged_test.py pnet-artifacts.json pnet_loopback_test 3 sudo -n env STAMP_REQUIRE_PRIVILEGED=1 TOKIO_WORKER_THREADS=2
       - name: Require pnet-profile sender header requests
         run: python3 scripts/run_privileged_test.py pnet-artifacts.json header_request_wire_test 1 sudo -n unshare --net --fork env STAMP_HEADER_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
       - name: Require pnet header reflection policy and control
         run: python3 scripts/run_privileged_test.py pnet-artifacts.json header_reflection_wire_test 1 sudo -n unshare --net --fork env STAMP_HEADER_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
+      - name: Require pnet assigned endpoints and family startup failures
+        run: >-
+          python3 scripts/run_privileged_test.py pnet-artifacts.json pnet_endpoint_test 3
+          sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)"
+          STAMP_PNET_ENDPOINT_TESTS=1 TOKIO_WORKER_THREADS=2
       - name: Build nix namespace tests without root
         run: cargo test --locked --all-features --test netns_conformance --test route_mtu_test --test header_request_wire_test --test header_reflection_wire_test --no-run --message-format=json > netns-artifacts.json
       - name: Require nix-profile sender header requests

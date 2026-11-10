@@ -966,6 +966,86 @@ uncommitted chunk remains pending.
 Temporary logs use `/tmp/t22b12-*`; these source regressions and this scope
 record are durable. Stop for a manual commit before the endpoint repair.
 
+## Pnet assigned-port endpoint repair (T22b13)
+
+Parent `3574d6e` contains the reflector header review. Its first pnet attempt
+at port zero exposed an endpoint defect: family sockets independently received
+ports, but readiness, capture filtering and received metadata kept configured
+zero. The new endpoint fixture fails before the repair for both configured
+families with an unassigned-port readiness report. All three cases pass after
+the repair; no failed wire exchange is counted as a successful baseline.
+
+`src/receiver/pnet.rs::bind_reply_sockets` retains the configured-family socket
+first, reads its actual endpoint and binds the other family to that port when
+available. The primary is required; an unavailable counterpart does not block
+it. IPv6 reply sockets are IPv6-only, allowing IPv4/IPv6 wildcard owners to
+coexist. A configured-family bind failure now stops startup before capture,
+including IPv6 failures previously masked by an optional IPv6 bind. Explicit
+ports remain exact. An IPv6 primary no longer depends on an unrelated IPv4
+bind succeeding. Capture filter, received Location ports and readiness use
+the selected port, and the send worker handles either unavailable counterpart.
+
+`tests/pnet_endpoint_test.rs::pnet_assigned_ipv4_ports_reach_capture_metadata_and_both_reply_families`
+and
+`tests/pnet_endpoint_test.rs::pnet_assigned_ipv6_ports_reach_capture_metadata_and_both_reply_families`
+exercise four concrete/wildcard binds, three key modes and assigned/explicit
+ports. Independent complete-checksum raw IPv4/IPv6 probes validate reply source
+ports, echoed sequence, Location destination/source ports and base/extension
+HMACs. A second startup fails while the original reflector retains its exact
+endpoint; no released-port reservation or readiness probe is used. Separate
+live counterpart owners establish optional-family fallback without changing
+the configured port. These tests require both reply families when available
+inside their private namespace, including IPv6 wildcard binds.
+
+`tests/pnet_endpoint_test.rs::pnet_ipv4_works_with_ipv6_disabled_and_ipv6_startup_fails`
+checks IPv4 replies and early IPv6 bind failure after disabling IPv6 addresses
+only inside the verified private namespace. A guard restores the sysctl. The
+three endpoint cases serialize even under a parallel test runner, require the
+recorded parent namespace to differ and reject missing prerequisites. Together
+they pass **63 replies, 27 expected startup failures and 39 graceful SIGTERM
+shutdowns** (each bounded to four seconds). CI requires all three ignored cases
+with the actual pnet backend; zero/gated suites cannot pass.
+
+`src/receiver/pnet.rs::tests::reply_socket_binding_retains_primary_endpoint_and_one_port`
+checks real unprivileged socket binding for all four concrete/wildcard profiles,
+available family ports, IPv6-only operation and retained primary conflicts.
+`tests/startup_failure_test.rs::reflector_reports_bind_failure` now checks both
+families through receiver startup before capture discovery. These run without
+capture privileges and join the existing native Windows unit/startup gates.
+
+The 200-exchange pnet header-policy test now uses its advertised assigned port,
+removing the fixed-port workaround. All three pre-existing raw loopback tests
+pass, including bad-checksum rejection. The scoped link-local IPv6 fixture
+initially failed on incomplete TX checksums; it now disables offload on its
+own private veth ends and passes open/authenticated bursts, alternate-address
+signatures and sender zones. Application checksum validation is unchanged.
+
+Exact pnet-library/startup-test source cross-checks pass for macOS and Windows
+with warnings denied using minimal harnesses. They do not establish native
+capture/runtime or the full platform dependency graph. Fresh remote CI for
+this uncommitted chunk remains pending. This is Linux software capture evidence,
+not physical NIC/driver evidence.
+
+The inventory stays **320 applicable, 316 referenced, four missing**; all
+status counts remain **472 clauses: 388 Compliant, 31 Partial, two Gap, 48
+N-A and three Excluded**. The remaining four rows and strict CI enforcement
+are T22b14/T22c.
+
+Final default/all-features/pnet suites pass **1,381/1,483/1,309** tests,
+respectively, with **15/15/18** privileged cases ignored in the ordinary runs.
+The explicit namespace executions above are separate evidence. All three
+Clippy profiles, rustfmt, Rust 1.87 all-targets checking in all-features and
+pnet-only profiles, warnings-denied rustdoc, 104 Python tests, release metadata
+and matrix counts pass. The Windows CI feature set passes the new binding
+unit and all 12 startup tests locally on Linux. Source checks pass 1,318
+citations; 461 documentation links pass (384 local, 77 external classified).
+Strict mode fails only on the four expected missing references. The edited
+workflow parses as YAML. An exact-parent query observes no CI run for
+`3574d6e`; remote CI remains pending for this uncommitted chunk.
+
+Temporary logs use `/tmp/t22b13-*`; durable regression source
+and this report retain the scope. Stop for a manual commit before T22b14.
+
 ## Local validation for T22a
 
 The all-features focused runs exercise 90 HMAC tests (including the new known

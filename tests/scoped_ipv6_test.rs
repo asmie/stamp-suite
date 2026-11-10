@@ -102,6 +102,15 @@ fn link_local_replies_bursts_alternates_and_sender_zones() {
     in_ns(&["link", "set", "lo", "up"]);
     in_ns(&["link", "set", &remote, "up"]);
     run(Command::new("ip").args(["link", "set", &local, "up"]));
+    if cfg!(all(feature = "ttl-pnet", not(feature = "ttl-nix"))) {
+        // Raw capture must see complete wire checksums. Disable offload only
+        // on these private veth endpoints, including the reflector's end.
+        run(Command::new("ethtool").args(["-K", &local, "tx", "off"]));
+        run(Command::new("nsenter")
+            .arg(format!("--net={ns}"))
+            .arg("ethtool")
+            .args(["-K", &remote, "tx", "off"]));
+    }
     for addr in ["fe80::1/64", "fe80::3/64"] {
         run(Command::new("ip").args(["-6", "addr", "add", addr, "dev", &local, "nodad"]));
     }

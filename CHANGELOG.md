@@ -44,6 +44,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Use one actual port for pnet reflector startup, capture filtering, received
+  endpoint metadata and replies when `--local-port 0` is requested. Require
+  the configured family to bind, keep the other family optional and use
+  separate IPv6-only reply sockets so wildcard families can share the port.
+
 - Add reflector wire evidence for per-source header disclosure, global TLV
   ordering and reverse-header control on nix and pnet. Verify fixed-header
   matching through shared packet processing and require the new tests in CI.

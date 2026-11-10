@@ -68,6 +68,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `netns_conformance.rs` | Wire behavior across network namespaces (CoS, SRv6, header reflection, Address Groups, BER, Type 12, TTL). | Linux; ignored, see [Namespace conformance tier](#namespace-conformance-tier) |
 | `output_stream_test.rs` | CLI stdout stays parseable with logs, packet details, periodic reports, BER and measurement CSV, reflector shutdown, schema output, validation errors, blocked stdout and broken pipes. | Linux, nix |
 | `pnet_loopback_test.rs` | Real pnet capture on `lo`: open, authenticated and TLV round trips, and that bad UDP checksums get no reply. | Linux, `ttl-pnet` without `ttl-nix`; ignored, see [Raw capture (pnet)](#raw-capture-pnet) |
+| `pnet_endpoint_test.rs` | Assigned and explicit ports across configured families/wildcards, both reply families, Location metadata, signatures, retained bind conflicts, unavailable counterpart, disabled IPv6 and graceful shutdown. | Linux, `ttl-pnet` without `ttl-nix`; three ignored namespace tests |
 | `proptest_tlv.rs` | Property tests: typed TLV and wire round trips, and no panics in TLV, packet and AgentX decoders on arbitrary bytes. | always; AgentX properties need `snmp` |
 | `ptp_e2e_test.rs` | PTP/NTP encoding and the reflector's declared clock metadata in Type 3. | always |
 | `replay_control_test.rs` | Type 12 replay handling (RFC 10052 §5): one U-flagged reply for duplicate, reordered or old requests; wraparound, SSID isolation, HMACs, both sequencing modes and drop policies; IPv4/IPv6. | Linux, nix |
@@ -203,6 +204,9 @@ STAMP_HEADER_NETNS_TESTS=1 unshare -Urn \
   cargo test --locked --all-features --test header_reflection_wire_test -- --ignored --nocapture
 STAMP_HEADER_NETNS_TESTS=1 unshare -Urn \
   cargo test --locked --no-default-features --features ttl-pnet --test header_reflection_wire_test -- --ignored --nocapture
+
+STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_PNET_ENDPOINT_TESTS=1 unshare -Urn \
+  cargo test --locked --no-default-features --features ttl-pnet --test pnet_endpoint_test -- --ignored --nocapture
 ```
 
 - `route_mtu_test` starts a reflector in a second namespace joined by a veth
@@ -221,11 +225,16 @@ STAMP_HEADER_NETNS_TESTS=1 unshare -Urn \
   sender origination, not reflector matching or raw pnet capture.
 - `header_reflection_wire_test` checks actual reflector replies under five
   disclosure policies, three key modes and both strictness settings. The pnet
-  case injects complete IPv6/UDP checksums and uses a fixed port owned only by
-  the reflector inside the fresh private namespace; the peer binds afterwards.
-  Nix uses its advertised kernel-assigned port. The shared ancillary helper
+  case injects complete IPv6/UDP checksums. Both backends use their advertised
+  kernel-assigned ports; the peer binds afterwards. The shared ancillary helper
   checks matching reply headers are absent. This is software loopback evidence;
-  nested raw capture, physical interfaces and pnet port zero remain separate.
+  nested raw capture and physical interfaces remain separate.
+- `pnet_endpoint_test` rejects execution in the recorded parent network
+  namespace. Its three cases serialize to protect private ports and IPv6
+  sysctls, including when Rust's test runner uses multiple threads. The
+  IPv6-disabled case restores its namespace setting. Raw probes carry complete
+  checksums, and contenders retain their sockets throughout startup attempts.
+  Every successful reflector must exit cleanly on SIGTERM within four seconds.
 
 The private veth fixtures turn off TX checksum offload with `ethtool` on their
 own interfaces, because the pnet backend rejects frames with incomplete
@@ -234,8 +243,9 @@ checksums.
 ### In CI
 
 The `privileged` job in `.github/workflows/conformance.yml` builds each backend
-without root, then uses `scripts/run_privileged_test.py` to run the three pnet
-tests, the nine namespace scenarios and the route MTU test in required mode.
+without root, then uses `scripts/run_privileged_test.py` to require the three
+pnet checksum/round-trip tests, three pnet endpoint cases, sender and reflector
+header cases, nine namespace scenarios and two route MTU cases.
 The script rejects an executable whose ignored-test count is wrong or zero, so
 a build with the wrong backend cannot pass with an empty suite.
 `scoped_ipv6_test` and `ext_hdr_nix_test` are not run in CI.

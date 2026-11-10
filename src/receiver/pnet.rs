@@ -36,8 +36,60 @@ use super::{
 
 /// Context for sending STAMP responses in pnet mode.
 struct PnetSendContext {
-    send_socket_v4: std::net::UdpSocket,
+    send_socket_v4: Option<std::net::UdpSocket>,
     send_socket_v6: Option<std::net::UdpSocket>,
+}
+
+fn bind_reply_socket(address: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    if address.is_ipv4() {
+        return std::net::UdpSocket::bind(address);
+    }
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    // Separate family sockets must coexist even on wildcard binds. Captured
+    // IPv4 traffic is sent through the IPv4 owner, never a mapped IPv6 send.
+    socket.set_only_v6(true)?;
+    socket.bind(&address.into())?;
+    Ok(socket.into())
+}
+
+/// The configured family is required; the other family is best effort.
+/// Retain the primary socket while binding the secondary to its actual port.
+fn bind_reply_sockets(
+    conf: &Configuration,
+) -> Result<(PnetSendContext, SocketAddr), crate::StartupError> {
+    let requested = conf.local_socket_addr();
+    let primary = bind_reply_socket(requested)
+        .map_err(|e| crate::StartupError::io(format!("Cannot bind to address {requested}"), e))?;
+    let bound = primary
+        .local_addr()
+        .map_err(|e| crate::StartupError::io("Cannot get bound reply address", e))?;
+    let secondary_address = match requested {
+        SocketAddr::V4(_) => (std::net::Ipv6Addr::UNSPECIFIED, bound.port()).into(),
+        SocketAddr::V6(_) => (std::net::Ipv4Addr::UNSPECIFIED, bound.port()).into(),
+    };
+    let secondary = match bind_reply_socket(secondary_address) {
+        Ok(socket) => Some(socket),
+        Err(error) => {
+            log::debug!("Reply socket {secondary_address} unavailable: {error}");
+            None
+        }
+    };
+    let sockets = if bound.is_ipv4() {
+        PnetSendContext {
+            send_socket_v4: Some(primary),
+            send_socket_v6: secondary,
+        }
+    } else {
+        PnetSendContext {
+            send_socket_v4: secondary,
+            send_socket_v6: Some(primary),
+        }
+    };
+    Ok((sockets, bound))
 }
 
 /// Everything the blocking capture loop owns.
@@ -73,31 +125,14 @@ pub async fn run_receiver(
     conf: &Configuration,
     shared: &ReceiverSharedState,
 ) -> Result<(), crate::StartupError> {
-    // Bind one reply socket per address family to the STAMP port.
-    // Connected senders discard replies from other source ports. Raw capture
-    // does not bind a receive socket, so the STAMP port is available.
-    let local_addr: SocketAddr = conf.local_socket_addr();
-    let send_bind_v4: SocketAddr = match conf.local_addr {
-        std::net::IpAddr::V4(v4) => (v4, conf.local_port).into(),
-        // Captured IPv4 traffic still needs an IPv4 reply socket when the
-        // reflector was pointed at an IPv6 (or wildcard) address.
-        std::net::IpAddr::V6(_) => (std::net::Ipv4Addr::UNSPECIFIED, conf.local_port).into(),
-    };
-    let send_socket_v4 = std::net::UdpSocket::bind(send_bind_v4).map_err(|e| {
-        crate::StartupError::io(
-            format!("Cannot bind to address {send_bind_v4} (IPv4 send socket)"),
-            e,
-        )
-    })?;
-    let send_bind_v6: SocketAddr = match conf.local_addr {
-        std::net::IpAddr::V6(_) => conf.local_socket_addr(),
-        std::net::IpAddr::V4(_) => (std::net::Ipv6Addr::UNSPECIFIED, conf.local_port).into(),
-    };
-    // Optional: IPv6 may be unavailable, or the port may already be taken by
-    // the v4 socket above on a dual-stack bind. Losing it only costs IPv6
-    // replies, which the v4 path cannot serve anyway.
-    let send_socket_v6 = std::net::UdpSocket::bind(send_bind_v6).ok();
-    for socket in std::iter::once(&send_socket_v4).chain(send_socket_v6.iter()) {
+    // Connected senders require the reply source port to match the selected
+    // receive endpoint, including a port assigned by the kernel for zero.
+    let (send_ctx, local_addr) = bind_reply_sockets(conf)?;
+    for socket in send_ctx
+        .send_socket_v4
+        .iter()
+        .chain(send_ctx.send_socket_v6.iter())
+    {
         crate::net_policy::set_hops(socket)
             .map_err(|e| crate::StartupError::io("Cannot set reply TTL/Hop Limit 255", e))?;
         if let Some(name) = conf.interface.as_deref() {
@@ -176,11 +211,6 @@ pub async fn run_receiver(
 
     let session_manager = Arc::clone(&shared.session_manager);
 
-    let send_ctx = PnetSendContext {
-        send_socket_v4,
-        send_socket_v6,
-    };
-
     log::info!(
         "STAMP Reflector listening on {} (pnet mode, real TTL)",
         local_addr
@@ -203,7 +233,7 @@ pub async fn run_receiver(
         interface_index: interface.index,
         queue_capacity: conf.reflector_queue_capacity as usize,
         shutdown_grace: Duration::from_millis(u64::from(conf.reflector_shutdown_grace_ms)),
-        local_port: conf.local_port,
+        local_port: local_addr.port(),
         cleanup_interval,
         shutdown: shutdown.clone(),
     };
@@ -728,12 +758,15 @@ fn run_transmit_loop_with_mtu(
         bool,
     ) -> std::io::Result<usize>,
 ) {
-    let local_v4 = sockets.send_socket_v4.local_addr().ok();
+    let local_v4 = sockets
+        .send_socket_v4
+        .as_ref()
+        .and_then(|s| s.local_addr().ok());
     let local_v6 = sockets
         .send_socket_v6
         .as_ref()
         .and_then(|s| s.local_addr().ok());
-    let mut sender_v4 = DatagramSender::new(&sockets.send_socket_v4);
+    let mut sender_v4 = sockets.send_socket_v4.as_ref().map(DatagramSender::new);
     let mut sender_v6 = sockets.send_socket_v6.as_ref().map(DatagramSender::new);
     let mut replies = ReplyQueue::default();
     let mut drain = ShutdownDrain::default();
@@ -774,7 +807,7 @@ fn run_transmit_loop_with_mtu(
                 },
                 |data, target, options| {
                     let sender = if target.is_ipv4() {
-                        Some(&mut sender_v4)
+                        sender_v4.as_mut()
                     } else {
                         sender_v6.as_mut()
                     };
@@ -782,7 +815,7 @@ fn run_transmit_loop_with_mtu(
                         .ok_or_else(|| {
                             std::io::Error::new(
                                 std::io::ErrorKind::AddrNotAvailable,
-                                "IPv6 socket unavailable",
+                                "reply socket unavailable",
                             )
                         })?
                         .send(data, target, options)
@@ -817,6 +850,45 @@ mod tests {
     use crate::{clock_format::ClockFormat, receiver::create_shared_state};
 
     #[test]
+    fn reply_socket_binding_retains_primary_endpoint_and_one_port() {
+        for ip in ["127.0.0.1", "0.0.0.0", "::1", "::"] {
+            let mut conf = Configuration::parse_from([
+                "test",
+                "--is-reflector",
+                "--local-addr",
+                ip,
+                "--local-port",
+                "0",
+            ]);
+            let (sockets, bound) = bind_reply_sockets(&conf).unwrap();
+            assert_eq!(bound.ip(), conf.local_addr);
+            assert_ne!(bound.port(), 0);
+            assert!(if bound.is_ipv4() {
+                sockets.send_socket_v4.is_some()
+            } else {
+                sockets.send_socket_v6.is_some()
+            });
+            for socket in sockets
+                .send_socket_v4
+                .iter()
+                .chain(sockets.send_socket_v6.iter())
+            {
+                assert_eq!(socket.local_addr().unwrap().port(), bound.port());
+            }
+            if let Some(socket) = &sockets.send_socket_v6 {
+                assert!(socket2::SockRef::from(socket).only_v6().unwrap());
+            }
+            conf.local_port = bound.port();
+            let error = bind_reply_sockets(&conf)
+                .err()
+                .expect("retained primary socket must exclude a second bind");
+            assert!(
+                error.to_string().contains("Cannot bind to address"),
+                "{error}"
+            );
+        }
+    }
+    #[test]
     fn bpf_loopback_ip_offset_skips_zeroed_placeholder() {
         let ipv4 = [0x45, 0x00, 0x00, 0x48];
         let ipv6 = [0x60, 0x00, 0x00, 0x00];
@@ -842,7 +914,7 @@ mod tests {
             let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let sockets = PnetSendContext {
-                send_socket_v4: std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+                send_socket_v4: Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap()),
                 send_socket_v6: None,
             };
             let counters = Arc::new(ReflectorCounters::new());
@@ -915,7 +987,7 @@ mod tests {
         let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let sockets = PnetSendContext {
-            send_socket_v4: std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+            send_socket_v4: Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap()),
             send_socket_v6: None,
         };
         let counters = Arc::new(ReflectorCounters::new());
@@ -999,7 +1071,7 @@ mod tests {
         peer.set_read_timeout(Some(Duration::from_millis(200)))
             .unwrap();
         let sockets = PnetSendContext {
-            send_socket_v4: std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+            send_socket_v4: Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap()),
             send_socket_v6: None,
         };
         let counters = Arc::new(ReflectorCounters::new());

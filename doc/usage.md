@@ -808,11 +808,17 @@ hardware timestamps where the build and platform support them. See the
 
 ### Ports and TTL
 
-Local port 0 chooses a random sender port from 49152–65535, retrying up to
+Sender local port 0 chooses a random port from 49152–65535, retrying up to
 128 candidates on busy ports or Windows WSAEACCES (10013). Other errors and
 explicit-port failures stop startup. The reflector defaults to 862; sender
 and remote ports must differ. When reusing a reflector config for a sender,
 set `local_port = 0`.
+
+Reflector `--local-port 0` uses a kernel-assigned port and reports it in the
+startup message. Pnet uses that port for capture and reply sockets in each
+available family. The configured family must bind successfully; an unavailable
+other family leaves the configured one usable. IPv6 wildcard binds use a
+separate IPv6-only socket alongside IPv4.
 
 Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-26
 requires. `--ttl` accepts only 255. Received packets with a lower hop count are
