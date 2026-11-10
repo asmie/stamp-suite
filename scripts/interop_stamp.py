@@ -128,8 +128,13 @@ def verify_reply(data, sent, vector, clock, stateful, ordinal, tos, peer,
         mac, digest(KEYS[ssid], data[:4] + data[base:offset])), "invalid TLV HMAC")
     if burst:
         original = parse_tlvs(sent, base)
-        for kind in (9, 10, 12):
+        for kind in (9, 12):
             require(fields[kind][1] == original[kind][1], f"changed Type {kind} value")
+        # RFC 9503 Section 4.1 inherits RFC 8972 child flag procedures.
+        # The understood SRv6 child clears U even when forwarding falls back
+        # and the outer Return Path carries U. Length and segment stay intact.
+        expected_path = struct.pack("!BBH", 0, 4, 16) + socket.inet_pton(socket.AF_INET6, "::1")
+        require(fields[10][1] == expected_path, "wrong Return Path child flags/value")
         require(fields[4][1] == bytes([184, 0, 0x30, 0]), "wrong CoS report")
         require(fields[5][1] == struct.pack("!III", 1, received_count, ordinal),
                 "wrong Direct Measurement counters")

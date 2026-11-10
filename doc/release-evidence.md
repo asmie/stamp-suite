@@ -301,6 +301,42 @@ remains outside the product scope.
 Each entry names the date, commit and platform it applies to. Later commits are
 not covered until the procedure is repeated.
 
+### Published-candidate conformance repair, 2026-11-10
+
+The first CI run after publishing `8a8128f94973d03ec4c28f1feda437ffb6359e51`
+failed three conformance jobs. The documentation job found two missing local
+targets: the T8a inventory and proposed status-check JSON were still untracked.
+The complete `doc/review/2026-11-10-t8a/` directory must accompany its references
+in a manual commit. A committed-only checkout reproduces both broken links;
+the existing files still match their recorded SHA-256 digests.
+
+Both independent UDP jobs rejected all sixteen configurations with
+`changed Type 10 value`. Their wire artifacts show a single changed byte: the
+understood Type 4 child flag becomes zero while outer Type 10 retains fallback
+U. This matches the Return Path flag normalization introduced by `ea4d97b`.
+The Python oracle incorrectly required an unchanged child flag. It now checks
+the complete expected child header and segment separately from the unchanged
+Type 9/12 values, with the final HMAC still required. Runtime code and request
+vectors are unchanged.
+
+New default-build reply observations cover open/authenticated and
+stateful/stateless modes. The historical observations remain untouched and
+must fail on their copied child U flags. Re-signed mutations of child U/M/I,
+reserved bits, type, length and segment bytes also fail, preventing a valid
+HMAC from hiding an incorrect field. See the
+[repair evidence](review/2026-11-10-t8b/ci-repair.json) for revision-bound CI
+observations, local wire results and artifact hashes. Remote conformance can
+only turn green after the repair and all new evidence files are committed
+and published.
+
+Local verification passes all sixteen protocol configurations and sixty BER
+cases for each default/all-features build (152 cases), all 106 Python tests,
+1,330 citations, 318/318 required test references, 467 documentation links,
+matrix counts and release metadata. A temporary checkout combining the
+committed tree with every proposed changed/new file also passes all 106 Python
+tests and 467 links. The remote main/CodeQL status is recorded in the repair
+evidence; successful local checks do not replace an exact-revision CI rerun.
+
 ### Dependency, standards and CI inventory, 2026-11-10
 
 The [retained inventory](review/2026-11-10-t8a/inventory.json) covers inputs at

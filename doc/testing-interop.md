@@ -51,6 +51,9 @@ advance T3, retain the requested CoS/source, and report the intervening send in
 the DM/Follow-Up fields. An extra reply during the final 150 ms guard fails.
 
 SRv6 forwarding is disabled: Type 10 must return U=1 with a valid final HMAC.
+Its understood Type 4 child clears U/M/I and reserved header bits, while
+retaining the child type, length and segment bytes. Outer fallback U does not
+permit copying the sender's child flags (RFC 9503 Section 4.1, RFC 8972 flags).
 Source matching uses loopback, so this fixture cannot establish multihomed source
 override. The 120 ms burst gap allows interleaving; it is not a timing benchmark.
 Physical LAG, NIC timestamps, and successful SRH transit need separate tests.
@@ -75,14 +78,19 @@ git diff -- tests/fixtures/interop/requests.json
 python3 -m unittest discover -s scripts/tests -v
 ```
 
-[`replies.json`](../tests/fixtures/interop/replies.json) holds four observed
-exchanges from the recorded baseline binary, with its SHA-256 and platform provenance.
+[`replies-normalized.json`](../tests/fixtures/interop/replies-normalized.json)
+holds four observed exchanges with normalized Return Path child flags, with
+binary, runner and request hashes and platform provenance.
 These are frozen regression inputs for the checker, not normative timestamp
 values or independent certification. Unit tests replay them and then deliberately
-corrupt sequences, timestamps, clocks, counters, flags, CoS, endpoints and
+corrupt sequences, timestamps, clocks, counters, outer/child flags, child
+framing and segments, CoS, endpoints and
 digests. Behavioral mutations are re-signed so their rejection checks semantics
 as well as integrity. The SHA-256 primitive also has the truncated
 [RFC 4231 §4.2 test vector](https://www.rfc-editor.org/rfc/rfc4231.html#section-4.2).
+The historical [`replies.json`](../tests/fixtures/interop/replies.json) remains
+unchanged; its copied child U flags must now fail the oracle. Signed child
+mutations verify that valid HMACs do not hide incorrect nested fields.
 
 The live report records binary, runner and request-fixture SHA-256, platform,
 Python version, UTC start, all measured transmitted/received UDP bytes and

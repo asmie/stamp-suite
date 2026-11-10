@@ -20,7 +20,8 @@ class InteropChecks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.vectors = json.loads(wire.VECTORS.read_text())
-        cls.replies = json.loads((wire.VECTORS.parent / "replies.json").read_text())
+        cls.replies = json.loads((wire.VECTORS.parent / "replies-normalized.json").read_text())
+        cls.legacy = json.loads((wire.VECTORS.parent / "replies.json").read_text())
 
     def test_frozen_request_vectors(self):
         self.assertEqual(self.vectors, wire.make_vectors())
@@ -60,6 +61,35 @@ class InteropChecks(unittest.TestCase):
 
     def authenticated_follow_up(self):
         return self.arguments(self.replies["cases"][-1], 2)
+
+    def test_legacy_copied_return_path_child_flags_are_rejected(self):
+        # Keep the old signed observations intact as evidence of the previous
+        # oracle blind spot, including open/auth and stateful/stateless cases.
+        for case in self.legacy["cases"]:
+            for ordinal in (0, 2, 3):
+                with self.subTest(vector=case["vector"], ordinal=ordinal), \
+                        self.assertRaisesRegex(wire.WireError, "Return Path child flags/value"):
+                    wire.verify_reply(**self.arguments(case, ordinal))
+
+    def test_signed_return_path_child_mutations_are_rejected(self):
+        # All observed modes must reject flags, framing, type and segment
+        # changes even when the final extension HMAC is freshly valid.
+        for case in self.replies["cases"]:
+            for child_offset, value in ((0, 0x80), (0, 0x40), (0, 0x20), (0, 1),
+                                        (1, 3), (3, 15), (19, 2)):
+                args = self.arguments(case, 0)
+                data = bytearray(args["data"])
+                base = 112 if args["vector"]["auth"] else 44
+                fields = wire.parse_tlvs(data, base)
+                data[fields[10][2] + 4 + child_offset] = value
+                mac_offset = fields[8][2]
+                key = wire.KEYS[args["vector"]["ssid"]]
+                data[mac_offset + 4:] = wire.digest(key, data[:4] + data[base:mac_offset])
+                args["data"] = bytes(data)
+                with self.subTest(vector=case["vector"], child_offset=child_offset,
+                                  value=value), \
+                        self.assertRaisesRegex(wire.WireError, "Return Path child flags/value"):
+                    wire.verify_reply(**args)
 
     def test_wrong_endpoint_or_traffic_class_is_rejected(self):
         for key, value, message in (("tos", 0, "traffic class"),
