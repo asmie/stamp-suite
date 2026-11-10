@@ -44,6 +44,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Add reflector wire evidence for per-source header disclosure, global TLV
+  ordering and reverse-header control on nix and pnet. Verify fixed-header
+  matching through shared packet processing and require the new tests in CI.
+
 - Add public-sender wire evidence for header request lengths, selectors,
   zero-filled Received fields, attachment order, subsets and control-only
   defaults. Require the namespace cases in nix/pnet CI and the portable

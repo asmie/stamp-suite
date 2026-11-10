@@ -80,6 +80,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `base_protocol_wire_test.rs` | Raw base-packet layout, sequence progression, NTP/PTP timestamps, zeroed transmitted and ignored received MBZ, authenticated signatures, stateless echo, stateful controls and symmetric trailers. Uses SSID zero for the base profile. | Sender: always; reflector: Unix, nix |
 | `return_path_wire_test.rs` | One originated Return Path, unique children, SR-MPLS/SRv6 network bytes and signatures; first-owner routing, child flag derivation, complete framing and selected lengths, Control Code precedence and failed-integrity copies. Copy exceptions keep the inherited flag requirement Partial. | Sender: always; reflector: Unix, nix |
 | `header_request_wire_test.rs` | Independent sender bytes for zero-filled Received fields, fixed header family lengths/selectors, opt-in and unique control-only TLVs; actual IPv6 ancillary headers establish request lengths/order, selective subsets and mutable-option masking. | Control: always; fixed: Linux; attachment case: Linux, ignored namespace test |
+| `header_reflection_wire_test.rs` | Actual reflector header disclosure, ordering and reverse-header control; complete-checksum IPv6 injection for pnet, ancillary capture for nix, independent STAMP/HMAC bytes and integrity-failure copies. | Linux, both backends; ignored namespace test |
 | `sender_pacing_test.rs` | A sender keeps its schedule when the reflector port is closed (ICMP errors), and interim reports continue during the final wait. | always |
 | `sender_schedule_test.rs` | `--count 0` with `--duration`, duration before count, sub-millisecond and Poisson intervals, `--interface`. | always; interface test on Linux and macOS |
 | `session_auth_admission_test.rs` | Rejected base packets do not create or refresh sessions: bad HMACs, unknown SSIDs, key rotation, strict short packets; an invalid TLV HMAC still gets an I-flagged reply. | Unix, nix |
@@ -198,6 +199,10 @@ STAMP_HEADER_NETNS_TESTS=1 unshare -Urn \
   cargo test --locked --test header_request_wire_test -- --ignored --nocapture
 STAMP_HEADER_NETNS_TESTS=1 unshare -Urn \
   cargo test --locked --no-default-features --features ttl-pnet --test header_request_wire_test -- --ignored --nocapture
+STAMP_HEADER_NETNS_TESTS=1 unshare -Urn \
+  cargo test --locked --all-features --test header_reflection_wire_test -- --ignored --nocapture
+STAMP_HEADER_NETNS_TESTS=1 unshare -Urn \
+  cargo test --locked --no-default-features --features ttl-pnet --test header_reflection_wire_test -- --ignored --nocapture
 ```
 
 - `route_mtu_test` starts a reflector in a second namespace joined by a veth
@@ -214,6 +219,13 @@ STAMP_HEADER_NETNS_TESTS=1 unshare -Urn \
   Destination Options headers. CI requires exactly one ignored case in each
   nix/pnet profile; missing privileges fail rather than skip. It establishes
   sender origination, not reflector matching or raw pnet capture.
+- `header_reflection_wire_test` checks actual reflector replies under five
+  disclosure policies, three key modes and both strictness settings. The pnet
+  case injects complete IPv6/UDP checksums and uses a fixed port owned only by
+  the reflector inside the fresh private namespace; the peer binds afterwards.
+  Nix uses its advertised kernel-assigned port. The shared ancillary helper
+  checks matching reply headers are absent. This is software loopback evidence;
+  nested raw capture, physical interfaces and pnet port zero remain separate.
 
 The private veth fixtures turn off TX checksum offload with `ethtool` on their
 own interfaces, because the pnet backend rejects frames with incomplete

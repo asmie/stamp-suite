@@ -8,6 +8,9 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
+
 use stamp_suite::configuration::{ClockFormat, TlvHandlingMode};
 use stamp_suite::crypto::HmacKey;
 use stamp_suite::packets::PacketUnauthenticated;
@@ -2214,4 +2217,141 @@ fn revision25_control_sub_tlv_nonzero_length_is_malformed() {
     let reply = reflect_unauth(&build_unauth_packet(&chain), &make_ctx(None));
     assert_eq!(reply.non_hmac_tlvs()[0].value[8], 0x40);
     assert_eq!(&reply.non_hmac_tlvs()[0].value[9..], &[240, 0, 1, 42]);
+}
+
+fn header_frame(flags: u8, kind: u8, value: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![flags, kind];
+    bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+fn check_header_response(
+    mode: u8,
+    strict: bool,
+    captured: &CapturedHeaders,
+    chain: &[u8],
+    expected: &[u8],
+) {
+    let key_bytes = [0xab; 16];
+    let key = HmacKey::new(key_bytes.to_vec()).unwrap();
+    let base = if mode == 2 { 112 } else { 44 };
+    let mut request = vec![0; base];
+    request[..4].copy_from_slice(&1u32.to_be_bytes());
+    request[if mode == 2 { 25 } else { 13 }] = 1;
+    if mode == 2 {
+        let digest = wire_hmac::digest(&key_bytes, &request[..96]);
+        request[96..112].copy_from_slice(&digest);
+    }
+    request.extend_from_slice(chain);
+    if mode != 0 {
+        let covered = [&request[..4], chain].concat();
+        request.extend(header_frame(
+            0x80,
+            8,
+            &wire_hmac::digest(&key_bytes, &covered),
+        ));
+    }
+    let mut ctx = make_ctx((mode != 0).then_some(&key));
+    ctx.captured_headers = Some(captured);
+    ctx.strict_packets = strict;
+    let response = process_stamp_packet(&request, src(), 64, mode == 2, &ctx).unwrap();
+    let mut expected = expected.to_vec();
+    if mode != 0 {
+        let covered = [&response.data[..4], &expected].concat();
+        expected.extend(header_frame(0, 8, &wire_hmac::digest(&key_bytes, &covered)));
+    }
+    assert_eq!(
+        &response.data[base..],
+        expected,
+        "mode={mode}, strict={strict}"
+    );
+    if mode == 2 {
+        assert_eq!(
+            &response.data[96..112],
+            &wire_hmac::digest(&key_bytes, &response.data[..96])
+        );
+    }
+}
+
+#[test]
+fn fixed_header_reflection_fills_requested_and_copies_received_in_capture_order() {
+    for (length, first_prefix, second_prefix, selector) in [
+        (20, [0x45, 0, 0, 60], [0x45, 0, 0, 61], [0x45, 0, 0, 61]),
+        (40, [0x60, 0, 1, 2], [0x60, 0, 2, 3], [0, 0, 2, 3]),
+    ] {
+        let mut first = first_prefix.to_vec();
+        first.resize(length, 0x11);
+        let mut second = second_prefix.to_vec();
+        second.resize(length, 0x22);
+        let captured = CapturedHeaders {
+            fixed_headers: vec![first.clone(), second.clone()],
+            ipv6_ext_headers: vec![],
+        };
+        let zero = vec![0; length];
+        for selective in [false, true] {
+            let mut selected = zero.clone();
+            if selective {
+                selected[..4].copy_from_slice(&selector);
+            }
+            let chain = [
+                header_frame(0x80, 247, &selected),
+                header_frame(0x80, 247, &zero),
+                header_frame(0x80, 247, &zero),
+            ]
+            .concat();
+            let mut selected_reply = if selective {
+                second.clone()
+            } else {
+                first.clone()
+            };
+            if selective {
+                selected_reply[..4].copy_from_slice(&selector);
+            }
+            let expected = [
+                header_frame(0, 247, &selected_reply),
+                header_frame(0, 247, if selective { &first } else { &second }),
+                header_frame(0x10, 247, &zero),
+            ]
+            .concat();
+            for mode in 0..3 {
+                for strict in [false, true] {
+                    check_header_response(mode, strict, &captured, &chain, &expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn global_header_order_refusal_preserves_all_requests_before_copying() {
+    for length in [20, 40] {
+        let fixed = vec![0x11; length];
+        let ext = vec![17, 1, 0x1e, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let captured = CapturedHeaders {
+            fixed_headers: vec![fixed],
+            ipv6_ext_headers: ext,
+        };
+        let mut fixed_request = vec![0xa5; length];
+        fixed_request[..4].fill(0);
+        let mut ext_request = vec![0x5a; 16];
+        ext_request[..8].fill(0);
+        let chain = [
+            header_frame(0x80, 246, &ext_request),
+            header_frame(0x80, 247, &fixed_request),
+            header_frame(0x80, 246, &ext_request),
+        ]
+        .concat();
+        let expected = [
+            header_frame(0x10, 246, &ext_request),
+            header_frame(0x10, 247, &fixed_request),
+            header_frame(0x10, 246, &ext_request),
+        ]
+        .concat();
+        for mode in 0..3 {
+            for strict in [false, true] {
+                check_header_response(mode, strict, &captured, &chain, &expected);
+            }
+        }
+    }
 }

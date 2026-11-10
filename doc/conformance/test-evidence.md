@@ -886,6 +886,86 @@ case passed separately in default/all-features/pnet, totaling 63 probes.
 Temporary logs use `/tmp/t22b11-*`; the source tests and this scope record are
 durable. Stop for a manual commit before reviewing the remaining 14 rows.
 
+## Reflector header disclosure, matching and control (T22b12)
+
+Parent `c89936d` contains the sender-header review. This chunk resolves ten
+reflector/header-policy references while preserving production behavior and
+all status/profile limits. Four rows remain: source-port separation, outgoing
+TTL/Hop Limit, nested fixed-header capture order and receive policing. Strict
+test-reference CI remains pending until their separate review is complete.
+
+`tests/header_reflection_wire_test.rs::reflector_disclosure_order_and_control_use_actual_headers_without_reverse_attachment`
+runs 200 exchanges per Linux profile: five source/header policies, three key
+modes and two strictness settings. Default deny, unmatched source, fixed-only,
+extension-only and both-kind permission are crossed with absent/single/duplicate
+reverse-header control and normal/reversed Type 247/246 order. There are 180
+normal replies and 20 failed-extension-integrity replies. Exact independent
+bytes check policy refusal, successful capture, every control-child C flag,
+parent flags, preserved data on global order refusal, echoed sender sequence
+and independent base/extension HMACs. Failed integrity retains request values
+and the failed digest without exposing captures. Reply ancillary metadata
+contains no matching Hop-by-Hop or Destination Options header, with or without
+control. This proves the cannot-add fallback, not bidirectional attachment.
+
+Default and all-features runs exercise nix capture of an actual Destination
+Options header; fixed headers remain unavailable and get C. The separate
+pnet-only run injects complete IPv6/UDP wire checksums through a raw socket,
+because loopback's incomplete TX checksums are deliberately rejected by the
+application. Its reply verifies actual fixed and extension capture, independent
+permissions for both kinds and the same control behavior. All three namespace
+runs pass without prerequisite skips: 600 replies total. This is Linux software
+loopback evidence; it does not establish physical interfaces or nested tunnels.
+CI requires exactly one ignored case per backend, rejecting empty/gated suites.
+
+`tests/tlv_flag_semantics.rs::fixed_header_reflection_fills_requested_and_copies_received_in_capture_order`
+checks supplied 20/40-octet fixed-header formats through `process_stamp_packet`:
+zero Requested filling, ordered consumption, unique selectors preserving
+wildcards, exact Received copying and exhaustion without data. Together with
+`tests/tlv_flag_semantics.rs::global_header_order_refusal_preserves_all_requests_before_copying`,
+these add 36 raw request/reply cases per feature profile across three key modes
+and both strictness settings, with independent signatures. The ordering case
+uses marked Received tails to prove preservation before any copy. Supplied
+capture records establish matching, not nested raw extraction (still pending).
+The full 60-test flag suite joins Windows' required driver-free runtime gate.
+
+`src/receiver/ingest.rs::tests::header_reflection_policy_is_per_source_and_header_kind`
+now passes captured data through real processing after constructing policy
+from configuration and each received source. Six source mappings, including
+IPv4-mapped canonicalization, check both policy decisions and exact allowed/
+refused fixed/extension response values. The shared ancillary capture helper
+moves to `tests/common/ipv6_headers.rs`; the prior sender namespace case passes
+again in all-features and pnet builds (42 probes).
+
+The pnet probe initially failed on `--local-port 0`: `run_receiver` reports the
+configured zero port, binds family sockets independently and installs capture
+filter port zero. That is a newly exposed endpoint defect, not a header-policy
+failure. This chunk's pnet reflector binds port 19862 inside its fresh private
+namespace before the peer binds; there is no released-port reservation or host
+port contention. Repair pnet port-zero binding/filter/advertisement in the next
+endpoint chunk, then review the four remaining rows. Do not infer port-zero
+support from this fixed-port capture pass.
+
+The inventory is **320 applicable, 316 referenced, four missing**. The rollup
+stays **472 clauses: 388 Compliant, 31 Partial, two Gap, 48 N-A and three
+Excluded**. No draft ambiguity, platform limitation or Partial row is promoted.
+
+Final default/all-features/pnet suites pass **1,381/1,483/1,308** tests,
+respectively (15 privileged tests ignored in each ordinary run). The namespace
+executions above are separate from those ignored counts. All three Clippy
+profiles, rustfmt, Rust 1.87 all-targets/all-features checking, warnings-denied
+rustdoc, 104 Python tests, release metadata and matrix counts pass. Source
+validation passes 1,312 citations; 461 documentation links pass (384 local,
+77 external classified). Strict mode fails only on the expected four rows.
+Both edited workflows parse as YAML. The Windows CI feature set passes all
+60 flag tests locally on Linux; exact-source minimal macOS/Windows harnesses
+cross-compile with warnings denied using the real default libraries. These
+source checks do not establish native runtime or the full platform dependency
+graph. An exact-parent query finds no CI run for `c89936d`; remote CI for this
+uncommitted chunk remains pending.
+
+Temporary logs use `/tmp/t22b12-*`; these source regressions and this scope
+record are durable. Stop for a manual commit before the endpoint repair.
+
 ## Local validation for T22a
 
 The all-features focused runs exercise 90 HMAC tests (including the new known

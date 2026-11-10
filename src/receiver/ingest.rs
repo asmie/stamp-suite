@@ -338,6 +338,16 @@ mod tests {
         ]);
         let shared = create_shared_state(&conf).unwrap();
         let settings = ReflectorSettings::from_config(&conf, &shared, false).unwrap();
+        let captured = CapturedHeaders {
+            fixed_headers: vec![vec![0x11; 20]],
+            ipv6_ext_headers: vec![17, 1, 0x1e, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        };
+        let mut data = vec![0; 44];
+        data[13] = 1;
+        data.extend_from_slice(&[0x80, 247, 0, 20]);
+        data.extend_from_slice(&[0; 20]);
+        data.extend_from_slice(&[0x80, 246, 0, 16]);
+        data.extend_from_slice(&[0; 16]);
         for (source, fixed, ext) in [
             ("192.0.2.1:50000", true, false),
             ("[::ffff:192.0.2.1]:50000", true, false),
@@ -347,7 +357,7 @@ mod tests {
             ("[2001:db8::2]:50000", false, false),
         ] {
             let packet = ReceivedPacket {
-                data: &[],
+                data: &data,
                 src: source.parse().unwrap(),
                 dst_addr: conf.local_addr,
                 local: conf.local_socket_addr(),
@@ -356,7 +366,7 @@ mod tests {
                 ecn: 0,
                 ingress_ifindex: None,
                 src_mac: None,
-                captured_headers: None,
+                captured_headers: Some(&captured),
                 rx_timestamp: None,
                 rx_method: TimestampMethod::SwLocal,
             };
@@ -372,6 +382,29 @@ mod tests {
                 (fixed, ext),
                 "{source}"
             );
+            // Exercise the resulting policy through real packet processing,
+            // including a fixed capture that UDP ancillary data cannot supply.
+            let response = crate::receiver::process_stamp_packet(
+                packet.data,
+                packet.src,
+                packet.ttl,
+                false,
+                &ctx,
+            )
+            .unwrap();
+            let mut expected = vec![if fixed { 0 } else { 0x10 }, 247, 0, 20];
+            expected.extend_from_slice(if fixed {
+                &captured.fixed_headers[0]
+            } else {
+                &[0; 20]
+            });
+            expected.extend_from_slice(&[if ext { 0 } else { 0x10 }, 246, 0, 16]);
+            expected.extend_from_slice(if ext {
+                &captured.ipv6_ext_headers
+            } else {
+                &[0; 16]
+            });
+            assert_eq!(&response.data[44..], expected, "{source}");
         }
     }
 }

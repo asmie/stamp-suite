@@ -253,6 +253,7 @@ jobs:
           --test session_ssid_validation_test --test sender_measurement_test
           --test startup_failure_test --test base_protocol_wire_test --test return_path_wire_test
           --test header_request_wire_test
+          --test tlv_flag_semantics
           2>&1 | tee windows-core.log
         shell: bash
       - name: Require repeated mixed-clock sender startup
