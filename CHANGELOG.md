@@ -44,6 +44,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Remove released-port selection from startup tests. Retain silent peer
+  sockets and use automatic sender ports so Windows port reuse cannot turn
+  the total-loss check into a local/remote port validation error. Verify
+  the transmitted probe and distinct source port for IPv4 and IPv6.
+
 - Wait for socket metadata setup before shared reflector fixtures send their
   first request. This prevents macOS from queueing that request without TTL
   metadata and timing out before session admission. Keep startup traffic-free.

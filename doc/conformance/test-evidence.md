@@ -583,9 +583,13 @@ corrects native-platform test assumptions and an admission snapshot race
 observed on `64465ea`. Commit `ef3f78d` passes Windows and Linux CI, but exposes
 a shared-fixture startup race in the native macOS jobs. The
 [metadata startup follow-up](../testing-startup.md#macos-metadata-startup-follow-up-10-november-2026)
-waits for socket setup before fixture traffic. These repairs do not change
-this evidence inventory; native macOS execution of the latest correction is
-still pending.
+waits for socket setup before fixture traffic. Commit `ea4f037` passes both
+native macOS profiles; only a Windows startup test fails after selecting the
+same released port twice. The
+[port reuse follow-up](../testing-startup.md#windows-startup-test-port-reuse-follow-up-10-november-2026)
+retains peers and uses automatic sender ports. These repairs do not change
+this evidence inventory; native Windows verification of the latest correction
+is still pending.
 
 ## Local validation for T22a
 

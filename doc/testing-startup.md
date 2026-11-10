@@ -285,6 +285,64 @@ Application code, TTL requirements, dependency graphs and CI gates are
 unchanged. Remaining conformance references and strict enforcement stay
 separate from this repair.
 
+## Windows startup test port reuse follow-up (10 November 2026)
+
+[CI run 42803965201](https://github.com/asmie/stamp-suite/actions/runs/42803965201)
+on `ea4f0370b44407ec412577cd571efae18765935f` passes **22 of 23 jobs**,
+including both native macOS runtime profiles. The metadata startup repair
+above now has native execution evidence. Only Windows runtime core fails,
+in `sender_total_loss_is_not_a_startup_failure`: its two calls to `free_port`
+both return port 58867. The sender correctly rejects those equal explicit
+local/remote ports before measuring loss. This is separate from the earlier
+macOS receive timeouts.
+[Conformance evidence](https://github.com/asmie/stamp-suite/actions/runs/42803964952)
+and [CodeQL](https://github.com/asmie/stamp-suite/actions/runs/42803964806)
+also pass on this commit.
+
+The helper bound port zero, read the assigned port and dropped its socket.
+That neither reserves the port nor ensures the next allocation differs.
+The total-loss fixture now retains a bound silent peer for the entire run and
+requests local port zero, allowing the existing sender allocator to choose a
+different dynamic source port. Both IPv4 and IPv6 require one sent packet,
+zero replies, actual probe receipt at the silent peer and a distinct source
+port. The peer intentionally sends no response.
+
+The same file's other startup checks no longer use released-port selection:
+local sockets use port zero unless an explicit occupied-port failure is being
+tested, network peers remain bound, and key-loading failures need no temporary
+ports. Occupied-port tests still retain their conflicting sockets. Sender
+validation, allocation policy and application behavior are unchanged.
+
+A temporary Linux `bind` interposer reuses the first assigned IPv4 loopback
+port for later port-zero requests when available; if it is occupied, it falls
+back to the original kernel allocation. With the original fixture, forced
+reuse produces the exact CI error, `sender local and remote ports must
+differ`. With the retained peer and automatic local port, the test passes
+under the same allocator condition for both families. This models the
+observed allocation choice; it is not a Windows runtime claim. Logs use
+`/tmp/ci-port-*` and `/tmp/ci-windows-port-*`.
+
+All 12 startup tests pass 20 consecutive rounds in each of three Linux
+profiles under that forced reuse: default, all-features and the Windows CI
+feature set (`--no-default-features --features ttl-pnet,metrics,control`).
+That is **720/720** tests with eight workers, no ignored tests and no failed
+rounds retried; each total-loss case covers both families. An isolated
+Windows-target harness compiles the exact modified test against the real
+default Windows library. It omits unrelated dev/optional C dependencies;
+full native Windows CI execution remains required.
+
+Full default/all-features/pnet Linux suites pass **1,365/1,467/1,295** tests,
+respectively, with 13 privileged tests ignored in each ordinary run. All
+three Clippy profiles, rustfmt, 104 Python tests, release metadata, matrix
+counts, 1,201 source citations and documentation checks pass. The link checker
+checks 379 local links and classifies 74 external links (453 total). Strict
+evidence checking fails only on the existing 56 missing test references.
+No remote CI pass is claimed for the uncommitted Windows correction.
+
+Only test fixtures, their assertions and documentation change. CI gates,
+production code and the conformance inventory remain unchanged. Native
+Windows verification of this correction follows the manual commit and push.
+
 ## Validation and reproduction
 
 Original T6 snapshot: local suites passed 1,315 default, 1,416 all-features and

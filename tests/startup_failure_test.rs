@@ -6,12 +6,6 @@ use stamp_suite::configuration::Configuration;
 use stamp_suite::{crypto::KeyLoadError, receiver, sender, StartupError};
 use tokio::net::UdpSocket;
 
-/// Grabs a port, then releases it so a caller can rebind it.
-async fn free_port() -> u16 {
-    let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    s.local_addr().unwrap().port()
-}
-
 #[tokio::test]
 async fn reflector_reports_bind_failure() {
     // Occupy the exact wildcard address the reflector will bind. A socket
@@ -41,14 +35,13 @@ async fn reflector_reports_bind_failure() {
 
 #[tokio::test]
 async fn reflector_reports_unreadable_key_file() {
-    let port = free_port().await;
     let conf = Configuration::parse_from([
         "stamp-suite",
         "--is-reflector",
         "--local-addr",
         "0.0.0.0",
         "--local-port",
-        &port.to_string(),
+        "0",
         "--auth-mode",
         "A",
         "--hmac-key-file",
@@ -70,14 +63,13 @@ async fn reflector_reports_unreadable_key_file() {
 
 #[tokio::test]
 async fn reflector_reports_missing_key_in_authenticated_mode() {
-    let port = free_port().await;
     let conf = Configuration::parse_from([
         "stamp-suite",
         "--is-reflector",
         "--local-addr",
         "0.0.0.0",
         "--local-port",
-        &port.to_string(),
+        "0",
         "--auth-mode",
         "A",
     ]);
@@ -91,9 +83,7 @@ async fn reflector_reports_missing_key_in_authenticated_mode() {
     );
 }
 
-fn sender_conf(port: u16, remote_port: u16, extra: &[&str]) -> Configuration {
-    let local_port = port.to_string();
-    let remote_port = remote_port.to_string();
+fn sender_conf(extra: &[&str]) -> Configuration {
     let mut args = vec![
         "stamp-suite",
         "--remote-addr",
@@ -101,9 +91,7 @@ fn sender_conf(port: u16, remote_port: u16, extra: &[&str]) -> Configuration {
         "--local-addr",
         "127.0.0.1",
         "--local-port",
-        &local_port,
-        "--remote-port",
-        &remote_port,
+        "0",
         "--count",
         "1",
         "--auth-mode",
@@ -115,11 +103,7 @@ fn sender_conf(port: u16, remote_port: u16, extra: &[&str]) -> Configuration {
 
 #[tokio::test]
 async fn sender_reports_unreadable_key_file() {
-    let conf = sender_conf(
-        free_port().await,
-        free_port().await,
-        &["--hmac-key-file", "/nonexistent/stamp-suite-test-key"],
-    );
+    let conf = sender_conf(&["--hmac-key-file", "/nonexistent/stamp-suite-test-key"]);
     let err = expect_startup_err(
         sender::run_sender(&conf).await,
         "an unreadable key file cannot start",
@@ -132,7 +116,7 @@ async fn sender_reports_unreadable_key_file() {
 
 #[tokio::test]
 async fn sender_reports_missing_key_in_authenticated_mode() {
-    let conf = sender_conf(free_port().await, free_port().await, &[]);
+    let conf = sender_conf(&[]);
     let err = expect_startup_err(
         sender::run_sender(&conf).await,
         "authenticated mode without a key cannot start",
@@ -147,6 +131,7 @@ async fn sender_reports_missing_key_in_authenticated_mode() {
 async fn sender_reports_bind_failure() {
     let _squatter = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let port = _squatter.local_addr().unwrap().port();
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
     let conf = Configuration::parse_from([
         "stamp-suite",
@@ -157,7 +142,7 @@ async fn sender_reports_bind_failure() {
         "--local-port",
         &port.to_string(),
         "--remote-port",
-        &free_port().await.to_string(),
+        &peer.local_addr().unwrap().port().to_string(),
         "--count",
         "1",
     ]);
@@ -173,6 +158,7 @@ async fn sender_reports_bind_failure() {
 
 #[tokio::test]
 async fn sender_reports_invalid_ber_pattern() {
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let conf = Configuration::parse_from([
         "stamp-suite",
         "--remote-addr",
@@ -180,9 +166,9 @@ async fn sender_reports_invalid_ber_pattern() {
         "--local-addr",
         "127.0.0.1",
         "--local-port",
-        &free_port().await.to_string(),
+        "0",
         "--remote-port",
-        &free_port().await.to_string(),
+        &peer.local_addr().unwrap().port().to_string(),
         "--count",
         "1",
         "--ber",
@@ -204,28 +190,43 @@ async fn sender_reports_invalid_ber_pattern() {
 /// to start.
 #[tokio::test]
 async fn sender_total_loss_is_not_a_startup_failure() {
-    let conf = Configuration::parse_from([
-        "stamp-suite",
-        "--remote-addr",
-        "127.0.0.1",
-        "--local-addr",
-        "127.0.0.1",
-        "--local-port",
-        &free_port().await.to_string(),
-        // Nothing is listening here, so the reply never comes.
-        "--remote-port",
-        &free_port().await.to_string(),
-        "--count",
-        "1",
-        "--send-delay",
-        "1",
-        "--timeout",
-        "1",
-    ]);
-    let stats = sender::run_sender(&conf)
+    for ip in ["127.0.0.1", "::1"] {
+        // Keep the peer's port owned for the entire run and never reply.
+        // Two released-port selections can return the same port on Windows.
+        let peer = UdpSocket::bind((ip, 0)).await.unwrap();
+        let peer_port = peer.local_addr().unwrap().port();
+        let conf = Configuration::parse_from([
+            "stamp-suite",
+            "--remote-addr",
+            ip,
+            "--local-addr",
+            ip,
+            "--local-port",
+            "0",
+            "--remote-port",
+            &peer_port.to_string(),
+            "--count",
+            "1",
+            "--send-delay",
+            "1",
+            "--timeout",
+            "1",
+        ]);
+        let stats = sender::run_sender(&conf)
+            .await
+            .expect("losing packets is a result, not a startup failure");
+        assert_eq!(stats.packets_sent, 1);
+        assert_eq!(stats.packets_received, 0);
+        let (len, source) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            peer.recv_from(&mut [0; 512]),
+        )
         .await
-        .expect("losing packets is a result, not a startup failure");
-    assert_eq!(stats.packets_received, 0);
+        .expect("silent peer must receive the probe")
+        .unwrap();
+        assert!(len >= 44);
+        assert_ne!(source.port(), peer_port);
+    }
 }
 
 /// `StatsSnapshot` deliberately has no `Debug`, so `expect_err` is unavailable.
@@ -241,6 +242,7 @@ fn expect_startup_err(
 
 #[tokio::test]
 async fn sender_stops_on_shutdown_and_reports_what_it_sent() {
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let conf = Configuration::parse_from([
         "stamp-suite",
         "--remote-addr",
@@ -248,9 +250,9 @@ async fn sender_stops_on_shutdown_and_reports_what_it_sent() {
         "--local-addr",
         "127.0.0.1",
         "--local-port",
-        &free_port().await.to_string(),
+        "0",
         "--remote-port",
-        &free_port().await.to_string(),
+        &peer.local_addr().unwrap().port().to_string(),
         "--count",
         "1000",
         "--send-delay",
@@ -289,7 +291,7 @@ async fn reflector_reports_missing_interface() {
         "--local-addr",
         "127.0.0.1",
         "--local-port",
-        &free_port().await.to_string(),
+        "0",
         "--interface",
         "nosuchif0",
     ]);
