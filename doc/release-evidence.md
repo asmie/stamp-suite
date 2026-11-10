@@ -184,11 +184,13 @@ counted as executed.
 
 ### Windows runtime gate
 
-`rust.yml` requires the library unit tests and eight integration test targets
+`rust.yml` requires the library unit tests and twelve integration test targets
 on Windows: configuration files, malformed input, TLV properties, mixed clocks,
 required Micro-session validation, SSID validation, sender measurement
-summaries and startup error reporting. These exercise codecs, the transmit
-scheduler and UDP sender peers without starting the pnet capture receiver.
+summaries, startup error reporting, base-protocol sender bytes, Return Path
+sender bytes, header-request controls and TLV flag semantics. These exercise
+codecs, the transmit scheduler and UDP sender peers without starting the pnet
+capture receiver.
 Scheduler tests inject a known MTU; a separate test checks that an unavailable
 route MTU drops a size-controlled burst while an ordinary reply still
 succeeds.
@@ -208,7 +210,8 @@ cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet,met
   --lib --test config_file_test --test malformed_input_test --test proptest_tlv \
   --test mixed_clock_test --test required_micro_session_test \
   --test session_ssid_validation_test --test sender_measurement_test \
-  --test startup_failure_test
+  --test startup_failure_test --test base_protocol_wire_test --test return_path_wire_test \
+  --test header_request_wire_test --test tlv_flag_semantics
 ```
 
 Automatic sender source-port selection retries Windows `WSAEACCES` (10013)
@@ -297,6 +300,53 @@ remains outside the product scope.
 
 Each entry names the date, commit and platform it applies to. Later commits are
 not covered until the procedure is repeated.
+
+### Dependency, standards and CI inventory, 2026-11-10
+
+The [retained inventory](review/2026-11-10-t8a/inventory.json) covers inputs at
+`cce43a964beca83f77252d0164438bb121bb2a6c`, before this documentation change.
+It includes input hashes, tool versions, commands, raw dependency diagnostics,
+live standards responses and read-only GitHub observations. No dependencies or
+runtime code changed in this chunk.
+
+- RustSec (`cargo-audit` 0.23.0) passes both lockfiles: 225 application and
+  112 fuzz dependencies, zero vulnerabilities and zero warnings. Both use
+  advisory database commit `28d73fc95e5972af3403225a217def57dcaba3c4`.
+- `cargo-deny` 0.20.2 passes advisories, bans, licenses and sources for both
+  all-features graphs under the existing policy, without new exceptions.
+  The application has five duplicate-version warnings and three unused-policy
+  warnings; fuzz has one duplicate-version warning and six unused-license
+  warnings. These warnings remain visible in the retained diagnostics.
+- The live standards check completes successfully: ten documents are current;
+  the expired YANG draft remains watch-only. This checks metadata and frozen
+  pins; normative-text review and RFC errata review remain separate work.
+- Remote `master` is still `f9c8bb8fce20ecb7115072dc0885b9afbacfe277`, eight
+  commits behind the local candidate. Its latest CI, conformance and CodeQL
+  runs pass all 32 observed checks. There are no runs for `cce43a9`; those
+  green results do not cover the eight newer commits. Fresh main, conformance,
+  CodeQL, standards and ten-target fuzz results must identify the eventual
+  published candidate and retain their logs/artifacts.
+- GitHub reports `master` as unprotected, with no effective branch rules or
+  repository rulesets. The [status-check proposal](review/2026-11-10-t8a/required-status-checks.proposed.json)
+  requires all 32 observed push/PR checks, binds them to the observed GitHub
+  Actions app and requires an up-to-date branch. It has **not been applied**.
+  An administrator must establish branch protection or a ruleset through the
+  normal repository process and verify enforcement. This JSON supplies only
+  the status-check policy, not a complete branch-protection request; review,
+  bypass and administrator policies need separate decisions. Reconfirm names
+  on the published candidate before applying it. Scheduled/manual standards
+  and fuzz workflows are release evidence rather than required PR contexts,
+  because they do not run on every PR.
+
+Native Windows/macOS, driver-backed capture, physical NIC timestamps and LAG
+evidence were not rerun here. The absence of a capture driver or suitable
+hardware remains a pending acceptance boundary, not a passed scenario.
+
+Documentation validation passes 104 Python tests, 1,330 source citations,
+318/318 required normative test references, 465 links, matrix counts and
+release metadata. Retained source/artifact digests, standards replay, proposed
+check names and the twelve-target Windows command also pass consistency
+checks; `validation.json` in the inventory directory records these results.
 
 ### 1.0.0 preparation, 2026-10-05
 

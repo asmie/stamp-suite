@@ -312,7 +312,7 @@ files in this directory.
   revocation on both platforms; on Linux it also checks that queued Type 12
   burst copies keep their accepted key, and on macOS that a size-controlled
   reply is dropped when the route MTU is unknown.
-- **Windows.** CI requires `--lib` and eight integration targets (see
+- **Windows.** CI requires `--lib` and twelve integration targets (see
   [Windows runtime gate](../doc/release-evidence.md#windows-runtime-gate)).
   Burst scheduling and shutdown tests inject a known route MTU; another test
   covers an unavailable route MTU (injected on Linux, real on Windows). Startup

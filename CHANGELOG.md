@@ -44,6 +44,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Refresh dependency, standards and CI evidence; retain the observed branch
+  protection gap and a proposed required-check policy. Correct the Windows
+  runtime reproduction command to include all twelve required targets.
+
 - Require valid citations and explicit test references for normative Compliant
   rows in conformance CI, retaining the detailed JSON inventory on failure.
   Standalone citation checks keep their advisory default without the flag.
