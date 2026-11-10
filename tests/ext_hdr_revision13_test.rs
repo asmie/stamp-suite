@@ -1,10 +1,15 @@
 //! Independent loopback peer for draft-ietf-ippm-stamp-ext-hdr-26 rules: source
 //! ports, TTL/Hop Limit 255 and session state notifications.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
-use nix::libc;
+#[path = "common/hops.rs"]
+mod hops;
+#[cfg(any(feature = "ttl-nix", not(feature = "ttl-pnet")))]
+#[path = "common/reflector.rs"]
+mod reflector;
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
+use hops::{receive, socket};
 use std::{
-    net::UdpSocket,
-    os::fd::AsRawFd,
     process::{Child, Command, Stdio},
     time::Duration,
 };
@@ -18,96 +23,6 @@ impl Drop for Process {
         }
     }
 }
-fn socket(ip: &str) -> UdpSocket {
-    let socket = UdpSocket::bind((ip, 0)).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    let (level, option) = if ip.contains(':') {
-        (libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT)
-    } else {
-        (libc::IPPROTO_IP, libc::IP_RECVTTL)
-    };
-    let on: libc::c_int = 1;
-    assert_eq!(
-        // SAFETY: the fd belongs to `socket`, which outlives the call, and the
-        // option value points to a live, aligned c_int whose size is passed.
-        unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                level,
-                option,
-                std::ptr::addr_of!(on).cast(),
-                std::mem::size_of_val(&on) as _,
-            )
-        },
-        0
-    );
-    socket
-}
-fn receive(socket: &UdpSocket) -> (Vec<u8>, std::net::SocketAddr, i32) {
-    // This socket has one receiver; peek obtains the peer without consuming
-    // the datagram whose ancillary hop metadata is inspected below.
-    let (_, peer) = socket.peek_from(&mut [0u8; 1]).unwrap();
-    let mut bytes = [0u8; 4096];
-    let mut iov = libc::iovec {
-        iov_base: bytes.as_mut_ptr().cast(),
-        iov_len: bytes.len(),
-    };
-    // usize provides cmsghdr alignment on both Darwin and Linux.
-    let mut control = [0usize; 16];
-    // SAFETY: msghdr is a plain C struct; all-zero (null pointers, zero
-    // lengths) is a valid value, and every pointer used is set below.
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = std::mem::size_of_val(&control) as _;
-    // SAFETY: `msg` points to `iov` and `control`, which stay live and writable
-    // for the call, with lengths that match their buffers; the fd is owned by
-    // `socket`.
-    let len = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut msg, 0) };
-    assert!(len >= 0, "recvmsg: {}", std::io::Error::last_os_error());
-    assert_eq!(msg.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC), 0);
-    let mut hops = None;
-    // SAFETY: recvmsg filled `control` (usize-aligned) and set msg_controllen,
-    // so CMSG_FIRSTHDR/CMSG_NXTHDR only yield headers inside it or null. Each
-    // payload length is checked before it is read, and multi-byte reads are
-    // unaligned.
-    unsafe {
-        let mut header = libc::CMSG_FIRSTHDR(&msg);
-        while !header.is_null() {
-            let data_len = (*header).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
-            match ((*header).cmsg_level, (*header).cmsg_type) {
-                #[cfg(target_os = "linux")]
-                (libc::IPPROTO_IP, libc::IP_TTL) => {
-                    assert_eq!(data_len, std::mem::size_of::<libc::c_int>());
-                    hops = Some(std::ptr::read_unaligned(
-                        libc::CMSG_DATA(header).cast::<libc::c_int>(),
-                    ));
-                }
-                #[cfg(target_os = "macos")]
-                (libc::IPPROTO_IP, libc::IP_RECVTTL) => {
-                    assert_eq!(data_len, 1);
-                    hops = Some(i32::from(*libc::CMSG_DATA(header)));
-                }
-                (libc::IPPROTO_IPV6, libc::IPV6_HOPLIMIT) => {
-                    assert_eq!(data_len, std::mem::size_of::<libc::c_int>());
-                    hops = Some(std::ptr::read_unaligned(
-                        libc::CMSG_DATA(header).cast::<libc::c_int>(),
-                    ));
-                }
-                _ => {}
-            }
-            header = libc::CMSG_NXTHDR(&msg, header);
-        }
-    }
-    (
-        bytes[..len as usize].to_vec(),
-        peer,
-        hops.expect("received hop metadata"),
-    )
-}
 fn reflected(request: &[u8]) -> Vec<u8> {
     let mut reply = vec![0; 44];
     reply[..16].copy_from_slice(&request[..16]);
@@ -115,6 +30,98 @@ fn reflected(request: &[u8]) -> Vec<u8> {
     reply[24..38].copy_from_slice(&request[..14]);
     reply[40] = 254;
     reply
+}
+
+fn finish(mut process: Process) -> std::process::Output {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while process.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sender failed to exit"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    process.0.take().unwrap().wait_with_output().unwrap()
+}
+
+#[test]
+fn sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            let peer = socket(ip);
+            let local_reflector = socket(ip); // Held throughout both attempts.
+            let command = |port: u16| {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
+                command
+                    .args([
+                        "--remote-addr",
+                        ip,
+                        "--local-addr",
+                        ip,
+                        "--remote-port",
+                        &peer.local_addr().unwrap().port().to_string(),
+                        "--local-port",
+                        &port.to_string(),
+                        "--count",
+                        "1",
+                        "--timeout",
+                        "1",
+                        "--hwtstamp",
+                        "off",
+                        "--output-format",
+                        "json",
+                    ])
+                    .env_remove("STAMP_HMAC_KEY")
+                    .env("TOKIO_WORKER_THREADS", "2")
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                if mode != 0 {
+                    command.args(["--hmac-key", "abababababababababababababababab"]);
+                }
+                if mode == 2 {
+                    command.args(["--auth-mode", "A"]);
+                }
+                command
+            };
+            let output = finish(Process(Some(
+                command(local_reflector.local_addr().unwrap().port())
+                    .spawn()
+                    .unwrap(),
+            )));
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("bind"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            peer.set_read_timeout(Some(Duration::from_millis(30)))
+                .unwrap();
+            assert!(matches!(
+                peer.peek_from(&mut [0; 1]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ));
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let process = Process(Some(command(0).spawn().unwrap()));
+            let (request, source, hops) = receive(&peer);
+            assert_eq!(hops, 255);
+            assert_ne!(source.port(), local_reflector.local_addr().unwrap().port());
+            assert_ne!(source.port(), peer.local_addr().unwrap().port());
+            if mode == 2 {
+                assert_eq!(
+                    &request[96..112],
+                    &wire_hmac::digest(&[0xab; 16], &request[..96])
+                );
+            }
+            let output = finish(process);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stats: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(stats["packets_sent"], 1);
+        }
+    }
 }
 #[test]
 fn sender_random_ports_hops_and_state_notifications_over_both_families() {
@@ -185,49 +192,42 @@ fn sender_random_ports_hops_and_state_notifications_over_both_families() {
 #[cfg(any(feature = "ttl-nix", not(feature = "ttl-pnet")))]
 fn reflector_transmits_255_and_accepts_lower_received_hops() {
     for ip in ["127.0.0.1", "::1"] {
-        let peer = socket(ip);
-        let reference = socket(ip);
-        let address = reference.local_addr().unwrap();
-        drop(reference);
-        let mut child = Process(Some(
-            Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
-                .args([
-                    "--is-reflector",
-                    "--local-addr",
-                    ip,
-                    "--local-port",
-                    &address.port().to_string(),
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        ));
-        let sock = socket2::SockRef::from(&peer);
-        if ip.contains(':') {
-            sock.set_unicast_hops_v6(37).unwrap();
-        } else {
-            sock.set_ttl_v4(37).unwrap();
-        }
-        peer.set_read_timeout(Some(Duration::from_millis(100)))
-            .unwrap();
-        let mut request = vec![0; 44];
-        request[12..14].copy_from_slice(&1u16.to_be_bytes());
-        let mut ready = false;
-        for _ in 0..30 {
-            peer.send_to(&request, address).unwrap();
-            let mut buf = [0; 512];
-            if peer.peek_from(&mut buf).is_ok() {
-                ready = true;
-                break;
+        for mode in 0..3 {
+            let peer = socket(ip);
+            let mut command = reflector::Reflector::command(ip);
+            command.args(["--hwtstamp", "off"]);
+            if mode != 0 {
+                command.args(["--hmac-key", "abababababababababababababababab"]);
             }
-            assert!(child.0.as_mut().unwrap().try_wait().unwrap().is_none());
+            if mode == 2 {
+                command.args(["--auth-mode", "A"]);
+            }
+            let child = reflector::Reflector::spawn(command).unwrap();
+            let sock = socket2::SockRef::from(&peer);
+            if ip.contains(':') {
+                sock.set_unicast_hops_v6(37).unwrap();
+            } else {
+                sock.set_ttl_v4(37).unwrap();
+            }
+            let mut request = vec![0; if mode == 2 { 112 } else { 44 }];
+            request[..4].copy_from_slice(&42u32.to_be_bytes());
+            request[if mode == 2 { 25 } else { 13 }] = 1;
+            if mode == 2 {
+                let digest = wire_hmac::digest(&[0xab; 16], &request[..96]);
+                request[96..112].copy_from_slice(&digest);
+            }
+            peer.send_to(&request, child.address).unwrap();
+            let (reply, source, hops) = receive(&peer);
+            assert_eq!(source, child.address);
+            assert_eq!(hops, 255);
+            assert_eq!(reply[if mode == 2 { 80 } else { 40 }], 37);
+            if mode == 2 {
+                assert_eq!(
+                    &reply[96..112],
+                    &wire_hmac::digest(&[0xab; 16], &reply[..96])
+                );
+            }
         }
-        assert!(ready, "reflector did not reply");
-        let (reply, source, hops) = receive(&peer);
-        assert_eq!(source, address);
-        assert_eq!(hops, 255);
-        assert_eq!(reply[40], 37);
     }
 }
 

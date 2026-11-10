@@ -1046,6 +1046,89 @@ workflow parses as YAML. An exact-parent query observes no CI run for
 Temporary logs use `/tmp/t22b13-*`; durable regression source
 and this report retain the scope. Stop for a manual commit before T22b14.
 
+## Final reflected-header reference review (T22b14)
+
+Parent `8d7afaa` contains the pnet assigned-port repair. This chunk reviews
+the four remaining header rows through real packet paths and narrows two
+unconditional claims. Production behavior is unchanged. Strict reference
+checking now passes locally; enabling that CI guard remains the separate T22c
+chunk after the manual commit. Reference completeness is not whole-matrix
+certification or execution evidence for every platform.
+
+`tests/pnet_nested_headers_test.rs::actual_nested_capture_reflects_outer_to_inner_and_rejects_bad_checksums_and_depth`
+injects complete-checksum envelopes into the actual Linux pnet capture path.
+Six IPv4/IPv6 two/three-layer chains cross unkeyed open/keyed open/authenticated
+modes and both parsing strictness settings. Thirty-six main replies and six
+fresh follow-ups verify exact outer-to-inner Type 247 values, independent
+base/extension HMACs, innermost reply endpoints and received hop count 37.
+Outer addresses/hops differ, so selecting outer session metadata fails the
+oracle. Thirty-six bad inner UDP checksums and six 32-layer envelopes get no
+reply; valid follow-ups prove the receiver remains live. The final run passes
+42 replies and 42 negative probes, with no prerequisite skip. CI requires the
+single ignored case on the actual pnet backend. This is software-loopback
+capture, not a physical tunnel, NIC or Windows capture-driver claim.
+
+`tests/ext_hdr_revision13_test.rs::sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys`
+checks actual sender UDP metadata across both families and three key modes:
+six explicit binds to a retained local reflector endpoint fail without sending,
+then six automatic binds send with hops 255 and distinct peer/local ports.
+The retained UDP owner establishes same-endpoint exclusion; it does not model
+an inventory of reflector ports on different addresses. Authenticated sender
+base bytes are checked independently.
+`tests/ext_hdr_revision13_test.rs::reflector_transmits_255_and_accepts_lower_received_hops`
+now uses readiness without a released-port handoff or startup traffic. Six
+nix cases reflect requests arriving with hops 37 and send with hops 255,
+including independent authenticated base signatures. The existing pnet
+endpoint suite now reads actual ancillary hop metadata on all 63 replies.
+`tests/common/hops.rs` shares that independent receive oracle across the tests.
+Pnet endpoint cases pass separately; the nix/sender cases pass in default/
+all-features and the sender cases also pass in pnet builds.
+
+A separate live control runs a pnet reflector on `127.0.0.1:56620` while the
+public sender sends from `127.0.0.2:56620` to a retained peer on another port.
+The peer observes the same numeric port and the reflector remains running.
+The original same-endpoint argument therefore did not establish the whole
+local-role-port requirement. The row stays MUST NOT but becomes **Partial**;
+operators must provision separate numeric role ports across addresses. This
+is a failed conformance control, not a passing test that freezes that limit.
+The control JSON is `/tmp/t22b14-local-port-control.json`; its observed values
+and scope are retained here and in the matrix.
+
+`src/configuration/tests.rs::receive_policing_defaults_and_provisioned_cli_toml_values_reach_runtime`
+checks default unlimited policing with 1,024 immediate accepts per address
+family, real TOML loading, CLI precedence and resulting runtime rate/burst
+values. This verifies the reflector's configuration path. It cannot establish
+that deployed limits accommodate aggregate offered traffic, other sessions,
+bursts and changing capacity. That MUST NOT row also becomes **Partial**.
+Operator provisioning and resource-protection drops remain documented; no
+aggregate-capacity validator or local role-port inventory is implemented.
+Those are possible future provisioning features, requiring explicit session/
+capacity input rather than inferred guarantees from the default limiter.
+
+Both normative levels are retained. Two rows gain executed evidence and two
+overbroad claims are narrowed. The header matrix is now **75: 62 Compliant,
+10 Partial, three N-A**. Overall counts are **472: 386 Compliant, 33 Partial,
+two Gap, 48 N-A, three Excluded**. The explicit-reference inventory is
+**318 applicable, 318 referenced, zero missing**, and strict mode succeeds.
+Existing profile, hardware, native-platform and draft-ambiguity limits remain.
+
+Final default/all-features/pnet suites pass **1,383/1,485/1,311** tests,
+respectively (15/15/19 privileged cases ignored in ordinary runs). The nested
+and endpoint executions above are separate evidence. All three Clippy
+profiles, rustfmt, Rust 1.87 all-targets checks for all-features/pnet-only,
+warnings-denied rustdoc, 104 Python tests, release metadata and matrix counts
+pass. Strict source checking passes 1,330 citations with no missing test
+references; 463 documentation links pass (386 local, 77 external classified).
+The edited workflow parses as YAML. The new configuration test passes locally
+on Linux under Windows CI features. Exact-source minimal macOS/Windows
+harnesses cross-check the pnet library and relevant startup/hop test source
+with warnings denied. This does not establish native runtime or the full
+platform dependency graph. No CI run is observed for exact parent `8d7afaa`;
+remote CI for this uncommitted chunk remains pending.
+
+Temporary logs use `/tmp/t22b14-*`; source tests and this report are durable.
+Stop for a manual commit before T22c enforcement.
+
 ## Local validation for T22a
 
 The all-features focused runs exercise 90 HMAC tests (including the new known

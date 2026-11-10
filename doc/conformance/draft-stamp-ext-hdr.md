@@ -6,7 +6,7 @@ implementation, tests and backend limits.
 Revision frozen: draft-ietf-ippm-stamp-ext-hdr-26, 27 October 2026.
 Source: [draft-ietf-ippm-stamp-ext-hdr-26](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-ext-hdr-26.txt).
 
-Summary: 75 clauses: 64 Compliant, 8 Partial, 0 Gap, 3 N-A, 0 Excluded.
+Summary: 75 clauses: 62 Compliant, 10 Partial, 0 Gap, 3 N-A, 0 Excluded.
 
 The Clause column paraphrases the draft. Existing row IDs remain stable where
 possible; ordering and MTU clauses use their revision-26 section numbers.
@@ -109,8 +109,8 @@ loss to the network. IOAM processing is not implemented.
 |---|---|---|---|---|---|
 | ext-hdr-3.1-1 | Choose randomized source UDP ports. | Descriptive | Sender | Compliant | `src/net_policy.rs::bind_sender` draws ports from the OS CSPRNG with bounded collision retries. Explicit local ports are an operator override; revision 25 uses lowercase should. |
 | ext-hdr-3.1-2 | Prefer source ports in 49152–65535. | SHOULD | Sender | Compliant | `src/net_policy.rs::bind_sender` binds in the dynamic range by default. Reflector replies use the provisioned listening port, as UDP reply demultiplexing requires. |
-| ext-hdr-3.1-3 | The sender source port must differ from the local reflector port. | MUST NOT | Sender | Compliant | Sender and reflector roles use separate sockets; an occupied local reflector port cannot be bound by the sender. `src/net_policy.rs::bind_sender` also excludes the remote reflector port. |
-| ext-hdr-3.1-4 | Set outgoing IPv4 TTL and IPv6 Hop Limit to 255. | MUST | Both | Compliant | `src/net_policy.rs::set_hops` runs before sending in both reflector backends and the sender; failure aborts startup. CLI and TOML reject other TTL values. Independent IPv4/IPv6 wire tests check 255. |
+| ext-hdr-3.1-3 | The sender source port must differ from the local reflector port. | MUST NOT | Sender | Partial | `src/net_policy.rs::bind_sender` excludes the remote port and cannot bind an already-held same local endpoint. Test: `tests/ext_hdr_revision13_test.rs::sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys`. A sender on another local IP can reuse the local reflector's numeric port; local role-port inventory is not enforced. See [port and policing limits](#port-and-policing-limits). |
+| ext-hdr-3.1-4 | Set outgoing IPv4 TTL and IPv6 Hop Limit to 255. | MUST | Both | Compliant | `src/net_policy.rs::set_hops` runs before sending in both reflector backends and the sender; failure aborts startup. Tests: `tests/ext_hdr_revision13_test.rs::sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys`, `tests/ext_hdr_revision13_test.rs::reflector_transmits_255_and_accepts_lower_received_hops`, `tests/pnet_endpoint_test.rs::pnet_assigned_ipv4_ports_reach_capture_metadata_and_both_reply_families`, `tests/pnet_endpoint_test.rs::pnet_assigned_ipv6_ports_reach_capture_metadata_and_both_reply_families`. Actual receive ancillary metadata checks IPv4/IPv6 outgoing hops in open/keyed/authenticated modes; pnet runs explicitly in namespaces. Native platform limits remain distinct from source checks. |
 | ext-hdr-4.1-A | Packets may contain multiple Type 246 TLVs. | MAY | Both | Compliant | `src/sender/packet.rs::reflected_header_request_tlvs`, `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled`. See [request construction](#request-construction). |
 | ext-hdr-4.1-B | Select extension headers by nonzero Requested octets; zero octets are wildcards. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision25_wildcards_ambiguity_and_policy`. |
 | ext-hdr-4.1-C | An all-zero Requested field selects the first unmatched extension header of the requested length, and the reflector fills Requested with its first eight octets. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision26_identical_headers_use_strict_unmatched_selection`. See [header matching](#header-matching). |
@@ -144,7 +144,7 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-6.2-2 | Omit fixed-header requests when reflection is not requested. | MUST NOT | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs`. Type 247 is opt-in. Tests: `tests/header_request_wire_test.rs::sender_control_request_is_unique_zero_length_and_opt_in`, `tests/header_request_wire_test.rs::sender_fixed_header_requests_have_family_length_selector_and_zero_received`. |
 | ext-hdr-6.2-3 | Do not originate more fixed-header requests than IP headers. | MUST | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs`. At most one request for the one originated IP header. Tests: `tests/header_request_wire_test.rs::sender_fixed_header_requests_have_family_length_selector_and_zero_received`, `src/configuration/tests.rs::revision26_sender_rejects_profiles_with_indistinguishable_originated_headers`. |
 | ext-hdr-6.2-4 | Copy the fixed-header portion after the four-octet Requested field. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`. See [wire format](#wire-format). Tests: `tests/tlv_flag_semantics.rs::fixed_header_reflection_fills_requested_and_copies_received_in_capture_order`, `tests/header_reflection_wire_test.rs::reflector_disclosure_order_and_control_use_actual_headers_without_reverse_attachment`. |
-| ext-hdr-6.2-5 | Process encapsulated fixed headers in outer-to-inner order. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `src/receiver/pnet.rs::checked_udp` (captures nested IP headers in order and rejects excessive nesting). |
+| ext-hdr-6.2-5 | Process encapsulated fixed headers in outer-to-inner order. | MUST | Reflector | Compliant | `src/receiver/pnet.rs::checked_udp` captures in wire order; `src/tlv/list/processing.rs::apply_reflected_header` consumes matching captures once. Test: `tests/pnet_nested_headers_test.rs::actual_nested_capture_reflects_outer_to_inner_and_rejects_bad_checksums_and_depth`. Actual pnet capture reflects mixed IPv4/IPv6 two/three-layer headers with exact bytes, inner endpoint/hop metadata and independent signatures; bad inner UDP checksums and excessive depth get no reply, followed by fresh valid requests. This is Linux software-loopback capture evidence. |
 | ext-hdr-6.2-6 | Use a four-octet selector for ambiguous same-length fixed headers. | MUST | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs`. The CLI accepts up to four selector octets and zero-pads the rest. Tests: `tests/header_request_wire_test.rs::sender_fixed_header_requests_have_family_length_selector_and_zero_received`, `src/configuration/tests.rs::fixed_hdr_selector_too_long_for_ipv4_is_rejected`. |
 | ext-hdr-6.2-7 | Match each nonzero Requested fixed-header octet exactly, and select only a unique unmatched header. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision25_wildcards_ambiguity_and_policy`. |
 | ext-hdr-6.2-subset | Do not use identical first-four-octet prefixes to select only some equal-length fixed headers. | MUST NOT | Sender | Compliant (originated profile) | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/configuration/tests.rs::revision26_sender_rejects_profiles_with_indistinguishable_originated_headers`. The sender originates one fixed IP header and rejects multiple fixed-header requests through both CLI and TOML. |
@@ -158,7 +158,7 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-9.2-2 | Report active after a validated reply while transmitting. | Descriptive | Sender | Compliant | `src/sender/session_state.rs::Monitor`; admission precedes state changes. |
 | ext-hdr-9.2-3 | Report failed after the configured consecutive-loss threshold following activation. | Descriptive | Sender | Compliant | `src/sender/session_state.rs::Monitor`, `--session-loss-threshold`. |
 | ext-hdr-9.2-4 | Recover from failed to active after a validated reply while transmitting. | Descriptive | Sender | Compliant | `src/sender/session_state.rs::Monitor`. |
-| ext-hdr-9.3-1 | Provision receive policing to accommodate aggregate transmitted traffic and bursts. | MUST NOT | Both | Compliant | Ingress limiting is disabled by default. `--max-pps`, `--reflector-rate-burst`, queue, session and Type 12 caps are operator-provisioned; see [deployment assumptions](#deployment-assumptions). |
+| ext-hdr-9.3-1 | Provision receive policing to accommodate aggregate transmitted traffic and bursts. | MUST NOT | Both | Partial | Ingress limiting is disabled by default and caps are operator-provisioned. Test: `src/configuration/tests.rs::receive_policing_defaults_and_provisioned_cli_toml_values_reach_runtime` verifies defaults, CLI/TOML precedence and actual runtime rate/burst values. The application does not check receive limits against aggregate offered traffic, concurrent sessions and deployment capacity. See [port and policing limits](#port-and-policing-limits). |
 | ext-hdr-10-1 | Do not assign Session-IDs predictably. | MUST NOT | Sender | N-A | The application does not allocate Session-IDs. Nonzero values are provisioned by the operator; an unset SSID is the RFC 8972 zero value. |
 
 | ext-hdr-4.1-type | Use the assigned Type for the extension-header TLV. | MUST | Both | Partial | `src/tlv/experimental.rs::REFLECTED_IPV6_EXT_HDR_TLV_TYPE` uses experimental 246 pending IANA allocation. |
@@ -185,6 +185,25 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-9.3-5 | Expose local limiting counters or notifications so operators can distinguish local suppression from network loss. | SHOULD | Reflector | Compliant | `src/receiver/limits.rs::ReflectorCounters` separates rate-limited, queue-rejected and cancelled work; control and SNMP expose reflector counters. |
 
 ## Notes
+
+### Port and policing limits
+
+Same-endpoint exclusion is exercised by an actual sender while the local
+reflector socket remains held, across IPv4/IPv6 and three key modes. This does
+not establish numeric role-port separation across different local IPs. A live
+private-namespace control keeps a pnet reflector on `127.0.0.1:56620` while
+the public sender originates from `127.0.0.2:56620` to another port. The peer
+observes the repeated numeric source port and the reflector stays running.
+This failed conformance control exposes a limit, not a passing regression.
+Operators must provision nonoverlapping local role ports across addresses.
+
+Default token-bucket policing is disabled and configured rate/burst values reach
+runtime through CLI/TOML loading. Those checks establish configuration behavior,
+not that a deployed limit accommodates aggregate traffic. Operators must size
+limits for concurrent sessions and bursts and correlate local drop counters
+with loss reports. Aggregate receive/transmit consistency is not automatically
+validated. These two formerly unconditional Compliant claims are Partial;
+their normative levels are retained.
 
 ### Request construction
 
@@ -227,8 +246,9 @@ fixed-header formats: all-zero Requested fields are filled in capture order,
 unique selectors preserve their wildcard bytes, Received tails are copied and
 exhausted captures return C without data. A separate global-order regression
 returns C on every header request before any copy. These supplied captures
-establish matching and response assembly, not nested IP capture extraction;
-that boundary remains pending under ext-hdr-6.2-5.
+establish matching and response assembly. T22b14 separately executes actual
+nested raw capture through the pnet backend (ext-hdr-6.2-5); physical tunnel
+deployment remains outside that software-loopback evidence.
 
 `tests/header_reflection_wire_test.rs::reflector_disclosure_order_and_control_use_actual_headers_without_reverse_attachment`
 checks actual Linux nix/pnet replies in private namespaces. Default deny,

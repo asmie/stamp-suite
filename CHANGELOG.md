@@ -44,6 +44,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Complete the remaining reflected-header evidence review with actual nested
+  pnet capture and outgoing hop checks. Record cross-address local role ports
+  and deployment-wide policing consistency as Partial, with concrete limits.
+
 - Use one actual port for pnet reflector startup, capture filtering, received
   endpoint metadata and replies when `--local-port 0` is requested. Require
   the configured family to bind, keep the other family optional and use

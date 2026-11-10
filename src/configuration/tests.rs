@@ -40,6 +40,34 @@ use std::net::IpAddr;
 use super::*;
 
 #[test]
+fn receive_policing_defaults_and_provisioned_cli_toml_values_reach_runtime() {
+    let defaults = load_from_args(&["test", "--is-reflector"]).unwrap();
+    assert_eq!(defaults.max_pps, 0);
+    let shared = crate::receiver::create_shared_state(&defaults).unwrap();
+    assert_eq!(shared.rate_limiter.rate(), 0);
+    for ip in ["192.0.2.1", "2001:db8::1"] {
+        for _ in 0..1024 {
+            assert!(shared.rate_limiter.allow(ip.parse().unwrap()));
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("policing.toml");
+    std::fs::write(
+        &file,
+        "is_reflector = true\nmax_pps = 12\nreflector_rate_burst = 48\n",
+    )
+    .unwrap();
+    for (extra, rate) in [(vec![], 12), (vec!["--max-pps", "24"], 24)] {
+        let mut args = vec!["test", "--config", file.to_str().unwrap()];
+        args.extend(extra);
+        let conf = load_from_args(&args).unwrap();
+        let shared = crate::receiver::create_shared_state(&conf).unwrap();
+        assert_eq!(shared.rate_limiter.rate(), rate);
+        assert_eq!(shared.rate_limiter.burst(), 48);
+    }
+}
+
+#[test]
 fn short_help_shows_everyday_options_and_examples() {
     let help = Configuration::command()
         .color(clap::ColorChoice::Never)

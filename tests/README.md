@@ -69,6 +69,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `output_stream_test.rs` | CLI stdout stays parseable with logs, packet details, periodic reports, BER and measurement CSV, reflector shutdown, schema output, validation errors, blocked stdout and broken pipes. | Linux, nix |
 | `pnet_loopback_test.rs` | Real pnet capture on `lo`: open, authenticated and TLV round trips, and that bad UDP checksums get no reply. | Linux, `ttl-pnet` without `ttl-nix`; ignored, see [Raw capture (pnet)](#raw-capture-pnet) |
 | `pnet_endpoint_test.rs` | Assigned and explicit ports across configured families/wildcards, both reply families, Location metadata, signatures, retained bind conflicts, unavailable counterpart, disabled IPv6 and graceful shutdown. | Linux, `ttl-pnet` without `ttl-nix`; three ignored namespace tests |
+| `pnet_nested_headers_test.rs` | Actual mixed IPv4/IPv6 tunnel capture: exact outer-to-inner fixed-header replies, innermost identity/hops, independent signatures, corrupt UDP checksums and excessive depth rejection with valid follow-ups. | Linux, `ttl-pnet` without `ttl-nix`; one ignored namespace test |
 | `proptest_tlv.rs` | Property tests: typed TLV and wire round trips, and no panics in TLV, packet and AgentX decoders on arbitrary bytes. | always; AgentX properties need `snmp` |
 | `ptp_e2e_test.rs` | PTP/NTP encoding and the reflector's declared clock metadata in Type 3. | always |
 | `replay_control_test.rs` | Type 12 replay handling (RFC 10052 §5): one U-flagged reply for duplicate, reordered or old requests; wraparound, SSID isolation, HMACs, both sequencing modes and drop policies; IPv4/IPv6. | Linux, nix |
@@ -207,6 +208,8 @@ STAMP_HEADER_NETNS_TESTS=1 unshare -Urn \
 
 STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_PNET_ENDPOINT_TESTS=1 unshare -Urn \
   cargo test --locked --no-default-features --features ttl-pnet --test pnet_endpoint_test -- --ignored --nocapture
+STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_PNET_HEADER_TESTS=1 unshare -Urn \
+  cargo test --locked --no-default-features --features ttl-pnet --test pnet_nested_headers_test -- --ignored --nocapture
 ```
 
 - `route_mtu_test` starts a reflector in a second namespace joined by a veth
@@ -235,6 +238,12 @@ STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_PNET_ENDPOINT_TESTS=1 u
   IPv6-disabled case restores its namespace setting. Raw probes carry complete
   checksums, and contenders retain their sockets throughout startup attempts.
   Every successful reflector must exit cleanly on SIGTERM within four seconds.
+- `pnet_nested_headers_test` injects complete-checksum raw IP envelopes into
+  the actual capture path. Two/three-layer same-family and mixed-family chains
+  return exact header bytes; the inner source/hop fields own the reply. It adds
+  a temporary loopback address only after verifying namespace separation.
+  `common/hops.rs` independently reads reply hop metadata for this fixture and
+  the endpoint/sender/nix tests. These are software-loopback checks.
 
 The private veth fixtures turn off TX checksum offload with `ethtool` on their
 own interfaces, because the pnet backend rejects frames with incomplete

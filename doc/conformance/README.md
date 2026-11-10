@@ -16,9 +16,9 @@ certify untested behavior.
 | [RFC 8545](rfc8545.md): OWAMP/TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [RFC 10052](draft-asymmetrical-pkts.md): Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 36 | 3 | 0 | 7 | 1 |
 | [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -02, 2 November 2026 | 30 | 17 | 4 | 0 | 9 | 0 |
-| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 64 | 8 | 0 | 3 | 0 |
+| [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 62 | 10 | 0 | 3 | 0 |
 | [draft-ietf-bpm-stamp-ber](draft-stamp-ber.md): Residual BER | -01, 2 November 2026 | 54 | 48 | 4 | 1 | 1 | 0 |
-| **Total** | | **472** | **388** | **31** | **2** | **48** | **3** |
+| **Total** | | **472** | **386** | **33** | **2** | **48** | **3** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).
@@ -78,6 +78,7 @@ not runtime evidence. Historical reports remain tied to their recorded commit.
 | Area | Supported profile and boundary | Evidence/details |
 |---|---|---|
 | Session admission | The default is permissive. RFC 8972 admission/provisioning rows are Compliant only with `--session-admission provisioned`; installing a key does not provision a session. | [RFC 8972 scope](rfc8972.md#scope), [provisioning](../usage.md#session-provisioning) |
+| Deployment provisioning | A held local endpoint excludes a sender bind, but a different local IP can reuse its numeric reflector port. Receive caps are configurable; the application does not verify aggregate receive/transmit consistency. Both claims are Partial. | [Port and policing limits](draft-stamp-ext-hdr.md#port-and-policing-limits) |
 | Reply correlation | The sender requires a complete echoed sequence and wire T1, even with lenient trailing-field parsing. Identical sequence/T1 pairs cannot prove freshness. Kernel TX corrections keep wire identity separate from OWD timing. | [Reply accounting and limits](../measurements.md#probes-reply-copies-and-duplicates) |
 | Micro-sessions and LAG | Numeric IDs are encoded, checked and learned. Physical member association, egress steering and ingress-member validation are absent. Sender port-pair sharing is not demonstrated by reflector demultiplexing. Eight rows remain Partial and one Gap. | [RFC 9534](rfc9534.md), [sender reply validation](rfc9534.md#sender-reply-validation) |
 | Header reflection | Both header types require explicit sender-IP disclosure permission. Linux nix can reflect Type 246 ancillary headers; fixed/nested headers (Type 247) need pnet. macOS nix and reverse-path header attachment return C. All-features selects nix. Revision 26's conflicting repeated-selector examples remain Partial. | [Backend support](draft-stamp-ext-hdr.md#backend-support), [revision interpretation](draft-stamp-ext-hdr.md#revision-26-interpretation) |

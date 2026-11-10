@@ -1,12 +1,14 @@
 //! Actual pnet endpoint binding, capture filtering, metadata and reply ports.
 #![cfg(all(target_os = "linux", feature = "ttl-pnet", not(feature = "ttl-nix")))]
+#[path = "common/hops.rs"]
+mod hops;
 #[path = "common/reflector.rs"]
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
 
 use std::{
-    net::{IpAddr, SocketAddr, UdpSocket},
+    net::{IpAddr, SocketAddr},
     time::Duration,
 };
 const KEY: [u8; 16] = [0xab; 16];
@@ -178,7 +180,7 @@ fn finish(mut child: reflector::Reflector) {
 }
 
 fn exchange(child: &reflector::Reflector, ip: &str, mode: u8, sequence: u32) {
-    let peer = UdpSocket::bind((ip, 0)).unwrap();
+    let peer = hops::socket(ip);
     peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     let target = SocketAddr::new(ip.parse().unwrap(), child.address.port());
     let base = if mode == 2 { 112 } else { 44 };
@@ -198,14 +200,14 @@ fn exchange(child: &reflector::Reflector, ip: &str, mode: u8, sequence: u32) {
         packet[96..112].copy_from_slice(&digest);
     }
     inject(peer.local_addr().unwrap(), target, &packet);
-    let mut bytes = [0; 512];
-    let (len, source) = peer.recv_from(&mut bytes).unwrap();
-    let reply = &bytes[..len];
+    let (reply, source, hops) = hops::receive(&peer);
+    assert_eq!(hops, 255, "actual pnet reply TTL/Hop Limit");
+    let reply = reply.as_slice();
     assert_eq!(
         source, target,
         "reply source must match the advertised port in each family"
     );
-    assert_eq!(len, packet.len());
+    assert_eq!(reply.len(), packet.len());
     let offset = if mode == 2 { 48 } else { 24 };
     assert_eq!(&reply[offset..offset + 4], &sequence.to_be_bytes());
     let mut expected = vec![0, 2, 0, 4];

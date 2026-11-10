@@ -582,6 +582,10 @@ sudo systemctl kill --signal=SIGHUP stamp-suite.service
 `--reflector-rate-burst` sets the token-bucket size in packets; 0 uses the
 `--max-pps` value.
 
+Provision limits for aggregate traffic and expected bursts across sessions.
+The application does not compare receive limits with deployed transmit load
+or capacity; correlate local limiting counters with reported network loss.
+
 ### Burst replies (Type 12)
 
 A Reflected Test Packet Control TLV (Type 12,
@@ -813,6 +817,10 @@ Sender local port 0 chooses a random port from 49152–65535, retrying up to
 explicit-port failures stop startup. The reflector defaults to 862; sender
 and remote ports must differ. When reusing a reflector config for a sender,
 set `local_port = 0`.
+
+Across local IPs, provision sender source ports separately from local reflector
+ports. Different addresses can share a numeric port; the application does not
+inventory other local reflector services or reject that reuse.
 
 Reflector `--local-port 0` uses a kernel-assigned port and reports it in the
 startup message. Pnet uses that port for capture and reply sockets in each
