@@ -70,8 +70,13 @@ fn request(mode: u8, tail: &[u8], bad_hmac: bool) -> Vec<u8> {
 }
 
 fn exchange(ip: &str, mode: u8, bytes: &[u8]) -> (Vec<u8>, u16, u16) {
+    exchange_configured(ip, mode, bytes, &[])
+}
+
+fn exchange_configured(ip: &str, mode: u8, bytes: &[u8], extra: &[&str]) -> (Vec<u8>, u16, u16) {
     let mut command = Reflector::command(ip);
     command.args(["--hwtstamp", "off", "--reflected-control-max-count", "16"]);
+    command.args(extra);
     if mode != 0 {
         command.args([
             "--hmac-key",
@@ -83,7 +88,9 @@ fn exchange(ip: &str, mode: u8, bytes: &[u8]) -> (Vec<u8>, u16, u16) {
         command.args(["--auth-mode", "A"]);
     }
     let reflector = Reflector::spawn(command).unwrap();
-    let peer = UdpSocket::bind((ip, 0)).unwrap();
+    // Distinct IPv4 endpoints make swapped source/destination metadata visible.
+    let peer_ip = if ip == "127.0.0.1" { "127.0.0.2" } else { ip };
+    let peer = UdpSocket::bind((peer_ip, 0)).unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     peer.send_to(bytes, reflector.address).unwrap();
     let mut response = [0; 2048];
@@ -206,7 +213,9 @@ fn failed_extension_integrity_preserves_all_values_and_the_failed_digest() {
         for mode in 0..3 {
             let mut tail = vec![];
             append(&mut tail, 0x80, 1, &[1, 2, 3, 4, 5]);
-            append(&mut tail, 0x80, 2, &[0; 4]);
+            // A malformed child must not be repaired before integrity passes:
+            // even its original I/M/reserved bits belong to the copied value.
+            append(&mut tail, 0x80, 2, &[0, 0, 0, 0, 0xff, 7, 0, 4, 1, 2, 3, 4]);
             append(&mut tail, 0x80, 5, &[0; 12]);
             append(&mut tail, 0x80, 200, &[0xde, 0xad, 0xbe, 0xff]);
             let sent = request(mode, &tail, true);
@@ -218,13 +227,186 @@ fn failed_extension_integrity_preserves_all_values_and_the_failed_digest() {
             for (got, original) in after.iter().zip(&before) {
                 assert_eq!(got.kind, original.kind);
                 assert_eq!(got.value, original.value);
-                assert_eq!(got.flags, if got.kind == 200 { 0xa0 } else { 0x20 });
+                assert_eq!(
+                    got.flags,
+                    match got.kind {
+                        2 => 0x60,       // malformed Location plus failed integrity
+                        5 | 200 => 0xa0, // stopped after malformed Location, plus I
+                        _ => 0x20,
+                    }
+                );
             }
             if mode == 2 {
                 assert_eq!(
                     &response[96..112],
                     &wire_hmac::digest(&KEY, &response[..96])
                 );
+            }
+        }
+    }
+}
+
+#[test]
+fn location_requests_preserve_lengths_and_report_observed_endpoints() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            for disclose in ["all", "none"] {
+                let mut location = vec![0x11, 0x22, 0x33, 0x44];
+                for (kind, size) in [(1, 8), (4, 16), (7, 16)] {
+                    append(&mut location, 0xff, kind, &vec![0xa5; size]);
+                }
+                append(&mut location, 0xff, 200, &[0x80, 12, 0, 0]);
+                // Specific answer types are echoed with U; they are not requests.
+                for kind in [2, 3, 5, 6, 8, 9] {
+                    append(
+                        &mut location,
+                        0xff,
+                        kind,
+                        &vec![0x5a; if kind < 4 { 8 } else { 16 }],
+                    );
+                }
+                let mut tail = vec![];
+                append(&mut tail, 0x80, 2, &location);
+                let (response, source_port, destination_port) = exchange_configured(
+                    ip,
+                    mode,
+                    &request(mode, &tail, false),
+                    &["--location-disclose", disclose, "--stateful-reflector"],
+                );
+                let base = if mode == 2 { 112 } else { 44 };
+                let outer = frames(&response, base);
+                assert_eq!(outer[0].kind, 2);
+                assert_eq!(outer[0].flags, 0);
+                assert_eq!(outer[0].value.len(), location.len());
+                let got = &outer[0].value;
+                if disclose == "all" {
+                    assert_eq!(&got[..2], &destination_port.to_be_bytes());
+                    assert_eq!(&got[2..4], &source_port.to_be_bytes());
+                } else {
+                    assert_eq!(&got[..4], &[0; 4]);
+                }
+                let children = frames(got, 4);
+                let original = frames(&location, 4);
+                for (index, (child, sent)) in children.iter().zip(&original).enumerate() {
+                    assert_eq!(child.value.len(), sent.value.len());
+                    assert_eq!(child.flags, if index < 3 { 0 } else { 0x80 });
+                    if index < 3 {
+                        if disclose == "none" || index == 0 {
+                            assert!(child.value.iter().all(|&n| n == 0));
+                            assert_eq!(child.kind, if disclose == "none" { sent.kind } else { 3 });
+                        } else {
+                            let address: std::net::IpAddr = if ip == "127.0.0.1" && index == 2 {
+                                "127.0.0.2".parse().unwrap()
+                            } else {
+                                ip.parse().unwrap()
+                            };
+                            let (kind, value) = match address {
+                                std::net::IpAddr::V4(addr) => {
+                                    let mut value = addr.octets().to_vec();
+                                    value.resize(16, 0);
+                                    (if index == 1 { 5 } else { 8 }, value)
+                                }
+                                std::net::IpAddr::V6(addr) => {
+                                    (if index == 1 { 6 } else { 9 }, addr.octets().to_vec())
+                                }
+                            };
+                            assert_eq!(child.kind, kind);
+                            assert_eq!(child.value, value);
+                        }
+                    } else {
+                        assert_eq!(child.kind, sent.kind);
+                        assert_eq!(child.value, sent.value);
+                    }
+                }
+                assert_eq!(children.len(), original.len());
+                verify_signatures(&response, mode);
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_signed_list_keeps_nested_location_bytes_and_original_digest() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 1..3 {
+            let location = [0, 0, 0, 0, 0xff, 7, 0, 4, 1, 2, 3, 4];
+            let mut tail = vec![];
+            append(&mut tail, 0x80, 2, &location);
+            let mut sent = request(mode, &tail, false);
+            let base = if mode == 2 { 112 } else { 44 };
+            let original = frames(&sent, base);
+            let original_digest = &original[1].value;
+            // Legal padding position, but structurally truncated. The signed
+            // list is echo-only even if the covered prefix verifies correctly.
+            sent.extend_from_slice(&[0x80, 1, 0, 8, 0xab]);
+            let (response, _, _) = exchange(ip, mode, &sent);
+            assert_eq!(response.len(), sent.len());
+            let copied = frames(&response[..response.len() - 5], base);
+            assert_eq!(copied[0].flags, 0x40);
+            assert_eq!(copied[0].value, location);
+            assert_eq!(&copied[1].value, original_digest);
+            assert_eq!(response.last(), Some(&0xab));
+            if mode == 2 {
+                assert_eq!(
+                    &response[96..112],
+                    &wire_hmac::digest(&KEY, &response[..96])
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn malformed_location_children_stop_later_outer_tlvs_on_the_wire() {
+    let mut cases = vec![];
+    for size in 0..4 {
+        cases.push((vec![0; size], None));
+    }
+    for size in 1..4 {
+        let mut value = vec![0; 4];
+        value.extend(std::iter::repeat_n(0x80, size));
+        cases.push((value, None));
+    }
+    let mut truncated = vec![0; 4];
+    truncated.extend_from_slice(&[0x80, 7, 0, 16, 1, 2, 3, 4]);
+    cases.push((truncated, Some(4)));
+    for kind in 1..=9 {
+        let mut value = vec![0; 4];
+        append(&mut value, 0x80, 4, &[0; 16]);
+        let malformed = value.len();
+        append(
+            &mut value,
+            0x80,
+            kind,
+            &vec![0x5a; if kind < 4 { 7 } else { 15 }],
+        );
+        append(&mut value, 0x80, 7, &[0; 16]);
+        cases.push((value, Some(malformed)));
+    }
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            for (location, malformed_child) in &cases {
+                let mut tail = vec![];
+                append(&mut tail, 0x80, 2, location);
+                append(&mut tail, 0x80, 5, &[0x55; 12]);
+                let (response, _, _) = exchange(ip, mode, &request(mode, &tail, false));
+                let actual = frames(&response, if mode == 2 { 112 } else { 44 });
+                assert_eq!(
+                    actual[0].flags, 0x40,
+                    "Location must be marked M: {location:?}"
+                );
+                let mut expected = location.clone();
+                if let Some(offset) = malformed_child {
+                    expected[*offset] = 0x40;
+                }
+                assert_eq!(
+                    actual[0].value, expected,
+                    "no Location values may be consumed"
+                );
+                assert_eq!(actual[1].kind, 5);
+                assert_eq!(actual[1].flags, 0x80);
+                assert_eq!(actual[1].value, [0x55; 12]);
+                verify_signatures(&response, mode);
             }
         }
     }

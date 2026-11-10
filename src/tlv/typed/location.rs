@@ -366,6 +366,32 @@ pub struct LocationTlv {
 }
 
 impl LocationTlv {
+    /// Find the first incomplete or known-type wrong-length child, without
+    /// allocating or interpreting address values. `check_m` is sender-only:
+    /// a reflector derives M from lengths and ignores incoming flag claims.
+    /// Values shorter than the port prefix fail at offset zero.
+    pub(crate) fn malformed_sub_tlv_offset(value: &[u8], check_m: bool) -> Option<usize> {
+        if value.len() < LOCATION_TLV_MIN_VALUE_SIZE {
+            return Some(0);
+        }
+        let mut offset = LOCATION_TLV_MIN_VALUE_SIZE;
+        while offset < value.len() {
+            let Some(span) = crate::tlv::TlvSpan::at(value, offset) else {
+                return Some(offset);
+            };
+            let kind = LocationSubType::from_byte(value[offset + 1]);
+            if kind
+                .mandated_value_len()
+                .is_some_and(|length| span.len != length)
+                || (check_m && span.flags.malformed)
+            {
+                return Some(offset);
+            }
+            offset = span.end();
+        }
+        None
+    }
+
     /// Creates an empty Location TLV (ports only, no sub-TLV requests).
     #[must_use]
     pub fn new() -> Self {

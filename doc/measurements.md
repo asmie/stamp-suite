@@ -129,6 +129,12 @@ original received bytes, so local diagnostic markers do not change signature
 coverage. A usable base reply can still contribute RTT when extensions are
 unusable; required identity checks retain their existing rejection policy.
 
+For Location, an invalid nested header/body or known-type length also derives
+outer M. A received child M is promoted to the local outer diagnostic, stopping
+later outer values; the Location child I bit is ignored. These are outer TLV
+occurrence counts, so nested errors do not add separate child entries to
+`by_type` or `observed_tlvs`.
+
 HMAC outcomes: `not_requested` means no HMAC or key; `missing` means an
 optional/exempt HMAC is absent with a key configured. Missing required HMACs
 count as `failed`. `unverified` means verification was unavailable, for example

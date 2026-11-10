@@ -236,6 +236,15 @@ before evaluating flags and optional values. Unused types participate in this
 check. The list carries diagnostic markers; HMAC verification retains the
 original wire slice for coverage.
 
+Location validation walks the entire nested structure before semantic handling.
+An incomplete child or invalid known length marks the outer Location M, making
+the whole value unusable and marking subsequent outer values U on the reflector.
+When integrity passes and the list permits processing, an identifiable malformed
+child header also receives M. Failed-integrity and structurally malformed signed
+echoes keep every original value byte. The sender additionally promotes received
+child M to the local outer diagnostic,
+ignoring nested I as required by the Location format.
+
 `sender/run.rs` runs one session. `run_senders` (in `sender.rs`) opens one
 `SenderRun` per `--remote-addr` before sending any probe, so a startup error in
 one target stops them all. It then runs them concurrently and labels each

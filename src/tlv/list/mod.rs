@@ -4,6 +4,7 @@ mod processing;
 
 use crate::crypto::HmacKey;
 use crate::tlv::core::{RawTlv, TlvError, TlvFlags, TlvType, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
+use crate::tlv::LocationTlv;
 
 /// A list of TLVs with special handling for HMAC TLV.
 ///
@@ -720,7 +721,7 @@ impl TlvList {
             return false;
         }
 
-        if let Some(key) = hmac_key {
+        let hmac_ok = if let Some(key) = hmac_key {
             if require_hmac_tlv && self.hmac_tlv().is_none() {
                 if !self.contains_only_extra_padding() {
                     self.mark_all_integrity_failed();
@@ -735,7 +736,28 @@ impl TlvList {
             false
         } else {
             true
+        };
+
+        // Values in integrity-failure and structurally malformed signed echoes
+        // must stay byte-for-byte intact.
+        // Only after verification succeeds may the malformed child's own
+        // header carry M. The enclosing Location already has M, so no part of
+        // its value or any later outer TLV reaches semantic processing.
+        if hmac_ok && self.allows_processing() {
+            for tlv in self.non_hmac_tlvs_mut() {
+                if tlv.tlv_type == TlvType::Location && tlv.is_malformed() && !tlv.is_unrecognized()
+                {
+                    if let Some(offset) = LocationTlv::malformed_sub_tlv_offset(&tlv.value, false) {
+                        if offset >= crate::tlv::core::LOCATION_TLV_MIN_VALUE_SIZE
+                            && tlv.value.len() - offset >= TLV_HEADER_SIZE
+                        {
+                            tlv.value[offset] = TlvFlags::M;
+                        }
+                    }
+                }
+            }
         }
+        hmac_ok
     }
 
     /// RFC 8972 §4: "If a TLV is malformed, the processing of extension TLVs
@@ -775,6 +797,16 @@ impl TlvList {
     /// Visit every retained entry, including duplicate HMACs.
     pub(crate) fn validate_known_tlv_lengths(&mut self) {
         Self::validate_known_tlv_lengths_slice(&mut self.entries);
+        // A peer may mark only the nested child. Promote M to the local outer
+        // diagnostic so sender validation also stops later extension values.
+        // Nested I is explicitly ignored by RFC 8972 §4.2.1.
+        for tlv in &mut self.entries {
+            if tlv.tlv_type == TlvType::Location
+                && LocationTlv::malformed_sub_tlv_offset(&tlv.value, true).is_some()
+            {
+                tlv.set_malformed();
+            }
+        }
     }
 
     /// Validates known TLV lengths on a single slice and sets M-flag on mismatches.
@@ -782,9 +814,8 @@ impl TlvList {
         use crate::tlv::core::{
             ACCESS_REPORT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE, DEST_NODE_ADDR_IPV4_SIZE,
             DEST_NODE_ADDR_IPV6_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
-            FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE, LOCATION_TLV_MIN_VALUE_SIZE,
-            MICRO_SESSION_ID_TLV_VALUE_SIZE, REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,
-            TIMESTAMP_INFO_TLV_VALUE_SIZE,
+            FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE, MICRO_SESSION_ID_TLV_VALUE_SIZE,
+            REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE, TIMESTAMP_INFO_TLV_VALUE_SIZE,
         };
 
         for tlv in tlvs {
@@ -794,7 +825,9 @@ impl TlvList {
                 // Optional sub-TLVs may follow the four fields (RFC 8972 §4.3).
                 TlvType::TimestampInfo => tlv.value.len() < TIMESTAMP_INFO_TLV_VALUE_SIZE,
                 TlvType::DirectMeasurement => tlv.value.len() != DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
-                TlvType::Location => tlv.value.len() < LOCATION_TLV_MIN_VALUE_SIZE,
+                TlvType::Location => {
+                    LocationTlv::malformed_sub_tlv_offset(&tlv.value, false).is_some()
+                }
                 TlvType::FollowUpTelemetry => tlv.value.len() != FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE,
                 TlvType::DestinationNodeAddress => {
                     tlv.value.len() != DEST_NODE_ADDR_IPV4_SIZE

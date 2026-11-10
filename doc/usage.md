@@ -350,6 +350,14 @@ of which values were requested. A malformed unused value also stops later TLVs;
 the diagnostics include locally detected M errors. Signature verification
 continues to cover the original bytes received from the peer.
 
+Location validation includes its port prefix and all nested headers, declared
+sizes and known-type lengths. A malformed child makes the enclosing Location
+unusable and stops later outer values. The sender also honors a child's M even
+when the peer omitted outer M; nested I is ignored. The reflector validates the
+whole Location before answering any field, and preserves its original size.
+Integrity-failure and structurally malformed signed echoes retain original
+nested value bytes.
+
 With `-R`, the per-packet line shows TLV results in a fixed order: HMAC, Access
 Report, CE, Micro-session ID, then U/M/I counts. Each result appears once even
 when several TLVs support it. `HMAC:unverified` marks a present HMAC that could

@@ -105,7 +105,7 @@ rerun the checker after edits rather than treating the numbers as certification.
 | Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
 | Type 12 C signaling | Packet-processing and independent wire tests now exercise exact/fractional rate ceilings, volume, count-zero suppression, sender C clearing, incoming C ignoring and protected admission. | Exact timing and conservative first-request selection are Partial. Identity protection is qualified by the authenticated protected profile. See T22b3 below. |
 
-After the reviews below, 102 missing references remain across five
+After the reviews below, 85 missing references remain across five
 matrices. Prioritize the remaining authentication, C-flag and admission claims,
 then work through the rest. The full test-evidence goal and strict CI gate
 remain unfinished.
@@ -364,6 +364,75 @@ profiles, the fuzz manifest build check, 104 Python tests, root/fuzz rustfmt,
 matrix counts, 1,117 source citations and 438 documentation links pass. Opt-in
 strict checking fails only on the expected 102 missing-reference rows. Logs
 and reports use `/tmp/t22b4-*`; no remote CI or new fuzz campaign is claimed.
+
+```sh
+cargo test --locked --all-features --test sender_measurement_test --test tlv_extension_wire_test
+```
+
+## Location nested validation review (T22b5)
+
+Review against parent `d804d3b` reproduced independent sender and reflector
+failures: incomplete Location child headers were silently ignored, and invalid
+nested lengths did not prevent later outer values from being used. A received
+child M with valid length also needed to stop the sender's outer processing.
+The allocation-free nested validator now checks the port prefix, child frames
+and known-type lengths before semantic processing. It marks the whole Location
+M, stopping later values. After successful integrity verification, an
+identifiable malformed child's header also receives M when the whole list
+permits processing. Failed-integrity and structurally malformed signed echoes
+preserve original nested bytes; signatures verify the original input and are
+regenerated over the final outgoing bytes when appropriate.
+
+`tests/sender_measurement_test.rs::sender_stops_at_malformed_location_children_but_ignores_child_i`
+checks incomplete headers, known wrong lengths, explicit child M and ignored
+child I in both families/authentication modes. The existing origination capture
+now asserts the exact zeroed Location value and nested U/M/I headers.
+`tests/tlv_extension_wire_test.rs::location_requests_preserve_lengths_and_report_observed_endpoints`
+checks real stateful all/none disclosure policies, observed ports and addresses,
+unknown/specific child echoes, I ignoring, MBZ zeroing and the nix missing-MAC
+fallback in both families and three key profiles. IPv4 uses distinct endpoints;
+IPv6 loopback is supplemented by distinct-address unit fixtures.
+`tests/tlv_extension_wire_test.rs::malformed_location_children_stop_later_outer_tlvs_on_the_wire`
+checks all nine known child length errors, short outer values, partial child
+headers and truncated bodies, outer/child M, later outer U and final signatures.
+The integrity-failure wire test now includes a malformed child with incoming I,
+checking that even those bytes survive unchanged. Both new failure regressions
+failed before the production fix.
+`tests/tlv_extension_wire_test.rs::malformed_signed_list_keeps_nested_location_bytes_and_original_digest`
+also reproduced a marker-edit regression during review and now checks the
+unchanged-value guard for a malformed signed list whose covered prefix verifies.
+The combined wire targets contain 15 tests.
+
+Sixteen missing Location references are resolved with tests. One additional
+row, RFC8972-4.2.1-3, becomes Partial: copied malformed/skipped/integrity-failure
+values can retain child I despite clearing it in originated and processed
+children. A flag/copy-rule precedence decision remains explicit follow-up;
+see [Location nested validation](rfc8972.md#location-nested-validation).
+The RFC 8972 matrix is **151 clauses: 143 Compliant, one Partial, seven N-A**,
+with 26 missing references left. The full rollup is **471 clauses: 390
+Compliant, 28 Partial, two Gap, 48 N-A and three Excluded**. The inventory is
+**322 applicable, 237 with references, 85 missing**. Strict CI stays advisory.
+These checks establish Linux software-loopback/shared-parser behavior, not
+physical addressing, NAT traversal or native/pnet capture runtime conformance.
+
+The first full all-features run failed once at the launcher's
+`retained_socket_excludes_other_binders_and_is_released_on_teardown` assertion,
+with AddrInUse (OS 98) on immediate rebind. A full rerun passed, and 50 isolated
+IPv4/IPv6 rounds of that test also passed. A new ephemeral allocation racing
+the rebind is possible, but no competing owner was captured; the cause remains
+unconfirmed and requires a separate teardown-test investigation. The failed
+run is retained as `/tmp/t22b5-all-features.log`; it is not counted as a pass.
+
+Final local verification passes full default/all-features/pnet suites with
+**1,352/1,454/1,291** tests, respectively (13 privileged ignored in each
+ordinary run). All 15 sender/reflector wire tests pass in the nix profiles;
+the pnet profile runs the shared sender path. Both required MTU tests pass
+separately without a skip, and all 60 independent BER cases pass against the
+final guarded all-features binary. All three Clippy profiles, the fuzz manifest
+build check, 104 Python tests, root/fuzz rustfmt, matrix counts, 1,144 source
+citations and 441 documentation links pass. Opt-in strict checking fails only
+on the expected 85 missing-reference rows; CI stays advisory. Reports/logs use
+`/tmp/t22b5-*`; no remote CI or new fuzz campaign is claimed.
 
 ```sh
 cargo test --locked --all-features --test sender_measurement_test --test tlv_extension_wire_test

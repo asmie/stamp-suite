@@ -44,6 +44,13 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Validate the complete nested Location TLV structure before using extension
+  values. Mark malformed Locations and identifiable children, stop later
+  outer TLVs, and honor received child M on the sender while ignoring child I.
+  Preserve original value bytes on failed integrity checks and verify signatures
+  before deriving nested markers. Add endpoint, disclosure and malformed-wire
+  regressions; qualify the Location child-I conformance claim for copied echoes.
+
 - Detect incoming TLVs by received payload length even after a base-only probe.
   Validate every known outer-TLV length before consuming reflected values,
   including unused types; malformed entries stop later TLV measurements.

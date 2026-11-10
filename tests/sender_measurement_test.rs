@@ -238,6 +238,50 @@ fn sender_validates_unused_tlv_lengths_before_later_measurements() {
 }
 
 #[test]
+fn sender_stops_at_malformed_location_children_but_ignores_child_i() {
+    let cases = [
+        (vec![0, 0, 0, 0, 0x80], 0),                   // incomplete child header
+        (vec![0, 0, 0, 0, 0, 7, 0, 4, 1, 2, 3, 4], 0), // known wrong length
+        ([vec![0, 0, 0, 0, 0x40, 7, 0, 16], vec![0; 16]].concat(), 0),
+        ([vec![0, 0, 0, 0, 0x20, 7, 0, 16], vec![0; 16]].concat(), 1),
+    ];
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            for (location, observations) in &cases {
+                let peer = UdpSocket::bind((ip, 0)).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let sender = Sender::start_profile(&peer, auth, 1, 1, true, &[]);
+                let mut request = [0; 2048];
+                let (len, source) = peer.recv_from(&mut request).unwrap();
+                let mut tail = vec![0, 2];
+                tail.extend_from_slice(&(location.len() as u16).to_be_bytes());
+                tail.extend_from_slice(location);
+                tail.extend_from_slice(&[0, 5, 0, 12]);
+                for value in [1u32, 2, 3] {
+                    tail.extend_from_slice(&value.to_be_bytes());
+                }
+                peer.send_to(&reply_with_extensions(&request[..len], auth, &tail), source)
+                    .unwrap();
+                let stats = sender.finish();
+                assert_eq!(stats["packets_received"], 1);
+                assert_eq!(
+                    stats["measurements"]["direct_measurement"]["observations"], *observations,
+                    "{ip} auth={auth} location={location:?}"
+                );
+                let validation = &stats["measurements"]["tlv_validation"];
+                assert_eq!(
+                    validation["flags"]["malformed"],
+                    u64::from(*observations == 0)
+                );
+                if auth {
+                    assert_eq!(validation["hmac"]["verified"], 1);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear() {
     for ip in ["127.0.0.1", "::1"] {
         for mode in 0..3 {
@@ -278,6 +322,15 @@ fn sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear() {
                 kinds.push(kind);
                 if kind == 1 {
                     assert_eq!(&request[pos + 2..pos + 4], &[1, 4], "260-byte value length");
+                }
+                if kind == 2 {
+                    let mut expected = vec![0; 4];
+                    expected.extend_from_slice(&[0x80, 7, 0, 16]);
+                    expected.extend_from_slice(&[0; 16]);
+                    expected.extend_from_slice(&[0x80, 4, 0, 16]);
+                    expected.extend_from_slice(&[0; 16]);
+                    assert_eq!(size, 44);
+                    assert_eq!(&request[pos + 4..pos + 4 + size], expected);
                 }
                 if kind == 5 {
                     assert_eq!(&request[pos + 4..pos + 8], &[0, 0, 0, 1]);
