@@ -15,6 +15,38 @@ use crate::tlv::{
     ReflectedControlTlv, ResidualBerValue, TimestampInfoTlv,
 };
 
+#[test]
+fn return_path_first_segment_owner_includes_empty_and_unsupported_lists() {
+    let mut valid = vec![0x80, 4, 0, 16];
+    valid.extend_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+    let forward = ReturnPathAction::Srv6Forward {
+        sids: vec![std::net::Ipv6Addr::LOCALHOST],
+        destination: None,
+    };
+    for (value, expected, unrecognized) in [
+        (
+            [vec![0x80, 4, 0, 0], valid.clone()].concat(),
+            ReturnPathAction::Normal,
+            true,
+        ),
+        (
+            [vec![0x80, 3, 0, 0], valid.clone()].concat(),
+            ReturnPathAction::UnsupportedSr,
+            true,
+        ),
+        (
+            [valid.clone(), vec![0x80, 4, 0, 0]].concat(),
+            forward.clone(),
+            false,
+        ),
+        ([valid, vec![0x80, 3, 0, 0]].concat(), forward, false),
+    ] {
+        let mut list = list_with_cleared(RawTlv::new(TlvType::ReturnPath, value));
+        assert_eq!(list.process_return_path(862, false, None), expected);
+        assert_eq!(list.non_hmac_tlvs()[0].is_unrecognized(), unrecognized);
+    }
+}
+
 /// Builds a single-TLV list and runs the reflector clear pass on it,
 /// mimicking the production pipeline state at the point each
 /// `process_*` function would normally run.

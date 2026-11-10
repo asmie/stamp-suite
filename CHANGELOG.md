@@ -44,6 +44,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Add independent Return Path sender bytes, duplicate-owner routing and empty
+  segment-list evidence. Include the portable sender test in Windows CI.
+  Record copied nested child flags as Partial conformance rather than treating
+  routing success as proof of complete RFC 9503 flag handling.
+
 - Add independent RFC 8762 base-packet evidence for sender sequences,
   NTP/PTP clocks, authenticated reserved-byte handling, symmetric reflection
   and default/configured UDP ports. Cover the portable sender in Windows CI.

@@ -105,8 +105,8 @@ rerun the checker after edits rather than treating the numbers as certification.
 | Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
 | Type 12 C signaling | Packet-processing and independent wire tests now exercise exact/fractional rate ceilings, volume, count-zero suppression, sender C clearing, incoming C ignoring and protected admission. | Exact timing and conservative first-request selection are Partial. Identity protection is qualified by the authenticated protected profile. See T22b3 below. |
 
-After the reviews below, 35 missing references remain across two
-matrices. Prioritize the remaining authentication, C-flag and admission claims,
+After the reviews below, 30 missing references remain in the reflected-header
+matrix. Prioritize the remaining authentication, C-flag and admission claims,
 then work through the rest. The full test-evidence goal and strict CI gate
 remain unfinished.
 
@@ -663,6 +663,82 @@ accuracy or an exact hardware arrival instant. No pnet reflector capture,
 privileged, hardware, new BER or fuzz campaign is claimed. Logs use
 `/tmp/t22b8-*`; strict CI enforcement stays pending until the other 35 rows
 are reviewed. No application/runtime default or packet encoding changed.
+
+## Return Path review (T22b9)
+
+Parent `ff1ebd7` contains the RFC 8762 chunk. Its native CI result has not yet
+been observed; the most recent observed green CI remains `f9c8bb8`. This
+review resolves the five remaining RFC 9503 test-reference gaps while adding
+a previously omitted inherited flag requirement as Partial.
+
+`tests/return_path_wire_test.rs::sender_emits_one_return_path_with_unique_network_order_children`
+runs the public sender against retained UDP peers in 42 combinations: both
+families, unkeyed open/keyed open/authenticated modes, and seven Return Path
+profiles (two Control Codes, address alone, each segment-list kind, and each
+list combined with an address). Raw expected bytes check one outer Type 10,
+unique child kinds, exclusion of Control Code with address/list children,
+positive list lengths, two nontrivial MPLS label stack entries in network
+order and two full SRv6 SID byte strings. Independent coverage checks verify
+the base and extension signatures where present. The peer cancels the run
+after observing one packet; these cases establish origination, not reply
+consumption or successful SR forwarding.
+
+`tests/return_path_wire_test.rs::reflector_first_return_path_owns_routing_even_when_unusable`
+uses the real nix reflector in six family/key combinations. Twenty-four
+replies verify first-owner precedence when a later TLV requests suppression:
+the first requests same-link, carries an empty SRv6/SR-MPLS list, or has a
+malformed outer value. A reversed first-suppress/later-same-link case gets no
+reply, followed by one live same-link request without a retry. Thirty replies
+and six suppressions check original sequence, copied values, the first outer
+U/M result and final signatures. Child flag bytes are deliberately excluded
+from equality assertions on processed values: their correctness is the
+separate Partial finding below, not frozen as intended behavior.
+
+`src/tlv/list/processing/tests.rs::return_path_first_segment_owner_includes_empty_and_unsupported_lists`
+tests empty-first and valid-first lists directly through route processing.
+An empty first SRv6 list is unusable even when a valid list follows; an
+unsupported first MPLS list cannot fall through to SRv6. A valid first SRv6
+list keeps its action when an empty second list follows. This is shared-core
+selection evidence, not an SRH forwarding test. The existing
+`src/configuration/tests.rs::empty_return_segment_lists_from_a_file_are_rejected`
+now also checks actual TOML loading and empty CLI values before sender startup.
+
+The original matrix omitted RFC 9503 Section 4.1's inherited sub-TLV flag
+procedures. A separate Linux wire control observes a recognized, used Control
+Code child retaining U=1 while the successful parent has U=0. It exits with a
+failed conformance result (`/tmp/t22b9-child-flags-before.json`), independently
+of the passing routing tests. The new `9503-4.1-flags` row is **Partial**;
+known/unknown child flags, framing, failed-integrity copying and Control Code
+ignore precedence need a separate repair before a broader claim is justified.
+See [the concrete request/reply](rfc9503.md#nested-flags). The RFC publication
+month is also corrected to October 2023 from the source document.
+
+The RFC 9503 matrix now has **27 clauses: 22 Compliant, one Partial, three
+N-A, one Excluded**. The rollup is **472 clauses: 388 Compliant, 31 Partial,
+two Gap, 48 N-A and three Excluded**. This adds an omitted requirement; it
+does not demote a working top-level routing clause to hide the nested issue.
+The inventory is **320 applicable, 290 with references, 30 missing**, all in
+the reflected-header draft. There are no missing normative Compliant test
+references in RFC 9503, but that is distinct from its new Partial flag row.
+
+The portable sender case joins Windows' required runtime gate and passes its
+feature set locally. Exact-source macOS/Windows target checks use minimal
+harnesses with the real default libraries; native runtime remains pending for
+this chunk. Reflector wire evidence is nix software loopback; pnet capture,
+physical interfaces and SR transit are not established here. The SR-MPLS
+forwarding exclusion remains. Protocol/runtime behavior is unchanged. Logs
+use `/tmp/t22b9-*`; repair the nested flags next, then review the remaining
+header rows before strict CI enforcement.
+
+Final default/all-features/pnet Linux suites pass **1,371/1,473/1,299** tests,
+respectively (13 privileged tests ignored in each ordinary run). The portable
+sender and shared-core/configuration cases pass in all three profiles; both
+nix profiles pass the reflector wire case. All three Clippy profiles,
+rustfmt, 104 Python tests, release metadata, matrix counts, 1,249 source
+citations and 460 documentation links pass (383 local checked, 77 external
+classified). Strict mode fails only on the expected 30 header references.
+These checks do not turn the separate nested-flag conformance failure into a
+pass. Native execution and remote CI of this chunk remain pending.
 
 ## Local validation for T22a
 

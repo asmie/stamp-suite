@@ -2918,6 +2918,16 @@ fn empty_return_segment_lists_from_a_file_are_rejected() {
         conf.return_sr_mpls_labels = file.return_sr_mpls_labels;
         assert!(conf.validate().is_err(), "{toml} accepted");
     }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty-return-path.toml");
+    for (name, flag) in [
+        ("return_srv6_sids", "--return-srv6-sids"),
+        ("return_sr_mpls_labels", "--return-sr-mpls-labels"),
+    ] {
+        assert!(Configuration::try_parse_from(["test", flag, ""]).is_err());
+        std::fs::write(&path, format!("{name} = []\n")).unwrap();
+        assert!(load_from_args(&["test", "--config", path.to_str().unwrap()]).is_err());
+    }
 }
 
 #[test]
