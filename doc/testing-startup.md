@@ -218,6 +218,73 @@ Conformance status and the **320 applicable / 264 referenced / 56 missing**
 test-evidence inventory stay unchanged. Strict evidence enforcement remains
 pending.
 
+## macOS metadata startup follow-up (10 November 2026)
+
+The next [CI run, 42799623458](https://github.com/asmie/stamp-suite/actions/runs/42799623458),
+on `ef3f78d3aeaa0711741884aee41d05ac9bdadaa8`, passes 21 of 23 jobs.
+Windows, Linux stable/beta, all Clippy jobs and macOS compilation pass.
+Only the two native macOS runtime jobs fail: eight tests in the default
+profile and ten with all features, across keyset-fallback, launcher,
+authentication-admission and session-identity suites. They share the
+in-process receiver fixture. Timeouts can leave received counters at zero;
+two admission tests pass in the default profile but fail with all features.
+
+The fixture retained the bound port but returned immediately after spawning
+its receiver thread. A caller could send before that thread enabled
+`IP_RECVTTL`/`IPV6_RECVHOPLIMIT`. Apple's
+[UDP input path](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet/udp_usrreq.c)
+constructs ancillary controls before appending a datagram to the socket queue;
+[IPv4 control creation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet/ip_input.c)
+includes TTL only when its receive option is enabled. A queued early packet
+can therefore lack metadata even after setup completes. The nix receiver
+requires real TTL and discards such a packet before session counters advance.
+This explains the macOS symptoms; native execution of the correction remains
+pending the manual commit and next CI run.
+
+The fixture now acknowledges its receiver's initial poll over a bounded
+channel before returning. The nix backend completes socket setup before its
+first suspension. The acknowledgement also unblocks on a startup error so
+existing `stop`/`assert_running` checks retain the actual failure. The parent
+bounds startup waiting to five seconds and keeps its normal shutdown owner
+while waiting. No warmup request, retry or fixed startup sleep is added, so
+authentication/admission tests still start with untouched session state.
+
+The new IPv4/IPv6 regression observes the real socket's TTL/Hop Limit receive
+option before sending anything, requires zero received/reflected packets and
+zero sessions, closes its temporary observation descriptor and checks clean
+shutdown. A temporary `setsockopt` interposer delays enabling metadata by
+100 ms, then calls the real syscall without changing its arguments or result.
+The regression fails against the original fixture (`TTL capture must be
+enabled before return`, value zero) and passes with the acknowledgement under
+the same delay. This reproduces the ordering defect on Linux; it does not
+claim to reproduce the Darwin kernel itself. Logs use `/tmp/ci-macos-*`.
+
+All four affected suites pass under the setup delay in default and
+all-features profiles: **38/38** tests with eight workers. The new startup
+regression also passes 20 consecutive delayed rounds per profile, **40/40**
+tests with both families each round. No failures are retried or tests ignored.
+The isolated macOS-target harness compiles the exact modified fixture and
+launcher source against the real default library; full native execution is
+still required in CI.
+
+Final Linux default/all-features/pnet suites pass **1,365/1,467/1,295** tests,
+respectively, with 13 privileged tests ignored in each ordinary run. Both nix
+profiles also pass the existing startup-error propagation check. All three
+Clippy profiles, rustfmt, 104 Python tests, release metadata, matrix counts,
+1,201 source citations and documentation checks pass. The link checker checks
+378 local links and classifies 71 external links (449 total). Strict checking
+fails only on the unchanged 56 missing test references. No remote CI pass is
+claimed for this correction.
+
+```sh
+cargo test --locked --all-features --test reflector_launcher_test --test keyset_fallback_test --test session_auth_admission_test --test session_identity_test
+```
+
+The change is confined to shared test startup, a regression and documentation.
+Application code, TTL requirements, dependency graphs and CI gates are
+unchanged. Remaining conformance references and strict enforcement stay
+separate from this repair.
+
 ## Validation and reproduction
 
 Original T6 snapshot: local suites passed 1,315 default, 1,416 all-features and

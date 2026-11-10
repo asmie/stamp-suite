@@ -188,6 +188,60 @@ fn occupied_port_rejects_fixed_bind_but_port_zero_startup_is_unaffected() {
 }
 
 #[test]
+fn owned_receiver_finishes_metadata_setup_without_readiness_traffic() {
+    use std::{os::fd::AsRawFd, sync::atomic::Ordering};
+
+    for ip in ["127.0.0.1", "::1"] {
+        let socket = UdpSocket::bind((ip, 0)).unwrap();
+        let observer = socket.try_clone().unwrap();
+        let server = receiver_fixture::Receiver::start_with_socket(socket, config);
+        let (level, option) = if server.address.is_ipv4() {
+            (libc::IPPROTO_IP, libc::IP_RECVTTL)
+        } else {
+            (libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT)
+        };
+        let mut enabled: libc::c_int = 0;
+        let mut len = std::mem::size_of_val(&enabled) as libc::socklen_t;
+        // SAFETY: observer owns an open socket and both output pointers refer
+        // to live values with the required lengths.
+        let result = unsafe {
+            libc::getsockopt(
+                observer.as_raw_fd(),
+                level,
+                option,
+                (&mut enabled as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(len as usize, std::mem::size_of_val(&enabled));
+        assert_ne!(
+            enabled, 0,
+            "{ip}: TTL capture must be enabled before return"
+        );
+        assert_eq!(
+            server
+                .shared
+                .counters
+                .packets_received
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            server
+                .shared
+                .counters
+                .packets_reflected
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(server.shared.session_manager.session_count(), 0);
+        drop(observer);
+        server.stop().expect("receiver must exit cleanly");
+    }
+}
+
+#[test]
 fn retained_socket_excludes_other_binders_and_is_released_on_teardown() {
     for ip in ["127.0.0.1", "::1"] {
         let bound = UdpSocket::bind((ip, 0)).unwrap();

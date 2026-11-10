@@ -44,6 +44,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Wait for socket metadata setup before shared reflector fixtures send their
+  first request. This prevents macOS from queueing that request without TTL
+  metadata and timing out before session admission. Keep startup traffic-free.
+
 - Repair CI test portability on macOS and Windows: use the Unix `libc`
   re-export for child reaping and expect source pinning only on Linux. Wait
   for completed reflector bookkeeping before authentication-state snapshots,

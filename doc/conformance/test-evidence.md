@@ -580,8 +580,12 @@ cargo test --locked --all-features --test cos_ecn_wire_test --test sender_measur
 
 The subsequent [CI follow-up](../testing-startup.md#ci-follow-up-10-november-2026)
 corrects native-platform test assumptions and an admission snapshot race
-observed on `64465ea`. It does not change this evidence inventory or claim
-native runtime verification for the uncommitted corrections.
+observed on `64465ea`. Commit `ef3f78d` passes Windows and Linux CI, but exposes
+a shared-fixture startup race in the native macOS jobs. The
+[metadata startup follow-up](../testing-startup.md#macos-metadata-startup-follow-up-10-november-2026)
+waits for socket setup before fixture traffic. These repairs do not change
+this evidence inventory; native macOS execution of the latest correction is
+still pending.
 
 ## Local validation for T22a
 

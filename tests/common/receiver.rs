@@ -1,13 +1,15 @@
 //! Retain the UDP port across startup for fixtures that inspect shared state
 //! or configure exact provisioned endpoints. One current-thread runtime owns
-//! the receiver; teardown cancels, bounds draining, and joins that thread.
+//! the receiver. Startup waits for socket metadata setup without sending any
+//! traffic; teardown cancels, bounds draining, and joins that thread.
 #![allow(dead_code)] // Integration targets use different helper fields/methods.
 
 use stamp_suite::{configuration::Configuration, receiver};
 use std::{
     cell::RefCell,
+    future::{poll_fn, Future},
     net::{SocketAddr, UdpSocket},
-    sync::Arc,
+    sync::{mpsc, Arc},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -33,11 +35,26 @@ impl Receiver {
         conf.validate().expect("validate fixture receiver");
         let shared = Arc::new(receiver::create_shared_state(&conf).expect("create fixture state"));
         let task_shared = Arc::clone(&shared);
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let task = thread::Builder::new().name("fixture-receiver".into()).spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all()
                 .build().map_err(|e| format!("receiver runtime: {e}"))?;
             runtime.block_on(async {
                 let receive = receiver::run_receiver_with_socket(&conf, &task_shared, socket);
+                tokio::pin!(receive);
+                let mut ready = Some(ready_tx);
+                let receive = poll_fn(|cx| {
+                    // The nix receiver configures its socket before its first
+                    // suspension. Darwin attaches TTL metadata at arrival, so
+                    // callers must not send while that setup is still pending.
+                    let result = receive.as_mut().poll(cx);
+                    if let Some(ready) = ready.take() {
+                        // Also unblock on a startup error; stop/assert_running
+                        // retain responsibility for reporting that result.
+                        let _ = ready.send(());
+                    }
+                    result
+                });
                 tokio::pin!(receive);
                 tokio::select! {
                     result = &mut receive => result.map_err(|e| e.to_string()),
@@ -49,11 +66,15 @@ impl Receiver {
                 }
             })
         }).expect("spawn fixture receiver thread");
-        Self {
+        let server = Self {
             shared,
             address,
             task: RefCell::new(Some(task)),
-        }
+        };
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fixture receiver did not finish initial socket setup");
+        server
     }
 
     pub fn assert_running(&self) {
