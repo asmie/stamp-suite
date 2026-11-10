@@ -124,7 +124,7 @@ pushes and pull requests to `master` and `1.0-line`.
 
 ```sh
 python3 scripts/check_conformance_counts.py
-python3 scripts/check_conformance_citations.py
+python3 scripts/check_conformance_citations.py --require-test-evidence
 python3 scripts/check_doc_links.py
 ```
 
@@ -148,10 +148,12 @@ semantics: a citation that resolves can still describe the code wrongly, so
 rows need review when the code changes.
 
 The same checker inventories explicit test references on normative Compliant
-rows. Missing references are advisory during backlog review; invalid citations
-still fail. Recognizing a test declaration, including an ignored or gated test,
-does not establish runtime or semantic coverage. See the
-[policy, reviewed paths and remaining backlog](test-evidence.md).
+rows. CI requires explicit test references and retains the detailed inventory
+in `citations.json`, including on a failed check. Omitting
+`--require-test-evidence` locally keeps missing references advisory; invalid
+citations still fail. Recognizing a test declaration, including an ignored or
+gated test, does not establish runtime or semantic coverage. See the
+[policy, reviewed paths and execution limits](test-evidence.md).
 
 `check_doc_links.py` checks repository Markdown paths and heading/HTML anchors
 offline. External release URLs are classified separately; a missing local

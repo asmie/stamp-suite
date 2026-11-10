@@ -44,6 +44,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Require valid citations and explicit test references for normative Compliant
+  rows in conformance CI, retaining the detailed JSON inventory on failure.
+  Standalone citation checks keep their advisory default without the flag.
+
 - Complete the remaining reflected-header evidence review with actual nested
   pnet capture and outgoing hop checks. Record cross-address local role ports
   and deployment-wide policing consistency as Partial, with concrete limits.

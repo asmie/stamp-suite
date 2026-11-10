@@ -70,8 +70,8 @@ reference on the row.
 ## Inventory and rollout
 
 ```sh
-python3 scripts/check_conformance_citations.py --json --details > citations.json
-python3 scripts/check_conformance_citations.py --require-test-evidence --json > strict-citations.json
+python3 scripts/check_conformance_citations.py --require-test-evidence --json --details > citations.json
+python3 scripts/check_conformance_citations.py --json --details > advisory-citations.json
 ```
 
 The first command keeps stale citation failures and adds `test_evidence` with
@@ -81,11 +81,13 @@ from rows missing one; they are not coverage percentages. Existing citation
 counts describe Rust source references; qualified Python test references are
 recorded under the test inventory, and invalid ones also fail source checking.
 
-Missing test references are advisory by default. `--require-test-evidence`
-returns nonzero and adds `missing-test-evidence` problems while any remain.
-The existing CI citation step retains this inventory in its `citations.json`
-artifact. Whole-backlog enforcement will be enabled only after review and
-resolution; an advisory success is not a claim that all rows are tested.
+The CI citation step uses `--require-test-evidence`: any missing normative
+Compliant test reference returns nonzero and adds a `missing-test-evidence`
+problem. Detailed inventory is retained in `citations.json`, including after
+a failed check. The standalone CLI default remains advisory when that flag
+is omitted; invalid citations still fail in either mode. T22b14 closed the
+reviewed backlog at 318 applicable rows with 318 references. This guard enforces
+source presence, not semantic coverage, successful execution or certification.
 
 The initial source inventory on 9 November 2026 (parent `d6a4f8a`) found
 325 applicable rows: 159 with explicit test references and 166 missing them.
@@ -105,10 +107,11 @@ rerun the checker after edits rather than treating the numbers as certification.
 | Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
 | Type 12 C signaling | Packet-processing and independent wire tests now exercise exact/fractional rate ceilings, volume, count-zero suppression, sender C clearing, incoming C ignoring and protected admission. | Exact timing and conservative first-request selection are Partial. Identity protection is qualified by the authenticated protected profile. See T22b3 below. |
 
-After the reviews below, 30 missing references remain in the reflected-header
-matrix. Prioritize the remaining authentication, C-flag and admission claims,
-then work through the rest. The full test-evidence goal and strict CI gate
-remain unfinished.
+The sections below retain their historical review snapshots and limits.
+T22b14 resolves the final four reference rows, including two Partial scope
+corrections. T22c enables the CI reference guard. Broader semantic review and
+native/hardware execution remain separate work; inventory completeness does
+not complete those checks.
 
 ## Sender MTU dispatch review (T22b1)
 
@@ -1128,6 +1131,45 @@ remote CI for this uncommitted chunk remains pending.
 
 Temporary logs use `/tmp/t22b14-*`; source tests and this report are durable.
 Stop for a manual commit before T22c enforcement.
+
+## Required CI test-reference guard (T22c)
+
+Parent `8d388e5` contains the final reference review. The conformance workflow
+now passes `--require-test-evidence --json --details` to the existing citation
+checker. Missing normative Compliant test references fail the evidence job,
+alongside existing stale-citation failures. The detailed `citations.json`
+artifact is still generated on a missing-reference failure; the upload step
+retains its `if: always()` condition. Standalone calls without the strict flag
+keep their advisory behavior. No checker defaults, Rust or protocol behavior
+are changed.
+
+The exact configured CI argv passes on the working tree: **318 applicable,
+318 referenced, zero missing**. A temporary source/matrix copy then replaces
+the ext-hdr-6.2-5 test citation with the valid production implementation alone.
+Strict mode returns **exit 1**, with **317 referenced, one missing** and exactly
+one `missing-test-evidence` diagnostic for that clause. The failure output is
+valid detailed JSON with `required: true` and `execution_checked: false`.
+The advisory control returns **exit 0** with the same missing reference.
+Restoring the row returns strict mode to **exit 0** and 318/318 references.
+All mutations are confined to the temporary copy; the repository matrix and
+status counts are unchanged. Control artifacts use `/tmp/t22c-*`.
+
+This is a source-reference guard, not execution or semantic certification.
+Ignored/platform-gated declarations still require the separate runtime evidence
+described in this policy. Broader already-referenced, native, hardware and
+deployment-profile reviews remain pending. T22c closes CI enforcement for the
+reviewed missing-reference backlog without marking those broader reviews done.
+
+All 104 Python tests, matrix counts, release metadata and whitespace checks
+pass. The configured strict command passes 1,330 citations with 318/318 test
+references; 463 documentation links pass (386 local, 77 external classified),
+and the workflow parses as YAML. Existing strict/advisory and invalid-citation
+unit tests pass alongside the real-copy control above. Rust/protocol tests
+are unchanged; their T22b14 execution record remains separate. No remote CI
+run is observed for exact parent `8d388e5`; this chunk awaits commit/push and
+remote execution. No files are staged or committed by the agent.
+
+Stop for a manual commit before the next implementation chunk.
 
 ## Local validation for T22a
 
