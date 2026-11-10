@@ -8,6 +8,8 @@ mod schedule;
 pub(crate) mod session_state;
 mod socket;
 pub(crate) mod telemetry;
+#[cfg(target_os = "windows")]
+mod timer;
 mod validate;
 
 pub(crate) use access_report::*;

@@ -184,13 +184,14 @@ counted as executed.
 
 ### Windows runtime gate
 
-`rust.yml` requires the library unit tests and twelve integration test targets
+`rust.yml` requires the library unit tests and thirteen integration test targets
 on Windows: configuration files, malformed input, TLV properties, mixed clocks,
 required Micro-session validation, SSID validation, sender measurement
 summaries, startup error reporting, base-protocol sender bytes, Return Path
-sender bytes, header-request controls and TLV flag semantics. These exercise
-codecs, the transmit scheduler and UDP sender peers without starting the pnet
-capture receiver.
+sender bytes, header-request controls, TLV flag semantics and sender scheduling.
+The scheduling checks cover duration/count limits, sub-millisecond intervals
+and Poisson rates with a silent UDP peer. These exercise codecs, the transmit
+scheduler and UDP sender peers without starting the pnet capture receiver.
 Scheduler tests inject a known MTU; a separate test checks that an unavailable
 route MTU drops a size-controlled burst while an ordinary reply still
 succeeds.
@@ -211,7 +212,7 @@ cargo test --locked --no-fail-fast --no-default-features --features ttl-pnet,met
   --test mixed_clock_test --test required_micro_session_test \
   --test session_ssid_validation_test --test sender_measurement_test \
   --test startup_failure_test --test base_protocol_wire_test --test return_path_wire_test \
-  --test header_request_wire_test --test tlv_flag_semantics
+  --test header_request_wire_test --test tlv_flag_semantics --test sender_schedule_test
 ```
 
 Automatic sender source-port selection retries Windows `WSAEACCES` (10013)

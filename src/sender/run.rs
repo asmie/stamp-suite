@@ -7,9 +7,9 @@ use super::schedule::Schedule;
 use super::*;
 use crate::shutdown::CancellationToken;
 
-/// Tokio timers fire on whole milliseconds, so a shorter gap before the next
-/// probe is spun through instead, polling for replies between yields. Rates
-/// above 1000 probes per second therefore keep one CPU core busy.
+/// Tokio timers fire on whole milliseconds. Windows also needs an active
+/// resolution request to avoid coarser OS waits. A shorter gap is spun through,
+/// polling for replies between yields, keeping one CPU core busy above 1000 pps.
 const TIMER_RESOLUTION: Duration = Duration::from_millis(1);
 /// How far behind schedule a probe may fall and still be sent at once.
 /// Beyond this the schedule restarts from now rather than bursting.
@@ -820,6 +820,8 @@ impl SenderRun {
         mut self,
         output: &crate::stats::StatsOutput,
     ) -> Result<StatsSnapshot, crate::StartupError> {
+        #[cfg(target_os = "windows")]
+        let _timer_resolution = super::timer::TimerResolution::request();
         // Each probe is due one gap after the previous due time, so the time
         // spent building and sending does not stretch the gap. Timer wakeups
         // can land a tick late; up to CATCH_UP behind, the next probe follows

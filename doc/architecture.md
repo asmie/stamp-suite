@@ -287,6 +287,15 @@ when a key is given.
    second. The loop ends at `--count` successful sends (`0` means no limit), at the end
    of `--duration`, on a zero-SSID stop, or on shutdown.
 
+   On Windows, each sender run requests 1 ms timer resolution through
+   [WinMM](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod).
+   A scoped guard releases each successful request when the run returns or is
+   dropped, including cancellation and errors. Coarser Windows waits otherwise
+   stretch short probe intervals beyond the 2 ms catch-up budget. The request
+   can increase CPU wakeups and power use while active; it does not guarantee
+   real-time scheduling. An unavailable request logs a warning and the sender
+   continues with the available timer resolution.
+
    Each probe is built in two steps. `build_probe` writes the TLVs straight
    into the packet buffer behind a zeroed base packet (`write_probe_tlvs`, no
    copy of the static TLVs). Only then are T1 and the RTT start read, and

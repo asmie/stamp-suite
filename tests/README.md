@@ -312,7 +312,7 @@ files in this directory.
   revocation on both platforms; on Linux it also checks that queued Type 12
   burst copies keep their accepted key, and on macOS that a size-controlled
   reply is dropped when the route MTU is unknown.
-- **Windows.** CI requires `--lib` and twelve integration targets (see
+- **Windows.** CI requires `--lib` and thirteen integration targets (see
   [Windows runtime gate](../doc/release-evidence.md#windows-runtime-gate)).
   Burst scheduling and shutdown tests inject a known route MTU; another test
   covers an unavailable route MTU (injected on Linux, real on Windows). Startup
@@ -321,6 +321,8 @@ files in this directory.
   times; its subprocess helpers keep stdout, stderr and exit status when a peer
   receives nothing or a sender does not exit. None of this exercises the
   capture driver.
+  Sender scheduling tests retain their rate assertions; each active sender
+  requests 1 ms Windows timer resolution and releases it when the run ends.
 
 ## Other test suites
 

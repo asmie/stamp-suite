@@ -44,6 +44,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Request 1 ms Windows timer resolution during sender runs and release it on
+  exit, cancellation or errors, preventing coarse waits from reducing periodic
+  and Poisson probe rates. Require the unchanged pacing assertions in Windows
+  CI alongside the other portable sender tests.
+
 - Require normalized Return Path child flags in the independent UDP oracle,
   including on SRv6 fallback. Preserve legacy observations as rejected cases
   and add signed child-flag, framing and segment mutation checks.
