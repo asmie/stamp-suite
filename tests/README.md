@@ -77,6 +77,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `same_link_reply_test.rs` | Return Path control code 0x1 (RFC 9503 §4.1.1): the reply leaves on the arrival link, or U is set where that cannot be done. | Unix, nix |
 | `scoped_ipv6_test.rs` | Link-local IPv6 over a veth pair: replies, delayed bursts, alternate return address and CLI zones, on both backends. | Linux; ignored, see [User-namespace tests](#user-namespace-tests) |
 | `sender_measurement_test.rs` | Independent peer checks sender summaries, burst collection, duplicates, counter gaps and Follow-Up summaries. | always |
+| `base_protocol_wire_test.rs` | Raw base-packet layout, sequence progression, NTP/PTP timestamps, zeroed transmitted and ignored received MBZ, authenticated signatures, stateless echo, stateful controls and symmetric trailers. Uses SSID zero for the base profile. | Sender: always; reflector: Unix, nix |
 | `sender_pacing_test.rs` | A sender keeps its schedule when the reflector port is closed (ICMP errors), and interim reports continue during the final wait. | always |
 | `sender_schedule_test.rs` | `--count 0` with `--duration`, duration before count, sub-millisecond and Poisson intervals, `--interface`. | always; interface test on Linux and macOS |
 | `session_auth_admission_test.rs` | Rejected base packets do not create or refresh sessions: bad HMACs, unknown SSIDs, key rotation, strict short packets; an invalid TLV HMAC still gets an I-flagged reply. | Unix, nix |

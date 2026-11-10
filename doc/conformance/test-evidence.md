@@ -105,7 +105,7 @@ rerun the checker after edits rather than treating the numbers as certification.
 | Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
 | Type 12 C signaling | Packet-processing and independent wire tests now exercise exact/fractional rate ceilings, volume, count-zero suppression, sender C clearing, incoming C ignoring and protected admission. | Exact timing and conservative first-request selection are Partial. Identity protection is qualified by the authenticated protected profile. See T22b3 below. |
 
-After the reviews below, 56 missing references remain across three
+After the reviews below, 35 missing references remain across two
 matrices. Prioritize the remaining authentication, C-flag and admission claims,
 then work through the rest. The full test-evidence goal and strict CI gate
 remain unfinished.
@@ -590,6 +590,79 @@ same released port twice. The
 retains peers and uses automatic sender ports. These repairs do not change
 this evidence inventory; native Windows verification of the latest correction
 is still pending.
+
+## Base packet review (T22b8)
+
+The parent `f9c8bb8` has green
+[CI (23/23 jobs)](https://github.com/asmie/stamp-suite/actions/runs/42808905339),
+[conformance evidence](https://github.com/asmie/stamp-suite/actions/runs/42808905202)
+and [CodeQL](https://github.com/asmie/stamp-suite/actions/runs/42808904888).
+The CI repairs are committed; this review resumes the remaining RFC 8762
+reference backlog. It does not claim remote execution of the new tests.
+
+`tests/base_protocol_wire_test.rs` uses raw offsets and an independent
+coverage selection for HMAC, rather than application packet builders/parsers:
+
+- `sender_base_sequence_clock_layout_and_reserved_receipt` runs the public
+  sender loop against a silent-until-reply UDP peer in 16 family/authentication/
+  clock/strictness combinations. Each fresh session sends sequences 0, 1, 2;
+  the peer checks the 44/112-byte layout, all transmitted reserved bytes, SSID
+  zero, NTP/PTP timestamp recency and Z, dynamic source-port separation and
+  authenticated bytes 96..112 over coverage 0..96. The peer replies with
+  deliberately nonzero reserved bytes and valid signatures; all three replies
+  must be accepted. NTP is tested without an explicit clock flag.
+- `reflector_base_mbz_symmetry_clocks_and_stateless_sequences` starts the real
+  nix reflector in 32 family/authentication/clock/strictness/state combinations.
+  Ninety-six replies check stateless echo versus stateful 0/1/2 controls,
+  copied sequence/T1/Error Estimate, real ingress TTL/Hop Limit 37, zeroed
+  reply reserved bytes, T2/T3 format and ordering within the exchange window,
+  final base signatures and symmetric sizes. Cases include bare bases,
+  three nonzero opaque trailer bytes and 32 zero padding bytes. Authenticated
+  requests carry nonzero MBZ signed over all 96 bytes; changing a covered MBZ
+  octet after signing must get no response or stateful sequence advance.
+
+The public configuration-loading test
+`src/configuration/tests.rs::base_protocol_default_ports_and_user_dynamic_ranges_reach_endpoints`
+checks default sender destination/reflector bind port 862 and NTP, and CLI/TOML
+overrides at 1024, 49151, 49152 and 65535 through actual endpoint accessors.
+The wire cases exercise real bound dynamic peers. The port-boundary/default
+checks establish configuration and endpoint selection; they do not claim
+live binds on every registered port or default-port access on every host.
+
+All 21 remaining RFC 8762 missing-reference rows now cite these tests. Nine
+already referenced rows gain the more direct wire evidence for base widths,
+MBZ origination/receipt, echoed fields, TTL and authenticated layout. Status
+counts remain **471 clauses: 388 Compliant, 30 Partial, two Gap, 48 N-A and
+three Excluded**. The inventory is **320 applicable, 285 with references,
+35 missing**: RFC 9503 (five) and the reflected-header draft (30). RFC 8762
+has no remaining normative Compliant row without an explicit test reference.
+This is source presence plus the execution scope below, not certification
+of every normative clause or configuration.
+
+The sender test is portable and added to the existing required Windows
+runtime job. Local execution also passes under its `ttl-pnet,metrics,control`
+feature set. Isolated macOS/Windows target harnesses compile the exact source
+against the real default libraries, omitting unrelated optional/dev C graphs;
+these are compile checks, not native runtime evidence for this chunk.
+
+Final default/all-features/pnet Linux suites pass **1,368/1,470/1,297** tests,
+respectively, with 13 privileged tests ignored in each ordinary run. The
+sender and port-configuration tests pass in all three profiles; the reflector
+wire case passes in both nix profiles. All three Clippy profiles, rustfmt,
+104 Python tests, release metadata, matrix counts, 1,236 source citations and
+456 documentation links pass (379 local checked, 77 external classified).
+Strict checking fails only on the expected 35 missing references. Native
+runtime and remote CI for this new chunk follow the manual commit.
+
+These are software-clock loopback checks with `--hwtstamp off` and SSID zero
+for the base profile. RFC 8972's SSID occupies two original reserved bytes;
+other SSID/extension profiles retain their separate evidence. PTP checks the
+documented UTC software encoding, not TAI alignment. The bounds enclose
+application receive/send timestamps; they do not establish NIC timestamp
+accuracy or an exact hardware arrival instant. No pnet reflector capture,
+privileged, hardware, new BER or fuzz campaign is claimed. Logs use
+`/tmp/t22b8-*`; strict CI enforcement stays pending until the other 35 rows
+are reviewed. No application/runtime default or packet encoding changed.
 
 ## Local validation for T22a
 

@@ -44,6 +44,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Add independent RFC 8762 base-packet evidence for sender sequences,
+  NTP/PTP clocks, authenticated reserved-byte handling, symmetric reflection
+  and default/configured UDP ports. Cover the portable sender in Windows CI.
+
 - Remove released-port selection from startup tests. Retain silent peer
   sockets and use automatic sender ports so Windows port reuse cannot turn
   the total-loss check into a local/remote port validation error. Verify

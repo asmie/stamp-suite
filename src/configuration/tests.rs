@@ -2675,6 +2675,50 @@ fn revision13_defaults_and_file_role_choose_correct_local_port() {
     std::fs::write(&path, "ttl = 64\n").unwrap();
     assert!(load_from_args(&["test", "--config", path.to_str().unwrap()]).is_err());
 }
+
+#[test]
+fn base_protocol_default_ports_and_user_dynamic_ranges_reach_endpoints() {
+    let sender = load_from_args(&["test"]).unwrap();
+    assert_eq!(sender.remote_socket_addr().port(), 862);
+    assert_eq!(sender.local_socket_addr().port(), 0);
+    let reflector = load_from_args(&["test", "--is-reflector"]).unwrap();
+    assert_eq!(reflector.local_socket_addr().port(), 862);
+    assert_eq!(sender.clock_source, ClockFormat::NTP);
+    assert_eq!(reflector.clock_source, ClockFormat::NTP);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ports.toml");
+    for port in [1024u16, 49151, 49152, 65535] {
+        let value = port.to_string();
+        let sender = load_from_args(&["test", "--remote-port", &value]).unwrap();
+        assert_eq!(sender.remote_socket_addr().port(), port);
+        let reflector =
+            load_from_args(&["test", "--is-reflector", "--local-port", &value]).unwrap();
+        assert_eq!(reflector.local_socket_addr().port(), port);
+        for is_reflector in [false, true] {
+            let key = if is_reflector {
+                "local_port"
+            } else {
+                "remote_port"
+            };
+            std::fs::write(
+                &path,
+                format!("is_reflector = {is_reflector}\n{key} = {port}\n"),
+            )
+            .unwrap();
+            let conf = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap();
+            assert_eq!(
+                if is_reflector {
+                    conf.local_socket_addr()
+                } else {
+                    conf.remote_socket_addr()
+                }
+                .port(),
+                port
+            );
+        }
+    }
+}
 #[test]
 fn revision13_rejects_invalid_headers_selectors_and_direction_ports() {
     for args in [
