@@ -19,3 +19,6 @@ __pycache__/
 
 # Generated for the target/features being packaged.
 /THIRD_PARTY_NOTICES.txt
+
+# Internal review evidence stays local.
+/doc/review/

@@ -48,9 +48,8 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   including on SRv6 fallback. Preserve legacy observations as rejected cases
   and add signed child-flag, framing and segment mutation checks.
 
-- Refresh dependency, standards and CI evidence; retain the observed branch
-  protection gap and a proposed required-check policy. Correct the Windows
-  runtime reproduction command to include all twelve required targets.
+- Correct the Windows runtime reproduction command to include all twelve
+  required targets and remove broken release-documentation links.
 
 - Require valid citations and explicit test references for normative Compliant
   rows in conformance CI, retaining the detailed JSON inventory on failure.
