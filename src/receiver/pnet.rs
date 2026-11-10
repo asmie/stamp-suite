@@ -114,6 +114,21 @@ struct InterfaceProps {
     is_point_to_point: bool,
 }
 
+fn matches_capture_interface(conf: &Configuration, iface: &NetworkInterface) -> bool {
+    let has_addr = if conf.local_addr.is_unspecified() {
+        // Capture APIs may advertise unspecified addresses. Those do not
+        // identify an interface; wildcard capture needs an explicit name.
+        conf.interface.is_some()
+    } else {
+        iface.ips.iter().any(|ip| ip.ip() == conf.local_addr)
+    };
+    conf.interface
+        .as_deref()
+        .is_none_or(|name| iface.name == name)
+        && (conf.local_scope_id == 0 || iface.index == conf.local_scope_id)
+        && has_addr
+}
+
 /// Runs the STAMP Session Reflector using pnet for raw packet capture.
 ///
 /// Captures packets at the datalink layer to extract the real TTL value.
@@ -152,19 +167,11 @@ pub async fn run_receiver(
     // Report ordinary socket and key failures before consulting that driver.
     // `--interface` selects the capture interface by name; the local
     // address, unless it is a wildcard, must still be one of its addresses.
-    let interface_ip_match = |iface: &NetworkInterface| {
-        let has_addr = (conf.interface.is_some() && conf.local_addr.is_unspecified())
-            || iface.ips.iter().any(|ip| ip.ip() == conf.local_addr);
-        conf.interface
-            .as_deref()
-            .is_none_or(|name| iface.name == name)
-            && (conf.local_scope_id == 0 || iface.index == conf.local_scope_id)
-            && has_addr
-    };
-
     // Find the interface matching --interface (if given) and the local address.
     let interfaces = datalink::interfaces();
-    let interface = interfaces.into_iter().find(interface_ip_match);
+    let interface = interfaces
+        .into_iter()
+        .find(|iface| matches_capture_interface(conf, iface));
 
     let Some(interface) = interface else {
         return Err(crate::StartupError::config(
@@ -849,6 +856,88 @@ mod tests {
     use crate::receiver::transmit::Transmission;
     use crate::{clock_format::ClockFormat, receiver::create_shared_state};
 
+    fn capture_conf(address: &str) -> Configuration {
+        Configuration::parse_from([
+            "test",
+            "--is-reflector",
+            "--local-addr",
+            address,
+            "--remote-addr",
+            if address.contains(':') {
+                "::1"
+            } else {
+                "127.0.0.1"
+            },
+        ])
+    }
+
+    fn capture_adapter() -> NetworkInterface {
+        NetworkInterface {
+            name: "capture-test".into(),
+            description: String::new(),
+            index: 7,
+            mac: None,
+            // Capture APIs can advertise an unspecified address, which is
+            // adapter metadata rather than a configured local endpoint.
+            ips: ["0.0.0.0/0", "::/0", "192.0.2.10/24", "2001:db8::10/64"]
+                .map(|address| address.parse().unwrap())
+                .to_vec(),
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn capture_selection_rejects_unnamed_wildcards_even_if_advertised() {
+        let iface = capture_adapter();
+        for address in ["0.0.0.0", "::"] {
+            assert!(!matches_capture_interface(&capture_conf(address), &iface));
+        }
+    }
+
+    #[test]
+    fn capture_selection_accepts_only_the_named_wildcard_interface() {
+        let mut iface = capture_adapter();
+        iface.ips.clear();
+        for address in ["0.0.0.0", "::"] {
+            let mut conf = capture_conf(address);
+            conf.interface = Some(iface.name.clone());
+            assert!(matches_capture_interface(&conf, &iface));
+            conf.interface = Some("another-interface".into());
+            assert!(!matches_capture_interface(&conf, &iface));
+        }
+    }
+
+    #[test]
+    fn capture_selection_requires_concrete_address_ownership_and_name() {
+        let iface = capture_adapter();
+        for (address, owned) in [
+            ("192.0.2.10", true),
+            ("192.0.2.11", false),
+            ("2001:db8::10", true),
+            ("2001:db8::11", false),
+        ] {
+            let mut conf = capture_conf(address);
+            assert_eq!(matches_capture_interface(&conf, &iface), owned);
+            conf.interface = Some(iface.name.clone());
+            assert_eq!(matches_capture_interface(&conf, &iface), owned);
+            conf.interface = Some("another-interface".into());
+            assert!(!matches_capture_interface(&conf, &iface));
+        }
+    }
+
+    #[test]
+    fn capture_selection_respects_scope_for_concrete_and_wildcard_addresses() {
+        let iface = capture_adapter();
+        for address in ["2001:db8::10", "::"] {
+            let mut conf = capture_conf(address);
+            conf.interface = Some(iface.name.clone());
+            conf.local_scope_id = iface.index;
+            assert!(matches_capture_interface(&conf, &iface));
+            conf.local_scope_id = iface.index + 1;
+            assert!(!matches_capture_interface(&conf, &iface));
+        }
+    }
+
     #[test]
     fn reply_socket_binding_retains_primary_endpoint_and_one_port() {
         for ip in ["127.0.0.1", "0.0.0.0", "::1", "::"] {
@@ -1247,33 +1336,40 @@ mod tests {
         assert_eq!(walked, 0);
     }
 
-    /// `run_receiver` reports a local address that is not on any interface
-    /// as a startup error instead of panicking.
+    /// An unnamed wildcard cannot select a capture interface, even when a
+    /// driver advertises that wildcard among an adapter's addresses.
     ///
     /// Bind an ephemeral wildcard socket so socket setup succeeds before
-    /// discovery rejects the address, which is not assigned to an interface.
+    /// discovery rejects the unspecified capture selection.
     #[tokio::test]
     async fn run_receiver_fails_on_missing_interface() {
-        let mut conf = Configuration::parse_from([
-            "stamp-suite",
-            "--remote-addr",
-            "127.0.0.1",
-            "--local-addr",
-            "0.0.0.0",
-            "--is-reflector",
-        ]);
-        // This library-level failure fixture does not need a fixed STAMP port.
-        conf.local_port = 0;
-        let shared = create_shared_state(&conf).unwrap();
-
-        // The failure must be an error, not a clean exit, so main exits non-zero.
-        let err = run_receiver(&conf, &shared)
-            .await
-            .expect_err("a missing capture interface is a startup failure");
-        assert!(
-            err.to_string().contains("No interface found"),
-            "unexpected startup error: {err}"
-        );
+        for (address, remote) in [("0.0.0.0", "127.0.0.1"), ("::", "::1")] {
+            for mode in ["O", "A"] {
+                let conf = Configuration::parse_from([
+                    "stamp-suite",
+                    "--remote-addr",
+                    remote,
+                    "--local-addr",
+                    address,
+                    "--local-port",
+                    "0",
+                    "--auth-mode",
+                    mode,
+                    "--hmac-key",
+                    "abababababababababababababababab",
+                    "--is-reflector",
+                ]);
+                let shared = create_shared_state(&conf).unwrap();
+                // The failure must be an error, not a clean exit, so main exits non-zero.
+                let err = run_receiver(&conf, &shared)
+                    .await
+                    .expect_err("a missing capture interface is a startup failure");
+                assert!(
+                    err.to_string().contains("No interface found"),
+                    "{address} mode={mode}: unexpected startup error: {err}"
+                );
+            }
+        }
     }
 }
 

@@ -44,6 +44,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Reject unnamed wildcard pnet capture selection even when an adapter
+  advertises an unspecified address. Preserve concrete address, interface-name
+  and IPv6 scope matching, and avoid entering capture during invalid startup.
+
 - Request 1 ms Windows timer resolution during sender runs and release it on
   exit, cancellation or errors, preventing coarse waits from reducing periodic
   and Poisson probe rates. Require the unchanged pacing assertions in Windows
@@ -53,7 +57,7 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   including on SRv6 fallback. Preserve legacy observations as rejected cases
   and add signed child-flag, framing and segment mutation checks.
 
-- Correct the Windows runtime reproduction command to include all twelve
+- Correct the Windows runtime reproduction command to include all
   required targets and remove broken release-documentation links.
 
 - Require valid citations and explicit test references for normative Compliant

@@ -128,6 +128,10 @@ traffic before UDP delivery, so UDP INPUT filtering alone does not restrict it.
 Pnet replies use UDP sockets bound to the STAMP port, so connected senders
 accept the source port. Pnet captures one interface: it needs a concrete local
 address, or a wildcard address together with `--interface`.
+An unspecified address advertised by a capture API does not identify an
+interface: an unnamed wildcard reports a startup error instead of opening
+capture on that adapter. Concrete addresses must belong to the selected
+interface; an explicit name and IPv6 scope must also match when provided.
 
 Pnet binds the configured address family first. Port zero selects a kernel
 port that is then used for readiness, capture filtering, received endpoint
