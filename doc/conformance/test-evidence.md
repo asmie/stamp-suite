@@ -813,6 +813,79 @@ for the expected 30 header references; it remains advisory in CI.
 Temporary validation logs use `/tmp/t22b10-*`; source regressions and this
 scope record are durable. Resume the 30 header rows in the next chunk.
 
+## Sender header-request evidence (T22b11)
+
+Parent `ea4d97b` contains the Return Path repair. This chunk resolves 16 sender
+references in the frozen ext-hdr-26 matrix without changing protocol behavior,
+selector syntax, platform support or status counts. It leaves 14 header rows
+for endpoint/hop policy, reflector matching/control, disclosure and policing.
+Strict evidence enforcement remains pending until that review is complete.
+
+`tests/header_request_wire_test.rs::sender_control_request_is_unique_zero_length_and_opt_in`
+uses the public sender and a retained independent peer in 18 combinations:
+IPv4/IPv6, unkeyed open/keyed open/authenticated, and plain/control-only/
+explicitly shaped control. Plain probes have no header or control requests.
+Control-only probes carry one Type 12 with count 1, length 0, interval 0 and
+exactly one zero-length control child (experimental Type 240). Explicit count,
+length and interval shaping survives separately. Raw expected bytes also
+check U/M/I/reserved flags and independent base/extension HMAC coverage. This
+portable case is included in Windows' required runtime test list.
+
+`tests/header_request_wire_test.rs::sender_fixed_header_requests_have_family_length_selector_and_zero_received`
+checks 12 Linux combinations: both families, all three key modes, and zero or
+nonzero Requested fields. Exactly one Type 247 has the family's 20/40-octet
+length, its four-octet selector and zero-filled Received tail. Whole-extension
+equality excludes stray Type 246 and control TLVs. This calls sender startup,
+route budgeting, packet building/signing and actual UDP transmission.
+
+`tests/header_request_wire_test.rs::linux::sender_header_requests_follow_actual_attached_order_and_select_subsets`
+runs 21 probes per Linux profile in private user/network namespaces, with
+missing prerequisites failing. The independent peer reads actual Hop-by-Hop
+and Destination Options ancillary headers alongside independently expected
+STAMP bytes. Seven attachment/request profiles in three key modes cover
+automatic and explicit full requests, different/same lengths, both same-length
+subsets, a length-selected subset, mutable-option masking and fixed-before-
+extension ordering even when CLI flags are reversed. Headers and request
+counts/lengths, selector bytes, zero Received tails and signatures are checked.
+Default, all-features and pnet runs pass separately. This is sender origination
+evidence with kernel receive metadata; it does not establish reflector matching,
+successful reflected measurements or raw pnet capture. The new namespace case
+joins the required nix and pnet CI gates with an exact nonzero test count.
+
+`src/configuration/tests.rs::revision26_sender_subset_rules_apply_to_cli_and_toml`
+now checks 14 profiles through both real CLI loading and TOML merge/validation:
+wrong request count, length and order, ambiguous/unique subsets and full-group
+wildcards. Selector arguments intentionally require a nonzero byte; explicit
+all-zero arguments remain rejected before matching. A bare length generates
+the supported all-zero wire field. An initial investigation treated this
+syntax rule as a matching defect; source review and the existing rejection
+test establish it as deliberate, so no production change is made.
+
+The exact portable test source cross-compiles for macOS and Windows in minimal
+harnesses with the real default libraries. The Windows CI feature set passes
+locally on Linux; these checks do not establish native runtime or the full
+platform dependency graph. An exact-parent CI query finds no run for
+`ea4d97b`; the latest observed CI, conformance and CodeQL success remains
+`f9c8bb8`. Remote CI for this uncommitted chunk is pending.
+
+The inventory is **320 applicable, 306 referenced, 14 missing**. All status
+counts are unchanged: **472 clauses: 388 Compliant, 31 Partial, two Gap, 48
+N-A and three Excluded**. Presence and execution are separate: the ignored
+namespace case is executed explicitly, not counted as an ordinary-suite pass.
+
+Final default/all-features/pnet suites pass **1,379/1,481/1,306** tests,
+respectively (14 privileged tests ignored in each ordinary run). All three
+Clippy profiles with warnings denied, rustfmt, Rust 1.87 all-targets/all-features
+checking, warnings-denied rustdoc, 104 Python tests, release metadata and
+matrix counts pass. Both edited workflows parse as YAML. Source validation
+passes 1,288 citations;
+461 documentation links pass (384 local checked, 77 external classified).
+Strict mode fails only on the expected 14 header references. The new ignored
+case passed separately in default/all-features/pnet, totaling 63 probes.
+
+Temporary logs use `/tmp/t22b11-*`; the source tests and this scope record are
+durable. Stop for a manual commit before reviewing the remaining 14 rows.
+
 ## Local validation for T22a
 
 The all-features focused runs exercise 90 HMAC tests (including the new known

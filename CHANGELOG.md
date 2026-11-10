@@ -44,6 +44,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Add public-sender wire evidence for header request lengths, selectors,
+  zero-filled Received fields, attachment order, subsets and control-only
+  defaults. Require the namespace cases in nix/pnet CI and the portable
+  control case in Windows CI; retain existing selector validation policy.
+
 - Derive Return Path child flags after integrity verification, validate nested
   framing and selected parameter lengths before routing, and zero processed
   Control Code reserved bits. Stop later sender extension values on child M;

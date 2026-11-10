@@ -3036,6 +3036,14 @@ fn revision26_sender_subset_rules_apply_to_cli_and_toml() {
         (vec!["8"], false),
         (vec!["8:11000104"], true),
         (vec!["8", "8"], true),
+        (vec!["8", "8", "8"], false),
+        (vec!["16"], false),
+        (vec!["8:11000104", "8:3c000104"], false),
+        (vec!["8:3c000104", "8:11000104"], true),
+        (vec!["8:0000000000000000", "8"], false),
+        (vec!["8", "8:0000000000000000"], false),
+        (vec!["8:0000000000000000", "8:0000000000000000"], false),
+        (vec!["8:0000000000000000"], false),
         (vec!["8", "8:00000104"], true),
         (vec!["8:11000104", "8:11000104"], false),
     ] {
@@ -3051,7 +3059,8 @@ fn revision26_sender_subset_rules_apply_to_cli_and_toml() {
         for request in &requests {
             args.extend(["--reflected-ipv6-ext-hdr", request]);
         }
-        assert_eq!(load_from_args(&args).is_ok(), accepted, "CLI {requests:?}");
+        let result = load_from_args(&args);
+        assert_eq!(result.is_ok(), accepted, "CLI {requests:?}: {result:?}");
         let values = requests
             .iter()
             .map(|value| format!("{value:?}"))
