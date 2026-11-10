@@ -814,8 +814,8 @@ fn apply_semantic_tlv_processing(
     };
     tlvs.update_follow_up_telemetry_tlvs(reflection, ctx.last_reflection_method);
 
-    // Discard Access Report TLVs with an invalid Access ID (RFC 8972 §4.6:
-    // values other than 1/2 MUST be discarded; marked U, size preserved).
+    // Normalize valid Access Report reserved fields and discard invalid IDs
+    // (RFC 8972 §4.6: values other than 1/2 get U, value/size preserved).
     tlvs.discard_invalid_access_report_tlvs();
 
     // Process Destination Node Address TLV (RFC 9503 §3)

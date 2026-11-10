@@ -387,7 +387,8 @@ impl TlvList {
                 continue;
             }
             {
-                let valid_len = tlv.value.len() == FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE;
+                let valid_len =
+                    !tlv.is_malformed() && tlv.value.len() == FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE;
                 match reflection {
                     // Stateful mode + well-formed TLV: report the previous
                     // reflection's seq/timestamp/method.
@@ -395,7 +396,6 @@ impl TlvList {
                         tlv.value[0..4].copy_from_slice(&last_seq.to_be_bytes());
                         tlv.value[4..12].copy_from_slice(&last_ts.to_be_bytes());
                         tlv.value[12] = mode_byte;
-                        tlv.value[13..16].fill(0); // Reserved
                     }
                     // Stateless mode OR invalid length (RFC 8972 §4.7): zero
                     // the Sequence Number and Follow-Up Timestamp fields (the
@@ -405,26 +405,35 @@ impl TlvList {
                         tlv.value[..end].fill(0);
                     }
                 }
+                if valid_len {
+                    // Reserved is zero on every processed well-formed reply,
+                    // including stateless mode and the first stateful reply.
+                    tlv.value[13..16].fill(0);
+                }
             }
         }
     }
 
-    /// Marks well-formed Access Reports with IDs other than 1 or 2 unrecognized
+    /// Normalize reserved fields on valid Access Reports and mark other IDs
+    /// unrecognized (only IDs 1 and 2 are valid).
     /// (RFC 8972 §4.6). U makes the sender skip the report (§4) while preserving
     /// the echoed bytes and symmetric packet size (RFC 8762 §4.3/§4.6).
     /// Invalid lengths are handled separately by the M-flag validator.
     pub fn discard_invalid_access_report_tlvs(&mut self) {
         self.for_each_matching_tlv(
             |tlv| {
-                if tlv.tlv_type != TlvType::AccessReport
-                    || tlv.value.len() != ACCESS_REPORT_TLV_VALUE_SIZE
-                {
-                    return false;
-                }
-                let access_id = (tlv.value[0] >> 4) & 0x0F;
-                access_id != 1 && access_id != 2
+                tlv.tlv_type == TlvType::AccessReport
+                    && tlv.value.len() == ACCESS_REPORT_TLV_VALUE_SIZE
             },
-            RawTlv::set_unrecognized,
+            |tlv| match tlv.value[0] >> 4 {
+                1 | 2 => {
+                    // Ignore received Resv/Reserved while echoing ID and Return
+                    // Code. Unprocessed/error echoes keep their original value.
+                    tlv.value[0] &= 0xf0;
+                    tlv.value[2..4].fill(0);
+                }
+                _ => tlv.set_unrecognized(),
+            },
         );
     }
 

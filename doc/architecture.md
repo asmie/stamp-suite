@@ -245,6 +245,16 @@ echoes keep every original value byte. The sender additionally promotes received
 child M to the local outer diagnostic,
 ignoring nested I as required by the Location format.
 
+Timestamp Information validates its four-field prefix and complete optional
+child framing; child values remain opaque. This check is shared by the typed
+decoder and sender/reflector length validation. Semantic handling normalizes
+reserved Access Report and Follow-Up fields only on processable valid values.
+Follow-Up also respects parser M when zeroing malformed sequence/timestamp
+fields, rather than treating the available byte count as a valid declared size.
+At transmission, a copied outer HMAC suppresses telemetry refresh unless the
+reflector generated that HMAC. This keeps assembly's signed-error value-copy
+decision intact while normal processed replies retain per-send refresh/signing.
+
 `sender/run.rs` runs one session. `run_senders` (in `sender.rs`) opens one
 `SenderRun` per `--remote-addr` before sending any probe, so a startup error in
 one target stops them all. It then runs them concurrently and labels each

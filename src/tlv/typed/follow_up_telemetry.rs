@@ -109,7 +109,8 @@ mod tests {
             follow_up_timestamp: 0xDEAD_BEEF_CAFE_BABE,
             timestamp_mode: TimestampMethod::HwAssist,
         };
-        let raw = original.to_raw();
+        let mut raw = original.to_raw();
+        raw.value[13..16].fill(0xa5); // received Reserved is ignored
         let parsed = FollowUpTelemetryTlv::from_raw(&raw).unwrap();
         assert_eq!(parsed, original);
     }

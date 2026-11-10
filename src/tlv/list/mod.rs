@@ -4,7 +4,7 @@ mod processing;
 
 use crate::crypto::HmacKey;
 use crate::tlv::core::{RawTlv, TlvError, TlvFlags, TlvType, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
-use crate::tlv::LocationTlv;
+use crate::tlv::{LocationTlv, TimestampInfoTlv};
 
 /// A list of TLVs with special handling for HMAC TLV.
 ///
@@ -815,15 +815,14 @@ impl TlvList {
             ACCESS_REPORT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE, DEST_NODE_ADDR_IPV4_SIZE,
             DEST_NODE_ADDR_IPV6_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
             FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE, MICRO_SESSION_ID_TLV_VALUE_SIZE,
-            REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE, TIMESTAMP_INFO_TLV_VALUE_SIZE,
+            REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,
         };
 
         for tlv in tlvs {
             let bad_length = match tlv.tlv_type {
                 TlvType::ClassOfService => tlv.value.len() != COS_TLV_VALUE_SIZE,
                 TlvType::AccessReport => tlv.value.len() != ACCESS_REPORT_TLV_VALUE_SIZE,
-                // Optional sub-TLVs may follow the four fields (RFC 8972 §4.3).
-                TlvType::TimestampInfo => tlv.value.len() < TIMESTAMP_INFO_TLV_VALUE_SIZE,
+                TlvType::TimestampInfo => !TimestampInfoTlv::has_valid_length(&tlv.value),
                 TlvType::DirectMeasurement => tlv.value.len() != DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
                 TlvType::Location => {
                     LocationTlv::malformed_sub_tlv_offset(&tlv.value, false).is_some()

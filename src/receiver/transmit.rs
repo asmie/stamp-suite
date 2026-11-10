@@ -212,7 +212,12 @@ impl Transmission {
             u32::from_be_bytes(data[..4].try_into().expect("validated response base"))
         };
         data[..4].copy_from_slice(&sequence.to_be_bytes());
-        refresh_telemetry(&mut data, base, &self.session, self.stateful);
+        // A copied HMAC belongs to an error/opaque echo. Assembly deliberately
+        // left those values unchanged; send-time refresh must respect that
+        // decision even for a processable prefix before a malformed tail.
+        if self.response.tlv_hmac_generated || !contains_hmac_tlv(&data, base) {
+            refresh_telemetry(&mut data, base, &self.session, self.stateful);
+        }
         let mut target = plan.target;
         let mut options = plan.options.clone();
         if plan.unsupported_srh {
@@ -505,6 +510,17 @@ fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> i
         data.extend_from_slice(&bytes);
     }
     Ok(controlled)
+}
+
+fn contains_hmac_tlv(data: &[u8], base: usize) -> bool {
+    let mut pos = base;
+    while let Some(tlv) = TlvSpan::at(data, pos) {
+        if tlv.tlv_type == TlvType::Hmac {
+            return true;
+        }
+        pos = tlv.end();
+    }
+    false
 }
 
 /// Refreshes send-time Direct Measurement counters and Follow-Up Telemetry

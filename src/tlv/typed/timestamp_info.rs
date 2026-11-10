@@ -120,6 +120,22 @@ pub struct TimestampInfoTlv {
 }
 
 impl TimestampInfoTlv {
+    /// Validate the fixed prefix and optional child framing without interpreting
+    /// unknown child values or allocating decoded children.
+    pub(crate) fn has_valid_length(value: &[u8]) -> bool {
+        if value.len() < TIMESTAMP_INFO_TLV_VALUE_SIZE {
+            return false;
+        }
+        let mut offset = TIMESTAMP_INFO_TLV_VALUE_SIZE;
+        while offset < value.len() {
+            let Some(span) = crate::tlv::TlvSpan::at(value, offset) else {
+                return false;
+            };
+            offset = span.end();
+        }
+        true
+    }
+
     /// Creates a Timestamp Info TLV from explicit reflector clock information.
     ///
     /// The `sync_src`/`ts_method` arguments populate the ingress ("In") fields.
@@ -151,9 +167,9 @@ impl TimestampInfoTlv {
 impl TypedTlv for TimestampInfoTlv {
     const TYPE: TlvType = TlvType::TimestampInfo;
 
-    /// Optional sub-TLVs after the four fields (RFC 8972 §4.3) are ignored.
+    /// Optional sub-TLVs must be structurally complete; their values are opaque.
     fn decode_value(value: &[u8]) -> Result<Self, TlvError> {
-        if value.len() < TIMESTAMP_INFO_TLV_VALUE_SIZE {
+        if !Self::has_valid_length(value) {
             return Err(TlvError::InvalidLength {
                 kind: TlvType::TimestampInfo,
                 length: value.len(),
@@ -306,5 +322,18 @@ mod tests {
         let parsed = TimestampInfoTlv::from_raw(&raw).unwrap();
         assert_eq!(parsed.sync_src_in, SyncSource::Ntp);
         assert_eq!(parsed.timestamp_out, TimestampMethod::from_byte(1));
+    }
+
+    #[test]
+    fn test_timestamp_info_rejects_incomplete_optional_sub_tlvs() {
+        for value in [
+            vec![1, 2, 3, 1, 0x80],
+            vec![1, 2, 3, 1, 0x80, 200, 0, 8, 1, 2, 3, 4],
+        ] {
+            let length = value.len();
+            let raw = RawTlv::new(TlvType::TimestampInfo, value);
+            assert!(matches!(TimestampInfoTlv::from_raw(&raw),
+                Err(TlvError::InvalidLength { kind: TlvType::TimestampInfo, length: got }) if got == length));
+        }
     }
 }

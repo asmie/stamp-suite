@@ -135,6 +135,10 @@ later outer values; the Location child I bit is ignored. These are outer TLV
 occurrence counts, so nested errors do not add separate child entries to
 `by_type` or `observed_tlvs`.
 
+Incomplete optional children in Timestamp Information also derive outer M,
+even when that TLV is unused by this sender. Complete unknown children are
+opaque and do not add child entries to the outer-TLV counters.
+
 HMAC outcomes: `not_requested` means no HMAC or key; `missing` means an
 optional/exempt HMAC is absent with a key configured. Missing required HMACs
 count as `failed`. `unverified` means verification was unavailable, for example

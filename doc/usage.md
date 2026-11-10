@@ -358,6 +358,15 @@ whole Location before answering any field, and preserves its original size.
 Integrity-failure and structurally malformed signed echoes retain original
 nested value bytes.
 
+Timestamp Information also requires complete optional child headers and values;
+unknown complete children remain opaque. Invalid framing marks the outer TLV M
+and stops later values. Processed valid Access Reports echo ID/Return Code with
+reserved fields zeroed, and valid Follow-Up replies zero their reserved bytes
+in both stateful and stateless mode. Invalid Access IDs and skipped/integrity
+error values retain their existing copy policy. A malformed Follow-Up zeroes
+the available sequence/timestamp fields when processing is allowed; a copied
+signed error reply preserves its original values through transmission.
+
 With `-R`, the per-packet line shows TLV results in a fixed order: HMAC, Access
 Report, CE, Micro-session ID, then U/M/I counts. Each result appears once even
 when several TLVs support it. `HMAC:unverified` marks a present HMAC that could

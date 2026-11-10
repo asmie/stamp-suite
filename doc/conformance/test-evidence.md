@@ -105,7 +105,7 @@ rerun the checker after edits rather than treating the numbers as certification.
 | Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
 | Type 12 C signaling | Packet-processing and independent wire tests now exercise exact/fractional rate ceilings, volume, count-zero suppression, sender C clearing, incoming C ignoring and protected admission. | Exact timing and conservative first-request selection are Partial. Identity protection is qualified by the authenticated protected profile. See T22b3 below. |
 
-After the reviews below, 85 missing references remain across five
+After the reviews below, 64 missing references remain across five
 matrices. Prioritize the remaining authentication, C-flag and admission claims,
 then work through the rest. The full test-evidence goal and strict CI gate
 remain unfinished.
@@ -445,6 +445,82 @@ stress testing also exposed a second reserve/drop/rebind gap in the launcher's
 contention control. The tests now inspect original Linux socket ownership and
 keep the contention endpoint held throughout. This changes test lifecycle
 evidence, not the normative inventory or the historical T22b5 run record.
+
+## Measurement telemetry review (T22b6)
+
+Review against parent `a7630af` reproduced nonzero reserved fields in valid
+Access Report and stateless Follow-Up replies through independent binary
+peers. Processable valid Access Reports now preserve ID/Return Code while
+zeroing the Resv nibble and Reserved tail. Valid Follow-Up replies zero their
+Reserved bytes in both reflector modes. Invalid IDs, skipped values and
+integrity-failure copies retain their existing byte-preservation policy.
+
+Two additional length failures were reproduced: incomplete Timestamp Information
+optional children were accepted, and a parser-marked truncated Follow-Up could
+report previous state merely because sixteen value bytes remained. A shared,
+allocation-free Timestamp Information check now validates the complete optional
+child framing in the typed decoder and both roles' length validation. Unknown
+complete children remain opaque. Follow-Up handling now respects parser M,
+zeroing available sequence/timestamp fields when processing is allowed.
+
+The expanded signed-list copy regression also found a send-path gap: assembly
+preserved an opaque signed list, but send-time telemetry refresh still changed
+its usable prefix. Transmission now refreshes signed telemetry only when the
+reflector generated the outer HMAC. Copied HMAC/value bytes remain unchanged;
+normal unsigned replies and generated signatures retain per-send updates.
+
+Direct evidence includes:
+
+- `tests/sender_measurement_test.rs::sender_direct_measurement_counts_actual_probes_and_zeroes_peer_fields`
+  captures three actual probes per family/key mode, checking S_TxC = 1, 2, 3,
+  zero reflector counters, zero request metadata and original signatures.
+  The existing all-type origination capture now checks exact Type 3/5/6/7 values.
+- `tests/tlv_extension_wire_test.rs::timestamp_and_direct_measurement_fields_are_finalized_per_probe`
+  checks observed receive/transmit counts, sentinel S_TxC preservation, declared
+  software clock metadata, complete opaque Timestamp Information children and
+  previous-reflection Follow-Up values over repeated actual requests.
+- `tests/tlv_extension_wire_test.rs::access_reports_preserve_identity_and_code_but_zero_reserved_fields`
+  checks both valid IDs and invalid-ID U echoes, dirty reserved input and exact
+  preserved Return Code in both families, three key profiles and both reflector
+  modes. `telemetry_known_lengths_mark_m_and_stop_later_values` checks valid
+  framing boundaries, M, later U, malformed Follow-Up zeroing and final signatures.
+- `tests/tlv_extension_wire_test.rs::truncated_follow_up_cannot_report_previous_state_as_a_valid_timestamp`
+  establishes real previous state before sending an unsigned truncated Follow-Up.
+  It verifies parser M and zero available fields in both families. The signed
+  malformed-list guard has separate unchanged-value coverage, including Access
+  Report, Follow-Up and Direct Measurement prefixes.
+- Skipped/integrity-failed telemetry retains all original values. Shared unit
+  tests cover normalization and optional framing, including pnet builds.
+  The stateless Follow-Up unit test previously left sender U set and never
+  populated its supposed prior state; it now clears flags and proves nonzero
+  state before checking zeroing. The typed Follow-Up regression also checks
+  that received Reserved bytes are ignored.
+
+Twenty-one missing references are resolved. The invalid Follow-Up zeroing claim
+(RFC8972-4.7-6) is now Partial: the malformed signed-list guard can retain an
+invalid Length-17 value unchanged despite a verified covered prefix. That
+copy/normalization precedence needs separate review before promotion. The
+inventory is **321 applicable, 257 with references, 64 missing**; five missing
+RFC 8972 references remain, all in CoS. The rollup is **471 clauses: 389
+Compliant, 29 Partial, two Gap, 48 N-A and three Excluded**. Strict CI remains advisory. Evidence is
+Linux software-loopback/shared-parser behavior, not physical synchronization,
+native-platform or pnet capture runtime certification. Reproduced failures are
+retained under `/tmp/t22b6-*` separately from passing runs.
+
+Final verification passes full default/all-features/pnet suites with
+**1,362/1,464/1,294** tests, respectively (13 privileged ignored in each ordinary
+run). The final wire targets pass 10 sender and 11 reflector tests; the signed
+copy cases also pass in the default profile. Both required MTU tests pass
+separately without a skip, and all 60 independent BER cases pass against the
+final all-features binary. All three Clippy profiles, fuzz manifest build check,
+104 Python tests, root/fuzz rustfmt, matrix counts, 1,176 source citations and
+441 documentation links pass. Strict checking fails only on the expected 64
+missing-reference rows; the CI inventory remains advisory. No remote CI,
+native/hardware pass or new fuzz campaign is claimed.
+
+```sh
+cargo test --locked --all-features --test sender_measurement_test --test tlv_extension_wire_test
+```
 
 ## Local validation for T22a
 

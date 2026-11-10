@@ -44,6 +44,13 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Validate Timestamp Information optional child framing before consuming
+  telemetry. Zero reserved fields in processed Access Reports and stateless
+  Follow-Up replies. Parser-marked truncated Follow-Up values zero available
+  sequence/timestamp fields even when sixteen bytes arrived. Preserve copied
+  signed error values during send-time telemetry refresh. Add independent
+  wire regressions and field-specific conformance evidence.
+
 - Remove released-port rebind assumptions from launcher lifecycle tests. Keep
   the occupied-port control bound, verify clean receiver shutdown explicitly,
   and check the original Linux socket identity rather than global endpoint

@@ -561,7 +561,12 @@ fn test_update_follow_up_telemetry_stateless_zeroes_seq_and_timestamp() {
     list.push(FollowUpTelemetryTlv::new().to_raw()).unwrap();
 
     // First populate as if stateful, then apply the stateless path.
+    list.clear_reflector_flags();
     list.update_follow_up_telemetry_tlvs(Some((42, 0xDEADBEEF)), TimestampMethod::SwLocal);
+    let populated = FollowUpTelemetryTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
+    assert_eq!(populated.sequence_number, 42);
+    assert_eq!(populated.follow_up_timestamp, 0xDEADBEEF);
+    list.non_hmac_tlvs_mut()[0].value[13..16].fill(0xa5);
     list.update_follow_up_telemetry_tlvs(None, TimestampMethod::SwLocal);
 
     let parsed = FollowUpTelemetryTlv::from_raw(&list.non_hmac_tlvs()[0]).unwrap();
@@ -573,6 +578,24 @@ fn test_update_follow_up_telemetry_stateless_zeroes_seq_and_timestamp() {
         parsed.follow_up_timestamp, 0,
         "timestamp must be zeroed in stateless mode"
     );
+    assert_eq!(&list.non_hmac_tlvs()[0].value[13..16], &[0; 3]);
+}
+
+#[test]
+fn test_access_report_reserved_fields_normalized_only_for_valid_ids() {
+    for id in [1, 2, 3] {
+        let value = vec![(id << 4) | 0x0f, 0xa6, 0xbe, 0xef];
+        let mut list = list_with_cleared(RawTlv::new(TlvType::AccessReport, value.clone()));
+        list.discard_invalid_access_report_tlvs();
+        let raw = &list.non_hmac_tlvs()[0];
+        if id == 3 {
+            assert!(raw.is_unrecognized());
+            assert_eq!(raw.value, value);
+        } else {
+            assert!(!raw.is_unrecognized());
+            assert_eq!(raw.value, [id << 4, 0xa6, 0, 0]);
+        }
+    }
 }
 
 #[test]

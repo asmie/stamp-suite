@@ -15,9 +15,9 @@ pub struct TlvHmacSummary {
     pub failed: u64,
 }
 
-/// Flags in parsed reflected TLVs. M includes truncation and known-type
-/// length errors detected locally, including nested Location errors or M,
-/// even when the peer omitted outer M.
+/// Flags in parsed reflected TLVs. M includes locally detected length/framing
+/// errors, including Location/Timestamp Info children and received Location
+/// child M, even when the peer omitted outer M.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct TlvFlagSummary {
     pub unrecognized: u64,
