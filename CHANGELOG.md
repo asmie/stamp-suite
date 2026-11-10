@@ -44,6 +44,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Qualify the original RFC 8972 CoS sixteen-bit Reserved claim for the selected
+  draft-02 EC1/RPE profile. Add independent CoS wire/marking, policy, burst,
+  signature and automatic ECT congestion-response evidence.
+
 - Validate Timestamp Information optional child framing before consuming
   telemetry. Zero reserved fields in processed Access Reports and stateless
   Follow-Up replies. Parser-marked truncated Follow-Up values zero available

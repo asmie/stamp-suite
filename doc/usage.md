@@ -379,6 +379,13 @@ continue after the main send loop until the reflector acknowledges the report
 or the retries run out. A silent peer can therefore extend a short run by up to
 15 seconds with the defaults.
 
+The CoS wire format uses draft-ietf-ippm-stamp-cos-ecn-02's EC1/RPE extension.
+It zeroes the remaining twelve Reserved bits. EC1/RPE occupy four bits of the
+original RFC 8972 sixteen-bit Reserved field, so the frozen RFC transmit-zero
+rule is scored Partial in the [conformance matrix](conformance/rfc8972.md#cos-format-profiles).
+The draft describes legacy peers ignoring these added bits. Peer support and
+the reported RPE still need to be checked before interpreting reverse ECN.
+
 **ECN response.** `--cos` with `--ecn 1` or `--ecn 2` turns on AIMD pacing. A
 CE-marked reply multiplies the send interval by `--ecn-backoff-factor`, up to
 `--ecn-max-delay` milliseconds. Each clean reply shortens it by

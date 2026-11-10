@@ -7,10 +7,12 @@
 use crate::tlv::core::{TlvError, TlvType, COS_TLV_VALUE_SIZE};
 use crate::tlv::traits::TypedTlv;
 
-/// Class of Service TLV (Type 4) for DSCP/ECN measurement per RFC 8972 §4.4
-/// as updated by draft-ietf-ippm-stamp-cos-ecn-02. EC1 and RPE occupy bits
-/// that RFC 8972 reserved, so the extension is backward compatible in both
-/// directions.
+/// Class of Service TLV (Type 4), using RFC 8972 §4.4 base fields and the
+/// EC1/RPE profile from draft-ietf-ippm-stamp-cos-ecn-02 (work in progress).
+/// Legacy decoders ignore the added fields in RFC-reserved bits. The extended
+/// profile can transmit nonzero EC1/RPE, so it does not satisfy the frozen
+/// RFC's original sixteen-bit transmit-zero rule; its remaining Reserved
+/// field is twelve bits.
 ///
 /// # Wire Format
 ///

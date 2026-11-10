@@ -444,6 +444,81 @@ fn sender_direct_measurement_counts_actual_probes_and_zeroes_peer_fields() {
         }
     }
 }
+#[test]
+fn sender_cos_fields_and_automatic_ect_response_reach_the_wire() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            for (include_cos, ecn) in [(false, 0u8), (true, 0), (true, 1), (true, 2), (true, 3)] {
+                let peer = UdpSocket::bind((ip, 0)).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let ecn_text = ecn.to_string();
+                let mut extra = vec!["--dscp", "46", "--ecn", &ecn_text];
+                if include_cos {
+                    extra.push("--cos");
+                }
+                if mode == 1 {
+                    extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
+                }
+                let auth = mode == 2;
+                let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
+                let mut request = [0; 2048];
+                let (length, source) = peer.recv_from(&mut request).unwrap();
+                let request = &request[..length];
+                let base = if auth { 112 } else { 44 };
+                if auth {
+                    assert_eq!(&request[96..112], &sign(&[&request[..96]]));
+                }
+                let mut pos = base;
+                let mut found = false;
+                while pos < request.len() {
+                    assert!(pos + 4 <= request.len());
+                    let size = u16::from_be_bytes([request[pos + 2], request[pos + 3]]) as usize;
+                    assert!(pos + 4 + size <= request.len());
+                    if request[pos + 1] == 4 {
+                        assert!(!found, "one originated CoS TLV");
+                        found = true;
+                        assert_eq!(&request[pos..pos + 4], &[0x80, 4, 0, 4]);
+                        assert_eq!(&request[pos + 4..pos + 4 + size], &[184, 0, ecn << 6, 0]);
+                    }
+                    if request[pos + 1] == 8 {
+                        assert_eq!(pos + 20, request.len());
+                        assert_eq!(
+                            &request[pos + 4..],
+                            &sign(&[&request[..4], &request[base..pos]])
+                        );
+                    }
+                    pos += 4 + size;
+                }
+                assert_eq!(found, include_cos);
+                // A valid independently signed forward-path CE report.
+                let mut response = reply_with_extensions(
+                    request,
+                    auth,
+                    &[0, 4, 0, 4, 184, 12, (ecn << 6) | 0x30, 0],
+                );
+                if mode == 1 {
+                    let digest = sign(&[&response[..4], &response[base..]]);
+                    response.extend_from_slice(&[0, 8, 0, 16]);
+                    response.extend_from_slice(&digest);
+                }
+                peer.send_to(&response, source).unwrap();
+                let stats = sender.finish();
+                assert_eq!(stats["packets_received"], 1);
+                let active = include_cos && matches!(ecn, 1 | 2);
+                assert_eq!(stats["congestion"].is_object(), active);
+                if active {
+                    assert_eq!(stats["congestion"]["ce_replies"], 1);
+                    assert_eq!(stats["congestion"]["backoffs_applied"], 1);
+                    assert!(
+                        stats["congestion"]["current_interval_ms"].as_f64().unwrap()
+                            > stats["congestion"]["base_interval_ms"].as_f64().unwrap()
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn peer(auth: bool) -> UdpSocket {
     let socket = UdpSocket::bind((if auth { "::1" } else { "127.0.0.1" }, 0)).unwrap();
     socket

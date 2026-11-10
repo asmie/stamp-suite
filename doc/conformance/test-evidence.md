@@ -105,7 +105,7 @@ rerun the checker after edits rather than treating the numbers as certification.
 | Reflected-header MTU rows 7.2-1, 3, 5 | The single-reply tests invoke actual transmission finalization, checking trimming, final signatures, unavailable budgets and EMSGSIZE refresh. The required namespace tests now also exercise sender route budgets, trimming/restoration and refusal. | Initially downgraded in T22a; restored after the T22b1 sender regression and fixes described below. Linux kernel-route evidence, not end-to-end PMTU discovery. |
 | Type 12 C signaling | Packet-processing and independent wire tests now exercise exact/fractional rate ceilings, volume, count-zero suppression, sender C clearing, incoming C ignoring and protected admission. | Exact timing and conservative first-request selection are Partial. Identity protection is qualified by the authenticated protected profile. See T22b3 below. |
 
-After the reviews below, 64 missing references remain across five
+After the reviews below, 56 missing references remain across three
 matrices. Prioritize the remaining authentication, C-flag and admission claims,
 then work through the rest. The full test-evidence goal and strict CI gate
 remain unfinished.
@@ -520,6 +520,62 @@ native/hardware pass or new fuzz campaign is claimed.
 
 ```sh
 cargo test --locked --all-features --test sender_measurement_test --test tlv_extension_wire_test
+```
+
+## CoS/ECN wire review (T22b7)
+
+Review against parent `64465ea` adds independent Linux packet/marking evidence
+for the selected draft-02 profile. The new reflector test runs seven policy
+cases in both families and open/keyed-open/authenticated modes: 42 profile
+combinations, each with three burst replies and an interleaved ordinary reply.
+It sets ingress IP TOS/Traffic Class independently of CoS value fields, then
+checks observed DSCP2/EC2, actual reply markings, global/scoped DSCP admission,
+independent ECN refusal, RPD/RPE, Reserved bits and final signatures on every
+copy. Distinct IPv4 endpoints exercise destination-scoped policy. The ordinary
+reply keeps its own marking, with no burst CoS leakage.
+
+`tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy`
+includes all ECN codepoints and a genuine legacy zero-reserved CoS request.
+`tests/sender_measurement_test.rs::sender_cos_fields_and_automatic_ect_response_reach_the_wire`
+checks actual Type/Length/RPD/RPE/Reserved origination and automatic congestion
+controller presence for CoS ECT0/ECT1, plus a backoff on a correctly signed
+forward CE report. Default/no-CoS and non-ECT CoS inputs are negative controls.
+This demonstrates enablement/response capability. The existing controller
+consistency, unsupported reverse-metadata and capability-diagnostic Partial
+claims remain; injected socket failures are distinct from actual Linux wire
+marking and admission rejection.
+
+Seven missing references gain tests. One further missing-reference row,
+RFC8972-4.4-5, is now Partial: draft-02 allocates EC1/RPE inside four of the
+original sixteen Reserved bits, and the selected profile can emit nonzero
+values there. Its twelve remaining Reserved bits are zeroed. The draft is
+work in progress and identifies RFC 8972 as an update only if approved; the
+frozen RFC's literal sixteen-bit rule is scored separately. No encoding,
+runtime default, controller or other production behavior changes in this chunk.
+
+The inventory is **320 applicable, 264 with references, 56 missing**. No
+normative Compliant row in the RFC 8972 or CoS/ECN matrices now lacks a test
+reference. The remaining missing rows are RFC 8762 (21), RFC 9503 (five), and
+the reflected-header draft (30). The RFC 8972 matrix is **141 Compliant,
+three Partial, seven N-A**; the full rollup is **471 clauses: 388 Compliant,
+30 Partial, two Gap, 48 N-A and three Excluded**. Strict CI stays advisory.
+These are software-loopback/shared-sender checks, not native-platform,
+hardware, downstream remarking or pnet capture runtime certification.
+
+Final local verification passes full default/all-features/pnet suites with
+**1,364/1,466/1,295** tests, respectively (13 privileged ignored in each ordinary
+run). The final focused run passes the CoS wire test and all 11 sender tests;
+the wire test covers 42 policy/family/key combinations and 168 replies, and
+the new sender case covers 30 combinations. All three Clippy profiles,
+104 Python tests, rustfmt, matrix counts, 1,201 source citations and 442
+documentation links pass. Strict checking fails only on the expected 56
+missing-reference rows; CI stays advisory. Logs use `/tmp/t22b7-*`. Remote CI
+and native/hardware behavior remain unclaimed. Runtime and protocol bytes did
+not change, so verification targets the new evidence rather than rerunning
+unchanged privileged/wire-oracle/fuzz campaigns.
+
+```sh
+cargo test --locked --all-features --test cos_ecn_wire_test --test sender_measurement_test
 ```
 
 ## Local validation for T22a
