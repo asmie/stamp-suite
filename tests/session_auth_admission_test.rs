@@ -44,6 +44,10 @@ impl Reflector {
                     "--max-sessions".into(),
                     "1".into(),
                     "--drop-replayed".into(),
+                    // Admission state must not change later through unrelated
+                    // kernel TX timestamp corrections.
+                    "--hwtstamp".into(),
+                    "off".into(),
                 ];
                 if stateful {
                     args.push("--stateful-reflector".into());
@@ -107,13 +111,39 @@ impl Reflector {
     }
 
     async fn exchange(&self, socket: &UdpSocket, data: &[u8]) -> u32 {
+        let completed = self
+            .shared
+            .counters
+            .packets_reflected
+            .load(Ordering::Relaxed)
+            + 1;
         socket.send_to(data, self.destination).await.unwrap();
         let mut response = [0; 512];
         timeout(Duration::from_secs(2), socket.recv_from(&mut response))
             .await
             .unwrap()
             .unwrap();
+        self.wait_for_send_completion(completed).await;
         u32::from_be_bytes(response[..4].try_into().unwrap())
+    }
+
+    async fn wait_for_send_completion(&self, expected: u64) {
+        // Peer receipt can precede the receiver's post-send session updates.
+        // This counter advances after both transmit count and reflection state.
+        timeout(Duration::from_secs(5), async {
+            while self
+                .shared
+                .counters
+                .packets_reflected
+                .load(Ordering::Relaxed)
+                < expected
+            {
+                self.server.assert_running();
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("receiver did not finish send bookkeeping");
     }
 }
 
@@ -152,6 +182,7 @@ async fn stateless_authentication_protects_counters_but_preserves_tlv_i_flag_rep
                 .unwrap();
             assert_eq!(u32::from_be_bytes(response[..4].try_into().unwrap()), 10);
             assert_ne!(response[112] & 0x20, 0, "invalid TLV HMAC must set I");
+            reflector.wait_for_send_completion(1).await;
             let before = reflector
                 .shared
                 .session_manager
@@ -212,6 +243,12 @@ async fn invalid_hmac_cannot_take_the_only_slot_or_refresh_existing_state() {
                     .get_session(before.key)
                     .unwrap();
                 let reflection = session.get_last_reflection();
+                assert_eq!(before.packets_transmitted, 1);
+                assert_eq!(reflection.0, 0);
+                assert_ne!(
+                    reflection.1, 0,
+                    "baseline must include the valid send's timestamp"
+                );
                 // The same sequence must not even reach replay classification until
                 // authentication succeeds. Nor may a forged high sequence poison it.
                 for seq in [100, 900] {

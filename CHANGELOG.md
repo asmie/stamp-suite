@@ -44,6 +44,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Repair CI test portability on macOS and Windows: use the Unix `libc`
+  re-export for child reaping and expect source pinning only on Linux. Wait
+  for completed reflector bookkeeping before authentication-state snapshots,
+  with asynchronous TX timestamp correction disabled in that fixture.
+
 - Qualify the original RFC 8972 CoS sixteen-bit Reserved claim for the selected
   draft-02 EC1/RPE profile. Add independent CoS wire/marking, policy, burst,
   signature and automatic ECT congestion-response evidence.

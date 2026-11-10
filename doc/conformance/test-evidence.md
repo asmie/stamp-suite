@@ -578,6 +578,11 @@ unchanged privileged/wire-oracle/fuzz campaigns.
 cargo test --locked --all-features --test cos_ecn_wire_test --test sender_measurement_test
 ```
 
+The subsequent [CI follow-up](../testing-startup.md#ci-follow-up-10-november-2026)
+corrects native-platform test assumptions and an admission snapshot race
+observed on `64465ea`. It does not change this evidence inventory or claim
+native runtime verification for the uncommitted corrections.
+
 ## Local validation for T22a
 
 The all-features focused runs exercise 90 HMAC tests (including the new known

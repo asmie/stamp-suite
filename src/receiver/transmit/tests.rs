@@ -1099,6 +1099,14 @@ fn unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures() {
             transmission.response.data[base + 6] = 0x70; // EC1=1, RPE=11.
             let source = transmission.source;
             let pinned = transmission.response.reply_source;
+            assert!(pinned.is_some(), "exercise a requested source address");
+            // Per-datagram source pinning is a Linux capability. Windows and
+            // macOS retain kernel source selection while preserving routing.
+            let expected_source = if cfg!(target_os = "linux") {
+                pinned
+            } else {
+                None
+            };
             let counters = ReflectorCounters::new();
             let mut attempts = 0;
             for seq in 0..3 {
@@ -1109,7 +1117,7 @@ fn unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures() {
                         |data, dst, options| {
                             attempts += 1;
                             assert_eq!(dst, source);
-                            assert_eq!(options.source, pinned);
+                            assert_eq!(options.source, expected_source);
                             assert!(options.dont_fragment);
                             if options.apply_tos {
                                 assert_eq!(options.tos, if attempts % 3 == 1 { 185 } else { 40 });

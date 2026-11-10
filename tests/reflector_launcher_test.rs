@@ -7,6 +7,7 @@ mod receiver_fixture;
 mod reflector;
 
 use clap::Parser;
+use nix::libc;
 use reflector::{Reflector, STDERR_LIMIT};
 use stamp_suite::{configuration::Configuration, receiver};
 use std::{

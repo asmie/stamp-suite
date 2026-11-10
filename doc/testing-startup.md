@@ -162,6 +162,62 @@ each with `--test-threads=8`, requires exactly nine passing/unignored tests per
 round, and stops on the first failure. Do not rebuild/change profiles while
 the stress executable is running.
 
+## CI follow-up (10 November 2026)
+
+[CI run 42791508079](https://github.com/asmie/stamp-suite/actions/runs/42791508079)
+failed on `64465ea12eea343fdd0bb4e898b5b0537669e7f0`, before the local
+CoS/ECN evidence commit `06c4848`. Five failed jobs have three test defects:
+
+| Failed jobs | Cause | Correction |
+| --- | --- | --- |
+| Native macOS, default and all-features | Launcher tests reference `libc`, but the direct dev dependency is Linux-only. | Import the existing `nix::libc` re-export on Unix. |
+| Windows runtime core | The ECN fallback test expects source pinning on Windows, where the transport uses kernel source selection. | Require the requested source on Linux and `None` elsewhere; retain destination, DF, marking, burst-copy and signature assertions. |
+| Ubuntu beta and default-feature tests | Peer receipt can precede post-send session bookkeeping, allowing the authentication test to snapshot an incomplete valid reflection. | Wait for the reflected-packet counter, which advances after the session updates, before taking the baseline. Disable unrelated asynchronous kernel TX timestamp correction in this admission fixture. |
+
+The missing macOS test-artifact errors follow the compile failure: the test
+step never ran. Existing artifact and test gates remain unchanged.
+[Conformance evidence passed](https://github.com/asmie/stamp-suite/actions/runs/42791508083)
+on the same commit. These observations do not establish CI status for the
+uncommitted corrections.
+
+For a causal Linux reproduction, a temporary `LD_PRELOAD` interposer calls the
+real `sendmsg`, preserves its result and errno, then delays return by 50 ms
+after successful delivery. This gives the peer time to receive a valid reply
+before the receiver updates its state. The original invalid-HMAC test fails
+with the same zero-baseline/nonzero-final timestamp assertion as CI. The
+corrected test passes under the identical delay. It now requires one recorded
+transmission and a nonzero baseline reflection timestamp before sending the
+invalid requests; authentication rejection assertions remain intact.
+
+All four admission tests then pass 20 rounds in each of the all-features and
+default profiles under that delay, with four test workers: **160/160**, no
+ignored tests and no failed rounds retried. Both address families remain
+covered. The interposer and stress driver are temporary diagnostics, not
+production dependencies. Logs use `/tmp/ci-fix-*`.
+
+An isolated macOS-target check of the exact launcher test source reproduces
+the three unresolved-`libc` errors before the import and compiles after it.
+The temporary Cargo harness uses the real default-feature library as a path
+dependency and the launcher's direct dependencies, avoiding unrelated
+`alloca`/`ring` cross-C builds. Its dummy binary only supplies the compile-time
+executable path. This checks macOS source compilation, not native execution
+or the complete all-features graph. Native macOS and Windows jobs must run
+after the manual commit; no remote pass is claimed.
+
+Final local checks pass full default/all-features/pnet suites with
+**1,364/1,466/1,295** tests, respectively (13 privileged tests ignored in each
+ordinary run). The corrected ECN fallback case passes in all three profiles.
+All three Clippy profiles, rustfmt, 104 Python tests, release metadata, matrix
+counts, 1,201 source citations and documentation checks pass. The link checker
+checks 377 local links and classifies 68 external links (445 total); external
+destinations are not fetched. Strict evidence checking fails only on the
+expected 56 missing references.
+
+No application code, wire format, dependency graph or CI gate changes.
+Conformance status and the **320 applicable / 264 referenced / 56 missing**
+test-evidence inventory stay unchanged. Strict evidence enforcement remains
+pending.
+
 ## Validation and reproduction
 
 Original T6 snapshot: local suites passed 1,315 default, 1,416 all-features and
