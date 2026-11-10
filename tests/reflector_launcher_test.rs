@@ -36,6 +36,87 @@ fn config(address: SocketAddr) -> Configuration {
     ])
 }
 
+/// Observe the kernel socket identity, rather than a reusable descriptor number
+/// or endpoint. This does not retain a duplicate socket or extend its lifetime.
+#[cfg(target_os = "linux")]
+struct SocketOwnership(std::path::PathBuf);
+
+#[cfg(target_os = "linux")]
+impl SocketOwnership {
+    fn observe(socket: &UdpSocket) -> Self {
+        use std::os::fd::AsRawFd;
+        let target = std::fs::read_link(format!("/proc/self/fd/{}", socket.as_raw_fd()))
+            .expect("read original socket identity");
+        assert!(target.to_string_lossy().starts_with("socket:["));
+        Self(target)
+    }
+
+    fn is_open_in_this_process(&self) -> bool {
+        for entry in std::fs::read_dir("/proc/self/fd").expect("list own descriptors") {
+            let path = entry.expect("read descriptor entry").path();
+            match std::fs::read_link(path) {
+                Ok(target) if target == self.0 => return true,
+                Ok(_) => (),
+                // Other test threads may close unrelated descriptors while
+                // the directory is enumerated. All other errors are failures.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => panic!("read descriptor identity: {error}"),
+            }
+        }
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn teardown_observer_distinguishes_retained_socket_from_another_endpoint_owner() {
+    use socket2::{Domain, Protocol, Socket, Type};
+    for ip in ["127.0.0.1", "::1"] {
+        let address = SocketAddr::new(ip.parse().unwrap(), 0);
+        let socket = Socket::new(
+            Domain::for_address(address),
+            Type::DGRAM,
+            Some(Protocol::UDP),
+        )
+        .unwrap();
+        socket.set_reuse_address(true).unwrap();
+        socket.bind(&address.into()).unwrap();
+        let socket: UdpSocket = socket.into();
+        let address = socket.local_addr().unwrap();
+        let ownership = SocketOwnership::observe(&socket);
+        let retained = socket.try_clone().unwrap();
+        let server = receiver_fixture::Receiver::start_with_socket(socket, config);
+
+        // Establish a different owner before teardown, leaving no unreserved
+        // bind window. Reuse is enabled only in this controlled test fixture.
+        let competitor = Socket::new(
+            Domain::for_address(address),
+            Type::DGRAM,
+            Some(Protocol::UDP),
+        )
+        .unwrap();
+        competitor.set_reuse_address(true).unwrap();
+        competitor.bind(&address.into()).unwrap();
+        server.stop().expect("receiver must stop cleanly");
+        assert!(
+            ownership.is_open_in_this_process(),
+            "a retained duplicate must be detected"
+        );
+        drop(retained);
+        assert!(
+            !ownership.is_open_in_this_process(),
+            "the original socket must now be closed"
+        );
+
+        assert_eq!(
+            UdpSocket::bind(address).unwrap_err().kind(),
+            std::io::ErrorKind::AddrInUse,
+            "endpoint occupancy must not be mistaken for original socket ownership"
+        );
+        drop(competitor);
+    }
+}
+
 fn assert_reaped(error: &str) {
     let pid: i32 = error
         .split("pid=")
@@ -60,14 +141,13 @@ fn assert_reaped(error: &str) {
 }
 
 #[test]
-fn released_reservation_can_be_taken_but_port_zero_startup_is_unaffected() {
+fn occupied_port_rejects_fixed_bind_but_port_zero_startup_is_unaffected() {
     for ip in ["127.0.0.1", "::1"] {
-        let reserve = UdpSocket::bind((ip, 0)).unwrap();
-        let released = reserve.local_addr().unwrap();
-        drop(reserve);
-        // Hold the exact port during the former reserve/drop/spawn gap.
-        // This is deterministic contention, not reliance on random reuse.
-        let competitor = UdpSocket::bind(released).unwrap();
+        // Retain the occupied endpoint throughout the control. Selecting and
+        // rebinding a released ephemeral port would race unrelated allocators
+        // before the fixed-port reflector even had a chance to start.
+        let competitor = UdpSocket::bind((ip, 0)).unwrap();
+        let occupied = competitor.local_addr().unwrap();
         let mut legacy = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
         legacy
             .args([
@@ -75,7 +155,7 @@ fn released_reservation_can_be_taken_but_port_zero_startup_is_unaffected() {
                 "--local-addr",
                 ip,
                 "--local-port",
-                &released.port().to_string(),
+                &occupied.port().to_string(),
                 "--hwtstamp",
                 "off",
             ])
@@ -109,8 +189,10 @@ fn released_reservation_can_be_taken_but_port_zero_startup_is_unaffected() {
 #[test]
 fn retained_socket_excludes_other_binders_and_is_released_on_teardown() {
     for ip in ["127.0.0.1", "::1"] {
-        let server =
-            receiver_fixture::Receiver::start(SocketAddr::new(ip.parse().unwrap(), 0), config);
+        let bound = UdpSocket::bind((ip, 0)).unwrap();
+        #[cfg(target_os = "linux")]
+        let ownership = SocketOwnership::observe(&bound);
+        let server = receiver_fixture::Receiver::start_with_socket(bound, config);
         let address = server.address;
         assert!(UdpSocket::bind(address).is_err());
         let socket = UdpSocket::bind((ip, 0)).unwrap();
@@ -122,8 +204,28 @@ fn retained_socket_excludes_other_binders_and_is_released_on_teardown() {
         socket.recv_from(&mut response).unwrap();
         server.assert_running();
         assert_eq!(&response[..4], &42u32.to_be_bytes());
-        drop(server);
-        UdpSocket::bind(address).expect("receiver teardown must release its port");
+        #[cfg(target_os = "linux")]
+        assert!(ownership.is_open_in_this_process());
+        server.stop().expect("receiver must exit cleanly");
+        #[cfg(target_os = "linux")]
+        assert!(
+            !ownership.is_open_in_this_process(),
+            "receiver teardown must close all original socket descriptors"
+        );
+    }
+}
+
+#[test]
+fn explicit_receiver_stop_reports_startup_failure() {
+    for ip in ["127.0.0.1", "::1"] {
+        let socket = UdpSocket::bind((ip, 0)).unwrap();
+        let peer = UdpSocket::bind((ip, 0)).unwrap();
+        socket.connect(peer.local_addr().unwrap()).unwrap();
+        let server = receiver_fixture::Receiver::start_with_socket(socket, config);
+        let error = server
+            .stop()
+            .expect_err("connected receiver socket must fail startup");
+        assert!(error.contains("unconnected and match"), "{error}");
     }
 }
 

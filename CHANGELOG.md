@@ -44,6 +44,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Remove released-port rebind assumptions from launcher lifecycle tests. Keep
+  the occupied-port control bound, verify clean receiver shutdown explicitly,
+  and check the original Linux socket identity rather than global endpoint
+  availability. Add duplicate-ownership and startup-error controls.
+
 - Validate the complete nested Location TLV structure before using extension
   values. Mark malformed Locations and identifiable children, stop later
   outer TLVs, and honor received child M on the sender while ignoring child I.

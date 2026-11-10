@@ -31,11 +31,12 @@ appears. Worker bounding is a test resource policy, not a claimed causal fix.
 
 Temporary local records are `/tmp/t6-startup-probe.json`,
 `/tmp/t6-startup-probe.log` and `/tmp/t6-repeat.json`; these are not durable CI
-artifacts. The deterministic reproducer is retained in
-[`reflector_launcher_test.rs`](../tests/reflector_launcher_test.rs): it takes the
-released port before starting the old-style child, verifies the bind error and
+artifacts. The control in
+[`reflector_launcher_test.rs`](../tests/reflector_launcher_test.rs) now holds the
+competing endpoint continuously, verifies a fixed-port child's bind error and
 reaped status, then starts a port-zero reflector while the competing socket
 is still held. A request/reply verifies that the new endpoint actually works.
+The follow-up below removes the control's own reserve/drop/rebind gap.
 
 ## Shared lifecycle
 
@@ -81,9 +82,90 @@ Other fixtures needing a warmup send one packet after obtaining the endpoint;
 no automatic startup send/restart loop hides failure. The reply-queue fixture
 still captures its JSON shutdown summary on stdout.
 
+## Teardown ownership follow-up (10 November 2026)
+
+Review against `59c3d94` follows the T22b5 all-features failure at
+`retained_socket_excludes_other_binders_and_is_released_on_teardown`: after
+dropping the receiver, the test tried to bind its just-released ephemeral port
+and received AddrInUse. That assertion confuses the receiver retaining its
+socket with another owner making the endpoint unavailable.
+
+The new Linux control
+`tests/reflector_launcher_test.rs::teardown_observer_distinguishes_retained_socket_from_another_endpoint_owner`
+checks both cases independently, in IPv4 and IPv6. A deliberately retained
+duplicate remains detectable after the receiver has stopped. Dropping that
+duplicate closes the original socket, while a different socket still holds
+the same endpoint. The old rebind assertion fails in this state even though
+the original socket is closed; `/tmp/t6b-before.log` records that red check.
+Both control sockets enable reuse before binding, so establishing the other
+owner needs no unreserved bind window. This is test setup, not a production
+socket-option change.
+
+The observer records the original socket's inode link and checks all descriptors
+in the test process after shutdown. Linux documents the socket identity format
+in [proc_pid_fd(5)](https://man7.org/linux/man-pages/man5/proc_pid_fd.5.html).
+It retains no duplicate itself, distinguishes another socket at the same
+endpoint, and detects an original duplicate under any descriptor number.
+Unrelated descriptors can close during enumeration; only those NotFound races
+are ignored. Other observation errors fail the test. This check concerns this
+process's ownership, not global port availability or descriptors in other
+processes.
+
+The first stress run after changing the teardown assertion failed on round 2
+in the separate `released_reservation_can_be_taken_but_port_zero_startup_is_unaffected`
+control. Its own reserve/drop/rebind sequence hit AddrInUse before a receiver
+was launched. `/tmp/t6b-stress-before.log` preserves that failure without retry.
+The control now keeps the competing socket continuously bound, checks the
+fixed-port reflector's bind failure and reaped child, and verifies that a
+port-zero reflector serves a real request while the occupied endpoint remains
+held. Neither test assumes that a released endpoint stays free.
+
+`tests/common/receiver.rs` now accepts an owned socket for inspection and offers
+explicit `stop()`: cancel, drain and join, returning the worker's result or
+panic error. The main lifecycle test checks this result before asserting Linux
+socket closure. `tests/reflector_launcher_test.rs::explicit_receiver_stop_reports_startup_failure`
+verifies that a connected socket's startup failure reaches the caller. Drop
+remains best-effort cleanup, including during unwinding.
+
+There are nine launcher tests on Linux and eight on other Unix nix profiles.
+Both families retain live request/reply, exclusive-bind and clean-exit checks;
+the independent kernel identity/duplicate checks require Linux procfs. This
+removes two unsafe rebind assumptions, but does not identify the uncaptured
+competing owner in the original T22b5 failure. No application code, CLI defaults,
+production socket policy, worker limits or CI gates change.
+
+Final T6b checks pass all 18 targeted shared-fixture/lifecycle tests, then
+20 consecutive all-features launcher rounds with eight workers (180/180 tests,
+no failed rounds retried). Full default/all-features/pnet suites pass
+**1,354/1,456/1,291** tests, respectively, with 13 privileged tests ignored in
+each ordinary run. All three Clippy profiles, rustfmt, 104 Python tests,
+matrix counts, 1,144 source citations and 443 documentation links pass.
+The normative test-reference inventory stays **322 applicable, 237 with
+references, 85 missing**; strict CI enforcement remains pending.
+
+The optional macOS cross-test check could not finish: C dependency builds for
+`alloca` and `ring` invoke the host `cc`, which rejects Darwin options such as
+`-arch` and `-mmacosx-version-min`. Run the existing native macOS CI job with
+its native compiler/SDK to verify that profile. No native macOS or remote CI
+pass is claimed. Application/fuzz code and wire formats did not change, so no
+new privileged, wire-oracle or fuzz run was needed for this fixture-only chunk.
+Logs are `/tmp/t6b-*`; the failed controls remain recorded separately from
+the final passing runs.
+
+```sh
+cargo test --locked --all-features --test reflector_launcher_test --test session_identity_test --test keyset_fallback_test --test session_auth_admission_test
+cargo test --locked --all-features --test reflector_launcher_test --no-run --message-format=json > /tmp/t6b-launcher-artifacts.json
+```
+
+Stress uses that one fixed all-features executable for 20 sequential rounds,
+each with `--test-threads=8`, requires exactly nine passing/unignored tests per
+round, and stops on the first failure. Do not rebuild/change profiles while
+the stress executable is running.
+
 ## Validation and reproduction
 
-Local suites passed 1,315 default, 1,416 all-features and 1,264 pnet tests;
+Original T6 snapshot: local suites passed 1,315 default, 1,416 all-features and
+1,264 pnet tests;
 12/12/13 privileged tests remained ignored. All three Clippy profiles passed
 with warnings denied. Rust 1.87 checked all-features/all-targets; Rustdoc,
 rustfmt, 81 Python tests, matrix counts and 1,019 citations passed. The final

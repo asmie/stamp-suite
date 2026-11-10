@@ -83,7 +83,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `session_capacity_test.rs` | Session cap rejection keeps sequence state; with `control`, drain and resume, runtime caps, expiry and drop counters. | Linux, nix |
 | `session_identity_test.rs` | Session identity and static admission on real sockets: SSIDs, Micro-session IDs, source ports and wildcard-bind destinations. | Unix, nix |
 | `pending_probe_limit_test.rs` | Independent sender peers: bounded retention, silent loss, late/duplicate replies, cancellation, Access Report retries and per-target budgets; IPv4/IPv6 and open/authenticated modes. | always; multi-target case Linux only |
-| `reflector_launcher_test.rs` | Deterministic port contention, kernel-selected ports, retained socket ownership, startup stderr/status bounds, timeout cleanup and child reaping. | Unix, nix |
+| `reflector_launcher_test.rs` | Continuously held port contention, kernel-selected ports, clean receiver exit, startup stderr/status bounds, timeout cleanup and child reaping. Linux also checks original socket closure and retained duplicates independently of endpoint occupancy. | Unix, nix; kernel socket-identity checks on Linux only |
 | `session_ssid_validation_test.rs` | Sender SSID checks and zero-SSID policies against an independent peer; IPv4/IPv6, open/authenticated. | always |
 | `snmp_lifecycle_test.rs` | CLI exits after finite sends, startup failures, signals and silent initial/reconnect handshakes. | Unix, `snmp`; reflector needs nix |
 | `startup_failure_test.rs` | Startup failures (bind, key file, missing key, bad BER pattern, missing interface) return errors; total loss and shutdown do not. | always; some cases Linux only |

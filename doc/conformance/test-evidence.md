@@ -419,8 +419,8 @@ The first full all-features run failed once at the launcher's
 `retained_socket_excludes_other_binders_and_is_released_on_teardown` assertion,
 with AddrInUse (OS 98) on immediate rebind. A full rerun passed, and 50 isolated
 IPv4/IPv6 rounds of that test also passed. A new ephemeral allocation racing
-the rebind is possible, but no competing owner was captured; the cause remains
-unconfirmed and requires a separate teardown-test investigation. The failed
+the rebind was possible, but no competing owner was captured; that left the
+cause unconfirmed and prompted the separate T6b investigation below. The failed
 run is retained as `/tmp/t22b5-all-features.log`; it is not counted as a pass.
 
 Final local verification passes full default/all-features/pnet suites with
@@ -437,6 +437,14 @@ on the expected 85 missing-reference rows; CI stays advisory. Reports/logs use
 ```sh
 cargo test --locked --all-features --test sender_measurement_test --test tlv_extension_wire_test
 ```
+
+The later [T6b teardown review](../testing-startup.md#teardown-ownership-follow-up-10-november-2026)
+addresses the launcher failure recorded under T22b5. A controlled case proves
+that the original socket can be closed while another socket holds the endpoint;
+stress testing also exposed a second reserve/drop/rebind gap in the launcher's
+contention control. The tests now inspect original Linux socket ownership and
+keep the contention endpoint held throughout. This changes test lifecycle
+evidence, not the normative inventory or the historical T22b5 run record.
 
 ## Local validation for T22a
 

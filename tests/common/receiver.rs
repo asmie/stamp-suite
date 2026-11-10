@@ -21,6 +21,13 @@ pub struct Receiver {
 impl Receiver {
     pub fn start(bind: SocketAddr, configure: impl FnOnce(SocketAddr) -> Configuration) -> Self {
         let socket = UdpSocket::bind(bind).expect("bind fixture receiver");
+        Self::start_with_socket(socket, configure)
+    }
+
+    pub fn start_with_socket(
+        socket: UdpSocket,
+        configure: impl FnOnce(SocketAddr) -> Configuration,
+    ) -> Self {
         let address = socket.local_addr().unwrap();
         let conf = configure(address);
         conf.validate().expect("validate fixture receiver");
@@ -56,13 +63,28 @@ impl Receiver {
             panic!("fixture receiver exited: {:?}", task.join());
         }
     }
+
+    /// Cancel, drain and join, reporting a startup/runtime/teardown failure.
+    /// The thread's runtime and receiver socket are dropped before join returns.
+    pub fn stop(mut self) -> Result<(), String> {
+        self.stop_inner()
+    }
+
+    fn stop_inner(&mut self) -> Result<(), String> {
+        self.shared.shutdown.cancel();
+        match self.task.get_mut().take() {
+            Some(task) => task
+                .join()
+                .map_err(|_| "fixture receiver thread panicked".to_string())?,
+            None => Ok(()),
+        }
+    }
 }
 
 impl Drop for Receiver {
     fn drop(&mut self) {
-        self.shared.shutdown.cancel();
-        if let Some(task) = self.task.get_mut().take() {
-            let _ = task.join();
-        }
+        // Best-effort fallback during unwinding. Tests that assert clean exit
+        // call stop explicitly so errors cannot be hidden by Drop.
+        let _ = self.stop_inner();
     }
 }
