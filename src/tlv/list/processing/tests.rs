@@ -16,6 +16,92 @@ use crate::tlv::{
 };
 
 #[test]
+fn processed_return_path_children_rederive_flags_and_ignore_other_parameters() {
+    let value = vec![
+        0xff, 1, 0, 4, 0xff, 0xff, 0xff, 0xff, // Used Control Code: bit 0 only.
+        0xff, 2, 0, 1, 0xaa, // Ignored address has an invalid parameter length.
+        0xff, 200, 0, 2, 0x12, 0x34, // Unknown child, no top-level rules.
+    ];
+    let mut list = list_with_cleared(RawTlv::new(TlvType::ReturnPath, value));
+    assert_eq!(
+        list.process_return_path(862, false, Some(7)),
+        ReturnPathAction::SameLink(7)
+    );
+    assert_eq!(
+        list.non_hmac_tlvs()[0].value,
+        [0, 1, 0, 4, 0, 0, 0, 1, 0x80, 2, 0, 1, 0xaa, 0x80, 200, 0, 2, 0x12, 0x34,]
+    );
+}
+
+#[test]
+fn malformed_return_path_stops_later_values_before_early_child_mutation() {
+    let original = vec![0xff, 1, 0, 4, 0xff, 0xff, 0xff, 0xff, 0xff, 2, 0, 16, 0xaa];
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::ReturnPath, original.clone()))
+        .unwrap();
+    list.push(RawTlv::new(
+        TlvType::ClassOfService,
+        vec![46, 1, 0xaa, 0xbb],
+    ))
+    .unwrap();
+    let bytes = list.to_bytes();
+    assert!(list.apply_reflector_flags(None, &[0; 4], &bytes));
+    let first = &list.non_hmac_tlvs()[0];
+    assert!(first.is_malformed() && first.is_unrecognized());
+    assert_eq!(&first.value[..8], &original[..8]);
+    assert_eq!(first.value[8], 0x40);
+    assert_eq!(&first.value[9..], &original[9..]);
+    assert!(list.non_hmac_tlvs()[1].is_unrecognized());
+    assert_eq!(
+        list.process_return_path(862, false, Some(7)),
+        ReturnPathAction::Normal
+    );
+    assert_eq!(list.get_cos_request(), None);
+}
+
+#[test]
+fn return_path_integrity_and_skipped_copies_keep_all_child_bytes() {
+    let original = vec![0xff, 1, 0, 4, 0xff, 0xff, 0xff, 0xff];
+    let key = crate::crypto::HmacKey::new(vec![0xab; 16]).unwrap();
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::ReturnPath, original.clone()))
+        .unwrap();
+    list.set_hmac(&key, &[0; 4]);
+    let mut bytes = list.to_bytes();
+    *bytes.last_mut().unwrap() ^= 1;
+    let (mut list, _) = TlvList::parse_lenient(&bytes);
+    assert!(!list.apply_reflector_flags(Some(&key), &[0; 4], &bytes));
+    assert_eq!(list.non_hmac_tlvs()[0].value, original);
+    assert_eq!(
+        list.process_return_path(862, true, Some(7)),
+        ReturnPathAction::Normal
+    );
+    assert_eq!(list.non_hmac_tlvs()[0].value, original);
+    assert_eq!(&list.hmac_tlv().unwrap().value, &bytes[bytes.len() - 16..]);
+
+    let mut list = TlvList::new();
+    list.push(RawTlv::new(TlvType::ClassOfService, vec![0]))
+        .unwrap();
+    list.push(RawTlv::new(TlvType::ReturnPath, original.clone()))
+        .unwrap();
+    let bytes = list.to_bytes();
+    assert!(list.apply_reflector_flags(None, &[0; 4], &bytes));
+    assert_eq!(
+        list.process_return_path(862, true, Some(7)),
+        ReturnPathAction::Normal
+    );
+    assert_eq!(list.non_hmac_tlvs()[1].value, original);
+
+    // A parser-marked outer error after another malformed TLV is still a
+    // skipped copy; it must not trigger a nested-header rewrite.
+    let bytes = [0x80, 4, 0, 1, 0xff, 0x80, 10, 0, 16, 0xff, 1, 0, 4, 0xff];
+    let (mut list, _) = TlvList::parse_lenient(&bytes);
+    let original = list.non_hmac_tlvs()[1].value.clone();
+    assert!(list.apply_reflector_flags(None, &[0; 4], &bytes));
+    assert_eq!(list.non_hmac_tlvs()[1].value, original);
+}
+
+#[test]
 fn return_path_first_segment_owner_includes_empty_and_unsupported_lists() {
     let mut valid = vec![0x80, 4, 0, 16];
     valid.extend_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
@@ -31,7 +117,7 @@ fn return_path_first_segment_owner_includes_empty_and_unsupported_lists() {
         ),
         (
             [vec![0x80, 3, 0, 0], valid.clone()].concat(),
-            ReturnPathAction::UnsupportedSr,
+            ReturnPathAction::Normal,
             true,
         ),
         (

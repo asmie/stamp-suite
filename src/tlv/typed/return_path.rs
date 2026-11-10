@@ -4,6 +4,25 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::tlv::core::{RawTlv, TlvError, TlvType, RETURN_PATH_CONTROL_CODE_SIZE, TLV_HEADER_SIZE};
 use crate::tlv::traits::TypedTlv;
+use crate::tlv::TlvSpan;
+
+#[derive(Default)]
+struct SelectedChildren {
+    control: Option<TlvSpan>,
+    address: Option<TlvSpan>,
+    segments: Option<TlvSpan>,
+}
+
+impl SelectedChildren {
+    fn selected(&self, offset: usize) -> bool {
+        if let Some(control) = self.control {
+            control.start == offset
+        } else {
+            self.address.is_some_and(|span| span.start == offset)
+                || self.segments.is_some_and(|span| span.start == offset)
+        }
+    }
+}
 
 /// Return Path sub-TLV type identifiers per RFC 9503 §4.
 ///
@@ -59,6 +78,91 @@ pub struct ReturnPathTlv {
 }
 
 impl ReturnPathTlv {
+    // Framing is checked for the entire value before routing. A Control Code
+    // overrides the other parameters; otherwise only the first address/list
+    // owns that parameter. Ignored parameters need not have usable lengths.
+    fn inspect(value: &[u8], check_m: bool) -> Result<SelectedChildren, usize> {
+        if value.len() < TLV_HEADER_SIZE {
+            return Err(0);
+        }
+        let mut selected = SelectedChildren::default();
+        let mut offset = 0;
+        let mut received_m = None;
+        while offset < value.len() {
+            let span = TlvSpan::at(value, offset).ok_or(offset)?;
+            if check_m && span.flags.malformed && received_m.is_none() {
+                received_m = Some(offset);
+            }
+            match value[offset + 1] {
+                1 if selected.control.is_none() => selected.control = Some(span),
+                2 if selected.address.is_none() => selected.address = Some(span),
+                3 | 4 if selected.segments.is_none() => selected.segments = Some(span),
+                _ => {}
+            }
+            offset = span.end();
+        }
+        let mut malformed = received_m;
+        for span in [selected.control, selected.address, selected.segments]
+            .into_iter()
+            .flatten()
+        {
+            if !selected.selected(span.start) {
+                continue;
+            }
+            let valid = match value[span.start + 1] {
+                1 => span.len == 4,
+                2 => matches!(span.len, 4 | 16),
+                3 => span.len != 0 && span.len % 4 == 0,
+                4 => span.len != 0 && span.len % 16 == 0,
+                _ => true,
+            };
+            if !valid {
+                malformed = Some(malformed.map_or(span.start, |old| old.min(span.start)));
+            }
+        }
+        malformed.map_or(Ok(selected), Err)
+    }
+
+    /// First invalid child framing/selected length, or received child M on
+    /// the sender. Reflectors ignore received flag claims and derive their own.
+    pub(crate) fn malformed_sub_tlv_offset(value: &[u8], check_m: bool) -> Option<usize> {
+        Self::inspect(value, check_m).err()
+    }
+
+    /// Generic I on a Return Path child invalidates all extension values.
+    /// Location's special rule to ignore child I does not apply here.
+    pub(crate) fn child_integrity_failed(value: &[u8]) -> bool {
+        let mut offset = 0;
+        while let Some(span) = TlvSpan::at(value, offset) {
+            if span.flags.integrity_failed {
+                return true;
+            }
+            offset = span.end();
+        }
+        false
+    }
+
+    /// Normalize only a verified, processable first Return Path, in place.
+    /// Understood selected children get U/M/I clear; unknown/ignored children
+    /// get U. Payloads and framing stay intact, except used Control Code
+    /// reserved bits, which are zero on transmission (RFC 9503 §4.1.1).
+    pub(crate) fn reflect_child_flags(value: &mut [u8]) -> Result<(), usize> {
+        let selected = Self::inspect(value, false)?;
+        let mut offset = 0;
+        while let Some(span) = TlvSpan::at(value, offset) {
+            value[offset] = if selected.selected(offset) { 0 } else { 0x80 };
+            offset = span.end();
+        }
+        if let Some(control) = selected.control {
+            let code = value[control.value()]
+                .try_into()
+                .expect("validated Control Code");
+            let code = u32::from_be_bytes(code) & 1;
+            value[control.value()].copy_from_slice(&code.to_be_bytes());
+        }
+        Ok(())
+    }
+
     /// Creates an empty Return Path TLV.
     #[must_use]
     pub fn new() -> Self {
@@ -246,11 +350,10 @@ impl TypedTlv for ReturnPathTlv {
                 length: value.len(),
             });
         }
-        let data_end = value.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
         let mut sub_tlvs = Vec::new();
         let mut offset = 0;
-        while offset < data_end && value.len() - offset >= TLV_HEADER_SIZE {
-            let (mut sub, consumed, _) = RawTlv::parse_lenient(&value[offset..])?;
+        while offset < value.len() {
+            let (mut sub, consumed) = RawTlv::parse(&value[offset..])?;
             sub.tlv_type = TlvType::Unknown(sub.tlv_type.to_byte());
             sub_tlvs.push(sub);
             offset += consumed;
@@ -299,6 +402,44 @@ pub enum ReturnPathAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn return_path_framing_and_selected_lengths_are_bounded() {
+        for value in [
+            vec![],
+            vec![0x80],
+            vec![0x80, 1, 0, 4, 0],
+            vec![0x80, 1, 0, 4, 0, 0, 0, 1, 0],
+        ] {
+            assert!(ReturnPathTlv::decode_value(&value).is_err(), "{value:?}");
+        }
+        for (kind, lengths) in [
+            (1, vec![0, 3, 5]),
+            (2, vec![0, 3, 5, 15, 17]),
+            (3, vec![0, 1, 3, 5]),
+            (4, vec![0, 1, 15, 17]),
+        ] {
+            for len in lengths {
+                let mut value = vec![0x80, kind, 0, len];
+                value.extend(std::iter::repeat_n(0, len as usize));
+                assert_eq!(
+                    ReturnPathTlv::malformed_sub_tlv_offset(&value, false),
+                    Some(0)
+                );
+            }
+        }
+        let value = [0, 1, 0, 4, 0, 0, 0, 1, 0x80, 4, 0, 0];
+        assert_eq!(
+            ReturnPathTlv::malformed_sub_tlv_offset(&value, false),
+            None,
+            "Control Code ignores a well-framed unusable parameter"
+        );
+        assert_eq!(
+            ReturnPathTlv::malformed_sub_tlv_offset(&[value.as_slice(), &[0]].concat(), false),
+            Some(12),
+            "Control Code does not exempt a broken container from framing validation"
+        );
+    }
 
     #[test]
     fn test_from_raw_roundtrip_is_equal() {

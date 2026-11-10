@@ -44,6 +44,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Derive Return Path child flags after integrity verification, validate nested
+  framing and selected parameter lengths before routing, and zero processed
+  Control Code reserved bits. Stop later sender extension values on child M;
+  discard extension values on child I. Preserve failed-integrity/skipped copies.
+
 - Add independent Return Path sender bytes, duplicate-owner routing and empty
   segment-list evidence. Include the portable sender test in Windows CI.
   Record copied nested child flags as Partial conformance rather than treating

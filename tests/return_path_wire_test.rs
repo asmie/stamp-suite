@@ -212,9 +212,9 @@ fn reflector_first_return_path_owns_routing_even_when_unusable() {
                     same_link.clone(),
                     if cfg!(target_os = "linux") { 0 } else { 0x80 },
                 ),
-                (frame(10, &frame(4, &[])), 0x80),
-                (frame(10, &frame(3, &[])), 0x80),
-                (frame(10, &[0xde, 0xad]), 0x40),
+                (frame(10, &frame(4, &[])), 0xc0),
+                (frame(10, &frame(3, &[])), 0xc0),
+                (frame(10, &[0xde, 0xad]), 0xc0),
             ]
             .into_iter()
             .enumerate()
@@ -230,8 +230,7 @@ fn reflector_first_return_path_owns_routing_even_when_unusable() {
                 assert_eq!(reply[base] & 0xc0, expected_flags);
                 assert_eq!(&reply[base + 1..base + 4], &first[1..4]);
                 if first.len() >= 8 {
-                    // Compare child types/lengths/values, not their flags:
-                    // nested flag derivation is a separate Partial requirement.
+                    // Compare values separately from newly derived flags.
                     let actual = fields(&reply[base + 4..base + first.len()]);
                     let expected = fields(&first[4..]);
                     assert_eq!(actual, expected);
@@ -262,6 +261,139 @@ fn reflector_first_return_path_owns_routing_even_when_unusable() {
             let len = peer.recv(&mut data).unwrap();
             assert_eq!(&data[..4], &41u32.to_be_bytes());
             verify_signatures(&data[..len], mode);
+        }
+    }
+}
+
+#[cfg(all(unix, any(feature = "ttl-nix", not(feature = "ttl-pnet"))))]
+#[test]
+fn reflector_normalizes_return_path_children_and_preserves_failure_values() {
+    use reflector::Reflector;
+    use std::net::UdpSocket;
+    let mut control = frame(1, &u32::MAX.to_be_bytes());
+    control[0] = 0xff;
+    let mut ignored_address = frame(2, &[0xaa]);
+    ignored_address[0] = 0xff;
+    let mut unknown = frame(8, &[0x12, 0x34]); // Child registry, not top-level HMAC.
+    unknown[0] = 0xff;
+    let valid = [control.clone(), ignored_address, unknown].concat();
+    let expected = vec![
+        0, 1, 0, 4, 0, 0, 0, 1, 0x80, 2, 0, 1, 0xaa, 0x80, 8, 0, 2, 0x12, 0x34,
+    ];
+    let mut malformed_tail = control.clone();
+    malformed_tail.extend_from_slice(&[0xff, 2, 0, 16, 0xaa]);
+    let mut short_tail = control.clone();
+    short_tail.push(0xff);
+    let cases = [
+        (valid.clone(), expected, None),
+        (malformed_tail.clone(), malformed_tail, Some(8)),
+        (short_tail.clone(), short_tail, Some(8)),
+        (frame(2, &[0xaa]), frame(2, &[0xaa]), Some(0)),
+        (frame(4, &[]), frame(4, &[]), Some(0)),
+        (frame(3, &[]), frame(3, &[]), Some(0)),
+        (
+            [control.clone(), frame(4, &[])].concat(),
+            [vec![0, 1, 0, 4, 0, 0, 0, 1], frame(4, &[])].concat(),
+            None,
+        ),
+    ];
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            for strict in [false, true] {
+                let mut command = Reflector::command(ip);
+                command.args(["--hwtstamp", "off"]);
+                if mode != 0 {
+                    command.args([
+                        "--hmac-key",
+                        "abababababababababababababababab",
+                        "--verify-tlv-hmac",
+                    ]);
+                }
+                if mode == 2 {
+                    command.args(["--auth-mode", "A"]);
+                }
+                if strict {
+                    command.arg("--strict-packets");
+                }
+                let child = Reflector::spawn(command).unwrap();
+                let peer = UdpSocket::bind((ip, 0)).unwrap();
+                peer.connect(child.address).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let base = if mode == 2 { 112 } else { 44 };
+                for (index, (value, expected, malformed)) in cases.iter().enumerate() {
+                    let access = frame(6, &[0x1f, 1, 0xa5, 0x5a]);
+                    let path = frame(10, value);
+                    let request =
+                        packet(mode, index as u32, &[path.clone(), access.clone()].concat());
+                    peer.send(&request).unwrap();
+                    let mut data = [0; 512];
+                    let len = peer.recv(&mut data).unwrap();
+                    let reply = &data[..len];
+                    assert_eq!(len, request.len());
+                    let mut expected = expected.clone();
+                    if let Some(offset) = malformed {
+                        if expected.len() - offset >= 4 {
+                            expected[*offset] = 0x40;
+                        }
+                        assert_eq!(reply[base] & 0xe0, 0xc0);
+                        assert_eq!(
+                            &reply[base + path.len()..base + path.len() + access.len()],
+                            &access
+                        );
+                    } else {
+                        assert_eq!(
+                            reply[base] & 0xe0,
+                            if cfg!(target_os = "linux") { 0 } else { 0x80 }
+                        );
+                        assert_eq!(
+                            &reply[base + path.len()..base + path.len() + access.len()],
+                            &[0, 6, 0, 4, 0x10, 1, 0, 0]
+                        );
+                    }
+                    assert_eq!(
+                        &reply[base + 4..base + path.len()],
+                        &expected,
+                        "{ip}, mode={mode}, strict={strict}, case={index}"
+                    );
+                    verify_signatures(reply, mode);
+                }
+                if mode != 0 {
+                    for value in [&valid, &frame(1, &[0xff, 0xff, 0xff, 0xfe])] {
+                        let path = frame(10, value);
+                        let mut request = packet(mode, 99, &path);
+                        let last = request.len() - 1;
+                        request[last] ^= 1; // Extension digest, outside base coverage.
+                        peer.send(&request).unwrap();
+                        let mut data = [0; 512];
+                        let len = peer.recv(&mut data).unwrap();
+                        let reply = &data[..len];
+                        assert_ne!(reply[base] & 0x20, 0);
+                        assert_eq!(&reply[base + 4..base + path.len()], value);
+                        assert_eq!(&reply[len - 16..], &request[request.len() - 16..]);
+                        if mode == 2 {
+                            assert_eq!(&reply[96..112], &wire_hmac::digest(&KEY, &reply[..96]));
+                        }
+                    }
+                }
+                // Ignore the unusable but well-framed list under Control Code 0.
+                let suppressed = [frame(1, &[0xff, 0xff, 0xff, 0xfe]), frame(4, &[])].concat();
+                peer.set_read_timeout(Some(Duration::from_millis(50)))
+                    .unwrap();
+                peer.send(&packet(mode, 100, &frame(10, &suppressed)))
+                    .unwrap();
+                let error = peer.recv(&mut [0; 512]).unwrap_err();
+                assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ));
+                peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                peer.send(&packet(mode, 101, &frame(10, &control))).unwrap();
+                let mut data = [0; 512];
+                let len = peer.recv(&mut data).unwrap();
+                assert_eq!(&data[..4], &101u32.to_be_bytes());
+                assert_eq!(&data[base + 4..base + 12], &[0, 1, 0, 4, 0, 0, 0, 1]);
+                verify_signatures(&data[..len], mode);
+            }
         }
     }
 }

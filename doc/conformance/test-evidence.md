@@ -740,6 +740,79 @@ classified). Strict mode fails only on the expected 30 header references.
 These checks do not turn the separate nested-flag conformance failure into a
 pass. Native execution and remote CI of this chunk remain pending.
 
+## Return Path child validation and flag repair (T22b10)
+
+Parent `5481841` contains the T22b9 origination/ownership review. This chunk
+repairs its concrete used-child U failure and reviews nested framing through
+the real reflector and sender. It does not enable strict evidence enforcement.
+
+`src/tlv/list/processing/tests.rs::processed_return_path_children_rederive_flags_and_ignore_other_parameters`
+failed before the repair: received `ff` headers remained unchanged instead of
+selected `00` and ignored `80`. It now passes through the shared processing
+entry point. `src/tlv/typed/return_path.rs::tests::return_path_framing_and_selected_lengths_are_bounded`
+checks complete framing, selected lengths and Control Code ignore precedence.
+`src/tlv/list/processing/tests.rs::malformed_return_path_stops_later_values_before_early_child_mutation`
+establishes that a valid early child is not changed before a malformed later
+child is discovered.
+`src/tlv/list/processing/tests.rs::return_path_integrity_and_skipped_copies_keep_all_child_bytes`
+checks failed-extension-integrity and already-skipped copies, including a
+parser-marked truncated container after an earlier malformed extension.
+
+`tests/return_path_wire_test.rs::reflector_normalizes_return_path_children_and_preserves_failure_values`
+runs the nix reflector in 12 family/key/strictness combinations: IPv4/IPv6,
+unkeyed open/keyed open/authenticated, permissive/strict. It checks 112 replies
+and 12 suppressions: selected/ignored/unknown flags, reserved Control Code
+bits, a valid early Control Code with later truncation, a partial child header,
+wrong selected address length, empty segment lists, and well-framed ignored
+parameters. A later Access Report is processed after a valid Return Path and
+copied after a malformed one. Independent byte/HMAC checks cover successful
+replies; failed extension signatures retain values and the failed digest,
+including a no-reply request that must instead be echoed. A fresh positive
+reply follows each suppression. The existing origination and first-owner
+suites also pass with the new malformed M/U behavior.
+
+`tests/sender_measurement_test.rs::sender_validates_return_path_children_before_consuming_extension_values`
+uses 56 independent mock replies across IPv4/IPv6 and open/authenticated modes.
+Direct Measurement occurs before and after the Return Path to verify that
+child M stops later values and child I blocks all extension values. It also
+checks partial framing, wrong selected lengths, late child M, an unrecognized
+parent whose child I is skipped, and a well-framed empty list ignored under a
+Control Code. Base RTT remains independently usable. These tests run in all
+three Linux feature profiles and the Windows CI feature set.
+
+The required `tests/netns_conformance.rs::scenario_3_srv6_return_path` passes
+in private user/mount/network namespaces with no prerequisite skip: 24 captured
+open/authenticated replies cover a transit SID and explicit final SID,
+SRH Segments Left 1 to 0, Hop Limit 255 to 254, CoS, independent HMACs and
+ordinary-reply isolation. Capture packages are extracted under `/tmp`; no
+system installation or host sysctl change is needed. This is Linux virtual
+network evidence, not physical-interface or pnet capture evidence.
+
+The final packet-processing ASan/libFuzzer run completes 100,000 executions
+from 48 Return Path seeds, with 965 new units, 330 MiB peak RSS and no crash.
+Its bounded run is a regression check, not exhaustive input coverage. Exact
+macOS/Windows test-source cross-checks pass in minimal harnesses using the
+real default libraries; they do not replace native runtime or full platform
+dependency builds. Native CI for this uncommitted chunk remains pending.
+
+The inherited child-flag row remains **Partial**: integrity-failed, malformed
+signed outer-list and already-skipped copies preserve child flags and reserved
+value bits. The RFC 9503 and rollup counts remain **27: 22 Compliant, one
+Partial, three N-A, one Excluded**, and **472: 388 Compliant, 31 Partial, two
+Gap, 48 N-A, three Excluded**. The test-reference inventory remains **320
+applicable, 290 referenced, 30 missing**, all in the reflected-header draft.
+
+Final default/all-features/pnet suites pass **1,377/1,479/1,304** tests,
+respectively, with 13 privileged tests ignored in each ordinary run. All three
+Clippy profiles with warnings denied, rustfmt, Rust 1.87 all-features/all-targets
+checking, warnings-denied rustdoc, 104 Python tests and release metadata pass.
+Matrix counts, 1,259 source citations and 461 documentation links pass
+(384 local checked, 77 external classified). Strict citation mode fails only
+for the expected 30 header references; it remains advisory in CI.
+
+Temporary validation logs use `/tmp/t22b10-*`; source regressions and this
+scope record are durable. Resume the 30 header rows in the next chunk.
+
 ## Local validation for T22a
 
 The all-features focused runs exercise 90 HMAC tests (including the new known

@@ -493,6 +493,18 @@ impl TlvList {
             return ReturnPathAction::Normal;
         };
 
+        if let Err(offset) =
+            ReturnPathTlv::reflect_child_flags(&mut self.non_hmac_tlvs_mut()[idx].value)
+        {
+            let raw = &mut self.non_hmac_tlvs_mut()[idx];
+            raw.set_malformed();
+            raw.set_unrecognized();
+            if raw.value.len().saturating_sub(offset) >= TLV_HEADER_SIZE {
+                raw.value[offset] = crate::tlv::TlvFlags::M;
+            }
+            return ReturnPathAction::Normal;
+        }
+
         let Ok(rp) = ReturnPathTlv::from_raw(&self.non_hmac_tlvs()[idx]) else {
             // A Return Path TLV that does not parse gets U.
             self.non_hmac_tlvs_mut()[idx].set_unrecognized();

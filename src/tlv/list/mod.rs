@@ -4,7 +4,7 @@ mod processing;
 
 use crate::crypto::HmacKey;
 use crate::tlv::core::{RawTlv, TlvError, TlvFlags, TlvType, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
-use crate::tlv::{LocationTlv, TimestampInfoTlv};
+use crate::tlv::{LocationTlv, ReturnPathTlv, TimestampInfoTlv};
 
 /// A list of TLVs with special handling for HMAC TLV.
 ///
@@ -710,7 +710,16 @@ impl TlvList {
             if !tlv.tlv_type.is_recognized() {
                 tlv.set_unrecognized();
             }
-            Self::validate_known_tlv_lengths_slice(std::slice::from_mut(tlv));
+        }
+        Self::validate_known_tlv_lengths_slice(&mut self.entries);
+        let mut return_path_seen = false;
+        for tlv in &mut self.entries {
+            if tlv.tlv_type == TlvType::ReturnPath {
+                if return_path_seen || tlv.is_malformed() {
+                    tlv.set_unrecognized(); // Ignored owner, or unusable path.
+                }
+                return_path_seen = true;
+            }
         }
         self.mark_unprocessed_after_malformed();
 
@@ -741,10 +750,20 @@ impl TlvList {
         // Values in integrity-failure and structurally malformed signed echoes
         // must stay byte-for-byte intact.
         // Only after verification succeeds may the malformed child's own
-        // header carry M. The enclosing Location already has M, so no part of
+        // header carry M. The enclosing container already has M, so no part of
         // its value or any later outer TLV reaches semantic processing.
         if hmac_ok && self.allows_processing() {
+            let mut return_path_seen = false;
             for tlv in self.non_hmac_tlvs_mut() {
+                if tlv.tlv_type == TlvType::ReturnPath && !return_path_seen && tlv.is_malformed() {
+                    if let Some(offset) = ReturnPathTlv::malformed_sub_tlv_offset(&tlv.value, false)
+                    {
+                        if tlv.value.len().saturating_sub(offset) >= TLV_HEADER_SIZE {
+                            tlv.value[offset] = TlvFlags::M;
+                        }
+                    }
+                }
+                return_path_seen |= tlv.tlv_type == TlvType::ReturnPath;
                 if tlv.tlv_type == TlvType::Location && tlv.is_malformed() && !tlv.is_unrecognized()
                 {
                     if let Some(offset) = LocationTlv::malformed_sub_tlv_offset(&tlv.value, false) {
@@ -754,6 +773,9 @@ impl TlvList {
                             tlv.value[offset] = TlvFlags::M;
                         }
                     }
+                }
+                if tlv.is_malformed() {
+                    break; // Later containers are copied, including nested headers.
                 }
             }
         }
@@ -799,8 +821,20 @@ impl TlvList {
         Self::validate_known_tlv_lengths_slice(&mut self.entries);
         // A peer may mark only the nested child. Promote M to the local outer
         // diagnostic so sender validation also stops later extension values.
-        // Nested I is explicitly ignored by RFC 8972 §4.2.1.
+        // Location ignores nested I (§4.2.1); Return Path uses generic I.
+        let mut return_path_seen = false;
         for tlv in &mut self.entries {
+            if tlv.tlv_type == TlvType::ReturnPath && !return_path_seen {
+                return_path_seen = true;
+                if !tlv.is_unrecognized() && !tlv.is_integrity_failed() {
+                    if ReturnPathTlv::malformed_sub_tlv_offset(&tlv.value, true).is_some() {
+                        tlv.set_malformed();
+                    }
+                    if ReturnPathTlv::child_integrity_failed(&tlv.value) {
+                        tlv.flags.integrity_failed = true;
+                    }
+                }
+            }
             if tlv.tlv_type == TlvType::Location
                 && LocationTlv::malformed_sub_tlv_offset(&tlv.value, true).is_some()
             {
@@ -818,6 +852,7 @@ impl TlvList {
             REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,
         };
 
+        let mut return_path_seen = false;
         for tlv in tlvs {
             let bad_length = match tlv.tlv_type {
                 TlvType::ClassOfService => tlv.value.len() != COS_TLV_VALUE_SIZE,
@@ -832,7 +867,13 @@ impl TlvList {
                     tlv.value.len() != DEST_NODE_ADDR_IPV4_SIZE
                         && tlv.value.len() != DEST_NODE_ADDR_IPV6_SIZE
                 }
-                TlvType::ReturnPath => tlv.value.len() < TLV_HEADER_SIZE,
+                TlvType::ReturnPath => {
+                    let first = !return_path_seen;
+                    return_path_seen = true;
+                    tlv.value.len() < TLV_HEADER_SIZE
+                        || (first
+                            && ReturnPathTlv::malformed_sub_tlv_offset(&tlv.value, false).is_some())
+                }
                 TlvType::Hmac => tlv.value.len() != HMAC_TLV_VALUE_SIZE,
                 TlvType::MicroSessionId => tlv.value.len() != MICRO_SESSION_ID_TLV_VALUE_SIZE,
                 TlvType::ReflectedControl => tlv.value.len() < REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,

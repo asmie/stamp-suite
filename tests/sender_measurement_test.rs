@@ -287,6 +287,58 @@ fn sender_stops_at_malformed_location_children_but_ignores_child_i() {
 }
 
 #[test]
+fn sender_validates_return_path_children_before_consuming_extension_values() {
+    let cases = [
+        (0, vec![0x80], 1, 0, 1, 0),
+        (0, vec![0, 2, 0, 1, 0xaa], 1, 0, 1, 0),
+        (0, vec![0x40, 1, 0, 4, 0, 0, 0, 1], 1, 0, 1, 0),
+        (0, vec![0x20, 1, 0, 4, 0, 0, 0, 1], 0, 1, 0, 0),
+        (0x80, vec![0x20, 1, 0, 4, 0, 0, 0, 1], 0, 0, 1, 1),
+        (0, vec![0, 1, 0, 4, 0, 0, 0, 1, 0x40, 8, 0, 0], 1, 0, 1, 0),
+        (0, vec![0, 1, 0, 4, 0, 0, 0, 1, 0x80, 4, 0, 0], 0, 0, 1, 1),
+    ];
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            for (flags, value, malformed, integrity, before, after) in &cases {
+                for dm_first in [false, true] {
+                    let peer = UdpSocket::bind((ip, 0)).unwrap();
+                    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let sender = Sender::start_profile(&peer, auth, 1, 1, true, &[]);
+                    let mut request = [0; 2048];
+                    let (len, source) = peer.recv_from(&mut request).unwrap();
+                    let mut dm = vec![0, 5, 0, 12];
+                    for n in [1u32, 2, 3] {
+                        dm.extend_from_slice(&n.to_be_bytes());
+                    }
+                    let mut path = vec![*flags, 10, 0, value.len() as u8];
+                    path.extend_from_slice(value);
+                    let tail = if dm_first {
+                        [dm, path].concat()
+                    } else {
+                        [path, dm].concat()
+                    };
+                    peer.send_to(&reply_with_extensions(&request[..len], auth, &tail), source)
+                        .unwrap();
+                    let stats = sender.finish();
+                    assert_eq!(stats["packets_received"], 1, "base RTT remains usable");
+                    assert_eq!(
+                        stats["measurements"]["direct_measurement"]["observations"],
+                        if dm_first { *before } else { *after },
+                        "{ip} auth={auth} value={value:?}: {stats}"
+                    );
+                    let validation = &stats["measurements"]["tlv_validation"];
+                    assert_eq!(validation["flags"]["malformed"], *malformed);
+                    assert_eq!(validation["flags"]["integrity_failed"], *integrity);
+                    if auth {
+                        assert_eq!(validation["hmac"]["verified"], 1);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear() {
     for ip in ["127.0.0.1", "::1"] {
         for mode in 0..3 {

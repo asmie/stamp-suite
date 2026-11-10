@@ -501,6 +501,18 @@ the source. This is separate from session admission.
   ordinary replies. Unsupported paths, including pnet, fall back with U set.
 - SR-MPLS label stack forwarding is unsupported and gets U set.
 
+The first Return Path owns routing. Validate the entire child framing before
+mutating any child; Control Code precedence ignores other well-framed parameter
+values, and otherwise only the first address and segment list are selected.
+Selected child headers clear U/M/I and reserved bits; unknown or ignored
+children get U. A processed Control Code transmits only bit 0. Broken framing
+or an invalid selected length marks the parent M/U and the identifiable child
+M, then stops later extension processing. Sender receipt promotes child M/I
+to local validation before consuming extension values. An unrecognized parent
+is skipped. Failed-integrity and already-skipped copies preserve child bytes;
+the inherited unconditional flag requirement remains Partial. See
+[nested flag limits](conformance/rfc9503.md#nested-flags).
+
 Source, alternate-address and SRH fallbacks are re-signed with the request's
 key. See [SRv6 verification](testing-netns.md#retaining-successful-srv6-evidence).
 
