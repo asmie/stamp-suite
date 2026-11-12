@@ -292,6 +292,56 @@ no probe or requested background progress fails and prints an incomplete
 report with the completed trials. CI tests invariants and failure handling;
 it imposes no latency or throughput threshold.
 
+## Expiry and transmission-guard contention
+
+The test-only `session::benchmarks::expiry_contention_measurements` fixture
+measures one cleanup call alongside a closed-loop producer refreshing one
+persistent identity. It covers 1,024, 16,384 and 65,536 seeded sessions,
+IPv4/IPv6, and 0%, 50% or 100% expired entries, with three fresh trials per
+combination. Mixed/full expiry also runs with a transmission guard on one
+expired entry, released after a requested 10 ms delay. There are 90 trials.
+
+```sh
+cargo test --locked --release --lib \
+  session::benchmarks::expiry_contention_measurements \
+  -- --exact --ignored --nocapture --test-threads=1 > /tmp/session-expiry.log
+cargo test --locked --lib session::benchmarks
+```
+
+Use at least two CPUs, recording affinity, revision/patch, compiler, build
+flags and executable hash. Save the `EXPIRY_CONTENTION_JSON=` line from the
+log as JSON. Debug builds refuse measurements. No packets or sockets are used.
+The module exists only in test builds; it adds no production API or dependency.
+
+Setup backdates the manager epoch by 120 seconds and assigns zero activity
+offsets to the expired entries. Live entries keep genuine current offsets and
+a 60-second timeout. A separate live probe makes the actual table size N+1;
+100% expiry removes all N seeded entries, leaving the probe. Each trial verifies
+the exact removals, remaining count, live identities and guarded retirement.
+Population, verification and final table destruction are outside cleanup timing.
+Expired entries normally release their last Arc during cleanup; the guarded
+case retains one additional Arc until after cleanup.
+
+JSON reports cleanup call duration, 32 pre-cleanup refresh calls, and every
+refresh in the concurrent window, including exact maximum and counts at or
+above 1 ms/10 ms. Quantiles use the same bounded collector as the contention
+example. The overlap of the longest refresh with the measured cleanup interval
+is reported explicitly. Zero overlap means that call is not evidence of a
+cleanup stall; scheduling can prevent overlap, particularly for short scans.
+An overlapping call still includes scheduling and ordinary call overhead,
+and is not an isolated lock-wait measurement. One-shot trial percentiles can
+hide a single blocked call, so inspect maxima and pause counts as well.
+
+The guard delay starts just before cleanup and can overshoot due to scheduling;
+its observed release offset is reported separately. It models delayed in-flight
+transmission retirement, without simulating a real network send. Handshakes and
+thread creation precede cleanup timing. The concurrent window can include calls
+immediately before/after cleanup; it always includes at least one call, even if
+the producer runs after cleanup has finished. Measurements cover existing-session
+refresh, not new-session creation, packet queues, independently arriving traffic,
+or sustained cleanup rates. Normal tests check small fixtures without latency
+thresholds.
+
 ## Session allocation requests
 
 `session_allocations` counts Rust allocator requests made by one session-manager

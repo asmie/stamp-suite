@@ -7,6 +7,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in session-expiry contention measurements for retained, mixed and
+  fully expired tables, including delayed transmission-guard retirement.
+
 - Add opt-in allocation/copy profiling fixtures for reply transmission, including
   authenticated bursts, MTU shaping and transport/CoS fallbacks.
 

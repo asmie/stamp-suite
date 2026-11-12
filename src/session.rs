@@ -699,3 +699,6 @@ pub struct SessionSummary {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod benchmarks;
