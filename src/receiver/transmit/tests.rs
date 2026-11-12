@@ -837,6 +837,93 @@ fn fallback_route_restores_original_length_and_c_flag() {
     }
 }
 
+#[test]
+fn full_attempt_then_trimmed_mtu_retry_restores_larger_fallback_and_burst_template() {
+    for auth in [false, true] {
+        for ipv6 in [false, true] {
+            for copies in [1, 3] {
+                let mut t = sized_sample(auth, 1500);
+                t.remaining = copies;
+                t.source = if ipv6 { "[::1]:4000" } else { "127.0.0.1:4000" }
+                    .parse()
+                    .unwrap();
+                let alternate: SocketAddr = if ipv6 { "[::2]:4001" } else { "127.0.0.2:4001" }
+                    .parse()
+                    .unwrap();
+                t.response.return_path_action = ReturnPathAction::AlternateAddress(alternate);
+                let template = t.response.data.clone();
+                let mut calls = 0;
+                let mut queries = Vec::new();
+                let counters = ReflectorCounters::new();
+                assert_eq!(
+                    t.send_next_with_mtu(
+                        &counters,
+                        &RateLimiter::new(0),
+                        |target, _, refresh| {
+                            queries.push((target, refresh));
+                            Ok(if target == alternate && refresh {
+                                1000
+                            } else {
+                                2000
+                            })
+                        },
+                        |bytes, target, _| {
+                            calls += 1;
+                            check_sized_signature(bytes, auth);
+                            assert_eq!(u32::from_be_bytes(bytes[..4].try_into().unwrap()), 0);
+                            let base = if auth {
+                                AUTH_BASE_SIZE
+                            } else {
+                                UNAUTH_BASE_SIZE
+                            };
+                            assert_eq!(bytes.len(), if calls == 2 { 1000 } else { 1500 });
+                            assert_eq!(
+                                bytes[base] & TlvFlags::C,
+                                if calls == 2 { TlvFlags::C } else { 0 }
+                            );
+                            match calls {
+                                1 => {
+                                    assert_eq!(target, alternate);
+                                    #[cfg(unix)]
+                                    let code = nix::libc::EMSGSIZE;
+                                    #[cfg(not(unix))]
+                                    let code = 10040;
+                                    Err(io::Error::from_raw_os_error(code))
+                                }
+                                2 => {
+                                    assert_eq!(target, alternate);
+                                    Err(io::ErrorKind::AddrNotAvailable.into())
+                                }
+                                3 => {
+                                    assert_ne!(target, alternate);
+                                    Ok(bytes.len())
+                                }
+                                _ => panic!("unbounded fallback attempts"),
+                            }
+                        }
+                    ),
+                    Some(0)
+                );
+                assert_eq!(calls, 3);
+                assert_eq!(
+                    queries,
+                    [(alternate, false), (alternate, true), (t.source, false)]
+                );
+                assert_eq!(t.remaining, copies - 1);
+                assert_eq!(t.session.peek_sequence_number(), 1);
+                assert_eq!(t.session.get_transmitted_count(), 1);
+                assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 1);
+                assert_eq!(counters.packets_dropped.load(Ordering::Relaxed), 0);
+                if copies > 1 {
+                    assert_eq!(t.response.data, template);
+                } else {
+                    assert!(t.response.data.is_empty());
+                }
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn mtu_race_refreshes_budget_without_routing_downgrade() {

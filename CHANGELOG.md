@@ -43,6 +43,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Reuse the untrimmed reply buffer for send attempts that fit the payload budget;
+  copy only for shaping, while preserving full retries, fresh signatures and
+  the template for later burst copies.
+
 - Replace MTU-cache clear-all capacity eviction with a bounded second-chance
   queue, preserving frequently used routes while keeping the 256-entry limit,
   original expiry deadlines, forced refresh and notification invalidation.

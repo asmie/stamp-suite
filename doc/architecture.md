@@ -565,6 +565,12 @@ per copy. `DatagramSender` serializes socket options and sends, and caches
 successful sticky settings separately per address family. Rate limiting or a
 send failure can stop the rest of a burst.
 
+Untrimmed attempts reuse the current copy's buffer. Shaping uses a separate
+buffer so another route can retry the full reply without inheriting a clamp's
+C flag or padding. Every attempt refreshes T3 and generated HMACs; failed sends
+do not consume sequence/counter state. Earlier burst copies keep their original
+template, while the last copy takes ownership of its buffer.
+
 Linux checks each reply route and subtracts IP, UDP and SRH overhead. Netlink
 notifications, a 250 ms expiry and an `EMSGSIZE` refresh keep the bounded cache
 current. At its 256-entry limit, a second-chance queue replaces one route rather

@@ -226,9 +226,6 @@ impl Transmission {
         let mut cos_fallback = false;
         let mut refresh_mtu = false;
         loop {
-            // Always start from the untrimmed reply: a fallback route may have
-            // a larger MTU and must not inherit another route's C flag/padding.
-            let mut attempt = data.clone();
             let mut clamped = false;
             let budget = if options.dont_fragment {
                 payload_cap(target, &options, refresh_mtu)
@@ -241,8 +238,19 @@ impl Transmission {
                         .reflected_control
                         .map_or(usize::MAX, |b| usize::from(b.max_size)),
                 );
+                // Shaping needs a copy: another route may allow the untrimmed
+                // reply and must not inherit this attempt's C flag/padding.
+                // Otherwise reuse data; T3 and generated HMACs are overwritten
+                // on every attempt, including after an untrimmed send fails.
+                let mut shaped;
+                let attempt = if data.len() > cap {
+                    shaped = data.clone();
+                    &mut shaped
+                } else {
+                    &mut data
+                };
                 clamped = fit_reply(
-                    &mut attempt,
+                    attempt,
                     base,
                     cap,
                     self.response.reflected_control.is_some(),
@@ -256,14 +264,14 @@ impl Transmission {
                     if self.auth {
                         // The base-packet HMAC covers the first 96 bytes and
                         // occupies bytes 96..112 (RFC 8762 §4.3.2).
-                        let hmac = crate::crypto::compute_packet_hmac(key, &attempt, 96);
+                        let hmac = crate::crypto::compute_packet_hmac(key, attempt, 96);
                         attempt[96..112].copy_from_slice(&hmac);
                     }
                     if self.response.tlv_hmac_generated {
-                        sign_tlvs(&mut attempt, base, key);
+                        sign_tlvs(attempt, base, key);
                     }
                 }
-                send(&attempt, target, &options).and_then(|sent| {
+                send(attempt, target, &options).and_then(|sent| {
                     if sent == attempt.len() {
                         Ok(timestamp)
                     } else {
