@@ -52,6 +52,8 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Refresh the shared Nix vendor hash after the patched `rustix` lockfile update.
+
 - Update the locked `rustix` dev dependency to 1.1.6, fixing
   RUSTSEC-2026-0486 without weakening dependency checks.
 
