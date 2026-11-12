@@ -420,6 +420,66 @@ packet latency. Real route churn, TTL expiry, EMSGSIZE refresh, egress/source/
 traffic-class isolation and missing notification behavior still require their
 functional tests and live workloads before accepting an eviction change.
 
+## Reply-transmission allocation and copy profiles
+
+An ignored library test profiles already-assembled replies through the real
+transmission finalizer. Normal CI validates all 30 fixtures without timing or
+allocation budgets. Application code and allocators are unchanged by this
+test-only driver. Build optimized code with debug information and select the
+exact library-test executable:
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG=1 cargo test --locked --release --lib --no-run \
+  --message-format=json > /tmp/transmit-profile-build.jsonl
+TX_BIN=$(python3 -c '
+import json
+builds = [json.loads(line) for line in open("/tmp/transmit-profile-build.jsonl")]
+print(next(build["executable"] for build in builds
+           if build.get("executable") and build["target"]["name"] == "stamp_suite"))
+')
+STAMP_TX_BENCH_CASE=burst-auth-ipv6 valgrind --tool=dhat --mode=heap \
+  --num-callers=40 --dhat-out-file=/tmp/transmit-heap.dhat \
+  "$TX_BIN" receiver::transmit::benchmarks::transmission_allocations \
+  --exact --ignored --nocapture --test-threads=1 > /tmp/transmit-profile.log
+```
+
+Repeat with `--mode=copy` and a different output file to inspect copy events.
+The [DHAT manual](https://valgrind.org/docs/manual/dh-manual.html) describes its
+heap/reallocation accounting, copy mode and JSON/viewer output. Select only
+program points whose stack contains `benchmarks::profile_send_region`; whole-
+process totals also include test-harness, fixture, verification and report work.
+In copy mode, separate the benchmark's preallocated frame-capture copy point
+from transport copies. Both are inside the named region. Observed memcpy/
+memmove events exclude copies inlined into other machine instructions, so they
+are not a complete count of all copied bytes. Heap totals are DHAT allocation
+blocks/bytes rather than Rust `GlobalAlloc` request counts or RSS.
+
+`STAMP_TX_BENCH_CASE` defaults to `ordinary-open-ipv4`. Tags combine a scenario
+(`ordinary`, `padded`, `burst`, `trim`, `alternate`, `mtu_race`, `cos`, `srv6`),
+`open`/`auth` and `ipv4`/`ipv6`. SRv6 cases are IPv6-only. The
+`STAMP_TX_BENCH_ITERATIONS` count defaults to ten and accepts 1–1,000. Debug
+runs and invalid selections fail without a completed report. Successful runs
+print a `TX_BENCH_JSON ` report with counts, source/binary hashes and features.
+
+Ordinary replies have only the 44/112-byte base. Other replies are 1,440 bytes
+with Direct Measurement and Follow-Up Telemetry; authenticated TLV replies also
+carry a generated TLV HMAC. Bursts produce 32 successful copies. Trim fixtures
+clamp to 900 bytes and stop the burst. Alternate/SRv6 failures restore the
+untrimmed reply on fallback; EMSGSIZE refreshes the budget once; CoS retries
+marking with the fallback value. Validation checks every attempt's base/TLV
+signatures, sequence, T3, counters and previous-reflection fields, plus final
+length, C/U flags, routing options and successful-copy accounting.
+
+Fixture/key/capture allocation, validation and report generation are outside
+the named boundary. Plan preparation, finalization, shaping, signing, retries
+and buffer destruction performed by the send method are inside. Mock sends
+copy into preallocated frame buffers and inject controlled errors. No packets,
+sockets, kernel send costs, input parsing, admission, queue scheduling or real
+rate pressure are measured. Native elapsed time includes frame capture, and
+profiler-instrumented elapsed time includes tool overhead. Neither predicts
+packet throughput. Save raw profiles, build/compiler/revision/tool metadata
+and process reports, and repeat cases before comparing buffer changes.
+
 The [2026-09-10 baseline](performance/2026-09-10-live-udp.md) records
 54 live trials on both Linux backends, including the duplicate replies observed
 with pnet loopback. Use its environment and workload limits when comparing results.

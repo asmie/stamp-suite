@@ -7,6 +7,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in allocation/copy profiling fixtures for reply transmission, including
+  authenticated bursts, MTU shaping and transport/CoS fallbacks.
+
 - Add opt-in release measurements for MTU-cache capacity traces and Linux
   loopback route-query costs, with IPv4/IPv6 fixture checks in normal tests.
 

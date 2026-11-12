@@ -1176,3 +1176,6 @@ mod tests;
 
 #[cfg(test)]
 mod ber_tests;
+
+#[cfg(test)]
+mod benchmarks;
