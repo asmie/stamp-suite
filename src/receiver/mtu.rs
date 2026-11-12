@@ -539,6 +539,9 @@ pub(crate) fn mtu_payload_cap(mtu: u32, is_ipv6: bool) -> u16 {
 }
 
 #[cfg(test)]
+mod benchmarks;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

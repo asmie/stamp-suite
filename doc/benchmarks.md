@@ -344,6 +344,61 @@ example reports no timing or throughput. Use a CPU/heap profiler and matched
 workloads before deciding on an optimization. CI checks allocator accounting,
 thread isolation and operation invariants without enforcing allocation budgets.
 
+## MTU-cache capacity and route-query cost
+
+Two ignored library tests provide opt-in release measurements of the private
+MTU cache without exposing application APIs or changing cache policy. Normal
+CI runs a functional fixture test; it does not run these timing measurements.
+
+```sh
+cargo test --locked --release --lib \
+  receiver::mtu::benchmarks::capacity_scaling \
+  -- --exact --ignored --nocapture --test-threads=1 > /tmp/mtu-capacity.log
+cargo test --locked --release --lib \
+  receiver::mtu::benchmarks::loopback_route_queries \
+  -- --exact --ignored --nocapture --test-threads=1 > /tmp/mtu-query.log
+```
+
+Successful runs print one `MTU_BENCH_JSON ` line containing their JSON report
+alongside the Rust test harness output. Debug measurement runs fail. Reports
+include executable/cache/driver source hashes, feature flags and each sample.
+Record compiler, build command, revision/patch, CPU affinity and host load too.
+Run multiple fresh processes; each invocation contains three repetitions.
+
+Capacity traces use 128, 256, 257, 512 and 1,024 distinct destination IPs in
+IPv4/IPv6. One trace cycles through all destinations; the other issues eight
+lookups cycling over 64 hot destinations, then one lookup cycling over the
+remaining destinations. Sixteen complete destination/cold-set traversals follow
+one unmeasured pass over all keys. Each case starts with a fresh cache.
+
+The capacity driver calls the real internal lookup policy with a cheap,
+destination-specific synthetic query result. It freezes the lookup's supplied
+time so entries never expire, isolating capacity behavior from the 250 ms TTL.
+It bypasses route-key construction and notification handling. Counts report
+synthetic queries/misses, hits, warmup queries, peak/final entries and a checksum;
+every result and the cache bound are validated. Native batch wall time includes
+key cloning, counters, result comparisons and checksum/peak tracking. Input
+construction, warmup and final destruction are excluded. This is neither a
+packet workload nor a measurement of kernel-route lookup throughput.
+
+The Linux-only calibration directly calls the real route query 1,000 times per
+sample, after one unmeasured query. It covers wildcard/bound sources for IPv4
+and IPv6 loopback, checks that MTU stays valid and unchanged, and records all
+individual wall latencies plus exact nearest-rank p50/p99 and extrema. It uses
+route netlink requests and interface MTU lookup; no UDP packets are sent. The
+socket lifecycle, request construction, syscalls and response parsing are timed;
+sample recording and sorting are excluded. The subscription/invalidation path
+and payload-cap computation are not included. Missing Linux support, socket
+permission, routes or a changing MTU prevents a completed calibration report.
+
+Use query counts to compare policy behavior on identical traces. A cyclic
+working set larger than the cache can miss under several eviction policies;
+the hot/cold trace tests whether capacity pressure also loses frequently used
+entries. Loopback query latency is context for miss cost, not a formula for
+packet latency. Real route churn, TTL expiry, EMSGSIZE refresh, egress/source/
+traffic-class isolation and missing notification behavior still require their
+functional tests and live workloads before accepting an eviction change.
+
 The [2026-09-10 baseline](performance/2026-09-10-live-udp.md) records
 54 live trials on both Linux backends, including the duplicate replies observed
 with pnet loopback. Use its environment and workload limits when comparing results.

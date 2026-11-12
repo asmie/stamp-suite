@@ -7,6 +7,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in release measurements for MTU-cache capacity traces and Linux
+  loopback route-query costs, with IPv4/IPv6 fixture checks in normal tests.
+
 - Add fixed-count session-table profiling with a named operation boundary,
   excluding setup and reporting validated operation counts for external profilers.
 
