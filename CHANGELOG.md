@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add a session contention example reporting foreground, retirement and
+  management-operation latency with concurrent inventory or cleanup, plus
+  functional CI checks without performance thresholds.
+
 - Add session-table scaling benchmarks for IPv4/IPv6 lookup, inventory,
   cleanup and control-expiry churn at up to 65,536 sessions, with fixture
   checks in CI.

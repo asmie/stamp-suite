@@ -179,6 +179,59 @@ Process CPU/RSS measurements include setup and Criterion analysis, so they
 are not operation-only resource costs. Keep generated results in ignored or
 external storage. Linux CI executes fixture checks without timing thresholds.
 
+## Concurrent session management
+
+`session_contention` measures each foreground session-manager call while a
+second thread repeatedly collects full inventory or scans retained sessions
+for cleanup. Compare each case with `--background none` using the same build,
+table size, probe mode and CPU affinity:
+
+```sh
+cargo build --locked --release --example session_contention
+target/release/examples/session_contention --sessions 65536 --probe admission \
+  --background none > /tmp/session-baseline.json
+target/release/examples/session_contention --sessions 65536 --probe admission \
+  --background inventory > /tmp/session-inventory.json
+target/release/examples/session_contention --sessions 65536 --probe refresh \
+  --background cleanup > /tmp/session-cleanup.json
+cargo test --locked --example session_contention
+```
+
+`--probe refresh` cycles through existing identities. `--probe admission`
+cycles through clients on a separate source port, creates one transient
+session, then retires it using the control manager operation. The table stays
+between N and N+1 sessions. Admission latency excludes retirement;
+`retirement_latency` reports its full-table ambiguity scan and any wait for the
+table lock, while `admission_cycle_latency` includes both stages.
+
+`--sessions` accepts 1–65,536 entries; `--ipv6` selects IPv6 identities.
+Each invocation defaults to three one-second trials (`--seconds` 1–60,
+`--repeats` 1–100). `--pause-us` pauses after each background operation,
+defaulting to 1,000 microseconds; zero requests continuous management pressure.
+This is a pause, not a guaranteed management request rate. Use at least two
+CPUs and record their affinity; allowing two CPUs does not pin each thread
+to a separate core. Debug builds refuse performance runs.
+
+JSON records counts, observed closed-loop operations/sec, min/max/mean and
+p50/p95/p99 call latency in nanoseconds, background operation costs, window
+overrun, final table size, feature flags and binary/source hashes. Every call
+contributes to bounded full-run quantiles: exact through 4,096 observations,
+then less than 0.78125% magnitude quantization error. Counts at or above 1 ms/10 ms
+and observed extrema remain exact. Sampling uncertainty and scheduler/clock
+effects are separate from that quantization bound.
+
+This closed-loop producer issues its next call after the previous cycle ends.
+It measures neither independently arriving traffic nor the queueing time that
+packets could accumulate while a call is blocked. Reported throughput includes
+statistics collection and, for admission, retirement work. Clock/call overhead
+is included; no packets, HTTP, mixed-age expiry, transmit guards or hardware
+timestamps are involved. Cleanup uses `Duration::MAX` and removes no entries.
+Table population and thread creation precede the active window; worker
+teardown and final summarization follow it. A run with
+no probe or requested background progress fails and prints an incomplete
+report with the completed trials. CI tests invariants and failure handling;
+it imposes no latency or throughput threshold.
+
 The [2026-09-10 baseline](performance/2026-09-10-live-udp.md) records
 54 live trials on both Linux backends, including the duplicate replies observed
 with pnet loopback. Use its environment and workload limits when comparing results.

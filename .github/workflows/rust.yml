@@ -125,6 +125,7 @@ jobs:
         run: |
           cargo test --locked --example live_udp_bench ${{ matrix.features }}
           cargo test --locked --bench session_scaling ${{ matrix.features }} -- --test
+          cargo test --locked --example session_contention ${{ matrix.features }}
 
   test-macos:
     name: Native macOS (${{ matrix.profile }})
