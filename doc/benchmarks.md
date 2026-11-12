@@ -179,6 +179,66 @@ Process CPU/RSS measurements include setup and Criterion analysis, so they
 are not operation-only resource costs. Keep generated results in ignored or
 external storage. Linux CI executes fixture checks without timing thresholds.
 
+## Session instruction profiles
+
+The same `session_scaling` executable has a separate fixed-count profiling
+mode. Its non-inlined `session_scaling::profile_operation` boundary contains
+one lookup/refresh, full inventory, retained cleanup, full expiry, or control
+expiry/replacement operation. Normal Criterion timing loops do not call this
+wrapper. Build optimized code with debug information, and select Cargo's exact
+executable rather than a potentially stale wildcard match:
+
+```sh
+CARGO_PROFILE_BENCH_DEBUG=1 cargo bench --locked --bench session_scaling \
+  --no-run --message-format=json > /tmp/session-profile-build.jsonl
+PROFILE_BIN=$(python3 -c '
+import json
+builds = [json.loads(line) for line in open("/tmp/session-profile-build.jsonl")]
+print(next(build["executable"] for build in builds
+           if build.get("executable") and build["target"]["name"] == "session_scaling"))
+')
+valgrind --tool=callgrind --collect-atstart=no \
+  '--toggle-collect=*session_scaling*profile_operation*' \
+  --callgrind-out-file=/tmp/session-inventory.callgrind \
+  "$PROFILE_BIN" --profile-operations --sessions 65536 \
+  --operation inventory --iterations 10 > /tmp/session-profile.json
+callgrind_annotate --auto=no --tree=both /tmp/session-inventory.callgrind
+```
+
+Install Valgrind and matching system debug symbols separately. The
+[Callgrind manual](https://valgrind.org/docs/manual/cl-manual.html) explains
+collection toggling and instruction/call-graph attribution. Check that the
+profile has nonzero `Ir`, the expected number of `profile_operation` calls,
+and that their inclusive instruction cost accounts for the collected total;
+an unmatched symbol can otherwise produce an empty profile. Call counters on
+other functions can include calls from phases where collection is disabled;
+use the allocation example for allocator-request counts.
+
+`--profile-operations` must be the executable's first argument. Its options
+are `--sessions` (1–65,536, default 16,384), `--ipv6`, `--operation`
+(`lookup-refresh`, `inventory`, `cleanup-keep`, `cleanup-expire`, `control-churn`)
+and `--iterations` (1–1,000, default 10). Every iteration gets a fresh full table.
+Population, key selection, validation, result storage, report generation and
+final table destruction are outside the profiling boundary. Returned Arc/vector
+destruction and removal/retirement work are inside. No other session references
+or transmission guards are held. Fixture checks exercise all ten family/
+operation combinations and argument bounds without requiring a profiler.
+
+JSON reports validated item counts and final table size per operation, build
+features, executable/source hashes and release/debug status. Debug runs fail;
+panics produce a failing process rather than a completed JSON report. Save the
+raw profile, annotations, compiler/build command, revision/patch, tool version
+and process output together. Repeat each workload with the same build and
+profiling configuration before interpreting differences.
+
+Callgrind's `Ir` is a count of instrumented user-space instructions, including
+the wrapper and its checks. It is not CPU cycles, kernel work, wall latency,
+lock-wait time or packet throughput. Hash-table order, heap state, code generation
+and profiler behavior affect the profile. This single-thread mode covers no
+concurrent expiry, active transmit guards, network traffic or hardware caches;
+cache/branch simulation is off in the command above. Use the native timing and
+contention measurements alongside profiles before selecting an optimization.
+
 ## Concurrent session management
 
 `session_contention` measures each foreground session-manager call while a

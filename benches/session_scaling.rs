@@ -4,15 +4,156 @@
 
 use std::{
     collections::HashSet,
+    fs,
     hint::black_box,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
 };
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use clap::{Parser, ValueEnum};
+use criterion::{criterion_group, BatchSize, BenchmarkId, Criterion};
+use serde::Serialize;
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use stamp_suite::session::{SessionKey, SessionManager};
 
 const SIZES: [usize; 3] = [1_024, 16_384, 65_536];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum ProfileOperation {
+    LookupRefresh,
+    Inventory,
+    CleanupKeep,
+    CleanupExpire,
+    ControlChurn,
+}
+
+#[derive(Parser, Serialize)]
+#[command(about = "Run fixed-count session operations for external profiling")]
+struct ProfileArgs {
+    #[arg(long, default_value_t = 16_384, value_parser = clap::value_parser!(u32).range(1..=65_536))]
+    sessions: u32,
+    #[arg(long)]
+    ipv6: bool,
+    #[arg(long, value_enum, default_value = "inventory")]
+    operation: ProfileOperation,
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=1_000))]
+    iterations: u32,
+}
+
+// Keep one stable profiling boundary, without adding calls to Criterion's
+// timed loops. Callgrind can toggle collection at entry/exit of this symbol.
+#[inline(never)]
+fn profile_operation(
+    manager: &SessionManager,
+    selected: SessionKey,
+    operation: ProfileOperation,
+) -> usize {
+    let result = match operation {
+        ProfileOperation::LookupRefresh => {
+            drop(black_box(
+                manager
+                    .get_or_create_session(black_box(selected))
+                    .expect("known session rejected"),
+            ));
+            1
+        }
+        ProfileOperation::Inventory => {
+            let rows = black_box(manager.session_summaries_extended());
+            let len = rows.len();
+            drop(black_box(rows));
+            len
+        }
+        ProfileOperation::CleanupKeep | ProfileOperation::CleanupExpire => {
+            manager.cleanup_stale_sessions()
+        }
+        ProfileOperation::ControlChurn => {
+            assert!(manager
+                .expire_matching(black_box(selected.client), None)
+                .expect("ambiguous profile client"));
+            drop(black_box(
+                manager
+                    .get_or_create_session(selected)
+                    .expect("replacement rejected"),
+            ));
+            1
+        }
+    };
+    // Preserve an observable instruction after the manager call rather than
+    // tail-calling it out of the profiler boundary.
+    black_box(result)
+}
+
+#[derive(Serialize)]
+struct ProfileSample {
+    iteration: u32,
+    observed_items: usize,
+    final_sessions: usize,
+}
+
+fn profile_samples(args: &ProfileArgs) -> Vec<ProfileSample> {
+    let size = args.sessions as usize;
+    let keys = keys(size, args.ipv6);
+    let mut samples = Vec::with_capacity(args.iterations as usize);
+    for iteration in 0..args.iterations {
+        let expires = args.operation == ProfileOperation::CleanupExpire;
+        let manager = populated(
+            &keys,
+            if expires {
+                Duration::ZERO
+            } else {
+                Duration::MAX
+            },
+        );
+        let selected = keys[(iteration as usize * 40_507) % size];
+        let observed_items = profile_operation(&manager, selected, args.operation);
+        let expected = match args.operation {
+            ProfileOperation::Inventory | ProfileOperation::CleanupExpire => size,
+            ProfileOperation::CleanupKeep => 0,
+            _ => 1,
+        };
+        assert_eq!(observed_items, expected);
+        let final_sessions = manager.session_count();
+        assert_eq!(final_sessions, if expires { 0 } else { size });
+        samples.push(ProfileSample {
+            iteration,
+            observed_items,
+            final_sessions,
+        });
+        // Population, validation/result storage and final manager destruction
+        // stay outside profile_operation, including the retained hash table.
+    }
+    samples
+}
+
+fn verify_profile_fixtures() {
+    for ipv6 in [false, true] {
+        for operation in [
+            ProfileOperation::LookupRefresh,
+            ProfileOperation::Inventory,
+            ProfileOperation::CleanupKeep,
+            ProfileOperation::CleanupExpire,
+            ProfileOperation::ControlChurn,
+        ] {
+            let samples = profile_samples(&ProfileArgs {
+                sessions: 16,
+                ipv6,
+                operation,
+                iterations: 2,
+            });
+            assert_eq!(samples.len(), 2);
+        }
+    }
+    for extra in [
+        ["--sessions", "0"],
+        ["--sessions", "65537"],
+        ["--iterations", "0"],
+        ["--iterations", "1001"],
+    ] {
+        assert!(ProfileArgs::try_parse_from(["session_scaling", extra[0], extra[1]]).is_err());
+    }
+}
 
 fn keys(size: usize, ipv6: bool) -> Vec<SessionKey> {
     let local = if ipv6 {
@@ -174,4 +315,34 @@ fn bench_session_table(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_session_table);
-criterion_main!(benches);
+
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--profile-operations") {
+        let args = ProfileArgs::parse_from(
+            std::iter::once("session_scaling".to_owned()).chain(std::env::args().skip(2)),
+        );
+        if cfg!(debug_assertions) {
+            eprintln!("use a release build for profiling");
+            std::process::exit(2);
+        }
+        let samples = profile_samples(&args);
+        println!("{}", serde_json::to_string_pretty(&json!({
+            "schema_version": 1, "completed": true, "settings": args,
+            "scope": "fixed-count session-manager operations; no timing or network packets",
+            "os":std::env::consts::OS, "arch":std::env::consts::ARCH,
+            "debug_build":cfg!(debug_assertions),
+            "binary_sha256":hex::encode(Sha256::digest(fs::read(std::env::current_exe().expect("executable path")).expect("executable bytes"))),
+            "source_sha256":hex::encode(Sha256::digest(include_bytes!("session_scaling.rs"))),
+            "features":{"metrics":cfg!(feature="metrics"), "control":cfg!(feature="control"),
+                "ttl_pnet":cfg!(feature="ttl-pnet"), "ttl_nix":cfg!(feature="ttl-nix"),
+                "snmp":cfg!(feature="snmp"), "hwtstamp":cfg!(feature="hwtstamp")},
+            "samples":samples
+        })).expect("profile report"));
+    } else {
+        verify_profile_fixtures();
+        // Match criterion_main!: normal timing loops and Criterion CLI remain
+        // unchanged, with only additional fixture validation before the group.
+        benches();
+        Criterion::default().configure_from_args().final_summary();
+    }
+}

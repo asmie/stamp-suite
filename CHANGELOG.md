@@ -7,6 +7,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add fixed-count session-table profiling with a named operation boundary,
+  excluding setup and reporting validated operation counts for external profilers.
+
 - Add a session allocation example counting allocator requests and requested
   bytes for lookup, inventory, cleanup and control churn, with accounting checks
   in CI.
