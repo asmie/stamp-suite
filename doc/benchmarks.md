@@ -232,6 +232,58 @@ no probe or requested background progress fails and prints an incomplete
 report with the completed trials. CI tests invariants and failure handling;
 it imposes no latency or throughput threshold.
 
+## Session allocation requests
+
+`session_allocations` counts Rust allocator requests made by one session-manager
+operation on the calling thread. Its allocator wrapper delegates to `System`
+and exists only in this example executable. It does not change the allocator
+used by `stamp-suite`, other examples or the library's consumers.
+
+```sh
+cargo build --locked --release --example session_allocations
+target/release/examples/session_allocations --sessions 65536 \
+  --workload inventory > /tmp/session-inventory-allocations.json
+target/release/examples/session_allocations --sessions 65536 --ipv6 \
+  --workload cleanup-expire > /tmp/session-expiry-allocations.json
+cargo test --locked --example session_allocations
+```
+
+Choose `--workload lookup-refresh`, `inventory`, `cleanup-keep`,
+`cleanup-expire` or `control-churn`; these correspond to the single-thread
+session-table scaling operations above. Each sample runs exactly one operation
+against a freshly populated table. Lookup releases its returned Arc, inventory
+destroys its summary vector, and control churn expires one client and releases
+its replacement Arc inside the counted scope. Full expiry includes removal,
+retirement and session destruction. No external session references or active
+transmit guards are held. Table population, key selection, result storage,
+validation, JSON and final manager destruction are excluded.
+
+`--sessions` accepts 1–65,536 identities (default 16,384), `--ipv6` selects
+IPv6, and `--iterations` accepts 1–1,000 samples (default 10). Debug builds
+refuse measurement runs. JSON records each sample, final table size, build
+features, executable/source hashes and the Git HEAD observed at execution.
+Record compiler, build command and revision/patch alongside the output.
+Counts describe that compiled build; optimization can change allocator calls.
+
+`alloc_calls` and `alloc_zeroed_calls` are separate successful requests;
+`allocated_bytes` includes both. Successful `realloc_calls` report old and new
+requested sizes separately, without also incrementing alloc/dealloc counts.
+`dealloc_calls` and `deallocated_bytes` include blocks allocated during setup
+when the operation frees them. `requested_bytes_delta` is allocated plus
+reallocated-to bytes minus deallocated and reallocated-from bytes. It can be
+negative during expiry. Detected accounting or table errors fail the run with
+an incomplete report containing completed samples. Panics or allocator aborts
+can terminate the process before a report is emitted.
+
+These are requested layout sizes at Rust's `GlobalAlloc` boundary. They are
+neither allocation site backtraces, internal `System` allocator calls, memory
+copies, live/peak heap usage nor RSS. Other threads and native allocations
+that bypass the Rust allocator are excluded. The counter itself uses
+allocation-free thread-local storage. It changes execution cost, so this
+example reports no timing or throughput. Use a CPU/heap profiler and matched
+workloads before deciding on an optimization. CI checks allocator accounting,
+thread isolation and operation invariants without enforcing allocation budgets.
+
 The [2026-09-10 baseline](performance/2026-09-10-live-udp.md) records
 54 live trials on both Linux backends, including the duplicate replies observed
 with pnet loopback. Use its environment and workload limits when comparing results.

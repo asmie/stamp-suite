@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add a session allocation example counting allocator requests and requested
+  bytes for lookup, inventory, cleanup and control churn, with accounting checks
+  in CI.
+
 - Add a session contention example reporting foreground, retirement and
   management-operation latency with concurrent inventory or cleanup, plus
   functional CI checks without performance thresholds.
