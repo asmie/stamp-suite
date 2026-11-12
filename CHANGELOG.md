@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add session-table scaling benchmarks for IPv4/IPv6 lookup, inventory,
+  cleanup and control-expiry churn at up to 65,536 sessions, with fixture
+  checks in CI.
+
 - Add opt-in `--max-pending-probes` / TOML `max_pending_probes` per-target
   retention. Retire oldest unanswered records at capacity without changing
   scheduling or retry budgets; disclose limit, retained/peak counts and

@@ -135,6 +135,50 @@ comparison with:
 cargo test --locked --all-features --bench reflector_hotpath -- --test
 ```
 
+## Session-table scaling
+
+The separate `session_scaling` harness measures IPv4 and IPv6 tables with
+1,024, 16,384 and 65,536 distinct, complete session identities. Fixture setup
+checks capacity and inventory membership, retained cleanup and full expiry.
+Addresses are in-memory fixtures; the harness sends no packets.
+
+```sh
+cargo test --locked --bench session_scaling -- --test
+cargo bench --locked --bench session_scaling
+cargo bench --locked --bench session_scaling -- 'session_table/inventory_'
+```
+
+Each benchmark name includes the operation, address family and table size:
+
+| Operation | Timed work |
+| --- | --- |
+| `lookup_refresh` | Step through a deterministic permutation of seeded identities, acquire each selected session, refresh activity and release the returned Arc. |
+| `inventory` | Collect and destroy the full extended summary vector used by control/SNMP inventory. HTTP DTO conversion and serialization are excluded. |
+| `cleanup_keep` | Scan a full table with no expired sessions (`Duration::MAX` timeout). |
+| `cleanup_expire` | Remove and retire every entry from a fresh full table (`Duration::ZERO` timeout). Population and final table destruction are excluded using one fixture per iteration. |
+| `control_churn` | Cycle over unique clients, expire one through the control API's manager operation and admit its replacement while keeping table size bounded. Includes that operation's full-table ambiguity scan; HTTP is excluded. |
+
+Population, access-order construction and fixture validation are outside the
+timed loops. Lookup and control churn retain their access cursor across samples
+and use an odd-stride permutation to spread short samples across the table.
+A short run need not visit every key. `unauth_stateful_sessions` repeatedly
+processes one source against a populated table. Inventory includes vector
+allocation/free; expiry includes the session retirement/removal work. Cleanup
+assertions remain in the timed loop so an empty-table or no-op result cannot
+silently replace the intended workload.
+
+These are single-thread operation timings. They do not measure blocked ingest,
+concurrent inventory, mixed-age expiry, allocation counts or packet latency.
+Criterion's sample distributions are not per-request latency percentiles.
+Measure those separately before selecting a cleanup or pagination change.
+
+Record revision, patch/build flags, compiler, executable hash, affinity, host
+load and repeated-run variation. Use the same fixtures and features for matched
+before/after comparisons; pin a CPU on Linux if the environment permits it.
+Process CPU/RSS measurements include setup and Criterion analysis, so they
+are not operation-only resource costs. Keep generated results in ignored or
+external storage. Linux CI executes fixture checks without timing thresholds.
+
 The [2026-09-10 baseline](performance/2026-09-10-live-udp.md) records
 54 live trials on both Linux backends, including the duplicate replies observed
 with pnet loopback. Use its environment and workload limits when comparing results.

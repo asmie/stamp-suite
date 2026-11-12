@@ -105,6 +105,10 @@ libc = "0.2"
 name = "reflector_hotpath"
 harness = false
 
+[[bench]]
+name = "session_scaling"
+harness = false
+
 # Exclude the fuzz package from the workspace — it has its own
 # (libfuzzer-based) build profile, requires nightly rustc, and shouldn't
 # be built by default `cargo build` / `cargo test` runs.

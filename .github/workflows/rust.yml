@@ -120,9 +120,11 @@ jobs:
           key: test-${{ matrix.os }}-${{ matrix.rust }}
       - name: Run tests
         run: cargo test --locked --verbose ${{ matrix.features }}
-      - name: Check live benchmark accounting
+      - name: Check benchmark fixtures and accounting
         if: runner.os == 'Linux'
-        run: cargo test --locked --example live_udp_bench ${{ matrix.features }}
+        run: |
+          cargo test --locked --example live_udp_bench ${{ matrix.features }}
+          cargo test --locked --bench session_scaling ${{ matrix.features }} -- --test
 
   test-macos:
     name: Native macOS (${{ matrix.profile }})
