@@ -11,6 +11,21 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+#[cfg(target_os = "linux")]
+thread_local! {
+    static ROUTE_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn note_route_query() {
+    ROUTE_QUERIES.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(target_os = "linux")]
+fn take_route_queries() -> usize {
+    ROUTE_QUERIES.with(|count| count.replace(0))
+}
+
 const SIZES: [usize; 5] = [128, 256, 257, 512, 1024];
 const HOT_KEYS: usize = 64;
 const ROUNDS: usize = 16;
@@ -228,6 +243,96 @@ fn capacity_scaling() -> Result<(), &'static str> {
         }
     }
     report("synthetic_capacity_fixed_time", samples);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "manual release-only cache lookup with real loopback route queries"]
+fn loopback_capacity() -> Result<(), Box<dyn std::error::Error>> {
+    require_release()?;
+    let options = SendOptions {
+        apply_tos: true,
+        egress_ifindex: None,
+        tos: 184,
+        source: None,
+        srh: None,
+        dont_fragment: true,
+    };
+    let mut samples = Vec::new();
+    for repeat in 0..3 {
+        for ipv6 in [false, true] {
+            for size in SIZES {
+                let mut keys = keys(size, ipv6);
+                for (i, key) in keys.iter_mut().enumerate() {
+                    key.local = if ipv6 { "[::1]:862" } else { "127.0.0.1:862" }.parse()?;
+                    key.target = if ipv6 {
+                        SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 5000 + i as u16)
+                    } else {
+                        SocketAddr::new(
+                            Ipv4Addr::from(u32::from(Ipv4Addr::LOCALHOST) + i as u32).into(),
+                            5000,
+                        )
+                    };
+                }
+                for trace in [Trace::RoundRobin, Trace::HotCold] {
+                    let indices = requests(size, trace, 4);
+                    let mut cache = MtuCache::default();
+                    take_route_queries();
+                    let expected =
+                        cache.payload_cap(keys[0].local, keys[0].target, &options, true)?;
+                    for key in &keys {
+                        if cache.payload_cap(key.local, key.target, &options, false)? != expected {
+                            return Err("loopback payload cap changed during warmup".into());
+                        }
+                    }
+                    let warmup_queries = take_route_queries();
+                    if cache.notifications.is_none() {
+                        return Err("route notification subscription unavailable".into());
+                    }
+                    let mut peak_entries = cache.entries.len();
+                    let mut checksum = 0u64;
+                    let mut all_valid = true;
+                    let started = Instant::now();
+                    for &i in &indices {
+                        let cap = cache.payload_cap(
+                            keys[i].local,
+                            keys[i].target,
+                            black_box(&options),
+                            false,
+                        )?;
+                        all_valid &= cap == expected;
+                        checksum += cap as u64;
+                        peak_entries = peak_entries.max(cache.entries.len());
+                    }
+                    let elapsed_ns = u64::try_from(started.elapsed().as_nanos())?;
+                    let queries = take_route_queries();
+                    if !all_valid
+                        || checksum != indices.len() as u64 * expected as u64
+                        || peak_entries > CACHE_LIMIT
+                        || queries > indices.len()
+                    {
+                        return Err("live cache result or accounting diverged".into());
+                    }
+                    samples.push(CacheSample {
+                        destinations: size,
+                        ipv6,
+                        trace,
+                        repeat,
+                        requests: indices.len(),
+                        queries,
+                        hits: indices.len() - queries,
+                        warmup_queries,
+                        peak_entries,
+                        final_entries: cache.entries.len(),
+                        checksum,
+                        elapsed_ns,
+                    });
+                }
+            }
+        }
+    }
+    report("linux_loopback_capacity_real_time", samples);
     Ok(())
 }
 

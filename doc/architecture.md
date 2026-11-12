@@ -567,7 +567,11 @@ send failure can stop the rest of a burst.
 
 Linux checks each reply route and subtracts IP, UDP and SRH overhead. Netlink
 notifications, a 250 ms expiry and an `EMSGSIZE` refresh keep the bounded cache
-current. Padding and optional reflected-header TLVs may shrink; mandatory
+current. At its 256-entry limit, a second-chance queue replaces one route rather
+than clearing the working set. Hits mark an entry for another chance without
+extending its expiry. Expired stored entries are rejected on lookup or replaced;
+notifications and notification failures clear both entries and queue state.
+Padding and optional reflected-header TLVs may shrink; mandatory
 fields may not. An MTU clamp sets C and stops the burst. An unknown MTU budget
 drops the reply. See [Reply size and route MTU](usage.md#reply-size-and-route-mtu).
 

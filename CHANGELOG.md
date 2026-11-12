@@ -40,6 +40,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Replace MTU-cache clear-all capacity eviction with a bounded second-chance
+  queue, preserving frequently used routes while keeping the 256-entry limit,
+  original expiry deadlines, forced refresh and notification invalidation.
+
 - Switch both BER endpoints to draft-ietf-bpm-stamp-ber-01 using local
   experimental outer Type 243 and pattern sub-TLV Type 241. Retire legacy
   Types 240–242 with U; do not infer format negotiation. Peers must agree on

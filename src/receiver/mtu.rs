@@ -5,7 +5,7 @@
 //! Kernel fragmentation prevention closes the race between lookup and send.
 use super::transmit::SendOptions;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io,
     net::SocketAddr,
     time::{Duration, Instant},
@@ -23,9 +23,18 @@ struct RouteKey {
     oif: u32,
 }
 
+struct CachedMtu {
+    until: Instant,
+    mtu: u32,
+    referenced: bool,
+}
+
 #[derive(Default)]
 pub(super) struct MtuCache {
-    entries: HashMap<RouteKey, (Instant, u32)>,
+    entries: HashMap<RouteKey, CachedMtu>,
+    // One key per entry; hits only set a bit. Capacity pressure advances this
+    // bounded second-chance queue rather than discarding the whole working set.
+    order: VecDeque<RouteKey>,
     #[cfg(target_os = "linux")]
     notifications: Option<std::os::fd::OwnedFd>,
 }
@@ -62,7 +71,7 @@ impl MtuCache {
                 )
             };
             if raw < 0 {
-                self.entries.clear();
+                self.clear();
                 return false;
             }
             // SAFETY: `raw` is a fresh, non-negative descriptor from socket(2)
@@ -96,12 +105,13 @@ impl MtuCache {
                 )
             } < 0
             {
-                self.entries.clear();
+                self.clear();
                 return false;
             }
             self.notifications = Some(socket);
         }
-        let socket = self.notifications.as_ref().unwrap();
+        // Clearing cache/replacement state below leaves this owned fd open.
+        let socket = self.notifications.as_ref().unwrap().as_raw_fd();
         let mut bytes = [0u8; 8192];
         for _ in 0..64 {
             // SAFETY: the fd is open and owned by `self.notifications`; the
@@ -110,7 +120,7 @@ impl MtuCache {
             // still writes at most `bytes.len()` bytes and the contents are unused.
             let received = unsafe {
                 libc::recv(
-                    socket.as_raw_fd(),
+                    socket,
                     bytes.as_mut_ptr().cast(),
                     bytes.len(),
                     libc::MSG_DONTWAIT | libc::MSG_TRUNC,
@@ -121,10 +131,10 @@ impl MtuCache {
                 if error.kind() == io::ErrorKind::WouldBlock {
                     return true;
                 }
-                self.entries.clear(); // includes ENOBUFS: notifications lost
+                self.clear(); // includes ENOBUFS: notifications lost
                 return false;
             }
-            self.entries.clear();
+            self.clear();
             if received == 0 {
                 return false;
             }
@@ -141,20 +151,53 @@ impl MtuCache {
         query: impl FnOnce(&RouteKey) -> io::Result<u32>,
     ) -> io::Result<u32> {
         if !refresh {
-            if let Some((until, mtu)) = self.entries.get(&key) {
-                if *until > now {
-                    return Ok(*mtu);
+            if let Some(entry) = self.entries.get_mut(&key) {
+                if entry.until > now {
+                    entry.referenced = true;
+                    return Ok(entry.mtu);
                 }
             }
         }
-        self.entries.remove(&key);
-        let mtu = query(&key)?;
-        self.entries.retain(|_, (until, _)| *until > now);
-        if self.entries.len() >= CACHE_LIMIT {
-            self.entries.clear();
+        if self.entries.remove(&key).is_some() {
+            self.order.retain(|queued| queued != &key);
         }
-        self.entries.insert(key, (now + CACHE_TTL, mtu));
+        let mtu = query(&key)?;
+        if self.entries.len() >= CACHE_LIMIT {
+            self.evict_one(now);
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            CachedMtu {
+                until: now + CACHE_TTL,
+                mtu,
+                referenced: true,
+            },
+        );
         Ok(mtu)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn evict_one(&mut self, now: Instant) {
+        while let Some(key) = self.order.pop_front() {
+            let Some(entry) = self.entries.get_mut(&key) else {
+                continue;
+            };
+            if entry.until > now && entry.referenced {
+                entry.referenced = false;
+                self.order.push_back(key);
+            } else {
+                self.entries.remove(&key);
+                return;
+            }
+        }
+        // Fail safe if replacement metadata ever becomes inconsistent. The
+        // normal path visits at most CACHE_LIMIT + 1 keys with exclusive access.
+        self.clear();
     }
 }
 
@@ -198,6 +241,8 @@ fn route_mtu(_: &RouteKey) -> io::Result<u32> {
 
 #[cfg(target_os = "linux")]
 fn route_mtu(key: &RouteKey) -> io::Result<u32> {
+    #[cfg(test)]
+    benchmarks::note_route_query();
     use nix::libc;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     // No destination traffic is generated. RTM_GETROUTE asks the kernel for
@@ -551,6 +596,198 @@ mod tests {
             target: SocketAddr::from(([127, 0, 0, 1], port)),
             tos: 184,
             oif: 0,
+        }
+    }
+
+    fn family_key(port: u16, ipv6: bool) -> RouteKey {
+        let mut key = key(port);
+        if ipv6 {
+            key.local = "[::1]:862".parse().unwrap();
+            key.target = SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), port);
+        }
+        key
+    }
+
+    fn verify_order(cache: &MtuCache) {
+        let queued: std::collections::HashSet<_> = cache.order.iter().collect();
+        assert_eq!(queued.len(), cache.order.len());
+        assert_eq!(queued, cache.entries.keys().collect());
+        assert!(cache.order.len() <= CACHE_LIMIT);
+    }
+
+    #[test]
+    fn capacity_replaces_one_entry_and_gives_hits_a_second_chance() {
+        for ipv6 in [false, true] {
+            let now = Instant::now();
+            let mut cache = MtuCache::default();
+            for port in 0..CACHE_LIMIT as u16 {
+                cache
+                    .lookup(family_key(port, ipv6), now, false, |_| Ok(1500))
+                    .unwrap();
+            }
+            cache
+                .lookup(family_key(256, ipv6), now, false, |_| Ok(1400))
+                .unwrap();
+            assert_eq!(cache.entries.len(), CACHE_LIMIT);
+            assert!(!cache.entries.contains_key(&family_key(0, ipv6)));
+            assert_eq!(
+                cache
+                    .lookup(family_key(1, ipv6), now, false, |_| panic!(
+                        "recent entry lost"
+                    ))
+                    .unwrap(),
+                1500
+            );
+            cache
+                .lookup(family_key(257, ipv6), now, false, |_| Ok(1300))
+                .unwrap();
+            assert!(cache.entries.contains_key(&family_key(1, ipv6)));
+            assert!(!cache.entries.contains_key(&family_key(2, ipv6)));
+            verify_order(&cache);
+        }
+    }
+
+    #[test]
+    fn expiry_refresh_failure_and_clear_keep_replacement_metadata_bounded() {
+        for ipv6 in [false, true] {
+            let now = Instant::now();
+            let mut cache = MtuCache::default();
+            for port in 0..CACHE_LIMIT as u16 {
+                cache
+                    .lookup(family_key(port, ipv6), now, false, |_| Ok(1500))
+                    .unwrap();
+            }
+            // A hit does not extend the original TTL.
+            cache
+                .lookup(family_key(0, ipv6), now + CACHE_TTL / 2, false, |_| {
+                    panic!("early expiry")
+                })
+                .unwrap();
+            assert_eq!(
+                cache
+                    .lookup(family_key(0, ipv6), now + CACHE_TTL, false, |_| Ok(1280))
+                    .unwrap(),
+                1280
+            );
+            for _ in 0..1000 {
+                cache
+                    .lookup(family_key(0, ipv6), now + CACHE_TTL, true, |_| Ok(9000))
+                    .unwrap();
+                verify_order(&cache);
+            }
+            assert!(cache
+                .lookup(family_key(0, ipv6), now + CACHE_TTL, true, |_| Err(
+                    io::Error::other("route removed")
+                ))
+                .is_err());
+            assert!(!cache.entries.contains_key(&family_key(0, ipv6)));
+            verify_order(&cache);
+            // Expired entries can remain stored, but are never returned.
+            assert_eq!(
+                cache
+                    .lookup(family_key(1, ipv6), now + CACHE_TTL, false, |_| Ok(1200))
+                    .unwrap(),
+                1200
+            );
+            cache
+                .lookup(family_key(300, ipv6), now + CACHE_TTL, false, |_| Ok(1600))
+                .unwrap();
+            verify_order(&cache);
+            cache.clear();
+            assert!(cache.entries.is_empty() && cache.order.is_empty());
+        }
+    }
+
+    #[test]
+    fn eviction_preserves_complete_flow_key_isolation() {
+        for ipv6 in [false, true] {
+            let now = Instant::now();
+            let base = family_key(5000, ipv6);
+            let mut keys = vec![base.clone()];
+            let mut other = base.clone();
+            other.local.set_port(863);
+            keys.push(other);
+            let mut other = base.clone();
+            other
+                .local
+                .set_ip(if ipv6 { "::2" } else { "127.0.0.2" }.parse().unwrap());
+            keys.push(other);
+            let mut other = base.clone();
+            other.target.set_port(5001);
+            keys.push(other);
+            let mut other = base.clone();
+            other
+                .target
+                .set_ip(if ipv6 { "::2" } else { "127.0.0.2" }.parse().unwrap());
+            keys.push(other);
+            let mut other = base.clone();
+            other.tos = 0;
+            keys.push(other);
+            let mut other = base.clone();
+            other.oif = 7;
+            keys.push(other);
+            if let SocketAddr::V6(target) = base.target {
+                let mut other = base.clone();
+                let mut scoped = target;
+                scoped.set_scope_id(7);
+                other.target = SocketAddr::V6(scoped);
+                keys.push(other);
+            }
+            let mut cache = MtuCache::default();
+            for (i, key) in keys.iter().enumerate() {
+                cache
+                    .lookup(key.clone(), now, false, |_| Ok(1280 + i as u32))
+                    .unwrap();
+            }
+            for (i, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    cache
+                        .lookup(key.clone(), now, false, |_| panic!("flow aliased or lost"))
+                        .unwrap(),
+                    1280 + i as u32
+                );
+            }
+            verify_order(&cache);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn notification_and_receive_error_clear_all_replacement_state() {
+        use std::os::unix::net::UnixDatagram;
+        for empty in [false, true] {
+            let mut cache = MtuCache::default();
+            cache
+                .lookup(key(1), Instant::now(), false, |_| Ok(1500))
+                .unwrap();
+            let (sender, receiver) = UnixDatagram::pair().unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            sender.send(if empty { &[] } else { &[1] }).unwrap();
+            cache.notifications = Some(receiver.into());
+            assert_eq!(cache.invalidate_routes(), !empty);
+            assert!(cache.entries.is_empty() && cache.order.is_empty());
+        }
+        let mut cache = MtuCache {
+            notifications: Some(std::fs::File::open("/dev/null").unwrap().into()),
+            ..MtuCache::default()
+        };
+        let options = SendOptions {
+            apply_tos: true,
+            egress_ifindex: None,
+            tos: 184,
+            source: None,
+            srh: None,
+            dont_fragment: true,
+        };
+        let local = "127.0.0.1:862".parse().unwrap();
+        let target = "127.0.0.1:5000".parse().unwrap();
+        let (route, _) = route_key(local, target, &options).unwrap();
+        for _ in 0..2 {
+            cache
+                .lookup(route.clone(), Instant::now(), true, |_| Ok(1))
+                .unwrap();
+            assert!(cache.payload_cap(local, target, &options, false).unwrap() >= 1000);
+            verify_order(&cache);
         }
     }
 

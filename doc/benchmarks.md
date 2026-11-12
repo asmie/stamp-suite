@@ -346,7 +346,7 @@ thread isolation and operation invariants without enforcing allocation budgets.
 
 ## MTU-cache capacity and route-query cost
 
-Two ignored library tests provide opt-in release measurements of the private
+Three ignored library tests provide opt-in release measurements of the private
 MTU cache without exposing application APIs or changing cache policy. Normal
 CI runs a functional fixture test; it does not run these timing measurements.
 
@@ -357,6 +357,9 @@ cargo test --locked --release --lib \
 cargo test --locked --release --lib \
   receiver::mtu::benchmarks::loopback_route_queries \
   -- --exact --ignored --nocapture --test-threads=1 > /tmp/mtu-query.log
+cargo test --locked --release --lib \
+  receiver::mtu::benchmarks::loopback_capacity \
+  -- --exact --ignored --nocapture --test-threads=1 > /tmp/mtu-live-cache.log
 ```
 
 Successful runs print one `MTU_BENCH_JSON ` line containing their JSON report
@@ -390,6 +393,24 @@ socket lifecycle, request construction, syscalls and response parsing are timed;
 sample recording and sorting are excluded. The subscription/invalidation path
 and payload-cap computation are not included. Missing Linux support, socket
 permission, routes or a changing MTU prevents a completed calibration report.
+
+The Linux-only `loopback_capacity` driver runs the same working-set sizes and
+trace patterns through the full payload-cap lookup path with real time. Each
+case uses four traversals after warmup, with route-key construction, notification
+polling, expiry checks, route queries and IP/UDP overhead calculation included.
+IPv4 uses distinct addresses in 127.0.0.0/8; IPv6 uses distinct destination ports
+on ::1, so its distinct keys represent UDP flows rather than distinct IPs.
+No UDP packets are sent. A successful notification subscription is required;
+every cap, hit/query count and cache bound is checked. A test-only thread-local
+counter records real route-query calls and adds no work to application builds.
+Input setup, warmup and final destruction are outside batch timing; counters,
+result comparisons and peak tracking are inside. TTL expiry or actual route
+notifications can increase query counts, so retain all counts with the timing.
+
+For an eviction comparison, build both policies with identical driver code,
+features and compiler, retain both executables, and alternate their run order
+on the same CPU. Compare query counts as well as repeated native wall times;
+do not turn a synthetic-query timing difference into a packet-throughput claim.
 
 Use query counts to compare policy behavior on identical traces. A cyclic
 working set larger than the cache can miss under several eviction policies;
