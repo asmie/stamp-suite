@@ -46,6 +46,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Scan retained sessions under a shared table lock during periodic cleanup,
+  allowing existing sessions to refresh activity while no expiry is needed.
+  Recheck expiry under the exclusive lock before removing any sessions.
+
 - Reuse the untrimmed reply buffer for send attempts that fit the payload budget;
   copy only for shaping, while preserving full retries, fresh signatures and
   the template for later burst copies.

@@ -559,6 +559,128 @@ fn test_session_manager_cleanup_keeps_active() {
 }
 
 #[test]
+fn retained_cleanup_completes_while_another_table_reader_is_active() {
+    for source in ["127.0.0.1:4000", "[::1]:4000"] {
+        let manager = SessionManager::new(Some(Duration::MAX), Some(1));
+        let key = SessionKey::from(source.parse::<SocketAddr>().unwrap());
+        let session = manager.get_or_create_session(key).unwrap();
+        let reader = manager.sessions.read().unwrap();
+        thread::scope(|scope| {
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            let manager_ref = &manager;
+            let cleanup = scope.spawn(move || {
+                finished_tx
+                    .send(manager_ref.cleanup_stale_sessions())
+                    .unwrap();
+            });
+            // The timeout bounds a deadlock failure, not cleanup performance.
+            // Release the reader before joining even when the check fails.
+            let result = finished_rx.recv_timeout(Duration::from_secs(5));
+            drop(reader);
+            cleanup.join().unwrap();
+            assert_eq!(result.unwrap(), 0);
+        });
+        assert!(Arc::ptr_eq(
+            &session,
+            &manager.get_or_create_session(key).unwrap()
+        ));
+        assert!(session.transmission_guard().is_some());
+        assert!(manager.get_or_create_session(make_addr(4001)).is_none());
+    }
+}
+
+#[test]
+fn cleanup_handles_activity_newer_than_its_scan_time() {
+    let manager = SessionManager::new(Some(Duration::from_secs(60)), None);
+    let client = make_addr(4000);
+    let session = manager.get_or_create_session(client).unwrap();
+    // A concurrent reader can refresh after the shared scan captures `now`.
+    // Model that ordering without a scheduling-dependent race or aging sleep.
+    manager.sessions.read().unwrap()[&SessionKey::from(client)]
+        .last_active
+        .store(manager.now_ns() + 1_000_000_000, Ordering::Relaxed);
+    assert_eq!(manager.cleanup_stale_sessions(), 0);
+    assert!(Arc::ptr_eq(&session, &manager.get_session(client).unwrap()));
+    assert!(session.transmission_guard().is_some());
+}
+
+#[test]
+fn concurrent_cleanup_creation_control_and_drain_preserve_retirement_and_cap() {
+    for ipv6 in [false, true] {
+        let manager = SessionManager::new(Some(Duration::ZERO), Some(8));
+        let keys: Vec<_> = (0..16)
+            .map(|i| {
+                SessionKey::from(if ipv6 {
+                    format!("[::1]:{}", 10_000 + i)
+                        .parse::<SocketAddr>()
+                        .unwrap()
+                } else {
+                    make_addr(10_000 + i)
+                })
+            })
+            .collect();
+        let mut handles: Vec<_> = keys[..8]
+            .iter()
+            .map(|key| manager.get_or_create_session(*key).unwrap())
+            .collect();
+        let start = std::sync::Barrier::new(4);
+        thread::scope(|scope| {
+            let creator = scope.spawn(|| {
+                start.wait();
+                let mut acquired = Vec::new();
+                for i in 0..256 {
+                    if let Some(session) = manager.get_or_create_session(keys[i % keys.len()]) {
+                        if let Some(_guard) = session.transmission_guard() {
+                            session.generate_sequence_number();
+                        }
+                        acquired.push(session);
+                    }
+                    assert!(manager.session_count() <= 8);
+                }
+                acquired
+            });
+            scope.spawn(|| {
+                start.wait();
+                for _ in 0..256 {
+                    manager.cleanup_stale_sessions();
+                }
+            });
+            scope.spawn(|| {
+                start.wait();
+                for i in 0..256 {
+                    manager
+                        .expire_matching(keys[i % keys.len()].client, None)
+                        .unwrap();
+                }
+            });
+            scope.spawn(|| {
+                start.wait();
+                for _ in 0..128 {
+                    manager.set_draining(true);
+                    manager.set_draining(false);
+                }
+            });
+            handles.extend(creator.join().unwrap());
+        });
+        manager.set_draining(true);
+        manager.cleanup_stale_sessions();
+        assert_eq!(manager.session_count(), 0);
+        assert!(keys
+            .iter()
+            .all(|key| manager.get_or_create_session(*key).is_none()));
+        assert!(handles
+            .iter()
+            .all(|session| session.transmission_guard().is_none()));
+        manager.set_draining(false);
+        let replacement = manager.get_or_create_session(keys[0]).unwrap();
+        assert!(handles
+            .iter()
+            .all(|old| old.get_id() != replacement.get_id()));
+        assert!(replacement.transmission_guard().is_some());
+    }
+}
+
+#[test]
 fn lowering_cap_preserves_existing_sessions_and_rejection_has_no_state() {
     let manager = SessionManager::new(None, Some(2));
     let first = manager.get_or_create_session(make_addr(1)).unwrap();

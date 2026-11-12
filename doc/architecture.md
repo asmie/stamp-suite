@@ -396,6 +396,14 @@ timeout is 300 seconds, and 0 disables cleanup. A cap or drain rejection
 creates no temporary session and consumes no ID or sequence number. Expiry
 keeps static provisioning.
 
+Periodic cleanup first checks for expiry under a shared table lock, allowing
+existing sessions to refresh activity during retained-only scans. If it finds
+a possible expiry, it releases that lock and rechecks activity under the
+exclusive lock before retiring and removing sessions. New identities still
+need exclusive access. An expiring session still waits for any active send
+under the table lock; the shared scan changes neither retirement nor admission
+rules. Sparse expiry can add a preliminary scan before the removal pass.
+
 ### Session admission and lifetime
 
 The internal admission permit records a provisioning decision for one manager

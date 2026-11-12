@@ -613,6 +613,21 @@ impl SessionManager {
             None => return 0,
         };
 
+        // Most periodic scans find only live entries. Let known identities
+        // continue refreshing activity during that scan instead of excluding
+        // every reader. A positive result is only a hint: activity may change
+        // before the exclusive pass, which must recheck every entry.
+        {
+            let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            if !sessions
+                .values()
+                .any(|entry| now.saturating_duration_since(self.last_active(entry)) >= timeout)
+            {
+                return 0;
+            }
+        }
+
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let before_count = sessions.len();
