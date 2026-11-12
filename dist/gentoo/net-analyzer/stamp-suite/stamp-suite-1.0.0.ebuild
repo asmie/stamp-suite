@@ -147,7 +147,7 @@ CRATES="
 	regex@1.13.1
 	ring@0.17.14
 	roff@1.1.1
-	rustix@1.1.5
+	rustix@1.1.6
 	rustls-pki-types@1.15.1
 	rustls-webpki@0.103.16
 	rustls@0.23.46

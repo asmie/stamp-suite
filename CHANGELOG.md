@@ -52,6 +52,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Update the locked `rustix` dev dependency to 1.1.6, fixing
+  RUSTSEC-2026-0486 without weakening dependency checks.
+
 - Reject unnamed wildcard pnet capture selection even when an adapter
   advertises an unspecified address. Preserve concrete address, interface-name
   and IPv6 scope matching, and avoid entering capture during invalid startup.
