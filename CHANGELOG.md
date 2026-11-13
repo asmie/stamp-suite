@@ -7,6 +7,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in admission measurements during retained, mixed and full session
+  expiry, separating creation, control retirement and complete cycle costs.
+
 - Add opt-in session-expiry contention measurements for retained, mixed and
   fully expired tables, including delayed transmission-guard retirement.
 

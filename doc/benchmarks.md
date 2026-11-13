@@ -342,6 +342,42 @@ refresh, not new-session creation, packet queues, independently arriving traffic
 or sustained cleanup rates. Normal tests check small fixtures without latency
 thresholds.
 
+The separate `session::benchmarks::expiry_admission_measurements` fixture uses
+the same 90-case size/family/expiry/guard matrix for new-session creation:
+
+```sh
+cargo test --locked --release --lib \
+  session::benchmarks::expiry_admission_measurements \
+  -- --exact --ignored --nocapture --test-threads=1 > /tmp/session-expiry-admission.log
+```
+
+Save the `EXPIRY_ADMISSION_JSON=` line as JSON. This mode reserves one additional
+slot: the cap is N+2, and the table varies from N+1 to N+2 before cleanup. Each
+closed-loop cycle creates an identity on source port 10001, checks its fresh
+sequence/counter state, then removes it through the control manager API. Seeded
+entries and the persistent live probe use port 10000. Transient entries keep
+genuine live activity offsets, so cleanup removes exactly the intended seeded
+entries. Final validation checks retained IDs, retirement and table size.
+
+Admission duration includes the manager acquisition and ID read, retaining its
+Arc until retirement. Retirement duration includes only the control manager
+call, whose ambiguity scan can inspect the entire table. Complete-cycle duration
+also includes freshness/retirement assertions and final Arc release. JSON
+separates all three distributions for 32 pre-cleanup cycles and every concurrent
+cycle, reporting overlap of each phase's longest call with cleanup. A cycle can
+overlap cleanup while its admission phase does not; inspect the phase-specific
+overlap fields before attributing a stall to creation.
+
+Reported cycle windows span the first call's start through the last cycle's end;
+their observed cycles/sec include statistics collection between cycles. The
+window can extend immediately before or after cleanup and always completes at
+least one cycle. This workload measures one transient identity at a time, with
+control removal between admissions; it is not sustained net table growth,
+independently arriving traffic, pure lock wait or packet queueing. Read the
+latencies alongside removal counts and exact maxima/pause counts. Small normal
+tests exercise both families and all expiry/guard combinations without timing
+thresholds. These test-only fixtures add no runtime API or production behavior.
+
 ## Session allocation requests
 
 `session_allocations` counts Rust allocator requests made by one session-manager

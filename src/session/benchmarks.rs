@@ -1,4 +1,4 @@
-//! One-shot expiry with a concurrent refresh producer. No sockets or packets.
+//! One-shot expiry with concurrent refresh or admission. No sockets or packets.
 //! Kept inside the test build so synthetic activity ages need no runtime API.
 
 use super::*;
@@ -143,6 +143,63 @@ impl Samples {
             "quantile_precision": self.collector.snapshot(self.count, 0).quantile_precision,
         })
     }
+
+    fn overlap(&self, started: Instant, finished: Instant) -> u64 {
+        self.longest_call
+            .map_or(0, |(call_started, call_finished)| {
+                call_finished
+                    .min(finished)
+                    .saturating_duration_since(call_started.max(started))
+                    .as_nanos() as u64
+            })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Probe {
+    Refresh,
+    Admission,
+}
+
+struct Observation {
+    acquisition: (Instant, Instant),
+    retirement: Option<(Instant, Instant)>,
+    cycle: (Instant, Instant),
+}
+
+#[derive(Default)]
+struct ProbeSamples {
+    acquisition: Samples,
+    retirement: Samples,
+    cycle: Samples,
+    first_cycle: Option<Instant>,
+    last_cycle: Option<Instant>,
+}
+
+impl ProbeSamples {
+    fn record(&mut self, observation: Observation) {
+        self.acquisition.record(observation.acquisition);
+        if let Some(retirement) = observation.retirement {
+            self.retirement.record(retirement);
+            self.cycle.record(observation.cycle);
+            self.first_cycle.get_or_insert(observation.cycle.0);
+            self.last_cycle = Some(observation.cycle.1);
+        }
+    }
+
+    fn window_ns(&self) -> u64 {
+        self.first_cycle
+            .zip(self.last_cycle)
+            .map_or(0, |(start, end)| {
+                end.duration_since(start).as_nanos() as u64
+            })
+    }
+
+    fn cycles_per_second(&self) -> Option<f64> {
+        let ns = self.window_ns();
+        (ns > 0).then(|| self.cycle.count as f64 * 1_000_000_000.0 / ns as f64)
+    }
 }
 
 struct StopOnDrop<'a>(&'a AtomicBool);
@@ -153,39 +210,90 @@ impl Drop for StopOnDrop<'_> {
 }
 
 fn trial(sessions: usize, percent: usize, ipv6: bool, guard_delay: Duration) -> Value {
+    trial_with_probe(sessions, percent, ipv6, guard_delay, Probe::Refresh)
+}
+
+fn trial_with_probe(
+    sessions: usize,
+    percent: usize,
+    ipv6: bool,
+    guard_delay: Duration,
+    probe: Probe,
+) -> Value {
     let fixture = Fixture::new(sessions, percent, ipv6);
+    let mut transient = fixture.probe;
+    transient.client.set_port(10_001);
+    if probe == Probe::Admission {
+        // Reserve exactly one slot beyond the seeded table and live probe.
+        fixture.manager.set_max_sessions(sessions + 2);
+    }
     assert!(guard_delay.is_zero() || fixture.expired > 0);
     let stop = AtomicBool::new(false);
     let guarded_session =
         (!guard_delay.is_zero()).then(|| fixture.manager.get_session(key(0, ipv6)).unwrap());
-    let refresh = || {
+    let operation = |previous_id: &mut Option<u32>| {
         let started = Instant::now();
         let session = fixture
             .manager
-            .get_or_create_session(fixture.probe)
+            .get_or_create_session(if probe == Probe::Admission {
+                transient
+            } else {
+                fixture.probe
+            })
             .unwrap();
         let id = session.get_id();
+        if probe == Probe::Refresh {
+            drop(session);
+            let finished = Instant::now();
+            assert_eq!(id, fixture.probe_id);
+            return Observation {
+                acquisition: (started, finished),
+                retirement: None,
+                cycle: (started, finished),
+            };
+        }
+        let acquired = Instant::now();
+        assert_ne!(
+            Some(id),
+            *previous_id,
+            "each admission must create fresh state"
+        );
+        assert_eq!(session.peek_sequence_number(), 0);
+        assert_eq!(session.get_received_count(), 0);
+        assert_eq!(session.get_transmitted_count(), 0);
+        *previous_id = Some(id);
+        let retiring = Instant::now();
+        let removed = fixture
+            .manager
+            .expire_matching(transient.client, Some(id))
+            .unwrap();
+        let retired = Instant::now();
+        assert!(removed);
+        assert!(session.transmission_guard().is_none());
         drop(session);
-        let finished = Instant::now();
-        assert_eq!(id, fixture.probe_id);
-        (started, finished)
+        Observation {
+            acquisition: (started, acquired),
+            retirement: Some((retiring, retired)),
+            cycle: (started, Instant::now()),
+        }
     };
     let (removed, cleanup_ns, baseline, concurrent, guard_release_ns) = thread::scope(|scope| {
         let (ready_tx, ready_rx) = mpsc::sync_channel(0);
         let (go_tx, go_rx) = mpsc::sync_channel(0);
         let stop_ref = &stop;
         let producer = scope.spawn(move || {
-            let mut baseline = Samples::default();
+            let mut previous_id = None;
+            let mut baseline = ProbeSamples::default();
             for _ in 0..32 {
-                baseline.record(refresh());
+                baseline.record(operation(&mut previous_id));
             }
             ready_tx.send(()).unwrap();
             go_rx.recv_timeout(HANDSHAKE_TIMEOUT).unwrap();
-            let mut concurrent = Samples::default();
+            let mut concurrent = ProbeSamples::default();
             // Always issue at least one call, even when cleanup finishes before
             // this thread is scheduled. Its latency is not proof of overlap.
             loop {
-                concurrent.record(refresh());
+                concurrent.record(operation(&mut previous_id));
                 if stop_ref.load(Ordering::Acquire) {
                     break;
                 }
@@ -226,11 +334,15 @@ fn trial(sessions: usize, percent: usize, ipv6: bool, guard_delay: Duration) -> 
         if let Some(session) = &guarded_session {
             assert!(session.transmission_guard().is_none());
         }
-        let (call_started, call_finished) = concurrent.longest_call.unwrap();
-        let overlap_ns = call_finished
-            .min(cleanup_finished)
-            .saturating_duration_since(call_started.max(cleanup_started))
-            .as_nanos() as u64;
+        let overlap_ns = [
+            concurrent
+                .acquisition
+                .overlap(cleanup_started, cleanup_finished),
+            concurrent
+                .retirement
+                .overlap(cleanup_started, cleanup_finished),
+            concurrent.cycle.overlap(cleanup_started, cleanup_finished),
+        ];
         (
             removed,
             cleanup_ns,
@@ -240,15 +352,44 @@ fn trial(sessions: usize, percent: usize, ipv6: bool, guard_delay: Duration) -> 
         )
     });
     fixture.validate(removed);
-    json!({
+    assert!(fixture.manager.get_session(transient).is_none());
+    if probe == Probe::Admission {
+        assert_eq!(baseline.acquisition.count, baseline.retirement.count);
+        assert_eq!(
+            concurrent.0.acquisition.count,
+            concurrent.0.retirement.count
+        );
+        assert_eq!(concurrent.0.acquisition.count, concurrent.0.cycle.count);
+    }
+    let mut report = json!({
+        "probe": probe,
         "seeded_sessions": sessions, "expired_percent": percent, "ipv6": ipv6,
         "guard_requested_ns": guard_delay.as_nanos() as u64,
         "guard_release_from_start_ns": guard_release_ns,
         "removed": removed, "remaining_including_probe": fixture.manager.session_count(),
         "cleanup_call_ns": cleanup_ns,
-        "baseline_refresh": baseline.report(), "concurrent_refresh": concurrent.0.report(),
-        "longest_refresh_overlap_with_cleanup_ns": concurrent.1,
-    })
+    });
+    if probe == Probe::Refresh {
+        report["baseline_refresh"] = baseline.acquisition.report();
+        report["concurrent_refresh"] = concurrent.0.acquisition.report();
+        report["longest_refresh_overlap_with_cleanup_ns"] = json!(concurrent.1[0]);
+    } else {
+        report["session_cap"] = json!(fixture.manager.max_sessions());
+        report["baseline_admission"] = baseline.acquisition.report();
+        report["baseline_retirement"] = baseline.retirement.report();
+        report["baseline_cycle"] = baseline.cycle.report();
+        report["concurrent_admission"] = concurrent.0.acquisition.report();
+        report["concurrent_retirement"] = concurrent.0.retirement.report();
+        report["concurrent_cycle"] = concurrent.0.cycle.report();
+        report["baseline_cycle_window_ns"] = json!(baseline.window_ns());
+        report["baseline_cycles_per_second"] = json!(baseline.cycles_per_second());
+        report["concurrent_cycle_window_ns"] = json!(concurrent.0.window_ns());
+        report["concurrent_cycles_per_second"] = json!(concurrent.0.cycles_per_second());
+        report["longest_admission_overlap_with_cleanup_ns"] = json!(concurrent.1[0]);
+        report["longest_retirement_overlap_with_cleanup_ns"] = json!(concurrent.1[1]);
+        report["longest_cycle_overlap_with_cleanup_ns"] = json!(concurrent.1[2]);
+    }
+    report
 }
 
 #[test]
@@ -290,6 +431,71 @@ fn concurrent_expiry_fixtures_complete_without_latency_thresholds() {
             }
         }
     }
+}
+
+#[test]
+fn concurrent_admission_expiry_preserves_capacity_and_fresh_state() {
+    for ipv6 in [false, true] {
+        for percent in [0, 50, 100] {
+            for delay_ms in [0, 1] {
+                if percent == 0 && delay_ms != 0 {
+                    continue;
+                }
+                let report = trial_with_probe(
+                    16,
+                    percent,
+                    ipv6,
+                    Duration::from_millis(delay_ms),
+                    Probe::Admission,
+                );
+                assert_eq!(report["session_cap"], 18);
+                assert_eq!(report["baseline_admission"]["calls"], 32);
+                assert_eq!(report["baseline_cycle"]["calls"], 32);
+                assert!(report["concurrent_admission"]["calls"].as_u64().unwrap() > 0);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual release measurement; see doc/benchmarks.md"]
+fn expiry_admission_measurements() -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(debug_assertions) {
+        return Err("measurements require --release".into());
+    }
+    let mut trials = Vec::new();
+    for sessions in [1_024, 16_384, 65_536] {
+        for ipv6 in [false, true] {
+            for percent in [0, 50, 100] {
+                for delay_ms in [0, 10] {
+                    if percent == 0 && delay_ms != 0 {
+                        continue;
+                    }
+                    for repeat in 0..3 {
+                        let mut result = trial_with_probe(
+                            sessions,
+                            percent,
+                            ipv6,
+                            Duration::from_millis(delay_ms),
+                            Probe::Admission,
+                        );
+                        result["repeat"] = json!(repeat);
+                        trials.push(result);
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "EXPIRY_ADMISSION_JSON={}",
+        json!({
+            "schema_version": 1,
+            "scope": "one-shot expiry with closed-loop bounded admission/control-retirement cycles; no packets",
+            "ttl_pnet": cfg!(feature = "ttl-pnet"), "ttl_nix": cfg!(feature = "ttl-nix"),
+            "snmp": cfg!(feature = "snmp"), "trials": trials,
+        })
+    );
+    Ok(())
 }
 
 #[test]
