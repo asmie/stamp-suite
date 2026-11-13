@@ -14,11 +14,12 @@ use nix::{
     libc,
     sys::socket::{recvmsg, ControlMessageOwned, MsgFlags, SockaddrStorage},
 };
-use tokio::{net::UdpSocket, time::interval};
+use tokio::net::UdpSocket;
 
 use crate::configuration::Configuration;
 
 use super::{
+    cleanup::SessionCleanup,
     ingest::{ReceivedPacket, ReflectorCore, ReflectorSettings},
     print_reflector_stats,
     transmit::{DatagramSender, ReplyQueue, ShutdownDrain},
@@ -334,15 +335,16 @@ pub async fn run_receiver_with_socket(
 
     let mut datagram_sender = DatagramSender::new(&tokio_socket);
 
-    // Session cleanup interval: run at half the timeout period, minimum 1 second
-    // When session_timeout is 0, checked_div returns None, disabling cleanup
-    let cleanup_interval = conf
-        .session_timeout
-        .checked_div(2)
-        .map(|t| Duration::from_secs(t.max(1)));
-    let mut cleanup_timer = cleanup_interval.map(interval);
-
-    let shutdown = shared.shutdown.clone();
+    let shutdown = shared.shutdown.child_token();
+    let mut cleanup = SessionCleanup::start(
+        Arc::clone(&session_manager),
+        conf.session_timeout,
+        true, // Match the previous immediate interval tick.
+        shutdown.clone(),
+    )
+    .map_err(|error| crate::StartupError::io("Cannot start session cleanup worker", error))?;
+    // On future cancellation, stop this reflector before joining cleanup.
+    let _stop_on_drop = shutdown.clone().drop_guard();
 
     // Sends the next copy of a reply, records its TX-timestamp correlation,
     // and requeues any later burst copies. This loop is the only sender, so
@@ -376,8 +378,10 @@ pub async fn run_receiver_with_socket(
     loop {
         if drain.finished(std::time::Instant::now(), budget.is_empty()) {
             drop(replies); // Account for every unsent copy before printing stats.
+            let result = cleanup.finish();
             print_reflector_stats(&counters, &session_manager, start_time, output_format);
-            return Ok(());
+            return result
+                .map_err(|error| crate::StartupError::io("Session cleanup failed", error));
         }
         // Apply kernel TX timestamps that arrived on the error queue since
         // the last iteration: correct the Follow-Up Telemetry record of the
@@ -415,9 +419,8 @@ pub async fn run_receiver_with_socket(
             }
         }
 
-        // Wait for socket to be readable, cleanup timer, or shutdown signal.
-        // Use unbiased select to ensure fair scheduling - biased select
-        // would starve the cleanup timer under heavy packet load.
+        // Cleanup runs independently of socket readiness and burst traffic.
+        // Keep queued replies and shutdown fairly scheduled under load.
         tokio::select! {
             _ = async {
                 if let Some(deadline) = replies.deadline() {
@@ -436,20 +439,6 @@ pub async fn run_receiver_with_socket(
                     crate::warn_throttled!("Failed to wait for readable: {}", e);
                     continue;
                 }
-            }
-
-            _ = async {
-                if let Some(ref mut timer) = cleanup_timer {
-                    timer.tick().await
-                } else {
-                    std::future::pending::<tokio::time::Instant>().await
-                }
-            } => {
-                let removed = session_manager.cleanup_stale_sessions();
-                if removed > 0 {
-                    log::debug!("Session cleanup: removed {} stale sessions", removed);
-                }
-                continue;
             }
 
             _ = shutdown.cancelled(), if drain.deadline().is_none() => {
@@ -609,7 +598,7 @@ pub async fn run_receiver_with_socket(
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // try_io cleared stale readiness; the next iteration can
-                    // sleep while still servicing cleanup/shutdown/error-queue work.
+                    // sleep while still servicing shutdown/error-queue work.
                     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
                     {
                         errqueue_suspect |= received == 0;
@@ -857,6 +846,70 @@ fn ipv4_addr_from_pktinfo(pktinfo: &libc::in_pktinfo) -> Ipv4Addr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn receiver_exit_joins_cleanup_without_cancelling_its_parent_on_abort() {
+        use clap::Parser;
+
+        for address in ["127.0.0.1", "::1"] {
+            for timeout in ["0", "300"] {
+                for abort in [false, true] {
+                    let conf = Configuration::parse_from([
+                        "stamp-suite",
+                        "--is-reflector",
+                        "--local-addr",
+                        address,
+                        "--local-port",
+                        "0",
+                        "--session-timeout",
+                        timeout,
+                    ]);
+                    let shared = Arc::new(super::super::create_shared_state(&conf).unwrap());
+                    let weak = Arc::downgrade(&shared.session_manager);
+                    let socket = std::net::UdpSocket::bind(conf.local_socket_addr()).unwrap();
+                    let bound = socket.local_addr().unwrap();
+                    let receiver_state = Arc::clone(&shared);
+                    let task = tokio::spawn(async move {
+                        run_receiver_with_socket(&conf, &receiver_state, socket).await
+                    });
+                    let _stop_on_failure = shared.shutdown.clone().drop_guard();
+                    let client = UdpSocket::bind((address.parse::<IpAddr>().unwrap(), 0))
+                        .await
+                        .unwrap();
+                    let packet = crate::packets::PacketUnauthenticated {
+                        sequence_number: 1,
+                        timestamp: 0,
+                        error_estimate: 0,
+                        ssid: 7,
+                        mbz: [0; 28],
+                    };
+                    client.send_to(&packet.to_bytes(), bound).await.unwrap();
+                    let mut response = [0; 128];
+                    tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut response))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if abort {
+                        task.abort();
+                        assert!(task.await.unwrap_err().is_cancelled());
+                        assert!(!shared.shutdown.is_cancelled());
+                    } else {
+                        shared.shutdown.cancel();
+                        tokio::time::timeout(Duration::from_secs(5), task)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .unwrap();
+                    }
+                    drop(shared);
+                    assert!(
+                        weak.upgrade().is_none(),
+                        "cleanup retained the manager after receiver exit"
+                    );
+                }
+            }
+        }
+    }
 
     /// Model kernel `in_pktinfo` bytes for 127.0.0.1 and verify extraction
     /// preserves the address instead of reversing it to 1.0.0.127.

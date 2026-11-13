@@ -28,6 +28,7 @@ use std::sync::Arc;
 use crate::{configuration::Configuration, shutdown::CancellationToken};
 
 use super::{
+    cleanup::SessionCleanup,
     ingest::{ReceivedPacket, ReflectorCore, ReflectorSettings},
     print_reflector_stats,
     transmit::{DatagramSender, QueuedTransmission, ReplyBudget, ReplyQueue, ShutdownDrain},
@@ -99,7 +100,6 @@ struct CaptureConfig {
     queue_capacity: usize,
     shutdown_grace: Duration,
     local_port: u16,
-    cleanup_interval: Option<Duration>,
     /// Child of the process shutdown token; also cancelled when the
     /// capture or transmit side stops.
     shutdown: CancellationToken,
@@ -223,13 +223,6 @@ pub async fn run_receiver(
         local_addr
     );
 
-    // Session cleanup interval: run at half the timeout period, minimum 1 second
-    // When session_timeout is 0, checked_div returns None, disabling cleanup
-    let cleanup_interval = conf
-        .session_timeout
-        .checked_div(2)
-        .map(|t| Duration::from_secs(t.max(1)));
-
     let shutdown = shared.shutdown.child_token();
     let counters = Arc::clone(&shared.counters);
     let start_time = shared.start_time;
@@ -241,11 +234,17 @@ pub async fn run_receiver(
         queue_capacity: conf.reflector_queue_capacity as usize,
         shutdown_grace: Duration::from_millis(u64::from(conf.reflector_shutdown_grace_ms)),
         local_port: local_addr.port(),
-        cleanup_interval,
         shutdown: shutdown.clone(),
     };
 
-    // Dropping this future (an aborted task) also stops capture and sending.
+    let mut cleanup = SessionCleanup::start(
+        Arc::clone(&session_manager),
+        conf.session_timeout,
+        false, // Wait one interval before the first scan, as before.
+        shutdown.clone(),
+    )
+    .map_err(|error| crate::StartupError::io("Cannot start session cleanup worker", error))?;
+    // Dropping this future stops capture/sending before joining cleanup.
     let _stop_on_drop = shutdown.drop_guard();
 
     // Spawn the blocking packet capture loop on a dedicated thread.
@@ -256,11 +255,13 @@ pub async fn run_receiver(
     })
     .await;
 
+    let cleanup_result = cleanup.finish();
     print_reflector_stats(&counters, &session_manager, start_time, output_format);
     // A normal shutdown (a signal or the control API) returns Ok. A panicked
     // capture thread returns an error so main exits non-zero and a
     // supervisor can restart the reflector.
-    result.map_err(|e| crate::StartupError::service("Capture thread terminated abnormally", e))
+    result.map_err(|e| crate::StartupError::service("Capture thread terminated abnormally", e))?;
+    cleanup_result.map_err(|error| crate::StartupError::io("Session cleanup failed", error))
 }
 
 struct TransmitWorker {
@@ -315,22 +316,10 @@ fn run_capture_loop(
         handle: Some(worker),
         shutdown: config.shutdown.clone(),
     };
-    let mut last_cleanup = Instant::now();
 
     loop {
         if config.shutdown.is_cancelled() {
             break;
-        }
-
-        // Periodic session cleanup check
-        if let Some(interval) = config.cleanup_interval {
-            if last_cleanup.elapsed() >= interval {
-                let removed = config.core.session_manager.cleanup_stale_sessions();
-                if removed > 0 {
-                    log::debug!("Session cleanup: removed {} stale sessions", removed);
-                }
-                last_cleanup = Instant::now();
-            }
         }
 
         match rx.next() {
@@ -370,7 +359,7 @@ fn run_capture_loop(
                 handle_packet(&ethernet, &config, &transmitter);
             }
             Err(e) => {
-                // read_timeout makes timeouts routine; keep looping so cleanup runs.
+                // read_timeout makes timeouts routine; keep polling shutdown.
                 if e.kind() != std::io::ErrorKind::TimedOut
                     && e.kind() != std::io::ErrorKind::WouldBlock
                 {
@@ -1407,7 +1396,6 @@ mod revision13_tests {
                 queue_capacity: 8,
                 shutdown_grace: Duration::ZERO,
                 local_port: 862,
-                cleanup_interval: None,
                 shutdown: CancellationToken::new(),
             };
             let mac = [2, 17, 34, 51, 68, 85];

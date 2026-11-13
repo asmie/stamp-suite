@@ -10,6 +10,7 @@
 //! - **`ttl-pnet`**: Force pnet backend
 
 mod assemble;
+mod cleanup;
 mod ingest;
 mod keys;
 mod limits;

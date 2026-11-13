@@ -46,6 +46,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Run periodic session cleanup in one worker per reflector, keeping scans out
+  of both receive loops. Stop and join the worker on exit; timeout zero creates
+  no worker, and a cleanup panic stops the affected reflector.
+
 - Release removed session state after unlocking the session table during idle
   cleanup, keeping retirement serialized with active sends and identity reuse.
 

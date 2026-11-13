@@ -396,7 +396,14 @@ timeout is 300 seconds, and 0 disables cleanup. A cap or drain rejection
 creates no temporary session and consumes no ID or sequence number. Expiry
 keeps static provisioning.
 
-Periodic cleanup first checks for expiry under a shared table lock, allowing
+Each reflector with a nonzero session timeout owns one cleanup worker. It runs
+at half the timeout, with a one-second minimum. The nix backend starts its first
+scan immediately; pnet waits one interval. Later scans wait one interval after
+the previous scan completes, so scans never overlap or accumulate catch-up
+requests. Timeout zero starts no worker. Cleanup no longer runs inline in the
+async receive loop or the pnet capture loop and can progress without traffic.
+
+The worker first checks for expiry under a shared table lock, allowing
 existing sessions to refresh activity during retained-only scans. If it finds
 a possible expiry, it releases that lock and rechecks activity under the
 exclusive lock before retiring and removing sessions. New identities still
@@ -410,8 +417,16 @@ releases its extra references afterward. This moves destruction of otherwise
 unreferenced sessions and their allocator work outside the lock. Queued replies
 and other owners can retain state longer. The reference buffer grows with the
 number of removals, adding temporary memory and reference bookkeeping. Cleanup
-still runs synchronously in the receive loop and waits for active sends during
-retirement; lower table contention does not imply shorter receive-loop pauses.
+still takes the table lock and waits for active sends during retirement, so
+packet processing can still wait for that lock. Moving scheduling off the
+receive loops does not remove those waits or establish a packet-latency bound.
+
+Exit and future cancellation stop and join the cleanup worker before releasing
+its owner. Joining can wait for a scan already in progress, including its send
+retirement waits. A worker startup failure is reported as a startup error. A
+cleanup panic cancels only the affected reflector's child shutdown token and
+is returned as a receiver error after draining; it does not cancel a shared
+parent token or leave the reflector running without periodic expiry.
 
 ### Session admission and lifetime
 
