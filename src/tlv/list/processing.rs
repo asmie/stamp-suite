@@ -594,11 +594,7 @@ impl TlvList {
     ///
     /// Returns `true` if all validations pass, `false` if a mismatch was found.
     pub fn update_micro_session_id_tlvs(&mut self, reflector_member_link_id: u16) -> bool {
-        if !Self::apply_micro_session_id(self.non_hmac_tlvs_mut(), reflector_member_link_id) {
-            return false;
-        }
-
-        true
+        Self::apply_micro_session_id(self.non_hmac_tlvs_mut(), reflector_member_link_id)
     }
 
     /// Returns the first Reflected Test Packet Control TLV request, if present.

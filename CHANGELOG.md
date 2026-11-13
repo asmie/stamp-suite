@@ -80,6 +80,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Fix Rust 1.100 Clippy failures from a duplicate CLI attribute and a redundant
+  boolean branch in Micro-session ID processing.
+
 - Refresh the shared Nix vendor hash after the patched `rustix` lockfile update.
 
 - Update the locked `rustix` dev dependency to 1.1.6, fixing

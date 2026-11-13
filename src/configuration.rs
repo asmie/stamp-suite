@@ -372,7 +372,6 @@ pub struct Configuration {
         short = 'S',
         long,
         default_value = "0.0.0.0",
-        help_heading = "Endpoints",
         help_heading = "Endpoints"
     )]
     pub local_addr: std::net::IpAddr,
