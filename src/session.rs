@@ -1,6 +1,11 @@
 pub use crate::session_identity::{SessionAdmission, SessionKey};
 use crate::tlv::TimestampMethod;
 
+#[cfg(feature = "control")]
+mod inventory;
+#[cfg(feature = "control")]
+pub use inventory::{SessionPage, SessionPageError, MAX_SESSION_PAGE_SIZE};
+
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     net::SocketAddr,
@@ -339,6 +344,8 @@ struct SessionEntry {
     /// Last use, in nanoseconds since the manager's `epoch`. Atomic so the
     /// per-packet refresh needs only the table's read lock.
     last_active: AtomicU64,
+    #[cfg(feature = "control")]
+    inventory_id: u64,
 }
 
 impl SessionEntry {
@@ -357,6 +364,12 @@ pub struct SessionManager {
     pub(crate) acquisitions: AtomicUsize,
     /// Map from complete identity to runtime state.
     sessions: RwLock<HashMap<SessionKey, SessionEntry>>,
+    // Enabled once, before the control server accepts requests. Known-session
+    // refreshes never touch this index. Lock order: sessions, then inventory.
+    #[cfg(feature = "control")]
+    inventory: RwLock<Option<inventory::InventoryIndex>>,
+    #[cfg(feature = "control")]
+    inventory_enabled: AtomicBool,
     admission: SessionAdmission,
     provisioned: HashSet<SessionKey>,
     /// Counter for generating unique session IDs.
@@ -420,6 +433,10 @@ impl SessionManager {
             admission,
             provisioned,
             sessions: RwLock::new(HashMap::new()),
+            #[cfg(feature = "control")]
+            inventory: RwLock::new(None),
+            #[cfg(feature = "control")]
+            inventory_enabled: AtomicBool::new(false),
             next_session_id: AtomicU32::new(0),
             session_timeout,
             max_sessions: AtomicUsize::new(max_sessions.unwrap_or(0)),
@@ -479,6 +496,8 @@ impl SessionManager {
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let removed = match sessions.entry(key) {
             Entry::Occupied(entry) if Arc::ptr_eq(&entry.get().session, &expected) => {
+                #[cfg(feature = "control")]
+                self.remove_inventory_entry(entry.get().inventory_id);
                 entry.remove();
                 true
             }
@@ -618,11 +637,15 @@ impl SessionManager {
                 if self.reject_new_entry(count, client.client) {
                     return None;
                 }
+                #[cfg(feature = "control")]
+                let inventory_id = self.insert_inventory_entry(client)?;
                 let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
                 let session = Arc::new(Session::new(session_id));
                 vacant.insert(SessionEntry {
                     session: Arc::clone(&session),
                     last_active: AtomicU64::new(self.now_ns()),
+                    #[cfg(feature = "control")]
+                    inventory_id,
                 });
                 log::debug!("Created new session {} for client {}", session_id, client);
 
@@ -700,12 +723,21 @@ impl SessionManager {
         let before_count = sessions.len();
         let mut retired = Vec::new();
         let mut pending = Vec::new();
+        #[cfg(feature = "control")]
+        let mut inventory = self
+            .inventory_enabled
+            .load(Ordering::Acquire)
+            .then(|| self.inventory.write().unwrap_or_else(|e| e.into_inner()));
         sessions.retain(|addr, entry| {
             if now.saturating_duration_since(self.last_active(entry)) < timeout {
                 return true;
             }
             let session = entry.begin_retirement();
             if session.try_finish_retirement() {
+                #[cfg(feature = "control")]
+                if let Some(index) = inventory.as_mut().and_then(|guard| guard.as_mut()) {
+                    index.entries.remove(&entry.inventory_id);
+                }
                 retired.push(session);
                 log::debug!("Removing stale session for client {}", addr);
                 false
@@ -720,6 +752,8 @@ impl SessionManager {
         if removed > 0 {
             self.note_table_shrunk(sessions.len());
         }
+        #[cfg(feature = "control")]
+        drop(inventory);
         drop(sessions);
         for (key, session) in pending {
             removed += usize::from(self.finish_removal(key, session));
@@ -760,19 +794,20 @@ impl SessionManager {
         let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions
             .iter()
-            .map(|(addr, entry)| {
-                let (last_seq, _ts) = entry.session.get_last_reflection();
-                SessionSummary {
-                    key: *addr,
-                    client_addr: addr.client,
-                    session_id: entry.session.get_id(),
-                    packets_received: entry.session.get_received_count(),
-                    packets_transmitted: entry.session.get_transmitted_count(),
-                    last_reflected_seq: last_seq,
-                    last_active: self.last_active(entry),
-                }
-            })
+            .map(|(addr, entry)| self.summarize(*addr, entry))
             .collect()
+    }
+
+    fn summarize(&self, key: SessionKey, entry: &SessionEntry) -> SessionSummary {
+        SessionSummary {
+            key,
+            client_addr: key.client,
+            session_id: entry.session.get_id(),
+            packets_received: entry.session.get_received_count(),
+            packets_transmitted: entry.session.get_transmitted_count(),
+            last_reflected_seq: entry.session.get_last_reflection().0,
+            last_active: self.last_active(entry),
+        }
     }
 }
 

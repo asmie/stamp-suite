@@ -85,6 +85,7 @@ compatibility contract.
 | Module | Purpose |
 | --- | --- |
 | `session.rs` | Session table, counters, replay windows, Follow-Up state and lifetime. |
+| `session/inventory.rs` | Optional ordered index and bounded control-plane session pages. |
 | `session_identity.rs` | Session identity and static reflector admission (RFC 8972 §3). |
 | `net_policy.rs` | Outgoing TTL/Hop Limit 255, interface binding (`--interface`) and sender port selection (draft-ietf-ippm-stamp-ext-hdr-26 §3.1). |
 | `net_scope.rs` | Interface zones for IPv6 link-local endpoints. |

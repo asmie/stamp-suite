@@ -256,7 +256,7 @@ async fn tls_serves_https_and_enforces_the_token() {
 
 #[tokio::test]
 async fn status_reports_uptime_and_counters() {
-    let app = router(test_state());
+    let app = router(test_state()).unwrap();
     let v = get_json(&app, "/v1/status").await;
     assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(v["draining"], false);
@@ -274,7 +274,7 @@ async fn sessions_lists_and_expires() {
     let state = test_state();
     let addr: std::net::SocketAddr = "10.0.0.1:5000".parse().unwrap();
     state.session_manager.get_or_create_session(addr).unwrap();
-    let app = router(state.clone());
+    let app = router(state.clone()).unwrap();
 
     let v = get_json(&app, "/v1/sessions").await;
     assert_eq!(v.as_array().unwrap().len(), 1);
@@ -308,6 +308,117 @@ async fn sessions_lists_and_expires() {
 }
 
 #[tokio::test]
+async fn sessions_page_defaults_limits_and_legacy_response() {
+    let state = test_state();
+    let app = router(state.clone()).unwrap();
+    for id in 0..502 {
+        let key: crate::session::SessionKey = format!("{id},[::1]:4000,[::1]:862").parse().unwrap();
+        state.session_manager.get_or_create_session(key).unwrap();
+    }
+    let legacy = get_json(&app, "/v1/sessions").await;
+    assert_eq!(legacy.as_array().unwrap().len(), 502);
+    let default = get_json(&app, "/v1/sessions/page").await;
+    assert_eq!(default["items"].as_array().unwrap().len(), 100);
+    assert!(default["next_cursor"].is_string());
+    let first = get_json(&app, "/v1/sessions/page?limit=500").await;
+    let rows = first["items"].as_array().unwrap();
+    assert_eq!(rows.len(), 500);
+    assert_eq!(rows[0]["client"], "[::1]:4000");
+    assert_eq!(rows[0]["local"], "[::1]:862");
+    assert_eq!(rows[0]["ssid"], 0);
+    assert!(rows[0]["idle_seconds"].is_number());
+    // Every legacy field remains available in the bounded representation.
+    assert_eq!(
+        rows[0].as_object().unwrap().keys().collect::<Vec<_>>(),
+        legacy[0].as_object().unwrap().keys().collect::<Vec<_>>()
+    );
+    let next = first["next_cursor"].as_str().unwrap();
+    let last = get_json(&app, &format!("/v1/sessions/page?limit=500&cursor={next}")).await;
+    assert_eq!(last["items"].as_array().unwrap().len(), 2);
+    assert!(last["next_cursor"].is_null());
+
+    let restarted = router(test_state()).unwrap();
+    let response = restarted
+        .oneshot(
+            Request::get(format!("/v1/sessions/page?cursor={next}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::GONE);
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"].is_string());
+}
+
+#[tokio::test]
+async fn sessions_page_empty_and_query_errors_are_json() {
+    let app = router(test_state()).unwrap();
+    assert_eq!(
+        get_json(&app, "/v1/sessions/page").await,
+        serde_json::json!({"items":[],"next_cursor":null})
+    );
+    for query in [
+        "limit=0",
+        "limit=501",
+        "limit=-1",
+        "limit=abc",
+        "limit=18446744073709551616",
+        "limit=1&limit=2",
+        "cursor=",
+        "cursor=%C3%A9",
+        "cursor=bad",
+        "offset=1",
+        "cursor=bad&cursor=bad",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/sessions/page?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"].is_string(),
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sessions_page_requires_the_configured_bearer_token() {
+    let mut state = test_state();
+    state.token = Some("secret".into());
+    let app = router(state).unwrap();
+    for (token, expected) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some("wrong"), StatusCode::UNAUTHORIZED),
+        (Some("secret"), StatusCode::OK),
+    ] {
+        let mut request = Request::get("/v1/sessions/page?limit=1");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
 async fn sessions_expiry_requires_disambiguation_for_shared_source() {
     let state = test_state();
     let key: crate::session::SessionKey = "42,127.0.0.1:4000,127.0.0.1:862,7".parse().unwrap();
@@ -316,7 +427,7 @@ async fn sessions_expiry_requires_disambiguation_for_shared_source() {
         .session_manager
         .get_or_create_session(crate::session::SessionKey { ssid: 43, ..key })
         .unwrap();
-    let app = router(state.clone());
+    let app = router(state.clone()).unwrap();
     let entries = get_json(&app, "/v1/sessions").await;
     assert_eq!(entries.as_array().unwrap().len(), 2);
     for entry in entries.as_array().unwrap() {
@@ -356,7 +467,7 @@ async fn sessions_expiry_requires_disambiguation_for_shared_source() {
 #[tokio::test]
 async fn key_lifecycle() {
     let state = test_state();
-    let app = router(state.clone());
+    let app = router(state.clone()).unwrap();
 
     // Empty start.
     let v = get_json(&app, "/v1/keys").await;
@@ -458,7 +569,7 @@ async fn key_lifecycle() {
 #[tokio::test]
 async fn caps_patch_round_trip() {
     let state = test_state();
-    let app = router(state.clone());
+    let app = router(state.clone()).unwrap();
 
     let v = get_json(&app, "/v1/caps").await;
     assert_eq!(v["max_pps"], 0);
@@ -499,7 +610,7 @@ async fn caps_patch_round_trip() {
 #[tokio::test]
 async fn caps_patch_updates_administrative_size_limit() {
     let state = test_state();
-    let app = router(state.clone());
+    let app = router(state.clone()).unwrap();
 
     let res = app
         .clone()
@@ -552,7 +663,7 @@ async fn caps_patch_updates_administrative_size_limit() {
 #[tokio::test]
 async fn drain_and_shutdown() {
     let state = test_state();
-    let app = router(state.clone());
+    let app = router(state.clone()).unwrap();
 
     let res = app
         .clone()
@@ -579,7 +690,7 @@ async fn drain_and_shutdown() {
 async fn token_enforced_when_configured() {
     let mut state = test_state();
     state.token = Some("s3cret".to_string());
-    let app = router(state);
+    let app = router(state).unwrap();
 
     let res = app
         .clone()

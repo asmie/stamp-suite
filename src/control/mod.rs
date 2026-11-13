@@ -7,7 +7,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{rejection::QueryRejection, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::crypto::{HmacKey, HmacKeySet};
 use crate::receiver::{RateLimiter, ReflectorCounters, RuntimeCaps};
-use crate::session::{SessionManager, SessionSummary};
+use crate::session::{SessionManager, SessionPageError, SessionSummary};
 
 /// Shared reflector state handed to the control server by `main.rs`
 /// (cloned `Arc`s out of `ReceiverSharedState`).
@@ -38,10 +38,12 @@ fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
-fn router(state: ControlState) -> Router {
-    Router::new()
+fn router(state: ControlState) -> Result<Router, std::io::Error> {
+    state.session_manager.enable_session_inventory()?;
+    Ok(Router::new()
         .route("/v1/status", get(get_status))
         .route("/v1/sessions", get(get_sessions))
+        .route("/v1/sessions/page", get(get_sessions_page))
         .route("/v1/sessions/expire", post(post_expire_session))
         .route("/v1/keys", get(get_keys))
         .route(
@@ -56,7 +58,7 @@ fn router(state: ControlState) -> Router {
             state.clone(),
             require_token,
         ))
-        .with_state(state)
+        .with_state(state))
 }
 
 /// Constant-time bearer-token check (when a token is configured).
@@ -142,6 +144,46 @@ async fn get_sessions(State(s): State<ControlState>) -> Json<Vec<SessionDto>> {
             .map(SessionDto::from)
             .collect(),
     )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionPageQuery {
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct SessionPageDto {
+    items: Vec<SessionDto>,
+    next_cursor: Option<String>,
+}
+
+async fn get_sessions_page(
+    State(s): State<ControlState>,
+    query: Result<Query<SessionPageQuery>, QueryRejection>,
+) -> Response {
+    let Ok(Query(query)) = query else {
+        return err(StatusCode::BAD_REQUEST, "invalid session page query");
+    };
+    match s
+        .session_manager
+        .session_summaries_page(query.limit.unwrap_or(100), query.cursor.as_deref())
+    {
+        Ok(page) => Json(SessionPageDto {
+            items: page.items.into_iter().map(SessionDto::from).collect(),
+            next_cursor: page.next_cursor,
+        })
+        .into_response(),
+        Err(error) => err(
+            match error {
+                SessionPageError::ExpiredCursor => StatusCode::GONE,
+                SessionPageError::NotEnabled => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::BAD_REQUEST,
+            },
+            &error.to_string(),
+        ),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -469,7 +511,7 @@ pub async fn init(
              loopback behind an SSH tunnel or reverse proxy"
         );
     }
-    let app = router(state);
+    let app = router(state)?;
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
 

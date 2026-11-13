@@ -33,6 +33,7 @@ All paths start with `/v1`. Request and response bodies are JSON; send
 | --- | --- | --- | --- | --- |
 | GET | `/v1/status` | none | 200 | Version, uptime, drain flag, session counts and counters |
 | GET | `/v1/sessions` | none | 200 | Tracked sessions |
+| GET | `/v1/sessions/page?limit=100&cursor=...` | none | 200 | Bounded page of tracked sessions |
 | POST | `/v1/sessions/expire` | `{"client": "ip:port", "session_id": 3}` | 200 | Remove one tracked session |
 | GET | `/v1/keys` | none | 200 | SSIDs that have a key, and whether a default key exists |
 | PUT | `/v1/keys/{ssid}` | `{"key_hex": "..."}` | 204 | Add or replace the key for one SSID (decimal, 0 to 65535) |
@@ -49,6 +50,8 @@ All paths start with `/v1`. Request and response bodies are JSON; send
 | Status | When | Body |
 | --- | --- | --- |
 | 400 | Invalid key (bad hex or shorter than 16 bytes) | `{"error": "invalid key: ..."}` |
+| 400 | Invalid session page query, limit or cursor | `{"error": "..."}` |
+| 410 | Session page cursor from another manager or process lifetime | `{"error": "..."}` |
 | 400 | Body is not valid JSON, or the SSID in the path is not a number from 0 to 65535 | Plain text |
 | 401 | Token configured and the header is missing or wrong | `{"error": "missing or invalid bearer token"}` |
 | 404 | No matching session, no key for that SSID, or no default key | `{"error": "..."}` |
@@ -120,6 +123,48 @@ since startup:
 
 `session_id` is an internal number, not the wire SSID. `idle_seconds` is the
 time since the last accepted packet for the session.
+
+For large tables, use `GET /v1/sessions/page` instead. It returns an object
+with `items` (the same session fields as above) and `next_cursor` (an opaque
+string, or `null` when the walk is complete). The optional `limit` defaults
+to 100 and accepts 1 through 500. For example:
+
+```sh
+curl -sS 'http://127.0.0.1:9091/v1/sessions/page?limit=100'
+# Pass the returned cursor unchanged, URL encoded, for the next page:
+curl -sS --get 'http://127.0.0.1:9091/v1/sessions/page' \
+  --data-urlencode 'limit=100' --data-urlencode "cursor=$next_cursor"
+```
+
+Use the configured bearer token on every request when authentication is enabled.
+An empty table returns `{"items":[],"next_cursor":null}`. Invalid limits,
+malformed cursors, duplicate parameters and unknown query fields return 400
+with a JSON `error`. A cursor from a different session manager, including
+after a process restart, returns 410 with a JSON `error`; start again without
+a cursor. Cursors otherwise remain valid for that manager's lifetime and have
+no time based expiry. The limit may change between pages.
+
+Each walk has a fixed creation boundary taken on its first page. Entries have
+a stable internal inventory order; entries present when the control server
+starts have an unspecified initial order, and subsequent entries follow
+creation order. Deletions are skipped. Later creations, including recreation
+of an expired identity or reuse of an internal `session_id`, are excluded
+from that walk. Counters and idle times are live when each page is collected;
+this is not a snapshot of the whole table. If remaining entries disappear,
+the final page can be empty. Retiring identities remain visible until removal
+completes, as they do in the legacy inventory.
+
+Each page collects only its range: O(log n + limit) index work and O(limit)
+response storage. The control server initializes an ordered key index once,
+before accepting requests. Initialization holds the table write lock for O(n)
+work and retains O(n) index storage; creation and removal maintain that index.
+Managers without a control server do not enable it. Page requests can still
+wait for table access or per-session metadata updates, so the page size does
+not impose a wall clock latency bound.
+
+The existing `GET /v1/sessions` continues to return its complete, unordered
+array. Migration is opt-in: switch the path, read `items`, and repeat with
+`next_cursor` until it is `null`.
 
 `POST /v1/sessions/expire` removes one session. `session_id` is optional when
 the client address matches exactly one session. When it matches several, the

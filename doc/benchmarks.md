@@ -292,6 +292,39 @@ no probe or requested background progress fails and prints an incomplete
 report with the completed trials. CI tests invariants and failure handling;
 it imposes no latency or throughput threshold.
 
+With `--features control`, `session_contention --indexed-inventory` enables
+the same ordered index used by the control server, before timing starts. This
+lets `--background none` include index maintenance during admission without
+inventory requests. Add `--inventory-page-size 100` or `500` with
+`--background inventory` to collect one bounded page per background operation;
+that option also enables the index. Pages continue the current walk and start
+a new walk after its final page. Background latency then describes one page,
+not a complete inventory. Compare indexed full inventory, paged inventory and
+no management activity using the same table size, compiler, build and pause.
+The index is initialized after fixture population, outside the timed window.
+
+```sh
+cargo build --locked --release --features control --example session_contention
+target/release/examples/session_contention --sessions 65536 --probe admission \
+  --background none --indexed-inventory > /tmp/session-indexed-idle.json
+target/release/examples/session_contention --sessions 65536 --probe admission \
+  --background inventory --indexed-inventory > /tmp/session-indexed-full.json
+target/release/examples/session_contention --sessions 65536 --probe admission \
+  --background inventory --inventory-page-size 100 > /tmp/session-paged.json
+cargo bench --locked --features control --bench session_scaling -- session_inventory
+```
+
+The additional `session_inventory` Criterion group covers 100/500-row pages,
+one-time index initialization, indexed lookup, control churn and full expiry
+at the same table sizes and in both address families. Page timing includes
+summary collection, cursor encoding and result destruction, including partially
+filled final pages. Initialization
+excludes fixture population; full expiry excludes population and index setup.
+Compare maintenance costs with the original `session_table` cases in the same
+build. The index trades retained O(n) storage and creation/removal work for
+bounded page collection. These manager-call fixtures do not directly measure
+lock hold duration, HTTP serialization, network ingest or packet queueing.
+
 ## Expiry and transmission-guard contention
 
 The test-only `session::benchmarks::expiry_contention_measurements` fixture
@@ -429,6 +462,18 @@ allocation-free thread-local storage. It changes execution cost, so this
 example reports no timing or throughput. Use a CPU/heap profiler and matched
 workloads before deciding on an optimization. CI checks allocator accounting,
 thread isolation and operation invariants without enforcing allocation budgets.
+
+With `--features control`, `--workload inventory-page --page-size 100` counts
+one first page, including its cursor and destruction of the returned values;
+`--page-size` accepts 1–500 and defaults to 100. Index setup is excluded from
+that operation. `--workload inventory-index` instead counts the one-time
+ordered index registration on an already populated table, retaining the index
+through the end of the sample. Its positive `requested_bytes_delta` describes
+requested index storage, not RSS. Do not pass `--indexed-inventory` for this
+initialization workload. For the other workloads, `--indexed-inventory`
+enables the index before counting, so expiry and churn include maintenance
+and index-node deallocation. Compare all of these with full inventory and
+index-disabled operations in the same build.
 
 ## MTU-cache capacity and route-query cost
 

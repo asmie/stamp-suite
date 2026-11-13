@@ -57,6 +57,14 @@ struct Args {
     /// Pause after each management operation; zero requests continuous work.
     #[arg(long, default_value_t = 1_000, value_parser = clap::value_parser!(u64).range(..=1_000_000))]
     pause_us: u64,
+    /// Maintain the optional control-plane index, including during admission.
+    #[cfg(feature = "control")]
+    #[arg(long)]
+    indexed_inventory: bool,
+    /// Collect one page per background operation, continuing the current walk.
+    #[cfg(feature = "control")]
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=500))]
+    inventory_page_size: Option<u16>,
 }
 
 #[derive(Default)]
@@ -171,6 +179,12 @@ fn trial(args: &Args, duration: Duration) -> Result<Trial, String> {
     if manager.session_count() != size || manager.get_session(admission_key).is_some() {
         return Err("invalid table population or reserved probe identity".into());
     }
+    #[cfg(feature = "control")]
+    if args.indexed_inventory || args.inventory_page_size.is_some() {
+        manager
+            .enable_session_inventory()
+            .map_err(|e| e.to_string())?;
+    }
     let stop = AtomicBool::new(false);
     thread::scope(|scope| {
         let _stop_on_drop = StopOnDrop(&stop);
@@ -185,15 +199,30 @@ fn trial(args: &Args, duration: Duration) -> Result<Trial, String> {
                     .send(())
                     .map_err(|_| "readiness receiver dropped")?;
                 let deadline = start_rx.recv().map_err(|_| "start signal dropped")?;
+                #[cfg(feature = "control")]
+                let mut inventory_cursor: Option<String> = None;
                 while !stop.load(Ordering::Acquire) && Instant::now() < deadline {
                     let started = Instant::now();
                     match args.background {
                         Background::Inventory => {
-                            let rows = manager.session_summaries_extended();
-                            if !(size..=size + 1).contains(&rows.len()) {
-                                return Err("inventory exceeded the bounded fixture".into());
+                            #[cfg(feature = "control")]
+                            if let Some(limit) = args.inventory_page_size {
+                                let page = manager
+                                    .session_summaries_page(
+                                        usize::from(limit),
+                                        inventory_cursor.as_deref(),
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                if page.items.len() > usize::from(limit) {
+                                    return Err("inventory exceeded the requested page size".into());
+                                }
+                                inventory_cursor = page.next_cursor;
+                                black_box(page.items);
+                            } else {
+                                full_inventory(&manager, size)?;
                             }
-                            black_box(rows);
+                            #[cfg(not(feature = "control"))]
+                            full_inventory(&manager, size)?;
                         }
                         Background::Cleanup => {
                             if manager.cleanup_stale_sessions() != 0 {
@@ -279,6 +308,15 @@ fn trial(args: &Args, duration: Duration) -> Result<Trial, String> {
     })
 }
 
+fn full_inventory(manager: &SessionManager, size: usize) -> Result<(), String> {
+    let rows = manager.session_summaries_extended();
+    if !(size..=size + 1).contains(&rows.len()) {
+        return Err("inventory exceeded the bounded fixture".into());
+    }
+    black_box(rows);
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     if cfg!(debug_assertions) {
@@ -335,6 +373,35 @@ mod tests {
 
     fn args() -> Args {
         Args::parse_from(["session_contention"])
+    }
+
+    #[cfg(feature = "control")]
+    #[test]
+    fn indexed_and_paged_inventory_preserve_bounded_state_during_admission() {
+        for ipv6 in [false, true] {
+            for probe in [Probe::Refresh, Probe::Admission] {
+                for limit in [None, Some(1), Some(7), Some(500)] {
+                    let mut settings = args();
+                    settings.sessions = 16;
+                    settings.ipv6 = ipv6;
+                    settings.probe = probe;
+                    settings.background = Background::Inventory;
+                    settings.indexed_inventory = true;
+                    settings.inventory_page_size = limit;
+                    settings.pause_us = 0;
+                    let report = trial(&settings, Duration::from_millis(100)).unwrap();
+                    assert_eq!(report.final_sessions, 16);
+                    assert!(report.probe_latency.samples > 0);
+                    assert!(report.background_latency.samples > 0);
+                }
+            }
+        }
+        for limit in ["0", "501"] {
+            assert!(
+                Args::try_parse_from(["session_contention", "--inventory-page-size", limit])
+                    .is_err()
+            );
+        }
     }
 
     #[test]

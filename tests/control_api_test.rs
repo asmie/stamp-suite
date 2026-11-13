@@ -41,6 +41,12 @@ fn http(addr: std::net::SocketAddr, request_head: &str, body: &str) -> String {
 async fn control_api_end_to_end() {
     let state = test_state();
     let shutdown = state.shutdown.clone();
+    for client in ["127.0.0.1:4000", "[::1]:4000"] {
+        state
+            .session_manager
+            .get_or_create_session(client.parse::<std::net::SocketAddr>().unwrap())
+            .unwrap();
+    }
 
     // No TLS in this test: it drives the plaintext loopback path.
     let server = init("127.0.0.1:0".parse().unwrap(), state, None)
@@ -56,6 +62,18 @@ async fn control_api_end_to_end() {
     assert!(res.starts_with("HTTP/1.1 200"), "status line: {res}");
     assert!(res.contains("\"version\""), "body: {res}");
     assert!(res.contains("\"counters\""), "body: {res}");
+
+    // The live server registers sessions that existed before API startup.
+    let res = tokio::task::spawn_blocking(move || {
+        http(addr, "GET /v1/sessions/page?limit=1 HTTP/1.1", "")
+    })
+    .await
+    .unwrap();
+    assert!(res.starts_with("HTTP/1.1 200"), "status line: {res}");
+    let page: serde_json::Value =
+        serde_json::from_str(res.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert!(page["next_cursor"].as_str().unwrap().starts_with("v1-"));
 
     // A shutdown request cancels the shared shutdown token.
     let addr2 = addr;

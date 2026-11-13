@@ -843,6 +843,8 @@ fn concurrent_control_replacement_survives_cleanup_even_with_wrapped_ids() {
             })
             .collect();
         let manager = SessionManager::new(Some(Duration::ZERO), Some(2));
+        #[cfg(feature = "control")]
+        manager.enable_session_inventory().unwrap();
         let first = manager.get_or_create_session(keys[0]).unwrap();
         let second = manager.get_or_create_session(keys[1]).unwrap();
         thread::scope(|scope| {
@@ -882,6 +884,14 @@ fn concurrent_control_replacement_survives_cleanup_even_with_wrapped_ids() {
             assert!(fresh.transmission_guard().is_some());
             assert_eq!(fresh.peek_sequence_number(), 0);
             assert_eq!(manager.session_count(), 1);
+            #[cfg(feature = "control")]
+            {
+                let page = manager.session_summaries_page(1, None).unwrap();
+                assert_eq!(page.items.len(), 1);
+                assert_eq!(page.items[0].key, keys[0]);
+                assert_eq!(page.items[0].session_id, fresh.get_id());
+                assert!(page.next_cursor.is_none());
+            }
             assert!(first.transmission_guard().is_none());
             assert!(second.transmission_guard().is_none());
         });

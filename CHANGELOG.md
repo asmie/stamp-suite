@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add bounded control-plane session inventory at `/v1/sessions/page`, with
+  1–500 entries per page and manager-scoped cursors. Preserve the existing
+  `/v1/sessions` array response; document live counters and concurrent changes.
+
 - Add opt-in admission measurements during retained, mixed and full session
   expiry, separating creation, control retirement and complete cycle costs.
 

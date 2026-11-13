@@ -314,6 +314,97 @@ fn bench_session_table(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "control")]
+fn indexed(keys: &[SessionKey], timeout: Duration) -> SessionManager {
+    let manager = populated(keys, timeout);
+    manager.enable_session_inventory().unwrap();
+    manager
+}
+
+#[cfg(feature = "control")]
+fn bench_session_inventory(c: &mut Criterion) {
+    let mut group = c.benchmark_group("session_inventory");
+    for (ipv6, family) in [(false, "ipv4"), (true, "ipv6")] {
+        for size in SIZES {
+            let keys = keys(size, ipv6);
+            let access_keys: Vec<_> = (0..size).map(|i| keys[(i * 40_507) % size]).collect();
+            for limit in [100, 500] {
+                group.bench_function(
+                    BenchmarkId::new(format!("page_{limit}_{family}"), size),
+                    |b| {
+                        let manager = indexed(&keys, Duration::MAX);
+                        let mut cursor: Option<String> = None;
+                        b.iter(|| {
+                            let page = manager
+                                .session_summaries_page(limit, cursor.as_deref())
+                                .unwrap();
+                            assert!(page.items.len() <= limit);
+                            cursor = page.next_cursor;
+                            black_box(page.items)
+                        });
+                        assert_eq!(manager.session_count(), size);
+                    },
+                );
+            }
+            group.bench_function(
+                BenchmarkId::new(format!("initialize_{family}"), size),
+                |b| {
+                    b.iter_batched_ref(
+                        || populated(&keys, Duration::MAX),
+                        |manager| {
+                            manager.enable_session_inventory().unwrap();
+                        },
+                        BatchSize::PerIteration,
+                    );
+                },
+            );
+            group.bench_function(
+                BenchmarkId::new(format!("cleanup_expire_indexed_{family}"), size),
+                |b| {
+                    b.iter_batched_ref(
+                        || indexed(&keys, Duration::ZERO),
+                        |manager| {
+                            assert_eq!(manager.cleanup_stale_sessions(), size);
+                        },
+                        BatchSize::PerIteration,
+                    );
+                },
+            );
+            group.bench_function(
+                BenchmarkId::new(format!("lookup_refresh_indexed_{family}"), size),
+                |b| {
+                    let manager = indexed(&keys, Duration::MAX);
+                    let mut cursor = 0;
+                    b.iter(|| {
+                        black_box(
+                            manager
+                                .get_or_create_session(next_key(&access_keys, &mut cursor))
+                                .unwrap(),
+                        )
+                    });
+                },
+            );
+            group.bench_function(
+                BenchmarkId::new(format!("control_churn_indexed_{family}"), size),
+                |b| {
+                    let manager = indexed(&keys, Duration::MAX);
+                    let mut cursor = 0;
+                    b.iter(|| {
+                        let key = next_key(&access_keys, &mut cursor);
+                        assert!(manager.expire_matching(key.client, None).unwrap());
+                        black_box(manager.get_or_create_session(key).unwrap())
+                    });
+                    assert_eq!(manager.session_count(), size);
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+#[cfg(feature = "control")]
+criterion_group!(benches, bench_session_table, bench_session_inventory);
+#[cfg(not(feature = "control"))]
 criterion_group!(benches, bench_session_table);
 
 fn main() {

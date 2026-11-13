@@ -149,6 +149,10 @@ enum Workload {
     CleanupKeep,
     CleanupExpire,
     ControlChurn,
+    #[cfg(feature = "control")]
+    InventoryPage,
+    #[cfg(feature = "control")]
+    InventoryIndex,
 }
 
 #[derive(Parser, Serialize)]
@@ -162,6 +166,14 @@ struct Args {
     workload: Workload,
     #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=1_000))]
     iterations: u32,
+    /// Maintain the control index before the measured operation.
+    #[cfg(feature = "control")]
+    #[arg(long)]
+    indexed_inventory: bool,
+    /// Number of summaries collected by inventory-page.
+    #[cfg(feature = "control")]
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
+    page_size: u16,
 }
 
 fn key(index: usize, ipv6: bool) -> SessionKey {
@@ -192,6 +204,7 @@ fn operation(
     manager: &SessionManager,
     selected: SessionKey,
     workload: Workload,
+    #[cfg(feature = "control")] page_size: u16,
 ) -> Result<usize, &'static str> {
     match workload {
         Workload::LookupRefresh => {
@@ -222,6 +235,24 @@ fn operation(
             ));
             Ok(1)
         }
+        #[cfg(feature = "control")]
+        Workload::InventoryPage => {
+            let page = black_box(
+                manager
+                    .session_summaries_page(usize::from(page_size), None)
+                    .map_err(|_| "page collection failed")?,
+            );
+            let count = page.items.len();
+            drop(black_box(page));
+            Ok(count)
+        }
+        #[cfg(feature = "control")]
+        Workload::InventoryIndex => {
+            manager
+                .enable_session_inventory()
+                .map_err(|_| "index initialization failed")?;
+            Ok(manager.session_count())
+        }
     }
 }
 
@@ -235,6 +266,10 @@ struct Sample {
 }
 
 fn run(args: &Args, samples: &mut Vec<Sample>) -> Result<(), &'static str> {
+    #[cfg(feature = "control")]
+    if args.indexed_inventory && args.workload == Workload::InventoryIndex {
+        return Err("inventory-index measures initialization; omit --indexed-inventory");
+    }
     let size = args.sessions as usize;
     let keys: Vec<_> = (0..size).map(|i| key(i, args.ipv6)).collect();
     for iteration in 0..args.iterations {
@@ -252,12 +287,30 @@ fn run(args: &Args, samples: &mut Vec<Sample>) -> Result<(), &'static str> {
         if manager.session_count() != size {
             return Err("invalid fixture population");
         }
+        #[cfg(feature = "control")]
+        if args.indexed_inventory || args.workload == Workload::InventoryPage {
+            manager
+                .enable_session_inventory()
+                .map_err(|_| "index initialization failed")?;
+        }
         let selected = keys[(iteration as usize * 40_507) % size];
-        let (observed, counts) = measure(|| operation(&manager, selected, args.workload));
+        let (observed, counts) = measure(|| {
+            operation(
+                &manager,
+                selected,
+                args.workload,
+                #[cfg(feature = "control")]
+                args.page_size,
+            )
+        });
         let observed = observed?;
         let expected = match args.workload {
             Workload::Inventory | Workload::CleanupExpire => size,
             Workload::CleanupKeep => 0,
+            #[cfg(feature = "control")]
+            Workload::InventoryPage => size.min(usize::from(args.page_size)),
+            #[cfg(feature = "control")]
+            Workload::InventoryIndex => size,
             _ => 1,
         };
         let final_sessions = manager.session_count();
@@ -421,12 +474,20 @@ mod tests {
                 Workload::CleanupKeep,
                 Workload::CleanupExpire,
                 Workload::ControlChurn,
+                #[cfg(feature = "control")]
+                Workload::InventoryPage,
+                #[cfg(feature = "control")]
+                Workload::InventoryIndex,
             ] {
                 let args = Args {
                     sessions: 16,
                     ipv6,
                     workload,
                     iterations: 2,
+                    #[cfg(feature = "control")]
+                    indexed_inventory: false,
+                    #[cfg(feature = "control")]
+                    page_size: 7,
                 };
                 let mut samples = Vec::new();
                 run(&args, &mut samples).unwrap();
@@ -442,6 +503,14 @@ mod tests {
                         }
                     );
                 }
+                #[cfg(feature = "control")]
+                if workload != Workload::InventoryIndex {
+                    let mut indexed = args;
+                    indexed.indexed_inventory = true;
+                    let mut samples = Vec::new();
+                    run(&indexed, &mut samples).unwrap();
+                    assert_eq!(samples.len(), 2);
+                }
             }
         }
     }
@@ -453,6 +522,10 @@ mod tests {
             ["--sessions", "65537"],
             ["--iterations", "0"],
             ["--iterations", "1001"],
+            #[cfg(feature = "control")]
+            ["--page-size", "0"],
+            #[cfg(feature = "control")]
+            ["--page-size", "501"],
         ] {
             assert!(Args::try_parse_from(["session_allocations", args[0], args[1]]).is_err());
         }
