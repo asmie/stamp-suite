@@ -49,6 +49,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Wait for active sends outside the session table lock during expiry and control
+  removal. Keep retiring identities and capacity reserved until removal, reject
+  their new acquisitions, and protect replacements from late retirement work.
+
 - Run periodic session cleanup in one worker per reflector, keeping scans out
   of both receive loops. Stop and join the worker on exit; timeout zero creates
   no worker, and a cleanup panic stops the affected reflector.

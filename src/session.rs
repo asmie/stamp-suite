@@ -6,7 +6,7 @@ use std::{
     net::SocketAddr,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
-        Arc, RwLock,
+        Arc, RwLock, TryLockError,
     },
     time::{Duration, Instant},
 };
@@ -67,9 +67,10 @@ pub struct Session {
     /// session as initialized, and bits 30..0 are a bitmap where bit `n` means
     /// "sequence number `high - (n + 1)` has been seen".
     replay_state: AtomicU64,
-    /// Serializes retirement against a datagram currently being transmitted.
-    /// An expired session cannot send queued replies after its identity restarts.
-    active: RwLock<bool>,
+    /// Once set, no new acquisitions or sends may use this session.
+    retiring: AtomicBool,
+    /// Keeps the identity reserved until every in-flight send has finished.
+    transmission: RwLock<()>,
 }
 
 impl Session {
@@ -84,23 +85,52 @@ impl Session {
             packets_transmitted: AtomicU32::new(0),
             last_reflection: RwLock::new((0, 0, TimestampMethod::SwLocal)),
             replay_state: AtomicU64::new(0),
-            active: RwLock::new(true),
+            retiring: AtomicBool::new(false),
+            transmission: RwLock::new(()),
         }
     }
 
-    /// Returns a guard that keeps the session active, or `None` once it is retired.
+    /// Keeps the identity reserved through this send, or returns `None` once
+    /// retirement starts. An already guarded send may finish before removal.
     /// Hold it through the send and its counter/telemetry updates.
-    pub(crate) fn transmission_guard(&self) -> Option<std::sync::RwLockReadGuard<'_, bool>> {
-        let guard = self.active.read().unwrap_or_else(|e| e.into_inner());
-        if *guard {
+    pub(crate) fn transmission_guard(&self) -> Option<std::sync::RwLockReadGuard<'_, ()>> {
+        if !self.is_active() {
+            return None;
+        }
+        let guard = self.transmission.read().unwrap_or_else(|e| e.into_inner());
+        if self.is_active() {
             Some(guard)
         } else {
             None
         }
     }
 
-    fn retire(&self) {
-        *self.active.write().unwrap_or_else(|e| e.into_inner()) = false;
+    fn is_active(&self) -> bool {
+        !self.retiring.load(Ordering::Acquire)
+    }
+
+    /// Called with the table write lock held; this commitment is irreversible.
+    fn begin_retirement(&self) {
+        self.retiring.store(true, Ordering::Release);
+    }
+
+    /// Wait outside the table lock. New sends already reject this session.
+    fn finish_retirement(&self) {
+        drop(self.transmission.write().unwrap_or_else(|e| e.into_inner()));
+    }
+
+    fn try_finish_retirement(&self) -> bool {
+        match self.transmission.try_write() {
+            Ok(guard) => {
+                drop(guard);
+                true
+            }
+            Err(TryLockError::Poisoned(error)) => {
+                drop(error.into_inner());
+                true
+            }
+            Err(TryLockError::WouldBlock) => false,
+        }
     }
 
     #[cfg(test)]
@@ -311,6 +341,14 @@ struct SessionEntry {
     last_active: AtomicU64,
 }
 
+impl SessionEntry {
+    /// Commit under exclusive table access, serializing with activity refresh.
+    fn begin_retirement(&mut self) -> Arc<Session> {
+        self.session.begin_retirement();
+        Arc::clone(&self.session)
+    }
+}
+
 /// Maintains independent state for each complete STAMP session identity.
 pub struct SessionManager {
     #[cfg(test)]
@@ -428,12 +466,29 @@ impl SessionManager {
         if matches.next().is_some() {
             return Err("multiple sessions for client; specify session_id");
         }
-        let removed = key.and_then(|key| sessions.remove(&key));
-        if let Some(entry) = &removed {
-            entry.session.retire();
+        let Some(key) = key else {
+            return Ok(false);
+        };
+        let session = sessions.get_mut(&key).unwrap().begin_retirement();
+        drop(sessions);
+        Ok(self.finish_removal(key, session))
+    }
+
+    fn finish_removal(&self, key: SessionKey, expected: Arc<Session>) -> bool {
+        expected.finish_retirement();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+        let removed = match sessions.entry(key) {
+            Entry::Occupied(entry) if Arc::ptr_eq(&entry.get().session, &expected) => {
+                entry.remove();
+                true
+            }
+            _ => false,
+        };
+        if removed {
             self.note_table_shrunk(sessions.len());
         }
-        Ok(removed.is_some())
+        drop(sessions);
+        removed
     }
 
     /// Returns true when a new entry must not be stored: the table is at
@@ -453,12 +508,12 @@ impl SessionManager {
     pub fn expire_session(&self, client: impl Into<SessionKey>) -> bool {
         let client = client.into();
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
-        let removed = sessions.remove(&client);
-        if let Some(entry) = &removed {
-            entry.session.retire();
-            self.note_table_shrunk(sessions.len());
-        }
-        removed.is_some()
+        let Some(entry) = sessions.get_mut(&client) else {
+            return false;
+        };
+        let session = entry.begin_retirement();
+        drop(sessions);
+        self.finish_removal(client, session)
     }
 
     /// Enables or disables drain mode (see `draining`).
@@ -519,7 +574,7 @@ impl SessionManager {
     }
 
     /// Look up or create a session without advancing its sequence.
-    /// Provisioning, capacity or drain rejection returns None without creating
+    /// Provisioning, capacity, drain or pending retirement returns None without creating
     /// state or consuming an internal session ID.
     pub fn get_or_create_session(&self, client: impl Into<SessionKey>) -> Option<Arc<Session>> {
         self.admit(client.into())?.acquire()
@@ -540,6 +595,9 @@ impl SessionManager {
         {
             let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = sessions.get(&client) {
+                if !entry.session.is_active() {
+                    return None;
+                }
                 entry.last_active.store(self.now_ns(), Ordering::Relaxed);
                 return Some(Arc::clone(&entry.session));
             }
@@ -550,6 +608,9 @@ impl SessionManager {
             // Created by another thread between the two locks.
             Entry::Occupied(occupied) => {
                 let entry = occupied.get();
+                if !entry.session.is_active() {
+                    return None;
+                }
                 entry.last_active.store(self.now_ns(), Ordering::Relaxed);
                 Some(Arc::clone(&entry.session))
             }
@@ -577,11 +638,15 @@ impl SessionManager {
     }
 
     /// Returns the session for a client only if it already exists, without
-    /// creating one or refreshing its activity time.
+    /// creating one or refreshing its activity time. Retiring entries return
+    /// `None` while their identities remain reserved in the table.
     pub fn get_session(&self, client: impl Into<SessionKey>) -> Option<Arc<Session>> {
         let client = client.into();
         let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
-        sessions.get(&client).map(|e| Arc::clone(&e.session))
+        sessions
+            .get(&client)
+            .filter(|entry| entry.session.is_active())
+            .map(|e| Arc::clone(&e.session))
     }
 
     #[cfg(test)]
@@ -605,7 +670,9 @@ impl SessionManager {
 
     /// Removes sessions that have been inactive longer than the timeout.
     ///
-    /// Returns the number of sessions removed.
+    /// Returns the number of entries this call removed. Retiring identities
+    /// remain reserved until in-flight sends finish; those identities reject
+    /// new acquisitions, while unrelated table operations may proceed.
     /// Does nothing if no timeout was configured.
     pub fn cleanup_stale_sessions(&self) -> usize {
         let timeout = match self.session_timeout {
@@ -632,32 +699,40 @@ impl SessionManager {
         let now = Instant::now();
         let before_count = sessions.len();
         let mut retired = Vec::new();
-
+        let mut pending = Vec::new();
         sessions.retain(|addr, entry| {
-            let keep = now.duration_since(self.last_active(entry)) < timeout;
-            if !keep {
-                entry.session.retire();
-                // Removal must not free the session allocation while excluding
-                // other table users. Release this reference after unlocking.
-                retired.push(Arc::clone(&entry.session));
-                log::debug!("Removing stale session for client {}", addr);
+            if now.saturating_duration_since(self.last_active(entry)) < timeout {
+                return true;
             }
-            keep
+            let session = entry.begin_retirement();
+            if session.try_finish_retirement() {
+                retired.push(session);
+                log::debug!("Removing stale session for client {}", addr);
+                false
+            } else {
+                // Keep the key and capacity reserved, but let unrelated table
+                // operations proceed while its active send finishes.
+                pending.push((*addr, session));
+                true
+            }
         });
-
-        let removed = before_count - sessions.len();
+        let mut removed = before_count - sessions.len();
         if removed > 0 {
-            log::info!("Cleaned up {} stale sessions", removed);
-
             self.note_table_shrunk(sessions.len());
         }
-
         drop(sessions);
+        for (key, session) in pending {
+            removed += usize::from(self.finish_removal(key, session));
+        }
         drop(retired);
+        if removed > 0 {
+            log::info!("Cleaned up {} stale sessions", removed);
+        }
         removed
     }
 
-    /// Returns the number of active sessions.
+    /// Returns the number of table entries, including retiring identities whose
+    /// capacity remains reserved until in-flight sends finish.
     pub fn session_count(&self) -> usize {
         self.sessions
             .read()

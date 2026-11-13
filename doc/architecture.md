@@ -403,23 +403,33 @@ the previous scan completes, so scans never overlap or accumulate catch-up
 requests. Timeout zero starts no worker. Cleanup no longer runs inline in the
 async receive loop or the pnet capture loop and can progress without traffic.
 
-The worker first checks for expiry under a shared table lock, allowing
-existing sessions to refresh activity during retained-only scans. If it finds
-a possible expiry, it releases that lock and rechecks activity under the
-exclusive lock before retiring and removing sessions. New identities still
-need exclusive access. An expiring session still waits for any active send
-under the table lock; the shared scan changes neither retirement nor admission
-rules. Sparse expiry can add a preliminary scan before the removal pass.
+The worker first checks for expiry under a shared table lock, allowing existing
+sessions to refresh activity during retained-only scans. It rechecks possible
+expiry under the exclusive lock before committing to retirement. A committed
+session rejects new acquisitions and queued sends. If no send holds its lifetime
+guard, cleanup removes it immediately. Otherwise its identity and capacity stay
+reserved while cleanup waits for that send outside the table lock. Unrelated
+sessions can be looked up, admitted or controlled during that wait, subject to
+the current cap and drain state. New identities still need exclusive table
+access, and the initial scan can still delay them.
+
+Inventory and capacity counts include reserved entries until removal. Direct
+lookup/admission returns `None` for a retiring identity; a later request can
+create fresh state after removal. Retirement cannot be undone by refreshing
+activity after that commitment. Control removal uses the same reservation and
+wait protocol. Removal checks the exact retained session reference, so a late
+finisher cannot remove a replacement even if numeric session IDs wrap.
 
 Cleanup retains a temporary reference to each removed session until the table
-lock is released. Retirement and removal still happen under the lock; cleanup
-releases its extra references afterward. This moves destruction of otherwise
+lock is released. Retirement commitment and final removal happen under the
+lock; waiting for busy sends happens outside it. Cleanup releases its extra
+references afterward. This moves destruction of otherwise
 unreferenced sessions and their allocator work outside the lock. Queued replies
 and other owners can retain state longer. The reference buffer grows with the
-number of removals, adding temporary memory and reference bookkeeping. Cleanup
-still takes the table lock and waits for active sends during retirement, so
-packet processing can still wait for that lock. Moving scheduling off the
-receive loops does not remove those waits or establish a packet-latency bound.
+number of removals, with additional key/reference storage for busy sessions.
+These buffers add temporary memory and reference bookkeeping. Scanning and
+removal still take the table lock, so this does not establish a packet-latency
+bound or eliminate every source of contention.
 
 Exit and future cancellation stop and join the cleanup worker before releasing
 its owner. Joining can wait for a scan already in progress, including its send
@@ -435,12 +445,13 @@ and identity. It holds no lock during authentication and reserves no capacity.
 Acquisition rechecks the current cap and drain state under the table write
 lock.
 
-Each send holds a session lifetime read guard through the syscall and the state
-updates. Expiry removes the entry and takes the lifetime write lock, so it
-waits for an active send and excludes later queued copies. The send path never
-takes the table lock while holding this guard. Re-admission creates fresh state
-and a new internal ID. Acquisition APIs return `None` on rejection or
-retirement.
+Each send holds a session lifetime read guard through the syscall and state
+updates. Retirement first sets an irreversible flag under exclusive table
+access. New sends check that flag before and after acquiring the lifetime guard.
+Removal waits for existing guards outside the table lock, then removes only the
+same session instance. The send path never takes the table lock while holding
+its guard. Re-admission creates fresh state and a new internal ID. Acquisition
+APIs return `None` on rejection or retirement in progress.
 
 ## TLV extensions reference
 

@@ -730,6 +730,164 @@ fn cleanup_releases_removed_sessions_and_preserves_live_sessions() {
     }
 }
 
+fn wait_for_retirement(sessions: &[&Arc<Session>]) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while sessions.iter().any(|session| session.is_active()) {
+        assert!(Instant::now() < deadline, "retirement did not start");
+        thread::yield_now();
+    }
+}
+
+#[test]
+fn retirement_wait_preserves_reservations_and_allows_unrelated_progress() {
+    for ipv6 in [false, true] {
+        for control in [false, true] {
+            let keys: Vec<_> = (0..4)
+                .map(|i| {
+                    SessionKey::from(if ipv6 {
+                        format!("[::1]:{}", 20_000 + i)
+                            .parse::<SocketAddr>()
+                            .unwrap()
+                    } else {
+                        make_addr(20_000 + i)
+                    })
+                })
+                .collect();
+            let manager = SessionManager::new(Some(Duration::ZERO), Some(1));
+            let old = manager.get_or_create_session(keys[0]).unwrap();
+            thread::scope(|scope| {
+                let guard = old.transmission_guard().unwrap();
+                let expiry = scope.spawn(|| {
+                    if control {
+                        usize::from(
+                            manager
+                                .expire_matching(keys[0].client, Some(old.get_id()))
+                                .unwrap(),
+                        )
+                    } else {
+                        manager.cleanup_stale_sessions()
+                    }
+                });
+                wait_for_retirement(&[&old]);
+                let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+                let manager = &manager;
+                let keys = &keys;
+                let old = &old;
+                let progress = scope.spawn(move || {
+                    assert_eq!(manager.session_count(), 1);
+                    assert_eq!(manager.session_summaries_by_key()[0].0, keys[0]);
+                    let next_id = manager.next_session_id.load(Ordering::Relaxed);
+                    assert!(manager.get_or_create_session(keys[0]).is_none());
+                    assert!(manager.get_session(keys[0]).is_none());
+                    assert!(manager.get_session_and_seq(keys[0]).is_none());
+                    assert_eq!(manager.next_session_id.load(Ordering::Relaxed), next_id);
+                    assert!(old.transmission_guard().is_none());
+                    assert!(
+                        manager.get_or_create_session(keys[1]).is_none(),
+                        "retiring slot must count toward cap"
+                    );
+                    manager.set_max_sessions(3);
+                    let kept = manager.get_or_create_session(keys[1]).unwrap();
+                    let removed = manager.get_or_create_session(keys[2]).unwrap();
+                    manager.set_draining(true);
+                    assert!(manager.get_or_create_session(keys[3]).is_none());
+                    assert!(Arc::ptr_eq(
+                        &kept,
+                        &manager.get_or_create_session(keys[1]).unwrap()
+                    ));
+                    assert_eq!(
+                        manager.expire_matching(keys[2].client, Some(removed.get_id())),
+                        Ok(true)
+                    );
+                    assert!(removed.transmission_guard().is_none());
+                    finished_tx.send(kept).unwrap();
+                });
+                // Release the guarded send before assertions/joins even if
+                // global-lock progress failed. The timeout bounds deadlock.
+                let kept = finished_rx.recv_timeout(Duration::from_secs(5));
+                drop(guard);
+                assert_eq!(expiry.join().unwrap(), 1);
+                progress.join().unwrap();
+                let kept = kept.expect("unrelated operations blocked on send retirement");
+                assert!(Arc::ptr_eq(&kept, &manager.get_session(keys[1]).unwrap()));
+                assert!(kept.transmission_guard().is_some());
+                assert_eq!(manager.session_count(), 1);
+            });
+            assert!(old.transmission_guard().is_none());
+            assert_eq!(old.peek_sequence_number(), 0);
+            assert!(
+                manager.get_or_create_session(keys[0]).is_none(),
+                "drain still applies after expiry"
+            );
+            manager.set_draining(false);
+            let fresh = manager.get_or_create_session(keys[0]).unwrap();
+            assert_ne!(fresh.get_id(), old.get_id());
+            assert_eq!(fresh.peek_sequence_number(), 0);
+            assert!(fresh.transmission_guard().is_some());
+        }
+    }
+}
+
+#[test]
+fn concurrent_control_replacement_survives_cleanup_even_with_wrapped_ids() {
+    for ipv6 in [false, true] {
+        let keys: Vec<_> = (0..2)
+            .map(|i| {
+                SessionKey::from(if ipv6 {
+                    format!("[::1]:{}", 21_000 + i)
+                        .parse::<SocketAddr>()
+                        .unwrap()
+                } else {
+                    make_addr(21_000 + i)
+                })
+            })
+            .collect();
+        let manager = SessionManager::new(Some(Duration::ZERO), Some(2));
+        let first = manager.get_or_create_session(keys[0]).unwrap();
+        let second = manager.get_or_create_session(keys[1]).unwrap();
+        thread::scope(|scope| {
+            let first_guard = first.transmission_guard().unwrap();
+            let guard = second.transmission_guard().unwrap();
+            let cleanup = scope.spawn(|| manager.cleanup_stale_sessions());
+            wait_for_retirement(&[&first, &second]);
+            drop(first_guard);
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            let manager = &manager;
+            let keys = &keys;
+            let first = &first;
+            let control = scope.spawn(move || {
+                let removed = manager
+                    .expire_matching(keys[0].client, Some(first.get_id()))
+                    .unwrap();
+                manager
+                    .next_session_id
+                    .store(first.get_id(), Ordering::Relaxed);
+                let fresh = manager.get_or_create_session(keys[0]).unwrap();
+                assert_eq!(fresh.get_id(), first.get_id());
+                assert!(!Arc::ptr_eq(&fresh, first));
+                assert!(
+                    !manager.finish_removal(keys[0], Arc::clone(first)),
+                    "a late finisher must not remove a replacement with the same numeric ID"
+                );
+                finished_tx.send((fresh, removed)).unwrap();
+            });
+            let fresh = finished_rx.recv_timeout(Duration::from_secs(5));
+            drop(guard);
+            let removed = cleanup.join().unwrap();
+            control.join().unwrap();
+            let (fresh, control_removed) =
+                fresh.expect("control removal/recreation blocked on unrelated retirement");
+            assert_eq!(removed + usize::from(control_removed), 2);
+            assert!(Arc::ptr_eq(&fresh, &manager.get_session(keys[0]).unwrap()));
+            assert!(fresh.transmission_guard().is_some());
+            assert_eq!(fresh.peek_sequence_number(), 0);
+            assert_eq!(manager.session_count(), 1);
+            assert!(first.transmission_guard().is_none());
+            assert!(second.transmission_guard().is_none());
+        });
+    }
+}
+
 #[test]
 fn lowering_cap_preserves_existing_sessions_and_rejection_has_no_state() {
     let manager = SessionManager::new(None, Some(2));
