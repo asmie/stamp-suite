@@ -631,11 +631,15 @@ impl SessionManager {
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let before_count = sessions.len();
+        let mut retired = Vec::new();
 
         sessions.retain(|addr, entry| {
             let keep = now.duration_since(self.last_active(entry)) < timeout;
             if !keep {
                 entry.session.retire();
+                // Removal must not free the session allocation while excluding
+                // other table users. Release this reference after unlocking.
+                retired.push(Arc::clone(&entry.session));
                 log::debug!("Removing stale session for client {}", addr);
             }
             keep
@@ -648,6 +652,8 @@ impl SessionManager {
             self.note_table_shrunk(sessions.len());
         }
 
+        drop(sessions);
+        drop(retired);
         removed
     }
 

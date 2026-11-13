@@ -46,6 +46,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Release removed session state after unlocking the session table during idle
+  cleanup, keeping retirement serialized with active sends and identity reuse.
+
 - Scan retained sessions under a shared table lock during periodic cleanup,
   allowing existing sessions to refresh activity while no expiry is needed.
   Recheck expiry under the exclusive lock before removing any sessions.

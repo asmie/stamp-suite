@@ -404,6 +404,15 @@ need exclusive access. An expiring session still waits for any active send
 under the table lock; the shared scan changes neither retirement nor admission
 rules. Sparse expiry can add a preliminary scan before the removal pass.
 
+Cleanup retains a temporary reference to each removed session until the table
+lock is released. Retirement and removal still happen under the lock; cleanup
+releases its extra references afterward. This moves destruction of otherwise
+unreferenced sessions and their allocator work outside the lock. Queued replies
+and other owners can retain state longer. The reference buffer grows with the
+number of removals, adding temporary memory and reference bookkeeping. Cleanup
+still runs synchronously in the receive loop and waits for active sends during
+retirement; lower table contention does not imply shorter receive-loop pauses.
+
 ### Session admission and lifetime
 
 The internal admission permit records a provisioning decision for one manager

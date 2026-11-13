@@ -681,6 +681,56 @@ fn concurrent_cleanup_creation_control_and_drain_preserve_retirement_and_cap() {
 }
 
 #[test]
+fn cleanup_releases_removed_sessions_and_preserves_live_sessions() {
+    for ipv6 in [false, true] {
+        let timeout = Duration::from_secs(60);
+        let mut manager = SessionManager::new(Some(timeout), Some(512));
+        manager.epoch = Instant::now().checked_sub(timeout * 2).unwrap();
+        let entries: Vec<_> = (0..512)
+            .map(|i| {
+                let client = if ipv6 {
+                    format!("[::1]:{}", 10_000 + i)
+                        .parse::<SocketAddr>()
+                        .unwrap()
+                } else {
+                    make_addr(10_000 + i)
+                };
+                let key = SessionKey::from(client);
+                let session = manager.get_or_create_session(key).unwrap();
+                (key, Arc::downgrade(&session), session.get_id())
+            })
+            .collect();
+        for (i, (key, _, _)) in entries.iter().enumerate() {
+            if i % 2 == 0 {
+                manager.sessions.read().unwrap()[key]
+                    .last_active
+                    .store(0, Ordering::Relaxed);
+            }
+        }
+        // One queued reply retains an expired session independently of the
+        // cleanup operation. Other removed sessions must lose their last strong
+        // reference; the Weak handles only keep the allocation headers alive.
+        let queued = entries[0].1.upgrade().unwrap();
+        assert_eq!(manager.cleanup_stale_sessions(), 256);
+        assert_eq!(manager.session_count(), 256);
+        assert!(queued.transmission_guard().is_none());
+        drop(queued);
+        for (i, (key, weak, id)) in entries.iter().enumerate() {
+            if i % 2 == 0 {
+                assert!(weak.upgrade().is_none(), "removed session ownership leaked");
+                assert!(manager.get_session(*key).is_none());
+            } else {
+                let live = weak.upgrade().unwrap();
+                assert_eq!(live.get_id(), *id);
+                assert!(Arc::ptr_eq(&live, &manager.get_session(*key).unwrap()));
+                assert!(live.transmission_guard().is_some());
+            }
+        }
+        assert_eq!(manager.cleanup_stale_sessions(), 0);
+    }
+}
+
+#[test]
 fn lowering_cap_preserves_existing_sessions_and_rejection_has_no_state() {
     let manager = SessionManager::new(None, Some(2));
     let first = manager.get_or_create_session(make_addr(1)).unwrap();
