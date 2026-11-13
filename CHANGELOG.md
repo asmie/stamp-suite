@@ -53,6 +53,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Batch inventory-index maintenance during session expiry. Rebuild from the
+  survivors after bulk removal and free the detached index outside the table
+  lock, preserving cursors and busy retiring reservations.
+
 - Wait for active sends outside the session table lock during expiry and control
   removal. Keep retiring identities and capacity reserved until removal, reject
   their new acquisitions, and protect replacements from late retirement work.

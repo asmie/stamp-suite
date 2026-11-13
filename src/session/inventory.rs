@@ -13,6 +13,33 @@ pub(super) struct InventoryIndex {
     pub(super) entries: BTreeMap<u64, SessionKey>,
 }
 
+impl InventoryIndex {
+    // The caller holds the table write lock, so its survivors are authoritative,
+    // including busy retiring reservations. Keep their original ordinals and
+    // leave the manager nonce/creation boundary unchanged.
+    pub(super) fn remove_expired(
+        &mut self,
+        removed: &[u64],
+        total_removed: usize,
+        survivors: &HashMap<SessionKey, SessionEntry>,
+    ) -> Option<BTreeMap<u64, SessionKey>> {
+        if survivors.len() <= total_removed / 3 {
+            // Rebuild only when at least three quarters of the table disappeared.
+            // Return the detached tree for destruction outside the table lock.
+            let retained = survivors
+                .iter()
+                .map(|(key, entry)| (entry.inventory_id, *key))
+                .collect();
+            Some(std::mem::replace(&mut self.entries, retained))
+        } else {
+            for id in removed {
+                self.entries.remove(id);
+            }
+            None
+        }
+    }
+}
+
 /// A live page within a fixed creation boundary, not a snapshot of counters.
 pub struct SessionPage {
     pub items: Vec<SessionSummary>,

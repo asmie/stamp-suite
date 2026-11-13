@@ -411,6 +411,33 @@ latencies alongside removal counts and exact maxima/pause counts. Small normal
 tests exercise both families and all expiry/guard combinations without timing
 thresholds. These test-only fixtures add no runtime API or production behavior.
 
+## Indexed session expiry
+
+With `--features control`, the ignored
+`session::benchmarks::indexed_expiry_measurements` fixture measures cleanup
+with the inventory index enabled. It includes 180 sequential trials (three
+sizes, IPv4/IPv6, 0/1/50/75/99/100% expiry and five repeats) and 288 concurrent
+trials (1/50/99/100%, refresh/admission, zero/10 ms guard delay, three repeats).
+Like the earlier fixtures, it keeps one live probe beyond the N seeded entries.
+The sequential clock covers cleanup only; setup, index initialization, result
+validation and final manager destruction are excluded. Concurrent results use
+the admission/refresh scopes and limitations described above. Save the
+`INDEXED_EXPIRY_JSON=` line and compare the same compiled fixture across revisions.
+
+```sh
+cargo test --locked --release --features control --lib \
+  session::benchmarks::indexed_expiry_measurements \
+  -- --exact --ignored --nocapture --test-threads=1 > /tmp/indexed-expiry.log
+cargo test --locked --features control --lib session::benchmarks
+```
+
+Use the existing indexed full-expiry Criterion cases to additionally measure
+an empty final table, and `session_allocations --indexed-inventory --workload
+cleanup-expire` to count its allocator requests. Bulk index retirement can trade
+temporary ordinal/replacement storage for less removal work under the table
+lock. Manager-call duration still includes destruction after unlocking and
+is not a direct lock-hold measurement or a packet-latency guarantee.
+
 ## Session allocation requests
 
 `session_allocations` counts Rust allocator requests made by one session-manager

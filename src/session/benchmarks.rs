@@ -47,7 +47,7 @@ struct Fixture {
 impl Fixture {
     fn new(sessions: usize, expired_percent: usize, ipv6: bool) -> Self {
         assert!(sessions > 0 && sessions <= 65_536);
-        assert!([0, 50, 100].contains(&expired_percent));
+        assert!(expired_percent <= 100);
         let mut manager = SessionManager::new(Some(LIVE_TIMEOUT), Some(sessions + 1));
         // Live entries receive genuine current offsets. Only expired entries are
         // backdated, well away from the timeout boundary; no aging sleeps needed.
@@ -220,7 +220,24 @@ fn trial_with_probe(
     guard_delay: Duration,
     probe: Probe,
 ) -> Value {
+    trial_with_inventory(sessions, percent, ipv6, guard_delay, probe, false)
+}
+
+fn trial_with_inventory(
+    sessions: usize,
+    percent: usize,
+    ipv6: bool,
+    guard_delay: Duration,
+    probe: Probe,
+    indexed: bool,
+) -> Value {
     let fixture = Fixture::new(sessions, percent, ipv6);
+    #[cfg(feature = "control")]
+    if indexed {
+        fixture.manager.enable_session_inventory().unwrap();
+    }
+    #[cfg(not(feature = "control"))]
+    assert!(!indexed);
     let mut transient = fixture.probe;
     transient.client.set_port(10_001);
     if probe == Probe::Admission {
@@ -363,6 +380,7 @@ fn trial_with_probe(
     }
     let mut report = json!({
         "probe": probe,
+        "indexed_inventory": indexed,
         "seeded_sessions": sessions, "expired_percent": percent, "ipv6": ipv6,
         "guard_requested_ns": guard_delay.as_nanos() as u64,
         "guard_release_from_start_ns": guard_release_ns,
@@ -390,6 +408,76 @@ fn trial_with_probe(
         report["longest_cycle_overlap_with_cleanup_ns"] = json!(concurrent.1[2]);
     }
     report
+}
+
+#[cfg(feature = "control")]
+#[test]
+fn indexed_expiry_fixtures_preserve_state_during_refresh_and_admission() {
+    for ipv6 in [false, true] {
+        for percent in [0, 1, 50, 75, 99, 100] {
+            for probe in [Probe::Refresh, Probe::Admission] {
+                trial_with_inventory(100, percent, ipv6, Duration::ZERO, probe, true);
+            }
+        }
+        for probe in [Probe::Refresh, Probe::Admission] {
+            trial_with_inventory(16, 100, ipv6, Duration::from_millis(1), probe, true);
+        }
+    }
+}
+
+#[cfg(feature = "control")]
+#[test]
+#[ignore = "manual release measurement; see doc/benchmarks.md"]
+fn indexed_expiry_measurements() -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(debug_assertions) {
+        return Err("measurements require --release".into());
+    }
+    let mut sequential = Vec::new();
+    let mut concurrent = Vec::new();
+    for sessions in [1_024, 16_384, 65_536] {
+        for ipv6 in [false, true] {
+            for percent in [0, 1, 50, 75, 99, 100] {
+                for repeat in 0..5 {
+                    let fixture = Fixture::new(sessions, percent, ipv6);
+                    fixture.manager.enable_session_inventory()?;
+                    let start = Instant::now();
+                    let removed = fixture.manager.cleanup_stale_sessions();
+                    let elapsed = start.elapsed().as_nanos() as u64;
+                    fixture.validate(removed);
+                    sequential.push(json!({"sessions":sessions,"ipv6":ipv6,
+                        "expired_percent":percent,"repeat":repeat,"cleanup_ns":elapsed}));
+                }
+                if ![1, 50, 99, 100].contains(&percent) {
+                    continue;
+                }
+                for probe in [Probe::Refresh, Probe::Admission] {
+                    for delay_ms in [0, 10] {
+                        for repeat in 0..3 {
+                            let mut row = trial_with_inventory(
+                                sessions,
+                                percent,
+                                ipv6,
+                                Duration::from_millis(delay_ms),
+                                probe,
+                                true,
+                            );
+                            row["repeat"] = json!(repeat);
+                            concurrent.push(row);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "INDEXED_EXPIRY_JSON={}",
+        json!({"schema_version":1,
+        "scope":"indexed one-shot expiry; sequential and closed-loop refresh/admission; no packets",
+        "features":{"control":cfg!(feature="control"),"metrics":cfg!(feature="metrics"),
+            "ttl_pnet":cfg!(feature="ttl-pnet"),"ttl_nix":cfg!(feature="ttl-nix")},
+        "sequential":sequential,"concurrent":concurrent})
+    );
+    Ok(())
 }
 
 #[test]

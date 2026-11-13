@@ -296,3 +296,126 @@ fn ordinal_exhaustion_rejects_new_entries_without_consuming_session_ids() {
     ));
     assert_eq!(manager.session_count(), 1);
 }
+
+#[test]
+fn sparse_and_bulk_expiry_preserve_walk_boundaries_and_live_order() {
+    for ipv6 in [false, true] {
+        for expired in [0, 1, 49, 50, 74, 75, 76, 99, 100] {
+            let timeout = Duration::from_secs(60);
+            let mut manager = SessionManager::new(Some(timeout), None);
+            manager.epoch = Instant::now() - timeout * 2;
+            manager.enable_session_inventory().unwrap();
+            for id in 0..100 {
+                manager.get_or_create_session(key(id, ipv6)).unwrap();
+            }
+            let first = manager.session_summaries_page(5, None).unwrap();
+            let expired_key = |id: u16| (usize::from(id) * 37) % 100 < expired;
+            {
+                let table = manager.sessions.read().unwrap();
+                for id in 0..100 {
+                    if expired_key(id) {
+                        table[&key(id, ipv6)]
+                            .last_active
+                            .store(0, Ordering::Relaxed);
+                    }
+                }
+            }
+            assert_eq!(manager.cleanup_stale_sessions(), expired);
+            manager.get_or_create_session(key(200, ipv6)).unwrap();
+            let mut cursor = first.next_cursor;
+            let mut remaining = Vec::new();
+            while let Some(token) = cursor {
+                let page = manager.session_summaries_page(7, Some(&token)).unwrap();
+                remaining.extend(page.items.into_iter().map(|row| row.key.ssid));
+                cursor = page.next_cursor;
+            }
+            assert_eq!(
+                remaining,
+                (5..100).filter(|id| !expired_key(*id)).collect::<Vec<_>>()
+            );
+            let page = manager.session_summaries_page(500, None).unwrap();
+            let expected: Vec<_> = (0..100)
+                .filter(|id| !expired_key(*id))
+                .chain([200])
+                .collect();
+            assert_eq!(
+                page.items
+                    .into_iter()
+                    .map(|row| row.key.ssid)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(page.next_cursor.is_none());
+        }
+    }
+}
+
+#[test]
+fn bulk_expiry_preserves_busy_reservations_and_accepts_unrelated_creations() {
+    for ipv6 in [false, true] {
+        let timeout = Duration::from_secs(60);
+        let mut manager = SessionManager::new(Some(timeout), Some(101));
+        manager.epoch = Instant::now() - timeout * 2;
+        manager.enable_session_inventory().unwrap();
+        for id in 0..101 {
+            manager.get_or_create_session(key(id, ipv6)).unwrap();
+        }
+        let first = manager.session_summaries_page(1, None).unwrap();
+        {
+            let table = manager.sessions.read().unwrap();
+            for id in 0..100 {
+                table[&key(id, ipv6)]
+                    .last_active
+                    .store(0, Ordering::Relaxed);
+            }
+        }
+        let manager = Arc::new(manager);
+        let first_session = manager.get_session(key(0, ipv6)).unwrap();
+        let second_session = manager.get_session(key(1, ipv6)).unwrap();
+        let guard = first_session.transmission_guard().unwrap();
+        let other_guard = second_session.transmission_guard().unwrap();
+        let cleaner = Arc::clone(&manager);
+        let cleanup = thread::spawn(move || cleaner.cleanup_stale_sessions());
+        let observer = Arc::clone(&manager);
+        let old = Arc::clone(&second_session);
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while old.is_active() && Instant::now() < deadline {
+                thread::yield_now();
+            }
+            let page = observer.session_summaries_page(500, None).unwrap();
+            assert!(observer.get_or_create_session(key(0, ipv6)).is_none());
+            observer.get_or_create_session(key(200, ipv6)).unwrap();
+            let continuation = observer
+                .session_summaries_page(500, first.next_cursor.as_deref())
+                .unwrap();
+            tx.send((
+                page.items
+                    .into_iter()
+                    .map(|row| row.key.ssid)
+                    .collect::<Vec<_>>(),
+                continuation
+                    .items
+                    .into_iter()
+                    .map(|row| row.key.ssid)
+                    .collect::<Vec<_>>(),
+            ))
+            .unwrap();
+        });
+        let observed = rx.recv_timeout(Duration::from_secs(5));
+        drop(guard);
+        drop(other_guard);
+        assert_eq!(cleanup.join().unwrap(), 100);
+        worker.join().unwrap();
+        assert_eq!(observed.unwrap(), (vec![0, 1, 100], vec![1, 100]));
+        let page = manager.session_summaries_page(500, None).unwrap();
+        assert_eq!(
+            page.items
+                .into_iter()
+                .map(|row| row.key.ssid)
+                .collect::<Vec<_>>(),
+            [100, 200]
+        );
+    }
+}

@@ -724,10 +724,16 @@ impl SessionManager {
         let mut retired = Vec::new();
         let mut pending = Vec::new();
         #[cfg(feature = "control")]
+        let mut retired_inventory_ids = Vec::new();
+        #[cfg(feature = "control")]
         let mut inventory = self
             .inventory_enabled
             .load(Ordering::Acquire)
             .then(|| self.inventory.write().unwrap_or_else(|e| e.into_inner()));
+        // Keep ordinary sparse expiry on the direct-removal path. Limit the
+        // work already paid if this scan turns out to require a bulk rebuild.
+        #[cfg(feature = "control")]
+        let inline_inventory_removals = (before_count / 64).max(1);
         sessions.retain(|addr, entry| {
             if now.saturating_duration_since(self.last_active(entry)) < timeout {
                 return true;
@@ -736,7 +742,11 @@ impl SessionManager {
             if session.try_finish_retirement() {
                 #[cfg(feature = "control")]
                 if let Some(index) = inventory.as_mut().and_then(|guard| guard.as_mut()) {
-                    index.entries.remove(&entry.inventory_id);
+                    if retired.len() < inline_inventory_removals {
+                        index.entries.remove(&entry.inventory_id);
+                    } else {
+                        retired_inventory_ids.push(entry.inventory_id);
+                    }
                 }
                 retired.push(session);
                 log::debug!("Removing stale session for client {}", addr);
@@ -749,12 +759,24 @@ impl SessionManager {
             }
         });
         let mut removed = before_count - sessions.len();
+        #[cfg(feature = "control")]
+        let retired_inventory = match inventory.as_mut().and_then(|guard| guard.as_mut()) {
+            Some(index) if !retired_inventory_ids.is_empty() => {
+                index.remove_expired(&retired_inventory_ids, removed, &sessions)
+            }
+            _ => None,
+        };
         if removed > 0 {
             self.note_table_shrunk(sessions.len());
         }
         #[cfg(feature = "control")]
         drop(inventory);
         drop(sessions);
+        #[cfg(feature = "control")]
+        {
+            drop(retired_inventory);
+            drop(retired_inventory_ids);
+        }
         for (key, session) in pending {
             removed += usize::from(self.finish_removal(key, session));
         }

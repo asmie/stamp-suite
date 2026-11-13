@@ -432,6 +432,16 @@ These buffers add temporary memory and reference bookkeeping. Scanning and
 removal still take the table lock, so this does not establish a packet-latency
 bound or eliminate every source of contention.
 
+When the control inventory index is enabled, cleanup removes a small initial
+batch of index entries directly, then buffers further removed ordinals. Sparse
+expiry can finish without an ordinal buffer. If at least three quarters of the
+table disappear and buffered removals remain, cleanup builds an index of the
+survivors and detaches the old tree for destruction after releasing the table lock.
+Survivors include busy retiring reservations and keep their original inventory
+ordinals, so existing page cursors retain their creation boundary and order.
+The ordinal buffer and replacement index add temporary memory during cleanup;
+index-disabled managers allocate neither.
+
 Exit and future cancellation stop and join the cleanup worker before releasing
 its owner. Joining can wait for a scan already in progress, including its send
 retirement waits. A worker startup failure is reported as a startup error. A
