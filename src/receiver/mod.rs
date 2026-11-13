@@ -169,6 +169,8 @@ impl ProcessingContext<'_> {
 /// Response from STAMP packet processing, including optional CoS request.
 #[derive(Debug)]
 pub struct StampResponse {
+    /// Local BER C conditions, counted only when a datagram is sent successfully.
+    pub ber_conformance: crate::ber::BerConformanceErrors,
     /// The response packet data to send.
     pub data: Vec<u8>,
     /// Requested DSCP/ECN from CoS TLV (if present).
@@ -603,6 +605,7 @@ fn process_stamp_packet_inner(
                     // The symmetric no-TLV path never parses a Destination Node
                     // Address TLV, so there is nothing to pin.
                     reply_source: None,
+                    ber_conformance: Default::default(),
                     tlv_hmac_generated: false,
                 })
             }
@@ -638,6 +641,7 @@ fn process_stamp_packet_inner(
                     reply_source: None,
                     return_path_action: ReturnPathAction::Normal,
                     reflected_control: None,
+                    ber_conformance: Default::default(),
                     tlv_hmac_generated: false,
                 })
             }
@@ -757,6 +761,7 @@ fn process_unauth_packet(
 
 /// Tuple returned from `apply_semantic_tlv_processing`.
 struct SemanticResult {
+    ber_conformance: crate::ber::BerConformanceErrors,
     cos_request: Option<(u8, u8)>,
     return_path_action: ReturnPathAction,
     reflected_control: Option<ReflectedControlBehavior>,
@@ -778,7 +783,7 @@ fn apply_semantic_tlv_processing(
 ) -> Option<SemanticResult> {
     // Validate BER/nested framing before other semantic mutations. Integrity
     // failures already carry I, so this leaves their opaque values untouched.
-    tlvs.process_ber();
+    let mut ber_conformance = tlvs.process_ber();
     // Sources describe clock discipline, never the selected wire encoding or S
     // bit. T2 may come from a separately disciplined PHC; current T3 is always
     // generated in software before send, even when hardware TX is requested.
@@ -1095,9 +1100,13 @@ fn apply_semantic_tlv_processing(
                         // The padding value carries (delta - 4) octets of
                         // zeros; push() places it before the HMAC TLV in
                         // wire order so the chain remains spec-compliant.
-                        let pad_tlv =
+                        let mut pad_tlv =
                             crate::tlv::ExtraPaddingTlv::new_zeros(delta - TLV_HEADER_SIZE)
                                 .to_raw();
+                        // This padding is locally generated, not an unprocessed
+                        // sender TLV. BER finalization must repair its pattern
+                        // and mark the changed denominator with C.
+                        pad_tlv.clear_reflector_flags();
                         let _ = tlvs.push(pad_tlv);
                     } else {
                         // Can't grow by less than one TLV header.
@@ -1147,12 +1156,13 @@ fn apply_semantic_tlv_processing(
     // Sign after all TLV mutations, using reflector flags (U=0, RFC 8972 §4).
     // A configured key signs the reply even if the request lacked an HMAC TLV
     // (see `TlvList::set_hmac_response`, RFC 8972 §4.8).
-    tlvs.finish_ber_padding(ber_padding_len);
+    ber_conformance.merge(tlvs.finish_ber_padding(ber_padding_len));
 
     let tlv_hmac_generated =
         tlv_hmac_key.is_some_and(|key| tlvs.set_hmac_response(key, &base_bytes[..4]));
 
     Some(SemanticResult {
+        ber_conformance,
         cos_request,
         return_path_action,
         reflected_control,

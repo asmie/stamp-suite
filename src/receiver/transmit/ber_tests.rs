@@ -40,6 +40,7 @@ fn single_ber_reply_checks_mtu_preserves_patterns_and_resigns() {
                 return_path_action: ReturnPathAction::Normal,
                 reflected_control: None,
                 reply_source: None,
+                ber_conformance: Default::default(),
                 tlv_hmac_generated: auth,
             };
             let mut t = Transmission::new(
@@ -141,7 +142,7 @@ fn ber_route_budget_keeps_whole_patterns_and_resigns_c_metadata() {
             "I-flagged failure echoes stay opaque"
         );
 
-        assert!(!fit_reply(&mut data, base, 1500, false).unwrap());
+        assert!(!fit_reply_for_test(&mut data, base, 1500, false).unwrap());
         assert!(data.len() <= 1500);
         sign_tlvs(&mut data, base, &key);
         let list = TlvList::parse(&data[base..]).unwrap();
@@ -155,7 +156,7 @@ fn ber_route_budget_keeps_whole_patterns_and_resigns_c_metadata() {
                 assert_eq!(t.value, [1, 2, 3, 4, 5].repeat(t.value.len() / 5));
             }
         }
-        assert!(fit_reply(&mut data, base, base + 10, false).is_err());
+        assert!(fit_reply_for_test(&mut data, base, base + 10, false).is_err());
     }
 }
 
@@ -187,7 +188,7 @@ fn header_trimming_precedes_successor_ber_padding_and_preserves_signatures() {
     list.set_hmac_response(&key, &[0; 4]);
     let mut data = vec![0; 44];
     data.extend_from_slice(&list.to_bytes());
-    assert!(fit_reply(&mut data, 44, 1500, false).is_ok());
+    assert!(fit_reply_for_test(&mut data, 44, 1500, false).is_ok());
     sign_tlvs(&mut data, 44, &key);
     let list = TlvList::parse(&data[44..]).unwrap();
     assert!(data.len() <= 1500);

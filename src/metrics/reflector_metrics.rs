@@ -64,3 +64,8 @@ pub(crate) fn record_tlv_errors(unrecognized: usize, malformed: usize, integrity
         }
     }
 }
+
+/// One successful datagram with this locally generated BER C condition.
+pub(crate) fn record_ber_conformance(reason: &'static str) {
+    counter!("stamp_reflector_ber_conformance_total", "reason" => reason).increment(1);
+}

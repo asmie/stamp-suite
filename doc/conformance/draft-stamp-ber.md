@@ -3,7 +3,7 @@
 Revision frozen: draft-ietf-bpm-stamp-ber-01, 2 November 2026.
 Source: [successor draft](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-ber-01.txt).
 
-Summary: 54 clauses: 48 Compliant, 4 Partial, 1 Gap, 1 N-A, 0 Excluded.
+Summary: 54 clauses: 48 Compliant, 5 Partial, 0 Gap, 1 N-A, 0 Excluded.
 
 ## Scope
 
@@ -88,7 +88,7 @@ by the value codec's property tests and fuzz target.
 | ber-6.2-reverse-errors | Report reverse bit error total. | MUST | Sender | Compliant | One reverse bit per accepted ordinary sample; the unavailable-burst response has clean reverse padding. Wire test: `scripts/interop_ber.py::sender_case`. |
 | ber-6.2-reverse-burst | Report maximum and average reverse burst. | MUST | Sender | Compliant | Maximum 1; average 1 (baseline) or 0.5 (gates); every accepted reverse burst is counted. Wire test: `scripts/interop_ber.py::sender_case`. |
 | ber-6.2-alarms | Configure per-million bit/packet thresholds and signal crossings. | Descriptive | Sender | Compliant | `src/ber.rs::directional_intervals_ratios_and_threshold_crossings`; `src/ber.rs::long_run_bounds_history_and_preserves_totals_and_alarm_transitions`; independent rate checks. |
-| ber-6.2-diagnostics | Log and count specific reflected C conditions locally. | SHOULD | Reflector | Gap | `src/receiver/limits.rs` has generic packet/drop counters; BER-specific reason logging and counters are absent. Follow-up: bounded per-reason diagnostics without packet payload logging. |
+| ber-6.2-diagnostics | Log and count specific reflected C conditions locally. | SHOULD | Reflector | Partial | BER-generated C reasons have fixed counters and independent throttled logs after successful send, including padding resizing. Test: `src/receiver/transmit/diagnostics_tests.rs::ber_reasons_match_reflected_c_flags_in_open_auth_ipv4_ipv6`, `src/receiver/transmit/diagnostics_tests.rs::diagnostics_log_each_reason_independently_without_per_packet_log_floods`, `src/receiver/transmit/diagnostics_tests.rs::mtu_retry_does_not_leak_failed_attempt_diagnostics`. The clause also covers other TLVs and sub-TLVs; their specific C diagnostics remain unimplemented. |
 | ber-7-security | Apply RFC 8762/8972 security considerations. | Descriptive | Both | Compliant (tested keyed profile) | Independent failures cover base/extension digests, opaque I echoes and invalid measurement admission. Provisioning remains operator policy; open mode supplies no general integrity protection. |
 | ber-9-iana | Allocate TBA1 and TBA2 in the respective registries. | IANA action | N-A | N-A | Allocation is external; local experimental values require explicit agreement. |
 

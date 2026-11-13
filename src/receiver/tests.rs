@@ -680,7 +680,7 @@ fn scoped_session_identity_keeps_both_endpoint_zones() {
 }
 
 /// Creates a default ProcessingContext for tests with given DSCP/ECN values.
-fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext<'static> {
+pub(super) fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext<'static> {
     ProcessingContext {
         ingress_ifindex: None,
         packet_local_addr: None,

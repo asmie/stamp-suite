@@ -267,6 +267,11 @@ async fn status_reports_uptime_and_counters() {
     // RFC 10052 §5 detection is observable without a log-level change.
     assert_eq!(v["counters"]["packets_replayed"], 0);
     assert_eq!(v["counters"]["packets_reordered"], 0);
+    let ber = v["counters"]["ber_conformance"].as_object().unwrap();
+    assert_eq!(ber.len(), crate::ber::BerConformanceReason::ALL.len());
+    for reason in crate::ber::BerConformanceReason::ALL {
+        assert_eq!(ber[reason.label()], 0);
+    }
 }
 
 #[tokio::test]

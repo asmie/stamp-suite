@@ -1,6 +1,6 @@
 //! In-place reflector updates for `TlvList`.
 
-use crate::ber::xor_popcount_and_max_burst;
+use crate::ber::{xor_popcount_and_max_burst, BerConformanceErrors, BerConformanceReason};
 use crate::tlv::core::{
     RawTlv, TlvFlags, TlvSpan, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE,
     DIRECT_MEASUREMENT_TLV_VALUE_SIZE, FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE,
@@ -639,9 +639,24 @@ impl TlvList {
         }
     }
 
+    pub(crate) fn short_ber_conformance_errors(&self) -> BerConformanceErrors {
+        let mut reasons = BerConformanceErrors::default();
+        if self.non_hmac_tlvs().iter().any(|t| {
+            t.tlv_type == TlvType::ResidualBer
+                && t.flags.conformant_reflected
+                && !t.flags.integrity_failed
+                && !t.flags.unrecognized
+                && t.value.len() < 8
+        }) {
+            reasons.insert(BerConformanceReason::ShortBerValue);
+        }
+        reasons
+    }
+
     /// Measure and repair successor BER padding (BPM BER-01 §§4–5.2.1).
     /// This runs after HMAC admission, before other semantic TLV processing.
-    pub fn process_ber(&mut self) {
+    pub fn process_ber(&mut self) -> BerConformanceErrors {
+        let mut reasons = BerConformanceErrors::default();
         let ber_indices: Vec<_> = self
             .non_hmac_tlvs()
             .iter()
@@ -653,7 +668,7 @@ impl TlvList {
             .iter()
             .any(|&i| self.non_hmac_tlvs()[i].is_processable())
         {
-            return;
+            return reasons;
         }
         let padding_indices: Vec<_> = self
             .non_hmac_tlvs()
@@ -663,13 +678,22 @@ impl TlvList {
             .map(|(i, _)| i)
             .collect();
         if ber_indices.len() != 1 || padding_indices.len() != 1 {
+            if ber_indices.len() > 1 {
+                reasons.insert(BerConformanceReason::DuplicateBer);
+            }
+            if padding_indices.is_empty() {
+                reasons.insert(BerConformanceReason::MissingPadding);
+            }
+            if padding_indices.len() > 1 {
+                reasons.insert(BerConformanceReason::DuplicatePadding);
+            }
             Self::mark_ber_tlvs_nonconformant(self.non_hmac_tlvs_mut());
-            return;
+            return reasons;
         }
         let ber = ber_indices[0];
         let padding = padding_indices[0];
         if !self.non_hmac_tlvs()[padding].is_processable() {
-            return;
+            return reasons;
         }
         // Normalize only complete nested TLVs up to the first malformed
         // boundary. Whole-value decoding alone would lose the processed prefix
@@ -682,6 +706,7 @@ impl TlvList {
             if raw.value.len() < 8 || raw.value.len() > usize::from(u16::MAX) {
                 if raw.value.len() < 8 {
                     raw.set_conformant_reflected();
+                    reasons.insert(BerConformanceReason::ShortBerValue);
                 }
                 raw.set_malformed();
                 framing_error = true;
@@ -719,14 +744,15 @@ impl TlvList {
             }
             if pattern_count > 1 {
                 raw.set_conformant_reflected();
+                reasons.insert(BerConformanceReason::DuplicatePattern);
             }
         }
         if framing_error {
             self.mark_unprocessed_after_malformed();
-            return;
+            return reasons;
         }
         if malformed || pattern_count > 1 {
-            return;
+            return reasons;
         }
         let value = ResidualBerValue::decode_value(&self.non_hmac_tlvs()[ber].value)
             .expect("nested framing validated above");
@@ -737,7 +763,8 @@ impl TlvList {
         let pad = &mut self.non_hmac_tlvs_mut()[padding].value;
         if !pad.len().is_multiple_of(pattern.len()) {
             self.non_hmac_tlvs_mut()[ber].set_conformant_reflected();
-            return;
+            reasons.insert(BerConformanceReason::PaddingMisaligned);
+            return reasons;
         }
         let (count, burst) = xor_popcount_and_max_burst(pad, pattern);
         for (i, byte) in pad.iter_mut().enumerate() {
@@ -746,34 +773,36 @@ impl TlvList {
         let raw = &mut self.non_hmac_tlvs_mut()[ber];
         raw.value[..4].copy_from_slice(&count.to_be_bytes());
         raw.value[4..8].copy_from_slice(&burst.to_be_bytes());
+        reasons
     }
 
     /// Reapply the validated pattern after another extension resizes padding.
     /// A changed denominator invalidates the forward sample with C.
-    pub fn finish_ber_padding(&mut self, original_len: Option<usize>) {
+    pub fn finish_ber_padding(&mut self, original_len: Option<usize>) -> BerConformanceErrors {
+        let mut reasons = BerConformanceErrors::default();
         let Some(ber) = self
             .non_hmac_tlvs()
             .iter()
             .position(|t| t.tlv_type == TlvType::ResidualBer)
         else {
-            return;
+            return reasons;
         };
         let raw = &self.non_hmac_tlvs()[ber];
         if !raw.is_processable() || raw.flags.conformant_reflected {
-            return;
+            return reasons;
         }
         let Ok(value) = ResidualBerValue::decode_value(&raw.value) else {
-            return;
+            return reasons;
         };
         if value
             .sub_tlvs
             .iter()
             .any(|s| s.flags & (TlvFlags::M | TlvFlags::I | TlvFlags::C) != 0)
         {
-            return;
+            return reasons;
         }
         let Ok(pattern) = value.explicit_pattern(RESIDUAL_BER_PATTERN_SUBTLV_TYPE) else {
-            return;
+            return reasons;
         };
         let pattern = pattern.unwrap_or(&RESIDUAL_BER_DEFAULT_PATTERN);
         let Some(padding) = self
@@ -782,13 +811,19 @@ impl TlvList {
             .position(|t| t.tlv_type == TlvType::ExtraPadding)
         else {
             self.non_hmac_tlvs_mut()[ber].set_conformant_reflected();
-            return;
+            reasons.insert(if original_len.is_some() {
+                BerConformanceReason::PaddingResized
+            } else {
+                BerConformanceReason::MissingPadding
+            });
+            return reasons;
         };
         if !self.non_hmac_tlvs()[padding].is_processable() {
-            return;
+            return reasons;
         }
         if Some(self.non_hmac_tlvs()[padding].value.len()) != original_len {
             self.non_hmac_tlvs_mut()[ber].set_conformant_reflected();
+            reasons.insert(BerConformanceReason::PaddingResized);
         }
         for (i, byte) in self.non_hmac_tlvs_mut()[padding]
             .value
@@ -797,6 +832,7 @@ impl TlvList {
         {
             *byte = pattern[i % pattern.len()];
         }
+        reasons
     }
 
     #[cfg(test)]

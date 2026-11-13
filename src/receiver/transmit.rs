@@ -227,6 +227,7 @@ impl Transmission {
         let mut refresh_mtu = false;
         loop {
             let mut clamped = false;
+            let mut ber_conformance = self.response.ber_conformance;
             let budget = if options.dont_fragment {
                 payload_cap(target, &options, refresh_mtu)
             } else {
@@ -254,6 +255,7 @@ impl Transmission {
                     base,
                     cap,
                     self.response.reflected_control.is_some(),
+                    &mut ber_conformance,
                 )?;
                 let timestamp = crate::time::generate_timestamp(self.clock);
                 // Reflector Timestamp offset: after the 4-byte Sequence Number,
@@ -293,6 +295,7 @@ impl Transmission {
                     self.session.record_transmitted();
                     self.session.record_reflection(sequence, timestamp);
                     counters.record_reflected();
+                    counters.record_ber_conformance(ber_conformance);
                     self.remaining -= 1;
                     return Some(sequence);
                 }
@@ -414,9 +417,25 @@ fn has_ber(data: &[u8], base: usize) -> bool {
     found && pos == data.len()
 }
 
+#[cfg(test)]
+fn fit_reply_for_test(
+    data: &mut Vec<u8>,
+    base: usize,
+    cap: usize,
+    controlled: bool,
+) -> io::Result<bool> {
+    fit_reply(data, base, cap, controlled, &mut Default::default())
+}
+
 /// Preserve complete mandatory TLVs and the final HMAC. Only padding and
 /// reflected header TLVs may be removed. Return true to terminate a burst.
-fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> io::Result<bool> {
+fn fit_reply(
+    data: &mut Vec<u8>,
+    base: usize,
+    cap: usize,
+    controlled: bool,
+    reasons: &mut crate::ber::BerConformanceErrors,
+) -> io::Result<bool> {
     if data.len() <= cap {
         return Ok(false);
     }
@@ -441,6 +460,9 @@ fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> i
             // metadata unusable once route MTU trimming changes that size.
             if crate::ber::is_ber(tlv.tlv_type) {
                 tlv.set_conformant_reflected();
+                if !tlv.flags.integrity_failed && !tlv.flags.unrecognized {
+                    reasons.insert(crate::ber::BerConformanceReason::PaddingResized);
+                }
             }
             resized.push(tlv).map_err(|_| cannot_fit())?;
         }
@@ -475,7 +497,7 @@ fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> i
                 for (_, bytes) in tlvs {
                     data.extend_from_slice(&bytes);
                 }
-                return fit_reply(data, base, cap, false);
+                return fit_reply(data, base, cap, false, reasons);
             }
             return Err(cannot_fit());
         };
@@ -510,6 +532,9 @@ fn fit_reply(data: &mut Vec<u8>, base: usize, cap: usize, controlled: bool) -> i
         for (tlv, bytes) in &mut tlvs {
             if crate::ber::is_ber(tlv.tlv_type) {
                 bytes[0] |= TlvFlags::C;
+                if !tlv.flags.integrity_failed && !tlv.flags.unrecognized {
+                    reasons.insert(crate::ber::BerConformanceReason::PaddingResized);
+                }
             }
         }
     }
@@ -1184,6 +1209,9 @@ mod tests;
 
 #[cfg(test)]
 mod ber_tests;
+
+#[cfg(test)]
+mod diagnostics_tests;
 
 #[cfg(test)]
 mod benchmarks;

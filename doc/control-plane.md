@@ -82,13 +82,31 @@ instead of being ignored.
     "queued_replies_cancelled": 0,
     "packets_rate_limited": 2,
     "packets_replayed": 0,
-    "packets_reordered": 1
+    "packets_reordered": 1,
+    "ber_conformance": {
+      "missing_padding": 0,
+      "duplicate_padding": 0,
+      "duplicate_ber": 0,
+      "short_ber_value": 0,
+      "duplicate_pattern": 0,
+      "padding_misaligned": 0,
+      "padding_resized": 0
+    }
   }
 }
 ```
 
 `session_admission` is `permissive` or `provisioned`. The counters are totals
 since startup:
+
+`counters.ber_conformance` counts successful reflected datagrams per locally
+generated BER C condition. Each reason counts at most once per datagram;
+successful burst copies count separately. Failed, cancelled, suppressed and
+integrity-failed observations do not add a reason. These counters describe
+processed conformance checks, not every possible fault in an invalid packet.
+`padding_resized` includes Type 12 and MTU changes that invalidate the original
+BER denominator. Opaque echoes and M-only nested errors add no BER C diagnostic.
+The seven keys are fixed and include zero values. See [BER diagnostics](ber-migration.md#conformance-diagnostics).
 
 | Counter | Meaning |
 | --- | --- |

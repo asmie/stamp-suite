@@ -125,11 +125,12 @@ The `residual_ber_value` fuzz target uses the same framing/semantic boundary;
 its CI corpus is seeded from these independent hex vectors.
 
 The [BER matrix](conformance/draft-stamp-ber.md) now evaluates 54 successor
-clauses: 48 Compliant, four Partial, one Gap and one N-A. The standards
+clauses: 48 Compliant, five Partial, zero Gap and one N-A. The standards
 manifest tracks `draft-ietf-bpm-stamp-ber-01`; the legacy replacement finding
 is resolved. This records current revision tracking, not full conformance:
 zero-checksum validation, MTU/platform and physical LAG limits remain. The
-draft's SHOULD for per-condition error logs/counters is an explicit Gap.
+draft's SHOULD for per-condition error logs/counters is Partial: BER-specific
+conditions are covered, while other TLVs and sub-TLVs still need diagnostics.
 
 T5c's [wire report](interop/2026-11-09-ber/REPORT.md) records 60 independently
 validated cases in each of the default and all-features builds. The Python
@@ -182,3 +183,45 @@ pass. Default production cross-checks compile for macOS and Windows; their
 native runtime evidence remains pending. A final seeded reflector fuzz run
 passed 820,478 executions in 31 seconds with ASan/LSan enabled. This validates
 parser/assembly paths; T5c still owns independent live-wire conformance evidence.
+
+## Conformance diagnostics
+
+The reflector retains a fixed set of local BER C reasons through packet
+assembly and send-time shaping. Counters advance after a complete successful
+UDP send, once per reason per datagram. Successful burst copies count separately;
+failed/partial sends, cancelled work and suppressed replies add nothing.
+An MTU retry starts again with the template's reasons, so a failed trimmed
+attempt cannot label a later untrimmed reply. Base authentication and TLV
+integrity failures do not produce BER observations. Opaque echoes are not
+reinterpreted for diagnostics; nested errors carrying only M add no C reason.
+
+| Reason | Meaning |
+| --- | --- |
+| `missing_padding` | Processed BER has no Extra Padding TLV. |
+| `duplicate_padding` | More than one Extra Padding TLV is present. |
+| `duplicate_ber` | More than one BER TLV is present. |
+| `short_ber_value` | Recognized BER value is shorter than eight bytes (M+C). |
+| `duplicate_pattern` | More than one known pattern sub-TLV is encountered. |
+| `padding_misaligned` | Padding length is not a whole number of patterns. |
+| `padding_resized` | Local Type 12 or MTU shaping changes the BER denominator. |
+
+Multiple detected conditions can increment on one datagram, but repeated
+instances of the same condition do not multiply its count. Validation stops
+retain their existing behavior: these are counts of processed conditions,
+not an exhaustive diagnosis of an invalid packet. Authentication and session admission retain their existing gates. Locally
+generated Type 12 padding now has its sender U flag cleared, allowing BER
+finalization to repair the pattern and return C for the changed denominator.
+Previously that padding was skipped as unprocessed.
+
+Counts are reflector lifetime totals, unaffected by session expiry, available
+under `counters.ber_conformance` in [control status](control-plane.md#status).
+Prometheus exposes `stamp_reflector_ber_conformance_total` with only the fixed
+`reason` label when runtime metrics are enabled. No peer/session labels are
+created. Every reason logs its own first, tenth, hundredth and later
+power-of-ten occurrence; suppressed occurrences emit no per-packet debug log.
+Messages contain only a reason token and its total, without packet values,
+keys, source addresses or session identifiers.
+
+The draft's section 6.2 wording applies to C on other TLVs/sub-TLVs too.
+Those specific diagnostics are outside this BER implementation, so the
+conformance row remains Partial rather than claiming the entire SHOULD.

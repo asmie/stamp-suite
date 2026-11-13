@@ -106,6 +106,7 @@ fn sample(auth: bool, action: ReturnPathAction) -> Transmission {
             suppress_reply_ext_headers: false,
         }),
         reply_source: Some("127.0.0.2".parse().unwrap()),
+        ber_conformance: Default::default(),
         tlv_hmac_generated: auth,
     };
     Transmission::new(
@@ -1005,7 +1006,7 @@ fn small_remainders_and_header_trimming_keep_valid_tlvs() {
         for gap in 0..4 {
             let mut t = sized_sample(auth, 1500);
             let mandatory = base + 16 + if auth { 20 } else { 0 };
-            assert!(fit_reply(&mut t.response.data, base, mandatory + gap, true).unwrap());
+            assert!(fit_reply_for_test(&mut t.response.data, base, mandatory + gap, true).unwrap());
             assert_eq!(t.response.data.len(), mandatory);
             if auth {
                 sign_tlvs(&mut t.response.data, base, t.key.as_ref().unwrap());
@@ -1018,11 +1019,11 @@ fn small_remainders_and_header_trimming_keep_valid_tlvs() {
         data.extend_from_slice(&[0; 8]);
         data.extend_from_slice(&[0, 8, 0, 16]);
         data.extend_from_slice(&[0; 16]);
-        assert!(!fit_reply(&mut data, base, base + 44, false).unwrap());
+        assert!(!fit_reply_for_test(&mut data, base, base + 44, false).unwrap());
         assert_eq!(data.len(), base + 44);
         assert_eq!(data[base + 1], 247);
         assert_eq!(data[base + 25], 8);
-        assert!(!fit_reply(&mut data, base, base + 20, false).unwrap());
+        assert!(!fit_reply_for_test(&mut data, base, base + 20, false).unwrap());
         assert_eq!(data[base + 1], 8);
     }
 }
@@ -1102,7 +1103,7 @@ fn reflected_headers_are_trimmed_before_ber_padding() {
         data.extend(vec![0; usize::from(len)]);
     }
     let cap = data.len() - 12;
-    assert!(!fit_reply(&mut data, base, cap, false).unwrap());
+    assert!(!fit_reply_for_test(&mut data, base, cap, false).unwrap());
     assert_eq!(data.len(), cap);
     let list = crate::tlv::TlvList::parse(&data[base..]).unwrap();
     let kinds: Vec<_> = list.iter().map(|t| t.tlv_type.to_byte()).collect();
@@ -1110,7 +1111,7 @@ fn reflected_headers_are_trimmed_before_ber_padding() {
     assert_eq!(list.non_hmac_tlvs()[1].value.len(), 128);
     // All optional header TLVs gone, but mandatory fields still do not fit:
     // refuse the packet instead of shrinking its BER padding.
-    assert!(fit_reply(&mut data, base, base + 8 + 132 + 20 - 1, false).is_err());
+    assert!(fit_reply_for_test(&mut data, base, base + 8 + 132 + 20 - 1, false).is_err());
 }
 
 #[test]

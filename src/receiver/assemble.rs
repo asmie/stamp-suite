@@ -180,6 +180,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
     let mut reply_source: Option<std::net::IpAddr> = None;
     let mut tlv_hmac_generated = false;
+    let mut ber_conformance = crate::ber::BerConformanceErrors::default();
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -215,6 +216,9 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                     None
                 };
                 let hmac_ok = tlvs.apply_reflector_flags(verify_key, incoming_seq_bytes, tlv_data);
+                if hmac_ok {
+                    ber_conformance.merge(tlvs.short_ber_conformance_errors());
+                }
 
                 // Record TLV error metrics
                 #[cfg(feature = "metrics")]
@@ -234,6 +238,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                             reflected_control = result.reflected_control;
                             reply_source = result.reply_source;
                             tlv_hmac_generated = result.tlv_hmac_generated;
+                            ber_conformance.merge(result.ber_conformance);
                         }
                         None => {
                             return StampResponse {
@@ -242,6 +247,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                                 return_path_action: ReturnPathAction::SuppressReply,
                                 reflected_control: None,
                                 reply_source: None,
+                                ber_conformance: Default::default(),
                                 tlv_hmac_generated: false,
                             };
                         }
@@ -273,6 +279,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
         reflected_control,
         reply_source,
         tlv_hmac_generated,
+        ber_conformance,
     }
 }
 
@@ -318,6 +325,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
     let mut reply_source: Option<std::net::IpAddr> = None;
     let mut tlv_hmac_generated = false;
+    let mut ber_conformance = crate::ber::BerConformanceErrors::default();
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -359,6 +367,9 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                     tlv_data,
                     require_hmac_tlv,
                 );
+                if hmac_ok {
+                    ber_conformance.merge(tlvs.short_ber_conformance_errors());
+                }
 
                 // Record TLV error metrics
                 #[cfg(feature = "metrics")]
@@ -378,6 +389,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                             reflected_control = result.reflected_control;
                             reply_source = result.reply_source;
                             tlv_hmac_generated = result.tlv_hmac_generated;
+                            ber_conformance.merge(result.ber_conformance);
                         }
                         None => {
                             return StampResponse {
@@ -386,6 +398,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                                 return_path_action: ReturnPathAction::SuppressReply,
                                 reflected_control: None,
                                 reply_source: None,
+                                ber_conformance: Default::default(),
                                 tlv_hmac_generated: false,
                             };
                         }
@@ -414,5 +427,6 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
         reflected_control,
         reply_source,
         tlv_hmac_generated,
+        ber_conformance,
     }
 }

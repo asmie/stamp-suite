@@ -102,6 +102,7 @@ async fn get_status(State(s): State<ControlState>) -> Json<serde_json::Value> {
             // RFC 10052 §5 replay detection.
             "packets_replayed": s.counters.packets_replayed.load(Ordering::Relaxed),
             "packets_reordered": s.counters.packets_reordered.load(Ordering::Relaxed),
+            "ber_conformance": s.counters.ber_conformance_counts(),
         },
     }))
 }

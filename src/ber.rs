@@ -2,6 +2,9 @@
 //! Count the first accepted reply per pending probe; unusable metadata adds
 //! no sample. Intervals use monotonic receive time and a fixed multiple of
 //! the configured transmit interval.
+mod diagnostics;
+pub use diagnostics::{BerConformanceErrors, BerConformanceReason};
+
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},

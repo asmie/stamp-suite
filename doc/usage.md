@@ -994,6 +994,14 @@ are `rate_limited`, `queue_full`, `processing_rejected`, `session_expired`,
 parsing, authentication, admission and replay policy; HMAC failures also have
 their own counter. These totals use the same events as the shutdown summary.
 
+`stamp_reflector_ber_conformance_total{reason="..."}` counts successfully sent
+datagrams with a locally generated BER C condition. The seven fixed reasons
+are also available in control status. Each reason logs its 1st, 10th, 100th,
+and subsequent power-of-ten occurrence independently; suppressed occurrences
+produce no per-packet debug message. Logs contain reason labels and counts,
+without packet contents or session identifiers. See
+[BER conformance diagnostics](ber-migration.md#conformance-diagnostics).
+
 Report output has a bounded queue and a five-second completion deadline. A
 slow reader can cause interim reports or text packet details to be skipped;
 a final-output failure stops the run with an error. See

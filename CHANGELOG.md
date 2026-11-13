@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add per-reason BER conformance counters and throttled local logs after
+  successful reflection, exposed through control status and Prometheus.
+  Cover BER validation and padding resizing without logging packet contents.
+
 - Add bounded control-plane session inventory at `/v1/sessions/page`, with
   1–500 entries per page and manager-scoped cursors. Preserve the existing
   `/v1/sessions` array response; document live counters and concurrent changes.
@@ -101,6 +105,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   CLI/TOML subset validation and authenticated header-consumption behavior.
 
 ### Fixed
+
+- Clear sender flags on Type 12-generated padding so BER finalization repairs
+  the pattern and marks the changed denominator with C.
 
 - Fix Rust 1.100 Clippy failures from a duplicate CLI attribute and a redundant
   boolean branch in Micro-session ID processing.

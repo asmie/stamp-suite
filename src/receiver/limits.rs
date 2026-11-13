@@ -29,6 +29,8 @@ pub struct ReflectorCounters {
     /// alongside the replay count so an operator can tell benign reordering
     /// from an actual duplicate.
     pub packets_reordered: AtomicU64,
+    /// Successful reflected datagrams per locally generated BER C condition.
+    ber_conformance: [AtomicU64; crate::ber::BerConformanceReason::ALL.len()],
 }
 
 impl ReflectorCounters {
@@ -44,6 +46,7 @@ impl ReflectorCounters {
             packets_rate_limited: AtomicU64::new(0),
             packets_replayed: AtomicU64::new(0),
             packets_reordered: AtomicU64::new(0),
+            ber_conformance: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 
@@ -68,6 +71,36 @@ impl ReflectorCounters {
         #[cfg(feature = "metrics")]
         if self.metrics_enabled {
             crate::metrics::reflector_metrics::record_packet_dropped(_reason);
+        }
+    }
+
+    pub fn ber_conformance_count(&self, reason: crate::ber::BerConformanceReason) -> u64 {
+        self.ber_conformance[reason as usize].load(Ordering::Relaxed)
+    }
+
+    pub fn ber_conformance_counts(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        crate::ber::BerConformanceReason::ALL
+            .into_iter()
+            .map(|reason| (reason.label(), self.ber_conformance_count(reason)))
+            .collect()
+    }
+
+    pub(super) fn record_ber_conformance(&self, reasons: crate::ber::BerConformanceErrors) {
+        if reasons.is_empty() {
+            return;
+        }
+        for reason in reasons.iter() {
+            let n = self.ber_conformance[reason as usize]
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            if crate::log_throttle::is_power_of_ten(n) {
+                log::warn!(target: "stamp_suite::ber::conformance",
+                    "reflected BER C condition: {} ({n} reflected datagrams)", reason.label());
+            }
+            #[cfg(feature = "metrics")]
+            if self.metrics_enabled {
+                crate::metrics::reflector_metrics::record_ber_conformance(reason.label());
+            }
         }
     }
 }
