@@ -92,6 +92,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `reflector_launcher_test.rs` | Continuously held port contention, kernel-selected ports, metadata setup before first send without readiness traffic, clean receiver exit, startup stderr/status bounds, timeout cleanup and child reaping. Linux also checks original socket closure and retained duplicates independently of endpoint occupancy. | Unix, nix; kernel socket-identity checks on Linux only |
 | `cos_ecn_wire_test.rs` | Actual ingress/reply IP markings, raw CoS fields, global/scoped admission, ECN refusal, burst/ordinary isolation and independent signatures. | Linux, nix |
 | `session_ssid_validation_test.rs` | Sender SSID checks and zero-SSID policies against an independent peer; IPv4/IPv6, open/authenticated. | always |
+| `zero_checksum_test.rs` | Captured IPv4 checksum-zero ingress, kernel checksum-drop controls, BER padding repair and signatures, strict/provisioned admission and authenticated base corruption. | Linux, nix; three ignored namespace tests |
 | `snmp_lifecycle_test.rs` | CLI exits after finite sends, startup failures, signals and silent initial/reconnect handshakes. | Unix, `snmp`; reflector needs nix |
 | `startup_failure_test.rs` | Startup failures (bind, key file, missing key, bad BER pattern, missing interface) return errors; total loss and shutdown do not. Retained silent peers and automatic sender ports avoid released-port races; IPv4/IPv6 total loss verifies the probe and distinct source port. | always; some cases Linux only |
 | `tlv_flag_semantics.rs` | U, M, I and C flag rules (RFC 8972, RFC 10052, draft-ietf-ippm-stamp-ext-hdr-26) through `process_stamp_packet`. | always |
@@ -251,10 +252,38 @@ checksums.
 
 ### In CI
 
+The zero-checksum fixture injects raw IPv4 requests and independently captures
+their IP/UDP headers. It checks the actual zero checksum, a valid nonzero
+checksum control, and the kernel's `InCsumErrors` increase for a payload changed
+after checksum calculation. Open, keyed-open and authenticated BER requests
+with four flipped padding bits must return count/burst 4 and repaired padding;
+keyed replies must retain valid independently checked digests. Short base
+packets and wrong provisioned SSIDs/source endpoints cannot allocate or refresh
+session state. Authenticated sequence, timestamp, Error Estimate and digest
+mutations cannot advance an established session. Replay drops follow the
+existing receive-count policy. This is receive-side characterization, not a
+complete zero-checksum admission claim; see the
+[profile boundary](../doc/ber-migration.md#zero-checksum-ingress-boundary).
+
+Run the default fixture locally, recording the parent namespace before entry:
+
+```bash
+cargo test --locked --test zero_checksum_test --no-run --message-format=json > /tmp/zero-udp-artifacts.json
+python3 scripts/run_privileged_test.py /tmp/zero-udp-artifacts.json zero_checksum_test 3 \
+  unshare -Urn env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
+```
+
+Repeat the build with `--all-features` to exercise the explicitly selected nix
+profile. The fixture requires its opt-in variable and a different network
+namespace before bringing up that namespace's loopback interface; absent raw
+socket capability fails the test. It reserves source/destination UDP ports
+throughout each case and stops/joins every reflector.
+
 The `privileged` job in `.github/workflows/conformance.yml` builds each backend
 without root, then uses `scripts/run_privileged_test.py` to require the three
 pnet checksum/round-trip tests, three pnet endpoint cases, sender and reflector
-header cases, nine namespace scenarios and two route MTU cases.
+header cases, nine namespace scenarios, two route MTU cases and three IPv4
+zero-checksum cases in each of the default and all-features profiles.
 The script rejects an executable whose ignored-test count is wrong or zero, so
 a build with the wrong backend cannot pass with an empty suite.
 `scoped_ipv6_test` and `ext_hdr_nix_test` are not run in CI.

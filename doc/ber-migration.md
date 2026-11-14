@@ -90,6 +90,50 @@ the default pattern. Verify HMAC/session admission before counting or repairing
 padding. Apply the same checks to sender observations, including nested U,
 M and I. Re-sign metadata after all edits and mark resized denominators unusable.
 
+## Zero-checksum ingress boundary
+
+The receive-side test profile is Linux IPv4 with the nix backend,
+`--strict-packets --session-admission provisioned --drop-replayed --tlv-mode echo`,
+an exact `--reflector-session SSID,SOURCE,DESTINATION` and `--hwtstamp off`.
+It covers open, keyed-open and authenticated BER padding processing. The raw
+[fixture](../tests/zero_checksum_test.rs) captures checksum-zero requests and
+uses valid/invalid nonzero-checksum controls. Replies use the normal transport;
+there is no zero-checksum sender or bidirectional zero-checksum mode. The pnet
+capture backend rejects zero UDP checksums in both address families. No IPv6
+zero-checksum support is claimed; the
+[BER draft, section 3](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-ber-01.txt#section-3)
+excludes it for STAMP under RFC 8200.
+
+This profile characterizes existing controls and remains **Partial** for
+`ber-3-zero-udp`. Strict parsing enforces base length, while the default lenient
+parser zero-fills short bases. Exact provisioning and configured base HMAC
+checks precede runtime session allocation, activity refresh and replay updates.
+The optional replay policy counts a received packet before rejecting a duplicate;
+Type 12 also has its own ordering response. TLV validation and integrity-error
+responses occur after those session updates. Timestamp and Error Estimate
+fields are decoded, rather than fully validated against a session-specific
+timestamp policy. These flags therefore do not establish a complete open-mode
+zero-checksum admission gate. A normal UDP socket also does not expose the
+incoming UDP checksum to that gate.
+
+The draft requires failed open-mode packet/session checks to be discarded, but
+[RFC 8972, sections 4 and 4.8](https://www.rfc-editor.org/rfc/rfc8972.html#section-4)
+specify malformed/integrity-error replies; the BER draft itself specifies M for
+a short BER value. A future admission policy must state which failures cause
+whole-packet discard before state changes and which retain those error replies.
+This fixture does not resolve that standards interaction or change the ordinary
+TLV response policy. A complete claim needs explicit configuration, sequence
+and timestamp rules, bounded top-level/nested framing checks before mutation,
+and malformed zero-checksum wire tests against that contract.
+
+Valid-looking changes to open-mode fields can escape validation. Sequence gaps,
+reordering or an old but representable timestamp alone do not establish
+corruption, and received MBZ fields remain ignored under
+[RFC 8762](https://www.rfc-editor.org/rfc/rfc8762.html#section-4.2).
+Only Extra Padding contributes BER; protected base-field corruption is tested
+as an authentication drop, not a BER sample. These software-loopback tests
+provide no physical-link, FEC or NIC error-capture evidence.
+
 ## Independent peer finding
 
 The draft lists Teaparty commit

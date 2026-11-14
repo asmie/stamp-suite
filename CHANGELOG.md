@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add required Linux raw-wire tests for IPv4 zero-checksum BER ingress,
+  strict/provisioned admission and authenticated base-field corruption.
+  Keep full zero-checksum admission conformance Partial.
+
 - Record preserved peer C provenance separately from local conformance causes,
   using bounded child-header observation in known TLV container layouts.
   Keep opaque values, failed digests and legacy TLV-ignore tails unchanged.
