@@ -453,6 +453,32 @@ everything after the base packet unprocessed. By default a short packet is
 zero-filled for TWAMP-Light interoperability; `--strict-packets` drops it
 instead (RFC 8762 §4.6).
 
+### Base-field validation
+
+Reflectors can opt into `--validate-base-fields` (TOML
+`validate_base_fields = true`). This requires a complete 44-byte open or
+112-byte authenticated base, even without `--strict-packets`, and drops a
+packet whose Error Estimate multiplier is zero or whose PTP nanoseconds are
+outside 0–999,999,999. The incoming Error Estimate Z bit selects the timestamp
+format; a PTP sender can use an NTP reflector and conversely. These checks run
+after configured base authentication and before session allocation, activity
+refresh, receive counts or replay classification. Aggregate receive/drop
+counters still include rejected datagrams.
+
+```bash
+stamp-suite --is-reflector --local-addr 192.0.2.10 --validate-base-fields
+```
+
+All NTP encodings, including zero and era wrap, remain representable. The
+policy imposes no timestamp freshness or synchronization threshold. Received
+MBZ fields are ignored. Sequence gaps, reordering and serial wrap retain the
+existing replay policy; `--drop-replayed` is a separate choice. A valid base
+still gets the normal TLV M/I responses when extensions fail validation.
+The option applies to either address family and backend, independently of UDP
+checksum handling. It does not enable a zero-checksum sender or establish the
+complete [zero-checksum BER admission profile](ber-migration.md#zero-checksum-ingress-boundary).
+The default is off, preserving the existing lenient base-field handling.
+
 ### Session provisioning
 
 [RFC 8972 §3](https://www.rfc-editor.org/rfc/rfc8972.html#section-3) requires
@@ -504,7 +530,8 @@ A packet rejected at the base-packet level does not create a session, extend
 its idle timeout, increment its receive count, consume a stateful sequence
 number, or change replay and Follow-Up state. This covers bad base HMACs,
 unknown or revoked per-SSID keys, and short packets rejected by
-`--strict-packets`. Such packets still count in the aggregate receive and drop
+`--strict-packets`, plus failures of `--validate-base-fields` when enabled.
+Such packets still count in the aggregate receive and drop
 counters. A valid base packet with a failed TLV HMAC gets the RFC 8972 I-flag
 reply.
 

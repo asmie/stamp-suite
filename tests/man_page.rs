@@ -27,7 +27,15 @@ fn render() -> String {
     clap_mangen::Man::new(cmd)
         .render(&mut buf)
         .expect("clap_mangen renders the CLI definition");
-    String::from_utf8(buf).expect("rendered roff is UTF-8")
+    // clap_mangen leaves a trailing space on the synopsis. Normalize the
+    // generated source so CLI changes also pass whitespace checks.
+    String::from_utf8(buf)
+        .expect("rendered roff is UTF-8")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 #[test]

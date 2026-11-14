@@ -71,6 +71,9 @@ service settings, session provisioning and policies.
 The reflector starts in open mode and answers anyone who can reach it. On an
 untrusted network, restrict access and turn on
 [authenticated mode](doc/security.md#enabling-authenticated-mode-on-the-packaged-unit).
+Use `--validate-base-fields` to reject incomplete bases, zero Error Estimate
+multipliers and invalid PTP nanoseconds before session updates. See
+[reflector admission](doc/usage.md#base-field-validation) for its scope.
 
 ## What it supports
 

@@ -37,6 +37,7 @@ fn make_ctx<'a>(clock_source: ClockFormat) -> ProcessingContext<'a> {
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: false,
         strict_packets: false,
+        validate_base_fields: false,
         #[cfg(feature = "metrics")]
         metrics_enabled: false,
         received_dscp: 0,

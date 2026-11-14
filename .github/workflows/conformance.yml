@@ -146,12 +146,12 @@ jobs:
       - name: Require default-profile IPv4 zero-checksum ingress
         run: |
           cargo test --locked --test zero_checksum_test --no-run --message-format=json > zero-udp-artifacts.json
-          python3 scripts/run_privileged_test.py zero-udp-artifacts.json zero_checksum_test 3 sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
+          python3 scripts/run_privileged_test.py zero-udp-artifacts.json zero_checksum_test 4 sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
       - name: Build nix namespace tests without root
         run: cargo test --locked --all-features --test netns_conformance --test route_mtu_test --test header_request_wire_test --test header_reflection_wire_test --test zero_checksum_test --no-run --message-format=json > netns-artifacts.json
       - name: Require all-features IPv4 zero-checksum ingress
         run: >-
-          python3 scripts/run_privileged_test.py netns-artifacts.json zero_checksum_test 3
+          python3 scripts/run_privileged_test.py netns-artifacts.json zero_checksum_test 4
           sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)"
           STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
       - name: Require nix-profile sender header requests

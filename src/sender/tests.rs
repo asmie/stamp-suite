@@ -2618,6 +2618,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: false,
         strict_packets: false,
+        validate_base_fields: false,
         #[cfg(feature = "metrics")]
         metrics_enabled: false,
         received_dscp: 0,
@@ -3033,6 +3034,7 @@ async fn ack_nth_then_watch_for_more(
                 tlv_mode: TlvHandlingMode::Echo,
                 verify_tlv_hmac: false,
                 strict_packets: false,
+                validate_base_fields: false,
                 #[cfg(feature = "metrics")]
                 metrics_enabled: false,
                 received_dscp: 0,

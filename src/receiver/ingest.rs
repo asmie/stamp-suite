@@ -25,6 +25,7 @@ pub(crate) struct ReflectorSettings {
     pub tlv_mode: TlvHandlingMode,
     pub verify_tlv_hmac: bool,
     pub strict_packets: bool,
+    pub validate_base_fields: bool,
     #[cfg(feature = "metrics")]
     pub metrics_enabled: bool,
     pub drop_replayed: bool,
@@ -118,6 +119,7 @@ impl ReflectorSettings {
             tlv_mode: conf.tlv_mode,
             verify_tlv_hmac: conf.verify_tlv_hmac,
             strict_packets: conf.strict_packets,
+            validate_base_fields: conf.validate_base_fields,
             #[cfg(feature = "metrics")]
             metrics_enabled: conf.metrics,
             drop_replayed: conf.drop_replayed,
@@ -277,6 +279,7 @@ impl<'a> ProcessingContext<'a> {
             tlv_mode: settings.tlv_mode,
             verify_tlv_hmac: settings.verify_tlv_hmac,
             strict_packets: settings.strict_packets,
+            validate_base_fields: settings.validate_base_fields,
             #[cfg(feature = "metrics")]
             metrics_enabled: settings.metrics_enabled,
             received_dscp: packet.dscp,

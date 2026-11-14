@@ -92,7 +92,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `reflector_launcher_test.rs` | Continuously held port contention, kernel-selected ports, metadata setup before first send without readiness traffic, clean receiver exit, startup stderr/status bounds, timeout cleanup and child reaping. Linux also checks original socket closure and retained duplicates independently of endpoint occupancy. | Unix, nix; kernel socket-identity checks on Linux only |
 | `cos_ecn_wire_test.rs` | Actual ingress/reply IP markings, raw CoS fields, global/scoped admission, ECN refusal, burst/ordinary isolation and independent signatures. | Linux, nix |
 | `session_ssid_validation_test.rs` | Sender SSID checks and zero-SSID policies against an independent peer; IPv4/IPv6, open/authenticated. | always |
-| `zero_checksum_test.rs` | Captured IPv4 checksum-zero ingress, kernel checksum-drop controls, BER padding repair and signatures, strict/provisioned admission and authenticated base corruption. | Linux, nix; three ignored namespace tests |
+| `zero_checksum_test.rs` | Captured IPv4 checksum-zero ingress, kernel checksum-drop controls, BER padding repair and signatures, strict/provisioned admission and authenticated base corruption. | Linux, nix; four ignored namespace tests |
 | `snmp_lifecycle_test.rs` | CLI exits after finite sends, startup failures, signals and silent initial/reconnect handshakes. | Unix, `snmp`; reflector needs nix |
 | `startup_failure_test.rs` | Startup failures (bind, key file, missing key, bad BER pattern, missing interface) return errors; total loss and shutdown do not. Retained silent peers and automatic sender ports avoid released-port races; IPv4/IPv6 total loss verifies the probe and distinct source port. | always; some cases Linux only |
 | `tlv_flag_semantics.rs` | U, M, I and C flag rules (RFC 8972, RFC 10052, draft-ietf-ippm-stamp-ext-hdr-26) through `process_stamp_packet`. | always |
@@ -261,7 +261,12 @@ keyed replies must retain valid independently checked digests. Short base
 packets and wrong provisioned SSIDs/source endpoints cannot allocate or refresh
 session state. Authenticated sequence, timestamp, Error Estimate and digest
 mutations cannot advance an established session. Replay drops follow the
-existing receive-count policy. This is receive-side characterization, not a
+existing receive-count policy. The opt-in base-field policy also rejects zero
+Error Estimate multipliers and invalid PTP nanoseconds in BER requests whose
+configured digests remain valid, before allocation or established-session
+updates. Portable processing tests cover both families/backends, state modes,
+mixed timestamp formats, sequence wrap/reordering and retained TLV M/I replies.
+This is receive-side characterization, not a
 complete zero-checksum admission claim; see the
 [profile boundary](../doc/ber-migration.md#zero-checksum-ingress-boundary).
 
@@ -269,7 +274,7 @@ Run the default fixture locally, recording the parent namespace before entry:
 
 ```bash
 cargo test --locked --test zero_checksum_test --no-run --message-format=json > /tmp/zero-udp-artifacts.json
-python3 scripts/run_privileged_test.py /tmp/zero-udp-artifacts.json zero_checksum_test 3 \
+python3 scripts/run_privileged_test.py /tmp/zero-udp-artifacts.json zero_checksum_test 4 \
   unshare -Urn env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
 ```
 
@@ -282,7 +287,7 @@ throughout each case and stops/joins every reflector.
 The `privileged` job in `.github/workflows/conformance.yml` builds each backend
 without root, then uses `scripts/run_privileged_test.py` to require the three
 pnet checksum/round-trip tests, three pnet endpoint cases, sender and reflector
-header cases, nine namespace scenarios, two route MTU cases and three IPv4
+header cases, nine namespace scenarios, two route MTU cases and four IPv4
 zero-checksum cases in each of the default and all-features profiles.
 The script rejects an executable whose ignored-test count is wrong or zero, so
 a build with the wrong backend cannot pass with an empty suite.

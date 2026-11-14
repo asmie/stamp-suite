@@ -565,6 +565,7 @@ fn test_location_tlv_ipv4_round_trip() {
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: false,
         strict_packets: false,
+        validate_base_fields: false,
         #[cfg(feature = "metrics")]
         metrics_enabled: false,
         received_dscp: 0,

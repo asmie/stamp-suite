@@ -562,6 +562,12 @@ pub struct Configuration {
     #[clap(long, help_heading = "Reflector", hide_short_help = true)]
     pub strict_packets: bool,
 
+    /// Reflector: reject incomplete bases, zero Error Estimate multipliers and
+    /// invalid PTP nanoseconds before session updates. The packet's Z bit selects
+    /// NTP/PTP; no timestamp freshness rule is imposed. TLV error replies are unchanged.
+    #[clap(long, help_heading = "Reflector", hide_short_help = true)]
+    pub validate_base_fields: bool,
+
     /// Keep per-session reflector sequence counters (RFC 8762 §4).
     ///
     /// The reflector maintains independent sequence counters for each full session identity instead of echoing
@@ -1582,6 +1588,9 @@ impl Configuration {
     /// parsed here so a typo fails at startup instead of falling back to a
     /// default on every packet.
     fn validate_reflector_policies(&self) -> Result<(), ConfigurationError> {
+        if self.validate_base_fields && !self.is_reflector {
+            return Err(invalid("--validate-base-fields requires --is-reflector"));
+        }
         if self.reflector_queue_capacity == 0 {
             return Err(invalid(
                 "reflector_queue_capacity must be greater than zero",
@@ -2280,6 +2289,7 @@ impl Configuration {
             hmac_key_dir,
             require_hmac,
             strict_packets,
+            validate_base_fields,
             stateful_reflector,
             session_admission,
             reflector_sessions,
@@ -2408,6 +2418,7 @@ impl Configuration {
         merge_opt!(hmac_key_dir);
         merge!(require_hmac);
         merge!(strict_packets);
+        merge!(validate_base_fields);
         merge!(stateful_reflector);
         merge!(session_admission);
         merge!(reflector_sessions);
@@ -2562,6 +2573,7 @@ pub struct FileConfiguration {
     pub hmac_key_dir: Option<PathBuf>,
     pub require_hmac: Option<bool>,
     pub strict_packets: Option<bool>,
+    pub validate_base_fields: Option<bool>,
     pub stateful_reflector: Option<bool>,
     pub session_admission: Option<SessionAdmission>,
     pub reflector_sessions: Option<Vec<String>>,
@@ -2691,6 +2703,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "hmac_key_dir":  { "type": "string" },
     "require_hmac":  { "type": "boolean" },
     "strict_packets": { "type": "boolean" },
+    "validate_base_fields": { "type": "boolean" },
     "stateful_reflector": { "type": "boolean" },
     "session_admission": { "type": "string", "enum": ["permissive", "provisioned"] },
     "reflector_sessions": { "type": "array", "items": { "type": "string" } },

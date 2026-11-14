@@ -10,6 +10,7 @@
 //! - **`ttl-pnet`**: Force pnet backend
 
 mod assemble;
+mod base_validation;
 mod cleanup;
 mod ingest;
 mod keys;
@@ -236,6 +237,8 @@ pub struct ProcessingContext<'a> {
     pub verify_tlv_hmac: bool,
     /// Whether to use strict packet parsing.
     pub strict_packets: bool,
+    /// Require complete bases and valid Error Estimate/timestamp encodings.
+    pub validate_base_fields: bool,
     /// Whether metrics recording is enabled.
     #[cfg(feature = "metrics")]
     pub metrics_enabled: bool,
@@ -506,6 +509,17 @@ fn process_stamp_packet_inner(
         ValidatedBase::Open(process_unauth_packet(data, src, ctx)?)
     };
 
+    if ctx.validate_base_fields {
+        let (timestamp, estimate) = match &packet {
+            ValidatedBase::Auth(packet) => (packet.timestamp, packet.error_estimate),
+            ValidatedBase::Open(packet) => (packet.timestamp, packet.error_estimate),
+        };
+        if let Err(reason) = base_validation::validate(timestamp, estimate) {
+            crate::warn_throttled!("Dropping invalid base fields from {}: {}", src, reason);
+            return None;
+        }
+    }
+
     // No allocation, activity refresh, receive count, or replay classification
     // occurs before base parsing and the configured authentication have passed.
     let mut ctx = ctx.clone();
@@ -683,7 +697,7 @@ fn process_auth_packet(
     // Parse packet leniently with canonical buffer for HMAC verification
     // Per RFC 8762 §4.6, short packets are zero-filled and HMAC must be
     // verified against the canonical (zero-padded) representation
-    let (packet, canonical_buf) = if ctx.strict_packets {
+    let (packet, canonical_buf) = if ctx.strict_packets || ctx.validate_base_fields {
         match PacketAuthenticated::from_bytes(data) {
             Ok(p) => {
                 let mut buf = [0u8; 112];
@@ -745,7 +759,7 @@ fn process_unauth_packet(
     src: SocketAddr,
     ctx: &ProcessingContext,
 ) -> Option<PacketUnauthenticated> {
-    let packet_result = if ctx.strict_packets {
+    let packet_result = if ctx.strict_packets || ctx.validate_base_fields {
         PacketUnauthenticated::from_bytes(data)
     } else {
         Ok(PacketUnauthenticated::from_bytes_lenient(data))

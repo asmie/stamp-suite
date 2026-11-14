@@ -116,6 +116,17 @@ timestamp policy. These flags therefore do not establish a complete open-mode
 zero-checksum admission gate. A normal UDP socket also does not expose the
 incoming UDP checksum to that gate.
 
+The separate opt-in `--validate-base-fields` policy now rejects incomplete
+bases, zero Error Estimate multipliers and out-of-range PTP nanoseconds before
+session updates. Its [contract](usage.md#base-field-validation) accepts both
+incoming timestamp formats via Z, ignores received MBZ and leaves sequence
+ordering to the existing replay policy. It adds no freshness threshold and
+does not alter TLV malformed/integrity-error replies. The fourth raw-wire case
+checks rejected zero-checksum BER requests with valid configured base/extension
+digests, both before allocation and against an established session. Portable
+processing tests also cover IPv4/IPv6, stateful/stateless operation, serial wrap,
+gaps/reordering, opt-out compatibility and retained M/I responses.
+
 The draft requires failed open-mode packet/session checks to be discarded, but
 [RFC 8972, sections 4 and 4.8](https://www.rfc-editor.org/rfc/rfc8972.html#section-4)
 specify malformed/integrity-error replies; the BER draft itself specifies M for

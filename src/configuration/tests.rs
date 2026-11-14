@@ -1006,6 +1006,58 @@ fn test_strict_packets_default_false() {
 }
 
 #[test]
+fn base_field_validation_is_opt_in_and_reflector_only() {
+    assert!(!Configuration::parse_from(["test"]).validate_base_fields);
+    assert!(
+        Configuration::parse_from(["test", "--validate-base-fields"])
+            .validate()
+            .is_err()
+    );
+    let mut conf = Configuration::parse_from(["test", "--is-reflector", "--validate-base-fields"]);
+    assert!(conf.validate_base_fields);
+    assert!(
+        !conf.strict_packets,
+        "the new policy must enforce completeness itself"
+    );
+    conf.validate().unwrap();
+    conf.is_reflector = false;
+    conf.local_port = 0;
+    assert!(conf
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("--is-reflector"));
+}
+
+#[test]
+fn base_field_validation_merges_from_toml_and_matches_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("validation.toml");
+    std::fs::write(&file, "is_reflector = true\nvalidate_base_fields = true\n").unwrap();
+    let conf = load_from_args(&["test", "--config", file.to_str().unwrap()]).unwrap();
+    assert!(conf.validate_base_fields);
+    conf.validate().unwrap();
+    std::fs::write(&file, "validate_base_fields = true\n").unwrap();
+    assert!(load_from_args(&["test", "--config", file.to_str().unwrap()]).is_err());
+    std::fs::write(&file, "is_reflector = true\nvalidate_base_fields = false\n").unwrap();
+    let conf = load_from_args(&[
+        "test",
+        "--config",
+        file.to_str().unwrap(),
+        "--validate-base-fields",
+    ])
+    .unwrap();
+    assert!(conf.validate_base_fields, "explicit CLI overrides TOML");
+    conf.validate().unwrap();
+    let schema: serde_json::Value = serde_json::from_str(CONFIG_JSON_SCHEMA).unwrap();
+    assert_eq!(
+        schema["properties"]["validate_base_fields"]["type"],
+        "boolean"
+    );
+    assert!(toml::from_str::<FileConfiguration>("validate_base_fields = 'true'").is_err());
+}
+
+#[test]
 fn test_log_format_default_text() {
     let args = vec!["test"];
     let conf = Configuration::parse_from(args);

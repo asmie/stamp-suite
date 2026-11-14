@@ -44,6 +44,10 @@ struct Peer {
 
 impl Peer {
     fn start(mode: u8) -> Self {
+        Self::start_with_validation(mode, false)
+    }
+
+    fn start_with_validation(mode: u8, validate: bool) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -73,6 +77,9 @@ impl Peer {
             }
             if mode == 2 {
                 args.extend(["--auth-mode".into(), "A".into()]);
+            }
+            if validate {
+                args.push("--validate-base-fields".into());
             }
             Configuration::parse_from(args)
         });
@@ -431,4 +438,43 @@ fn zero_checksum_authenticated_base_corruption_does_not_advance_session() {
     peer.exchange(&next);
     assert_eq!(peer.summary().packets_received, 2);
     peer.receiver.stop().unwrap();
+}
+
+#[test]
+#[ignore = "requires a private network namespace and CAP_NET_RAW"]
+fn zero_checksum_base_field_policy_rejects_validly_signed_invalid_fields() {
+    let _namespace = namespace();
+    for mode in 0..=2 {
+        let peer = Peer::start_with_validation(mode, true);
+        for sequence in [0, 1] {
+            let valid = peer.packet(sequence, true);
+            for bad_ptp in [false, true] {
+                let mut invalid = valid.clone();
+                let estimate = if mode == 2 { 24 } else { 12 };
+                if bad_ptp {
+                    // The NTP fraction 0x80000000 is outside PTP's nanosecond
+                    // range. Switching only Z makes the timestamp invalid.
+                    invalid[estimate] |= 0x40;
+                } else {
+                    invalid[estimate + 1] = 0;
+                }
+                if mode == 2 {
+                    let digest = wire_hmac::digest(&KEY, &invalid[..96]);
+                    invalid[96..112].copy_from_slice(&digest);
+                }
+                // Extension coverage excludes these base fields: both base
+                // and extension HMACs remain valid when configured.
+                let before = (sequence != 0).then(|| peer.summary());
+                peer.reject(&peer.socket, &invalid);
+                if let Some(before) = before {
+                    peer.unchanged(&before);
+                } else {
+                    assert_eq!(peer.receiver.shared.session_manager.session_count(), 0);
+                }
+            }
+            peer.exchange(&valid);
+        }
+        assert_eq!(peer.summary().packets_received, 2);
+        peer.receiver.stop().unwrap();
+    }
 }

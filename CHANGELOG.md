@@ -7,6 +7,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in reflector base-field validation through `--validate-base-fields`
+  and TOML. Reject incomplete bases, zero Error Estimate multipliers and invalid
+  PTP nanoseconds before session updates, preserving existing TLV error replies.
+  Cover validly signed invalid fields with required zero-checksum wire tests.
+
 - Add required Linux raw-wire tests for IPv4 zero-checksum BER ingress,
   strict/provisioned admission and authenticated base-field corruption.
   Keep full zero-checksum admission conformance Partial.
