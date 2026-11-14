@@ -1004,6 +1004,7 @@ mod tests {
                 cos_request: None,
                 reply_source: None,
                 ber_conformance: Default::default(),
+                tlv_conformance: Default::default(),
                 tlv_hmac_generated: false,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: Some(super::super::ReflectedControlBehavior {
@@ -1099,6 +1100,7 @@ mod tests {
                 cos_request: None,
                 reply_source: None,
                 ber_conformance: Default::default(),
+                tlv_conformance: Default::default(),
                 tlv_hmac_generated: false,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: Some(super::super::ReflectedControlBehavior {
@@ -1166,6 +1168,7 @@ mod tests {
                 cos_request: None,
                 reply_source: None,
                 ber_conformance: Default::default(),
+                tlv_conformance: Default::default(),
                 tlv_hmac_generated: false,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: controlled.then_some(super::super::ReflectedControlBehavior {

@@ -181,6 +181,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
     let mut reply_source: Option<std::net::IpAddr> = None;
     let mut tlv_hmac_generated = false;
     let mut ber_conformance = crate::ber::BerConformanceErrors::default();
+    let mut tlv_conformance = crate::tlv::TlvConformanceErrors::default();
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -239,6 +240,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                             reply_source = result.reply_source;
                             tlv_hmac_generated = result.tlv_hmac_generated;
                             ber_conformance.merge(result.ber_conformance);
+                            tlv_conformance.merge(result.tlv_conformance);
                         }
                         None => {
                             return StampResponse {
@@ -248,6 +250,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                                 reflected_control: None,
                                 reply_source: None,
                                 ber_conformance: Default::default(),
+                                tlv_conformance: Default::default(),
                                 tlv_hmac_generated: false,
                             };
                         }
@@ -280,6 +283,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
         reply_source,
         tlv_hmac_generated,
         ber_conformance,
+        tlv_conformance,
     }
 }
 
@@ -326,6 +330,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
     let mut reply_source: Option<std::net::IpAddr> = None;
     let mut tlv_hmac_generated = false;
     let mut ber_conformance = crate::ber::BerConformanceErrors::default();
+    let mut tlv_conformance = crate::tlv::TlvConformanceErrors::default();
 
     // Handle TLVs based on mode
     match tlv_mode {
@@ -390,6 +395,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                             reply_source = result.reply_source;
                             tlv_hmac_generated = result.tlv_hmac_generated;
                             ber_conformance.merge(result.ber_conformance);
+                            tlv_conformance.merge(result.tlv_conformance);
                         }
                         None => {
                             return StampResponse {
@@ -399,6 +405,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                                 reflected_control: None,
                                 reply_source: None,
                                 ber_conformance: Default::default(),
+                                tlv_conformance: Default::default(),
                                 tlv_hmac_generated: false,
                             };
                         }
@@ -428,5 +435,6 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
         reply_source,
         tlv_hmac_generated,
         ber_conformance,
+        tlv_conformance,
     }
 }

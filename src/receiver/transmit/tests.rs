@@ -107,6 +107,7 @@ fn sample(auth: bool, action: ReturnPathAction) -> Transmission {
         }),
         reply_source: Some("127.0.0.2".parse().unwrap()),
         ber_conformance: Default::default(),
+        tlv_conformance: Default::default(),
         tlv_hmac_generated: auth,
     };
     Transmission::new(

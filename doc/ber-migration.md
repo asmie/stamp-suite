@@ -234,5 +234,7 @@ Messages contain only a reason token and its total, without packet values,
 keys, source addresses or session identifiers.
 
 The draft's section 6.2 wording applies to C on other TLVs/sub-TLVs too.
-Those specific diagnostics are outside this BER implementation, so the
-conformance row remains Partial rather than claiming the entire SHOULD.
+Type 12 reasons now have separate fixed counters and throttled logs, exposed
+through [control status](control-plane.md#status) and Prometheus. Header, CoS
+and other nested C conditions still lack specific diagnostics, so the
+conformance row remains Partial.

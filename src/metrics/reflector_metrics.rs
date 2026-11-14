@@ -69,3 +69,8 @@ pub(crate) fn record_tlv_errors(unrecognized: usize, malformed: usize, integrity
 pub(crate) fn record_ber_conformance(reason: &'static str) {
     counter!("stamp_reflector_ber_conformance_total", "reason" => reason).increment(1);
 }
+
+/// One successful reflected datagram for a fixed non-BER C-condition label.
+pub(crate) fn record_tlv_conformance(reason: &'static str) {
+    counter!("stamp_reflector_tlv_conformance_total", "reason" => reason).increment(1);
+}

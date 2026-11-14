@@ -41,6 +41,7 @@ fn single_ber_reply_checks_mtu_preserves_patterns_and_resigns() {
                 reflected_control: None,
                 reply_source: None,
                 ber_conformance: Default::default(),
+                tlv_conformance: Default::default(),
                 tlv_hmac_generated: auth,
             };
             let mut t = Transmission::new(
@@ -287,6 +288,7 @@ fn controlled_sample(
         }),
         reply_source: None,
         ber_conformance: Default::default(),
+        tlv_conformance: Default::default(),
         tlv_hmac_generated: signed,
     };
     let source = if ipv6 { "[::1]:4000" } else { "127.0.0.1:4000" }

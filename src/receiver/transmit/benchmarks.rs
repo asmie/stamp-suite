@@ -185,6 +185,7 @@ fn fixture(case: Case) -> Transmission {
             }),
             reply_source: None,
             ber_conformance: Default::default(),
+            tlv_conformance: Default::default(),
             tlv_hmac_generated: case.auth && case.scenario != Scenario::Ordinary,
         },
         session,

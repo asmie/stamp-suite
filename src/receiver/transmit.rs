@@ -228,17 +228,18 @@ impl Transmission {
         loop {
             let mut clamped = false;
             let mut ber_conformance = self.response.ber_conformance;
+            let mut tlv_conformance = self.response.tlv_conformance;
             let budget = if options.dont_fragment {
                 payload_cap(target, &options, refresh_mtu)
             } else {
                 Ok(usize::MAX)
             };
-            let result = budget.and_then(|cap| {
-                let cap = cap.min(
-                    self.response
-                        .reflected_control
-                        .map_or(usize::MAX, |b| usize::from(b.max_size)),
-                );
+            let result = budget.and_then(|route_cap| {
+                let admin_cap = self
+                    .response
+                    .reflected_control
+                    .map_or(usize::MAX, |b| usize::from(b.max_size));
+                let cap = route_cap.min(admin_cap);
                 // Shaping needs a copy: another route may allow the untrimmed
                 // reply and must not inherit this attempt's C flag/padding.
                 // Otherwise reuse data; T3 and generated HMACs are overwritten
@@ -257,6 +258,16 @@ impl Transmission {
                     self.response.reflected_control.is_some(),
                     &mut ber_conformance,
                 )?;
+                if clamped && has_control_c(attempt, base) {
+                    // Ties mean both constraints bind. Rebuild these reasons
+                    // for each attempt, so a failed route never gets counted.
+                    if route_cap <= admin_cap {
+                        tlv_conformance.insert(crate::tlv::TlvConformanceReason::Type12RouteMtu);
+                    }
+                    if admin_cap <= route_cap {
+                        tlv_conformance.insert(crate::tlv::TlvConformanceReason::Type12SizeLimit);
+                    }
+                }
                 let timestamp = crate::time::generate_timestamp(self.clock);
                 // Reflector Timestamp offset: after the 4-byte Sequence Number,
                 // plus 12 MBZ bytes in authenticated mode (RFC 8762 §4.3.2).
@@ -296,6 +307,7 @@ impl Transmission {
                     self.session.record_reflection(sequence, timestamp);
                     counters.record_reflected();
                     counters.record_ber_conformance(ber_conformance);
+                    counters.record_tlv_conformance(tlv_conformance);
                     self.remaining -= 1;
                     return Some(sequence);
                 }
@@ -378,6 +390,21 @@ fn is_message_too_large(error: &io::Error) -> bool {
         // WSAEMSGSIZE
         error.raw_os_error() == Some(10040)
     }
+}
+
+/// Inspect the shaped output rather than classifying an opaque incoming C flag.
+fn has_control_c(data: &[u8], base: usize) -> bool {
+    let mut pos = base;
+    while let Some(tlv) = TlvSpan::at(data, pos) {
+        if tlv.tlv_type == TlvType::ReflectedControl
+            && tlv.flags.processed()
+            && tlv.flags.conformant_reflected
+        {
+            return true;
+        }
+        pos = tlv.end();
+    }
+    false
 }
 
 fn is_reflected_header(tlv: &TlvSpan) -> bool {
@@ -1264,3 +1291,6 @@ mod diagnostics_tests;
 
 #[cfg(test)]
 mod benchmarks;
+
+#[cfg(test)]
+mod type12_diagnostics_tests;

@@ -2,14 +2,14 @@ use super::*;
 use crate::ber::{BerConformanceErrors, BerConformanceReason as Reason};
 use crate::tlv::TlvList;
 
-fn tlv(kind: u8, value: &[u8]) -> Vec<u8> {
+pub(super) fn tlv(kind: u8, value: &[u8]) -> Vec<u8> {
     let mut raw = vec![0x80, kind];
     raw.extend_from_slice(&(value.len() as u16).to_be_bytes());
     raw.extend_from_slice(value);
     raw
 }
 
-fn chain(parts: &[Vec<u8>]) -> Vec<u8> {
+pub(super) fn chain(parts: &[Vec<u8>]) -> Vec<u8> {
     parts.concat()
 }
 
@@ -76,12 +76,24 @@ fn reflect(
     bad_tlv_hmac: bool,
     bad_base_hmac: bool,
 ) -> Option<Transmission> {
+    reflect_configured(raw, auth, ipv6, bad_tlv_hmac, bad_base_hmac, |_| {})
+}
+
+pub(super) fn reflect_configured(
+    raw: &[u8],
+    auth: bool,
+    ipv6: bool,
+    bad_tlv_hmac: bool,
+    bad_base_hmac: bool,
+    configure: impl FnOnce(&mut super::super::ProcessingContext<'_>),
+) -> Option<Transmission> {
     let key = HmacKey::new(vec![0x42; 16]).unwrap();
     let mut ctx = super::super::tests::test_ctx(0, 0);
     ctx.hmac_key = Some(&key);
     ctx.require_hmac = auth;
     ctx.verify_tlv_hmac = true;
     ctx.reflected_control_max_count = 16;
+    configure(&mut ctx);
     let mut base = vec![
         0;
         if auth {
@@ -345,7 +357,10 @@ impl log::Log for CaptureLogger {
         true
     }
     fn log(&self, record: &log::Record<'_>) {
-        if record.target() == "stamp_suite::ber::conformance" {
+        if matches!(
+            record.target(),
+            "stamp_suite::ber::conformance" | "stamp_suite::tlv::conformance"
+        ) {
             LOGS.with(|slot| {
                 if let Some(logs) = slot.borrow_mut().as_mut() {
                     logs.push(record.args().to_string());
@@ -398,6 +413,28 @@ fn diagnostics_log_each_reason_independently_without_per_packet_log_floods() {
             expected.iter().collect::<Vec<_>>()
         );
     }
+
+    LOGS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+    let mut report = crate::tlv::TlvConformanceErrors::default();
+    for reason in crate::tlv::TlvConformanceReason::ALL {
+        report.insert(reason);
+        report.insert(reason);
+    }
+    report.merge(report);
+    for _ in 0..1000 {
+        counters.record_tlv_conformance(report);
+    }
+    let logs = LOGS.with(|slot| slot.borrow_mut().take().unwrap());
+    assert_eq!(logs.len(), 4 * crate::tlv::TlvConformanceReason::ALL.len());
+    for reason in crate::tlv::TlvConformanceReason::ALL {
+        assert_eq!(counters.tlv_conformance_count(reason), 1000);
+        for n in [1, 10, 100, 1000] {
+            assert!(logs.contains(&format!(
+                "reflected TLV C condition: {} ({n} reflected datagrams)",
+                reason.label()
+            )));
+        }
+    }
 }
 
 #[cfg(feature = "metrics")]
@@ -417,7 +454,33 @@ fn prometheus_uses_only_fixed_reason_labels_and_honors_runtime_disable() {
             .contains("stamp_reflector_ber_conformance_total"));
         counters.metrics_enabled = true;
         counters.record_ber_conformance(report);
+        let mut tlv_report = crate::tlv::TlvConformanceErrors::default();
+        for reason in crate::tlv::TlvConformanceReason::ALL {
+            tlv_report.insert(reason);
+        }
+        counters.metrics_enabled = false;
+        counters.record_tlv_conformance(tlv_report);
+        assert!(!handle
+            .render()
+            .contains("stamp_reflector_tlv_conformance_total"));
+        counters.metrics_enabled = true;
+        counters.record_tlv_conformance(tlv_report);
         let text = handle.render();
+        let tlv_rows: Vec<_> = text
+            .lines()
+            .filter(|l| l.starts_with("stamp_reflector_tlv_conformance_total{"))
+            .collect();
+        assert_eq!(tlv_rows.len(), crate::tlv::TlvConformanceReason::ALL.len());
+        for reason in crate::tlv::TlvConformanceReason::ALL {
+            assert!(tlv_rows.contains(
+                &format!(
+                    "stamp_reflector_tlv_conformance_total{{reason=\"{}\"}} 1",
+                    reason.label()
+                )
+                .as_str()
+            ));
+        }
+
         let rows: Vec<_> = text
             .lines()
             .filter(|l| l.starts_with("stamp_reflector_ber_conformance_total{"))

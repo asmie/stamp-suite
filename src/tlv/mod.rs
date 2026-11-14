@@ -15,6 +15,7 @@
 //! ```
 
 mod core;
+mod diagnostics;
 mod experimental;
 mod list;
 mod residual_ber;
@@ -22,6 +23,8 @@ mod traits;
 mod typed;
 
 // Public API. These re-exports are the module's only external surface.
+
+pub use diagnostics::{TlvConformanceErrors, TlvConformanceReason};
 
 // Trait
 pub use self::core::{RESIDUAL_BER_PATTERN_SUBTLV_TYPE, RESIDUAL_BER_TLV_TYPE};

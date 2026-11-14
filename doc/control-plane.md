@@ -91,6 +91,15 @@ instead of being ignored.
       "duplicate_pattern": 0,
       "padding_misaligned": 0,
       "padding_resized": 0
+    },
+    "tlv_conformance": {
+      "type12_count_limit": 0,
+      "type12_interval_limit": 0,
+      "type12_size_limit": 0,
+      "type12_rate_limit": 0,
+      "type12_volume_limit": 0,
+      "type12_route_mtu": 0,
+      "type12_padding_unencodable": 0
     }
   }
 }
@@ -107,6 +116,26 @@ processed conformance checks, not every possible fault in an invalid packet.
 `padding_resized` includes Type 12 and MTU changes that invalidate the original
 BER denominator. Opaque echoes and M-only nested errors add no BER C diagnostic.
 The seven keys are fixed and include zero values. See [BER diagnostics](ber-migration.md#conformance-diagnostics).
+
+`counters.tlv_conformance` counts successfully sent datagrams with locally
+generated Type 12 C conditions. It uses the same once-per-reason, successful-send
+rules as the BER counters and includes all seven zero-valued keys:
+
+| Reason | Meaning |
+| --- | --- |
+| `type12_count_limit` | Requested count exceeds the configured maximum. |
+| `type12_interval_limit` | Multiple copies request an interval below the configured floor. |
+| `type12_size_limit` | Rounded requested size exceeds the configured cap, or the cap binds at send-time shaping. |
+| `type12_rate_limit` | Requested multi-copy byte rate exceeds the configured maximum. |
+| `type12_volume_limit` | Requested total bytes exceed the configured maximum. |
+| `type12_route_mtu` | The route payload budget binds when shaping a processed Type 12 reply. |
+| `type12_padding_unencodable` | The requested size leaves a gap smaller than a padding TLV header. |
+
+If route and configured caps tie during shaping, both reasons count. A failed
+attempt contributes no send-time reason to a later retry. Disabled, replayed,
+opaque and integrity-failed requests add no Type 12 C diagnostics. BER reasons
+remain independent; a reply can increment both groups. Other TLVs' C conditions
+are not yet covered by these counters.
 
 | Counter | Meaning |
 | --- | --- |

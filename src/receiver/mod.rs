@@ -169,6 +169,8 @@ impl ProcessingContext<'_> {
 /// Response from STAMP packet processing, including optional CoS request.
 #[derive(Debug)]
 pub struct StampResponse {
+    /// Local non-BER C conditions, counted after a complete successful send.
+    pub tlv_conformance: crate::tlv::TlvConformanceErrors,
     /// Local BER C conditions, counted only when a datagram is sent successfully.
     pub ber_conformance: crate::ber::BerConformanceErrors,
     /// The response packet data to send.
@@ -606,6 +608,7 @@ fn process_stamp_packet_inner(
                     // Address TLV, so there is nothing to pin.
                     reply_source: None,
                     ber_conformance: Default::default(),
+                    tlv_conformance: Default::default(),
                     tlv_hmac_generated: false,
                 })
             }
@@ -642,6 +645,7 @@ fn process_stamp_packet_inner(
                     return_path_action: ReturnPathAction::Normal,
                     reflected_control: None,
                     ber_conformance: Default::default(),
+                    tlv_conformance: Default::default(),
                     tlv_hmac_generated: false,
                 })
             }
@@ -761,6 +765,7 @@ fn process_unauth_packet(
 
 /// Tuple returned from `apply_semantic_tlv_processing`.
 struct SemanticResult {
+    tlv_conformance: crate::tlv::TlvConformanceErrors,
     ber_conformance: crate::ber::BerConformanceErrors,
     cos_request: Option<(u8, u8)>,
     return_path_action: ReturnPathAction,
@@ -784,6 +789,7 @@ fn apply_semantic_tlv_processing(
     // Validate BER/nested framing before other semantic mutations. Integrity
     // failures already carry I, so this leaves their opaque values untouched.
     let mut ber_conformance = tlvs.process_ber();
+    let mut tlv_conformance = crate::tlv::TlvConformanceErrors::default();
     // Sources describe clock discipline, never the selected wire encoding or S
     // bit. T2 may come from a separately disciplined PHC; current T3 is always
     // generated in software before send, even when hardware TX is requested.
@@ -1064,11 +1070,13 @@ fn apply_semantic_tlv_processing(
                 // limit and the interval floor is the rate limit.
                 if requested_count > ctx.reflected_control_max_count {
                     non_conformant = true;
+                    tlv_conformance.insert(crate::tlv::TlvConformanceReason::Type12CountLimit);
                 }
                 if requested_count > 1
                     && req.interval_nanoseconds < ctx.reflected_control_min_interval_ns
                 {
                     non_conformant = true;
+                    tlv_conformance.insert(crate::tlv::TlvConformanceReason::Type12IntervalLimit);
                 }
 
                 // RFC 10052 §3 length rules: the reflected length is the larger of
@@ -1092,6 +1100,7 @@ fn apply_semantic_tlv_processing(
                 let cap = ctx.reflected_control_max_size as usize;
                 if aligned_req > cap {
                     non_conformant = true;
+                    tlv_conformance.insert(crate::tlv::TlvConformanceReason::Type12SizeLimit);
                 }
                 let target = aligned_req.min(cap);
                 if target > current {
@@ -1111,6 +1120,8 @@ fn apply_semantic_tlv_processing(
                     } else {
                         // Can't grow by less than one TLV header.
                         non_conformant = true;
+                        tlv_conformance
+                            .insert(crate::tlv::TlvConformanceReason::Type12PaddingUnencodable);
                     }
                 }
 
@@ -1120,6 +1131,7 @@ fn apply_semantic_tlv_processing(
                 let count = u128::from(requested_count);
                 if reply_len * count > u128::from(ctx.reflected_control_max_volume) {
                     non_conformant = true;
+                    tlv_conformance.insert(crate::tlv::TlvConformanceReason::Type12VolumeLimit);
                 }
                 if requested_count > 1 {
                     let interval = u128::from(req.interval_nanoseconds.max(1));
@@ -1129,6 +1141,7 @@ fn apply_semantic_tlv_processing(
                         > u128::from(ctx.reflected_control_max_rate) * interval
                     {
                         non_conformant = true;
+                        tlv_conformance.insert(crate::tlv::TlvConformanceReason::Type12RateLimit);
                     }
                 }
 
@@ -1162,6 +1175,7 @@ fn apply_semantic_tlv_processing(
         tlv_hmac_key.is_some_and(|key| tlvs.set_hmac_response(key, &base_bytes[..4]));
 
     Some(SemanticResult {
+        tlv_conformance,
         ber_conformance,
         cos_request,
         return_path_action,

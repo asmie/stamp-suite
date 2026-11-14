@@ -103,6 +103,7 @@ async fn get_status(State(s): State<ControlState>) -> Json<serde_json::Value> {
             "packets_replayed": s.counters.packets_replayed.load(Ordering::Relaxed),
             "packets_reordered": s.counters.packets_reordered.load(Ordering::Relaxed),
             "ber_conformance": s.counters.ber_conformance_counts(),
+            "tlv_conformance": s.counters.tlv_conformance_counts(),
         },
     }))
 }

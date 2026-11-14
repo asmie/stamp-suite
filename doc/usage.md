@@ -1002,6 +1002,13 @@ produce no per-packet debug message. Logs contain reason labels and counts,
 without packet contents or session identifiers. See
 [BER conformance diagnostics](ber-migration.md#conformance-diagnostics).
 
+`stamp_reflector_tlv_conformance_total{reason="..."}` applies the same counting
+and logging rules to the seven [Type 12 reasons](control-plane.md#status),
+including successful send-time MTU shaping. The log target is
+`stamp_suite::tlv::conformance`; BER uses `stamp_suite::ber::conformance`.
+Type 12 and BER counters are independent. Runtime-disabled metrics emit no
+series. C diagnostics for header, CoS and other nested conditions remain open.
+
 Report output has a bounded queue and a five-second completion deadline. A
 slow reader can cause interim reports or text packet details to be skipped;
 a final-output failure stops the run with an error. See

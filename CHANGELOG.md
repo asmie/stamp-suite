@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add fixed Type 12 conformance counters and throttled logs for count,
+  interval, size, rate, volume, unencodable padding and route MTU conditions.
+  Count successful replies through control status and optional Prometheus.
+
 - Add per-reason BER conformance counters and throttled local logs after
   successful reflection, exposed through control status and Prometheus.
   Cover BER validation and padding resizing without logging packet contents.
