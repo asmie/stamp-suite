@@ -665,15 +665,25 @@ current partial window does not raise alarms. See
 [retention](statistics.md#memory-and-ber-history).
 
 On Linux, sender padding shrinks by whole pattern repetitions to fit the route
-MTU. A resized reply marks the BER metadata with C because the denominator
-changed. Use symmetric replies for BER. UDP checksums and link CRC or FEC may
+MTU. At reflection, Type 12/MTU fitting fills the exact route budget with the
+validated BER pattern, including when semantic resizing already set parent C.
+A controlled reply can end with a partial repetition; BER C marks the resized
+sample unusable.
+Reflected headers are removed before shrinking BER padding. A padding resize
+marks BER metadata with C because the denominator changed; header-only removal
+preserves that denominator. The Type 12 MTU clamp sets its own C and stops the
+burst. Standalone BER trimming retains whole repetitions. Controlled fitting
+requires the mandatory fields and padding header to fit; otherwise it drops
+the reply rather than emitting a malformed TLV tail.
+Use symmetric replies for BER. UDP checksums and link CRC or FEC may
 discard corrupt packets before delivery, so this measures residual delivered
 errors, not raw link BER.
 
-BER conformance-error flags are reflected, but specific error-reason logs and
-counters remain absent. The [matrix](conformance/draft-stamp-ber.md) records
-that SHOULD as a Gap and keeps zero-checksum validation, platform MTU and
-physical LAG limitations explicit.
+BER conformance-error reasons have fixed counters and independently throttled
+logs after successful transmission. The [matrix](conformance/draft-stamp-ber.md)
+keeps the broader diagnostics SHOULD Partial because other TLVs/sub-TLVs still
+need specific C diagnostics. Zero-checksum validation, platform MTU and physical
+LAG limitations remain explicit.
 
 ### Reflected IPv6 Extension and Fixed Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr-26)
 

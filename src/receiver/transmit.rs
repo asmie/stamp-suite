@@ -450,25 +450,9 @@ fn fit_reply(
     }
     // Header-reflection packets follow ext-hdr-26 §7.2: remove complete
     // reflected-header TLVs before considering any other resizing policy.
-    if has_ber(data, base) && !controlled && !has_reflected_headers(data, base) {
-        let list = crate::tlv::TlvList::parse(&data[base..]).map_err(|_| cannot_fit())?;
-        let mut tlvs: Vec<_> = list.iter().cloned().collect();
-        crate::ber::fit_padding(&mut tlvs, cap, base)?;
-        let mut resized = crate::tlv::TlvList::new();
-        for mut tlv in tlvs {
-            // The forward count described the original padding size. Mark
-            // metadata unusable once route MTU trimming changes that size.
-            if crate::ber::is_ber(tlv.tlv_type) {
-                tlv.set_conformant_reflected();
-                if !tlv.flags.integrity_failed && !tlv.flags.unrecognized {
-                    reasons.insert(crate::ber::BerConformanceReason::PaddingResized);
-                }
-            }
-            resized.push(tlv).map_err(|_| cannot_fit())?;
-        }
-        data.truncate(base);
-        data.extend_from_slice(&resized.to_bytes());
-        return Ok(false);
+    let ber = has_ber(data, base);
+    if ber && !has_reflected_headers(data, base) {
+        return fit_ber_reply(data, base, cap, controlled, reasons);
     }
     // Every byte after the base must belong to a well-formed TLV.
     let mut pos = base;
@@ -478,7 +462,7 @@ fn fit_reply(
         if tlv.flags.malformed {
             return Err(cannot_fit());
         }
-        if !controlled || tlv.tlv_type != TlvType::ExtraPadding {
+        if !controlled || ber || tlv.tlv_type != TlvType::ExtraPadding {
             tlvs.push((tlv, data[tlv.start..tlv.end()].to_vec()));
         }
         pos = tlv.end();
@@ -489,19 +473,26 @@ fn fit_reply(
             .iter()
             .rposition(|(tlv, _)| is_reflected_header(tlv) && tlv.flags.processed())
         else {
-            // After exhausting optional header TLVs, BER can still fit by
-            // reducing padding in whole repetitions. Re-enter once with no
-            // processed header TLVs, preserving mandatory/opaque fields.
-            if !controlled && has_ber(data, base) {
+            // After exhausting optional headers, use BER-specific padding:
+            // whole repetitions for standalone replies, or an exact-budget
+            // pattern prefix plus C for controlled replies.
+            if ber {
                 data.truncate(base);
                 for (_, bytes) in tlvs {
                     data.extend_from_slice(&bytes);
                 }
-                return fit_reply(data, base, cap, false, reasons);
+                return fit_reply(data, base, cap, controlled, reasons);
             }
             return Err(cannot_fit());
         };
         size -= tlvs.remove(index).1.len();
+    }
+    if controlled && ber {
+        data.truncate(base);
+        for (_, bytes) in tlvs {
+            data.extend_from_slice(&bytes);
+        }
+        return fit_ber_reply(data, base, cap, true, reasons);
     }
     if controlled {
         // RFC 10052 §3: a reply clamped to the MTU carries C.
@@ -511,6 +502,8 @@ fn fit_reply(
         {
             control[0] |= TlvFlags::C;
         }
+    }
+    if controlled && !ber {
         let padding = cap - size;
         if padding >= TLV_HEADER_SIZE {
             let pad = crate::tlv::ExtraPaddingTlv::new_zeros(padding - TLV_HEADER_SIZE);
@@ -542,6 +535,62 @@ fn fit_reply(
     for (_, bytes) in tlvs {
         data.extend_from_slice(&bytes);
     }
+    Ok(controlled)
+}
+
+fn fit_ber_reply(
+    data: &mut Vec<u8>,
+    base: usize,
+    cap: usize,
+    controlled: bool,
+    reasons: &mut crate::ber::BerConformanceErrors,
+) -> io::Result<bool> {
+    let cannot_fit = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "BER fields exceed payload budget",
+        )
+    };
+    let list = crate::tlv::TlvList::parse(&data[base..]).map_err(|_| cannot_fit())?;
+    let mut tlvs: Vec<_> = list.iter().cloned().collect();
+    let resized = if controlled {
+        let pads: Vec<_> = tlvs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.tlv_type == TlvType::ExtraPadding)
+            .map(|(i, _)| i)
+            .collect();
+        if pads.len() != 1 {
+            return Err(cannot_fit());
+        }
+        let pad = pads[0];
+        let old_len = tlvs[pad].value.len();
+        let fixed = base
+            + tlvs
+                .iter()
+                .map(crate::tlv::RawTlv::wire_size)
+                .sum::<usize>()
+            - old_len;
+        let new_len = cap.checked_sub(fixed).ok_or_else(cannot_fit)?;
+        tlvs[pad].value.resize(new_len, 0);
+        crate::ber::repair_reflected_padding(&mut tlvs)?;
+        old_len != new_len
+    } else {
+        crate::ber::fit_padding(&mut tlvs, cap, base).map_err(|_| cannot_fit())?
+    };
+    let mut fitted = crate::tlv::TlvList::new();
+    for mut tlv in tlvs {
+        if resized && crate::ber::is_ber(tlv.tlv_type) {
+            tlv.set_conformant_reflected();
+            reasons.insert(crate::ber::BerConformanceReason::PaddingResized);
+        }
+        if controlled && tlv.tlv_type == TlvType::ReflectedControl && tlv.is_processable() {
+            tlv.set_conformant_reflected();
+        }
+        fitted.push(tlv).map_err(|_| cannot_fit())?;
+    }
+    data.truncate(base);
+    data.extend_from_slice(&fitted.to_bytes());
     Ok(controlled)
 }
 

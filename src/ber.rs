@@ -438,6 +438,50 @@ pub(crate) fn fit_padding(
     Ok(true)
 }
 
+/// Restore the validated BER pattern after rebuilding a controlled reply.
+/// A parent C flag does not invalidate an otherwise unambiguous pattern: it
+/// can describe a denominator change that occurred during semantic assembly.
+pub(crate) fn repair_reflected_padding(tlvs: &mut [RawTlv]) -> std::io::Result<()> {
+    let fail = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ambiguous BER padding pattern",
+        )
+    };
+    let mut metadata = tlvs.iter().filter(|t| is_ber(t.tlv_type));
+    let raw = metadata.next().ok_or_else(fail)?;
+    if metadata.next().is_some() {
+        return Err(fail());
+    }
+    let value = ResidualBerValue::decode_value(&raw.value).map_err(|_| fail())?;
+    if value.sub_tlvs.iter().any(|sub| {
+        sub.kind == RESIDUAL_BER_PATTERN_SUBTLV_TYPE
+            && sub.flags & (TlvFlags::U | TlvFlags::M | TlvFlags::I | TlvFlags::C) != 0
+    }) {
+        return Err(fail());
+    }
+    let pattern = value
+        .explicit_pattern(RESIDUAL_BER_PATTERN_SUBTLV_TYPE)
+        .map_err(|_| fail())?
+        .unwrap_or(&RESIDUAL_BER_DEFAULT_PATTERN);
+    if tlvs
+        .iter()
+        .filter(|t| t.tlv_type == TlvType::ExtraPadding)
+        .count()
+        != 1
+    {
+        return Err(fail());
+    }
+    let padding = tlvs
+        .iter_mut()
+        .find(|t| t.tlv_type == TlvType::ExtraPadding)
+        .unwrap();
+    for (i, byte) in padding.value.iter_mut().enumerate() {
+        *byte = pattern[i % pattern.len()];
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

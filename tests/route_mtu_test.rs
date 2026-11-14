@@ -437,9 +437,59 @@ fn live_route_mtu_changes_and_alternate_destinations() {
                     [3, 1]
                 );
                 assert_eq!(headers[1].2, padding, "mandatory padding stays intact");
+                // Type 12 first rebuilds BER padding for its requested size;
+                // route-MTU fitting must fill the budget with the repaired pattern prefix.
+                for explicit in [false, true] {
+                    let pattern: &[u8] = if explicit {
+                        &[1, 2, 3, 4, 5]
+                    } else {
+                        &[0xff, 0, 0xff, 0]
+                    };
+                    let mut metadata = vec![0; 8];
+                    if explicit {
+                        metadata.extend_from_slice(&[0x80, 241, 0, 5, 1, 2, 3, 4, 5]);
+                    }
+                    let mut control = vec![0x05, 0xdc, 0, 3]; // 1500 bytes, 3 copies
+                    control.extend_from_slice(&1_000_000u32.to_be_bytes());
+                    control.extend_from_slice(&[0; 4]);
+                    let fixed = base + hmac_size + 4 + metadata.len() + 16 + 4;
+                    let repetitions = (cap + 40 - fixed) / pattern.len();
+                    let request = single_reply_packet(
+                        auth,
+                        10 + u32::from(explicit),
+                        &[
+                            (243, metadata),
+                            (12, control),
+                            (1, pattern.repeat(repetitions)),
+                        ],
+                    );
+                    let reply = exchange_single_reply(&socket, destination, &request, auth, cap);
+                    assert_eq!(
+                        base + reply.iter().map(|(_, _, v)| 4 + v.len()).sum::<usize>(),
+                        cap
+                    );
+                    for (kind, flags, value) in reply {
+                        match kind {
+                            243 => {
+                                assert_eq!(flags, 0x10, "resized BER needs C");
+                                assert_eq!(&value[..8], &[0; 8], "preserve measured counters");
+                            }
+                            12 => assert_eq!(flags, 0x10, "MTU-clamped control needs C"),
+                            1 => {
+                                assert_eq!(flags, 0);
+                                assert!(!value.is_empty());
+                                assert!(value
+                                    .iter()
+                                    .zip(pattern.iter().cycle())
+                                    .all(|(a, b)| a == b));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 in_ns(&["route", "del", sender, "dev", &remote]);
                 in_ns(&["route", "del", alternate, "dev", &remote]);
-                eprintln!("PASS ipv6={ipv6} auth={auth} bound={bound}: link decrease/increase, route metric, alternate destination, single C response, single BER/header reply fitting and signatures");
+                eprintln!("PASS ipv6={ipv6} auth={auth} bound={bound}: link decrease/increase, route metric, alternate destination, single C response, single BER/header reply fitting, controlled BER patterns and signatures");
             }
         }
     }

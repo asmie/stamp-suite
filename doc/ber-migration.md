@@ -213,6 +213,17 @@ generated Type 12 padding now has its sender U flag cleared, allowing BER
 finalization to repair the pattern and return C for the changed denominator.
 Previously that padding was skipped as unprocessed.
 
+Send-time Type 12/MTU clamping fills the exact route budget with the validated
+pattern, including a partial final repetition when necessary, and restores
+those bytes even if earlier semantic resizing already set parent C. It removes reflected headers before shrinking BER padding,
+preserves count/burst fields and signs the resulting reply. A padding resize
+sets BER C; header removal alone preserves its denominator and BER flag while
+setting Type 12 C and stopping the burst. A budget without the mandatory
+fields and padding header, or an ambiguous/unusable pattern, is refused.
+Standalone BER fitting continues to retain whole repetitions. A controlled
+resize sets BER C, so a partial repetition cannot become a valid BER sample. Failed MTU
+attempts do not alter the template used by a later larger-budget retry.
+
 Counts are reflector lifetime totals, unaffected by session expiry, available
 under `counters.ber_conformance` in [control status](control-plane.md#status).
 Prometheus exposes `stamp_reflector_ber_conformance_total` with only the fixed

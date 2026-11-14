@@ -225,3 +225,370 @@ fn generated_hmac_after_malformed_ber_uses_actual_stateful_sequence() {
         assert_eq!(&data[at + 20..], &original[at + 20..]);
     }
 }
+
+fn controlled_sample(
+    mode: u8,
+    ipv6: bool,
+    explicit_pattern: Option<&[u8]>,
+    prior_c: bool,
+    header: bool,
+) -> Transmission {
+    let auth = mode == 2;
+    let signed = mode != 0;
+    let key = HmacKey::new(vec![0xab; 16]).unwrap();
+    let base = if auth {
+        AUTH_BASE_SIZE
+    } else {
+        UNAUTH_BASE_SIZE
+    };
+    let pattern = explicit_pattern.unwrap_or(&[0xff, 0, 0xff, 0]);
+    let mut value =
+        ResidualBerValue::request(RESIDUAL_BER_PATTERN_SUBTLV_TYPE, explicit_pattern).unwrap();
+    value.count = 6;
+    value.max_burst = 3;
+    for sub in &mut value.sub_tlvs {
+        sub.flags = 0;
+    }
+    let mut list = TlvList::new();
+    let mut ber = value.to_raw().unwrap();
+    ber.clear_reflector_flags();
+    if prior_c {
+        ber.set_conformant_reflected();
+    }
+    list.push(ber).unwrap();
+    let mut control = crate::tlv::ReflectedControlTlv::new(3000, 3, 1000).to_raw();
+    control.clear_reflector_flags();
+    list.push(control).unwrap();
+    if header {
+        let mut raw = crate::tlv::RawTlv::new(TlvType::ReflectedFixedHdr, vec![0; 20]);
+        raw.clear_reflector_flags();
+        list.push(raw).unwrap();
+    }
+    let mut pad = ExtraPaddingTlv {
+        padding: pattern.repeat(500),
+    }
+    .to_raw();
+    pad.clear_reflector_flags();
+    list.push(pad).unwrap();
+    if signed {
+        list.set_hmac_response(&key, &[0; 4]);
+    }
+    let mut data = vec![0; base];
+    data.extend_from_slice(&list.to_bytes());
+    let response = StampResponse {
+        data,
+        cos_request: None,
+        return_path_action: ReturnPathAction::Normal,
+        reflected_control: Some(super::super::ReflectedControlBehavior {
+            max_size: 3000,
+            extra_copies: 2,
+            interval_ns: 1000,
+            suppress_reply_ext_headers: false,
+        }),
+        reply_source: None,
+        ber_conformance: Default::default(),
+        tlv_hmac_generated: signed,
+    };
+    let source = if ipv6 { "[::1]:4000" } else { "127.0.0.1:4000" }
+        .parse()
+        .unwrap();
+    Transmission::new(
+        response,
+        Arc::new(Session::new(0)),
+        source,
+        ClockFormat::NTP,
+        auth,
+        true,
+        signed.then_some(key),
+        0,
+        false,
+    )
+}
+
+#[test]
+fn controlled_ber_mtu_clamp_preserves_pattern_bytes_and_signatures() {
+    for mode in 0..3 {
+        let auth = mode == 2;
+        let signed = mode != 0;
+        let key = HmacKey::new(vec![0xab; 16]).unwrap();
+        for ipv6 in [false, true] {
+            for explicit in [false, true] {
+                for prior_c in [false, true] {
+                    for header in [false, true] {
+                        let base = if auth {
+                            AUTH_BASE_SIZE
+                        } else {
+                            UNAUTH_BASE_SIZE
+                        };
+                        let pattern: &[u8] = if explicit {
+                            &[1, 2, 3, 4, 5]
+                        } else {
+                            &[0xff, 0, 0xff, 0]
+                        };
+                        let mut tx = controlled_sample(
+                            mode,
+                            ipv6,
+                            explicit.then_some(pattern),
+                            prior_c,
+                            header,
+                        );
+                        let cap = super::super::mtu_payload_cap(1500, ipv6) as usize;
+                        let counters = ReflectorCounters::new();
+                        tx.send_next_with_mtu(
+                            &counters,
+                            &RateLimiter::new(0),
+                            |_, _, _| Ok(cap),
+                            |bytes, _, _| {
+                                assert_eq!(bytes.len(), cap);
+                                let list = TlvList::parse(&bytes[base..]).unwrap();
+                                assert!(
+                                    list.iter()
+                                        .all(|t| t.tlv_type != TlvType::ReflectedFixedHdr),
+                                    "remove reflected headers before resizing BER padding"
+                                );
+                                let pad = list
+                                    .iter()
+                                    .find(|t| t.tlv_type == TlvType::ExtraPadding)
+                                    .unwrap();
+                                assert!(pad.is_processable());
+                                assert!(!pad.value.is_empty());
+                                assert!(
+                                    pad.value
+                                        .iter()
+                                        .zip(pattern.iter().cycle())
+                                        .all(|(a, b)| a == b),
+                                    "repaired BER bytes"
+                                );
+                                let ber = list
+                                    .iter()
+                                    .find(|t| t.tlv_type == TlvType::ResidualBer)
+                                    .unwrap();
+                                assert!(ber.flags.conformant_reflected);
+                                let value = ResidualBerValue::from_raw(ber).unwrap();
+                                assert_eq!((value.count, value.max_burst), (6, 3));
+                                assert!(
+                                    list.iter()
+                                        .find(|t| t.tlv_type == TlvType::ReflectedControl)
+                                        .unwrap()
+                                        .flags
+                                        .conformant_reflected
+                                );
+                                if signed {
+                                    list.verify_hmac(&key, &bytes[..4], &bytes[base..]).unwrap();
+                                }
+                                if auth {
+                                    assert_eq!(
+                                        &bytes[96..112],
+                                        &crate::crypto::compute_packet_hmac(&key, bytes, 96)
+                                    );
+                                }
+                                Ok(bytes.len())
+                            },
+                        )
+                        .unwrap();
+                        assert_eq!(tx.remaining, 0, "MTU clamp terminates the burst");
+                        assert_eq!(
+                            counters.ber_conformance_count(
+                                crate::ber::BerConformanceReason::PaddingResized
+                            ),
+                            1
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn controlled_header_trimming_marks_only_changed_ber_denominators() {
+    for mode in 0..3 {
+        for ipv6 in [false, true] {
+            for refill in [0, 7] {
+                let mut tx = controlled_sample(mode, ipv6, Some(&[1, 2, 3, 4, 5]), false, true);
+                let base = if mode == 2 { 112 } else { 44 };
+                let cap = tx.response.data.len() - 24 + refill;
+                let counters = ReflectorCounters::new();
+                tx.send_next_with_mtu(
+                    &counters,
+                    &RateLimiter::new(0),
+                    |_, _, _| Ok(cap),
+                    |bytes, _, _| {
+                        assert_eq!(bytes.len(), cap);
+                        let list = TlvList::parse(&bytes[base..]).unwrap();
+                        assert!(list
+                            .iter()
+                            .all(|t| t.tlv_type != TlvType::ReflectedFixedHdr));
+                        let ber = list
+                            .iter()
+                            .find(|t| t.tlv_type == TlvType::ResidualBer)
+                            .unwrap();
+                        assert_eq!(ber.flags.conformant_reflected, refill != 0);
+                        let padding = list
+                            .iter()
+                            .find(|t| t.tlv_type == TlvType::ExtraPadding)
+                            .unwrap();
+                        assert_eq!(padding.value.len(), 2500 + refill);
+                        assert!(padding
+                            .value
+                            .iter()
+                            .zip([1, 2, 3, 4, 5].iter().cycle())
+                            .all(|(a, b)| a == b));
+                        assert!(
+                            list.iter()
+                                .find(|t| t.tlv_type == TlvType::ReflectedControl)
+                                .unwrap()
+                                .flags
+                                .conformant_reflected
+                        );
+                        if mode != 0 {
+                            list.verify_hmac(
+                                &HmacKey::new(vec![0xab; 16]).unwrap(),
+                                &bytes[..4],
+                                &bytes[base..],
+                            )
+                            .unwrap();
+                        }
+                        Ok(bytes.len())
+                    },
+                )
+                .unwrap();
+                assert_eq!(tx.remaining, 0);
+                assert_eq!(
+                    counters
+                        .ber_conformance_count(crate::ber::BerConformanceReason::PaddingResized),
+                    u64::from(refill != 0)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn controlled_ber_clamp_handles_partial_patterns_without_malformed_tails() {
+    for mode in 0..3 {
+        for ipv6 in [false, true] {
+            for deficit in 1..=3 {
+                let mut tx = controlled_sample(mode, ipv6, Some(&[1, 2, 3, 4, 5]), false, false);
+                let cap = tx.response.data.len() - 2500 - deficit;
+                let counters = ReflectorCounters::new();
+                assert!(tx
+                    .send_next_with_mtu(
+                        &counters,
+                        &RateLimiter::new(0),
+                        |_, _, _| Ok(cap),
+                        |_, _, _| panic!("mandatory fields do not fit")
+                    )
+                    .is_none());
+                assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 0);
+            }
+            for available in 0..=5 {
+                let mut tx = controlled_sample(mode, ipv6, Some(&[1, 2, 3, 4, 5]), false, false);
+                let cap = tx.response.data.len() - 2500 + available;
+                let base = if mode == 2 { 112 } else { 44 };
+                let counters = ReflectorCounters::new();
+                let result = tx.send_next_with_mtu(
+                    &counters,
+                    &RateLimiter::new(0),
+                    |_, _, _| Ok(cap),
+                    |bytes, _, _| {
+                        assert_eq!(bytes.len(), cap);
+                        let list = TlvList::parse(&bytes[base..]).unwrap();
+                        assert_eq!(
+                            list.iter()
+                                .find(|t| t.tlv_type == TlvType::ExtraPadding)
+                                .unwrap()
+                                .value,
+                            [1, 2, 3, 4, 5][..available]
+                        );
+                        Ok(bytes.len())
+                    },
+                );
+                assert!(result.is_some());
+                assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 1);
+                assert_eq!(
+                    counters
+                        .ber_conformance_count(crate::ber::BerConformanceReason::PaddingResized),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn controlled_ber_mtu_retry_restores_untrimmed_template_and_burst() {
+    for mode in 0..3 {
+        for ipv6 in [false, true] {
+            let mut tx = controlled_sample(mode, ipv6, Some(&[1, 2, 3, 4, 5]), false, true);
+            let original_len = tx.response.data.len();
+            let base = if mode == 2 { 112 } else { 44 };
+            let counters = ReflectorCounters::new();
+            let mut sends = 0;
+            tx.send_next_with_mtu(
+                &counters,
+                &RateLimiter::new(0),
+                |_, _, refresh| Ok(if refresh { 4000 } else { 1400 }),
+                |bytes, _, _| {
+                    sends += 1;
+                    if sends == 1 {
+                        #[cfg(windows)]
+                        let code = 10040;
+                        #[cfg(not(windows))]
+                        let code = libc::EMSGSIZE;
+                        return Err(io::Error::from_raw_os_error(code));
+                    }
+                    assert_eq!(bytes.len(), original_len);
+                    let list = TlvList::parse(&bytes[base..]).unwrap();
+                    assert!(list
+                        .iter()
+                        .any(|t| t.tlv_type == TlvType::ReflectedFixedHdr));
+                    assert!(list.iter().all(|t| !t.flags.conformant_reflected));
+                    let padding = list
+                        .iter()
+                        .find(|t| t.tlv_type == TlvType::ExtraPadding)
+                        .unwrap();
+                    assert_eq!(padding.value, [1, 2, 3, 4, 5].repeat(500));
+                    if mode != 0 {
+                        list.verify_hmac(
+                            &HmacKey::new(vec![0xab; 16]).unwrap(),
+                            &bytes[..4],
+                            &bytes[base..],
+                        )
+                        .unwrap();
+                    }
+                    Ok(bytes.len())
+                },
+            )
+            .unwrap();
+            assert_eq!(sends, 2);
+            assert_eq!(tx.remaining, 2);
+            assert_eq!(
+                counters.ber_conformance_count(crate::ber::BerConformanceReason::PaddingResized),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn controlled_ber_clamp_does_not_interpret_unusable_nested_patterns() {
+    for flags in [TlvFlags::U, TlvFlags::M, TlvFlags::I, TlvFlags::C] {
+        let mut tx = controlled_sample(1, false, Some(&[1, 2, 3, 4, 5]), true, false);
+        tx.response.data[UNAUTH_BASE_SIZE + 4 + 8] = flags;
+        let counters = ReflectorCounters::new();
+        assert!(tx
+            .send_next_with_mtu(
+                &counters,
+                &RateLimiter::new(0),
+                |_, _, _| Ok(1400),
+                |_, _, _| panic!("unusable pattern was sent")
+            )
+            .is_none());
+        assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            counters.ber_conformance_count(crate::ber::BerConformanceReason::PaddingResized),
+            0
+        );
+    }
+}

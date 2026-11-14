@@ -106,6 +106,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Preserve BER padding patterns when Type 12 replies are clamped to a
+  route MTU. Fill the exact budget, remove reflected headers first, re-sign,
+  and avoid marking BER resized when header removal leaves padding unchanged.
+
 - Clear sender flags on Type 12-generated padding so BER finalization repairs
   the pattern and marks the changed denominator with C.
 
