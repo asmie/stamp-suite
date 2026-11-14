@@ -224,11 +224,15 @@ impl Transmission {
             super::set_return_path_u_flag_in_response(&mut data, base);
         }
         let mut cos_fallback = false;
+        let mut cos_marking_unavailable = false;
         let mut refresh_mtu = false;
         loop {
             let mut clamped = false;
             let mut ber_conformance = self.response.ber_conformance;
             let mut tlv_conformance = self.response.tlv_conformance;
+            if cos_marking_unavailable {
+                tlv_conformance.insert(crate::tlv::TlvConformanceReason::CosMarkingUnavailable);
+            }
             let budget = if options.dont_fragment {
                 payload_cap(target, &options, refresh_mtu)
             } else {
@@ -342,7 +346,8 @@ impl Transmission {
                         }
                         // Neither EC1 nor the Not-ECT fallback can be applied
                         // (cos-ecn-02 §3.2). Preserve routing and sign C below.
-                        super::reply_bytes::set_cos_marking_unavailable(&mut data, base);
+                        cos_marking_unavailable |=
+                            super::reply_bytes::set_cos_marking_unavailable(&mut data, base);
                     }
                     options.apply_tos = false;
                 }
@@ -399,6 +404,16 @@ fn is_message_too_large(error: &io::Error) -> bool {
         // WSAEMSGSIZE
         error.raw_os_error() == Some(10040)
     }
+}
+
+/// Produce the same platform error consumed by the production MTU retry path.
+#[cfg(test)]
+fn message_too_large_error() -> io::Error {
+    #[cfg(unix)]
+    let code = nix::libc::EMSGSIZE;
+    #[cfg(not(unix))]
+    let code = 10040; // WSAEMSGSIZE
+    io::Error::from_raw_os_error(code)
 }
 
 /// Inspect the shaped output rather than classifying an opaque incoming C flag.
@@ -1306,3 +1321,6 @@ mod type12_diagnostics_tests;
 
 #[cfg(test)]
 mod header_diagnostics_tests;
+
+#[cfg(test)]
+mod cos_control_diagnostics_tests;

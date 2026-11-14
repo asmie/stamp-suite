@@ -19,10 +19,13 @@ pub enum TlvConformanceReason {
     HeaderSelectorAmbiguous,
     HeaderSelectorNoMatch,
     HeaderLengthUnavailable,
+    CosMarkingUnavailable,
+    ReplyHeaderUnsupported,
+    ReplyHeaderDuplicate,
 }
 
 impl TlvConformanceReason {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 18] = [
         Self::Type12CountLimit,
         Self::Type12IntervalLimit,
         Self::Type12SizeLimit,
@@ -38,6 +41,9 @@ impl TlvConformanceReason {
         Self::HeaderSelectorAmbiguous,
         Self::HeaderSelectorNoMatch,
         Self::HeaderLengthUnavailable,
+        Self::CosMarkingUnavailable,
+        Self::ReplyHeaderUnsupported,
+        Self::ReplyHeaderDuplicate,
     ];
 
     /// A fixed counter label, without any peer-supplied value.
@@ -58,6 +64,9 @@ impl TlvConformanceReason {
             Self::HeaderSelectorAmbiguous => "header_selector_ambiguous",
             Self::HeaderSelectorNoMatch => "header_selector_no_match",
             Self::HeaderLengthUnavailable => "header_length_unavailable",
+            Self::CosMarkingUnavailable => "cos_marking_unavailable",
+            Self::ReplyHeaderUnsupported => "reply_header_unsupported",
+            Self::ReplyHeaderDuplicate => "reply_header_duplicate",
         }
     }
 }

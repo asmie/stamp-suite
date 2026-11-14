@@ -271,11 +271,7 @@ fn mtu_retry_does_not_leak_failed_attempt_diagnostics() {
                 |b, _, _| {
                     sends += 1;
                     if sends == 1 {
-                        Err(io::Error::from_raw_os_error(if cfg!(windows) {
-                            10040
-                        } else {
-                            libc::EMSGSIZE
-                        }))
+                        Err(message_too_large_error())
                     } else {
                         Ok(b.len())
                     }

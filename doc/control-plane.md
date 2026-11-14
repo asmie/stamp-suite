@@ -107,7 +107,10 @@ instead of being ignored.
       "header_capture_unavailable": 0,
       "header_selector_ambiguous": 0,
       "header_selector_no_match": 0,
-      "header_length_unavailable": 0
+      "header_length_unavailable": 0,
+      "cos_marking_unavailable": 0,
+      "reply_header_unsupported": 0,
+      "reply_header_duplicate": 0
     }
   }
 }
@@ -118,17 +121,20 @@ since startup:
 
 `counters.ber_conformance` counts successful reflected datagrams per locally
 generated BER C condition. Each reason counts at most once per datagram;
-successful burst copies count separately. Failed, cancelled, suppressed and
-integrity-failed observations do not add a reason. These counters describe
-processed conformance checks, not every possible fault in an invalid packet.
+successful burst copies count separately. Failed, cancelled and suppressed
+sends do not add a reason. Protected payloads are not semantically classified
+after an integrity failure. A locally generated `short_ber_value` C is counted
+even if verification subsequently sets I: its cause is the structural length
+check, not a payload interpretation. These counters do not diagnose every fault
+in an invalid packet.
 `padding_resized` includes Type 12 and MTU changes that invalidate the original
 BER denominator. Opaque echoes and M-only nested errors add no BER C diagnostic.
 The seven keys are fixed and include zero values. See [BER diagnostics](ber-migration.md#conformance-diagnostics).
 
 `counters.tlv_conformance` counts successfully sent datagrams with locally
-generated Type 12 and header-reflection C conditions. It uses the same
-once-per-reason, successful-send rules as the BER counters and includes all
-15 fixed keys, including zero values. The Type 12 reasons are:
+generated Type 12, header-reflection, CoS and nested control C conditions. It
+uses the same once-per-reason, successful-send rules as the BER counters and includes all
+18 fixed keys, including zero values. The Type 12 reasons are:
 
 | Reason | Meaning |
 | --- | --- |
@@ -142,7 +148,7 @@ once-per-reason, successful-send rules as the BER counters and includes all
 
 If route and configured caps tie during shaping, both reasons count. A failed
 attempt contributes no send-time reason to a later retry. Disabled, replayed,
-opaque and integrity-failed requests add no Type 12 C diagnostics. BER reasons
+opaque and integrity-failed requests add no Type 12 limit diagnostics. BER reasons
 remain independent; a reply can increment both groups.
 
 Header reasons describe processed Type 246/247 C flags:
@@ -162,8 +168,23 @@ Size trimming removes optional headers from the end. A header reason counts
 only if a header that produced it survives in the sent reply. Repeated headers
 with the same reason count once per datagram. A failed MTU attempt neither
 adds nor removes a reason from a later retry. Opaque, malformed and
-integrity-failed echoes add no header reason. CoS and nested reply-header
-control C diagnostics remain outside this counter coverage.
+integrity-failed echoes add no header reason.
+
+| Reason | Meaning |
+| --- | --- |
+| `cos_marking_unavailable` | The backend cannot apply either requested ECN or the Not-ECT fallback, and marks a processed CoS TLV with C. |
+| `reply_header_unsupported` | A processed IPv6 Extension Header Control child receives C because reply-header attachment is unsupported. |
+| `reply_header_duplicate` | A Type 12 parent has multiple complete IPv6 Extension Header Control children and at least one receives C. |
+
+A successful Not-ECT fallback, a policy refusal without C, and an ordinary
+UDP send error add no CoS reason. Repeated child Cs count once per reason per
+successful copy. A nonzero-length control child gets M rather than C and adds
+no C reason by itself. A locally marked child remains diagnosed if its parent
+later receives U for disabled or replayed Type 12 handling. Ignored later
+parents, unknown children and integrity-failed opaque values do not manufacture
+these reasons. Preserved peer C bits in unknown or opaque nested values are
+outside the local-cause classification; the broader diagnostics requirement
+remains Partial pending that provenance review.
 
 | Counter | Meaning |
 | --- | --- |

@@ -1019,7 +1019,7 @@ fn apply_semantic_tlv_processing(
             // violate cardinality. Type-246 reflection is handled independently.
             let one_way_ext_headers = ipv6_ext_hdr_control_count == 1;
             if ipv6_ext_hdr_control_count >= 1 {
-                tlvs.set_ipv6_ext_hdr_control_c_flag();
+                tlv_conformance.merge(tlvs.set_ipv6_ext_hdr_control_c_with_diagnostics());
             }
 
             if return_path_action == ReturnPathAction::SuppressReply

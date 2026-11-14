@@ -1003,13 +1003,16 @@ without packet contents or session identifiers. See
 [BER conformance diagnostics](ber-migration.md#conformance-diagnostics).
 
 `stamp_reflector_tlv_conformance_total{reason="..."}` applies the same counting
-and logging rules to seven Type 12 and eight header-reflection reasons in
+and logging rules to 18 fixed Type 12, header-reflection, CoS and nested control
+reasons in
 [control status](control-plane.md#status), including successful send-time MTU
 shaping. Header reasons count only for offending headers retained in the sent
 reply. The log target is
 `stamp_suite::tlv::conformance`; BER uses `stamp_suite::ber::conformance`.
 Type 12 and BER counters are independent. Runtime-disabled metrics emit no
-series. C diagnostics for CoS and nested reply-header control remain open.
+series. CoS counts only when C is actually set after marking failure, and nested
+control counts follow locally generated child C flags. Preserved peer C bits in
+unknown or opaque nested data are not classified as local error causes.
 
 Report output has a bounded queue and a five-second completion deadline. A
 slow reader can cause interim reports or text packet details to be skipped;

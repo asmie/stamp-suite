@@ -1230,6 +1230,11 @@ fn unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures() {
             }
             assert_eq!(attempts, 9);
             assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 3);
+            assert_eq!(
+                counters
+                    .tlv_conformance_count(crate::tlv::TlvConformanceReason::CosMarkingUnavailable),
+                3
+            );
         }
     }
 }

@@ -639,12 +639,14 @@ impl TlvList {
         }
     }
 
+    /// Length validation generates short-value C before HMAC verification.
+    /// A later I flag does not erase that local structural failure; recording
+    /// it does not interpret or validate any protected payload bytes.
     pub(crate) fn short_ber_conformance_errors(&self) -> BerConformanceErrors {
         let mut reasons = BerConformanceErrors::default();
         if self.non_hmac_tlvs().iter().any(|t| {
             t.tlv_type == TlvType::ResidualBer
                 && t.flags.conformant_reflected
-                && !t.flags.integrity_failed
                 && !t.flags.unrecognized
                 && t.value.len() < 8
         }) {
@@ -1147,10 +1149,15 @@ impl TlvList {
     /// Used for unsupported reply-header attachment and duplicate requests;
     /// the latter require C on every offending copy.
     pub fn set_ipv6_ext_hdr_control_c_flag(&mut self) {
-        Self::mark_ipv6_ext_hdr_control_c(self.non_hmac_tlvs_mut());
+        self.set_ipv6_ext_hdr_control_c_with_diagnostics();
     }
 
-    fn mark_ipv6_ext_hdr_control_c(tlvs: &mut [RawTlv]) {
+    pub(crate) fn set_ipv6_ext_hdr_control_c_with_diagnostics(&mut self) -> TlvConformanceErrors {
+        Self::mark_ipv6_ext_hdr_control_c(self.non_hmac_tlvs_mut())
+    }
+
+    fn mark_ipv6_ext_hdr_control_c(tlvs: &mut [RawTlv]) -> TlvConformanceErrors {
+        let mut report = TlvConformanceErrors::default();
         for tlv in tlvs {
             if tlv.tlv_type != TlvType::ReflectedControl || !tlv.is_processable() {
                 continue;
@@ -1162,10 +1169,14 @@ impl TlvList {
             // Sub-TLVs use the standard 4-byte STAMP header and begin after the
             // 8-octet fixed fields.
             let mut offset = REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE;
+            let mut control_count = 0;
+            let mut marked = false;
             while let Some(sub) = TlvSpan::at(value, offset) {
                 if sub.tlv_type.to_byte() == REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL {
+                    control_count += 1;
                     // Sub-TLV flags follow the STAMP TLV flag layout.
                     value[offset] |= if sub.end() == offset + TLV_HEADER_SIZE {
+                        marked = true;
                         TlvFlags::C
                     } else {
                         TlvFlags::M
@@ -1173,7 +1184,16 @@ impl TlvList {
                 }
                 offset = sub.end();
             }
+            if marked {
+                // Count only conditions that actually generated a child C.
+                // A nonzero-length child gets M, not a C diagnostic by itself.
+                report.insert(TlvConformanceReason::ReplyHeaderUnsupported);
+                if control_count > 1 {
+                    report.insert(TlvConformanceReason::ReplyHeaderDuplicate);
+                }
+            }
         }
+        report
     }
 
     fn mark_ber_tlvs_nonconformant(tlvs: &mut [RawTlv]) {

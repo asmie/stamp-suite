@@ -534,11 +534,7 @@ fn controlled_ber_mtu_retry_restores_untrimmed_template_and_burst() {
                 |bytes, _, _| {
                     sends += 1;
                     if sends == 1 {
-                        #[cfg(windows)]
-                        let code = 10040;
-                        #[cfg(not(windows))]
-                        let code = libc::EMSGSIZE;
-                        return Err(io::Error::from_raw_os_error(code));
+                        return Err(message_too_large_error());
                     }
                     assert_eq!(bytes.len(), original_len);
                     let list = TlvList::parse(&bytes[base..]).unwrap();

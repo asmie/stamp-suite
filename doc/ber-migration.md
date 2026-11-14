@@ -129,8 +129,9 @@ clauses: 48 Compliant, five Partial, zero Gap and one N-A. The standards
 manifest tracks `draft-ietf-bpm-stamp-ber-01`; the legacy replacement finding
 is resolved. This records current revision tracking, not full conformance:
 zero-checksum validation, MTU/platform and physical LAG limits remain. The
-draft's SHOULD for per-condition error logs/counters is Partial: BER-specific
-conditions are covered, while other TLVs and sub-TLVs still need diagnostics.
+draft's SHOULD for per-condition error logs/counters is Partial: known
+local causes are covered across implemented TLVs and sub-TLVs; preserved peer
+C bits in unknown or opaque nested values still require provenance review.
 
 T5c's [wire report](interop/2026-11-09-ber/REPORT.md) records 60 independently
 validated cases in each of the default and all-features builds. The Python
@@ -194,13 +195,16 @@ An MTU retry starts again with the template's reasons, so a failed trimmed
 attempt cannot label a later untrimmed reply. Base authentication and TLV
 integrity failures do not produce BER observations. Opaque echoes are not
 reinterpreted for diagnostics; nested errors carrying only M add no C reason.
+The structural short-value C is generated before HMAC verification and remains
+countable if I is added later. The failed digest and protected values are copied;
+this diagnostic neither accepts a BER sample nor repairs unverified padding.
 
 | Reason | Meaning |
 | --- | --- |
 | `missing_padding` | Processed BER has no Extra Padding TLV. |
 | `duplicate_padding` | More than one Extra Padding TLV is present. |
 | `duplicate_ber` | More than one BER TLV is present. |
-| `short_ber_value` | Recognized BER value is shorter than eight bytes (M+C). |
+| `short_ber_value` | Recognized BER value is shorter than eight bytes (M+C), including when a later HMAC failure adds I. |
 | `duplicate_pattern` | More than one known pattern sub-TLV is encountered. |
 | `padding_misaligned` | Padding length is not a whole number of patterns. |
 | `padding_resized` | Local Type 12 or MTU shaping changes the BER denominator. |
@@ -237,5 +241,7 @@ The draft's section 6.2 wording applies to C on other TLVs/sub-TLVs too.
 Type 12 and header-reflection reasons have separate fixed counters and
 throttled logs, exposed through [control status](control-plane.md#status) and
 Prometheus. Header reasons follow the offending headers through size trimming
-and MTU retries. CoS and nested reply-header control C conditions still lack
-specific diagnostics, so the conformance row remains Partial.
+and MTU retries. CoS marking failure and nested unsupported/duplicate reply-header controls also
+have specific reasons. Every known local C-generation site now has a diagnostic;
+preserved peer C bits inside unknown/opaque nested values still need a provenance
+decision, so the broader conformance row remains Partial.

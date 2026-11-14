@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add successful-send diagnostics for CoS marking unavailability and nested
+  unsupported/duplicate reply-header controls, with fixed counters and
+  throttled logs through control status and optional Prometheus.
+
 - Add eight fixed header-reflection conformance reasons to successful-send
   counters and throttled logs, control status and optional Prometheus metrics.
   Discard reasons for removed headers and isolate MTU retry attempts.
@@ -113,6 +117,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   CLI/TOML subset validation and authenticated header-consumption behavior.
 
 ### Fixed
+
+- Fix macOS/Windows compilation of MTU retry diagnostics tests by using
+  platform-gated socket errors without a Linux-only `libc` dependency.
+
+- Count locally generated short-BER C diagnostics when a later HMAC failure
+  adds I, while preserving the failed digest and protected payload bytes.
 
 - Preserve valid signed TLV framing after administrative header trimming.
   Count an existing request HMAC once in the size budget and leave removed

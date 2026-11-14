@@ -232,11 +232,7 @@ fn type12_mtu_retry_discards_only_failed_attempt_reasons() {
                     sends += 1;
                     assert_signed_control(bytes, auth, true);
                     if sends == 1 {
-                        Err(io::Error::from_raw_os_error(if cfg!(windows) {
-                            10040
-                        } else {
-                            libc::EMSGSIZE
-                        }))
+                        Err(message_too_large_error())
                     } else {
                         assert_eq!(bytes.len(), 400);
                         Ok(bytes.len())

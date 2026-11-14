@@ -306,11 +306,7 @@ fn header_mtu_retries_restore_reason_provenance_from_the_original_reply() {
                     |bytes, _, _| {
                         sends += 1;
                         if sends == 1 {
-                            Err(io::Error::from_raw_os_error(if cfg!(windows) {
-                                10040
-                            } else {
-                                libc::EMSGSIZE
-                            }))
+                            Err(message_too_large_error())
                         } else {
                             assert_signed_headers(bytes, auth, usize::from(grows));
                             Ok(bytes.len())

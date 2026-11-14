@@ -679,7 +679,7 @@ Use symmetric replies for BER. UDP checksums and link CRC or FEC may
 discard corrupt packets before delivery, so this measures residual delivered
 errors, not raw link BER.
 
-BER, Type 12 and header-reflection conformance-error reasons have fixed
+BER, Type 12, header-reflection, CoS and nested control C reasons have fixed
 counters and independently throttled logs after successful transmission.
 Header reasons use fixed provenance metadata to track whether an offending
 header survives size trimming; failed MTU attempts do not affect later retries.
@@ -687,8 +687,10 @@ Administrative trimming counts an existing request HMAC once and reserves space
 for a new HMAC only when needed. The shorter reply preserves complete TLV framing;
 it does not refill removed headers with raw zero bytes after the HMAC.
 The [matrix](conformance/draft-stamp-ber.md) keeps the broader diagnostics SHOULD
-Partial because CoS and nested reply-header control still need specific C
-diagnostics. Zero-checksum validation, platform MTU and physical
+Partial pending provenance review of peer C bits preserved inside unknown or
+opaque nested data. All known local C-generation sites have specific reasons.
+Structural short-BER C is generated before HMAC verification and remains
+countable when a later I is added; failed digests and payload bytes stay opaque. Zero-checksum validation, platform MTU and physical
 LAG limitations remain explicit.
 
 ### Reflected IPv6 Extension and Fixed Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr-26)

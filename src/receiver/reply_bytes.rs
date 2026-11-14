@@ -35,9 +35,11 @@ pub(crate) fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usi
 }
 
 /// The backend cannot apply either EC1 or Not-ECT (cos-ecn-02 §3.2).
-/// Opaque U/M/I echoes must remain byte-for-byte unchanged.
-pub(super) fn set_cos_marking_unavailable(response: &mut [u8], base: usize) {
+/// Opaque U/M/I echoes must remain byte-for-byte unchanged. Returns whether
+/// any locally processed CoS TLV was marked, for successful-send diagnostics.
+pub(super) fn set_cos_marking_unavailable(response: &mut [u8], base: usize) -> bool {
     let mut pos = base;
+    let mut updated = false;
     while let Some(tlv) = TlvSpan::at(response, pos) {
         if tlv.flags.malformed {
             break;
@@ -47,9 +49,11 @@ pub(super) fn set_cos_marking_unavailable(response: &mut [u8], base: usize) {
             && tlv.flags.processed()
         {
             response[tlv.start] |= TlvFlags::C;
+            updated = true;
         }
         pos = tlv.end();
     }
+    updated
 }
 
 /// Returns received DSCP with Not-ECT for a failed CoS application
