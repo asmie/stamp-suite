@@ -255,6 +255,10 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                             };
                         }
                     }
+                } else {
+                    // Observe only bounded child headers in known container
+                    // layouts; this neither validates nor mutates opaque values.
+                    tlv_conformance.merge(tlvs.preserved_peer_c_errors(false));
                 }
 
                 tlvs.write_to(&mut response);
@@ -409,6 +413,10 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                             };
                         }
                     }
+                } else {
+                    // Observe only bounded child headers in known container
+                    // layouts; this neither validates nor mutates opaque values.
+                    tlv_conformance.merge(tlvs.preserved_peer_c_errors(false));
                 }
 
                 tlvs.write_to(&mut response);

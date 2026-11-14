@@ -78,8 +78,12 @@ fn nested_control_reasons_count_only_generated_c_and_distinguish_duplicates() {
                     1,
                     vec![Reason::ReplyHeaderUnsupported, Reason::ReplyHeaderDuplicate],
                 ),
-                // Unknown/unprocessed C bytes are not locally diagnosed errors.
-                (vec![vec![TlvFlags::C, 239, 0, 0]], 0, vec![]),
+                // Preserve peer provenance without inventing a local failure.
+                (
+                    vec![vec![TlvFlags::C, 239, 0, 0]],
+                    0,
+                    vec![Reason::PeerCPreserved],
+                ),
                 (vec![vec![0x80, 240, 0, 4, 0]], 0, vec![]),
             ] {
                 let raw = control(&children, 1);

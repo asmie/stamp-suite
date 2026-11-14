@@ -1324,3 +1324,6 @@ mod header_diagnostics_tests;
 
 #[cfg(test)]
 mod cos_control_diagnostics_tests;
+
+#[cfg(test)]
+mod peer_c_diagnostics_tests;

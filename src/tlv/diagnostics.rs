@@ -1,6 +1,6 @@
-//! Fixed-cardinality diagnostics for locally generated non-BER C conditions.
+//! Fixed-cardinality diagnostics for reflected TLV C conditions and provenance.
 
-/// A locally processed non-BER condition that caused a reflected C flag.
+/// A reflected C condition, including an explicitly preserved peer flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TlvConformanceReason {
@@ -22,10 +22,11 @@ pub enum TlvConformanceReason {
     CosMarkingUnavailable,
     ReplyHeaderUnsupported,
     ReplyHeaderDuplicate,
+    PeerCPreserved,
 }
 
 impl TlvConformanceReason {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Type12CountLimit,
         Self::Type12IntervalLimit,
         Self::Type12SizeLimit,
@@ -44,6 +45,7 @@ impl TlvConformanceReason {
         Self::CosMarkingUnavailable,
         Self::ReplyHeaderUnsupported,
         Self::ReplyHeaderDuplicate,
+        Self::PeerCPreserved,
     ];
 
     /// A fixed counter label, without any peer-supplied value.
@@ -67,11 +69,12 @@ impl TlvConformanceReason {
             Self::CosMarkingUnavailable => "cos_marking_unavailable",
             Self::ReplyHeaderUnsupported => "reply_header_unsupported",
             Self::ReplyHeaderDuplicate => "reply_header_duplicate",
+            Self::PeerCPreserved => "peer_c_preserved",
         }
     }
 }
 
-/// At most one occurrence of each processed condition per reflected datagram.
+/// At most one occurrence of each C condition or provenance per reflected datagram.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TlvConformanceErrors {
     bits: u32,

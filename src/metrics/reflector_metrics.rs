@@ -70,7 +70,7 @@ pub(crate) fn record_ber_conformance(reason: &'static str) {
     counter!("stamp_reflector_ber_conformance_total", "reason" => reason).increment(1);
 }
 
-/// One successful reflected datagram for a fixed non-BER C-condition label.
+/// One successful reflected datagram for a fixed TLV C-condition/provenance label.
 pub(crate) fn record_tlv_conformance(reason: &'static str) {
     counter!("stamp_reflector_tlv_conformance_total", "reason" => reason).increment(1);
 }

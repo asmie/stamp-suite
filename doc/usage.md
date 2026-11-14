@@ -1003,16 +1003,19 @@ without packet contents or session identifiers. See
 [BER conformance diagnostics](ber-migration.md#conformance-diagnostics).
 
 `stamp_reflector_tlv_conformance_total{reason="..."}` applies the same counting
-and logging rules to 18 fixed Type 12, header-reflection, CoS and nested control
-reasons in
+and logging rules to 19 fixed reasons for Type 12, header-reflection, CoS,
+nested control and preserved peer C in
 [control status](control-plane.md#status), including successful send-time MTU
 shaping. Header reasons count only for offending headers retained in the sent
 reply. The log target is
 `stamp_suite::tlv::conformance`; BER uses `stamp_suite::ber::conformance`.
 Type 12 and BER counters are independent. Runtime-disabled metrics emit no
 series. CoS counts only when C is actually set after marking failure, and nested
-control counts follow locally generated child C flags. Preserved peer C bits in
-unknown or opaque nested data are not classified as local error causes.
+control counts follow locally generated child C flags. `peer_c_preserved`
+identifies copied peer flags in complete child headers of known container
+layouts, including opaque integrity-failure echoes. It carries no claim that
+the packet was verified or a network fault occurred. Legacy TLV-ignore tails
+remain uninterpreted.
 
 Report output has a bounded queue and a five-second completion deadline. A
 slow reader can cause interim reports or text packet details to be skipped;

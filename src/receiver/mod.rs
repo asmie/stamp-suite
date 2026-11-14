@@ -169,7 +169,7 @@ impl ProcessingContext<'_> {
 /// Response from STAMP packet processing, including optional CoS request.
 #[derive(Debug)]
 pub struct StampResponse {
-    /// Local non-BER C conditions, counted after a complete successful send.
+    /// TLV C conditions and peer provenance, counted after a complete successful send.
     pub tlv_conformance: crate::tlv::TlvConformanceErrors,
     /// Local BER C conditions, counted only when a datagram is sent successfully.
     pub ber_conformance: crate::ber::BerConformanceErrors,
@@ -790,6 +790,7 @@ fn apply_semantic_tlv_processing(
     // failures already carry I, so this leaves their opaque values untouched.
     let mut ber_conformance = tlvs.process_ber();
     let mut tlv_conformance = crate::tlv::TlvConformanceErrors::default();
+    let mut generated_reply_controls = false;
     // Sources describe clock discipline, never the selected wire encoding or S
     // bit. T2 may come from a separately disciplined PHC; current T3 is always
     // generated in software before send, even when hardware TX is requested.
@@ -1019,6 +1020,7 @@ fn apply_semantic_tlv_processing(
             // violate cardinality. Type-246 reflection is handled independently.
             let one_way_ext_headers = ipv6_ext_hdr_control_count == 1;
             if ipv6_ext_hdr_control_count >= 1 {
+                generated_reply_controls = true;
                 tlv_conformance.merge(tlvs.set_ipv6_ext_hdr_control_c_with_diagnostics());
             }
 
@@ -1177,6 +1179,8 @@ fn apply_semantic_tlv_processing(
 
     let tlv_hmac_generated =
         tlv_hmac_key.is_some_and(|key| tlvs.set_hmac_response(key, &base_bytes[..4]));
+
+    tlv_conformance.merge(tlvs.preserved_peer_c_errors(generated_reply_controls));
 
     Some(SemanticResult {
         tlv_conformance,

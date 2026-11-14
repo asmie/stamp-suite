@@ -1,5 +1,6 @@
 //! TlvList collection with HMAC, parsing, serialization, and flag management.
 
+mod diagnostics;
 mod processing;
 
 use crate::crypto::HmacKey;

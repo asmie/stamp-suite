@@ -110,7 +110,8 @@ instead of being ignored.
       "header_length_unavailable": 0,
       "cos_marking_unavailable": 0,
       "reply_header_unsupported": 0,
-      "reply_header_duplicate": 0
+      "reply_header_duplicate": 0,
+      "peer_c_preserved": 0
     }
   }
 }
@@ -131,10 +132,11 @@ in an invalid packet.
 BER denominator. Opaque echoes and M-only nested errors add no BER C diagnostic.
 The seven keys are fixed and include zero values. See [BER diagnostics](ber-migration.md#conformance-diagnostics).
 
-`counters.tlv_conformance` counts successfully sent datagrams with locally
-generated Type 12, header-reflection, CoS and nested control C conditions. It
-uses the same once-per-reason, successful-send rules as the BER counters and includes all
-18 fixed keys, including zero values. The Type 12 reasons are:
+`counters.tlv_conformance` counts successfully sent datagrams with
+reflected Type 12, header-reflection, CoS and nested control C conditions,
+plus preserved peer C provenance. It uses the same once-per-reason,
+successful-send rules as the BER counters and includes all
+19 fixed keys, including zero values. The Type 12 reasons are:
 
 | Reason | Meaning |
 | --- | --- |
@@ -175,6 +177,7 @@ integrity-failed echoes add no header reason.
 | `cos_marking_unavailable` | The backend cannot apply either requested ECN or the Not-ECT fallback, and marks a processed CoS TLV with C. |
 | `reply_header_unsupported` | A processed IPv6 Extension Header Control child receives C because reply-header attachment is unsupported. |
 | `reply_header_duplicate` | A Type 12 parent has multiple complete IPv6 Extension Header Control children and at least one receives C. |
+| `peer_c_preserved` | A complete child header in a known container retains C supplied by the peer, with no corresponding local C-generation cause. |
 
 A successful Not-ECT fallback, a policy refusal without C, and an ordinary
 UDP send error add no CoS reason. Repeated child Cs count once per reason per
@@ -182,9 +185,18 @@ successful copy. A nonzero-length control child gets M rather than C and adds
 no C reason by itself. A locally marked child remains diagnosed if its parent
 later receives U for disabled or replayed Type 12 handling. Ignored later
 parents, unknown children and integrity-failed opaque values do not manufacture
-these reasons. Preserved peer C bits in unknown or opaque nested values are
-outside the local-cause classification; the broader diagnostics requirement
-remains Partial pending that provenance review.
+the local-cause reasons.
+
+`peer_c_preserved` is a provenance observation, including when HMAC failure
+requires an opaque echo. It does not establish a verified measurement or a
+local/network fault. Only child headers in the defined Location, Timestamp
+Information, Return Path, Type 12 and BER layouts are observed. Values and
+unknown container formats are not decoded; an incomplete child stops observation
+of that chain. A child C generated locally uses its specific local reason even
+if the sender also supplied C. Separate preserved children can add the peer
+reason on the same datagram. No packet bytes or authentication decisions change.
+Legacy `--tlv-mode ignore` copies an uninterpreted tail and has no TLV provenance
+claim. These diagnostics describe the TLV-enabled reflector profile.
 
 | Counter | Meaning |
 | --- | --- |

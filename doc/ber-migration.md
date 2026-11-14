@@ -125,13 +125,13 @@ The `residual_ber_value` fuzz target uses the same framing/semantic boundary;
 its CI corpus is seeded from these independent hex vectors.
 
 The [BER matrix](conformance/draft-stamp-ber.md) now evaluates 54 successor
-clauses: 48 Compliant, five Partial, zero Gap and one N-A. The standards
+clauses: 49 Compliant, four Partial, zero Gap and one N-A. The standards
 manifest tracks `draft-ietf-bpm-stamp-ber-01`; the legacy replacement finding
 is resolved. This records current revision tracking, not full conformance:
 zero-checksum validation, MTU/platform and physical LAG limits remain. The
-draft's SHOULD for per-condition error logs/counters is Partial: known
-local causes are covered across implemented TLVs and sub-TLVs; preserved peer
-C bits in unknown or opaque nested values still require provenance review.
+draft's SHOULD for per-condition error logs/counters is covered in the
+TLV-enabled profile: local causes have specific reasons, and copied peer C in
+complete child headers has explicit provenance without inferring a local fault.
 
 T5c's [wire report](interop/2026-11-09-ber/REPORT.md) records 60 independently
 validated cases in each of the default and all-features builds. The Python
@@ -193,8 +193,10 @@ UDP send, once per reason per datagram. Successful burst copies count separately
 failed/partial sends, cancelled work and suppressed replies add nothing.
 An MTU retry starts again with the template's reasons, so a failed trimmed
 attempt cannot label a later untrimmed reply. Base authentication and TLV
-integrity failures do not produce BER observations. Opaque echoes are not
-reinterpreted for diagnostics; nested errors carrying only M add no C reason.
+integrity failures do not produce BER observations. Opaque values are not decoded for diagnostics; bounded child-header observation
+can record `peer_c_preserved` in known container layouts. It never admits a BER
+sample or establishes a verified fault. Nested errors carrying only M add no
+C reason.
 The structural short-value C is generated before HMAC verification and remains
 countable if I is added later. The failed digest and protected values are copied;
 this diagnostic neither accepts a BER sample nor repairs unverified padding.
@@ -242,6 +244,10 @@ Type 12 and header-reflection reasons have separate fixed counters and
 throttled logs, exposed through [control status](control-plane.md#status) and
 Prometheus. Header reasons follow the offending headers through size trimming
 and MTU retries. CoS marking failure and nested unsupported/duplicate reply-header controls also
-have specific reasons. Every known local C-generation site now has a diagnostic;
-preserved peer C bits inside unknown/opaque nested values still need a provenance
-decision, so the broader conformance row remains Partial.
+have specific reasons. Every known local C-generation site has a diagnostic.
+`peer_c_preserved` covers retained peer C in complete child headers of the five
+known container layouts. It distinguishes an unexpected peer flag from a
+locally established conformance failure, including protected opaque echoes,
+without changing their values or digests. The diagnostics row is Compliant for
+the TLV-enabled profile; unknown value formats and legacy TLV-ignore tails have
+no inferred child-field semantics.

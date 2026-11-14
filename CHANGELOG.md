@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Record preserved peer C provenance separately from local conformance causes,
+  using bounded child-header observation in known TLV container layouts.
+  Keep opaque values, failed digests and legacy TLV-ignore tails unchanged.
+
 - Add successful-send diagnostics for CoS marking unavailability and nested
   unsupported/duplicate reply-header controls, with fixed counters and
   throttled logs through control status and optional Prometheus.

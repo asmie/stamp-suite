@@ -686,9 +686,14 @@ header survives size trimming; failed MTU attempts do not affect later retries.
 Administrative trimming counts an existing request HMAC once and reserves space
 for a new HMAC only when needed. The shorter reply preserves complete TLV framing;
 it does not refill removed headers with raw zero bytes after the HMAC.
-The [matrix](conformance/draft-stamp-ber.md) keeps the broader diagnostics SHOULD
-Partial pending provenance review of peer C bits preserved inside unknown or
-opaque nested data. All known local C-generation sites have specific reasons.
+The [matrix](conformance/draft-stamp-ber.md) records diagnostics for the
+TLV-enabled profile. All known local C-generation sites have specific reasons;
+`peer_c_preserved` separately records copied C in complete child headers of
+Location, Timestamp Information, Return Path, Type 12 and BER containers. This
+bounded observation reads headers only and stops at incomplete child framing;
+it never decodes values or unknown container formats. It does not validate an
+opaque value or influence packet processing. TLV-ignore legacy tails remain
+uninterpreted.
 Structural short-BER C is generated before HMAC verification and remains
 countable when a later I is added; failed digests and payload bytes stay opaque. Zero-checksum validation, platform MTU and physical
 LAG limitations remain explicit.

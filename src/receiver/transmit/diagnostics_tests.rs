@@ -128,7 +128,17 @@ pub(super) fn reflect_captured(
     tlvs.set_hmac(&key, &base[..4]);
     let mut data = tlvs.to_bytes();
     if bad_tlv_hmac {
-        *data.last_mut().unwrap() ^= 1;
+        // Permitted padding can follow the HMAC; corrupt the actual digest,
+        // rather than an uncovered padding byte at the end of the packet.
+        let mut pos = 0;
+        loop {
+            let span = TlvSpan::at(&data, pos).expect("fixture HMAC TLV");
+            if span.tlv_type.is_hmac() {
+                data[span.end() - 1] ^= 1;
+                break;
+            }
+            pos = span.end();
+        }
     }
     if auth {
         let mac = crate::crypto::compute_packet_hmac(&key, &base, crate::packets::AUTH_HMAC_OFFSET);
