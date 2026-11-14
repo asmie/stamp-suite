@@ -99,7 +99,15 @@ instead of being ignored.
       "type12_rate_limit": 0,
       "type12_volume_limit": 0,
       "type12_route_mtu": 0,
-      "type12_padding_unencodable": 0
+      "type12_padding_unencodable": 0,
+      "header_order": 0,
+      "header_fixed_policy": 0,
+      "header_ipv6_policy": 0,
+      "header_ipv6_length": 0,
+      "header_capture_unavailable": 0,
+      "header_selector_ambiguous": 0,
+      "header_selector_no_match": 0,
+      "header_length_unavailable": 0
     }
   }
 }
@@ -118,8 +126,9 @@ BER denominator. Opaque echoes and M-only nested errors add no BER C diagnostic.
 The seven keys are fixed and include zero values. See [BER diagnostics](ber-migration.md#conformance-diagnostics).
 
 `counters.tlv_conformance` counts successfully sent datagrams with locally
-generated Type 12 C conditions. It uses the same once-per-reason, successful-send
-rules as the BER counters and includes all seven zero-valued keys:
+generated Type 12 and header-reflection C conditions. It uses the same
+once-per-reason, successful-send rules as the BER counters and includes all
+15 fixed keys, including zero values. The Type 12 reasons are:
 
 | Reason | Meaning |
 | --- | --- |
@@ -134,8 +143,27 @@ rules as the BER counters and includes all seven zero-valued keys:
 If route and configured caps tie during shaping, both reasons count. A failed
 attempt contributes no send-time reason to a later retry. Disabled, replayed,
 opaque and integrity-failed requests add no Type 12 C diagnostics. BER reasons
-remain independent; a reply can increment both groups. Other TLVs' C conditions
-are not yet covered by these counters.
+remain independent; a reply can increment both groups.
+
+Header reasons describe processed Type 246/247 C flags:
+
+| Reason | Meaning |
+| --- | --- |
+| `header_order` | A fixed-header request follows an extension-header request. |
+| `header_fixed_policy` | Local policy refuses fixed-header reflection. |
+| `header_ipv6_policy` | Local policy refuses IPv6 extension-header reflection. |
+| `header_ipv6_length` | An extension-header request is shorter than eight octets or not a multiple of eight. |
+| `header_capture_unavailable` | The backend cannot supply captures of the requested header class. |
+| `header_selector_ambiguous` | A nonzero selector matches multiple unconsumed records. |
+| `header_selector_no_match` | Records of the requested length remain, but none matches the selector. |
+| `header_length_unavailable` | No unconsumed record has the requested length and minimum selector size. |
+
+Size trimming removes optional headers from the end. A header reason counts
+only if a header that produced it survives in the sent reply. Repeated headers
+with the same reason count once per datagram. A failed MTU attempt neither
+adds nor removes a reason from a later retry. Opaque, malformed and
+integrity-failed echoes add no header reason. CoS and nested reply-header
+control C diagnostics remain outside this counter coverage.
 
 | Counter | Meaning |
 | --- | --- |

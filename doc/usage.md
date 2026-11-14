@@ -1003,11 +1003,13 @@ without packet contents or session identifiers. See
 [BER conformance diagnostics](ber-migration.md#conformance-diagnostics).
 
 `stamp_reflector_tlv_conformance_total{reason="..."}` applies the same counting
-and logging rules to the seven [Type 12 reasons](control-plane.md#status),
-including successful send-time MTU shaping. The log target is
+and logging rules to seven Type 12 and eight header-reflection reasons in
+[control status](control-plane.md#status), including successful send-time MTU
+shaping. Header reasons count only for offending headers retained in the sent
+reply. The log target is
 `stamp_suite::tlv::conformance`; BER uses `stamp_suite::ber::conformance`.
 Type 12 and BER counters are independent. Runtime-disabled metrics emit no
-series. C diagnostics for header, CoS and other nested conditions remain open.
+series. C diagnostics for CoS and nested reply-header control remain open.
 
 Report output has a bounded queue and a five-second completion deadline. A
 slow reader can cause interim reports or text packet details to be skipped;

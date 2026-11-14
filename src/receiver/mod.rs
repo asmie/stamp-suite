@@ -931,20 +931,21 @@ fn apply_semantic_tlv_processing(
             ),
             None => (None, None),
         };
-    tlvs.process_reflected_headers_with_policy(
+    tlv_conformance.merge(tlvs.process_reflected_headers_with_diagnostics(
         captured_fixed,
         captured_ext,
         ctx.reflect_fixed_header,
         ctx.reflect_ipv6_ext_header,
-    );
+    ));
 
     // Trim complete optional header TLVs to the administrative reply limit
     // (ext-hdr-26 §§4.2, 6.2), reserving the base and keyed response HMAC.
     // The send path separately checks the actual route MTU, including
     // alternate destinations and SRH overhead, before each datagram.
     {
+        // An existing HMAC is already in wire_size(); reserve only a new one.
         // HMAC TLV wire size = 4-byte header + 16-byte value.
-        let hmac_reserve = if tlv_hmac_key.is_some() {
+        let hmac_reserve = if tlv_hmac_key.is_some() && tlvs.hmac_tlv().is_none() {
             TLV_HEADER_SIZE + 16
         } else {
             0
@@ -953,6 +954,9 @@ fn apply_semantic_tlv_processing(
             base_bytes.len() + hmac_reserve,
             ctx.reflected_control_max_size as usize,
         );
+        if removed > 0 && tlv_conformance.has_header_reasons() {
+            tlv_conformance.retain_headers(tlvs.processed_reflected_header_count());
+        }
         if removed > 0 {
             crate::warn_throttled!(
                 "Removed {removed} Reflected Fixed/IPv6 Ext Header TLV(s) (Type 246/247) from \

@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add eight fixed header-reflection conformance reasons to successful-send
+  counters and throttled logs, control status and optional Prometheus metrics.
+  Discard reasons for removed headers and isolate MTU retry attempts.
+
 - Add fixed Type 12 conformance counters and throttled logs for count,
   interval, size, rate, volume, unencodable padding and route MTU conditions.
   Count successful replies through control status and optional Prometheus.
@@ -109,6 +113,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   CLI/TOML subset validation and authenticated header-consumption behavior.
 
 ### Fixed
+
+- Preserve valid signed TLV framing after administrative header trimming.
+  Count an existing request HMAC once in the size budget and leave removed
+  headers out of the reply instead of appending raw zeros after its HMAC.
 
 - Preserve BER padding patterns when Type 12 replies are clamped to a
   route MTU. Fill the exact budget, remove reflected headers first, re-sign,

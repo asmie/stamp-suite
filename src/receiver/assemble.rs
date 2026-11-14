@@ -259,17 +259,16 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
 
                 tlvs.write_to(&mut response);
 
-                // Copy the unparsed tail after the TLVs so the reply keeps the
-                // request's size and bytes (RFC 8762 §4.3/§4.6). It follows the
-                // HMAC, outside its coverage. Never truncate a longer reply, and
-                // skip when Type 12 controls the reply length
-                // (RFC 10052 §3).
+                // Preserve only the received unparsed tail (RFC 8762 §4.3/§4.6).
+                // Do not refill removed header TLVs with raw zeros: after an
+                // HMAC those would be unframed non-padding TLVs. The header
+                // size limit intentionally permits a shorter reply. Skip when
+                // Type 12 controls the reply length (RFC 10052 §3).
                 if reflected_control.is_none() && response.len() < original_data.len() {
                     let take = unparsed_tail
                         .len()
                         .min(original_data.len() - response.len());
                     response.extend_from_slice(&unparsed_tail[..take]);
-                    response.resize(original_data.len(), 0);
                 }
             }
         }
@@ -421,7 +420,6 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                         .len()
                         .min(original_data.len() - response.len());
                     response.extend_from_slice(&unparsed_tail[..take]);
-                    response.resize(original_data.len(), 0);
                 }
             }
         }

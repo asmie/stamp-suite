@@ -258,6 +258,15 @@ impl Transmission {
                     self.response.reflected_control.is_some(),
                     &mut ber_conformance,
                 )?;
+                if tlv_conformance.has_header_reasons() {
+                    let mut pos = base;
+                    let mut retained = 0;
+                    while let Some(tlv) = TlvSpan::at(attempt, pos) {
+                        retained += usize::from(is_reflected_header(&tlv) && tlv.flags.processed());
+                        pos = tlv.end();
+                    }
+                    tlv_conformance.retain_headers(retained);
+                }
                 if clamped && has_control_c(attempt, base) {
                     // Ties mean both constraints bind. Rebuild these reasons
                     // for each attempt, so a failed route never gets counted.
@@ -1294,3 +1303,6 @@ mod benchmarks;
 
 #[cfg(test)]
 mod type12_diagnostics_tests;
+
+#[cfg(test)]
+mod header_diagnostics_tests;

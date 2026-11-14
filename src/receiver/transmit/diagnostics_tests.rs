@@ -87,12 +87,33 @@ pub(super) fn reflect_configured(
     bad_base_hmac: bool,
     configure: impl FnOnce(&mut super::super::ProcessingContext<'_>),
 ) -> Option<Transmission> {
+    reflect_captured(
+        raw,
+        auth,
+        ipv6,
+        bad_tlv_hmac,
+        bad_base_hmac,
+        None,
+        configure,
+    )
+}
+
+pub(super) fn reflect_captured(
+    raw: &[u8],
+    auth: bool,
+    ipv6: bool,
+    bad_tlv_hmac: bool,
+    bad_base_hmac: bool,
+    headers: Option<&super::super::CapturedHeaders>,
+    configure: impl FnOnce(&mut super::super::ProcessingContext<'_>),
+) -> Option<Transmission> {
     let key = HmacKey::new(vec![0x42; 16]).unwrap();
     let mut ctx = super::super::tests::test_ctx(0, 0);
     ctx.hmac_key = Some(&key);
     ctx.require_hmac = auth;
     ctx.verify_tlv_hmac = true;
     ctx.reflected_control_max_count = 16;
+    ctx.captured_headers = headers;
     configure(&mut ctx);
     let mut base = vec![
         0;

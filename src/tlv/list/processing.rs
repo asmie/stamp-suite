@@ -10,8 +10,8 @@ use crate::tlv::core::{
 use crate::tlv::{
     ClassOfServiceTlv, DestinationNodeAddressTlv, LocationDisclosure, LocationSubType,
     MicroSessionIdTlv, PacketAddressInfo, ReflectedControlTlv, ResidualBerValue, ReturnPathAction,
-    ReturnPathTlv, SegmentList, SyncSource, TimestampMethod, TypedTlv,
-    RESIDUAL_BER_DEFAULT_PATTERN, RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
+    ReturnPathTlv, SegmentList, SyncSource, TimestampMethod, TlvConformanceErrors,
+    TlvConformanceReason, TypedTlv, RESIDUAL_BER_DEFAULT_PATTERN, RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
 };
 
 use super::TlvList;
@@ -885,13 +885,42 @@ impl TlvList {
         allow_fixed: bool,
         allow_ext: bool,
     ) {
+        self.process_reflected_headers_with_diagnostics(
+            captured_fixed,
+            captured_ext_headers,
+            allow_fixed,
+            allow_ext,
+        );
+    }
+
+    /// Apply the same wire decisions while tracking the provenance of C flags.
+    pub(crate) fn process_reflected_headers_with_diagnostics(
+        &mut self,
+        captured_fixed: Option<&[Vec<u8>]>,
+        captured_ext_headers: Option<&[u8]>,
+        allow_fixed: bool,
+        allow_ext: bool,
+    ) -> TlvConformanceErrors {
         Self::apply_reflected_headers(
             self.non_hmac_tlvs_mut(),
             captured_fixed,
             captured_ext_headers,
             allow_fixed,
             allow_ext,
-        );
+        )
+    }
+
+    pub(crate) fn processed_reflected_header_count(&self) -> usize {
+        self.non_hmac_tlvs()
+            .iter()
+            .filter(|tlv| {
+                tlv.is_processable()
+                    && matches!(
+                        tlv.tlv_type,
+                        TlvType::ReflectedFixedHdr | TlvType::ReflectedIpv6ExtHdr
+                    )
+            })
+            .count()
     }
 
     /// Remove Types 246/247 until `base_len + self.wire_size() <= max_reply_bytes`
@@ -931,7 +960,8 @@ impl TlvList {
         captured_ext_headers: Option<&[u8]>,
         allow_fixed: bool,
         allow_ext: bool,
-    ) {
+    ) -> TlvConformanceErrors {
+        let mut report = TlvConformanceErrors::default();
         let is_header_tlv = |tlv: &RawTlv| {
             matches!(
                 tlv.tlv_type,
@@ -940,7 +970,7 @@ impl TlvList {
         };
         // Most packets carry neither type; skip the record bookkeeping below.
         if !tlvs.iter().any(is_header_tlv) {
-            return;
+            return report;
         }
         // ext-hdr-26 §7.1 requires Type 247 before Type 246.
         // If any 247 follows a 246, set C on all header TLVs and copy no data.
@@ -957,15 +987,18 @@ impl TlvList {
             }
         }
         if out_of_order {
+            let mut ordinal = 0;
             for tlv in tlvs.iter_mut().filter(|tlv| tlv.is_processable()) {
                 if matches!(
                     tlv.tlv_type,
                     TlvType::ReflectedFixedHdr | TlvType::ReflectedIpv6ExtHdr
                 ) {
                     tlv.set_conformant_reflected();
+                    report.insert_header(TlvConformanceReason::HeaderOrder, ordinal);
+                    ordinal += 1;
                 }
             }
-            return;
+            return report;
         }
 
         // Split the captured ext-header blob into individual records (wire
@@ -982,37 +1015,42 @@ impl TlvList {
         // observe the same filled payload.
         let mut consumed_ext: Vec<bool> = Vec::new();
         let mut consumed_fixed: Vec<bool> = Vec::new();
+        let mut ordinal = 0;
         for tlv in tlvs.iter_mut().filter(|tlv| tlv.is_processable()) {
-            match tlv.tlv_type {
+            let reason = match tlv.tlv_type {
                 TlvType::ReflectedFixedHdr if !allow_fixed => {
                     log::debug!("Header reflection refused by local policy: fixed header");
                     tlv.set_conformant_reflected();
+                    Some(TlvConformanceReason::HeaderFixedPolicy)
                 }
                 TlvType::ReflectedIpv6ExtHdr if !allow_ext => {
                     log::debug!("Header reflection refused by local policy: IPv6 extension header");
                     tlv.set_conformant_reflected();
+                    Some(TlvConformanceReason::HeaderIpv6Policy)
                 }
-                TlvType::ReflectedFixedHdr => {
-                    Self::apply_reflected_header::<4>(
-                        tlv,
-                        fixed_records.as_deref(),
-                        &mut consumed_fixed,
-                    );
-                }
+                TlvType::ReflectedFixedHdr => Self::apply_reflected_header::<4>(
+                    tlv,
+                    fixed_records.as_deref(),
+                    &mut consumed_fixed,
+                ),
                 // An extension header is a whole number of 8-octet units.
                 TlvType::ReflectedIpv6ExtHdr if tlv.value.len() < 8 || tlv.value.len() % 8 != 0 => {
                     tlv.set_conformant_reflected();
+                    Some(TlvConformanceReason::HeaderIpv6Length)
                 }
-                TlvType::ReflectedIpv6ExtHdr => {
-                    Self::apply_reflected_header::<8>(
-                        tlv,
-                        ext_records.as_deref(),
-                        &mut consumed_ext,
-                    );
-                }
-                _ => {}
+                TlvType::ReflectedIpv6ExtHdr => Self::apply_reflected_header::<8>(
+                    tlv,
+                    ext_records.as_deref(),
+                    &mut consumed_ext,
+                ),
+                _ => continue,
+            };
+            if let Some(reason) = reason {
+                report.insert_header(reason, ordinal);
             }
+            ordinal += 1;
         }
+        report
     }
 
     /// Match a Type-247 (N=4) or Type-246 (N=8) request to the first unconsumed
@@ -1023,12 +1061,12 @@ impl TlvList {
         tlv: &mut RawTlv,
         records: Option<&[&[u8]]>,
         consumed: &mut Vec<bool>,
-    ) {
+    ) -> Option<TlvConformanceReason> {
         let Some(records) = records else {
             // The backend cannot observe these headers.
             log_reflected_hdr_unsupported_once();
             tlv.set_conformant_reflected();
-            return;
+            return Some(TlvConformanceReason::HeaderCaptureUnavailable);
         };
         if consumed.len() < records.len() {
             consumed.resize(records.len(), false);
@@ -1056,12 +1094,13 @@ impl TlvList {
                 "Header reflection selector is ambiguous; returning C without copying data"
             );
             tlv.set_conformant_reflected();
-            return;
+            return Some(TlvConformanceReason::HeaderSelectorAmbiguous);
         }
         match found {
             Some(i) => {
                 consumed[i] = true;
                 Self::copy_reflected::<N>(&mut tlv.value, records[i]);
+                None
             }
             None => {
                 if selector.is_some() && records.iter().any(|header| header.len() == len) {
@@ -1070,6 +1109,17 @@ impl TlvList {
                     log_reflected_hdr_length_mismatch_once();
                 }
                 tlv.set_conformant_reflected();
+                Some(
+                    if records
+                        .iter()
+                        .enumerate()
+                        .any(|(i, header)| !consumed[i] && header.len() == len && header.len() >= N)
+                    {
+                        TlvConformanceReason::HeaderSelectorNoMatch
+                    } else {
+                        TlvConformanceReason::HeaderLengthUnavailable
+                    },
+                )
             }
         }
     }

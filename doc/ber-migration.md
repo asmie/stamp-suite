@@ -234,7 +234,8 @@ Messages contain only a reason token and its total, without packet values,
 keys, source addresses or session identifiers.
 
 The draft's section 6.2 wording applies to C on other TLVs/sub-TLVs too.
-Type 12 reasons now have separate fixed counters and throttled logs, exposed
-through [control status](control-plane.md#status) and Prometheus. Header, CoS
-and other nested C conditions still lack specific diagnostics, so the
-conformance row remains Partial.
+Type 12 and header-reflection reasons have separate fixed counters and
+throttled logs, exposed through [control status](control-plane.md#status) and
+Prometheus. Header reasons follow the offending headers through size trimming
+and MTU retries. CoS and nested reply-header control C conditions still lack
+specific diagnostics, so the conformance row remains Partial.

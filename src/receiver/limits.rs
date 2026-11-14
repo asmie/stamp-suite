@@ -29,7 +29,7 @@ pub struct ReflectorCounters {
     /// alongside the replay count so an operator can tell benign reordering
     /// from an actual duplicate.
     pub packets_reordered: AtomicU64,
-    /// Successful reflected datagrams per locally generated Type 12 C condition.
+    /// Successful reflected datagrams per locally generated non-BER C condition.
     tlv_conformance: [AtomicU64; crate::tlv::TlvConformanceReason::ALL.len()],
     /// Successful reflected datagrams per locally generated BER C condition.
     ber_conformance: [AtomicU64; crate::ber::BerConformanceReason::ALL.len()],
