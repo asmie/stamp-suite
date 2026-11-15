@@ -4547,3 +4547,32 @@ fn ce_backoff_paces_zero_interval_bursts_but_preserves_control_only_zero() {
     assert_eq!(only.interval_nanoseconds, 0);
     assert_eq!(only.sub_tlvs, [0, 240, 0, 0]);
 }
+
+#[tokio::test]
+async fn zero_udp_checksum_restrictions_precede_key_loading_and_network_setup() {
+    use clap::Parser;
+    let conf = Configuration::parse_from([
+        "test",
+        "--zero-udp-checksum",
+        "--ber",
+        "--local-port",
+        "0",
+        "--hmac-key-file",
+        "/nonexistent-stamp-checksum-fixture/key",
+    ]);
+    let result = run::SenderRun::open(
+        std::sync::Arc::new(conf),
+        SenderObservers::default(),
+        crate::shutdown::CancellationToken::new(),
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("unsupported profile started"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains(if cfg!(target_os = "linux") {
+        "requires --ber and authenticated mode"
+    } else {
+        "only on Linux"
+    }));
+}

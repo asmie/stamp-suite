@@ -116,6 +116,11 @@ impl SenderRun {
         shutdown: CancellationToken,
     ) -> Result<Self, crate::StartupError> {
         let conf = &*shared_conf;
+        if conf.zero_udp_checksum {
+            // Direct library callers must get the same restrictions as CLI
+            // and TOML users, before key loading or network side effects.
+            conf.validate().map_err(crate::StartupError::config)?;
+        }
         // Load the key before touching the network. It also signs the TLV
         // HMAC in open mode, so a configured key that fails to load is an
         // error in either mode. The key directory is reflector-only.
@@ -149,6 +154,12 @@ impl SenderRun {
 
         crate::net_policy::set_hops(&std_socket)
             .map_err(|e| crate::StartupError::io("Cannot set TTL/Hop Limit 255", e))?;
+        if conf.zero_udp_checksum {
+            enable_zero_udp_checksum(&std_socket).map_err(|e| {
+                crate::StartupError::io("Cannot enable zero UDP transmit checksum", e)
+            })?;
+            log::info!("IPv4 zero UDP transmit checksum enabled for authenticated BER");
+        }
         // Bind to the device before connecting so the route lookup uses it.
         if let Some(name) = conf.interface.as_deref() {
             crate::net_policy::bind_to_interface(&std_socket, name).map_err(|e| {

@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in `--zero-udp-checksum` for Linux IPv4 authenticated BER senders.
+  Keep base/TLV HMAC protection and kernel receive checksum validation; reject
+  unsupported configurations at startup. Require actual sender wire tests in CI.
+
 - Add allocation-free TLV framing inspection with exact outer/child error
   offsets and bounded scans of known container layouts. Keep unknown values
   opaque and preserve the existing reflector reply/discard policy.

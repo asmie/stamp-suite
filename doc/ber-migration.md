@@ -97,8 +97,11 @@ The receive-side test profile is Linux IPv4 with the nix backend,
 an exact `--reflector-session SSID,SOURCE,DESTINATION` and `--hwtstamp off`.
 It covers open, keyed-open and authenticated BER padding processing. The raw
 [fixture](../tests/zero_checksum_test.rs) captures checksum-zero requests and
-uses valid/invalid nonzero-checksum controls. Replies use the normal transport;
-there is no zero-checksum sender or bidirectional zero-checksum mode. The pnet
+uses valid/invalid nonzero-checksum controls. Replies use the normal transport.
+A separate [sender option](usage.md#zero-checksum-ber-transmission) now supports
+Linux IPv4 authenticated BER requests with zero checksum, default off. It rejects
+open mode and keeps base/TLV HMACs and receive checksum validation enabled.
+There is no bidirectional zero-checksum mode. The pnet
 capture backend rejects zero UDP checksums in both address families. No IPv6
 zero-checksum support is claimed; the
 [BER draft, section 3](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-ber-01.txt#section-3)

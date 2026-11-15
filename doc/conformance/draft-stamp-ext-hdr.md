@@ -72,7 +72,9 @@ of the innermost IP endpoints before STAMP admission.
 
 ### Checksums and capture
 
-Kernel UDP sockets generate and verify checksums. The application never
+Kernel UDP sockets normally generate and verify checksums; the separate
+[authenticated IPv4 BER sender option](../usage.md#zero-checksum-ber-transmission)
+can omit request checksums on Linux. The application never
 enables IPv6 zero-checksum operation (RFC 6936). Raw capture rejects
 truncated, fragmented, corrupt and zero-checksum datagrams, so successful raw
 reflection needs a capture point that sees complete wire checksums. Frames with
@@ -349,8 +351,9 @@ Stable clause IDs are retained where possible; control procedure rows reference
 Figures 6 and 7 are covered by the field width and length rows. Keyword boilerplate, topology examples, IOAM
 descriptions, implementation-status text and IANA procedures add no runtime
 requirement. Revision 25 removes revision 15's zero-checksum section. Checksums
-remain enabled and validated; the application does not implement zero-checksum
-mode. Requirements of referenced RFCs are covered by their own matrices.
+remain enabled and validated for IPv6; the separate Linux IPv4 authenticated BER
+sender option does not enable an IPv6 zero-checksum mode. Requirements of
+referenced RFCs are covered by their own matrices.
 
 See the [namespace tests](../testing-netns.md), [measurement
 semantics](../measurements.md) and [release verification](../release-evidence.md).

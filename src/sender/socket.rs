@@ -3,6 +3,48 @@
 
 use super::*;
 
+#[cfg(all(test, target_os = "linux"))]
+mod tests;
+
+/// Disable IPv4 UDP TX checksums only. Kernel receive validation is unchanged.
+#[cfg(target_os = "linux")]
+pub(super) fn enable_zero_udp_checksum(socket: &std::net::UdpSocket) -> std::io::Result<()> {
+    use nix::libc;
+    use std::os::fd::AsRawFd;
+
+    if !socket.local_addr()?.is_ipv4() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "zero UDP checksum requires an IPv4 socket",
+        ));
+    }
+    let enabled: libc::c_int = 1;
+    // SAFETY: socket owns this open descriptor; enabled is aligned and live
+    // throughout the call, and its exact size is supplied to the kernel.
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_NO_CHECK,
+            std::ptr::addr_of!(enabled).cast(),
+            std::mem::size_of_val(&enabled) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn enable_zero_udp_checksum(_socket: &std::net::UdpSocket) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "zero UDP checksum transmission is supported only on Linux",
+    ))
+}
+
 /// Applies the egress IP header options to the socket `fd`.
 ///
 /// DSCP/ECN is packed into the TOS / IPv6 Traffic Class octet so the *wire*

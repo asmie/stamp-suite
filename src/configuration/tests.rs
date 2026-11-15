@@ -1030,6 +1030,88 @@ fn base_field_validation_is_opt_in_and_reflector_only() {
 }
 
 #[test]
+fn zero_udp_checksum_profile_rejects_unsupported_combinations() {
+    assert!(!Configuration::parse_from(["test"]).zero_udp_checksum);
+    let valid = Configuration::parse_from([
+        "test",
+        "--local-addr",
+        "127.0.0.1",
+        "--remote-addr",
+        "127.0.0.1",
+        "--local-port",
+        "0",
+        "--ber",
+        "--auth-mode",
+        "A",
+        "--hmac-key",
+        "abababababababababababababababab",
+        "--zero-udp-checksum",
+    ]);
+    if cfg!(target_os = "linux") {
+        valid.validate().unwrap();
+    } else {
+        assert!(valid
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("only on Linux"));
+    }
+    for variant in 0..8 {
+        let mut conf = valid.clone();
+        match variant {
+            0 => conf.is_reflector = true,
+            1 => conf.ber = false,
+            2 => conf.auth_mode = AuthMode::Open,
+            3 => conf.local_addr = "::1".parse().unwrap(),
+            4 => conf.remote_addr = vec!["::1".parse().unwrap()],
+            5 => conf.remote_addr.push("::ffff:127.0.0.1".parse().unwrap()),
+            6 => conf.tlv_hmac = TlvHmacMode::Off,
+            7 => conf.hmac_key = None,
+            _ => unreachable!(),
+        }
+        assert!(conf.validate().is_err(), "variant {variant}");
+    }
+}
+
+#[test]
+fn zero_udp_checksum_toml_and_schema_use_boolean_values() {
+    let conf: FileConfiguration = toml::from_str("zero_udp_checksum = true").unwrap();
+    assert_eq!(conf.zero_udp_checksum, Some(true));
+    assert!(toml::from_str::<FileConfiguration>("zero_udp_checksum = 'true'").is_err());
+    let schema: serde_json::Value = serde_json::from_str(CONFIG_JSON_SCHEMA).unwrap();
+    assert_eq!(schema["properties"]["zero_udp_checksum"]["type"], "boolean");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn zero_udp_checksum_merges_from_toml_and_cli_takes_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("checksum.toml");
+    let mut args = vec![
+        "test",
+        "--config",
+        file.to_str().unwrap(),
+        "--local-addr",
+        "127.0.0.1",
+        "--remote-addr",
+        "127.0.0.1",
+        "--local-port",
+        "0",
+        "--ber",
+        "--auth-mode",
+        "A",
+        "--hmac-key",
+        "abababababababababababababababab",
+    ];
+    std::fs::write(&file, "zero_udp_checksum = true").unwrap();
+    assert!(load_from_args(&args).unwrap().zero_udp_checksum);
+    std::fs::write(&file, "zero_udp_checksum = false").unwrap();
+    assert!(!load_from_args(&args).unwrap().zero_udp_checksum);
+    args.push("--zero-udp-checksum");
+    assert!(load_from_args(&args).unwrap().zero_udp_checksum);
+}
+
+#[test]
 fn base_field_validation_merges_from_toml_and_matches_schema() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("validation.toml");

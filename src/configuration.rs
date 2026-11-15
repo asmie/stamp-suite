@@ -1053,6 +1053,12 @@ pub struct Configuration {
     #[clap(long, help_heading = "Bit Error Rate", hide_short_help = true)]
     pub ber: bool,
 
+    /// Linux IPv4 sender: omit the UDP transmit checksum for authenticated BER.
+    /// Requires --ber and authenticated mode with TLV HMAC enabled. Replies use
+    /// normal receive checksum validation. Open mode and IPv6 are unsupported.
+    #[clap(long, help_heading = "Bit Error Rate", hide_short_help = true)]
+    pub zero_udp_checksum: bool,
+
     /// Append an Extra Padding TLV with this many value octets (RFC 8972 §4.1).
     /// Uses pseudorandom bytes as §4.1 recommends, for MTU or fragmentation tests.
     /// With `--ber`, BER measurement supplies the padding and its known pattern.
@@ -1494,6 +1500,7 @@ impl Configuration {
     /// Returns the first invalid or conflicting setting found.
     pub fn validate(&self) -> Result<(), ConfigurationError> {
         self.validate_features()?;
+        self.validate_zero_udp_checksum()?;
         self.validate_sender_run()?;
         self.validate_addresses()?;
         self.validate_reflector_policies()?;
@@ -1508,6 +1515,33 @@ impl Configuration {
         // draft-ietf-ippm-stamp-ext-hdr-26 §§4.2/6.2/4.1/6.1 header-reflection
         // request flags (repeatable) plus the §4.2 header attachment flag.
         self.validate_ext_hdr_flags()
+    }
+
+    /// The initial checksum-zero profile protects the base and extensions;
+    /// open-mode admission needs a separate complete validation contract.
+    fn validate_zero_udp_checksum(&self) -> Result<(), ConfigurationError> {
+        if !self.zero_udp_checksum {
+            return Ok(());
+        }
+        if !cfg!(target_os = "linux") {
+            return Err(invalid("--zero-udp-checksum is supported only on Linux"));
+        }
+        if self.is_reflector {
+            return Err(invalid("--zero-udp-checksum is sender-only"));
+        }
+        if !self.ber || !self.auth_mode.is_authenticated() {
+            return Err(invalid(
+                "--zero-udp-checksum requires --ber and authenticated mode (-A A)",
+            ));
+        }
+        if !self.local_addr.is_ipv4() || self.remote_addr.iter().any(|address| !address.is_ipv4()) {
+            return Err(invalid(
+                "--zero-udp-checksum requires IPv4 local and remote addresses",
+            ));
+        }
+        // validate_keys also rejects --tlv-hmac off and missing keys in
+        // authenticated mode, including values merged from TOML.
+        Ok(())
     }
 
     /// Sender-only run parameters.
@@ -2347,6 +2381,7 @@ impl Configuration {
             reflector_shutdown_grace_ms,
             max_sessions,
             ber,
+            zero_udp_checksum,
             ber_pattern,
             ber_padding_size,
             ber_interval,
@@ -2476,6 +2511,7 @@ impl Configuration {
         merge!(reflector_shutdown_grace_ms);
         merge!(max_sessions);
         merge!(ber);
+        merge!(zero_udp_checksum);
         merge_opt!(ber_pattern);
         merge!(ber_padding_size);
         merge!(ber_interval);
@@ -2631,6 +2667,7 @@ pub struct FileConfiguration {
     pub reflector_shutdown_grace_ms: Option<u32>,
     pub max_sessions: Option<u32>,
     pub ber: Option<bool>,
+    pub zero_udp_checksum: Option<bool>,
     pub ber_pattern: Option<String>,
     pub ber_padding_size: Option<usize>,
     pub ber_interval: Option<u32>,
@@ -2761,6 +2798,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "reflector_shutdown_grace_ms": { "type": "integer", "minimum": 0, "maximum": 60000 },
     "max_sessions": { "type": "integer", "minimum": 0 },
     "ber": { "type": "boolean" },
+    "zero_udp_checksum": { "type": "boolean" },
     "ber_pattern": { "type": "string", "pattern": "^(0x)?([0-9a-fA-F]{2}){4,}$" },
     "ber_padding_size": { "type": "integer", "minimum": 0, "maximum": 65347 },
     "extra_padding": { "type": "integer", "minimum": 0, "maximum": 65347 },

@@ -1079,3 +1079,28 @@ patterns or resized padding never become clean samples. See
 [measurement semantics](measurements.md#integrity-and-ber) and
 [migration details](ber-migration.md). This wire change targets the next
 minor release, 1.1.0; it is incompatible with the 1.0.x BER profile.
+
+### Zero-checksum BER transmission
+
+Linux IPv4 senders can opt into `--zero-udp-checksum` (TOML
+`zero_udp_checksum = true`) with `--ber --auth-mode A` and a configured key.
+Base and TLV HMACs protect measurement fields; Extra Padding stays outside the
+TLV HMAC so a checksum-zero request can reach a capable reflector despite
+padding bit errors. Open/keyed-open mode, `--tlv-hmac off`, reflector mode,
+IPv6 (including mapped addresses or mixed targets), and other platforms are
+rejected at startup. The default keeps normal transmit checksums.
+
+```bash
+stamp-suite --remote-addr 192.0.2.20 --ber --auth-mode A \
+  --hmac-key-file /etc/stamp-suite/session.key --zero-udp-checksum
+```
+
+This affects all probes on each sender socket, including probes after a peer
+disables BER via U. Authentication remains enabled. Receive checksum validation
+and the reflector's reply transport are unchanged; this is a request-direction
+feature, not bidirectional zero-checksum BER. The peer must accept IPv4
+checksum-zero traffic; this application's pnet reflector rejects it, while the
+Linux nix reflector can receive it. Transmission needs no raw-socket privilege.
+The [open-mode admission limitation](ber-migration.md#zero-checksum-ingress-boundary)
+remains Partial, and software-loopback tests do not certify physical-link error
+capture or FEC behavior.

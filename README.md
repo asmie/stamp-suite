@@ -86,6 +86,8 @@ multipliers and invalid PTP nanoseconds before session updates. See
   and steering are not implemented; SR-MPLS return paths receive U.
 - Draft extensions for reflected IP headers, CoS/ECN response and residual bit
   error rate. Header and BER experimental codepoints need peer agreement.
+  Linux IPv4 authenticated BER can send checksum-zero requests with
+  [`--zero-udp-checksum`](doc/usage.md#zero-checksum-ber-transmission).
 - Text, JSON lines and CSV output. Optional Prometheus metrics, SNMP AgentX
   sub-agent and reflector control API.
 
