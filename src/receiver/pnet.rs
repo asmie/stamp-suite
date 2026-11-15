@@ -1206,14 +1206,14 @@ mod tests {
             Duration::from_secs(1),
             |local, target, options, refresh| {
                 lookups += 1;
-                if cfg!(target_os = "linux") {
-                    // Exercise the same failure on Linux, where discovery works.
+                if cfg!(any(target_os = "linux", target_os = "windows")) {
+                    // Exercise the same failure on platforms with discovery.
                     Err(std::io::Error::new(
                         std::io::ErrorKind::Unsupported,
                         "fixture: no route MTU",
                     ))
                 } else {
-                    // Verify the real unsupported route lookup on Windows/macOS.
+                    // Verify the real unsupported route lookup on other platforms.
                     mtu_cache.payload_cap(local, target, options, refresh)
                 }
             },

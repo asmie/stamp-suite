@@ -348,7 +348,7 @@ curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/js
   allow unlimited copies. `reflected_control_max_rate` (bytes per second) and
   `reflected_control_max_volume` (bytes) limit what one request can generate.
 - `reflected_control_max_size` is an administrative payload limit. Each reply
-  copy is also checked against the route MTU on Linux before it is sent, and
+  copy is also checked against the route MTU on Linux and Windows before it is sent, and
   PATCH cannot bypass that check.
 
 Each field is applied on its own. PATCH does not check combinations of

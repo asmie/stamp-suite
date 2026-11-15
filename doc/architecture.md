@@ -68,7 +68,7 @@ compatibility contract.
 | `receiver/pnet.rs` | Raw capture backend (pnet datalink) with a separate send worker. |
 | `receiver/assemble.rs` | Reply packet assembly with TLV handling. |
 | `receiver/transmit.rs` | Reply queue and budget, shutdown drain, `DatagramSender`, final per-send timestamps and signing. |
-| `receiver/mtu.rs` | Linux route MTU lookup with a notification-invalidated cache. |
+| `receiver/mtu.rs` | Linux route MTU lookup with a notification-invalidated cache; fresh Windows IP Helper path/interface queries. |
 | `receiver/shared.rs` | `ReceiverSharedState` (counters, sessions, keys, caps, shutdown token) and `reload_keys`. |
 | `receiver/limits.rs` | Reflector counters, the per-source rate limiter and runtime Type 12 caps. |
 | `receiver/keys.rs` | Per-packet HMAC key selection. |

@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Query Windows reflector path/interface MTU estimates for Type 12, header and
+  BER replies. Refuse unknown budgets, fit and sign each datagram, and restore
+  ordinary fragmentation policy after controlled replies.
+
 - Read connected Windows sender MTU estimates and socket-local caps for
   fixed-header requests and initial BER fitting. Disable fragmentation for
   these probes; check native IPv4/IPv6 trimming, restoration and oversize refusal.

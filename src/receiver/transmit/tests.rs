@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(target_os = "windows")]
+#[path = "windows_tests.rs"]
+mod windows_tests;
+
 #[test]
 fn reply_budget_covers_handoff_active_send_and_rescheduled_copies() {
     let counters = Arc::new(ReflectorCounters::new());

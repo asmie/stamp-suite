@@ -1191,12 +1191,13 @@ pub struct Configuration {
     /// Reflector: maximum padded reply size in bytes (RFC 10052 §3).
     /// Requests above the cap get one reply padded to the cap, with C set.
     ///
-    /// Linux also checks the reply route MTU before each send, including
+    /// Linux and Windows also check the reply route MTU before each send, including
     /// wildcard binds and alternate destinations. IP/UDP and SRH overhead
     /// reduce the payload budget (1472 bytes for plain IPv4 at MTU 1500;
-    /// 1452 for IPv6). Route notifications and cache expiry track changes.
+    /// 1452 for IPv6). Linux uses route notifications and cache expiry;
+    /// Windows queries the kernel on every attempt.
     /// Unknown MTU or mandatory fields that cannot fit cause a drop.
-    /// Non-Linux route MTU lookup is unavailable. Runtime cap updates cannot
+    /// Other platforms lack route MTU lookup. Runtime cap updates cannot
     /// bypass these send-time checks.
     #[clap(
         long,

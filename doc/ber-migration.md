@@ -242,8 +242,9 @@ The sender fits padding in whole pattern repetitions after accounting for the
 combined metadata. Linux reply fitting handles both a single BER reply and a
 reply with optional reflected headers: remove eligible headers first, then
 reduce BER padding if needed. Resized metadata gets C and is signed again.
-Reflector route-MTU lookup is still Linux-only; Windows senders also use the
-connected socket's kernel estimate for initial fitting. No end-to-end path-MTU probing or
+Linux and Windows reflectors use kernel route/path and interface MTU estimates;
+Windows senders use the connected socket's estimate for initial fitting.
+Other platforms retain their existing limits. No end-to-end path-MTU probing or
 physical-link BER accuracy is implied. T5c's independent wire evidence and
 successor conformance scoring remain pending.
 

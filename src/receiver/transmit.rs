@@ -1,5 +1,8 @@
 //! Finalize every datagram at its actual send attempt, including burst copies.
 
+#[cfg(target_os = "windows")]
+mod windows;
+
 use super::{RateLimiter, ReflectorCounters, StampResponse, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE};
 use crate::{
     clock_format::ClockFormat,
@@ -75,7 +78,8 @@ impl TransportPlan {
             srh: None,
             dont_fragment: response.reflected_control.is_some()
                 || has_reflected_headers(&response.data, base)
-                || (cfg!(target_os = "linux") && has_ber(&response.data, base)),
+                || (cfg!(any(target_os = "linux", target_os = "windows"))
+                    && has_ber(&response.data, base)),
         };
         let mut unsupported_srh = false;
         if let ReturnPathAction::Srv6Forward { sids, .. } = &response.return_path_action {
@@ -892,7 +896,6 @@ pub(super) struct DatagramSender<'a> {
     fd: std::os::fd::BorrowedFd<'a>,
     #[cfg(windows)]
     socket: &'a std::net::UdpSocket,
-    #[cfg(unix)]
     settings: [Option<i32>; 2],
     #[cfg(target_os = "linux")]
     srh: Option<Arc<[u8]>>,
@@ -911,7 +914,10 @@ impl<'a> DatagramSender<'a> {
 
     #[cfg(windows)]
     pub fn new(socket: &'a std::net::UdpSocket) -> Self {
-        Self { socket }
+        Self {
+            socket,
+            settings: [None; 2],
+        }
     }
 
     pub fn send(
@@ -944,6 +950,12 @@ impl<'a> DatagramSender<'a> {
                     "Windows CoS marking requires a QoS-capable backend",
                 )));
             }
+            windows::apply_fragmentation_policy(
+                self.socket,
+                dst,
+                options.dont_fragment,
+                &mut self.settings,
+            )?;
             self.socket.send_to(payload, dst)
         }
     }
@@ -998,7 +1010,7 @@ fn apply_verified_tos(
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 fn update_socket_option(
     cached: &mut Option<i32>,
     requested: i32,

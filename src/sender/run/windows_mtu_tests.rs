@@ -7,8 +7,7 @@ use windows_sys::Win32::Networking::WinSock::{
     IP_USER_MTU,
 };
 
-#[path = "../../../tests/common/wire_hmac.rs"]
-mod wire_hmac;
+use crate::test_wire_hmac as wire_hmac;
 
 fn cap_mtu(socket: &UdpSocket, ipv6: bool, mtu: u32) {
     let (level, option) = if ipv6 {

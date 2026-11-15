@@ -1,8 +1,10 @@
-//! Destination-specific Linux route MTU lookup for reflected datagrams.
+//! Destination-specific kernel MTU estimates for reflected datagrams.
 //!
-//! Route/link/address/rule notifications invalidate the bounded cache; a
+//! Linux route/link/address/rule notifications invalidate the bounded cache; a
 //! 250 ms expiry and EMSGSIZE-triggered refresh provide additional backstops.
 //! Kernel fragmentation prevention closes the race between lookup and send.
+//! Windows queries the route/path/interface on every attempt, without reusing
+//! cached estimates.
 use super::transmit::SendOptions;
 use std::{
     collections::{HashMap, VecDeque},
@@ -13,6 +15,11 @@ use std::{
 
 const CACHE_LIMIT: usize = 256;
 const CACHE_TTL: Duration = Duration::from_millis(250);
+
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows::route_mtu;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RouteKey {
@@ -48,6 +55,9 @@ impl MtuCache {
         refresh: bool,
     ) -> io::Result<usize> {
         let (key, overhead) = route_key(local, target, options)?;
+        // Until Windows route-change notifications are supported, never reuse
+        // a cached estimate, including for later copies of a burst.
+        let refresh = refresh || cfg!(target_os = "windows");
         #[cfg(target_os = "linux")]
         let refresh = refresh || !self.invalidate_routes();
         let mtu = self.lookup(key, Instant::now(), refresh, route_mtu)?;
@@ -231,11 +241,11 @@ fn route_key(
     ))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn route_mtu(_: &RouteKey) -> io::Result<u32> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "reply route MTU lookup requires Linux",
+        "reply route MTU lookup requires Linux or Windows",
     ))
 }
 

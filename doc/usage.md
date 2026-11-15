@@ -721,8 +721,12 @@ cover the final packet. A Type-12 reply clamped by the MTU has the C flag set
 and ends the burst. If fewer than four padding bytes would remain, the reply
 stays slightly shorter because a TLV header cannot fit. Mandatory fields are
 never truncated: if they cannot fit, or the route MTU is unknown, the reply is
-dropped. Route MTU lookup is Linux-only, so reflectors on other platforms
-cannot send size-controlled or reflected-header replies.
+dropped. Windows reflectors query the selected route, cached path MTU and
+interface MTU through IP Helper on every attempt, including burst copies.
+They use the smaller path/interface value and subtract the IP/UDP headers.
+Missing path entries fail closed; no fixed-size substitute is used. Interface
+pinning and SRv6 remain unsupported on Windows. Other platforms without route
+MTU lookup cannot send size-controlled or reflected-header replies.
 
 Raising the administrative limit allows larger replies on routes that can
 carry them. `PATCH /v1/caps` changes that limit at runtime; the route limits
@@ -999,8 +1003,7 @@ stamp-suite --remote-addr 2001:db8::20 --local-addr 2001:db8::10 --attach-ext-hd
   Both platforms disable fragmentation for these probes. Windows also honors
   any socket-local MTU cap. These are kernel estimates, not active end-to-end
   path-MTU measurements. Windows support covers fixed-header requests;
-  attaching IPv6 extension headers and reflector route-MTU lookup still require
-  Linux.
+  attaching IPv6 extension headers still requires Linux.
 
 Type 246 has an eight-byte Requested field; Type 247 has a four-byte one. A
 nonzero Requested value matches only its nonzero octets: zero octets are
@@ -1022,7 +1025,7 @@ explicit ambiguity rule; its conflicting example is documented in the
 On Linux, the nix reflector reads IPv6 extension headers from the socket's
 ancillary data and reflects them. It cannot read the fixed IP header, so Type
 247 requests get the C flag; use the pnet backend to reflect fixed headers.
-Reflected-header replies need the Linux route MTU lookup described in
+Reflected-header replies need the Linux or Windows route MTU lookup described in
 [Reply size and route MTU](#reply-size-and-route-mtu). The pnet capture path
 drops packets with a zero, corrupt or incomplete UDP checksum, so capture where
 the packets carry complete checksums, not before checksum offload fills them

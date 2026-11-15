@@ -307,7 +307,7 @@ route change cannot fragment a probe. The reflector sizes each reply against the
 destination route before signing (`src/receiver/mtu.rs`,
 `src/receiver/transmit.rs::fit_reply`); an unknown budget fails closed. Header
 requests need a known route MTU, provided by Linux and Windows senders;
-the reflector lookup remains Linux-only. That limits where the feature runs;
+reflector lookup is also available on Linux and Windows. That limits where the feature runs;
 it never permits an oversized packet.
 
 Windows sender tests in `src/sender/run/windows_mtu_tests.rs` query native
@@ -320,6 +320,15 @@ estimates and socket caps, not active path probing or live host route changes.
 Windows loopback may bypass send-time MTU enforcement even with Don't Fragment
 set; these tests establish application refusal and socket policy, not physical
 fragmentation behavior.
+
+The Windows reflector reads the selected route, path MTU and interface MTU on
+every attempt, refusing an unavailable budget. Its native tests in
+`src/receiver/mtu/windows.rs` cover bound/wildcard sources, stale-cache bypass,
+unavailable sources and IPv6 zone encoding. The transmit test
+`src/receiver/transmit/windows_tests.rs::windows_reflector_mtu_shapes_native_datagrams_and_restores_policy`
+checks actual IPv4/IPv6 datagrams, Type 12 clamping, header removal, BER whole
+patterns, HMACs and restoring ordinary socket policy. These are transmit-side
+loopback checks, not capture-driver, real route-change or physical-path evidence.
 
 Single replies without Type 12 initialize their transport policy before moving
 the reply buffer. Transmit regressions cover Types 246/247, IPv4/IPv6, open and

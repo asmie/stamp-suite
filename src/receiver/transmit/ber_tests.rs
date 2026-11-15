@@ -7,7 +7,7 @@ use crate::{
     },
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[test]
 fn single_ber_reply_checks_mtu_preserves_patterns_and_resigns() {
     let key = HmacKey::new(vec![0xab; 16]).unwrap();
