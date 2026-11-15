@@ -309,6 +309,13 @@ a build with the wrong backend cannot pass with an empty suite.
 
 ## Unit test coverage notes
 
+Sender count/duration and catch-up decisions use the same timing policy in the
+live loop and `src/sender/schedule/timeline_tests.rs`. Tests supply synthetic
+instants and send costs, so exact deadline, 2 ms catch-up and 1 ms spin boundaries
+do not depend on wall-clock scheduling. They also cover count zero, counter
+width, final waits and changing intervals. Seeded exponential-gap tests and the
+unchanged live sender rate/pacing suites provide separate evidence.
+
 The allocation-free TLV framing checker has directed and property tests in
 `src/tlv/framing/tests.rs`: exact offsets and parent ownership, parent bounds,
 single-error termination, extreme starting offsets, maximum lengths and

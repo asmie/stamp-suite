@@ -217,6 +217,14 @@ timers have 1 ms resolution, so rates above 1000 probes per second keep one CPU
 core busy. A sender that falls more than 2 ms behind its timeline restarts the
 timeline instead of sending a burst to catch up.
 
+The first probe is due immediately. Count and duration limits govern when the
+next probe can start; a send already in progress can finish after the duration.
+The wait after each probe is capped by any configured duration, including the wait after
+the final counted probe. Count completion does not remove that last scheduled
+wait. Exactly 2 ms of lateness remains on the original timeline; larger lateness
+resets it. A gap of exactly 1 ms uses the timer rather than busy-waiting.
+Final reply draining and Access Report retries keep their separate rules.
+
 ```bash
 # 4000 probes per second for ten minutes, with a report every 10 s.
 stamp-suite --remote-addr 192.0.2.10 --send-delay 250us --count 0 --duration 600 \

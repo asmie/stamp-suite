@@ -4,6 +4,61 @@ use std::time::Duration;
 
 use crate::configuration::SendSchedule;
 
+/// Tokio timers fire on whole milliseconds. Shorter gaps are spun through,
+/// polling for replies between yields. Windows also requests precise timers.
+const TIMER_RESOLUTION: Duration = Duration::from_millis(1);
+/// Keep a small lateness on the original timeline, but discard a larger backlog.
+const CATCH_UP: Duration = Duration::from_millis(2);
+
+/// Decisions for the initial probe loop. Access Report retries and the final
+/// reply drain retain their separate rules in SenderRun.
+pub(super) struct SendTimeline {
+    due: tokio::time::Instant,
+    stop_at: Option<tokio::time::Instant>,
+    count: u64,
+}
+
+pub(super) struct SendWait {
+    pub(super) deadline: tokio::time::Instant,
+    pub(super) spin: bool,
+}
+
+impl SendTimeline {
+    pub(super) fn new(start: tokio::time::Instant, count: u32, duration: Option<u32>) -> Self {
+        Self {
+            due: start,
+            stop_at: duration.map(|seconds| start + Duration::from_secs(u64::from(seconds))),
+            count: u64::from(count),
+        }
+    }
+
+    /// Check count before reading the duration clock. No initial gap is drawn:
+    /// the first probe is eligible at the run's start. The duration bound is
+    /// exclusive and does not cancel a send already in progress.
+    pub(super) fn can_send(&self, sent: u64, now: impl FnOnce() -> tokio::time::Instant) -> bool {
+        (self.count == 0 || sent < self.count) && self.stop_at.is_none_or(|at| now() < at)
+    }
+
+    /// Advance from the previous due time before consulting the clock, matching
+    /// the live loop's order. Each completed probe, including the last counted
+    /// probe, gets this wait. Only the duration limit clamps its deadline.
+    pub(super) fn after_probe(
+        &mut self,
+        gap: Duration,
+        now: impl FnOnce() -> tokio::time::Instant,
+    ) -> SendWait {
+        self.due += gap;
+        let now = now();
+        if now.saturating_duration_since(self.due) > CATCH_UP {
+            self.due = now;
+        }
+        SendWait {
+            deadline: self.stop_at.map_or(self.due, |at| self.due.min(at)),
+            spin: gap < TIMER_RESOLUTION,
+        }
+    }
+}
+
 pub(super) struct Schedule {
     kind: SendSchedule,
     rng: u64,
@@ -81,3 +136,7 @@ mod tests {
         assert!((above - (-1f64).exp()).abs() < 0.01, "tail {above}");
     }
 }
+
+#[cfg(test)]
+#[path = "schedule/timeline_tests.rs"]
+mod timeline_tests;

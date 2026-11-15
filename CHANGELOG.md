@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add deterministic coverage of sender count/duration limits, deadline
+  clamping and catch-up boundaries using the production timing policy.
+  Retain existing periodic/Poisson live rate checks and thresholds.
+
 - Add opt-in `--zero-udp-checksum` for Linux IPv4 authenticated BER senders.
   Keep base/TLV HMAC protection and kernel receive checksum validation; reject
   unsupported configurations at startup. Require actual sender wire tests in CI.

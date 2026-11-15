@@ -3,17 +3,9 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use super::schedule::Schedule;
+use super::schedule::{Schedule, SendTimeline};
 use super::*;
 use crate::shutdown::CancellationToken;
-
-/// Tokio timers fire on whole milliseconds. Windows also needs an active
-/// resolution request to avoid coarser OS waits. A shorter gap is spun through,
-/// polling for replies between yields, keeping one CPU core busy above 1000 pps.
-const TIMER_RESOLUTION: Duration = Duration::from_millis(1);
-/// How far behind schedule a probe may fall and still be sent at once.
-/// Beyond this the schedule restarts from now rather than bursting.
-const CATCH_UP: Duration = Duration::from_millis(2);
 
 /// How each probe is built; decided once at startup.
 enum SendMode {
@@ -835,34 +827,20 @@ impl SenderRun {
         let _timer_resolution = super::timer::TimerResolution::request();
         // Each probe is due one gap after the previous due time, so the time
         // spent building and sending does not stretch the gap. Timer wakeups
-        // can land a tick late; up to CATCH_UP behind, the next probe follows
+        // can land a tick late; up to 2 ms behind, the next probe follows
         // at once so the rate holds. Further behind, the schedule restarts
         // from now instead of sending a burst.
         let start = tokio::time::Instant::now();
-        let stop_at = self
-            .conf
-            .duration
-            .map(|seconds| start + Duration::from_secs(seconds.into()));
-        let count = u64::from(self.conf.count);
-        let mut due = start;
-        while count == 0 || self.packets_sent < count {
-            if stop_at.is_some_and(|at| tokio::time::Instant::now() >= at) {
-                break;
-            }
+        let mut timeline = SendTimeline::new(start, self.conf.count, self.conf.duration);
+        while timeline.can_send(self.packets_sent, tokio::time::Instant::now) {
             let attach_access_report = self
                 .access_report_state
                 .as_mut()
                 .is_some_and(|state| state.tick(Instant::now()));
             self.send_probe(attach_access_report).await?;
             let gap = self.schedule.next_gap(self.send_interval());
-            due += gap;
-            let now = tokio::time::Instant::now();
-            if now.saturating_duration_since(due) > CATCH_UP {
-                due = now;
-            }
-            let until = stop_at.map_or(due, |at| due.min(at));
-            let spin = gap < TIMER_RESOLUTION;
-            self.receive_until(until, Wait::NextSend { spin }, output)
+            let wait = timeline.after_probe(gap, tokio::time::Instant::now);
+            self.receive_until(wait.deadline, Wait::NextSend { spin: wait.spin }, output)
                 .await?;
             self.expire();
             if self.stopping() {
