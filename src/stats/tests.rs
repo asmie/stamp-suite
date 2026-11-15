@@ -1003,3 +1003,39 @@ async fn shared_output_preserves_final_order_and_one_csv_header() {
         assert_eq!(csv_fields(line)[0], target);
     }
 }
+
+#[test]
+fn ecn_observations_use_existing_report_containers() {
+    let mut ecn = EcnSummary::new(2, None);
+    ecn.replies = 2;
+    ecn.unavailable_cos = 2;
+    ecn.reply_ip_ecn = [0, 0, 0, 1];
+    ecn.unavailable_reply_ip_ecn = 1;
+    ecn.reverse_unknown = 2;
+    let snap = RttCollector::new()
+        .snapshot(2, 0)
+        .with_measurements(MeasurementSummary {
+            ecn: Some(ecn),
+            ..MeasurementSummary::default()
+        });
+    let mut text = Vec::new();
+    snap.write_report(&mut text, OutputFormat::Text, false, true)
+        .unwrap();
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("configured egress unknown"));
+    assert!(text.contains("reverse comparable 0, unknown 2"));
+    let mut json = Vec::new();
+    snap.write_report(&mut json, OutputFormat::Json, false, true)
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let mut csv = Vec::new();
+    snap.write_report(&mut csv, OutputFormat::Csv, false, true)
+        .unwrap();
+    let csv = String::from_utf8(csv).unwrap();
+    let cells = csv_report(&csv);
+    let measurements: serde_json::Value = serde_json::from_str(&cells["measurements"]).unwrap();
+    assert_eq!(measurements["ecn"], json["measurements"]["ecn"]);
+    assert_eq!(measurements["ecn"]["reverse_unknown"], 2);
+    let absent = serde_json::to_value(MeasurementSummary::default()).unwrap();
+    assert!(absent.get("ecn").is_none());
+}

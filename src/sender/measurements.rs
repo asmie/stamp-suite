@@ -95,6 +95,9 @@ pub struct FollowUpSummary {
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct MeasurementSummary {
+    /// Present only when CoS was requested; counts admitted unique reply copies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ecn: Option<super::ecn::EcnSummary>,
     /// Per-target pending limit; zero preserves unlimited retention.
     pub pending_limit: u32,
     /// Unanswered records retained, including records finalized as lost at shutdown.
@@ -277,6 +280,20 @@ pub(super) struct Measurements {
     direct: Direct,
 }
 impl Measurements {
+    pub(super) fn enable_ecn(&mut self, requested: u8, configured: Option<u8>) {
+        self.summary.ecn = Some(super::ecn::EcnSummary::new(requested, configured));
+    }
+
+    pub(super) fn record_ecn(
+        &mut self,
+        cos: Option<super::telemetry::CosObservation>,
+        reply_ecn: Option<u8>,
+    ) {
+        if let Some(ecn) = self.summary.ecn.as_mut() {
+            ecn.record(cos, reply_ecn);
+        }
+    }
+
     pub(super) fn record_tlv_validation(
         &mut self,
         tlvs: &crate::tlv::TlvList,

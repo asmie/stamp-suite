@@ -41,7 +41,6 @@ pub(super) struct SenderRun {
     use_auth: bool,
     use_tlvs: bool,
     send_mode: SendMode,
-    ecn_response_active: bool,
     kernel_rx_enabled: bool,
     #[cfg(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos")))]
     // Read only by the Linux TX-timestamp path.
@@ -202,6 +201,11 @@ impl SenderRun {
             }
         }
 
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut configured_egress_ecn = None;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let configured_egress_ecn = None;
+
         // Mark the egress IP header so the on-the-wire DSCP/ECN matches the Class
         // of Service TLV advertisement (RFC 8972 §4.4) and honour the configured
         // TTL / Hop Limit. Without this the CoS TLV would be advisory only and
@@ -219,6 +223,7 @@ impl SenderRun {
                 match apply_egress_ip_options(socket.as_raw_fd(), is_ipv6, egress_tos, None) {
                     Ok(()) => {
                         if let Some(tos) = egress_tos {
+                            configured_egress_ecn = Some(tos & 3);
                             log::info!(
                                 "Egress IP marking set: TOS/Traffic-Class=0x{tos:02x} (DSCP={}, ECN={})",
                                 conf.dscp,
@@ -236,16 +241,16 @@ impl SenderRun {
             // draft-ietf-ippm-stamp-cos-ecn-02 §3.4 reverse-path detection:
             // read back the reply packet's own on-wire ECN via recvmsg cmsgs
             // (see `extract_reply_ecn_from_cmsgs`, used from `recv_packet`).
-            if ecn_response_active {
+            if conf.cos {
                 let is_ipv6 = socket.local_addr().is_ok_and(|a| a.is_ipv6());
                 match enable_reply_tos_reception(socket.as_raw_fd(), is_ipv6) {
                     Ok(()) => log::info!(
                         "Reply ECN reception enabled (IP_RECVTOS/IPV6_RECVTCLASS) for \
-                         reverse-path congestion detection (draft-ietf-ippm-stamp-cos-ecn-02 §3.4)"
+                         reverse-path ECN observations (draft-ietf-ippm-stamp-cos-ecn-02)"
                     ),
                     Err(e) => log::warn!(
-                        "Failed to enable reply ECN reception: {e}; reverse-path congestion \
-                         detection (wire ECN of replies) disabled; forward-path detection via the \
+                        "Failed to enable reply ECN reception: {e}; reverse-path ECN \
+                         observations unavailable; forward-path detection via the \
                          reflected CoS TLV's EC2 field is unaffected"
                     ),
                 }
@@ -294,9 +299,9 @@ impl SenderRun {
                      the outgoing IP header will use OS defaults"
                 );
             }
-            if ecn_response_active {
+            if conf.cos {
                 log::warn!(
-                    "Reverse-path ECN congestion detection (wire ECN of replies) requires \
+                    "Reverse-path ECN observations (wire ECN of replies) require \
                      Linux/macOS; only forward-path detection via the reflected CoS TLV's EC2 \
                      field is active on this platform (draft-ietf-ippm-stamp-cos-ecn-02 §3.4)"
                 );
@@ -384,6 +389,9 @@ impl SenderRun {
         let sess = Session::new(0);
         let pending: HashMap<u32, PendingPacket> = HashMap::new();
         let mut measurements = Measurements::new(conf.reflected_control_count);
+        if conf.cos {
+            measurements.enable_ecn(conf.ecn, configured_egress_ecn);
+        }
         measurements.monitor = Some(session_state::Monitor::new(
             conf.session_loss_threshold,
             Duration::from_secs(u64::from(conf.timeout)),
@@ -768,7 +776,6 @@ impl SenderRun {
             use_auth,
             use_tlvs,
             send_mode,
-            ecn_response_active,
             kernel_rx_enabled,
             #[cfg(all(feature = "hwtstamp", any(target_os = "linux", target_os = "macos")))]
             kernel_ts: sender_kernel_ts,
@@ -982,7 +989,7 @@ impl SenderRun {
                     &mut self.recv_buf,
                     &mut self.cmsg_buf,
                     self.kernel_rx_enabled,
-                    self.ecn_response_active,
+                    self.conf.cos,
                     self.conf.clock_source,
                 ) => Event::Datagram(result),
                 _ = async {

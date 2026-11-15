@@ -3,6 +3,7 @@
 //! Sender RTT percentiles, jitter and standard deviation, reflector shutdown
 //! summaries, and text, JSON and CSV reports.
 
+pub use crate::sender::ecn::EcnSummary;
 pub use crate::sender::measurements::{
     CounterPoint, DelaySummary, DirectSummary, FollowUpSummary, MeasurementSummary,
 };
@@ -684,6 +685,15 @@ impl StatsSnapshot {
             self.quantile_precision.relative_error_bound * 100.0,
         )?;
         if let Some(m) = &self.measurements {
+            if let Some(e) = &m.ecn {
+                writeln!(out, "{prefix}ECN observations: {} replies, {} usable CoS, {} unavailable; requested {}, configured egress {} (socket setting)",
+                    e.replies, e.usable_cos, e.unavailable_cos, e.requested_ecn,
+                    e.configured_egress_ecn.map_or_else(|| "unknown".into(), |v| v.to_string()))?;
+                writeln!(out, "{prefix}ECN codepoint counts [Not-ECT, ECT(1), ECT(0), CE]: EC2 {:?}, echoed EC1 {:?}, reply IP {:?} ({} unavailable)",
+                    e.received_ec2, e.echoed_ec1, e.reply_ip_ecn, e.unavailable_reply_ip_ecn)?;
+                writeln!(out, "{prefix}ECN reflector reports: RPE [legacy/unknown, reserved, unable, applied] {:?}, RPD [00, 01, 10, 11] {:?}, C {}; reverse comparable {}, unknown {}",
+                    e.rpe, e.rpd, e.conformant_reflected, e.reverse_comparable, e.reverse_unknown)?;
+            }
             if m.pending_limit != 0 || m.pending_evictions != 0 {
                 writeln!(out, "{prefix}Pending probes: {} retained, limit {}, peak {}; {} retired as lost (not timed expiry)",
                     m.pending_probes, m.pending_limit, m.pending_high_watermark, m.pending_evictions)?;

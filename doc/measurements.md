@@ -308,3 +308,44 @@ are cumulative, and individual events are only logged, not stored. Configure
 enough endpoint capacity for the offered traffic, and compare the reflector's
 queue, session-cap and rate-limit counters with failed states: a missing reply
 looks the same whether the reflector was overloaded or the path lost it.
+
+## ECN observations
+
+`--cos` adds `measurements.ecn` to JSON and the existing CSV `measurements`
+cell, and prints the same counters in text reports. It is absent when CoS
+was not requested. Counters cover accepted distinct reply copies, including
+retained late replies and additional burst copies; duplicates, wrong SSIDs,
+stale echoed timestamps and rejected replies do not contribute.
+
+`requested_ecn` is the configured EC1 request. `configured_egress_ecn` records
+successful local socket marking, or null when unavailable; a successful socket
+setting does not prove the marking after local traffic policies or on the wire.
+Linux/macOS receive reply IP ECN for all four requested codepoints, including
+Not-ECT and CE. Other platforms report unavailable IP metadata. AIMD still
+activates only for ECT(1)/ECT(0); these observation counters do not drive it.
+
+The four entries of `received_ec2`, `echoed_ec1` and `reply_ip_ecn` count
+Not-ECT (0), ECT(1) (1), ECT(0) (2) and CE (3), respectively. `rpe` and `rpd`
+use numeric wire order 0, 1, 2, 3. RPE=0 is compatible with legacy reflectors,
+1 is reserved, 2 reports inability to apply EC1, and 3 reports application.
+RPE=2 alone cannot distinguish policy refusal from platform limitations.
+RPD=1 reports DSCP policy refusal; it does not establish an ECN refusal.
+`conformant_reflected` counts CoS C flags independently of RPE.
+
+`usable_cos` requires exactly one CoS TLV, reachable under U/M processing,
+without an I flag anywhere in the list, and with verified TLV HMAC when a key
+is configured. Missing, ambiguous, malformed or integrity-unusable CoS counts
+as `unavailable_cos`; no received value is fabricated from its zeros. C does
+not erase the raw observation, but excludes it from reverse comparison.
+Reply IP metadata is outside TLV integrity protection and is retained
+independently, including when CoS is unavailable.
+
+`reverse_comparable` requires usable CoS with C=0, RPE=3, an echoed EC1 matching
+the request and available reply IP ECN. Every other accepted copy counts as
+`reverse_unknown`. These counters indicate available evidence, not successful
+preservation or a path fault. The histograms are separate totals, not paired
+transitions; they cannot by themselves locate bleaching or remarking. Correlate
+with [ECN deployment guidance](usage.md#ecn-deployment-and-interpretation) and
+independent captures. The underlying CoS profile is
+[draft-ietf-ippm-stamp-cos-ecn-02](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-02.html),
+a work in progress.

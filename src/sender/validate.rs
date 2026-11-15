@@ -118,6 +118,14 @@ pub(super) fn validate_reflected_tlvs(
     let mut dm_seen = false;
     let mut follow_seen = false;
     let mut next_reflector_msid = *latched_reflector_msid;
+    // Multiple CoS instances are ambiguous for diagnostic pairing, including
+    // instances that will be skipped by U/M processing below.
+    let single_cos = tlvs
+        .non_hmac_tlvs()
+        .iter()
+        .filter(|raw| raw.tlv_type == TlvType::ClassOfService)
+        .count()
+        == 1;
     if want_msid {
         let count = tlvs
             .non_hmac_tlvs()
@@ -170,6 +178,14 @@ pub(super) fn validate_reflected_tlvs(
             // Measurement counters/timestamps require a verified HMAC when a
             // key is configured; legacy control acknowledgements remain separate.
             if hmac.permits_measurements() {
+                if single_cos && raw.tlv_type == TlvType::ClassOfService {
+                    if let Ok(value) = ClassOfServiceTlv::from_raw(raw) {
+                        telemetry.cos = Some(super::telemetry::CosObservation {
+                            value,
+                            conformant_reflected: raw.flags.conformant_reflected,
+                        });
+                    }
+                }
                 if raw.tlv_type == TlvType::DirectMeasurement {
                     match DirectMeasurementTlv::from_raw(raw) {
                         Ok(value) => {

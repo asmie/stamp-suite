@@ -1,5 +1,6 @@
 mod access_report;
 mod congestion;
+pub(crate) mod ecn;
 pub(crate) mod measurements;
 mod observer;
 mod packet;
@@ -627,6 +628,7 @@ fn process_response(
         else {
             return; // duplicate or outside retained sent-probe history
         };
+        measurements.record_ecn(telemetry.as_ref().and_then(|t| t.cos), reply_ecn);
         let t4_ns = timestamp_to_unix_nanos(sender_recv_ts, clock_source, reference);
         measurements.observe(ReplyObservation {
             key,

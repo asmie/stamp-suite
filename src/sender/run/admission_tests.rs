@@ -4,6 +4,16 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 async fn open(ip: &str, auth: bool, limit: u32, clock: ClockFormat) -> (SenderRun, UdpSocket) {
+    open_ecn(ip, auth, limit, clock, 2).await
+}
+
+async fn open_ecn(
+    ip: &str,
+    auth: bool,
+    limit: u32,
+    clock: ClockFormat,
+    ecn: u8,
+) -> (SenderRun, UdpSocket) {
     let peer = UdpSocket::bind((ip, 0)).await.unwrap();
     let mut conf = Configuration::parse_from([
         "test",
@@ -25,7 +35,7 @@ async fn open(ip: &str, auth: bool, limit: u32, clock: ClockFormat) -> (SenderRu
         "1",
         "--cos",
         "--ecn",
-        "2",
+        &ecn.to_string(),
         "--direct-measurement",
         "--reflected-control-count",
         "3",
@@ -240,5 +250,121 @@ async fn short_replies_need_full_echo_but_may_omit_trailing_fields() {
         let next = probe(&mut sender, &peer).await;
         receive(&mut sender, &reflected(&next, false, 2)[..41]);
         assert_eq!(sender.packets_received, 2);
+    }
+}
+
+#[tokio::test]
+async fn ecn_reporting_counts_only_admitted_distinct_copies() {
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            let (mut sender, peer) = open(ip, auth, 2, ClockFormat::NTP).await;
+            let request = probe(&mut sender, &peer).await;
+            let bytes = reflected(&request, auth, 1);
+            let base = if auth { 112 } else { 44 };
+            let mut wrong_ssid = bytes.clone();
+            let ssid = if auth { 26 } else { 14 };
+            wrong_ssid[ssid..ssid + 2].copy_from_slice(&43u16.to_be_bytes());
+            if auth {
+                let mac = sign(&wrong_ssid[..96]);
+                wrong_ssid[96..112].copy_from_slice(&mac);
+            }
+            receive(&mut sender, &wrong_ssid);
+            let mut wrong_echo = bytes.clone();
+            wrong_echo[if auth { 64 } else { 28 }] ^= 1;
+            if auth {
+                let mac = sign(&wrong_echo[..96]);
+                wrong_echo[96..112].copy_from_slice(&mac);
+            }
+            receive(&mut sender, &wrong_echo);
+            assert_eq!(sender.measurements.snapshot().ecn.unwrap().replies, 0);
+            receive(&mut sender, &bytes);
+            receive(&mut sender, &bytes); // exact duplicate
+            let ecn = sender.measurements.snapshot().ecn.unwrap();
+            assert_eq!(ecn.replies, 1);
+            assert_eq!(ecn.usable_cos, 1);
+            assert_eq!(ecn.received_ec2, [0, 0, 0, 1]);
+            assert_eq!(ecn.rpe, [1, 0, 0, 0]); // legacy must not imply support
+            assert_eq!(ecn.reverse_unknown, 1);
+            assert_eq!(ecn.reply_ip_ecn, [0, 0, 0, 1]);
+            // An independently sequenced burst copy is counted, with a signed
+            // applied EC1 response and preserved C provenance.
+            let mut additional = bytes;
+            additional[..4].copy_from_slice(&100u32.to_be_bytes());
+            additional[base + 16] = 0x10;
+            additional[base + 22] = 0xb0; // EC1=2, RPE=3
+            let end = additional.len() - 20;
+            let mut covered = additional[..4].to_vec();
+            covered.extend_from_slice(&additional[base..end]);
+            additional[end + 4..].copy_from_slice(&sign(&covered));
+            if auth {
+                let mac = sign(&additional[..96]);
+                additional[96..112].copy_from_slice(&mac);
+            }
+            receive(&mut sender, &additional);
+            let summary = sender.measurements.snapshot();
+            let ecn = summary.ecn.unwrap();
+            assert_eq!(summary.additional_replies, 1);
+            assert_eq!(ecn.replies, 2);
+            assert_eq!(ecn.rpe, [1, 0, 0, 1]);
+            assert_eq!(ecn.conformant_reflected, 1);
+            assert_eq!(ecn.reverse_comparable, 0);
+            assert_eq!(ecn.reverse_unknown, 2);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn ecn_reporting_receives_ip_metadata_for_all_requested_codepoints() {
+    use std::os::fd::AsRawFd;
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            for ecn in 0..4 {
+                let (mut sender, peer) = open_ecn(ip, auth, 2, ClockFormat::NTP, ecn).await;
+                assert_eq!(sender.congestion.is_some(), matches!(ecn, 1 | 2));
+                assert_eq!(
+                    sender
+                        .measurements
+                        .snapshot()
+                        .ecn
+                        .unwrap()
+                        .configured_egress_ecn,
+                    Some(ecn)
+                );
+                let request = probe(&mut sender, &peer).await;
+                apply_egress_ip_options(peer.as_raw_fd(), ip == "::1", Some(ecn), None).unwrap();
+                peer.send_to(
+                    &reflected(&request, auth, 1),
+                    sender.socket.local_addr().unwrap(),
+                )
+                .await
+                .unwrap();
+                let (len, ts, reply_ecn) = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    recv_packet(
+                        &sender.socket,
+                        &mut sender.recv_buf,
+                        &mut sender.cmsg_buf,
+                        false,
+                        sender.conf.cos,
+                        ClockFormat::NTP,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(reply_ecn, Some(ecn), "{ip} auth={auth}");
+                sender.on_reply(
+                    &crate::stats::StatsOutput::new(crate::stats::OutputFormat::Json).unwrap(),
+                    len,
+                    ts,
+                    reply_ecn,
+                );
+                let summary = sender.measurements.snapshot().ecn.unwrap();
+                assert_eq!(summary.replies, 1);
+                assert_eq!(summary.reply_ip_ecn[usize::from(ecn)], 1);
+                assert_eq!(summary.unavailable_reply_ip_ecn, 0);
+            }
+        }
     }
 }

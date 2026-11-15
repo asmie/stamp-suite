@@ -110,6 +110,14 @@ pub(super) struct FlagCounts {
     pub integrity_failed: usize,
 }
 
+/// A single well-formed CoS TLV under measurement integrity rules. C is
+/// retained for diagnostics; it does not establish usable reverse marking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CosObservation {
+    pub value: crate::tlv::ClassOfServiceTlv,
+    pub conformant_reflected: bool,
+}
+
 /// Validated requested values. U skips, M stops the remainder, and I or
 /// unusable HMAC blocks values while retaining diagnostics.
 /// Required Micro-session ID failures return a separate error.
@@ -122,6 +130,7 @@ pub(super) struct TlvTelemetry {
     pub access_report: Option<AccessReportTlv>,
     /// Any usable CoS TLV reported EC2=CE; later clean TLVs cannot clear it.
     pub forward_ce: bool,
+    pub cos: Option<CosObservation>,
     pub micro_session: Option<MicroSessionIdTlv>,
     pub direct_measurement: Option<DirectMeasurementTlv>,
     pub follow_up: Option<FollowUpTelemetryTlv>,
@@ -170,6 +179,7 @@ mod tests {
     #[test]
     fn telemetry_diagnostics_render_typed_fields_in_stable_order() {
         let report = TlvTelemetry {
+            cos: None,
             tlv_count: 8,
             flags: FlagCounts {
                 unrecognized: 1,

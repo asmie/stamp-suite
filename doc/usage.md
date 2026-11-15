@@ -408,6 +408,10 @@ Reports show CE observations, backoffs, and the current and peak intervals.
 
 ### ECN deployment and interpretation
 
+`--cos` includes [ECN observation counters](measurements.md#ecn-observations)
+in text, JSON and CSV reports, with separate CoS and reply IP metadata and
+explicit unknown reverse comparisons.
+
 Before measuring ECN, verify that both peers implement the extended CoS TLV
 and capture a short exchange for each address family and codepoint. Confirm
 DSCP, ECN and RPE on the wire: RPE=11 reports EC1 applied, RPE=10 reports

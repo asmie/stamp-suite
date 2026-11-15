@@ -7,6 +7,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Report bounded ECN observations for `--cos` in text, JSON and the existing
+  CSV measurements cell. Retain validated EC1/EC2, RPE/RPD and C separately
+  from reply IP ECN; count accepted distinct copies and identify unavailable
+  reverse comparisons. Receive reply ECN for all four requested codepoints.
+
 - Add live Linux nix header benchmarks for fixed-header C fallback, injected
   IPv6 Destination Options and policy refusals. Verify returned bytes, flags
   and HMACs with bounded header sizes and explicit workload metadata.
