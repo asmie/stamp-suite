@@ -465,15 +465,17 @@ pub struct Configuration {
     /// with exponentially distributed gaps (RFC 2330 §11.1.1).
     #[clap(long, value_enum, default_value_t = SendSchedule::Periodic, help_heading = "Sender", hide_short_help = true)]
     pub send_schedule: SendSchedule,
-    /// Number of probes to send; 0 runs until stopped.
+    /// Number of scheduled probes to send; 0 runs until stopped.
     ///
     /// With 0, sends until `--duration` ends or the sender is interrupted.
+    /// Timer-driven Access Report retries are additional probes.
     #[clap(short = 'c', long, default_value_t = 1000, help_heading = "Sender")]
     pub count: u32,
-    /// Stop sending after this many seconds.
+    /// Stop scheduled probes after this many seconds.
     ///
     /// Stops even if `--count` probes have not all been sent.
-    /// Replies are still awaited for `--timeout`.
+    /// Replies are still awaited for `--timeout`; an Access Report exchange
+    /// can continue until acknowledged or its retry budget is exhausted.
     #[clap(long, value_name = "SECONDS", help_heading = "Sender")]
     pub duration: Option<u32>,
     /// Seconds to wait for a reply before counting the probe as lost.

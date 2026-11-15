@@ -842,12 +842,17 @@ impl SenderRun {
         // from now instead of sending a burst.
         let start = tokio::time::Instant::now();
         let mut timeline = SendTimeline::new(start, self.conf.count, self.conf.duration);
-        while timeline.can_send(self.packets_sent, tokio::time::Instant::now) {
+        // Timer-driven report retries are additional traffic. They must not
+        // consume the quota of successfully sent scheduled measurement probes.
+        let mut scheduled_sent = self.packets_sent;
+        while timeline.can_send(scheduled_sent, tokio::time::Instant::now) {
             let attach_access_report = self
                 .access_report_state
                 .as_mut()
                 .is_some_and(|state| state.tick(Instant::now()));
+            let sent_before = self.packets_sent;
             self.send_probe(attach_access_report).await?;
+            scheduled_sent += self.packets_sent - sent_before;
             let interval = self.send_interval();
             let gap = self.schedule.next_gap(interval);
             let wait = timeline.after_probe(gap, tokio::time::Instant::now);
@@ -998,10 +1003,10 @@ impl SenderRun {
                 .monitor
                 .as_ref()
                 .and_then(|m| m.deadline());
-            // A long final reply timeout must not postpone Access Report
-            // retransmission. Keep the drain deadline fixed while servicing
-            // the report's independent timer and bounded retry budget.
-            let access_report_due = if matches!(wait, Wait::Drain) {
+            // Neither a drawn probe gap nor the final reply timeout may
+            // postpone report delivery. Retries leave the measurement timeline
+            // (including its Poisson draw and CE backoff) and drain deadline alone.
+            let access_report_due = if matches!(wait, Wait::NextSend { .. } | Wait::Drain) {
                 self.access_report_state
                     .as_ref()
                     .and_then(|state| state.armed_deadline())
@@ -1083,6 +1088,12 @@ impl SenderRun {
                     }
                 }
                 Event::AccessReportDue => {
+                    // If the wait also expired, let its caller advance first.
+                    // A due scheduled probe can carry this report without an
+                    // extra send; duration and final-drain limits still win.
+                    if tokio::time::Instant::now() >= deadline {
+                        return Ok(true);
+                    }
                     if self
                         .access_report_state
                         .as_mut()

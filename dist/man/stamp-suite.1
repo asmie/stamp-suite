@@ -171,14 +171,14 @@ poisson: Exponentially distributed gaps with the interval as their mean (RFC 233
 .RE
 .TP
 \fB\-c\fR, \fB\-\-count\fR \fI<COUNT>\fR [default: 1000]
-Number of probes to send; 0 runs until stopped.
+Number of scheduled probes to send; 0 runs until stopped.
 
-With 0, sends until `\-\-duration` ends or the sender is interrupted.
+With 0, sends until `\-\-duration` ends or the sender is interrupted. Timer\-driven Access Report retries are additional probes.
 .TP
 \fB\-\-duration\fR \fI<SECONDS>\fR
-Stop sending after this many seconds.
+Stop scheduled probes after this many seconds.
 
-Stops even if `\-\-count` probes have not all been sent. Replies are still awaited for `\-\-timeout`.
+Stops even if `\-\-count` probes have not all been sent. Replies are still awaited for `\-\-timeout`; an Access Report exchange can continue until acknowledged or its retry budget is exhausted.
 .TP
 \fB\-L\fR, \fB\-\-timeout\fR \fI<TIMEOUT>\fR [default: 5]
 Seconds to wait for a reply before counting the probe as lost

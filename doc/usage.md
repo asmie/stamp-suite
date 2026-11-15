@@ -124,8 +124,8 @@ control a run:
 | Option | Unit | Default | Meaning |
 |--------|------|---------|---------|
 | `-d`, `--send-delay` | interval; a plain number is milliseconds, or use `us`, `ms`, `s` | `1000` (1 s) | Gap between probes. Resolution 1 µs, maximum one hour. |
-| `-c`, `--count` | probes | `1000` | Probes to send. `0` sends until `--duration` ends or the sender is interrupted. |
-| `--duration` | seconds | none | Stop sending after this time, even if `--count` probes have not all been sent. Must be at least 1. |
+| `-c`, `--count` | probes | `1000` | Scheduled probes to send; timer-driven Access Report retries are additional. `0` sends until `--duration` ends or the sender is interrupted. |
+| `--duration` | seconds | none | Stop scheduled probes after this time, even if `--count` probes have not all been sent. Must be at least 1. |
 | `-L`, `--timeout` | seconds (0 to 255) | `5` | How long to wait for a reply before the probe counts as lost. |
 | `--max-pending-probes` | probes per target | `0` (unlimited) | Bound unanswered records by retiring the oldest as lost when a new successful send needs a slot; report `pending_evictions`. |
 
@@ -223,7 +223,11 @@ The wait after each probe is capped by any configured duration, including the wa
 the final counted probe. Count completion does not remove that last scheduled
 wait. Exactly 2 ms of lateness remains on the original timeline; larger lateness
 resets it. A gap of exactly 1 ms uses the timer rather than busy-waiting.
-Final reply draining and Access Report retries keep their separate rules.
+Access Report retries can occur between scheduled probes. They do not advance
+the measurement timeline, redraw a Poisson gap or consume the `--count` quota.
+If a scheduled probe is already due, it can carry the report itself. Final
+reply draining and an unfinished Access Report exchange continue after the
+count or duration limit; packet statistics include every successful send.
 
 ```bash
 # 4000 probes per second for ten minutes, with a report every 10 s.
@@ -389,9 +393,12 @@ HMAC.
 `--access-report-retries` (default 4) bound the delivery procedure. Retries
 continue after the main send loop until the reflector acknowledges the report
 or the retries run out. A silent peer can therefore extend a short run by up to
-15 seconds with the defaults. The Access Report timer also runs during the
-final reply wait, so a longer `--timeout` does not postpone retries. Retries
-do not extend that wait's deadline; an unfinished exchange continues afterward.
+15 seconds with the defaults. The Access Report timer runs during both probe
+pacing and the final reply wait, so long scheduled gaps or a longer `--timeout`
+do not postpone retries. Retry timing follows `--access-report-timeout`, even
+when congestion backoff has extended a measurement gap; reflected-burst pacing
+in each retry still uses the current congestion factor. Retries do not extend
+the final reply wait's deadline; an unfinished exchange continues afterward.
 Acknowledgement requires exactly one usable Access Report with the original
 Access ID and Return Code. Wrong values or duplicate reports leave the retry
 timer armed; Reserved bits and bytes are ignored. These replies can still

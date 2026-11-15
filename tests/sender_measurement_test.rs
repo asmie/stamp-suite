@@ -829,6 +829,89 @@ fn near_unity_ce_factors_do_not_stall_sender_backoff() {
 }
 
 #[test]
+fn access_report_retries_during_pacing_preserve_scheduled_count_and_duration() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            let peer = UdpSocket::bind((ip, 0)).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut extra = vec![
+                "--send-delay",
+                "4000",
+                "--duration",
+                "5",
+                "--access-report",
+                "2",
+                "--access-return-code",
+                "255",
+                "--access-report-timeout",
+                "1",
+                "--access-report-retries",
+                "2",
+            ];
+            if mode == 1 {
+                extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
+            }
+            let auth = mode == 2;
+            let sender = Sender::start_profile(&peer, auth, 2, 1, false, &extra);
+            let mut buffer = [0; 2048];
+            let (length, source) = peer.recv_from(&mut buffer).unwrap();
+            let started = Instant::now();
+            let base = if auth { 112 } else { 44 };
+            let report = [0x80, 6, 0, 4, 0x20, 255, 0, 0];
+            assert_eq!(&buffer[base..base + 8], &report);
+            let send = |request: &[u8], tail: &[u8]| {
+                let mut response = reply_with_extensions(request, auth, tail);
+                if mode == 1 && !tail.is_empty() {
+                    let digest = sign(&[&response[..4], &response[44..]]);
+                    response.extend_from_slice(&[0, 8, 0, 16]);
+                    response.extend_from_slice(&digest);
+                }
+                peer.send_to(&response, source).unwrap();
+            };
+            // Accept the original RTT without acknowledging report delivery.
+            send(&buffer[..length], &[]);
+            let first_seq = buffer[..4].to_vec();
+            let (length, retry_source) = peer
+                .recv_from(&mut buffer)
+                .expect("report retry must precede the four-second probe deadline");
+            assert_eq!(retry_source, source);
+            assert!(started.elapsed() >= Duration::from_millis(800));
+            assert_ne!(&buffer[..4], &first_seq);
+            assert_eq!(&buffer[base..base + 8], &report);
+            send(&buffer[..length], &[0, 6, 0, 4, 0x20, 255, 0, 0]);
+            let retry_seq = buffer[..4].to_vec();
+            peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let (length, _) = peer
+                .recv_from(&mut buffer)
+                .expect("a timer retry must not consume the second scheduled probe");
+            assert!(started.elapsed() >= Duration::from_millis(3800));
+            assert_ne!(&buffer[..4], &retry_seq);
+            let mut offset = base;
+            while offset < length {
+                let size =
+                    usize::from(u16::from_be_bytes([buffer[offset + 2], buffer[offset + 3]]));
+                assert_ne!(
+                    buffer[offset + 1],
+                    6,
+                    "acknowledged report must not be resent"
+                );
+                offset += 4 + size;
+            }
+            assert_eq!(offset, length);
+            send(&buffer[..length], &[]);
+            let stats = sender.finish();
+            // The duration caps the final scheduled wait (otherwise 8 seconds).
+            assert!(started.elapsed() < Duration::from_secs(7));
+            assert_eq!(stats["packets_sent"], 3, "{ip} mode={mode}");
+            assert_eq!(stats["packets_received"], 3);
+            assert_eq!(stats["packets_lost"], 0);
+            assert_eq!(stats["access_report"]["outcome"], "acknowledged");
+            assert_eq!(stats["access_report"]["retransmissions"], 1);
+        }
+    }
+}
+
+#[test]
 fn access_report_retries_during_final_reply_drain() {
     for ip in ["127.0.0.1", "::1"] {
         for mode in 0..3 {

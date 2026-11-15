@@ -198,6 +198,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Honor Access Report retry deadlines during long probe intervals. Timer-driven
+  retries preserve the scheduled probe count, duration limit, Poisson draw and
+  congestion backoff; packet statistics include the additional transmissions.
+
 - Service Access Report retry deadlines during the final reply wait. A long
   `--timeout` no longer delays retries; acknowledgement, retry limits and the
   final-wait deadline remain effective.
