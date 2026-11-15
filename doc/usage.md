@@ -228,6 +228,9 @@ the measurement timeline, redraw a Poisson gap or consume the `--count` quota.
 If a scheduled probe is already due, it can carry the report itself. Final
 reply draining and an unfinished Access Report exchange continue after the
 count or duration limit; packet statistics include every successful send.
+After a non-ICMP receive error during pacing, the sender suspends socket reads
+until its next wait. Cancellation, reporting and Access Report timers remain
+active, and the scheduled probe deadline is preserved.
 
 ```bash
 # 4000 probes per second for ten minutes, with a report every 10 s.

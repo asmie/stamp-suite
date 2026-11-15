@@ -1003,6 +1003,10 @@ impl SenderRun {
             Report,
             Shutdown,
         }
+        // A persistent receive failure must not spin, but it must not turn
+        // pacing into an uninterruptible sleep either. Resume socket reads
+        // on the next wait; keep all other events active in this one.
+        let mut receive_enabled = true;
         // A gap shorter than the timer resolution is spun through, yielding
         // between receive polls, so sub-millisecond spacing stays exact.
         loop {
@@ -1051,7 +1055,7 @@ impl SenderRun {
                     self.kernel_rx_enabled,
                     self.conf.cos,
                     self.conf.clock_source,
-                ) => Event::Datagram(result),
+                ), if receive_enabled => Event::Datagram(result),
                 _ = async {
                     match monitor_due {
                         Some(at) => tokio::time::sleep_until(at.into()).await,
@@ -1102,11 +1106,10 @@ impl SenderRun {
                     crate::eprintln_throttled!("Receive error{during}: {e}");
                     if !is_icmp_feedback(&e) {
                         if matches!(wait, Wait::NextSend { .. }) {
-                            // Keep the send schedule even if the socket keeps failing.
-                            tokio::time::sleep_until(deadline).await;
-                            return Ok(true);
+                            receive_enabled = false;
+                        } else {
+                            return Ok(false);
                         }
-                        return Ok(false);
                     }
                 }
                 Event::MonitorDue => {
@@ -1686,6 +1689,10 @@ mod mtu_tests;
 #[cfg(all(test, target_os = "windows"))]
 #[path = "run/windows_mtu_tests.rs"]
 mod windows_mtu_tests;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "run/windows_receive_error_tests.rs"]
+mod windows_receive_error_tests;
 
 #[cfg(test)]
 #[path = "run/admission_tests.rs"]

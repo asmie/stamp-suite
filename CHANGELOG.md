@@ -206,6 +206,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Keep cancellation, Access Report retries and other timers active after a
+  non-ICMP receive error during sender pacing. Retry receiving at the next
+  wait without advancing the probe deadline or repeatedly polling the failure.
+
 - Scale pending Poisson gaps from their original draw during congestion backoff.
   Repeated small increases now accumulate correctly instead of losing their
   effect through repeated rounding of an already scaled gap.
