@@ -159,3 +159,83 @@ fn spin_threshold_uses_the_drawn_gap_even_when_duration_clamps_the_wait() {
         "a short remaining duration does not change the gap's spin policy"
     );
 }
+
+#[test]
+fn ce_extends_pending_deadline_and_recovery_cannot_shorten_it() {
+    let start = start();
+    let mut timeline = SendTimeline::new(start, 0, None);
+    let mut interval = Duration::from_millis(20);
+    let mut gap = interval;
+    timeline.after_probe(gap, || start);
+    // Repeated observations at the same limit do not repeatedly extend the
+    // wait. Clean feedback cannot cancel a backoff already scheduled.
+    for (current_ms, due_ms) in [(40, 40), (40, 40), (30, 40), (80, 80), (20, 80)] {
+        let wait = timeline.back_off(&mut gap, &mut interval, Duration::from_millis(current_ms));
+        assert_eq!(wait.deadline, start + Duration::from_millis(due_ms));
+    }
+    // The following probe continues from the corrected timeline, using the
+    // recovered controller interval without catching up to the old deadline.
+    let wait = timeline.after_probe(Duration::from_millis(20), || {
+        start + Duration::from_millis(81)
+    });
+    assert_eq!(wait.deadline, start + Duration::from_millis(100));
+}
+
+#[test]
+fn ce_scales_the_existing_poisson_draw_without_resampling() {
+    use super::Schedule;
+    use crate::configuration::SendSchedule;
+    let start = start();
+    let mut actual = Schedule::with_seed(SendSchedule::Poisson, 42);
+    let mut expected = Schedule::with_seed(SendSchedule::Poisson, 42);
+    let base = Duration::from_millis(20);
+    for _ in 0..100 {
+        let mut timeline = SendTimeline::new(start, 0, None);
+        let original = expected.next_gap(base);
+        let mut gap = actual.next_gap(base);
+        let mut interval = base;
+        timeline.after_probe(gap, || start);
+        for factor in [2, 4, 8] {
+            let wait = timeline.back_off(&mut gap, &mut interval, base * factor);
+            assert_eq!(wait.deadline, start + original * factor);
+        }
+    }
+}
+
+#[test]
+fn backoff_leaves_spin_wait_when_zero_or_sub_millisecond_gap_grows() {
+    let start = start();
+    for base in [Duration::ZERO, Duration::from_micros(500)] {
+        let mut timeline = SendTimeline::new(start, 0, None);
+        let mut interval = base;
+        let mut gap = base;
+        assert!(timeline.after_probe(gap, || start).spin);
+        let wait = timeline.back_off(&mut gap, &mut interval, Duration::from_millis(2));
+        assert!(!wait.spin);
+        assert_eq!(wait.deadline, start + Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn duration_limit_still_clamps_a_backed_off_deadline() {
+    let start = start();
+    let mut timeline = SendTimeline::new(start, 0, Some(1));
+    let mut interval = Duration::from_millis(500);
+    let mut gap = interval;
+    timeline.after_probe(gap, || start);
+    let wait = timeline.back_off(&mut gap, &mut interval, Duration::from_secs(2));
+    assert_eq!(wait.deadline, start + Duration::from_secs(1));
+    assert!(!timeline.can_send(1, || wait.deadline));
+}
+
+#[test]
+fn ce_extends_from_the_reset_timeline_after_a_large_send_delay() {
+    let start = start();
+    let mut timeline = SendTimeline::new(start, 0, None);
+    let mut interval = Duration::from_millis(20);
+    let mut gap = interval;
+    let completed = start + Duration::from_millis(100);
+    assert_eq!(timeline.after_probe(gap, || completed).deadline, completed);
+    let wait = timeline.back_off(&mut gap, &mut interval, Duration::from_millis(40));
+    assert_eq!(wait.deadline, completed + Duration::from_millis(20));
+}

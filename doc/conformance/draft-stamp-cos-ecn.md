@@ -153,6 +153,14 @@ Control-only requests keep their required zero interval. Reply counts remain
 unchanged. Response remains enabled for CoS ECT0/ECT1 and has no
 controlled-measurement disable option.
 
+CE also extends the pending probe deadline, scaling the existing Poisson draw
+where applicable. Recovery does not shorten that wait, and the duration limit
+still caps it. Deadline tests:
+`src/sender/schedule/timeline_tests.rs::ce_extends_pending_deadline_and_recovery_cannot_shorten_it`,
+`src/sender/schedule/timeline_tests.rs::ce_scales_the_existing_poisson_draw_without_resampling`,
+`src/sender/schedule/timeline_tests.rs::duration_limit_still_clamps_a_backed_off_deadline`
+and `tests/sender_measurement_test.rs::sender_applies_ce_backoff_to_the_already_scheduled_probe`.
+
 Recovery requires one usable non-CE CoS observation and no observed reverse
 CE. Missing, duplicate, skipped, malformed or integrity-unusable CoS leaves
 the interval unchanged; a configured key requires a verified TLV HMAC for

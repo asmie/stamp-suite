@@ -20,11 +20,13 @@ enum SendMode {
 }
 
 /// What a receive wait ends on, besides its deadline.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Wait {
-    /// The next probe is due. `spin` busy-waits a gap shorter than the
-    /// timer resolution.
-    NextSend { spin: bool },
+enum Wait<'a> {
+    /// Backoff can extend this already drawn gap while receiving replies.
+    NextSend {
+        timeline: &'a mut SendTimeline,
+        gap: Duration,
+        interval: Duration,
+    },
     /// Every probe has a reply (or its burst copies are in), or time is up.
     Drain,
     /// The Access Report timer expires or the report is acknowledged.
@@ -845,10 +847,19 @@ impl SenderRun {
                 .as_mut()
                 .is_some_and(|state| state.tick(Instant::now()));
             self.send_probe(attach_access_report).await?;
-            let gap = self.schedule.next_gap(self.send_interval());
+            let interval = self.send_interval();
+            let gap = self.schedule.next_gap(interval);
             let wait = timeline.after_probe(gap, tokio::time::Instant::now);
-            self.receive_until(wait.deadline, Wait::NextSend { spin: wait.spin }, output)
-                .await?;
+            self.receive_until(
+                wait.deadline,
+                Wait::NextSend {
+                    timeline: &mut timeline,
+                    gap,
+                    interval,
+                },
+                output,
+            )
+            .await?;
             self.expire();
             if self.stopping() {
                 break;
@@ -929,7 +940,7 @@ impl SenderRun {
         self.stopped_on_zero_ssid() || self.shutdown.is_cancelled()
     }
 
-    fn wait_over(&self, wait: Wait) -> bool {
+    fn wait_over(&self, wait: &Wait<'_>) -> bool {
         if self.shutdown.is_cancelled() {
             return true;
         }
@@ -953,8 +964,8 @@ impl SenderRun {
     /// satisfied. Returns false when a receive error ended the wait early.
     async fn receive_until(
         &mut self,
-        deadline: tokio::time::Instant,
-        wait: Wait,
+        mut deadline: tokio::time::Instant,
+        mut wait: Wait<'_>,
         output: &crate::stats::StatsOutput,
     ) -> Result<bool, crate::StartupError> {
         enum Event {
@@ -966,10 +977,21 @@ impl SenderRun {
         }
         // A gap shorter than the timer resolution is spun through, yielding
         // between receive polls, so sub-millisecond spacing stays exact.
-        let spin = matches!(wait, Wait::NextSend { spin: true });
         loop {
+            let spin = if let Wait::NextSend {
+                timeline,
+                gap,
+                interval,
+            } = &mut wait
+            {
+                let updated = timeline.back_off(gap, interval, self.send_interval());
+                deadline = updated.deadline;
+                updated.spin
+            } else {
+                false
+            };
             output.check().map_err(output_error)?;
-            if self.wait_over(wait) {
+            if self.wait_over(&wait) {
                 return Ok(true);
             }
             if spin && tokio::time::Instant::now() >= deadline {

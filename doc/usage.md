@@ -402,6 +402,10 @@ down to `--send-delay`. Missing, ambiguous or unusable CoS feedback holds the
 current interval. With a key configured, recovery requires a verified TLV
 HMAC; an unsigned or unverifiable report cannot increase the send rate.
 These replies can still contribute valid base-packet RTT/loss observations.
+Backoff also extends the pending probe deadline, scaling the already drawn
+gap for a Poisson schedule. Clean feedback cannot shorten that pending wait;
+recovery applies when drawing the following gap. The `--duration` limit still
+caps the wait.
 Forward feedback comes from the CoS TLV's EC2 field. Reverse feedback reads
 the reply's IP ECN bits, which works on Linux and macOS only; other platforms log a warning and
 use forward feedback alone. The same factor scales the Type-12 interval of

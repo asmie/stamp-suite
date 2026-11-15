@@ -57,6 +57,32 @@ impl SendTimeline {
             spin: gap < TIMER_RESOLUTION,
         }
     }
+
+    /// Apply backoff to the gap already drawn for the next probe. Retain the
+    /// Poisson draw rather than sampling again for each reply. Recovery affects
+    /// the next draw only: it must not undo a CE delay during the current wait.
+    /// A zero base interval has no draw to scale, so use the controller's floor.
+    pub(super) fn back_off(
+        &mut self,
+        gap: &mut Duration,
+        interval: &mut Duration,
+        current_interval: Duration,
+    ) -> SendWait {
+        if current_interval > *interval {
+            let scaled = if interval.is_zero() {
+                current_interval
+            } else {
+                gap.mul_f64(current_interval.as_secs_f64() / interval.as_secs_f64())
+            };
+            self.due += scaled.saturating_sub(*gap);
+            *gap = scaled;
+            *interval = current_interval;
+        }
+        SendWait {
+            deadline: self.stop_at.map_or(self.due, |at| self.due.min(at)),
+            spin: *gap < TIMER_RESOLUTION,
+        }
+    }
 }
 
 pub(super) struct Schedule {

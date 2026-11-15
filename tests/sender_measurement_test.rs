@@ -42,8 +42,6 @@ impl Sender {
                 "0",
                 "--count",
                 &count.to_string(),
-                "--send-delay",
-                "20",
                 "--timeout",
                 "1",
                 "--hwtstamp",
@@ -56,6 +54,9 @@ impl Sender {
             .env_remove("STAMP_HMAC_KEY")
             .env("RUST_LOG", "off")
             .env("TOKIO_WORKER_THREADS", "2");
+        if !extra.contains(&"--send-delay") {
+            command.args(["--send-delay", "20"]);
+        }
         if extensions {
             command.args(["--direct-measurement", "--follow-up-telemetry"]);
         }
@@ -774,6 +775,60 @@ fn sender_holds_ecn_backoff_until_usable_non_ce_feedback_returns() {
                     "{ip} mode={mode} case={case}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            let peer = UdpSocket::bind((ip, 0)).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            // Allow time to answer on loaded CI hosts. The 100 ms gap becomes
+            // 500 ms after the first reply.
+            let mut extra = vec![
+                "--cos",
+                "--ecn",
+                "2",
+                "--send-delay",
+                "100",
+                "--ecn-backoff-factor",
+                "5",
+            ];
+            if mode == 1 {
+                extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
+            }
+            let auth = mode == 2;
+            let sender = Sender::start_profile(&peer, auth, 2, 1, false, &extra);
+            let mut request = [0; 2048];
+            let (length, source) = peer.recv_from(&mut request).unwrap();
+            let first = Instant::now();
+            let mut response =
+                reply_with_extensions(&request[..length], auth, &[0, 4, 0, 4, 0, 12, 0xb0, 0]);
+            if mode == 1 {
+                let digest = sign(&[&response[..4], &response[44..]]);
+                response.extend_from_slice(&[0, 8, 0, 16]);
+                response.extend_from_slice(&digest);
+            }
+            peer.send_to(&response, source).unwrap();
+            let (length, source) = peer.recv_from(&mut request).unwrap();
+            let gap = first.elapsed();
+            // Wide margin for process/socket scheduling, but well beyond the
+            // stale 100 ms deadline. Exact timing is covered by timeline tests.
+            assert!(
+                gap >= Duration::from_millis(350),
+                "{ip} mode={mode}: {gap:?}"
+            );
+            peer.send_to(
+                &reply_with_extensions(&request[..length], auth, &[]),
+                source,
+            )
+            .unwrap();
+            let stats = sender.finish();
+            assert_eq!(stats["packets_received"], 2);
+            assert_eq!(stats["congestion"]["ce_replies"], 1);
+            assert_eq!(stats["congestion"]["current_interval_ms"], 500.0);
         }
     }
 }

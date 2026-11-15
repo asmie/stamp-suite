@@ -194,6 +194,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Apply ECN backoff to the next probe's pending deadline immediately, including
+  Poisson spacing, while preserving the duration limit. Clean feedback cannot
+  cancel an already scheduled backoff.
+
 - Hold ECN backoff when reflected CoS feedback is missing, ambiguous or
   unusable. Rate recovery now requires a usable non-CE report with verified
   TLV integrity when keyed; valid base RTT/loss observations remain available.
