@@ -170,6 +170,36 @@ raw Criterion samples from repeated processes before interpreting variation.
 Use the live UDP harness for transport costs and the transmission profiling
 fixtures for per-copy burst work; in-process iterations/sec are not wire pps.
 
+### Header reflection and reply assembly
+
+The `headers` group covers eight synthetic capture scenarios in open and
+authenticated modes (16 cases): one IPv4 fixed header; eight stacked IPv4
+fixed headers; one IPv6 fixed header; IPv6 fixed plus 8- or 256-octet
+extension data; eight 16-octet extension records requested by unique selectors
+in reverse capture order; missing capture; and fixed/extension reflection
+denied by policy. The last two cases request IPv6 fixed and extension data
+and verify exact C flags, preserved request values and diagnostic reasons.
+Successful fixtures compare every returned header octet, TLV type, order and
+flag against independently retained captures. Authenticated fixtures verify
+request TLV HMACs and reply base/TLV HMACs before timing.
+
+```sh
+cargo test --locked --bench reflector_hotpath -- --test headers/
+cargo bench --locked --bench reflector_hotpath -- headers/
+```
+
+Each timed iteration processes one request and destroys the owned response.
+Synthetic capture construction, selector/request creation, signing, context
+setup and validation happen outside timing. The captures are byte fixtures,
+without IP checksum, option or forwarding validation; this measures header
+record splitting, matching/copying, refusal handling and reply assembly from
+already available metadata. It excludes actual capture, ancillary-data parsing,
+IP header attachment, sockets, session management, route/MTU work and burst
+transmission. Linux CI's existing reflector fixture command exercises every
+case without timing budgets. Repeat optimized builds with recorded compiler,
+features, binary/source hashes, affinity and host load; keep Criterion batch
+costs separate from live packet throughput and latency measurements.
+
 ## Session-table scaling
 
 The separate `session_scaling` harness measures IPv4 and IPv6 tables with
