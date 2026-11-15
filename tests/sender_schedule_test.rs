@@ -9,6 +9,11 @@ use std::{
 use clap::Parser;
 use stamp_suite::{configuration::Configuration, sender};
 
+// These wall-clock checks must not compete with each other's senders. Acquire
+// the async lock before starting the measurement clock, and bound each test's
+// worker pool below so runtime startup cannot scale with runner CPU count.
+static SCHEDULE_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A bound socket that never answers, so probes draw neither replies nor
 /// ICMP errors.
 fn silent_sink() -> UdpSocket {
@@ -35,12 +40,13 @@ fn sender_conf(sink: &UdpSocket, extra: &[&str]) -> Configuration {
 }
 
 async fn sent_in(conf: &Configuration) -> (u64, Duration) {
+    let _guard = SCHEDULE_TEST.lock().await;
     let started = Instant::now();
     let stats = sender::run_sender(conf).await.unwrap();
     (stats.packets_sent, started.elapsed())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn count_zero_sends_until_duration_ends() {
     let sink = silent_sink();
     let conf = sender_conf(
@@ -52,7 +58,7 @@ async fn count_zero_sends_until_duration_ends() {
     assert!(elapsed < Duration::from_millis(1500), "took {elapsed:?}");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duration_stops_before_count() {
     let sink = silent_sink();
     let conf = sender_conf(
@@ -63,7 +69,7 @@ async fn duration_stops_before_count() {
     assert!((45..=51).contains(&sent), "sent {sent}");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sub_millisecond_interval_keeps_its_rate() {
     let sink = silent_sink();
     let conf = sender_conf(
@@ -75,7 +81,7 @@ async fn sub_millisecond_interval_keeps_its_rate() {
     assert!((1600..=2001).contains(&sent), "sent {sent}");
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poisson_schedule_keeps_the_mean_rate() {
     let sink = silent_sink();
     let conf = sender_conf(
@@ -97,8 +103,9 @@ async fn poisson_schedule_keeps_the_mean_rate() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sender_binds_to_the_requested_interface() {
+    let _guard = SCHEDULE_TEST.lock().await;
     let sink = silent_sink();
     let loopback = if cfg!(target_os = "macos") {
         "lo0"
