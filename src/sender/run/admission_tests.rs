@@ -368,3 +368,74 @@ async fn ecn_reporting_receives_ip_metadata_for_all_requested_codepoints() {
         }
     }
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn ecn_directional_reports_pair_signed_cos_with_received_ip_markings() {
+    use std::os::fd::AsRawFd;
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            for requested in 0..4u8 {
+                for observed in 0..4u8 {
+                    let (mut sender, peer) =
+                        open_ecn(ip, auth, 2, ClockFormat::NTP, requested).await;
+                    let request = probe(&mut sender, &peer).await;
+                    let mut bytes = reflected(&request, auth, 1);
+                    let base = if auth { 112 } else { 44 };
+                    // Independent peer fabricates ingress EC2 and RPE=3;
+                    // reverse IP metadata comes from a real marked datagram.
+                    bytes[base + 21] = observed << 2;
+                    bytes[base + 22] = (requested << 6) | 0x30;
+                    let end = bytes.len() - 20;
+                    let mut covered = bytes[..4].to_vec();
+                    covered.extend_from_slice(&bytes[base..end]);
+                    bytes[end + 4..].copy_from_slice(&sign(&covered));
+                    apply_egress_ip_options(
+                        peer.as_raw_fd(),
+                        ip == "::1",
+                        Some(3 - observed),
+                        None,
+                    )
+                    .unwrap();
+                    peer.send_to(&bytes, sender.socket.local_addr().unwrap())
+                        .await
+                        .unwrap();
+                    let (len, ts, reply_ecn) = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        recv_packet(
+                            &sender.socket,
+                            &mut sender.recv_buf,
+                            &mut sender.cmsg_buf,
+                            false,
+                            sender.conf.cos,
+                            ClockFormat::NTP,
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(reply_ecn, Some(3 - observed));
+                    let output =
+                        crate::stats::StatsOutput::new(crate::stats::OutputFormat::Json).unwrap();
+                    sender.on_reply(&output, len, ts, reply_ecn);
+                    sender.on_reply(&output, len, ts, reply_ecn); // no second diagnostic sample
+                    let summary = sender.snapshot().measurements.unwrap().ecn.unwrap();
+                    assert_eq!(summary.replies, 1);
+                    assert_eq!(summary.forward.comparable, 1);
+                    assert_eq!(summary.reverse.comparable, 1);
+                    assert_eq!(
+                        summary.forward.transitions[usize::from(requested)][usize::from(observed)],
+                        1
+                    );
+                    assert_eq!(
+                        summary.reverse.transitions[usize::from(requested)]
+                            [usize::from(3 - observed)],
+                        1
+                    );
+                    assert_eq!(summary.forward.unknown, 0);
+                    assert_eq!(summary.reverse.unknown, 0);
+                }
+            }
+        }
+    }
+}

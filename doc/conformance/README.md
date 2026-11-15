@@ -15,10 +15,10 @@ certify untested behavior.
 | [RFC 9534](rfc9534.md): Micro-session ID (LAG) | RFC 9534, February 2024 | 18 | 7 | 8 | 1 | 2 | 0 |
 | [RFC 8545](rfc8545.md): OWAMP/TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [RFC 10052](draft-asymmetrical-pkts.md): Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 36 | 3 | 0 | 7 | 1 |
-| [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -02, 2 November 2026 | 30 | 17 | 4 | 0 | 9 | 0 |
+| [draft-ietf-ippm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -02, 2 November 2026 | 30 | 18 | 3 | 0 | 9 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 63 | 9 | 0 | 3 | 0 |
 | [draft-ietf-bpm-stamp-ber](draft-stamp-ber.md): Residual BER | -01, 2 November 2026 | 54 | 49 | 4 | 0 | 1 | 0 |
-| **Total** | | **472** | **388** | **32** | **1** | **48** | **3** |
+| **Total** | | **472** | **389** | **31** | **1** | **48** | **3** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).
@@ -87,7 +87,7 @@ not runtime evidence. Historical reports remain tied to their recorded commit.
 | Return paths | IP/SRv6 support has explicit backend/route constraints. SR-MPLS is Excluded and receives U. Processed child flags and malformed-stop handling are checked; protected/skipped copies can retain original child flags, keeping the inherited requirement Partial. A fallback is not evidence of SRH transit. | [RFC 9503 scope](rfc9503.md#scope), [nested flags](rfc9503.md#nested-flags), [privileged tests](../testing-netns.md) |
 | Management | AgentX is a read-only subagent and is not scored in these protocol matrices; SET is unsupported. A separate master is required. YANG management is not implemented and its expired draft is watch-only. | [Observability](../usage.md#observability), [AgentX](../architecture.md#snmp-agentx-sub-agent) |
 | BER | Four Partial rows cover zero-checksum validation, platform MTU, physical LAG and link-MTU filling. Diagnostics cover local C causes and explicit preserved-peer provenance in defined child layouts for the TLV-enabled profile; arbitrary values and legacy TLV-ignore tails remain uninterpreted. The independent BER peer uses ordinary UDP checksums; separate raw fixtures cover IPv4 checksum-zero ingress and authenticated sender transmission. None establishes raw-link/FEC error capture. A compatible maintained application peer remains unverified. | [BER matrix](draft-stamp-ber.md), [migration evidence](../interop/2026-11-09-ber/REPORT.md) |
-| CoS/ECN | Revision 02 is reconciled within the scored profile; RFC 3168/9330 controller consistency and capability/bleaching diagnostics remain Partial. Reverse feedback is supported on Linux/macOS; Windows marking returns C. | [CoS/ECN scope](draft-stamp-cos-ecn.md#scope) |
+| CoS/ECN | Revision 02 is reconciled within the scored profile; RPE-aware directional diagnostics distinguish endpoint observations from unknown comparisons. RFC 3168/9330 controller consistency remains Partial. Reverse feedback is supported on Linux/macOS; Windows marking returns C. | [CoS/ECN scope](draft-stamp-cos-ecn.md#scope) |
 | Platforms and hardware | Physical LAG/NIC timestamp evidence is absent. macOS has software receive timestamps; Windows driver-free checks do not establish driver-backed capture. A cross-build is not a native runtime test. | [Release verification](../release-evidence.md), [hardware timestamps](../testing-hardware-timestamps.md) |
 
 ## Experimental codepoints

@@ -3,7 +3,7 @@
 //! Sender RTT percentiles, jitter and standard deviation, reflector shutdown
 //! summaries, and text, JSON and CSV reports.
 
-pub use crate::sender::ecn::EcnSummary;
+pub use crate::sender::ecn::{EcnDirectionSummary, EcnSummary, EcnUnknownSummary};
 pub use crate::sender::measurements::{
     CounterPoint, DelaySummary, DirectSummary, FollowUpSummary, MeasurementSummary,
 };
@@ -693,6 +693,16 @@ impl StatsSnapshot {
                     e.received_ec2, e.echoed_ec1, e.reply_ip_ecn, e.unavailable_reply_ip_ecn)?;
                 writeln!(out, "{prefix}ECN reflector reports: RPE [legacy/unknown, reserved, unable, applied] {:?}, RPD [00, 01, 10, 11] {:?}, C {}; reverse comparable {}, unknown {}",
                     e.rpe, e.rpd, e.conformant_reflected, e.reverse_comparable, e.reverse_unknown)?;
+                for (direction, d) in [("forward", &e.forward), ("reverse", &e.reverse)] {
+                    writeln!(out, "{prefix}ECN {direction}: {} comparable, {} unknown; {} unchanged, {} bleaching, {} ECT-to-CE, {} other remarking; {} observed CE (endpoint comparisons)",
+                        d.comparable, d.unknown, d.unchanged, d.bleaching, d.ce_marked, d.remarked, d.ce_observed)?;
+                    if d.unknown != 0 {
+                        let r = &d.unknown_reasons;
+                        writeln!(out, "{prefix}ECN {direction} unknown reasons: CoS unavailable {}, local marking unavailable {}, C {}, EC1 mismatch {}, legacy/unconfirmed {}, reserved RPE {}, reflector unable {}, IP metadata unavailable {}",
+                            r.cos_unavailable, r.local_marking_unavailable, r.conformant_reflected, r.request_mismatch,
+                            r.legacy_or_unconfirmed, r.reserved_rpe, r.reflector_unable, r.reply_ip_unavailable)?;
+                    }
+                }
             }
             if m.pending_limit != 0 || m.pending_evictions != 0 {
                 writeln!(out, "{prefix}Pending probes: {} retained, limit {}, peak {}; {} retired as lost (not timed expiry)",

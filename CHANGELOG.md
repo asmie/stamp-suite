@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add paired forward/reverse ECN diagnostics with transition matrices,
+  bleaching, ECT-to-CE and other remarking counts, plus explicit unknown
+  reasons. Preserve raw observations, CSV columns and AIMD behavior.
+
 - Report bounded ECN observations for `--cos` in text, JSON and the existing
   CSV measurements cell. Retain validated EC1/EC2, RPE/RPD and C separately
   from reply IP ECN; count accepted distinct copies and identify unavailable

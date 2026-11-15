@@ -37,6 +37,7 @@ fn ecn_retains_wire_fields_and_limits_reverse_comparison() {
                             for reply in [None, Some(0), Some(1), Some(2), Some(3), Some(4)] {
                                 let mut summary = EcnSummary::new(requested, Some(requested));
                                 summary.record(Some(cos), reply);
+                                assert_direction_totals(&summary);
                                 assert_eq!(summary.received_ec2[usize::from(ec2)], 1);
                                 assert_eq!(summary.echoed_ec1[usize::from(ec1)], 1);
                                 assert_eq!(summary.rpe[usize::from(rpe)], 1);
@@ -114,4 +115,134 @@ fn missing_cos_does_not_hide_observed_ip_ce_or_claim_path_support() {
     assert_eq!(summary.reverse_unknown, 2);
     assert_eq!(summary.reverse_comparable, 0);
     assert_eq!(summary.configured_egress_ecn, None);
+}
+
+fn assert_direction_totals(summary: &EcnSummary) {
+    for direction in [&summary.forward, &summary.reverse] {
+        assert_eq!(direction.comparable + direction.unknown, summary.replies);
+        assert_eq!(
+            direction.transitions.iter().flatten().sum::<u64>(),
+            direction.comparable
+        );
+        assert_eq!(
+            direction.unchanged + direction.bleaching + direction.ce_marked + direction.remarked,
+            direction.comparable
+        );
+        let reasons = serde_json::to_value(&direction.unknown_reasons).unwrap();
+        assert_eq!(
+            reasons
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|v| v.as_u64().unwrap())
+                .sum::<u64>(),
+            direction.unknown
+        );
+    }
+    assert_eq!(summary.reverse_comparable, summary.reverse.comparable);
+    assert_eq!(summary.reverse_unknown, summary.reverse.unknown);
+}
+
+#[test]
+fn ecn_directional_classification_covers_every_codepoint_pair() {
+    // Golden table in [baseline][observation] order. CE->CE is unchanged;
+    // Not-ECT->CE is remarking, not evidence of ECT congestion marking.
+    let expected = [
+        ["unchanged", "remarked", "remarked", "remarked"],
+        ["bleaching", "unchanged", "remarked", "ce_marked"],
+        ["bleaching", "remarked", "unchanged", "ce_marked"],
+        ["bleaching", "remarked", "remarked", "unchanged"],
+    ];
+    for baseline in 0..4u8 {
+        for observed in 0..4u8 {
+            let cos = decode(
+                &[0, 4, 0, 4, 0, observed << 2, (baseline << 6) | 0x30, 0],
+                None,
+            );
+            let mut summary = EcnSummary::new(baseline, Some(baseline));
+            summary.record(cos, Some(observed));
+            for direction in [&summary.forward, &summary.reverse] {
+                let json = serde_json::to_value(direction).unwrap();
+                assert_eq!(
+                    json[expected[usize::from(baseline)][usize::from(observed)]],
+                    1
+                );
+                assert_eq!(
+                    direction.transitions[usize::from(baseline)][usize::from(observed)],
+                    1
+                );
+                assert_eq!(direction.ce_observed, u64::from(observed == 3));
+            }
+            assert_direction_totals(&summary);
+        }
+    }
+}
+
+#[test]
+fn ecn_unknown_reasons_are_exclusive_and_do_not_fabricate_transitions() {
+    // Overlapping failures pin priority: C, RPE, request mismatch, then IP.
+    for (flags, ec1, rpe, ip, reason) in [
+        (0x10, 1, 0, None, "conformant_reflected"),
+        (0, 1, 3, None, "request_mismatch"),
+        (0, 1, 0, None, "legacy_or_unconfirmed"),
+        (0, 2, 1, None, "reserved_rpe"),
+        (0, 2, 2, Some(0), "reflector_unable"),
+        (0, 2, 3, None, "reply_ip_unavailable"),
+        (0, 2, 3, Some(4), "reply_ip_unavailable"),
+    ] {
+        let cos = decode(&[flags, 4, 0, 4, 0, 0, (ec1 << 6) | (rpe << 4), 0], None);
+        let mut summary = EcnSummary::new(2, Some(2));
+        summary.record(cos, ip);
+        assert_eq!(
+            summary.forward.bleaching, 1,
+            "reverse flags do not invalidate ingress EC2"
+        );
+        assert_eq!(summary.reverse.comparable, 0);
+        assert_eq!(
+            serde_json::to_value(&summary.reverse.unknown_reasons).unwrap()[reason],
+            1
+        );
+        assert_direction_totals(&summary);
+    }
+    let mut summary = EcnSummary::new(2, None);
+    summary.record(None, Some(3));
+    assert_eq!(summary.forward.unknown_reasons.cos_unavailable, 1);
+    assert_eq!(summary.reverse.unknown_reasons.cos_unavailable, 1);
+    summary.record(decode(&[0, 4, 0, 4, 0, 0, 0xb0, 0], None), Some(3));
+    assert_eq!(summary.forward.unknown_reasons.local_marking_unavailable, 1);
+    assert_eq!(summary.forward.comparable, 0);
+    assert_eq!(summary.reverse.ce_marked, 1);
+    assert_direction_totals(&summary);
+}
+
+#[test]
+fn ecn_forward_baseline_is_local_marking_and_reverse_pairs_stay_per_reply() {
+    let cos = decode(&[0, 4, 0, 4, 0, 4, 0x70, 0], None);
+    let mut summary = EcnSummary::new(1, Some(2));
+    summary.record(cos, Some(1));
+    assert_eq!(summary.forward.transitions[2][1], 1);
+    assert_eq!(summary.forward.remarked, 1);
+    assert_eq!(summary.reverse.unchanged, 1);
+    assert_direction_totals(&summary);
+
+    // Same marginal CoS/IP counts; only the eligible pair changes.
+    let applied = decode(&[0, 4, 0, 4, 0, 8, 0xb0, 0], None);
+    let refused = decode(&[0, 4, 0, 4, 0, 8, 0xa0, 0], None);
+    let mut first = EcnSummary::new(2, Some(2));
+    first.record(applied, Some(0));
+    first.record(refused, Some(3));
+    let mut second = EcnSummary::new(2, Some(2));
+    second.record(refused, Some(0)); // reverse order also must not affect pairing
+    second.record(applied, Some(3));
+    assert_eq!(first.reply_ip_ecn, second.reply_ip_ecn);
+    assert_eq!(first.rpe, second.rpe);
+    assert_eq!(first.received_ec2, second.received_ec2);
+    assert_eq!(first.reverse.bleaching, 1);
+    assert_eq!(first.reverse.ce_marked, 0);
+    assert_eq!(second.reverse.bleaching, 0);
+    assert_eq!(second.reverse.ce_marked, 1);
+    for summary in [&first, &second] {
+        assert_eq!(summary.reverse.unknown_reasons.reflector_unable, 1);
+        assert_direction_totals(summary);
+    }
 }

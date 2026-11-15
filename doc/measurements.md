@@ -340,12 +340,63 @@ not erase the raw observation, but excludes it from reverse comparison.
 Reply IP metadata is outside TLV integrity protection and is retained
 independently, including when CoS is unavailable.
 
-`reverse_comparable` requires usable CoS with C=0, RPE=3, an echoed EC1 matching
-the request and available reply IP ECN. Every other accepted copy counts as
-`reverse_unknown`. These counters indicate available evidence, not successful
-preservation or a path fault. The histograms are separate totals, not paired
-transitions; they cannot by themselves locate bleaching or remarking. Correlate
-with [ECN deployment guidance](usage.md#ecn-deployment-and-interpretation) and
-independent captures. The underlying CoS profile is
+`reverse_comparable` and `reverse_unknown` retain their meanings and equal
+`reverse.comparable` and `reverse.unknown` in the directional diagnostics below.
+The raw histograms are separate totals; use the paired transitions to analyze
+changes. The underlying CoS profile is
 [draft-ietf-ippm-stamp-cos-ecn-02](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-02.html),
 a work in progress.
+
+### Directional ECN diagnostics
+
+`measurements.ecn.forward` compares the successful local socket marking with
+validated ingress EC2 from the same reply. If local marking or usable CoS is
+unavailable, that comparison is unknown. RPE, C and echoed EC1 constrain reverse
+marking and do not erase a usable forward ingress observation.
+
+`measurements.ecn.reverse` compares echoed EC1 with that reply's IP ECN only
+when CoS is usable, C=0, RPE=3, EC1 matches the request and IP metadata exists.
+An RPE=2 refusal with a Not-ECT reply is unknown, not path bleaching. RPD alone
+is a DSCP policy signal and does not prevent ECN comparison.
+
+Each direction has a bounded 4-by-4 `transitions` matrix. Rows are baseline
+codepoints and columns are observed codepoints, both in numeric order 0..3.
+Pairs are classified before aggregation, so a refused reply's IP marking
+cannot be associated with another reply's applied EC1. The four outcome
+counters are mutually exclusive and sum to `comparable`:
+
+| Counter | Baseline → observation |
+|---------|------------------------|
+| `unchanged` | Equal codepoints, including CE → CE |
+| `bleaching` | ECT(1), ECT(0) or CE → Not-ECT |
+| `ce_marked` | ECT(1) or ECT(0) → CE |
+| `remarked` | Other unequal pairs, including ECT swaps, Not-ECT → CE and CE → ECT |
+
+`ce_observed` counts comparable pairs ending in CE; it overlaps the outcome
+counters. CE → CE does not establish newly introduced congestion marking, and
+Not-ECT → CE is classified as other remarking. The raw `reply_ip_ecn` histogram
+still retains IP CE observations when directional analysis is unavailable.
+
+`comparable + unknown` equals the number of admitted distinct reply copies.
+`unknown_reasons` assigns one primary reason per unknown comparison, making
+its counters sum to `unknown`. For forward analysis, unusable CoS takes
+precedence over unavailable local marking. Reverse precedence is unusable CoS,
+C, RPE=0 (legacy/unconfirmed), RPE=1 (reserved), RPE=2 (reflector unable),
+echoed EC1 mismatch, then missing/invalid IP metadata. Legacy responses that
+zero EC1 therefore remain legacy/unconfirmed rather than request mismatches. Multiple limitations can
+coexist; the raw RPE/C/IP totals remain independent. RPE=2 cannot identify
+whether policy or platform capability caused the refusal.
+
+Text reports print the outcome and unknown-reason counts. JSON and CSV retain
+the complete matrix in the existing `measurements` object; CSV columns and
+previous raw counters are unchanged. For example, use `--cos --ecn 2
+--output-format json` to obtain ECT(0) comparisons with separate ECT-to-CE and
+bleaching totals.
+
+These are endpoint comparisons, not proof of a faulty hop or a cause of
+congestion. The forward baseline is an accepted socket setting, and the
+reverse baseline is the reflector's report; local policies, tunnels and
+intermediate processing can affect either comparison. Equal endpoint values
+can also hide intermediate changes. Correlate with independent captures and
+[ECN deployment guidance](usage.md#ecn-deployment-and-interpretation). AIMD
+feedback, admission rules and integrity requirements are unchanged.

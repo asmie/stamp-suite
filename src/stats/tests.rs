@@ -1012,6 +1012,10 @@ fn ecn_observations_use_existing_report_containers() {
     ecn.reply_ip_ecn = [0, 0, 0, 1];
     ecn.unavailable_reply_ip_ecn = 1;
     ecn.reverse_unknown = 2;
+    for direction in [&mut ecn.forward, &mut ecn.reverse] {
+        direction.unknown = 2;
+        direction.unknown_reasons.cos_unavailable = 2;
+    }
     let snap = RttCollector::new()
         .snapshot(2, 0)
         .with_measurements(MeasurementSummary {
@@ -1024,6 +1028,8 @@ fn ecn_observations_use_existing_report_containers() {
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("configured egress unknown"));
     assert!(text.contains("reverse comparable 0, unknown 2"));
+    assert!(text.contains("ECN forward: 0 comparable, 2 unknown"));
+    assert!(text.contains("ECN reverse unknown reasons: CoS unavailable 2"));
     let mut json = Vec::new();
     snap.write_report(&mut json, OutputFormat::Json, false, true)
         .unwrap();
@@ -1036,6 +1042,64 @@ fn ecn_observations_use_existing_report_containers() {
     let measurements: serde_json::Value = serde_json::from_str(&cells["measurements"]).unwrap();
     assert_eq!(measurements["ecn"], json["measurements"]["ecn"]);
     assert_eq!(measurements["ecn"]["reverse_unknown"], 2);
+    assert_eq!(
+        measurements["ecn"]["forward"]["unknown_reasons"]["cos_unavailable"],
+        2
+    );
+    assert_eq!(measurements["ecn"]["reverse"]["unknown"], 2);
     let absent = serde_json::to_value(MeasurementSummary::default()).unwrap();
     assert!(absent.get("ecn").is_none());
+}
+
+#[test]
+fn ecn_directional_report_preserves_transition_matrix_and_outcome_labels() {
+    let mut ecn = EcnSummary::new(2, Some(2));
+    ecn.replies = 4;
+    ecn.usable_cos = 4;
+    ecn.received_ec2 = [1; 4];
+    ecn.reply_ip_ecn = [1; 4];
+    ecn.echoed_ec1 = [0, 0, 4, 0];
+    ecn.rpe = [0, 0, 0, 4];
+    ecn.rpd = [4, 0, 0, 0];
+    ecn.reverse_comparable = 4;
+    ecn.forward = EcnDirectionSummary {
+        comparable: 4,
+        unchanged: 1,
+        bleaching: 1,
+        ce_marked: 1,
+        remarked: 1,
+        ce_observed: 1,
+        transitions: [[0; 4], [0; 4], [1; 4], [0; 4]],
+        ..EcnDirectionSummary::default()
+    };
+    ecn.reverse = ecn.forward.clone();
+    let snap = RttCollector::new()
+        .snapshot(4, 0)
+        .with_measurements(MeasurementSummary {
+            ecn: Some(ecn),
+            ..MeasurementSummary::default()
+        });
+    let mut text = Vec::new();
+    snap.write_report(&mut text, OutputFormat::Text, false, true)
+        .unwrap();
+    let text = String::from_utf8(text).unwrap();
+    for direction in ["forward", "reverse"] {
+        assert!(text.contains(&format!("ECN {direction}: 4 comparable, 0 unknown; 1 unchanged, 1 bleaching, 1 ECT-to-CE, 1 other remarking; 1 observed CE")));
+    }
+    let mut json = Vec::new();
+    snap.write_report(&mut json, OutputFormat::Json, false, true)
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let mut csv = Vec::new();
+    snap.write_report(&mut csv, OutputFormat::Csv, false, true)
+        .unwrap();
+    let cells = csv_report(&String::from_utf8(csv).unwrap());
+    let measurements: serde_json::Value = serde_json::from_str(&cells["measurements"]).unwrap();
+    assert_eq!(measurements["ecn"], json["measurements"]["ecn"]);
+    assert_eq!(
+        measurements["ecn"]["reverse"]["transitions"][2],
+        serde_json::json!([1, 1, 1, 1])
+    );
+    assert_eq!(measurements["ecn"]["forward"]["bleaching"], 1);
+    assert_eq!(measurements["ecn"]["forward"]["ce_marked"], 1);
 }

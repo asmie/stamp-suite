@@ -410,7 +410,9 @@ Reports show CE observations, backoffs, and the current and peak intervals.
 
 `--cos` includes [ECN observation counters](measurements.md#ecn-observations)
 in text, JSON and CSV reports, with separate CoS and reply IP metadata and
-explicit unknown reverse comparisons.
+explicit unknown reverse comparisons. [Directional diagnostics](measurements.md#directional-ecn-diagnostics)
+separate bleaching, ECT-to-CE marking and other remarking, and explain unknown
+comparisons without attributing a faulty hop.
 
 Before measuring ECN, verify that both peers implement the extended CoS TLV
 and capture a short exchange for each address family and codepoint. Confirm
