@@ -194,6 +194,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Abort RPM installation when creating the service user or group fails,
+  instead of installing a service that cannot start. Require RPM’s dependency
+  scanner in packaging workflows to avoid falling back to incorrect weak-symbol
+  dependencies when RPM tools are missing.
+
 - Fix macOS/Windows compilation of MTU retry diagnostics tests by using
   platform-gated socket errors without a Linux-only `libc` dependency.
 

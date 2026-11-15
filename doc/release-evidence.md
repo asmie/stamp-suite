@@ -78,6 +78,13 @@ RPM 4.18's `rpm2cpio` requires; DEB
 inspection requires `dpkg-deb`. Tar and ZIP inspection use Python's standard
 library. These checks run before release artifacts are uploaded.
 
+RPM packaging requires the RPM tools, including `/usr/lib/rpm/find-requires`.
+Use `cargo generate-rpm --auto-req find-requires` after building the binary and
+generating its notices. CI and release jobs use that explicit scanner so missing
+tools fail packaging. The packager's automatic fallback can otherwise emit
+invalid weak-symbol dependencies on some hosts, producing an RPM that cannot
+be installed.
+
 Debian, RPM, Gentoo, OpenWrt, Nix and container recipes install the bundle under
 `/usr/share/doc/stamp-suite/` (or the platform's documentation prefix). Source
 archives retain the generator and reviewed policy; vendor archives preserve

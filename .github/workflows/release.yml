@@ -117,7 +117,7 @@ jobs:
       - name: Build DEB
         run: cargo deb --no-build --target ${{ matrix.target }}
       - name: Build RPM
-        run: cargo generate-rpm --target ${{ matrix.target }}
+        run: cargo generate-rpm --auto-req find-requires --target ${{ matrix.target }}
       - name: Assemble tarball
         shell: bash
         run: |

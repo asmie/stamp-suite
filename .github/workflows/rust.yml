@@ -391,7 +391,7 @@ jobs:
         run: |
           python3 scripts/third_party_notices.py --features all
           cargo deb --no-build
-          cargo generate-rpm
+          cargo generate-rpm --auto-req find-requires
       - name: Verify packaged third-party notices
         run: python3 scripts/check_packaged_notices.py "target/debian/*.deb" "target/generate-rpm/*.rpm"
       - name: Verify DEB package
