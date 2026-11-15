@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in round-trip latency observations to the live UDP benchmark, with
+  bounded timestamp storage, first-valid-reply sampling and explicit quantile
+  precision. Keep tracking disabled by default.
+
 - Add live UDP BER benchmark workloads with verified counters, repaired padding
   and HMACs, bounded padding and controlled corruption. Preserve completed
   trial reports on runtime errors and report payload size/profile metadata.

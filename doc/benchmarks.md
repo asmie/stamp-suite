@@ -24,7 +24,8 @@ one loopback session: readiness probe, 2 s idle, probe, 3 s load, 500 ms drain,
 counts. By default packets are 44 bytes open or 112 authenticated, without
 TLVs. Optional BER workloads add metadata, padding and an authenticated-mode
 TLV HMAC. Bursts and kernel/NIC timestamps are excluded. A fixed timestamp
-checks echoes; delays are not measured. The HMAC key is public test data.
+checks echoes; round-trip observations require `--latency`. The HMAC key is
+public test data.
 
 Options (`live_udp_bench --help` lists limits and defaults):
 
@@ -44,6 +45,7 @@ Options (`live_udp_bench --help` lists limits and defaults):
 | `--metrics` | Start the reflector with `--metrics` on an ephemeral loopback port, to include the metrics cost. The reflector binary must be built with the `metrics` feature, or it fails at startup. |
 | `--ber-padding OCTETS` | Include combined BER metadata and 16–1,200 padding octets, in complete four-octet default patterns. |
 | `--ber-damaged` | Require `--ber-padding`; inject five padding bit errors, including a four-bit run across an octet boundary. |
+| `--latency` | Observe local send-call-to-receive time for first valid replies; require `rate × seconds` ≤1,000,000 probe slots. Disabled by default. |
 
 The generator sends 1 ms batches, skips missed pacing slots, and drains replies
 on a separate thread. Bookkeeping is bounded by `rate × seconds + 1` slots
@@ -71,6 +73,39 @@ JSON adds request payload size, expected BER profile and a `completed` flag.
 If a trial returns a runtime error, prior completed trials and the error are
 printed before a nonzero exit. Startup metadata/hash failures or a panic can
 still prevent a report. Always check both the exit code and completion flag.
+
+### Optional round-trip observations
+
+```bash
+target/release/examples/live_udp_bench --rate 5000 --latency
+target/release/examples/live_udp_bench --rate 5000 --latency \
+  --ber-padding 1200 --ber-damaged --authenticated --ipv6
+```
+
+With `--latency`, each trial includes `observed_rtt`: sample count, exact
+minimum/maximum, mean, p50/p95/p99 in nanoseconds and `quantile_precision`.
+Tracking publishes a monotonic timestamp after request construction and before
+the send syscall. Receipt is observed immediately after `recv` returns, before
+base/HMAC/BER validation. A sample is retained only for the first validated
+reply to a sent sequence. Warm-up probes, invalid replies and duplicates do
+not contribute; valid drain replies do. Sample count must equal unique valid
+load-plus-drain replies, or the trial fails.
+
+These observations include timestamp publication, send-call work, kernel and
+socket queues, reflector processing and generator receive scheduling. They
+exclude request construction and reply validation after receipt. They are
+local application round-trip observations, without wire/NIC timestamps or
+one-way delay inference. Batched generator pacing remains unchanged. Missing
+replies have no timing sample, so loss can bias the reported distribution.
+
+Timestamp storage is bounded to 1,000,000 scheduled probes (about 8 MB plus
+the reserved warm-up slot), regardless of how many pacing positions are sent.
+The existing bounded RTT collector retains exact order statistics through
+4,096 samples and then reports its magnitude-relative quantization bound;
+clock error and statistical uncertainty are separate. Compare enabled and
+disabled runs: atomics, clocks and statistics add generator work and can
+affect the observations. Without the flag, `observed_rtt` is null and no
+timestamp ledger or RTT collector is created.
 
 ### Reading the results
 
@@ -108,7 +143,7 @@ Sweep IPv4/IPv6 and both authentication modes at 5,000, 25,000 and 100,000 pps.
 Add `--stateful` to measure session costs. Hold workers, CPU affinity, features
 and host load constant; use more repeats on a quiet host. This single-session
 loopback test can be limited by either process or the kernel. It does not
-measure NIC throughput, multi-client scaling, latency, non-BER TLVs, bursts or
+measure NIC throughput, multi-client scaling, non-BER TLVs, bursts or
 hardware timestamps, and requires matched before/after runs to assess an
 optimization. BER adds request serialization, bit-pattern checks and TLV HMAC
 work to the generator as well as the reflector; compare generator CPU and

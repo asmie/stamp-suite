@@ -3,6 +3,10 @@
 #[path = "live_udp_bench/ber.rs"]
 mod ber;
 
+#[cfg(target_os = "linux")]
+#[path = "live_udp_bench/latency.rs"]
+mod latency;
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("live_udp_bench requires Linux /proc CPU accounting");
@@ -17,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::ber::Profile;
+    use super::latency::{Samples, SendTimes};
     use clap::Parser;
     use serde::Serialize;
     use serde_json::json;
@@ -76,6 +81,9 @@ mod linux {
         /// Inject five padding bit errors, including one four-bit burst.
         #[arg(long, requires = "ber_padding")]
         ber_damaged: bool,
+        /// Observe local send-call-to-receive time; at most one million probe slots.
+        #[arg(long)]
+        latency: bool,
     }
 
     struct Reflector(Child);
@@ -248,16 +256,18 @@ mod linux {
         seen: Vec<bool>,
         #[serde(skip)]
         highest: Option<u32>,
+        #[serde(skip)]
+        rtt: Option<Samples>,
     }
     impl Replies {
-        fn record(&mut self, seq: Option<u32>, during_load: bool) {
+        fn record(&mut self, seq: Option<u32>, during_load: bool) -> bool {
             let Some(seq) = seq.filter(|&seq| (seq as usize) < self.seen.len()) else {
                 self.invalid += 1;
-                return;
+                return false;
             };
             if std::mem::replace(&mut self.seen[seq as usize], true) {
                 self.duplicates += 1;
-                return;
+                return false;
             }
             if self.highest.is_some_and(|highest| seq < highest) {
                 self.out_of_order += 1;
@@ -268,7 +278,31 @@ mod linux {
             } else {
                 self.unique_during_drain += 1;
             }
+            true
         }
+
+        fn record_received(
+            &mut self,
+            seq: Option<u32>,
+            during_load: bool,
+            timing: Option<(&SendTimes, u64)>,
+        ) -> Result<()> {
+            if seq == Some(0) {
+                return Ok(());
+            }
+            if !self.record(seq, during_load) {
+                return Ok(());
+            }
+            if let Some(samples) = &mut self.rtt {
+                let (times, received_ns) = timing.ok_or("missing receive observation")?;
+                samples.record(times.elapsed(seq.ok_or("missing reply sequence")?, received_ns)?);
+            }
+            Ok(())
+        }
+    }
+
+    fn elapsed_ns(start: Instant) -> Result<u64> {
+        Ok(u64::try_from(start.elapsed().as_nanos())?)
     }
 
     fn trial(
@@ -317,8 +351,10 @@ mod linux {
         probe(&mut child, &socket, key, ber, 0)?;
         // Load sequences start at 1; slot zero is reserved for delayed warm-up replies.
         let capacity = args.rate as usize * args.seconds as usize + 1;
+        let send_times = args.latency.then(|| SendTimes::new(capacity)).transpose()?;
         let mut replies = Replies {
             seen: vec![false; capacity],
+            rtt: args.latency.then(Samples::default),
             ..Default::default()
         };
         let reflector_before = cpu_ticks(child.0.id())?;
@@ -333,9 +369,17 @@ mod linux {
                     while Instant::now() < receive_deadline {
                         match socket.recv(&mut buf) {
                             Ok(n) => {
+                                // Observe receipt before authentication/BER validation;
+                                // only an admitted first reply contributes the sample.
+                                let received_ns =
+                                    send_times.as_ref().map(|_| elapsed_ns(start)).transpose()?;
                                 let seq = response_sequence(&buf[..n], key, ber);
                                 if seq != Some(0) {
-                                    replies.record(seq, Instant::now() < deadline);
+                                    replies.record_received(
+                                        seq,
+                                        Instant::now() < deadline,
+                                        send_times.as_ref().zip(received_ns),
+                                    )?;
                                 }
                             }
                             Err(e) if transient(&e) => {}
@@ -357,6 +401,11 @@ mod linux {
                             break;
                         }
                         let request = request(sent + 1, key, ber);
+                        if let Some(times) = &send_times {
+                            // Publish before the syscall: a fast reply can be read
+                            // while send() is still returning on the sender thread.
+                            times.mark(sent + 1, elapsed_ns(start)?)?;
+                        }
                         if socket.send(&request)? != request.len() {
                             return Err("incomplete UDP send".into());
                         }
@@ -382,10 +431,18 @@ mod linux {
         if unique == 0 {
             return Err("no valid responses during the load/drain sample".into());
         }
+        let observed_rtt = replies.rtt.as_ref().map(Samples::summary);
+        if observed_rtt
+            .as_ref()
+            .is_some_and(|summary| summary.samples != unique)
+        {
+            return Err("latency samples do not match unique valid replies".into());
+        }
         let idle_after = idle(&mut child, args.idle_seconds, hz)?;
         probe(&mut child, &socket, key, ber, sent + 1)?;
         Ok(json!({
             "reflector_command": command_line, "sent": sent, "replies": replies,
+            "observed_rtt": observed_rtt,
             "missing_after_drain": sent as u64 - unique,
             "loss_percent": 100.0 * (sent as u64 - unique) as f64 / sent as f64,
             "skipped_pacing_slots": skipped_slots,
@@ -402,6 +459,9 @@ mod linux {
     }
     fn run_inner() -> Result<()> {
         let mut args = Args::parse();
+        if args.latency {
+            super::latency::validate_capacity(args.rate as usize * args.seconds as usize + 1)?;
+        }
         let ber = args
             .ber_padding
             .map(|bytes| Profile::new(usize::from(bytes), args.ber_damaged))
@@ -461,6 +521,73 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn latency_ignores_warmup_duplicates_and_invalid_replies_and_includes_drain() {
+            let times = SendTimes::new(4).unwrap();
+            times.mark(1, 100).unwrap();
+            times.mark(2, 150).unwrap();
+            times.mark(3, 200).unwrap();
+            let mut replies = Replies {
+                seen: vec![false; 4],
+                rtt: Some(Samples::default()),
+                ..Default::default()
+            };
+            for (seq, during_load, received_ns) in [
+                (Some(0), true, 0),
+                (Some(3), true, 300),
+                (Some(1), false, 500),
+                (Some(3), true, 1000),
+                (None, true, 0),
+                (Some(4), true, 0),
+                (Some(2), true, 250),
+            ] {
+                replies
+                    .record_received(seq, during_load, Some((&times, received_ns)))
+                    .unwrap();
+            }
+            assert_eq!(
+                (
+                    replies.unique_during_load,
+                    replies.unique_during_drain,
+                    replies.duplicates,
+                    replies.invalid,
+                    replies.out_of_order
+                ),
+                (2, 1, 1, 2, 2)
+            );
+            let summary = serde_json::to_value(replies.rtt.as_ref().unwrap().summary()).unwrap();
+            assert_eq!(summary["samples"], 3);
+            assert_eq!(summary["min_ns"], 100);
+            assert_eq!(summary["max_ns"], 400);
+            assert_eq!(summary["mean_ns"], 200.0);
+            assert!(!replies.seen[0]);
+        }
+
+        #[test]
+        fn latency_rejects_missing_timing_and_disabled_mode_keeps_no_samples() {
+            let times = SendTimes::new(3).unwrap();
+            for timing in [None, Some((&times, 100))] {
+                let mut replies = Replies {
+                    seen: vec![false; 3],
+                    rtt: Some(Samples::default()),
+                    ..Default::default()
+                };
+                assert!(replies.record_received(Some(1), true, timing).is_err());
+            }
+            let mut plain = Replies {
+                seen: vec![false; 3],
+                ..Default::default()
+            };
+            plain.record_received(Some(1), true, None).unwrap();
+            assert_eq!(plain.unique_during_load, 1);
+            assert!(plain.rtt.is_none());
+            assert!(
+                Args::try_parse_from(["bench", "--latency"])
+                    .unwrap()
+                    .latency
+            );
+        }
 
         #[test]
         fn ber_options_require_padding_and_enforce_cli_bounds() {
