@@ -119,9 +119,8 @@ impl AimdController {
     /// §3.4 (observe EC2 and be capable of reducing the rate on CE).
     pub fn on_ce_observed(&mut self) {
         self.ce_observations += 1;
-        // A zero (or otherwise tiny) current interval can't be grown by a
-        // finite multiplicative factor in any observable way; bump to a
-        // floor first so backoff from "as fast as possible" is real.
+        // Multiplying zero cannot grow it; bump to a floor first so backoff
+        // from "as fast as possible" is real.
         let floor = if self.current.is_zero() {
             MIN_BACKOFF_FLOOR
         } else {
@@ -138,6 +137,12 @@ impl AimdController {
         } else {
             max
         };
+        // A validated factor just above one can round back to `current`.
+        // Require one nanosecond of progress, the Duration resolution, while
+        // respecting the cap even when it is already reached.
+        let next = next
+            .max(self.current.saturating_add(Duration::from_nanos(1)))
+            .min(max);
         if next > self.current {
             self.current = next;
             self.backoffs_applied += 1;
@@ -366,6 +371,44 @@ mod tests {
     }
 
     #[test]
+    fn near_unity_backoff_makes_progress_until_the_cap() {
+        // Both factors are accepted by configuration validation. Their
+        // products can round to the original nanosecond interval forever.
+        for (base, factor) in [
+            (Duration::from_micros(1), 1.0001),
+            (
+                Duration::from_millis(100),
+                f64::from_bits(1.0f64.to_bits() + 1),
+            ),
+            (
+                Duration::from_secs(3600),
+                f64::from_bits(1.0f64.to_bits() + 1),
+            ),
+        ] {
+            let mut c = AimdController::new(AimdParams {
+                base_interval: base,
+                backoff_factor: factor,
+                max_interval: base + Duration::from_nanos(3),
+                recovery_step: Duration::from_nanos(1),
+            });
+            for step in 1..=5 {
+                c.on_ce_observed();
+                assert_eq!(
+                    c.current_interval(),
+                    base + Duration::from_nanos(step.min(3))
+                );
+                assert_eq!(c.stats().ce_observations, step);
+                assert_eq!(c.stats().backoffs_applied, step.min(3));
+            }
+            for _ in 0..3 {
+                c.on_clean_reply();
+            }
+            assert_eq!(c.current_interval(), base);
+            assert_eq!(c.stats().peak_interval, base + Duration::from_nanos(3));
+        }
+    }
+
+    #[test]
     fn interleaved_ce_and_clean_events_never_exceed_max_or_go_below_base() {
         let mut c = AimdController::new(params());
         let script = [
@@ -397,6 +440,32 @@ mod proptests {
     use super::*;
 
     proptest! {
+        /// Accepted factors must make progress below the cap even when their
+        /// floating-point product rounds back to the same nanosecond value.
+        #[test]
+        fn every_ce_increases_the_interval_unless_capped(
+            base_ns in 0u64..=3_600_000_000_000,
+            headroom_ns in 0u64..=4_000_000_000_000_000,
+            factor_bits in (1.0f64.to_bits() + 1)..=f64::MAX.to_bits(),
+        ) {
+            let base = Duration::from_nanos(base_ns);
+            let max = base + Duration::from_nanos(headroom_ns);
+            let mut c = AimdController::new(AimdParams {
+                base_interval: base,
+                backoff_factor: f64::from_bits(factor_bits),
+                max_interval: max,
+                recovery_step: Duration::from_nanos(1),
+            });
+            for _ in 0..8 {
+                let before = c.current_interval();
+                let count = c.stats().backoffs_applied;
+                c.on_ce_observed();
+                prop_assert!(c.current_interval() <= max);
+                prop_assert_eq!(c.current_interval() > before, before < max);
+                prop_assert_eq!(c.stats().backoffs_applied, count + u64::from(before < max));
+            }
+        }
+
         /// For any sequence of CE / clean events, the controller's interval
         /// stays within [base_interval, max_interval] at every step. This is
         /// the core AIMD safety property the controller exists to guarantee.

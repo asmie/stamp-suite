@@ -153,6 +153,13 @@ Control-only requests keep their required zero interval. Reply counts remain
 unchanged. Response remains enabled for CoS ECT0/ECT1 and has no
 controlled-measurement disable option.
 
+Duration rounding cannot stall backoff below the cap: factors just above one
+advance the stored interval by at least 1 ns. This is arithmetic progress,
+not nanosecond wire-timing evidence. Tests:
+`src/rate_control.rs::near_unity_backoff_makes_progress_until_the_cap`,
+`src/rate_control.rs::every_ce_increases_the_interval_unless_capped` and
+`tests/sender_measurement_test.rs::near_unity_ce_factors_do_not_stall_sender_backoff`.
+
 The zero-gap burst floor uses the controller's backoff state, independently
 of its scale factor. With a zero probe interval, a 1 ms cap or partial recovery
 below 1 ms can leave the factor at one while still backed off. Tests:

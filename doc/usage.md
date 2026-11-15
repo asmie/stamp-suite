@@ -400,7 +400,11 @@ the reported RPE still need to be checked before interpreting reverse ECN.
 
 **ECN response.** `--cos` with `--ecn 1` or `--ecn 2` turns on AIMD pacing. A
 CE-marked reply multiplies the send interval by `--ecn-backoff-factor`, up to
-`--ecn-max-delay` milliseconds. Each reply with one usable non-CE CoS report
+`--ecn-max-delay` milliseconds. If multiplication would round back to the same
+interval, backoff adds 1 ns (the duration representation's resolution) without
+exceeding that cap. This prevents factors very close to 1 from stalling; it is
+not a claim of nanosecond wire-timing accuracy.
+Each reply with one usable non-CE CoS report
 and no observed reverse CE shortens it by `--ecn-recovery-step` milliseconds,
 down to `--send-delay`. Missing, ambiguous or unusable CoS feedback holds the
 current interval. With a key configured, recovery requires a verified TLV

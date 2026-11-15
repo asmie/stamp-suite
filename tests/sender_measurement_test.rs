@@ -780,6 +780,54 @@ fn sender_holds_ecn_backoff_until_usable_non_ce_feedback_returns() {
 }
 
 #[test]
+fn near_unity_ce_factors_do_not_stall_sender_backoff() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            for (delay, factor, base_ms) in [
+                ("1us", "1.0001", 0.001),
+                ("100", "1.0000000000000002", 100.0),
+            ] {
+                let peer = UdpSocket::bind((ip, 0)).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut extra = vec![
+                    "--cos",
+                    "--ecn",
+                    "2",
+                    "--send-delay",
+                    delay,
+                    "--ecn-backoff-factor",
+                    factor,
+                ];
+                if mode == 1 {
+                    extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
+                }
+                let auth = mode == 2;
+                let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
+                let mut request = [0; 2048];
+                let (length, source) = peer.recv_from(&mut request).unwrap();
+                let mut response =
+                    reply_with_extensions(&request[..length], auth, &[0, 4, 0, 4, 0, 12, 0xb0, 0]);
+                if mode == 1 {
+                    let digest = sign(&[&response[..4], &response[44..]]);
+                    response.extend_from_slice(&[0, 8, 0, 16]);
+                    response.extend_from_slice(&digest);
+                }
+                peer.send_to(&response, source).unwrap();
+                let stats = sender.finish();
+                assert_eq!(stats["packets_received"], 1);
+                assert_eq!(stats["congestion"]["ce_replies"], 1);
+                assert_eq!(stats["congestion"]["backoffs_applied"], 1);
+                let interval = stats["congestion"]["current_interval_ms"].as_f64().unwrap();
+                assert!(
+                    (interval - base_ms - 0.000001).abs() < 1e-12,
+                    "{ip} mode={mode} factor={factor}: {interval}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
     for ip in ["127.0.0.1", "::1"] {
         for mode in 0..3 {

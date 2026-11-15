@@ -198,6 +198,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Prevent valid ECN backoff factors close to 1 from stalling through duration
+  rounding. Every CE observation below the configured cap now increases the
+  stored interval by at least 1 ns; cap and recovery behavior remain intact.
+
 - Keep zero-gap reflected bursts paced while a zero-delay sender remains
   backed off, including a 1 ms ECN cap and partial recovery below 1 ms.
   Preserve configured nonzero burst gaps and control-only requests.
