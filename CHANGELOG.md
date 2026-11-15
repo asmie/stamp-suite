@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Read connected Windows sender MTU estimates and socket-local caps for
+  fixed-header requests and initial BER fitting. Disable fragmentation for
+  these probes; check native IPv4/IPv6 trimming, restoration and oversize refusal.
+
 - Require disposable-container DEB/RPM install, reinstall, privileged-port
   reflection and uninstall checks in CI and Linux release packaging. Preserve
   failure reports and pin Linux package builds to the tested Ubuntu 24.04 ABI.

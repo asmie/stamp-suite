@@ -88,10 +88,12 @@ checksums and also check that corrupt packets are rejected.
 `--attach-ext-hdr` attaches one Hop-by-Hop and one Destination Options header
 to IPv6 probes on Linux. Header requests (`--attach-ext-hdr`,
 `--reflected-ipv6-ext-hdr`, `--reflected-fixed-hdr`) need a known egress route
-MTU, which the sender reads only on Linux (`egress_mtu` in
-`src/sender/socket.rs`); on other platforms the sender refuses to start with
-them. Sender source ports are random dynamic ports by default, and
-explicit local and remote ports must differ. Both endpoints send with TTL/Hop
+MTU, which the sender reads on Linux and Windows (`egress_mtu` in
+`src/sender/socket.rs` and `src/sender/socket/windows.rs`); on other platforms
+the sender refuses to start with them. Windows supports fixed-header requests;
+IPv6 extension-header attachment remains Linux-only. Sender source ports are
+random dynamic ports by default, and explicit local and remote ports must differ.
+Both endpoints send with TTL/Hop
 Limit 255.
 
 ### Deployment assumptions
@@ -300,12 +302,24 @@ oversized mandatory packet before attempting a send. A failed route lookup
 also refuses the probe; it does not reuse the previous budget. Dynamic control,
 Direct Measurement, Access Report, diagnostic bytes and the originated HMAC
 are reserved before trimming. Header requests can return after the MTU grows,
-even if startup removed every request. On Linux it sets Don't Fragment, so a
+even if startup removed every request. On Linux and Windows it sets Don't Fragment, so a
 route change cannot fragment a probe. The reflector sizes each reply against the actual
 destination route before signing (`src/receiver/mtu.rs`,
 `src/receiver/transmit.rs::fit_reply`); an unknown budget fails closed. Header
-requests need a known route MTU, which only Linux provides. That limits where
-the feature runs; it never permits an oversized packet.
+requests need a known route MTU, provided by Linux and Windows senders;
+the reflector lookup remains Linux-only. That limits where the feature runs;
+it never permits an oversized packet.
+
+Windows sender tests in `src/sender/run/windows_mtu_tests.rs` query native
+IPv4, IPv6 and IPv4-mapped sockets, apply socket-local caps without changing
+host routes, and check trimming/restoration, mandatory oversize refusal and
+the configured fragmentation policy. Open, keyed-open and authenticated sends
+include independent HMAC checks. The portable fixed-header wire test in
+`tests/header_request_wire_test.rs` also runs on Windows. These exercise kernel
+estimates and socket caps, not active path probing or live host route changes.
+Windows loopback may bypass send-time MTU enforcement even with Don't Fragment
+set; these tests establish application refusal and socket policy, not physical
+fragmentation behavior.
 
 Single replies without Type 12 initialize their transport policy before moving
 the reply buffer. Transmit regressions cover Types 246/247, IPv4/IPv6, open and

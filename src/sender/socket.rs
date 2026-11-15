@@ -1,10 +1,16 @@
 //! Sender socket options: egress IP options, attached IPv6 extension headers,
 //! route MTU, and reply TOS reception.
 
+#[cfg(not(target_os = "windows"))]
 use super::*;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
+
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub(super) use windows::{egress_mtu, enable_mtu_discovery};
 
 /// Disable IPv4 UDP TX checksums only. Kernel receive validation is unchanged.
 #[cfg(target_os = "linux")]
@@ -146,8 +152,8 @@ pub(super) fn apply_attach_ext_hdrs(
 }
 
 /// Returns the egress route/interface MTU for the (connected) sender socket via
-/// `getsockopt(IP_MTU / IPV6_MTU)` on Linux, or `None` when it cannot be
-/// determined (non-Linux, or the option is unavailable). This reads the kernel's
+/// `getsockopt(IP_MTU / IPV6_MTU)` on Linux, or `None` when the option is
+/// unavailable. This reads the kernel's
 /// cached route MTU for the connected peer; it does not probe the path.
 #[cfg(target_os = "linux")]
 pub(super) fn egress_mtu(socket: &UdpSocket) -> Option<u32> {
@@ -178,7 +184,7 @@ pub(super) fn egress_mtu(socket: &UdpSocket) -> Option<u32> {
     (rc == 0 && mtu > 0).then_some(mtu as u32)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(super) fn egress_mtu(_socket: &UdpSocket) -> Option<u32> {
     None
 }

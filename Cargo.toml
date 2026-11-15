@@ -87,6 +87,7 @@ nix = { version = "0.31", default-features = false, features = ["socket", "uio",
 
 [target.'cfg(target_os = "windows")'.dependencies]
 pnet = "0.35"
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

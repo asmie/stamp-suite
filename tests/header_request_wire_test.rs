@@ -139,7 +139,7 @@ async fn sender_control_request_is_unique_zero_length_and_opt_in() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[tokio::test]
 async fn sender_fixed_header_requests_have_family_length_selector_and_zero_received() {
     for ip in ["127.0.0.1", "::1"] {
