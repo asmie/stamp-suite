@@ -1,11 +1,14 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use stamp_suite::tlv::{TlvFlags, TlvList};
+use stamp_suite::tlv::{check_tlv_framing, TlvFlags, TlvList};
 
 // A parsed list serializes back to its input, with reserved flag bits cleared
 // and without a trailing fragment shorter than a TLV header.
 fuzz_target!(|data: &[u8]| {
+    // Structural inspection never allocates values or follows unknown layouts.
+    // It deliberately reports short tails that the legacy parser tolerates.
+    let _ = check_tlv_framing(data);
     if let Ok(list) = TlvList::parse(data) {
         let known = TlvFlags::U | TlvFlags::M | TlvFlags::I | TlvFlags::C;
         let mut expected = data.to_vec();

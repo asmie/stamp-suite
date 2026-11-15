@@ -94,6 +94,16 @@ by the value codec's property tests and fuzz target.
 
 ## Evidence boundaries
 
+Read-only framing inspection is available for a future admission gate, but
+does not itself reject packets or verify typed lengths, flags or integrity.
+Tests: `src/tlv/framing/tests.rs::known_children_report_absolute_offsets_and_parent_ownership`,
+`src/tlv/framing/tests.rs::child_values_cannot_consume_a_later_parent`,
+`src/tlv/framing/tests.rs::framing_success_does_not_validate_semantic_lengths_or_integrity`
+and `src/tlv/framing/tests.rs::opaque_values_and_child_type_numbers_never_trigger_recursion`.
+The helper stops after one failure, keeps child reads within the owning parent
+and never guesses a value's container layout. Runtime M/I responses and the
+Partial zero-checksum admission status are unchanged.
+
 The signer regression failed before the fix: a well-framed semantic M response
 retained assembly's sequence-zero HMAC because its nonzero BER padding tail
 prevented the final signer from finding the HMAC. Final signing now walks

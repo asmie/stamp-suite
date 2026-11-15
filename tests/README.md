@@ -295,6 +295,14 @@ a build with the wrong backend cannot pass with an empty suite.
 
 ## Unit test coverage notes
 
+The allocation-free TLV framing checker has directed and property tests in
+`src/tlv/framing/tests.rs`: exact offsets and parent ownership, parent bounds,
+single-error termination, extreme starting offsets, maximum lengths and
+zero-length progress. Hand-encoded frames check arbitrary type/flag/value bytes;
+unknown values and child type numbers never trigger recursive inspection.
+Framing success is tested separately from semantic M and integrity policy.
+The `tlv_list_parse` fuzz target also exercises this checker.
+
 Many protocol details are covered by unit tests inside `src/` rather than by
 files in this directory.
 

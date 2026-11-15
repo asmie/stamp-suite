@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add allocation-free TLV framing inspection with exact outer/child error
+  offsets and bounded scans of known container layouts. Keep unknown values
+  opaque and preserve the existing reflector reply/discard policy.
+
 - Add opt-in reflector base-field validation through `--validate-base-fields`
   and TOML. Reject incomplete bases, zero Error Estimate multipliers and invalid
   PTP nanoseconds before session updates, preserving existing TLV error replies.

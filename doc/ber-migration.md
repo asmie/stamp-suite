@@ -127,6 +127,17 @@ digests, both before allocation and against an established session. Portable
 processing tests also cover IPv4/IPv6, stateful/stateless operation, serial wrap,
 gaps/reordering, opt-out compatibility and retained M/I responses.
 
+The shared `check_tlv_framing` helper now distinguishes incomplete outer/child
+headers from values that overrun their containing region, without allocating
+or decoding values. It checks known Location, Timestamp Information, Return
+Path, Type 12 and BER child regions; unknown layouts and child values stay
+opaque. Short complete fixed prefixes, known value lengths, flags, cardinality
+and HMAC validation remain separate semantic checks. A one-to-three-byte tail
+is a framing error to this helper, although the legacy list parser tolerates
+it. The identity reader uses the same frame iterator while preserving its
+existing stop-at-first-incomplete-frame behavior. The helper does not enable
+a new admission/discard policy or upgrade `ber-3-zero-udp`.
+
 The draft requires failed open-mode packet/session checks to be discarded, but
 [RFC 8972, sections 4 and 4.8](https://www.rfc-editor.org/rfc/rfc8972.html#section-4)
 specify malformed/integrity-error replies; the BER draft itself specifies M for

@@ -93,8 +93,9 @@ use crate::{
     time::generate_timestamp,
     tlv::{
         LocationDisclosure, PacketAddressInfo, ReturnPathAction, SyncSource, TimestampMethod,
-        TlvList, TlvSpan, TlvType, TypedTlv, HMAC_TLV_VALUE_SIZE, MICRO_SESSION_ID_TLV_VALUE_SIZE,
-        REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, TLV_HEADER_SIZE,
+        TlvFrames, TlvList, TlvSpan, TlvType, TypedTlv, HMAC_TLV_VALUE_SIZE,
+        MICRO_SESSION_ID_TLV_VALUE_SIZE, REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL,
+        TLV_HEADER_SIZE,
     },
 };
 
@@ -131,8 +132,10 @@ fn packet_session_key(
     } else {
         UNAUTH_BASE_SIZE
     };
-    let mut pos = base;
-    while let Some(tlv) = TlvSpan::at(data, pos) {
+    for tlv in TlvFrames::new(data, base) {
+        let Ok(tlv) = tlv else {
+            break;
+        };
         if tlv.tlv_type == TlvType::MicroSessionId {
             if key.sender_micro_session_id.is_some() {
                 return None;
@@ -143,7 +146,6 @@ fn packet_session_key(
             let value = tlv.value_start();
             key.sender_micro_session_id = Some(u16::from_be_bytes([data[value], data[value + 1]]));
         }
-        pos = tlv.end();
     }
     Some(key)
 }

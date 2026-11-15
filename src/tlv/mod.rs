@@ -17,6 +17,7 @@
 mod core;
 mod diagnostics;
 mod experimental;
+mod framing;
 mod list;
 mod residual_ber;
 mod traits;
@@ -25,6 +26,7 @@ mod typed;
 // Public API. These re-exports are the module's only external surface.
 
 pub use diagnostics::{TlvConformanceErrors, TlvConformanceReason};
+pub use framing::{check_tlv_framing, TlvFrames, TlvFramingError, TlvFramingErrorKind};
 
 // Trait
 pub use self::core::{RESIDUAL_BER_PATTERN_SUBTLV_TYPE, RESIDUAL_BER_TLV_TYPE};
