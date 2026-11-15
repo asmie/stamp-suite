@@ -3140,7 +3140,7 @@ async fn test_wait_phase_retransmits_when_reflector_silent_then_aborts() {
     let port = socket.local_addr().unwrap().port();
 
     // timeout=1s, retries=2 ⇒ retry budget = 1*(1+2) = 3s worst case,
-    // after the 1s reply drain that precedes the retry phase.
+    // overlapping the 1s final reply drain.
     let conf = access_report_test_config(port, 1, 2);
 
     let reflector = tokio::spawn(collect_silently(socket, 4, Duration::from_secs(8)));

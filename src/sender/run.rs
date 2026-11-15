@@ -876,9 +876,9 @@ impl SenderRun {
         let drain_until = tokio::time::Instant::now() + self.timeout;
         self.receive_until(drain_until, Wait::Drain, output).await?;
 
-        // Access Report retries continue after the last probe (RFC 8972
-        // §4.6), including `--count 1` runs, for an exchange the probe loop
-        // started. Each retry carries identical report bytes.
+        // Finish an Access Report exchange still pending after the reply drain
+        // (RFC 8972 §4.6), including `--count 1` runs. The drain also drives
+        // report deadlines; each retry carries identical report bytes.
         while !self.stopping()
             && self
                 .access_report_state
@@ -966,6 +966,7 @@ impl SenderRun {
         enum Event {
             Datagram(std::io::Result<(usize, Option<u64>, Option<u8>)>),
             MonitorDue,
+            AccessReportDue,
             Deadline,
             Report,
             Shutdown,
@@ -997,6 +998,16 @@ impl SenderRun {
                 .monitor
                 .as_ref()
                 .and_then(|m| m.deadline());
+            // A long final reply timeout must not postpone Access Report
+            // retransmission. Keep the drain deadline fixed while servicing
+            // the report's independent timer and bounded retry budget.
+            let access_report_due = if matches!(wait, Wait::Drain) {
+                self.access_report_state
+                    .as_ref()
+                    .and_then(|state| state.armed_deadline())
+            } else {
+                None
+            };
             let report_timer = &mut self.report_timer;
             // Unbiased: under a steady stream of replies a biased select
             // would starve the send deadline.
@@ -1015,6 +1026,12 @@ impl SenderRun {
                         None => std::future::pending().await,
                     }
                 } => Event::MonitorDue,
+                _ = async {
+                    match access_report_due {
+                        Some(at) => tokio::time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => Event::AccessReportDue,
                 _ = async {
                     if spin {
                         tokio::task::yield_now().await;
@@ -1063,6 +1080,15 @@ impl SenderRun {
                 Event::MonitorDue => {
                     if let Some(m) = self.measurements.monitor.as_mut() {
                         m.advance(Instant::now());
+                    }
+                }
+                Event::AccessReportDue => {
+                    if self
+                        .access_report_state
+                        .as_mut()
+                        .is_some_and(|state| state.tick(Instant::now()))
+                    {
+                        self.send_probe(true).await?;
                     }
                 }
                 Event::Deadline if !spin => return Ok(true),
@@ -1618,3 +1644,7 @@ mod admission_tests;
 #[cfg(test)]
 #[path = "run/congestion_tests.rs"]
 mod congestion_tests;
+
+#[cfg(test)]
+#[path = "run/access_report_tests.rs"]
+mod access_report_tests;

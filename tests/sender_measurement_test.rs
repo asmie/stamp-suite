@@ -42,8 +42,6 @@ impl Sender {
                 "0",
                 "--count",
                 &count.to_string(),
-                "--timeout",
-                "1",
                 "--hwtstamp",
                 "off",
                 "--output-format",
@@ -54,6 +52,9 @@ impl Sender {
             .env_remove("STAMP_HMAC_KEY")
             .env("RUST_LOG", "off")
             .env("TOKIO_WORKER_THREADS", "2");
+        if !extra.contains(&"--timeout") {
+            command.args(["--timeout", "1"]);
+        }
         if !extra.contains(&"--send-delay") {
             command.args(["--send-delay", "20"]);
         }
@@ -823,6 +824,73 @@ fn near_unity_ce_factors_do_not_stall_sender_backoff() {
                     "{ip} mode={mode} factor={factor}: {interval}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn access_report_retries_during_final_reply_drain() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            let peer = UdpSocket::bind((ip, 0)).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut extra = vec![
+                "--timeout",
+                "10",
+                "--access-report",
+                "2",
+                "--access-return-code",
+                "255",
+                "--access-report-timeout",
+                "1",
+                "--access-report-retries",
+                "2",
+            ];
+            if mode == 1 {
+                extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
+            }
+            let auth = mode == 2;
+            let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
+            let mut buffer = [0; 2048];
+            let (length, source) = peer.recv_from(&mut buffer).unwrap();
+            let first = buffer[..length].to_vec();
+            let base = if auth { 112 } else { 44 };
+            let report = [0x80, 6, 0, 4, 0x20, 255, 0, 0];
+            assert_eq!(&first[base..base + 8], &report);
+            let started = Instant::now();
+            let (length, retry_source) = peer
+                .recv_from(&mut buffer)
+                .expect("Access Report retry must not wait for the ten-second reply drain");
+            assert_eq!(retry_source, source);
+            assert!(started.elapsed() >= Duration::from_millis(800));
+            assert_eq!(&buffer[base..base + 8], &report);
+            assert_ne!(&first[..4], &buffer[..4], "retry needs a fresh sequence");
+            let send = |request: &[u8], tail: &[u8]| {
+                let mut response = reply_with_extensions(request, auth, tail);
+                if mode == 1 && !tail.is_empty() {
+                    let digest = sign(&[&response[..4], &response[44..]]);
+                    response.extend_from_slice(&[0, 8, 0, 16]);
+                    response.extend_from_slice(&digest);
+                }
+                peer.send_to(&response, source).unwrap();
+            };
+            send(&buffer[..length], &[0, 6, 0, 4, 0x20, 255, 0, 0]);
+            // Keep the original probe pending beyond the next retry deadline.
+            // Acknowledging the retry must disarm its timer during the drain.
+            peer.set_read_timeout(Some(Duration::from_millis(1500)))
+                .unwrap();
+            let error = peer.recv_from(&mut buffer).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ));
+            send(&first, &[]);
+            let stats = sender.finish();
+            assert_eq!(stats["packets_sent"], 2, "{ip} mode={mode}");
+            assert_eq!(stats["packets_received"], 2);
+            assert_eq!(stats["packets_lost"], 0);
+            assert_eq!(stats["access_report"]["outcome"], "acknowledged");
+            assert_eq!(stats["access_report"]["retransmissions"], 1);
         }
     }
 }

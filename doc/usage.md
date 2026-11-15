@@ -389,7 +389,9 @@ HMAC.
 `--access-report-retries` (default 4) bound the delivery procedure. Retries
 continue after the main send loop until the reflector acknowledges the report
 or the retries run out. A silent peer can therefore extend a short run by up to
-15 seconds with the defaults.
+15 seconds with the defaults. The Access Report timer also runs during the
+final reply wait, so a longer `--timeout` does not postpone retries. Retries
+do not extend that wait's deadline; an unfinished exchange continues afterward.
 Acknowledgement requires exactly one usable Access Report with the original
 Access ID and Return Code. Wrong values or duplicate reports leave the retry
 timer armed; Reserved bits and bytes are ignored. These replies can still

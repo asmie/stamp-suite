@@ -198,6 +198,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Service Access Report retry deadlines during the final reply wait. A long
+  `--timeout` no longer delays retries; acknowledgement, retry limits and the
+  final-wait deadline remain effective.
+
 - Require a single matching Access Report echo before cancelling retries.
   Wrong Access IDs, Return Codes and duplicate reports no longer acknowledge
   delivery; Reserved fields remain ignored and valid RTT samples are retained.
