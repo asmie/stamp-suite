@@ -23,8 +23,8 @@ one loopback session: readiness probe, 2 s idle, probe, 3 s load, 500 ms drain,
 2 s idle, then a final verified probe. Probe traffic is excluded from load
 counts. By default packets are 44 bytes open or 112 authenticated, without
 TLVs. Optional BER workloads add metadata, padding and an authenticated-mode
-TLV HMAC. Optional Type 12 workloads request bursts; kernel/NIC timestamps are
-excluded. A fixed timestamp
+TLV HMAC. Optional Type 12 workloads request bursts; header workloads exercise
+reflection separately. Kernel/NIC timestamps are excluded. A fixed timestamp
 checks echoes; round-trip observations require `--latency`. The HMAC key is
 public test data.
 
@@ -49,6 +49,9 @@ Options (`live_udp_bench --help` lists limits and defaults):
 | `--latency` | Observe local send-call-to-receive time for first valid replies; require `rate × seconds` ≤1,000,000 probe slots. Disabled by default. |
 | `--burst-count N` | Request 1–16 Type 12 reply copies per probe. Require `--stateful`; conflict with BER. Bound `rate × seconds × count` to 1,000,000 scheduled copies. |
 | `--burst-bytes OCTETS` | Require `--burst-count`; request 240–1,200 payload octets aligned to four, default 240. |
+| `--headers MODE` | Linux nix only: `fixed` for fixed-header C fallback, `ipv6-ext` for Destination Options, or `combined` for both. Conflict with BER/bursts; extension modes require `--ipv6`. |
+| `--header-bytes OCTETS` | Require an extension mode; 16–256 Destination Options octets aligned to eight, default 16. |
+| `--headers-denied` | Require `--headers`; keep reflection denied on the temporary child while still attaching requested forward options. |
 
 The generator sends 1 ms batches, skips missed pacing slots, and drains replies
 on a separate thread. Bookkeeping is bounded by `rate × seconds + 1` slots
@@ -76,6 +79,43 @@ JSON adds request payload size, expected BER profile and a `completed` flag.
 If a trial returns a runtime error, prior completed trials and the error are
 printed before a nonzero exit. Startup metadata/hash failures or a panic can
 still prevent a report. Always check both the exit code and completion flag.
+
+### Live header reflection
+
+```bash
+target/release/examples/live_udp_bench --rate 5000 --headers fixed --latency
+unshare -Urn sh -ec 'ip link set lo up
+  exec target/release/examples/live_udp_bench --rate 5000 --ipv6 --authenticated \
+    --headers combined --header-bytes 256 --latency'
+unshare -Urn sh -ec 'ip link set lo up
+  exec target/release/examples/live_udp_bench --rate 5000 --ipv6 \
+    --headers ipv6-ext --headers-denied'
+```
+
+Header profiles use the Linux nix backend; explicit pnet-only builds reject
+them at startup. Attaching IPv6 options requires `CAP_NET_RAW` on Linux; the
+commands above grant it inside a private user/network namespace and enable
+that namespace's loopback. They require permitted unprivileged namespaces
+and `iproute2`. A failed attachment returns an error. Fixed-only cases need
+no attachment capability. Fixed-header requests expect the backend's C fallback with
+preserved zero values for IPv4 and IPv6. Extension modes attach one bounded
+Destination Options header through `IPV6_DSTOPTS` before connecting each
+generator socket. A skippable experimental option carries deterministic bytes;
+the kernel sets Next Header to UDP. The reflector observes the forward header
+through ancillary data and returns its bytes inside Type 246. Combined mode
+places the Type 247 fixed-header request before Type 246.
+
+By default the temporary reflector permits requested reflection for the
+loopback sender. `--headers-denied` retains default-deny policy; extension
+requests then expect C and unchanged values, while sockets still attach the
+same options. Every reply must have exact TLV ordering, values, flags, length,
+base identity and applicable base/TLV HMACs. Attachment or missing expected
+data fails visibly. JSON records `header_profile`, and old workload profiles
+remain null. These cases measure actual socket option/capture/reflection work
+on loopback, without claiming physical capture, raw independent verification,
+reverse IP header attachment or pnet header performance. Keep generator
+serialization/verification costs and first-reply RTT scope in mind when
+comparing modes and sizes.
 
 ### Type 12 reply bursts
 
@@ -180,7 +220,7 @@ Sweep IPv4/IPv6 and both authentication modes at 5,000, 25,000 and 100,000 pps.
 Add `--stateful` to measure session costs. Hold workers, CPU affinity, features
 and host load constant; use more repeats on a quiet host. This single-session
 loopback test can be limited by either process or the kernel. It does not
-measure NIC throughput, multi-client scaling, non-BER/Type-12 TLVs or
+measure NIC throughput, multi-client scaling, other TLVs or
 hardware timestamps, and requires matched before/after runs to assess an
 optimization. BER adds request serialization, bit-pattern checks and TLV HMAC
 work to the generator as well as the reflector; compare generator CPU and

@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add live Linux nix header benchmarks for fixed-header C fallback, injected
+  IPv6 Destination Options and policy refusals. Verify returned bytes, flags
+  and HMACs with bounded header sizes and explicit workload metadata.
+
 - Add live Type 12 burst benchmark workloads with bounded per-copy accounting,
   reply/HMAC validation, complete/partial probe totals and separate copy loss.
   Drain warm-up bursts and retain first-reply latency sampling.

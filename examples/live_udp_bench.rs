@@ -11,6 +11,10 @@ mod latency;
 #[path = "live_udp_bench/burst.rs"]
 mod burst;
 
+#[cfg(target_os = "linux")]
+#[path = "live_udp_bench/headers.rs"]
+mod headers;
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("live_udp_bench requires Linux /proc CPU accounting");
@@ -26,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod linux {
     use super::ber::Profile;
     use super::burst::{Copies, Profile as Burst, Verdict};
+    use super::headers::{Mode as HeaderMode, Profile as Headers};
     use super::latency::{Samples, SendTimes};
     use clap::Parser;
     use serde::Serialize;
@@ -95,6 +100,15 @@ mod linux {
         /// Burst reply payload size, 240–1200 octets aligned to four (default 240).
         #[arg(long, value_parser=clap::value_parser!(u16).range(240..=1200), requires="burst_count")]
         burst_bytes: Option<u16>,
+        /// Linux nix header workload: fixed C fallback, IPv6 options, or both.
+        #[arg(long, value_enum, conflicts_with_all=["ber_padding","burst_count"])]
+        headers: Option<HeaderMode>,
+        /// Destination Options size, 16–256 octets aligned to eight (default 16).
+        #[arg(long, requires="headers", value_parser=clap::value_parser!(u16).range(16..=256))]
+        header_bytes: Option<u16>,
+        /// Keep child header reflection denied while still attaching requested options.
+        #[arg(long, requires = "headers")]
+        headers_denied: bool,
     }
 
     struct Reflector(Child);
@@ -228,10 +242,14 @@ mod linux {
         key: Option<&HmacKey>,
         ber: Option<&Profile>,
         burst: Option<&Burst>,
+        headers: Option<&Headers>,
     ) -> Vec<u8> {
         let mut bytes = request(seq, key, ber);
         if let Some(burst) = burst {
             burst.append(&mut bytes, key);
+        }
+        if let Some(headers) = headers {
+            headers.append(&mut bytes, key);
         }
         bytes
     }
@@ -241,7 +259,13 @@ mod linux {
         key: Option<&HmacKey>,
         ber: Option<&Profile>,
         burst: Option<&Burst>,
+        headers: Option<&Headers>,
     ) -> Option<u32> {
+        if let Some(headers) = headers {
+            let base = if key.is_some() { 112 } else { 44 };
+            let seq = reply_sequence(buf.get(..base)?, key)?;
+            return headers.validate(buf, base, key).then_some(seq);
+        }
         let Some(burst) = burst else {
             return response_sequence(buf, key, ber);
         };
@@ -256,14 +280,40 @@ mod linux {
         key: Option<&HmacKey>,
         ber: Option<&Profile>,
         burst: Option<&Burst>,
+        headers: Option<&Headers>,
         seq: u32,
     ) -> Result<()> {
+        if let Some(headers) = headers {
+            let start = Instant::now();
+            let request = workload_request(seq, key, None, None, Some(headers));
+            let mut buf = [0; 2048];
+            while start.elapsed() < Duration::from_secs(5) {
+                child.check()?;
+                if socket.send(&request)? != request.len() {
+                    return Err("incomplete header probe send".into());
+                }
+                match socket.recv(&mut buf) {
+                    Ok(n)
+                        if workload_response(&buf[..n], key, None, None, Some(headers))
+                            == Some(seq) =>
+                    {
+                        return Ok(())
+                    }
+                    Ok(_) => {}
+                    Err(e)
+                        if transient(&e) || e.kind() == std::io::ErrorKind::ConnectionRefused => {}
+                    Err(e) => return Err(e.into()),
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            return Err("no valid header probe response within five seconds".into());
+        }
         let Some(burst) = burst else {
             return probe(child, socket, key, ber, seq);
         };
         let start = Instant::now();
         let mut next_send = start;
-        let request = workload_request(seq, key, None, Some(burst));
+        let request = workload_request(seq, key, None, Some(burst), None);
         let mut sequences = Vec::new();
         let mut buf = [0; 2048];
         while start.elapsed() < Duration::from_secs(5) {
@@ -275,7 +325,9 @@ mod linux {
                 next_send = Instant::now() + Duration::from_millis(20);
             }
             match socket.recv(&mut buf) {
-                Ok(n) if workload_response(&buf[..n], key, None, Some(burst)) == Some(seq) => {
+                Ok(n)
+                    if workload_response(&buf[..n], key, None, Some(burst), None) == Some(seq) =>
+                {
                     let nonce = u32::from_be_bytes(buf[..4].try_into()?);
                     if !sequences.contains(&nonce) {
                         sequences.push(nonce);
@@ -429,11 +481,25 @@ mod linux {
         Ok(u64::try_from(start.elapsed().as_nanos())?)
     }
 
+    fn workload_socket(destination: SocketAddr, headers: Option<&Headers>) -> Result<UdpSocket> {
+        let Some(headers) = headers else {
+            return socket(destination);
+        };
+        let socket = UdpSocket::bind((destination.ip(), 0))?;
+        // Set sticky headers before connect so route/socket setup sees their overhead.
+        headers.attach(&socket)?;
+        socket.connect(destination)?;
+        socket.set_read_timeout(Some(Duration::from_millis(10)))?;
+        socket.set_write_timeout(Some(Duration::from_millis(100)))?;
+        Ok(socket)
+    }
+
     fn trial(
         args: &Args,
         key: Option<&HmacKey>,
         ber: Option<&Profile>,
         burst: Option<&Burst>,
+        headers: Option<&Headers>,
         hz: u64,
     ) -> Result<serde_json::Value> {
         let ip = if args.ipv6 { "::1" } else { "127.0.0.1" };
@@ -472,16 +538,19 @@ mod linux {
                 &burst.bytes.to_string(),
             ]);
         }
+        if let Some(headers) = headers {
+            headers.configure(&mut command, ip);
+        }
         let command_line = format!("{command:?}");
         drop(reserve); // Bind race fails visibly via child status; never retry a different server.
         let mut child = Reflector(command.spawn()?);
-        let probe_socket = socket(destination)?;
-        workload_probe(&mut child, &probe_socket, key, ber, burst, 0)?;
+        let probe_socket = workload_socket(destination, headers)?;
+        workload_probe(&mut child, &probe_socket, key, ber, burst, headers, 0)?;
         thread::sleep(Duration::from_millis(100));
         let idle_before = idle(&mut child, args.idle_seconds, hz)?;
-        let socket = socket(destination)?;
+        let socket = workload_socket(destination, headers)?;
         // Warm the measured session and validate that readiness resumed after idle.
-        workload_probe(&mut child, &socket, key, ber, burst, 0)?;
+        workload_probe(&mut child, &socket, key, ber, burst, headers, 0)?;
         // Load sequences start at 1; slot zero is reserved for delayed warm-up replies.
         let capacity = args.rate as usize * args.seconds as usize + 1;
         let send_times = args.latency.then(|| SendTimes::new(capacity)).transpose()?;
@@ -509,7 +578,7 @@ mod linux {
                                 // only an admitted first reply contributes the sample.
                                 let received_ns =
                                     send_times.as_ref().map(|_| elapsed_ns(start)).transpose()?;
-                                let seq = workload_response(&buf[..n], key, ber, burst);
+                                let seq = workload_response(&buf[..n], key, ber, burst, headers);
                                 if seq != Some(0) {
                                     let timing = send_times.as_ref().zip(received_ns);
                                     if burst.is_some() {
@@ -553,7 +622,7 @@ mod linux {
                         if Instant::now() >= deadline {
                             break;
                         }
-                        let request = workload_request(sent + 1, key, ber, burst);
+                        let request = workload_request(sent + 1, key, ber, burst, headers);
                         if let Some(times) = &send_times {
                             // Publish before the syscall: a fast reply can be read
                             // while send() is still returning on the sender thread.
@@ -603,7 +672,7 @@ mod linux {
         {
             return Err("burst probe totals disagree with unique reply accounting".into());
         }
-        workload_probe(&mut child, &socket, key, ber, burst, sent + 1)?;
+        workload_probe(&mut child, &socket, key, ber, burst, headers, sent + 1)?;
         Ok(json!({
             "reflector_command": command_line, "sent": sent, "replies": replies,
             "observed_rtt": observed_rtt,
@@ -625,6 +694,13 @@ mod linux {
     }
     fn run_inner() -> Result<()> {
         let mut args = Args::parse();
+        let headers = args
+            .headers
+            .map(|mode| Headers::new(mode, args.ipv6, args.header_bytes, args.headers_denied))
+            .transpose()?;
+        if headers.is_some() && cfg!(all(feature = "ttl-pnet", not(feature = "ttl-nix"))) {
+            return Err("header workloads require the Linux nix backend".into());
+        }
         let burst = args
             .burst_count
             .map(|count| Burst::new(count, args.burst_bytes.unwrap_or(240)))
@@ -654,7 +730,14 @@ mod linux {
         let mut failure = None;
         for index in 0..args.repeats {
             eprintln!("live UDP trial {}/{}", index + 1, args.repeats);
-            match trial(&args, key.as_ref(), ber.as_ref(), burst.as_ref(), hz as u64) {
+            match trial(
+                &args,
+                key.as_ref(),
+                ber.as_ref(),
+                burst.as_ref(),
+                headers.as_ref(),
+                hz as u64,
+            ) {
                 Ok(result) => trials.push(result),
                 Err(error) => {
                     failure = Some(error.to_string());
@@ -669,9 +752,10 @@ mod linux {
             serde_json::to_string_pretty(&json!({
                 "schema_version": 1, "settings": args, "trials": trials,
                 "completed": failure.is_none(), "error": failure,
-                "request_payload_octets": workload_request(0, key.as_ref(), ber.as_ref(),burst.as_ref()).len(),
+                "request_payload_octets": workload_request(0, key.as_ref(), ber.as_ref(),burst.as_ref(),headers.as_ref()).len(),
                 "ber_profile": ber.as_ref().map(Profile::summary),
                 "burst_profile":burst.as_ref().map(Burst::summary),
+                "header_profile":headers.as_ref().map(Headers::summary),
                 "cpu_ticks_per_second": hz,
                 "reflector_sha256": binary_hash(args.reflector.clone())?,
                 "generator_sha256": binary_hash(std::env::current_exe()?)?,
@@ -695,6 +779,110 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn header_options_require_a_mode_and_exclude_other_workloads() {
+            for args in [
+                vec!["bench", "--headers-denied"],
+                vec!["bench", "--header-bytes", "16"],
+                vec!["bench", "--headers", "fixed", "--ber-padding", "120"],
+                vec![
+                    "bench",
+                    "--headers",
+                    "fixed",
+                    "--stateful",
+                    "--burst-count",
+                    "4",
+                ],
+            ] {
+                assert!(Args::try_parse_from(args).is_err());
+            }
+            let args = Args::try_parse_from([
+                "bench",
+                "--headers",
+                "combined",
+                "--ipv6",
+                "--header-bytes",
+                "256",
+                "--headers-denied",
+            ])
+            .unwrap();
+            assert!(Headers::new(
+                args.headers.unwrap(),
+                args.ipv6,
+                args.header_bytes,
+                args.headers_denied
+            )
+            .is_ok());
+            assert!(Headers::new(HeaderMode::Ipv6Ext, false, None, false).is_err());
+        }
+
+        #[test]
+        fn header_workload_keeps_base_identity_and_signature_checks() {
+            use stamp_suite::tlv::{
+                ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv, TlvList, TypedTlv,
+            };
+            for auth in [false, true] {
+                let key = auth.then(|| HmacKey::from_hex(KEY).unwrap());
+                let profile = Headers::new(HeaderMode::Combined, true, Some(16), false).unwrap();
+                let base = if auth { 112 } else { 44 };
+                let mut bytes = vec![0; base];
+                let (ssid, seq, timestamp, estimate) = if auth {
+                    (26, 48, 64, 72)
+                } else {
+                    (14, 24, 28, 36)
+                };
+                bytes[..4].copy_from_slice(&9u32.to_be_bytes());
+                bytes[ssid..ssid + 2].copy_from_slice(&SSID.to_be_bytes());
+                bytes[seq..seq + 4].copy_from_slice(&3u32.to_be_bytes());
+                bytes[timestamp..timestamp + 8].copy_from_slice(&STAMP.to_be_bytes());
+                bytes[estimate..estimate + 2].copy_from_slice(&1u16.to_be_bytes());
+                let mut fixed = ReflectedFixedHdrTlv::request_with_capacity(40).to_raw();
+                fixed.clear_reflector_flags();
+                fixed.set_conformant_reflected();
+                let mut ext = ReflectedIpv6ExtHdrTlv::with_data(vec![
+                    17, 1, 0x1e, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                ])
+                .to_raw();
+                ext.clear_reflector_flags();
+                let mut list = TlvList::new();
+                list.push(fixed).unwrap();
+                list.push(ext).unwrap();
+                if let Some(key) = &key {
+                    let digest = key.compute(&bytes[..96]);
+                    bytes[96..112].copy_from_slice(&digest);
+                    assert!(list.set_hmac_response(key, &bytes[..4]));
+                }
+                bytes.extend(list.to_bytes());
+                assert_eq!(
+                    workload_response(&bytes, key.as_ref(), None, None, Some(&profile)),
+                    Some(3)
+                );
+                assert_eq!(
+                    workload_response(&bytes, key.as_ref(), None, None, None),
+                    None
+                );
+                for offset in [ssid, timestamp, estimate] {
+                    let mut wrong = bytes.clone();
+                    wrong[offset] ^= 1;
+                    if let Some(key) = &key {
+                        let digest = key.compute(&wrong[..96]);
+                        wrong[96..112].copy_from_slice(&digest);
+                    }
+                    assert_eq!(
+                        workload_response(&wrong, key.as_ref(), None, None, Some(&profile)),
+                        None
+                    );
+                }
+                if auth {
+                    bytes[96] ^= 1;
+                    assert_eq!(
+                        workload_response(&bytes, key.as_ref(), None, None, Some(&profile)),
+                        None
+                    );
+                }
+            }
+        }
 
         #[test]
         fn burst_options_require_stateful_mode_and_exclude_ber() {
@@ -809,10 +997,13 @@ mod linux {
                 }
                 bytes.extend(list.to_bytes());
                 assert_eq!(
-                    workload_response(&bytes, key.as_ref(), None, Some(&profile)),
+                    workload_response(&bytes, key.as_ref(), None, Some(&profile), None),
                     Some(3)
                 );
-                assert_eq!(workload_response(&bytes, key.as_ref(), None, None), None);
+                assert_eq!(
+                    workload_response(&bytes, key.as_ref(), None, None, None),
+                    None
+                );
                 for offset in [ssid, timestamp, estimate] {
                     let mut wrong = bytes.clone();
                     wrong[offset] ^= 1;
@@ -821,14 +1012,14 @@ mod linux {
                         wrong[96..112].copy_from_slice(&digest);
                     }
                     assert_eq!(
-                        workload_response(&wrong, key.as_ref(), None, Some(&profile)),
+                        workload_response(&wrong, key.as_ref(), None, Some(&profile), None),
                         None
                     );
                 }
                 if auth {
                     bytes[96] ^= 1;
                     assert_eq!(
-                        workload_response(&bytes, key.as_ref(), None, Some(&profile)),
+                        workload_response(&bytes, key.as_ref(), None, Some(&profile), None),
                         None
                     );
                 }
