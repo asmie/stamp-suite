@@ -26,6 +26,9 @@ use stamp_suite::tlv::{
     TypedTlv,
 };
 
+#[path = "reflector_hotpath/ber.rs"]
+mod ber;
+
 fn src() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 12345)
 }
@@ -282,5 +285,6 @@ criterion_group!(
     bench_auth_no_tlvs,
     bench_auth_full_chain,
     bench_unauth_stateful_sessions,
+    ber::bench,
 );
 criterion_main!(benches);

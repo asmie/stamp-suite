@@ -135,6 +135,41 @@ comparison with:
 cargo test --locked --all-features --bench reflector_hotpath -- --test
 ```
 
+### BER processing and reply assembly
+
+The `ber` group covers 32 combinations: 120/1,200 padding octets, default
+four-octet/explicit five-octet patterns, clean/damaged padding, open/authenticated
+packets and IPv4/IPv6 address metadata. Both sizes contain whole patterns.
+Damaged padding has a four-bit error run crossing an octet boundary and a
+separate one-bit error. Before timing, each fixture checks exactly five errors
+and a maximum burst of four (or zero/zero when clean), processed TLV flags,
+repaired padding, preserved explicit patterns, symmetric reply size and valid
+request/reply HMACs when authenticated. Damaged padding is outside the BER TLV
+HMAC coverage; these cases measure successful verification and processing.
+
+```sh
+cargo test --locked --bench reflector_hotpath -- --test ber/
+cargo bench --locked --bench reflector_hotpath -- ber/
+```
+
+Request construction, key creation and fixture validation are outside the
+timed loop. Each iteration calls `process_stamp_packet` and destroys the owned
+reply, including parsing, applicable base/TLV authentication, BER counting and
+repair, timestamp generation and response serialization. One reported element
+is one request processed. The context has no session manager; live admission,
+replay classification, session locks, UDP checksums, route/MTU lookup, kernel
+timestamps, burst transmission and syscalls are excluded. IPv4/IPv6 cases vary
+in-memory source/destination metadata, without constructing IP headers or
+testing either network backend. This group does not measure a zero-UDP-checksum
+transport or independently arriving packets.
+
+Linux CI executes all reflector fixtures in Criterion test mode, with no
+timing budget. For local measurements, select the executable from Cargo's JSON
+compiler artifacts, hold build features/compiler/affinity constant, and save
+raw Criterion samples from repeated processes before interpreting variation.
+Use the live UDP harness for transport costs and the transmission profiling
+fixtures for per-copy burst work; in-process iterations/sec are not wire pps.
+
 ## Session-table scaling
 
 The separate `session_scaling` harness measures IPv4 and IPv6 tables with

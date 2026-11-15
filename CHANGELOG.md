@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add validated in-process BER benchmarks for clean/damaged padding, default
+  and explicit patterns, two sizes, both authentication modes and IPv4/IPv6
+  metadata. Check reflector benchmark fixtures in Linux CI without timing gates.
+
 - Add deterministic coverage of sender count/duration limits, deadline
   clamping and catch-up boundaries using the production timing policy.
   Retain existing periodic/Poisson live rate checks and thresholds.

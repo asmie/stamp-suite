@@ -124,6 +124,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cargo test --locked --example live_udp_bench ${{ matrix.features }}
+          cargo test --locked --bench reflector_hotpath ${{ matrix.features }} -- --test
           cargo test --locked --bench session_scaling ${{ matrix.features }} -- --test
           cargo test --locked --example session_contention ${{ matrix.features }}
           cargo test --locked --example session_allocations ${{ matrix.features }}
