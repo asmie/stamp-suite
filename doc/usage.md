@@ -416,6 +416,9 @@ use forward feedback alone. The same factor scales the Type-12 interval of
 later requests, including Access Report retries; reply counts do not change.
 A zero burst interval uses a 1 ms floor while backed off, then scales by the
 same factor. Control-only requests retain their required zero interval.
+With `--send-delay 0`, that burst floor remains active at a 1 ms ECN cap
+and during partial recovery below 1 ms. It is removed only when the probe
+interval returns to zero.
 Reports show CE observations, backoffs, and the current and peak intervals.
 
 ### ECN deployment and interpretation

@@ -4537,27 +4537,85 @@ fn tlv_validation_excludes_base_hmac_failures_and_reports_unsigned_open_replies(
 #[test]
 fn ce_backoff_paces_zero_interval_bursts_but_preserves_control_only_zero() {
     let mut controller = AimdController::new(congestion_test_params());
-    let control = |count, no_ext_hdr, scale| {
+    let control = |count, no_ext_hdr, scale, backed_off| {
         ReflectedControlTlv::from_raw(
-            &scaled_reflected_control_tlv(0, count, 0, no_ext_hdr, scale).unwrap(),
+            &scaled_reflected_control_tlv(0, count, 0, no_ext_hdr, scale, backed_off).unwrap(),
         )
         .unwrap()
     };
     assert_eq!(
-        control(3, false, controller.scale_factor()).interval_nanoseconds,
+        control(
+            3,
+            false,
+            controller.scale_factor(),
+            controller.is_backed_off()
+        )
+        .interval_nanoseconds,
         0
     );
     controller.on_ce_observed();
-    let paced = control(3, false, controller.scale_factor());
+    let paced = control(
+        3,
+        false,
+        controller.scale_factor(),
+        controller.is_backed_off(),
+    );
     assert!(
         paced.interval_nanoseconds > 0,
         "CE must pace an initially unpaced burst"
     );
     assert_eq!(paced.number_of_reflected_packets, 3);
-    assert_eq!(control(3, false, f64::MAX).interval_nanoseconds, u32::MAX);
-    let only = control(1, true, controller.scale_factor());
+    assert_eq!(
+        control(3, false, f64::MAX, true).interval_nanoseconds,
+        u32::MAX
+    );
+    let only = control(
+        1,
+        true,
+        controller.scale_factor(),
+        controller.is_backed_off(),
+    );
     assert_eq!(only.interval_nanoseconds, 0);
     assert_eq!(only.sub_tlvs, [0, 240, 0, 0]);
+}
+
+#[test]
+fn zero_base_bursts_stay_paced_at_the_cap_and_during_partial_recovery() {
+    for (factor, max_ms, expected) in [
+        (2.0, 1, vec![0, 1_000_000, 0, 0]),
+        (1.5, 10, vec![0, 1_500_000, 1_000_000, 0]),
+    ] {
+        let mut controller = AimdController::new(AimdParams {
+            base_interval: Duration::ZERO,
+            backoff_factor: factor,
+            max_interval: Duration::from_millis(max_ms),
+            recovery_step: Duration::from_millis(1),
+        });
+        for (step, expected_ns) in expected.into_iter().enumerate() {
+            match step {
+                0 => (),
+                1 => controller.on_ce_observed(),
+                _ => controller.on_clean_reply(),
+            }
+            let control = ReflectedControlTlv::from_raw(
+                &scaled_reflected_control_tlv(
+                    0,
+                    3,
+                    0,
+                    false,
+                    controller.scale_factor(),
+                    controller.is_backed_off(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                control.interval_nanoseconds, expected_ns,
+                "factor={factor} max={max_ms} step={step}"
+            );
+            assert_eq!(control.number_of_reflected_packets, 3);
+        }
+    }
 }
 
 #[tokio::test]

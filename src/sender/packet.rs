@@ -118,11 +118,14 @@ pub(super) fn scaled_reflected_control_tlv(
     interval_ns: u32,
     no_ext_hdr: bool,
     scale: f64,
+    backed_off: bool,
 ) -> Option<RawTlv> {
     // Multiplying an unpaced burst's zero gap would never slow its copies.
     // Reuse the controller's 1 ms floor only while backed off. Control-only
     // requests (count <= 1) retain their required zero interval.
-    let interval = if interval_ns == 0 && count > 1 && scale > 1.0 {
+    // A scale of one can still mean backoff when the base probe interval is
+    // zero and the current interval is at or below the floor.
+    let interval = if interval_ns == 0 && count > 1 && backed_off {
         crate::rate_control::MIN_BACKOFF_FLOOR.as_nanos() as f64
     } else {
         f64::from(interval_ns)

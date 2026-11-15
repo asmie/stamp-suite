@@ -194,6 +194,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Keep zero-gap reflected bursts paced while a zero-delay sender remains
+  backed off, including a 1 ms ECN cap and partial recovery below 1 ms.
+  Preserve configured nonzero burst gaps and control-only requests.
+
 - Make `--on-zero-ssid stop` interrupt the current probe wait immediately,
   avoiding delayed exit with long send intervals or ECN backoff. Preserve
   reply identity checks, loss accounting and the `continue` policy.

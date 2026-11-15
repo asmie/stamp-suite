@@ -153,6 +153,15 @@ Control-only requests keep their required zero interval. Reply counts remain
 unchanged. Response remains enabled for CoS ECT0/ECT1 and has no
 controlled-measurement disable option.
 
+The zero-gap burst floor uses the controller's backoff state, independently
+of its scale factor. With a zero probe interval, a 1 ms cap or partial recovery
+below 1 ms can leave the factor at one while still backed off. Tests:
+`src/sender/tests.rs::zero_base_bursts_stay_paced_at_the_cap_and_during_partial_recovery`
+and `src/sender/run/congestion_tests.rs::backed_off_zero_base_bursts_keep_the_floor_on_wire`
+cover these transitions, full recovery, unchanged nonzero burst gaps and
+independently verified probe bytes/signatures across both IP families and
+all three key modes.
+
 CE also extends the pending probe deadline, scaling the existing Poisson draw
 where applicable. Recovery does not shorten that wait, and the duration limit
 still caps it. Deadline tests:

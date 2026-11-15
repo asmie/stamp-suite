@@ -92,6 +92,13 @@ impl AimdController {
         self.current
     }
 
+    /// Whether CE still holds the interval above the configured base. The
+    /// scale factor alone cannot tell: with a zero base, a positive interval
+    /// at or below MIN_BACKOFF_FLOOR has a scale factor of one.
+    pub(crate) fn is_backed_off(&self) -> bool {
+        self.current > self.params.base_interval
+    }
+
     /// Current/base interval ratio, floored at 1.0, for scaling reflected
     /// burst gaps (cos-ecn-02 §3.4-3).
     /// Uses [`MIN_BACKOFF_FLOOR`] as the denominator when the base is zero,

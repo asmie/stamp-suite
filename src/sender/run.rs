@@ -1160,16 +1160,16 @@ impl SenderRun {
             per_probe.push(AccessReportTlv::new(access_id, conf.access_return_code).to_raw());
         }
         if self.scale_reflected_control {
-            let scale = self
-                .congestion
-                .as_ref()
-                .map_or(1.0, |c| c.controller.scale_factor());
+            let (scale, backed_off) = self.congestion.as_ref().map_or((1.0, false), |c| {
+                (c.controller.scale_factor(), c.controller.is_backed_off())
+            });
             if let Some(control) = scaled_reflected_control_tlv(
                 conf.reflected_control_length,
                 conf.reflected_control_count,
                 conf.reflected_control_interval_ns,
                 conf.reflected_control_no_ext_hdr,
                 scale,
+                backed_off,
             ) {
                 per_probe.push(control);
             }
@@ -1613,3 +1613,7 @@ mod mtu_tests;
 #[cfg(test)]
 #[path = "run/admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(test)]
+#[path = "run/congestion_tests.rs"]
+mod congestion_tests;
