@@ -23,7 +23,8 @@ one loopback session: readiness probe, 2 s idle, probe, 3 s load, 500 ms drain,
 2 s idle, then a final verified probe. Probe traffic is excluded from load
 counts. By default packets are 44 bytes open or 112 authenticated, without
 TLVs. Optional BER workloads add metadata, padding and an authenticated-mode
-TLV HMAC. Bursts and kernel/NIC timestamps are excluded. A fixed timestamp
+TLV HMAC. Optional Type 12 workloads request bursts; kernel/NIC timestamps are
+excluded. A fixed timestamp
 checks echoes; round-trip observations require `--latency`. The HMAC key is
 public test data.
 
@@ -46,6 +47,8 @@ Options (`live_udp_bench --help` lists limits and defaults):
 | `--ber-padding OCTETS` | Include combined BER metadata and 16–1,200 padding octets, in complete four-octet default patterns. |
 | `--ber-damaged` | Require `--ber-padding`; inject five padding bit errors, including a four-bit run across an octet boundary. |
 | `--latency` | Observe local send-call-to-receive time for first valid replies; require `rate × seconds` ≤1,000,000 probe slots. Disabled by default. |
+| `--burst-count N` | Request 1–16 Type 12 reply copies per probe. Require `--stateful`; conflict with BER. Bound `rate × seconds × count` to 1,000,000 scheduled copies. |
+| `--burst-bytes OCTETS` | Require `--burst-count`; request 240–1,200 payload octets aligned to four, default 240. |
 
 The generator sends 1 ms batches, skips missed pacing slots, and drains replies
 on a separate thread. Bookkeeping is bounded by `rate × seconds + 1` slots
@@ -73,6 +76,40 @@ JSON adds request payload size, expected BER profile and a `completed` flag.
 If a trial returns a runtime error, prior completed trials and the error are
 printed before a nonzero exit. Startup metadata/hash failures or a panic can
 still prevent a report. Always check both the exit code and completion flag.
+
+### Type 12 reply bursts
+
+```bash
+target/release/examples/live_udp_bench --rate 100 --stateful \
+  --burst-count 16 --burst-bytes 1200 --latency
+```
+
+Burst mode explicitly enables Type 12 on the temporary child reflector with
+count/size caps matching the workload. Requests use a 1 ms interval and the
+existing reflector rate/volume policies. BER and bursts are separate workload
+profiles. Probes collect every expected copy and drain until a read timeout
+before load starts. This prevents warm-up copies from contaminating the load
+window. Readiness/drain still have bounded deadlines and fail visibly.
+
+Each copy must pass base identity/HMAC checks plus exact Type 12 fields,
+processed flags, reply size, zero padding and the applicable TLV HMAC. The
+pair of echoed sender sequence and stateful reflector sequence identifies a
+copy, without assuming copies arrive consecutively or in order. Repeated
+pairs are duplicates; additional distinct copies within the requested count
+are valid. Unexpected extra copies increment invalid replies. Copy storage
+uses bounded flat arrays (about 5 MB at most, plus reserved slots); ordinary
+per-probe accounting and optional latency storage remain separate.
+
+`sent`, `achieved_send_pps`, unique replies and ordinary loss count **probes**.
+The `burst` object reports expected/unique/missing **copies**, load/drain copy
+counts and complete/partial/unreplied probe totals. Its denominator is actual
+successful probe sends times requested copies. `unique_reply_copy_pps_during_load`
+reports copy throughput. Duplicate counts refer to repeated pairs in burst
+mode. Latency still observes only the first valid reply per probe, so it does
+not describe later-copy delay or verify actual inter-copy spacing. UDP
+checksums are ordinary; this is not physical capture or raw zero-checksum
+evidence. Keep the probe rate low enough to distinguish generator, queues and
+amplification effects; copy throughput is not the probe request rate.
 
 ### Optional round-trip observations
 
@@ -143,7 +180,7 @@ Sweep IPv4/IPv6 and both authentication modes at 5,000, 25,000 and 100,000 pps.
 Add `--stateful` to measure session costs. Hold workers, CPU affinity, features
 and host load constant; use more repeats on a quiet host. This single-session
 loopback test can be limited by either process or the kernel. It does not
-measure NIC throughput, multi-client scaling, non-BER TLVs, bursts or
+measure NIC throughput, multi-client scaling, non-BER/Type-12 TLVs or
 hardware timestamps, and requires matched before/after runs to assess an
 optimization. BER adds request serialization, bit-pattern checks and TLV HMAC
 work to the generator as well as the reflector; compare generator CPU and

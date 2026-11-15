@@ -7,6 +7,10 @@ mod ber;
 #[path = "live_udp_bench/latency.rs"]
 mod latency;
 
+#[cfg(target_os = "linux")]
+#[path = "live_udp_bench/burst.rs"]
+mod burst;
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("live_udp_bench requires Linux /proc CPU accounting");
@@ -21,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::ber::Profile;
+    use super::burst::{Copies, Profile as Burst, Verdict};
     use super::latency::{Samples, SendTimes};
     use clap::Parser;
     use serde::Serialize;
@@ -84,6 +89,12 @@ mod linux {
         /// Observe local send-call-to-receive time; at most one million probe slots.
         #[arg(long)]
         latency: bool,
+        /// Type 12 replies per probe; require stateful reflector sequence numbers.
+        #[arg(long, value_parser=clap::value_parser!(u16).range(1..=16), requires="stateful", conflicts_with="ber_padding")]
+        burst_count: Option<u16>,
+        /// Burst reply payload size, 240–1200 octets aligned to four (default 240).
+        #[arg(long, value_parser=clap::value_parser!(u16).range(240..=1200), requires="burst_count")]
+        burst_bytes: Option<u16>,
     }
 
     struct Reflector(Child);
@@ -212,6 +223,90 @@ mod linux {
         Ok(socket)
     }
 
+    fn workload_request(
+        seq: u32,
+        key: Option<&HmacKey>,
+        ber: Option<&Profile>,
+        burst: Option<&Burst>,
+    ) -> Vec<u8> {
+        let mut bytes = request(seq, key, ber);
+        if let Some(burst) = burst {
+            burst.append(&mut bytes, key);
+        }
+        bytes
+    }
+
+    fn workload_response(
+        buf: &[u8],
+        key: Option<&HmacKey>,
+        ber: Option<&Profile>,
+        burst: Option<&Burst>,
+    ) -> Option<u32> {
+        let Some(burst) = burst else {
+            return response_sequence(buf, key, ber);
+        };
+        let base = if key.is_some() { 112 } else { 44 };
+        let seq = reply_sequence(buf.get(..base)?, key)?;
+        burst.validate(buf, base, key).then_some(seq)
+    }
+
+    fn workload_probe(
+        child: &mut Reflector,
+        socket: &UdpSocket,
+        key: Option<&HmacKey>,
+        ber: Option<&Profile>,
+        burst: Option<&Burst>,
+        seq: u32,
+    ) -> Result<()> {
+        let Some(burst) = burst else {
+            return probe(child, socket, key, ber, seq);
+        };
+        let start = Instant::now();
+        let mut next_send = start;
+        let request = workload_request(seq, key, None, Some(burst));
+        let mut sequences = Vec::new();
+        let mut buf = [0; 2048];
+        while start.elapsed() < Duration::from_secs(5) {
+            child.check()?;
+            if sequences.is_empty() && Instant::now() >= next_send {
+                if socket.send(&request)? != request.len() {
+                    return Err("incomplete burst probe send".into());
+                }
+                next_send = Instant::now() + Duration::from_millis(20);
+            }
+            match socket.recv(&mut buf) {
+                Ok(n) if workload_response(&buf[..n], key, None, Some(burst)) == Some(seq) => {
+                    let nonce = u32::from_be_bytes(buf[..4].try_into()?);
+                    if !sequences.contains(&nonce) {
+                        sequences.push(nonce);
+                    }
+                    if sequences.len() == usize::from(burst.count) {
+                        // Drain queued probe replies until one read timeout so no
+                        // remaining warm-up copies enter the measured window.
+                        while start.elapsed() < Duration::from_secs(5) {
+                            match socket.recv(&mut buf) {
+                                Ok(_) => {}
+                                Err(e)
+                                    if e.kind() == std::io::ErrorKind::TimedOut
+                                        || e.kind() == std::io::ErrorKind::WouldBlock =>
+                                {
+                                    return Ok(())
+                                }
+                                Err(e) if transient(&e) => {}
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) if transient(&e) || e.kind() == std::io::ErrorKind::ConnectionRefused => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err("burst probe did not complete and drain within five seconds".into())
+    }
+
     fn probe(
         child: &mut Reflector,
         socket: &UdpSocket,
@@ -258,6 +353,8 @@ mod linux {
         highest: Option<u32>,
         #[serde(skip)]
         rtt: Option<Samples>,
+        #[serde(skip)]
+        copies: Option<Copies>,
     }
     impl Replies {
         fn record(&mut self, seq: Option<u32>, during_load: bool) -> bool {
@@ -299,6 +396,33 @@ mod linux {
             }
             Ok(())
         }
+
+        fn record_burst(
+            &mut self,
+            seq: Option<u32>,
+            nonce: Option<u32>,
+            during_load: bool,
+            timing: Option<(&SendTimes, u64)>,
+        ) -> Result<()> {
+            if seq == Some(0) {
+                return Ok(());
+            }
+            let verdict = match (seq, nonce) {
+                (Some(seq), Some(nonce)) => self
+                    .copies
+                    .as_mut()
+                    .ok_or("missing burst ledger")?
+                    .record(seq, nonce, during_load),
+                _ => Verdict::Invalid,
+            };
+            match verdict {
+                Verdict::First => self.record_received(seq, during_load, timing)?,
+                Verdict::Additional => {}
+                Verdict::Duplicate => self.duplicates += 1,
+                Verdict::Invalid => self.invalid += 1,
+            }
+            Ok(())
+        }
     }
 
     fn elapsed_ns(start: Instant) -> Result<u64> {
@@ -309,6 +433,7 @@ mod linux {
         args: &Args,
         key: Option<&HmacKey>,
         ber: Option<&Profile>,
+        burst: Option<&Burst>,
         hz: u64,
     ) -> Result<serde_json::Value> {
         let ip = if args.ipv6 { "::1" } else { "127.0.0.1" };
@@ -339,22 +464,33 @@ mod linux {
         if args.metrics {
             command.args(["--metrics", "--metrics-addr", "127.0.0.1:0"]);
         }
+        if let Some(burst) = burst {
+            command.args([
+                "--reflected-control-max-count",
+                &burst.count.to_string(),
+                "--reflected-control-max-size",
+                &burst.bytes.to_string(),
+            ]);
+        }
         let command_line = format!("{command:?}");
         drop(reserve); // Bind race fails visibly via child status; never retry a different server.
         let mut child = Reflector(command.spawn()?);
         let probe_socket = socket(destination)?;
-        probe(&mut child, &probe_socket, key, ber, 0)?;
+        workload_probe(&mut child, &probe_socket, key, ber, burst, 0)?;
         thread::sleep(Duration::from_millis(100));
         let idle_before = idle(&mut child, args.idle_seconds, hz)?;
         let socket = socket(destination)?;
         // Warm the measured session and validate that readiness resumed after idle.
-        probe(&mut child, &socket, key, ber, 0)?;
+        workload_probe(&mut child, &socket, key, ber, burst, 0)?;
         // Load sequences start at 1; slot zero is reserved for delayed warm-up replies.
         let capacity = args.rate as usize * args.seconds as usize + 1;
         let send_times = args.latency.then(|| SendTimes::new(capacity)).transpose()?;
         let mut replies = Replies {
             seen: vec![false; capacity],
             rtt: args.latency.then(Samples::default),
+            copies: burst
+                .map(|profile| Copies::new(profile, capacity))
+                .transpose()?,
             ..Default::default()
         };
         let reflector_before = cpu_ticks(child.0.id())?;
@@ -373,13 +509,30 @@ mod linux {
                                 // only an admitted first reply contributes the sample.
                                 let received_ns =
                                     send_times.as_ref().map(|_| elapsed_ns(start)).transpose()?;
-                                let seq = response_sequence(&buf[..n], key, ber);
+                                let seq = workload_response(&buf[..n], key, ber, burst);
                                 if seq != Some(0) {
-                                    replies.record_received(
-                                        seq,
-                                        Instant::now() < deadline,
-                                        send_times.as_ref().zip(received_ns),
-                                    )?;
+                                    let timing = send_times.as_ref().zip(received_ns);
+                                    if burst.is_some() {
+                                        let nonce = seq.map(|_| {
+                                            u32::from_be_bytes(
+                                                buf[..4]
+                                                    .try_into()
+                                                    .expect("validated complete base"),
+                                            )
+                                        });
+                                        replies.record_burst(
+                                            seq,
+                                            nonce,
+                                            Instant::now() < deadline,
+                                            timing,
+                                        )?;
+                                    } else {
+                                        replies.record_received(
+                                            seq,
+                                            Instant::now() < deadline,
+                                            timing,
+                                        )?;
+                                    }
                                 }
                             }
                             Err(e) if transient(&e) => {}
@@ -400,7 +553,7 @@ mod linux {
                         if Instant::now() >= deadline {
                             break;
                         }
-                        let request = request(sent + 1, key, ber);
+                        let request = workload_request(sent + 1, key, ber, burst);
                         if let Some(times) = &send_times {
                             // Publish before the syscall: a fast reply can be read
                             // while send() is still returning on the sender thread.
@@ -439,10 +592,23 @@ mod linux {
             return Err("latency samples do not match unique valid replies".into());
         }
         let idle_after = idle(&mut child, args.idle_seconds, hz)?;
-        probe(&mut child, &socket, key, ber, sent + 1)?;
+        let burst_summary = replies
+            .copies
+            .as_ref()
+            .map(|copies| copies.summary(sent))
+            .transpose()?;
+        if burst_summary
+            .as_ref()
+            .is_some_and(|summary| summary.received_probes as u64 != unique)
+        {
+            return Err("burst probe totals disagree with unique reply accounting".into());
+        }
+        workload_probe(&mut child, &socket, key, ber, burst, sent + 1)?;
         Ok(json!({
             "reflector_command": command_line, "sent": sent, "replies": replies,
             "observed_rtt": observed_rtt,
+            "burst":burst_summary,
+            "unique_reply_copy_pps_during_load":burst_summary.as_ref().map(|summary|summary.unique_during_load as f64/args.seconds as f64),
             "missing_after_drain": sent as u64 - unique,
             "loss_percent": 100.0 * (sent as u64 - unique) as f64 / sent as f64,
             "skipped_pacing_slots": skipped_slots,
@@ -459,6 +625,13 @@ mod linux {
     }
     fn run_inner() -> Result<()> {
         let mut args = Args::parse();
+        let burst = args
+            .burst_count
+            .map(|count| Burst::new(count, args.burst_bytes.unwrap_or(240)))
+            .transpose()?;
+        if let Some(burst) = &burst {
+            burst.validate_capacity(args.rate as usize * args.seconds as usize)?;
+        }
         if args.latency {
             super::latency::validate_capacity(args.rate as usize * args.seconds as usize + 1)?;
         }
@@ -481,7 +654,7 @@ mod linux {
         let mut failure = None;
         for index in 0..args.repeats {
             eprintln!("live UDP trial {}/{}", index + 1, args.repeats);
-            match trial(&args, key.as_ref(), ber.as_ref(), hz as u64) {
+            match trial(&args, key.as_ref(), ber.as_ref(), burst.as_ref(), hz as u64) {
                 Ok(result) => trials.push(result),
                 Err(error) => {
                     failure = Some(error.to_string());
@@ -496,8 +669,9 @@ mod linux {
             serde_json::to_string_pretty(&json!({
                 "schema_version": 1, "settings": args, "trials": trials,
                 "completed": failure.is_none(), "error": failure,
-                "request_payload_octets": request(0, key.as_ref(), ber.as_ref()).len(),
+                "request_payload_octets": workload_request(0, key.as_ref(), ber.as_ref(),burst.as_ref()).len(),
                 "ber_profile": ber.as_ref().map(Profile::summary),
+                "burst_profile":burst.as_ref().map(Burst::summary),
                 "cpu_ticks_per_second": hz,
                 "reflector_sha256": binary_hash(args.reflector.clone())?,
                 "generator_sha256": binary_hash(std::env::current_exe()?)?,
@@ -521,6 +695,145 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn burst_options_require_stateful_mode_and_exclude_ber() {
+            for args in [
+                vec!["bench", "--burst-count", "4"],
+                vec!["bench", "--burst-bytes", "240"],
+                vec!["bench", "--stateful", "--burst-count", "0"],
+                vec!["bench", "--stateful", "--burst-count", "17"],
+                vec![
+                    "bench",
+                    "--stateful",
+                    "--burst-count",
+                    "4",
+                    "--ber-padding",
+                    "120",
+                ],
+            ] {
+                assert!(Args::try_parse_from(args).is_err());
+            }
+            let args = Args::try_parse_from([
+                "bench",
+                "--stateful",
+                "--burst-count",
+                "16",
+                "--burst-bytes",
+                "1200",
+            ])
+            .unwrap();
+            assert!(Burst::new(args.burst_count.unwrap(), args.burst_bytes.unwrap()).is_ok());
+        }
+
+        #[test]
+        fn burst_copy_accounting_keeps_first_reply_latency_and_distinguishes_duplicates() {
+            let burst = Burst::new(4, 240).unwrap();
+            let times = SendTimes::new(4).unwrap();
+            times.mark(1, 100).unwrap();
+            times.mark(2, 100).unwrap();
+            let mut replies = Replies {
+                seen: vec![false; 4],
+                rtt: Some(Samples::default()),
+                copies: Some(Copies::new(&burst, 4).unwrap()),
+                ..Default::default()
+            };
+            for (probe, nonce, load, received) in [
+                (Some(0), Some(0), true, 0),
+                (Some(1), Some(u32::MAX), true, 200),
+                (Some(1), Some(0), true, 250),
+                (Some(1), Some(0), false, 800),
+                (Some(2), Some(0), false, 400),
+                (Some(1), Some(1), false, 300),
+                (Some(1), Some(2), false, 600),
+                (Some(1), Some(3), true, 700),
+                (None, None, true, 0),
+                (Some(4), Some(0), true, 0),
+            ] {
+                replies
+                    .record_burst(probe, nonce, load, Some((&times, received)))
+                    .unwrap();
+            }
+            assert_eq!(
+                (
+                    replies.unique_during_load,
+                    replies.unique_during_drain,
+                    replies.duplicates,
+                    replies.invalid
+                ),
+                (1, 1, 1, 3)
+            );
+            let rtt = serde_json::to_value(replies.rtt.as_ref().unwrap().summary()).unwrap();
+            assert_eq!(rtt["samples"], 2);
+            assert_eq!(rtt["mean_ns"], 200.0);
+            let copies =
+                serde_json::to_value(replies.copies.as_ref().unwrap().summary(3).unwrap()).unwrap();
+            assert_eq!(copies["unique_copies"], 5);
+            assert_eq!(copies["missing_copies"], 7);
+            assert_eq!(copies["received_probes"], 2);
+            assert_eq!(copies["unique_during_load"], 2);
+            assert_eq!(copies["unique_during_drain"], 3);
+        }
+
+        #[test]
+        fn burst_reply_validation_keeps_signed_base_identity_checks() {
+            use stamp_suite::tlv::{ExtraPaddingTlv, ReflectedControlTlv, TlvList, TypedTlv};
+            for auth in [false, true] {
+                let key = auth.then(|| HmacKey::from_hex(KEY).unwrap());
+                let profile = Burst::new(4, 240).unwrap();
+                let base = if auth { 112 } else { 44 };
+                let mut bytes = vec![0; base];
+                let (ssid, seq, timestamp, estimate) = if auth {
+                    (26, 48, 64, 72)
+                } else {
+                    (14, 24, 28, 36)
+                };
+                bytes[..4].copy_from_slice(&9u32.to_be_bytes());
+                bytes[ssid..ssid + 2].copy_from_slice(&SSID.to_be_bytes());
+                bytes[seq..seq + 4].copy_from_slice(&3u32.to_be_bytes());
+                bytes[timestamp..timestamp + 8].copy_from_slice(&STAMP.to_be_bytes());
+                bytes[estimate..estimate + 2].copy_from_slice(&1u16.to_be_bytes());
+                let mut list = TlvList::new();
+                list.push(ReflectedControlTlv::new(240, 4, 1_000_000).to_raw())
+                    .unwrap();
+                list.push(
+                    ExtraPaddingTlv::new_zeros(240 - base - 16 - 4 - if auth { 20 } else { 0 })
+                        .to_raw(),
+                )
+                .unwrap();
+                list.clear_reflector_flags();
+                if let Some(key) = &key {
+                    let digest = key.compute(&bytes[..96]);
+                    bytes[96..112].copy_from_slice(&digest);
+                    assert!(list.set_hmac_response(key, &bytes[..4]));
+                }
+                bytes.extend(list.to_bytes());
+                assert_eq!(
+                    workload_response(&bytes, key.as_ref(), None, Some(&profile)),
+                    Some(3)
+                );
+                assert_eq!(workload_response(&bytes, key.as_ref(), None, None), None);
+                for offset in [ssid, timestamp, estimate] {
+                    let mut wrong = bytes.clone();
+                    wrong[offset] ^= 1;
+                    if let Some(key) = &key {
+                        let digest = key.compute(&wrong[..96]);
+                        wrong[96..112].copy_from_slice(&digest);
+                    }
+                    assert_eq!(
+                        workload_response(&wrong, key.as_ref(), None, Some(&profile)),
+                        None
+                    );
+                }
+                if auth {
+                    bytes[96] ^= 1;
+                    assert_eq!(
+                        workload_response(&bytes, key.as_ref(), None, Some(&profile)),
+                        None
+                    );
+                }
+            }
+        }
 
         #[test]
         fn latency_ignores_warmup_duplicates_and_invalid_replies_and_includes_drain() {

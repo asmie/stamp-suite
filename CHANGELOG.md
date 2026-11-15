@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add live Type 12 burst benchmark workloads with bounded per-copy accounting,
+  reply/HMAC validation, complete/partial probe totals and separate copy loss.
+  Drain warm-up bursts and retain first-reply latency sampling.
+
 - Add opt-in round-trip latency observations to the live UDP benchmark, with
   bounded timestamp storage, first-valid-reply sampling and explicit quantile
   precision. Keep tracking disabled by default.
