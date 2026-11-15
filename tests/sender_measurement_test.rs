@@ -724,3 +724,56 @@ fn ipv4_open_directional_counter_window() {
 fn ipv6_authenticated_directional_counter_window() {
     loss(true);
 }
+
+#[test]
+fn sender_holds_ecn_backoff_until_usable_non_ce_feedback_returns() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            for case in ["clean", "missing", "bad_hmac", "duplicate"] {
+                let peer = UdpSocket::bind((ip, 0)).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut extra = vec!["--cos", "--ecn", "2", "--ecn-recovery-step", "10"];
+                if mode == 1 {
+                    extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
+                }
+                let auth = mode == 2;
+                let sender = Sender::start_profile(&peer, auth, 3, 1, false, &extra);
+                for index in 0..3 {
+                    let mut request = [0; 2048];
+                    let (length, source) = peer.recv_from(&mut request).unwrap();
+                    // Independent CoS bytes: CE first, then test feedback, then
+                    // usable non-CE. Each response matches an actual sent probe.
+                    let mut tail = vec![0, 4, 0, 4, 0, if index == 0 { 12 } else { 8 }, 0xb0, 0];
+                    if index == 1 {
+                        if case == "missing" {
+                            tail.clear();
+                        }
+                        if case == "duplicate" {
+                            tail.extend_from_within(..);
+                        }
+                    }
+                    let mut response = reply_with_extensions(&request[..length], auth, &tail);
+                    let base = if auth { 112 } else { 44 };
+                    if !auth && (mode == 1 || (index == 1 && case == "bad_hmac")) {
+                        let digest = sign(&[&response[..4], &response[base..]]);
+                        response.extend_from_slice(&[0, 8, 0, 16]);
+                        response.extend_from_slice(&digest);
+                    }
+                    if index == 1 && case == "bad_hmac" {
+                        *response.last_mut().unwrap() ^= 1;
+                    }
+                    peer.send_to(&response, source).unwrap();
+                }
+                let stats = sender.finish();
+                assert_eq!(stats["packets_received"], 3, "{ip} mode={mode} case={case}");
+                assert_eq!(stats["congestion"]["ce_replies"], 1);
+                assert_eq!(stats["congestion"]["backoffs_applied"], 1);
+                assert_eq!(
+                    stats["congestion"]["current_interval_ms"].as_f64().unwrap(),
+                    if case == "clean" { 20.0 } else { 30.0 },
+                    "{ip} mode={mode} case={case}"
+                );
+            }
+        }
+    }
+}

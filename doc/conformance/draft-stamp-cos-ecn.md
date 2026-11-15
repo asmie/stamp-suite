@@ -153,6 +153,16 @@ Control-only requests keep their required zero interval. Reply counts remain
 unchanged. Response remains enabled for CoS ECT0/ECT1 and has no
 controlled-measurement disable option.
 
+Recovery requires one usable non-CE CoS observation and no observed reverse
+CE. Missing, duplicate, skipped, malformed or integrity-unusable CoS leaves
+the interval unchanged; a configured key requires a verified TLV HMAC for
+recovery. Valid base-packet measurements remain available. CE still takes
+precedence, including reverse IP CE when CoS is unusable. Tests:
+`src/sender/tests.rs::congestion_recovery_requires_unambiguous_usable_cos` and
+`tests/sender_measurement_test.rs::sender_holds_ecn_backoff_until_usable_non_ce_feedback_returns`.
+This is feedback admission, not an assertion that an unobserved reverse path
+is congestion-free or that non-CE proves the absence of bleaching.
+
 This demonstrates CE response capability. It does not establish all the
 consistency required by revision 02. Recovery subtracts a fixed interval on
 each clean reply; it does not implement a congestion window, RTT epochs,

@@ -396,10 +396,14 @@ the reported RPE still need to be checked before interpreting reverse ECN.
 
 **ECN response.** `--cos` with `--ecn 1` or `--ecn 2` turns on AIMD pacing. A
 CE-marked reply multiplies the send interval by `--ecn-backoff-factor`, up to
-`--ecn-max-delay` milliseconds. Each clean reply shortens it by
-`--ecn-recovery-step` milliseconds, down to `--send-delay`. Forward feedback
-comes from the CoS TLV's EC2 field. Reverse feedback reads the reply's IP ECN
-bits, which works on Linux and macOS only; other platforms log a warning and
+`--ecn-max-delay` milliseconds. Each reply with one usable non-CE CoS report
+and no observed reverse CE shortens it by `--ecn-recovery-step` milliseconds,
+down to `--send-delay`. Missing, ambiguous or unusable CoS feedback holds the
+current interval. With a key configured, recovery requires a verified TLV
+HMAC; an unsigned or unverifiable report cannot increase the send rate.
+These replies can still contribute valid base-packet RTT/loss observations.
+Forward feedback comes from the CoS TLV's EC2 field. Reverse feedback reads
+the reply's IP ECN bits, which works on Linux and macOS only; other platforms log a warning and
 use forward feedback alone. The same factor scales the Type-12 interval of
 later requests, including Access Report retries; reply counts do not change.
 A zero burst interval uses a 1 ms floor while backed off, then scales by the

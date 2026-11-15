@@ -671,7 +671,14 @@ fn process_response(
                 reverse_ce,
                 state.controller.current_interval()
             );
-        } else {
+        } else if telemetry
+            .as_ref()
+            .and_then(|info| info.cos)
+            .is_some_and(|cos| cos.value.ecn2 != 0b11)
+        {
+            // Absence of usable forward feedback is not a clean observation.
+            // Recovery needs one unambiguous CoS report, including verified
+            // TLV integrity when keyed. CE from either direction still wins.
             state.controller.on_clean_reply();
         }
     }

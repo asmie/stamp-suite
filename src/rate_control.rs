@@ -2,7 +2,9 @@
 //!
 //! The send loop reports CE from the CoS EC2 field or reply IP header to
 //! `AimdController::on_ce_observed`, and clean replies to
-//! `AimdController::on_clean_reply`. The controller supplies the next send
+//! `AimdController::on_clean_reply` only with usable non-CE CoS feedback and
+//! no observed reverse CE. Missing feedback does not authorize recovery.
+//! The controller supplies the next send
 //! interval through `AimdController::current_interval`; it owns no timers.
 //!
 //! This provides CE response capability, not a demonstrated RFC 3168/9330
@@ -140,7 +142,8 @@ impl AimdController {
 
     /// Records a reply that was NOT CE-marked: additively shrinks the
     /// interval by `params.recovery_step`, floored at `params.base_interval`,
-    /// so recovery never overshoots the operator-configured rate.
+    /// so recovery never overshoots the operator-configured rate. The caller
+    /// must establish usable non-CE feedback; missing data is not clean.
     pub fn on_clean_reply(&mut self) {
         if self.current <= self.params.base_interval {
             self.current = self.params.base_interval;

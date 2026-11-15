@@ -755,8 +755,9 @@ pub struct Configuration {
     )]
     pub ecn_max_delay: u32,
 
-    /// AIMD recovery in milliseconds per non-CE reply, down to --send-delay
-    /// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
+    /// AIMD recovery in milliseconds per usable non-CE CoS reply, down to
+    /// --send-delay. Missing or unusable CoS holds the interval; observed CE
+    /// still backs off (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
     #[clap(
         long,
         default_value_t = 50,

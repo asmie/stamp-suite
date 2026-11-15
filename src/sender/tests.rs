@@ -2475,7 +2475,19 @@ fn test_process_response_clean_reply_recovers_congestion_controller() {
         sess_sender_ttl: 0,
         mbz3: [0; 3],
     };
-    let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, TlvList::new());
+    let mut tlvs = TlvList::new();
+    let mut cos = ClassOfServiceTlv {
+        dscp1: 0,
+        ecn1: 2,
+        dscp2: 0,
+        ecn2: 2,
+        rpd: 0,
+        rpe: 3,
+    }
+    .to_raw();
+    cos.clear_reflector_flags();
+    tlvs.push(cos).unwrap();
+    let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
     let buf = ext.to_bytes();
 
     let mut pending = HashMap::new();
@@ -2508,7 +2520,7 @@ fn test_process_response_clean_reply_recovers_congestion_controller() {
         &mut zero_ssid_seen,
     );
 
-    // Neither direction CE-marked: a clean reply recovers by the
+    // Valid non-CE forward feedback and no observed reverse CE recover by the
     // configured step (10ms in `congestion_test_params`).
     process_response(&buf, false, true, ClockFormat::NTP, None, None, &mut ctx);
 
@@ -4575,4 +4587,131 @@ async fn zero_udp_checksum_restrictions_precede_key_loading_and_network_setup() 
     } else {
         "only on Linux"
     }));
+}
+
+#[test]
+fn congestion_recovery_requires_unambiguous_usable_cos() {
+    for (auth, keyed) in [(false, false), (false, true), (true, true)] {
+        for case in [
+            "clean",
+            "not_ect",
+            "c_flag",
+            "missing",
+            "unrecognized",
+            "malformed",
+            "integrity_failed",
+            "short",
+            "duplicate",
+            "bad_hmac",
+            "missing_hmac",
+            "flagged_hmac",
+            "malformed_before",
+            "ce",
+        ] {
+            for reverse_ce in [false, true] {
+                let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+                let base = if auth {
+                    AUTH_BASE_SIZE
+                } else {
+                    UNAUTH_BASE_SIZE
+                };
+                let mut wire = ssid_test_reply(auth, false, 42, 0, &key);
+                let mut cos = vec![0, 4, 0, 4, 0, 8, 0x80, 0]; // EC2=ECT(0).
+                match case {
+                    "not_ect" => cos[5] = 0,
+                    "c_flag" => cos[0] = 0x10,
+                    "unrecognized" => cos[0] = 0x80,
+                    "malformed" => cos[0] = 0x40,
+                    "integrity_failed" => cos[0] = 0x20,
+                    "short" => {
+                        cos[3] = 3;
+                        cos.pop();
+                    }
+                    "ce" => cos[5] = 12,
+                    _ => {}
+                }
+                if case == "malformed_before" {
+                    wire.extend_from_slice(&[0x40, 255, 0, 0]);
+                }
+                if case != "missing" {
+                    wire.extend_from_slice(&cos);
+                    if case == "duplicate" {
+                        wire.extend_from_slice(&cos);
+                    }
+                }
+                if (keyed && case != "missing_hmac") || matches!(case, "bad_hmac" | "flagged_hmac")
+                {
+                    let mut covered = wire[..4].to_vec();
+                    covered.extend_from_slice(&wire[base..]);
+                    wire.extend_from_slice(&[
+                        if case == "flagged_hmac" { 0x80 } else { 0 },
+                        8,
+                        0,
+                        16,
+                    ]);
+                    wire.extend_from_slice(&key.compute(&covered));
+                    if case == "bad_hmac" {
+                        *wire.last_mut().unwrap() ^= 1;
+                    }
+                }
+                let mut pending = HashMap::from([(
+                    42,
+                    PendingPacket {
+                        send_time: Instant::now(),
+                        send_timestamp: 0,
+                        wire_timestamp: 0,
+                    },
+                )]);
+                let mut rtt = RttCollector::new();
+                let mut owd = OwdCollector::new();
+                let mut received = 0;
+                let mut latched = None;
+                let mut zero = false;
+                let mut congestion = CongestionState::new(congestion_test_params());
+                congestion.controller.on_ce_observed(); // 100 -> 200 ms.
+                let mut ctx = congestion_process_response_ctx(
+                    &mut pending,
+                    &mut rtt,
+                    &mut owd,
+                    &mut received,
+                    &mut latched,
+                    Some(&mut congestion),
+                    &mut zero,
+                );
+                ctx.hmac_key = keyed.then_some(&key);
+                process_response(
+                    &wire,
+                    auth,
+                    true,
+                    ClockFormat::NTP,
+                    None,
+                    reverse_ce.then_some(3),
+                    &mut ctx,
+                );
+                let clean = matches!(case, "clean" | "not_ect" | "c_flag")
+                    || (case == "missing_hmac" && !keyed);
+                let ce = reverse_ce || case == "ce";
+                assert_eq!(
+                    congestion.controller.current_interval(),
+                    Duration::from_millis(if ce {
+                        400
+                    } else if clean {
+                        190
+                    } else {
+                        200
+                    }),
+                    "auth={auth} keyed={keyed} case={case} reverse_ce={reverse_ce}"
+                );
+                assert_eq!(
+                    received, 1,
+                    "unusable feedback must not discard a valid base reply"
+                );
+                assert!(pending.is_empty());
+                assert_eq!(
+                    congestion.controller.stats().ce_observations,
+                    if ce { 2 } else { 1 }
+                );
+            }
+        }
+    }
 }
