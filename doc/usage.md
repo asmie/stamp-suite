@@ -429,7 +429,9 @@ current interval. With a key configured, recovery requires a verified TLV
 HMAC; an unsigned or unverifiable report cannot increase the send rate.
 These replies can still contribute valid base-packet RTT/loss observations.
 Backoff also extends the pending probe deadline, scaling the already drawn
-gap for a Poisson schedule. Clean feedback cannot shorten that pending wait;
+gap for a Poisson schedule. Each backoff scales from the original draw and
+its original interval, so repeated small increases do not lose their accumulated
+effect through rounding. Clean feedback cannot shorten that pending wait;
 recovery applies when drawing the following gap. The `--duration` limit still
 caps the wait.
 Forward feedback comes from the CoS TLV's EC2 field. Reverse feedback reads

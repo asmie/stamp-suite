@@ -198,6 +198,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Scale pending Poisson gaps from their original draw during congestion backoff.
+  Repeated small increases now accumulate correctly instead of losing their
+  effect through repeated rounding of an already scaled gap.
+
 - Collect later Access Report retry replies after acknowledgement or retry
   exhaustion, including reflected burst copies. The remaining wait is bounded
   by `--timeout` from the last successful retry, without restarting on completion.

@@ -16,6 +16,9 @@ pub(super) struct SendTimeline {
     due: tokio::time::Instant,
     stop_at: Option<tokio::time::Instant>,
     count: u64,
+    /// Original draw and interval for the current wait. Scaling the already
+    /// rounded gap at every step would discard fractional-nanosecond growth.
+    backoff_origin: Option<(Duration, Duration)>,
 }
 
 pub(super) struct SendWait {
@@ -29,6 +32,7 @@ impl SendTimeline {
             due: start,
             stop_at: duration.map(|seconds| start + Duration::from_secs(u64::from(seconds))),
             count: u64::from(count),
+            backoff_origin: None,
         }
     }
 
@@ -47,6 +51,7 @@ impl SendTimeline {
         gap: Duration,
         now: impl FnOnce() -> tokio::time::Instant,
     ) -> SendWait {
+        self.backoff_origin = None;
         self.due += gap;
         let now = now();
         if now.saturating_duration_since(self.due) > CATCH_UP {
@@ -69,11 +74,15 @@ impl SendTimeline {
         current_interval: Duration,
     ) -> SendWait {
         if current_interval > *interval {
-            let scaled = if interval.is_zero() {
+            let (original_gap, original_interval) =
+                *self.backoff_origin.get_or_insert((*gap, *interval));
+            let scaled = if original_interval.is_zero() {
                 current_interval
             } else {
-                gap.mul_f64(current_interval.as_secs_f64() / interval.as_secs_f64())
-            };
+                original_gap
+                    .mul_f64(current_interval.as_secs_f64() / original_interval.as_secs_f64())
+            }
+            .max(*gap);
             self.due += scaled.saturating_sub(*gap);
             *gap = scaled;
             *interval = current_interval;

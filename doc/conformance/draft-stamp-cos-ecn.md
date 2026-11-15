@@ -169,11 +169,17 @@ cover these transitions, full recovery, unchanged nonzero burst gaps and
 independently verified probe bytes/signatures across both IP families and
 all three key modes.
 
+Scaling always uses the original draw and interval, avoiding accumulated
+rounding error across small increases; each new probe resets that reference.
+This is deadline arithmetic evidence, not sub-timer wire-accuracy evidence.
 CE also extends the pending probe deadline, scaling the existing Poisson draw
 where applicable. Recovery does not shorten that wait, and the duration limit
 still caps it. Deadline tests:
 `src/sender/schedule/timeline_tests.rs::ce_extends_pending_deadline_and_recovery_cannot_shorten_it`,
 `src/sender/schedule/timeline_tests.rs::ce_scales_the_existing_poisson_draw_without_resampling`,
+`src/sender/schedule/timeline_tests.rs::small_backoff_steps_accumulate_against_the_original_poisson_draw`,
+`src/sender/schedule/timeline_tests.rs::near_unity_controller_backoff_scales_each_new_draw_from_its_own_base`,
+`src/sender/schedule/timeline_tests.rs::backoff_deadline_depends_on_peak_not_feedback_partition`,
 `src/sender/schedule/timeline_tests.rs::duration_limit_still_clamps_a_backed_off_deadline`
 and `tests/sender_measurement_test.rs::sender_applies_ce_backoff_to_the_already_scheduled_probe`.
 

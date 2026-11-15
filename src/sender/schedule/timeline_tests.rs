@@ -239,3 +239,81 @@ fn ce_extends_from_the_reset_timeline_after_a_large_send_delay() {
     let wait = timeline.back_off(&mut gap, &mut interval, Duration::from_millis(40));
     assert_eq!(wait.deadline, completed + Duration::from_millis(20));
 }
+
+#[test]
+fn small_backoff_steps_accumulate_against_the_original_poisson_draw() {
+    let start = start();
+    let mut timeline = SendTimeline::new(start, 0, None);
+    let mut interval = Duration::from_micros(1);
+    let mut gap = Duration::from_nanos(100);
+    timeline.after_probe(gap, || start);
+    for nanos in 1001..=2000 {
+        timeline.back_off(&mut gap, &mut interval, Duration::from_nanos(nanos));
+    }
+    assert_eq!(gap, Duration::from_nanos(200));
+    assert_eq!(
+        timeline.after_probe(Duration::ZERO, || start).deadline,
+        start + Duration::from_nanos(200)
+    );
+}
+
+#[test]
+fn near_unity_controller_backoff_scales_each_new_draw_from_its_own_base() {
+    use crate::rate_control::{AimdController, AimdParams};
+    let start = start();
+    let mut timeline = SendTimeline::new(start, 0, None);
+    let mut controller = AimdController::new(AimdParams {
+        base_interval: Duration::from_micros(1),
+        max_interval: Duration::from_micros(3),
+        backoff_factor: 1.0001,
+        recovery_step: Duration::from_nanos(1),
+    });
+    let mut due = start;
+    for (draw_ns, expected_ns) in [(100, 200), (300, 450)] {
+        let mut gap = Duration::from_nanos(draw_ns);
+        let mut interval = controller.current_interval();
+        let mut wait = timeline.after_probe(gap, || due);
+        for _ in 0..1000 {
+            controller.on_ce_observed();
+            wait = timeline.back_off(&mut gap, &mut interval, controller.current_interval());
+        }
+        assert_eq!(gap, Duration::from_nanos(expected_ns));
+        due += gap;
+        assert_eq!(wait.deadline, due);
+    }
+}
+
+proptest::proptest! {
+    #[test]
+    fn backoff_deadline_depends_on_peak_not_feedback_partition(
+        base_ns in 0u64..2_000_000,
+        drawn_ns in 0u64..2_000_000,
+        steps in proptest::collection::vec(0u64..2_000_000, 0..40),
+        capped in proptest::bool::ANY,
+        delayed in proptest::bool::ANY,
+    ) {
+        let start = start();
+        let stop = capped.then_some(1);
+        let completed = start + if delayed { Duration::from_millis(5) } else { Duration::ZERO };
+        let original = if base_ns == 0 { Duration::ZERO } else { Duration::from_nanos(drawn_ns) };
+        let base = Duration::from_nanos(base_ns);
+        let peak = Duration::from_nanos(base_ns + steps.iter().copied().max().unwrap_or(0));
+        let mut repeated = SendTimeline::new(start, 0, stop);
+        let mut once = SendTimeline::new(start, 0, stop);
+        let mut repeated_gap = original;
+        let mut once_gap = original;
+        let mut repeated_interval = base;
+        let mut once_interval = base;
+        let mut observed = repeated.after_probe(original, || completed);
+        once.after_probe(original, || completed);
+        for step in steps {
+            observed = repeated.back_off(&mut repeated_gap, &mut repeated_interval,
+                Duration::from_nanos(base_ns + step));
+        }
+        let expected = once.back_off(&mut once_gap, &mut once_interval, peak);
+        proptest::prop_assert_eq!(observed.deadline, expected.deadline);
+        proptest::prop_assert_eq!(observed.spin, expected.spin);
+        proptest::prop_assert_eq!(repeated_gap, once_gap);
+        proptest::prop_assert_eq!(repeated_interval, once_interval);
+    }
+}
