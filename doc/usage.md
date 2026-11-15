@@ -392,13 +392,18 @@ HMAC.
 **Access Report retries.** `--access-report-timeout` (default 3 seconds) and
 `--access-report-retries` (default 4) bound the delivery procedure. Retries
 continue after the main send loop until the reflector acknowledges the report
-or the retries run out. A silent peer can therefore extend a short run by up to
-15 seconds with the defaults. The Access Report timer runs during both probe
+or the retries run out. A silent peer can extend a short run through the retry
+budget and the final retry's reply window. The Access Report timer runs during both probe
 pacing and the final reply wait, so long scheduled gaps or a longer `--timeout`
 do not postpone retries. Retry timing follows `--access-report-timeout`, even
 when congestion backoff has extended a measurement gap; reflected-burst pacing
-in each retry still uses the current congestion factor. Retries do not extend
-the final reply wait's deadline; an unfinished exchange continues afterward.
+in each retry still uses the current congestion factor. Retries do not restart
+the initial reply-drain deadline; an unfinished exchange continues afterward.
+After acknowledgement or retry exhaustion, the sender collects remaining
+replies within `--timeout` of the last successful retry. This retains later
+burst copies without restarting the window from acknowledgement or exhaustion.
+Collection ends early when every requested reply has arrived; shutdown and
+`--on-zero-ssid stop` still end it immediately.
 Acknowledgement requires exactly one usable Access Report with the original
 Access ID and Return Code. Wrong values or duplicate reports leave the retry
 timer armed; Reserved bits and bytes are ignored. These replies can still

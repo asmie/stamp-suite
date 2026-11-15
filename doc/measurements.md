@@ -88,6 +88,11 @@ validation rejection, timeout and network loss. **They are not a network-loss
 estimate.** Extra replies to one probe cannot satisfy another probe's request.
 For bursts, the final receive phase continues after the first response, until
 all requested copies have been observed or the final `--timeout` expires.
+An Access Report acknowledgement confirms delivery, not completion of its
+requested reply burst. After delivery is acknowledged or aborted, remaining
+retry replies are collected within `--timeout` of the last successful retry.
+Acknowledgement and retry exhaustion do not restart that window. This also
+covers retries sent near the end of the initial reply drain.
 `--on-zero-ssid stop` ends reception early. A run without bursts finishes
 once every probe has its first accepted reply; packets that arrive after exit
 are unobserved.

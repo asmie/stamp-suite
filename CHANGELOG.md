@@ -198,6 +198,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Collect later Access Report retry replies after acknowledgement or retry
+  exhaustion, including reflected burst copies. The remaining wait is bounded
+  by `--timeout` from the last successful retry, without restarting on completion.
+
 - Honor Access Report retry deadlines during long probe intervals. Timer-driven
   retries preserve the scheduled probe count, duration limit, Poisson draw and
   congestion backoff; packet statistics include the additional transmissions.

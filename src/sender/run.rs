@@ -87,6 +87,9 @@ pub(super) struct SenderRun {
     zero_ssid_seen: bool,
     congestion: Option<CongestionState>,
     access_report_state: Option<AccessReportRetransmitState>,
+    /// Reply window of the last successfully sent report retry. A delivery
+    /// acknowledgement must not discard that probe's later burst copies.
+    access_report_reply_deadline: Option<Instant>,
     /// TLVs sent with every probe; per-probe TLVs are added at build time.
     extra_tlvs: Vec<RawTlv>,
     /// Untrimmed TLV set when header reflection is requested; each probe
@@ -811,6 +814,7 @@ impl SenderRun {
             zero_ssid_seen,
             congestion,
             access_report_state,
+            access_report_reply_deadline: None,
             extra_tlvs,
             header_template,
             header_fixed_overhead,
@@ -911,6 +915,26 @@ impl SenderRun {
                 .await?
             {
                 break;
+            }
+        }
+
+        // Delivery completion and measurement completion are separate: the
+        // first reflected copy can acknowledge the report before its remaining
+        // burst arrives. Keep only the remainder of the last successful retry's
+        // reply window, including retries sent near the initial drain deadline.
+        // Never restart an exchange after a receive error or reset this window
+        // from an acknowledgement or from budget exhaustion.
+        if self
+            .access_report_state
+            .as_ref()
+            .is_some_and(|state| state.is_terminal())
+        {
+            if let Some(deadline) = self
+                .access_report_reply_deadline
+                .filter(|deadline| *deadline > Instant::now())
+            {
+                self.receive_until(deadline.into(), Wait::Drain, output)
+                    .await?;
             }
         }
 
@@ -1172,6 +1196,14 @@ impl SenderRun {
             Ok(n) if n == packet.len() => {
                 self.consecutive_send_errors = 0;
                 self.record_sent(seq, send_time, send_timestamp);
+                if attach_access_report
+                    && self
+                        .access_report_state
+                        .as_ref()
+                        .is_some_and(|state| state.retransmissions() > 0)
+                {
+                    self.access_report_reply_deadline = Some(send_time + self.timeout);
+                }
             }
             Ok(_) => {
                 return Err(crate::StartupError::io(

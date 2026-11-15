@@ -829,6 +829,180 @@ fn near_unity_ce_factors_do_not_stall_sender_backoff() {
 }
 
 #[test]
+fn incomplete_retry_bursts_keep_the_send_based_timeout_after_ack_or_abort() {
+    for acknowledge in [true, false] {
+        let peer = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let sender = Sender::start_profile(
+            &peer,
+            false,
+            1,
+            3,
+            false,
+            &[
+                "--timeout",
+                "2",
+                "--access-report",
+                "1",
+                "--access-report-timeout",
+                "1",
+                "--access-report-retries",
+                "1",
+            ],
+        );
+        let mut request = [0; 2048];
+        let (length, source) = peer.recv_from(&mut request).unwrap();
+        // All initial copies arrive, but report delivery remains unconfirmed.
+        for _ in 0..3 {
+            peer.send_to(
+                &reply_with_extensions(&request[..length], false, &[]),
+                source,
+            )
+            .unwrap();
+        }
+        let (length, _) = peer.recv_from(&mut request).unwrap();
+        let retry_received = Instant::now();
+        let tail = if acknowledge {
+            // A later ACK must not start a fresh two-second reply window.
+            std::thread::sleep(Duration::from_millis(700));
+            &[0, 6, 0, 4, 0x10, 1, 0, 0][..]
+        } else {
+            // Delivery has exhausted its one-second timer, but a valid base
+            // reply can still arrive within the retry's two-second window.
+            std::thread::sleep(Duration::from_millis(1200));
+            &[][..]
+        };
+        peer.send_to(
+            &reply_with_extensions(&request[..length], false, tail),
+            source,
+        )
+        .unwrap();
+        let stats = sender.finish();
+        let elapsed = retry_received.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(1800),
+            "reply window ended early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(2600),
+            "reply window was restarted: {elapsed:?}"
+        );
+        assert_eq!(stats["packets_sent"], 2);
+        assert_eq!(stats["packets_received"], 2);
+        assert_eq!(stats["packets_lost"], 0);
+        assert_eq!(
+            stats["access_report"]["outcome"],
+            if acknowledge {
+                "acknowledged"
+            } else {
+                "aborted"
+            }
+        );
+        assert_eq!(stats["access_report"]["retransmissions"], 1);
+        assert_eq!(stats["measurements"]["unique_replies"], 4);
+        assert_eq!(stats["measurements"]["unobserved_requested_replies"], 2);
+    }
+}
+
+#[test]
+fn access_report_acknowledgement_keeps_later_retry_burst_copies() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            for retry_during_drain in [false, true] {
+                let peer = UdpSocket::bind((ip, 0)).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut extra = vec![
+                    "--access-report",
+                    "2",
+                    "--access-return-code",
+                    "255",
+                    "--access-report-timeout",
+                    "1",
+                    "--access-report-retries",
+                    "1",
+                ];
+                if mode == 1 {
+                    extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
+                }
+                let auth = mode == 2;
+                let sender = Sender::start_profile(&peer, auth, 1, 3, false, &extra);
+                let encode = |request: &[u8], tail: &[u8]| {
+                    let mut response = reply_with_extensions(request, auth, tail);
+                    if mode == 1 && !tail.is_empty() {
+                        let digest = sign(&[&response[..4], &response[44..]]);
+                        response.extend_from_slice(&[0, 8, 0, 16]);
+                        response.extend_from_slice(&digest);
+                    }
+                    response
+                };
+                let mut buffer = [0; 2048];
+                let (length, source) = peer.recv_from(&mut buffer).unwrap();
+                let original = buffer[..length].to_vec();
+                // Complete the initial burst to enter report completion early,
+                // or hold one copy so the retry occurs near the drain deadline.
+                for _ in 0..if retry_during_drain { 2 } else { 3 } {
+                    peer.send_to(&encode(&original, &[]), source).unwrap();
+                }
+                let (length, _) = peer.recv_from(&mut buffer).unwrap();
+                let retry = buffer[..length].to_vec();
+                let base = if auth { 112 } else { 44 };
+                let mut offset = base;
+                let mut copies = None;
+                let mut reports = 0;
+                while offset < length {
+                    let size =
+                        usize::from(u16::from_be_bytes([retry[offset + 2], retry[offset + 3]]));
+                    let end = offset + 4 + size;
+                    assert!(end <= length);
+                    match retry[offset + 1] {
+                        6 => {
+                            reports += 1;
+                            assert_eq!(&retry[offset + 4..end], &[0x20, 255, 0, 0]);
+                        }
+                        12 => {
+                            copies = Some(u32::from_be_bytes(
+                                retry[offset + 4..offset + 8].try_into().unwrap(),
+                            ))
+                        }
+                        _ => (),
+                    }
+                    offset = end;
+                }
+                assert_eq!(reports, 1);
+                assert_eq!(copies, Some(3));
+                let acknowledgement = encode(&retry, &[0, 6, 0, 4, 0x20, 255, 0, 0]);
+                peer.send_to(&acknowledgement, source).unwrap();
+                peer.send_to(&acknowledgement, source).unwrap(); // exact duplicate
+                                                                 // The sender must remain alive for later distinct burst copies,
+                                                                 // after both the acknowledgement and the original drain window.
+                std::thread::sleep(Duration::from_millis(150));
+                if retry_during_drain {
+                    peer.send_to(&encode(&original, &[]), source).unwrap();
+                }
+                for _ in 0..2 {
+                    peer.send_to(&encode(&retry, &[]), source).unwrap();
+                }
+                let stats = sender.finish();
+                assert_eq!(stats["packets_sent"], 2);
+                assert_eq!(stats["packets_received"], 2);
+                assert_eq!(stats["packets_lost"], 0);
+                assert_eq!(stats["access_report"]["outcome"], "acknowledged");
+                assert_eq!(stats["access_report"]["retransmissions"], 1);
+                let measurements = &stats["measurements"];
+                assert_eq!(
+                    measurements["unique_replies"], 6,
+                    "{ip} mode={mode} drain={retry_during_drain}: {stats}"
+                );
+                assert_eq!(measurements["additional_replies"], 4);
+                assert_eq!(measurements["duplicate_replies"], 1);
+                assert_eq!(measurements["unobserved_requested_replies"], 0);
+                assert_eq!(measurements["reply_rtt"]["samples"], 6);
+            }
+        }
+    }
+}
+
+#[test]
 fn access_report_retries_during_pacing_preserve_scheduled_count_and_duration() {
     for ip in ["127.0.0.1", "::1"] {
         for mode in 0..3 {
