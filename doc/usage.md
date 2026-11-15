@@ -390,6 +390,10 @@ HMAC.
 continue after the main send loop until the reflector acknowledges the report
 or the retries run out. A silent peer can therefore extend a short run by up to
 15 seconds with the defaults.
+Acknowledgement requires exactly one usable Access Report with the original
+Access ID and Return Code. Wrong values or duplicate reports leave the retry
+timer armed; Reserved bits and bytes are ignored. These replies can still
+contribute valid base-packet RTT/loss measurements.
 
 The CoS wire format uses draft-ietf-ippm-stamp-cos-ecn-02's EC1/RPE extension.
 It zeroes the remaining twelve Reserved bits. EC1/RPE occupy four bits of the

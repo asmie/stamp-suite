@@ -15,6 +15,7 @@ pub(crate) const DEFAULT_ACCESS_REPORT_RETRIES: u32 = 4;
 /// acknowledgment disarms the timer. No separate task or timer is needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AccessReportRetransmitState {
+    expected_report: AccessReportTlv,
     pub(super) timeout: Duration,
     pub(super) max_retries: u32,
     pub(super) phase: AccessReportPhase,
@@ -40,8 +41,13 @@ pub(super) enum AccessReportPhase {
 impl AccessReportRetransmitState {
     /// Creates an unarmed state machine with the configured timer and retry
     /// budget (RFC 8972 §4.6).
-    pub(super) fn new(timeout: Duration, max_retries: u32) -> Self {
+    pub(super) fn new(
+        timeout: Duration,
+        max_retries: u32,
+        expected_report: AccessReportTlv,
+    ) -> Self {
         Self {
+            expected_report,
             timeout,
             max_retries,
             phase: AccessReportPhase::NotStarted,
@@ -80,10 +86,11 @@ impl AccessReportRetransmitState {
         }
     }
 
-    /// Disarms an armed timer on a reflected Access Report echo (RFC 8972 §4.6).
-    /// Other states are unchanged.
-    pub(super) fn acknowledge(&mut self) {
-        if matches!(self.phase, AccessReportPhase::Armed { .. }) {
+    /// Disarms an armed timer only when the usable echo matches the report
+    /// being delivered (RFC 8972 §4.6). Decoding has already ignored Reserved
+    /// bits; Access ID and Return Code must both match. Other states are unchanged.
+    pub(super) fn acknowledge(&mut self, report: AccessReportTlv) {
+        if report == self.expected_report && matches!(self.phase, AccessReportPhase::Armed { .. }) {
             self.phase = AccessReportPhase::Acknowledged;
         }
     }
@@ -139,6 +146,40 @@ impl AccessReportRetransmitState {
         AccessReportSummary {
             outcome: self.outcome(),
             retransmissions: self.retransmissions(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acknowledgement_requires_both_original_report_fields() {
+        let now = Instant::now();
+        for expected in [AccessReportTlv::new(1, 1), AccessReportTlv::new(2, 255)] {
+            for id in 0..=15 {
+                for code in 0..=255 {
+                    let mut state =
+                        AccessReportRetransmitState::new(Duration::from_secs(1), 1, expected);
+                    state.tick(now);
+                    let deadline = state.armed_deadline();
+                    let received = AccessReportTlv::new(id, code);
+                    state.acknowledge(received);
+                    if received == expected {
+                        assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
+                        assert!(!state.tick(now + Duration::from_secs(1)));
+                    } else {
+                        assert_eq!(state.outcome(), AccessReportOutcome::Pending);
+                        assert_eq!(state.armed_deadline(), deadline);
+                        assert_eq!(state.retransmissions(), 0);
+                        assert!(state.tick(now + Duration::from_secs(1)));
+                        assert_eq!(state.retransmissions(), 1);
+                        state.acknowledge(expected);
+                        assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
+                    }
+                }
+            }
         }
     }
 }

@@ -88,7 +88,7 @@ fn reflected(request: &[u8], auth: bool, count: u32) -> Vec<u8> {
     bytes[t1..t1 + 10].copy_from_slice(&request[t3..t3 + 10]);
     bytes[ttl] = 255;
     bytes.extend_from_slice(&[0, 11, 0, 4, 0, 7, 0, 9]);
-    bytes.extend_from_slice(&[0, 6, 0, 4, 0x10, 0, 0, 0]);
+    bytes.extend_from_slice(&[0, 6, 0, 4, 0x10, 1, 0, 0]);
     bytes.extend_from_slice(&[0, 4, 0, 4, 0, 12, 0, 0]); // forward CE
     bytes.extend_from_slice(&[0, 5, 0, 12]);
     bytes.extend_from_slice(&count.to_be_bytes());

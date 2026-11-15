@@ -828,6 +828,103 @@ fn near_unity_ce_factors_do_not_stall_sender_backoff() {
 }
 
 #[test]
+fn access_report_retries_until_one_matching_unambiguous_echo() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            let peer = UdpSocket::bind((ip, 0)).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let (id, code) = match mode {
+                0 => (1u8, 1u8),
+                1 => (2, 255),
+                _ => (2, 0),
+            };
+            let (id_text, code_text) = (id.to_string(), code.to_string());
+            let mut extra = vec![
+                "--access-report",
+                &id_text,
+                "--access-return-code",
+                &code_text,
+                "--access-report-timeout",
+                "1",
+                "--access-report-retries",
+                "1",
+            ];
+            if mode == 1 {
+                extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
+            }
+            let auth = mode == 2;
+            let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
+            let mut request = [0; 2048];
+            let (length, source) = peer.recv_from(&mut request).unwrap();
+            let base = if auth { 112 } else { 44 };
+            let originated = [0x80, 6, 0, 4, id << 4, code, 0, 0];
+            assert_eq!(&request[base..base + 8], &originated);
+            let send = |request: &[u8], tail: &[u8]| {
+                let mut response = reply_with_extensions(request, auth, tail);
+                if mode == 1 {
+                    let digest = sign(&[&response[..4], &response[44..]]);
+                    response.extend_from_slice(&[0, 8, 0, 16]);
+                    response.extend_from_slice(&digest);
+                }
+                peer.send_to(&response, source).unwrap();
+            };
+            // All base replies and signatures are valid. None confirms the
+            // single report sent by this session.
+            for value in [
+                [(3 - id) << 4, code, 0, 0],
+                [id << 4, code ^ 1, 0, 0],
+                [0, code, 0, 0],
+                [0xf0, code, 0, 0],
+            ] {
+                let mut tail = vec![0, 6, 0, 4];
+                tail.extend_from_slice(&value);
+                send(&request[..length], &tail);
+            }
+            // A matching first report must not hide a conflicting duplicate,
+            // including a second instance carrying the U flag.
+            for flags in [0, 0x80] {
+                send(
+                    &request[..length],
+                    &[
+                        0,
+                        6,
+                        0,
+                        4,
+                        id << 4,
+                        code,
+                        0,
+                        0,
+                        flags,
+                        6,
+                        0,
+                        4,
+                        (3 - id) << 4,
+                        code,
+                        0,
+                        0,
+                    ],
+                );
+            }
+            let (length, _) = peer
+                .recv_from(&mut request)
+                .expect("a mismatched report must not cancel the retry");
+            assert_eq!(&request[base..base + 8], &originated);
+            // Reserved bits and bytes must still be ignored on a matching echo.
+            send(
+                &request[..length],
+                &[0, 6, 0, 4, (id << 4) | 0x0f, code, 0xff, 0xff],
+            );
+            let stats = sender.finish();
+            assert_eq!(stats["packets_sent"], 2, "{ip} mode={mode}");
+            assert_eq!(stats["packets_received"], 2);
+            assert_eq!(stats["packets_lost"], 0);
+            assert_eq!(stats["access_report"]["outcome"], "acknowledged");
+            assert_eq!(stats["access_report"]["retransmissions"], 1);
+        }
+    }
+}
+
+#[test]
 fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
     for ip in ["127.0.0.1", "::1"] {
         for mode in 0..3 {

@@ -193,14 +193,16 @@ fn test_access_report_defaults_match_rfc_8972_4_6() {
 
 #[test]
 fn test_access_report_state_fresh_is_pending() {
-    let state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     assert_eq!(state.outcome(), AccessReportOutcome::Pending);
     assert_eq!(state.retransmissions(), 0);
 }
 
 #[test]
 fn test_access_report_first_tick_attaches_and_arms() {
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
     assert!(state.tick(now), "first tick must attach the TLV");
     assert_eq!(state.outcome(), AccessReportOutcome::Pending);
@@ -213,7 +215,8 @@ fn test_access_report_first_tick_attaches_and_arms() {
 /// packets.
 #[test]
 fn test_access_report_fresh_state_has_not_started() {
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     assert!(!state.has_started(), "fresh state must not have started");
     assert!(
         !state.has_started() || state.is_terminal(),
@@ -227,7 +230,8 @@ fn test_access_report_fresh_state_has_not_started() {
 
 #[test]
 fn test_access_report_tick_before_deadline_does_not_reattach() {
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
     assert!(state.tick(now));
     // Still well before the 3s deadline.
@@ -237,7 +241,8 @@ fn test_access_report_tick_before_deadline_does_not_reattach() {
 
 #[test]
 fn test_access_report_tick_after_deadline_retransmits() {
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
     assert!(state.tick(now));
     let after_expiry = now + Duration::from_secs(3) + Duration::from_millis(1);
@@ -251,7 +256,8 @@ fn test_access_report_tick_after_deadline_retransmits() {
 
 #[test]
 fn test_access_report_retries_exhausted_then_aborted() {
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 2);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(1), 2, AccessReportTlv::new(1, 1));
     let mut now = Instant::now();
     assert!(state.tick(now)); // original send (attempt 0)
     now += Duration::from_secs(1) + Duration::from_millis(1);
@@ -281,7 +287,8 @@ fn test_access_report_retries_exhausted_then_aborted() {
 fn test_access_report_zero_retries_aborts_on_first_expiry() {
     // RFC 8972 §4.6 MUST: operators must be able to control the retry
     // count, including down to 0 (abort immediately, no retransmits).
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 0);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(1), 0, AccessReportTlv::new(1, 1));
     let now = Instant::now();
     assert!(state.tick(now));
     let after_expiry = now + Duration::from_secs(1) + Duration::from_millis(1);
@@ -292,10 +299,11 @@ fn test_access_report_zero_retries_aborts_on_first_expiry() {
 
 #[test]
 fn test_access_report_acknowledge_before_deadline_disarms() {
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
     assert!(state.tick(now));
-    state.acknowledge();
+    state.acknowledge(AccessReportTlv::new(1, 1));
     assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
 
     // Acknowledged is terminal: no further attach, ever, even long past
@@ -306,14 +314,15 @@ fn test_access_report_acknowledge_before_deadline_disarms() {
 
 #[test]
 fn test_access_report_acknowledge_after_retransmit_disarms_and_stops() {
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 4);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(1), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
     assert!(state.tick(now));
     let after_expiry = now + Duration::from_secs(1) + Duration::from_millis(1);
     assert!(state.tick(after_expiry)); // retransmission 1
     assert_eq!(state.retransmissions(), 1);
 
-    state.acknowledge();
+    state.acknowledge(AccessReportTlv::new(1, 1));
     assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
     assert_eq!(
         state.retransmissions(),
@@ -327,20 +336,22 @@ fn test_access_report_acknowledge_after_retransmit_disarms_and_stops() {
 fn test_access_report_acknowledge_before_any_send_is_noop() {
     // An ack cannot arrive before the TLV was ever sent. This guards
     // against a caller wiring this up backwards.
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
-    state.acknowledge();
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
+    state.acknowledge(AccessReportTlv::new(1, 1));
     assert_eq!(state.outcome(), AccessReportOutcome::Pending);
 }
 
 #[test]
 fn test_access_report_acknowledge_after_aborted_is_noop() {
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 0);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(1), 0, AccessReportTlv::new(1, 1));
     let now = Instant::now();
     assert!(state.tick(now));
     assert!(!state.tick(now + Duration::from_secs(2)));
     assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
 
-    state.acknowledge();
+    state.acknowledge(AccessReportTlv::new(1, 1));
     assert_eq!(
         state.outcome(),
         AccessReportOutcome::Aborted,
@@ -350,11 +361,12 @@ fn test_access_report_acknowledge_after_aborted_is_noop() {
 
 #[test]
 fn test_access_report_summary_reflects_state() {
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(1), 4);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(1), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
     assert!(state.tick(now));
     assert!(state.tick(now + Duration::from_secs(1) + Duration::from_millis(1)));
-    state.acknowledge();
+    state.acknowledge(AccessReportTlv::new(1, 1));
     let summary = state.summary();
     assert_eq!(summary.outcome, AccessReportOutcome::Acknowledged);
     assert_eq!(summary.retransmissions, 1);
@@ -848,13 +860,14 @@ fn unsolicited_msid_cannot_seed_the_reflector_latch() {
     let mut latched = None;
     let mut zero = false;
     let mut congestion = CongestionState::new(congestion_test_params());
-    let mut access = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut access =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     access.tick(Instant::now());
     for seq in [99u32, 42] {
         let mut reply = vec![0; 44];
         reply[24..28].copy_from_slice(&seq.to_be_bytes());
         reply.extend_from_slice(&[0, 11, 0, 4, 0, 7, 0, 9]);
-        reply.extend_from_slice(&[0, 6, 0, 4, 0x10, 0, 0, 0]);
+        reply.extend_from_slice(&[0, 6, 0, 4, 0x10, 1, 0, 0]);
         let mut ctx = congestion_process_response_ctx(
             &mut pending,
             &mut rtt,
@@ -1595,6 +1608,9 @@ proptest::proptest! {
             }
             tlvs.push(raw).unwrap();
         }
+        // One originated Access Report requires one unambiguous echo, even
+        // when a duplicate would otherwise be skipped by its flags.
+        access &= entries.iter().filter(|(is_access, _)| *is_access).count() == 1;
         // Formatting-looking payload cannot create a control decision.
         let mut opaque = RawTlv::new(TlvType::Unknown(253), b"AccessReport:ack, CoS:CE".to_vec());
         opaque.clear_reflector_flags();
@@ -1710,7 +1726,11 @@ fn telemetry_control_decisions_do_not_depend_on_formatting() {
             let mut latched = None;
             let mut zero = false;
             let mut congestion = CongestionState::new(congestion_test_params());
-            let mut access = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+            let mut access = AccessReportRetransmitState::new(
+                Duration::from_secs(3),
+                4,
+                AccessReportTlv::new(1, 1),
+            );
             access.tick(Instant::now());
             let mut ctx = congestion_process_response_ctx(
                 &mut pending,
@@ -2180,7 +2200,8 @@ fn test_process_response_acknowledges_access_report_state() {
     let mut owd_collector = OwdCollector::new();
     let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
-    let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut access_report_state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     access_report_state.tick(Instant::now()); // simulate the original send having armed it
     let mut ctx = SenderRecvContext {
         local_error_estimate: None,
@@ -2248,7 +2269,8 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
     let mut owd_collector = OwdCollector::new();
     let mut packets_received: u64 = 0;
     let mut latched_reflector_msid = None;
-    let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut access_report_state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     access_report_state.tick(Instant::now());
     let mut ctx = SenderRecvContext {
         local_error_estimate: None,
@@ -2603,7 +2625,8 @@ fn test_access_report_loopback_acked_on_first_reply() {
     let return_code = 1u8;
     let extra_tlvs = [AccessReportTlv::new(access_id, return_code).to_raw()];
 
-    let mut access_report_state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut access_report_state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let send_time = Instant::now();
     assert!(access_report_state.tick(send_time));
 
@@ -2734,7 +2757,8 @@ fn test_access_report_no_reflector_echo_leads_to_retransmit_then_abort() {
     // Simulates total silence from the reflector (packet lost / dropped)
     // by never calling `acknowledge()`, only driving `tick`
     // forward in time, exactly as the send loop does every iteration.
-    let mut state = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+    let mut state =
+        AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let mut now = Instant::now();
 
     assert!(state.tick(now), "iteration 0: original send");
@@ -3525,7 +3549,11 @@ fn mismatched_ssid_preserves_measurement_and_control_state() {
                 let mut latched = None;
                 let mut zero = false;
                 let mut congestion = CongestionState::new(congestion_test_params());
-                let mut access = AccessReportRetransmitState::new(Duration::from_secs(3), 4);
+                let mut access = AccessReportRetransmitState::new(
+                    Duration::from_secs(3),
+                    4,
+                    AccessReportTlv::new(1, 1),
+                );
                 access.tick(Instant::now());
                 for ssid in [43u16, u16::MAX, 42] {
                     let reply = ssid_test_reply(auth, extensions, ssid, t1, &key);
@@ -3687,7 +3715,7 @@ fn ssid_test_reply(
     }
     if extensions {
         reply.extend_from_slice(&[0, 11, 0, 4, 0, 7, 0, 9]);
-        reply.extend_from_slice(&[0, 6, 0, 4, 0x10, 0, 0, 0]);
+        reply.extend_from_slice(&[0, 6, 0, 4, 0x10, 1, 0, 0]);
         if auth {
             let mut covered = reply[..4].to_vec();
             covered.extend_from_slice(&reply[base..]);

@@ -198,6 +198,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Require a single matching Access Report echo before cancelling retries.
+  Wrong Access IDs, Return Codes and duplicate reports no longer acknowledge
+  delivery; Reserved fields remain ignored and valid RTT samples are retained.
+
 - Prevent valid ECN backoff factors close to 1 from stalling through duration
   rounding. Every CE observation below the configured cap now increases the
   stored interval by at least 1 ns; cap and recovery behavior remain intact.

@@ -126,6 +126,15 @@ pub(super) fn validate_reflected_tlvs(
         .filter(|raw| raw.tlv_type == TlvType::ClassOfService)
         .count()
         == 1;
+    // The sender originates one Access Report. Multiple instances cannot
+    // unambiguously acknowledge it, even when a later one is flagged U/M.
+    let single_access_report = track_access_report
+        && tlvs
+            .non_hmac_tlvs()
+            .iter()
+            .filter(|raw| raw.tlv_type == TlvType::AccessReport)
+            .count()
+            == 1;
     if want_msid {
         let count = tlvs
             .non_hmac_tlvs()
@@ -152,11 +161,14 @@ pub(super) fn validate_reflected_tlvs(
                 continue; // RFC 8972 §4: U flag skips this TLV.
             }
             if track_access_report && raw.tlv_type == crate::tlv::TlvType::AccessReport {
-                // A recognized, well-formed echo acknowledges the report (RFC 8972 §4.6).
+                // Retain one usable candidate; the retransmission state also
+                // checks its ID and Return Code against the original report.
                 // U/M checks above and the surrounding integrity check reject unusable TLVs.
                 match AccessReportTlv::from_raw(raw) {
                     Ok(report) => {
-                        telemetry.access_report.get_or_insert(report);
+                        if single_access_report {
+                            telemetry.access_report = Some(report);
+                        }
                     }
                     Err(_) => {
                         telemetry.flags.malformed += 1;

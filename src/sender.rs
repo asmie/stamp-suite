@@ -244,7 +244,8 @@ pub fn fuzz_reply(
         now,
         [Some(1.0), Some(1.0)],
     );
-    let mut access_report = AccessReportRetransmitState::new(Duration::from_secs(1), 3);
+    let mut access_report =
+        AccessReportRetransmitState::new(Duration::from_secs(1), 3, AccessReportTlv::new(1, 1));
     access_report.tick(now);
     let mut congestion = CongestionState::new(AimdParams {
         base_interval: Duration::from_millis(10),
@@ -647,11 +648,8 @@ fn process_response(
     // Disarm Access Report retries on a usable echo (RFC 8972 §4.6).
     // Identity and TLV integrity were checked above.
     if let Some(state) = ctx.access_report_state.as_mut() {
-        if telemetry
-            .as_ref()
-            .is_some_and(|info| info.access_report.is_some())
-        {
-            state.acknowledge();
+        if let Some(report) = telemetry.as_ref().and_then(|info| info.access_report) {
+            state.acknowledge(report);
         }
     }
 

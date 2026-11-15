@@ -482,6 +482,7 @@ impl SenderRun {
             AccessReportRetransmitState::new(
                 Duration::from_secs(conf.access_report_timeout as u64),
                 conf.access_report_retries,
+                AccessReportTlv::new(access_id, conf.access_return_code),
             )
         });
 
