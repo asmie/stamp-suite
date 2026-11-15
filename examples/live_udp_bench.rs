@@ -19,6 +19,10 @@ mod headers;
 #[path = "live_udp_bench/sessions.rs"]
 mod sessions;
 
+#[cfg(target_os = "linux")]
+#[path = "live_udp_bench/memory.rs"]
+mod memory;
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("live_udp_bench requires Linux /proc CPU accounting");
@@ -36,6 +40,7 @@ mod linux {
     use super::burst::{Copies, Profile as Burst, Verdict};
     use super::headers::{Mode as HeaderMode, Profile as Headers};
     use super::latency::{Samples, SendTimes};
+    use super::memory;
     use super::sessions::{Profile as Sessions, Replies as SessionReplies};
     use clap::Parser;
     use serde::Serialize;
@@ -99,6 +104,9 @@ mod linux {
         /// Observe local send-call-to-receive time; at most one million probe slots.
         #[arg(long)]
         latency: bool,
+        /// Observe process RSS/PSS outside load via Linux smaps_rollup.
+        #[arg(long)]
+        memory: bool,
         /// Type 12 replies per probe; require stateful reflector sequence numbers.
         #[arg(long, value_parser=clap::value_parser!(u16).range(1..=16), requires="stateful", conflicts_with="ber_padding")]
         burst_count: Option<u16>,
@@ -592,6 +600,7 @@ mod linux {
                 .transpose()?,
             ..Default::default()
         };
+        let memory_before_load = memory::snapshot(args.memory, child.0.id())?;
         let reflector_before = cpu_ticks(child.0.id())?;
         let generator_before = cpu_ticks(std::process::id())?;
         let start = Instant::now();
@@ -684,6 +693,7 @@ mod linux {
                 Ok((sent, skipped_slots, replies, reflector_cpu, generator_cpu))
             })?;
         child.check()?;
+        let memory_after_drain = memory::snapshot(args.memory, child.0.id())?;
         let unique = replies.unique_during_load + replies.unique_during_drain;
         if unique > sent as u64 || replies.highest.is_some_and(|seq| seq > sent) {
             return Err("received an unsent sequence; accounting is invalid".into());
@@ -710,6 +720,7 @@ mod linux {
             return Err("session totals disagree with unique reply accounting".into());
         }
         let idle_after = idle(&mut child, args.idle_seconds, hz)?;
+        let memory_after_idle = memory::snapshot(args.memory, child.0.id())?;
         let burst_summary = replies
             .copies
             .as_ref()
@@ -724,6 +735,12 @@ mod linux {
         workload_probe(&mut child, &socket, key, ber, burst, headers, sent + 1)?;
         Ok(json!({
             "reflector_command": command_line, "sent": sent, "replies": replies,
+            "memory": memory_before_load.map(|before_load| json!({
+                "source": "/proc/<pid>/smaps_rollup",
+                "before_load": before_load,
+                "after_drain": memory_after_drain,
+                "after_idle": memory_after_idle,
+            })),
             "observed_rtt": observed_rtt,
             "burst":burst_summary,
             "sessions": session_summary,

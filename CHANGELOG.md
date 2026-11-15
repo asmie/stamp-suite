@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in process memory observations to live UDP benchmarks, reporting
+  reflector and generator RSS/PSS before load, after drain and after idle.
+  Keep collection outside timed CPU windows and fail on unavailable data.
+
 - Add bounded multi-session live UDP benchmarks using distinct SSIDs, with
   sequence/identity/HMAC validation and per-session reply completeness.
   Separate warm-up identities and make initial creation and disabled expiry

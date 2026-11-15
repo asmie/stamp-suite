@@ -47,6 +47,7 @@ Options (`live_udp_bench --help` lists limits and defaults):
 | `--ber-padding OCTETS` | Include combined BER metadata and 16–1,200 padding octets, in complete four-octet default patterns. |
 | `--ber-damaged` | Require `--ber-padding`; inject five padding bit errors, including a four-bit run across an octet boundary. |
 | `--latency` | Observe local send-call-to-receive time for first valid replies; require `rate × seconds` ≤1,000,000 probe slots. Disabled by default. |
+| `--memory` | Read reflector and generator RSS/PSS from Linux `smaps_rollup` before load, after drain and after idle. Disabled by default; unavailable or malformed data fails the trial. |
 | `--burst-count N` | Request 1–16 Type 12 reply copies per probe. Require `--stateful`; conflict with BER. Bound `rate × seconds × count` to 1,000,000 scheduled copies. |
 | `--burst-bytes OCTETS` | Require `--burst-count`; request 240–1,200 payload octets aligned to four, default 240. |
 | `--headers MODE` | Linux nix only: `fixed` for fixed-header C fallback, `ipv6-ext` for Destination Options, or `combined` for both. Conflict with BER/bursts; extension modes require `--ipv6`. |
@@ -80,6 +81,38 @@ JSON adds request payload size, expected BER profile and a `completed` flag.
 If a trial returns a runtime error, prior completed trials and the error are
 printed before a nonzero exit. Startup metadata/hash failures or a panic can
 still prevent a report. Always check both the exit code and completion flag.
+
+### Process memory observations
+
+```bash
+target/release/examples/live_udp_bench --stateful --sessions 65534 \
+  --rate 40000 --seconds 2 --latency --memory
+```
+
+With `--memory`, each trial's `memory` object contains three snapshots:
+`before_load` after warm-up and bookkeeping allocation, `after_drain` after
+the receiver joins, and `after_idle` before the final readiness probe. Each
+snapshot contains reflector and generator PIDs, RSS, PSS, private/shared
+clean-plus-dirty memory and swap in bytes, plus total `collection_seconds`.
+The [Linux proc documentation](https://docs.kernel.org/filesystems/proc.html)
+defines these fields: RSS counts resident pages, while PSS apportions shared
+pages among processes. Private/shared totals use their respective clean and
+dirty fields. These fields exclude explicit hugetlbfs memory. Kernel `kB`
+values are converted using 1,024 bytes per unit.
+
+Reads occur outside load and idle CPU timing windows, sequentially for each
+process; they are not atomic across processes. Collection still has overhead
+and can affect subsequent observations. The generator includes reply/RTT
+bookkeeping, allocator retention and earlier trial reports. Each reflector is
+a fresh process; the generator persists across repeats. Use fresh invocations
+for comparisons requiring an independent generator baseline.
+
+These are observations at phase boundaries, not peak memory, allocations per
+packet, heap-only usage or exact per-session costs. Post-drain buffers remain
+allocated, and post-idle RSS need not fall when sessions expire. No memory
+reclamation is forced. A missing or inaccessible `smaps_rollup`, malformed
+field or overflow fails the trial instead of reporting zero. Without the flag,
+the `memory` field is null and no rollup files are read.
 
 ### Many stateful sessions
 
