@@ -7,6 +7,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add bounded multi-session live UDP benchmarks using distinct SSIDs, with
+  sequence/identity/HMAC validation and per-session reply completeness.
+  Separate warm-up identities and make initial creation and disabled expiry
+  explicit in workload metadata.
+
 - Require controlled Linux ECN rewrite tests for the default and all-feature
   nix profiles. Compare real endpoint reports with raw IP/TLV captures and
   signatures across both IP families, three key modes and policy refusals;

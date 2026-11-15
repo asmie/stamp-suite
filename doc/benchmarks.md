@@ -52,6 +52,7 @@ Options (`live_udp_bench --help` lists limits and defaults):
 | `--headers MODE` | Linux nix only: `fixed` for fixed-header C fallback, `ipv6-ext` for Destination Options, or `combined` for both. Conflict with BER/bursts; extension modes require `--ipv6`. |
 | `--header-bytes OCTETS` | Require an extension mode; 16–256 Destination Options octets aligned to eight, default 16. |
 | `--headers-denied` | Require `--headers`; keep reflection denied on the temporary child while still attaching requested forward options. |
+| `--sessions N` | Cycle through 1–65,534 measured SSIDs on one UDP tuple. Require `--stateful`; conflict with BER, bursts and headers. Include first-use session creation, disable expiry and reserve separate warm-up identities. |
 
 The generator sends 1 ms batches, skips missed pacing slots, and drains replies
 on a separate thread. Bookkeeping is bounded by `rate × seconds + 1` slots
@@ -79,6 +80,47 @@ JSON adds request payload size, expected BER profile and a `completed` flag.
 If a trial returns a runtime error, prior completed trials and the error are
 printed before a nonzero exit. Startup metadata/hash failures or a panic can
 still prevent a report. Always check both the exit code and completion flag.
+
+### Many stateful sessions
+
+```bash
+target/release/examples/live_udp_bench --stateful --sessions 8192 \
+  --rate 20000 --seconds 2 --latency
+target/release/examples/live_udp_bench --stateful --sessions 65534 \
+  --rate 40000 --seconds 2 --ipv6 --authenticated --latency
+```
+
+The measured socket cycles through distinct nonzero SSIDs, skipping SSID 7,
+which is reserved for warm-up. The two warm-up UDP tuples are outside the
+measured identities. The child receives `--session-timeout 0` and
+`--max-sessions N+2`, so expiry and admission-cap drops do not confound this
+creation/lookup workload. Initial creation is included in load CPU and RTT:
+these are not prepopulated steady-state-only measurements. Packet payloads
+remain 44 or 112 octets. Combine this mode with `--latency`, but not BER,
+header or burst workloads.
+
+Startup rejects more sessions than scheduled probes (`rate × seconds`). Missed
+pacing slots can still reduce actual coverage; inspect `offered_sessions`
+instead of assuming the requested number was reached. Global successful-send
+sequences remain contiguous and replies must echo the SSID assigned to their
+sequence, timestamp and Error Estimate, with a valid HMAC when authenticated.
+Delayed warm-up replies do not enter measured accounting.
+
+`session_profile` records the workload settings. Each trial's `sessions` object
+reports configured/offered identities, identities with replies, fully/partially
+replied and unanswered identities, unique/missing probe replies, and the minimum
+and maximum replies per offered identity. Accounting adds at most 65,534 u32
+counters (256 KiB); global deduplication and optional RTT bounds remain in force.
+Each unique accepted reply contributes once, including drain replies. The
+summary's unique and missing totals agree with the ordinary probe totals.
+
+This isolates many SSIDs on one destination and source socket. It does not
+measure many source ports/destinations, concurrent control inventory, expiry,
+queue saturation or packet arrival independently of the generator. Offered and
+answered identities are not a direct snapshot of the reflector's session table.
+Use repeated matched builds and record generator CPU/pacing shortfalls before
+attributing a difference to reflector session costs. The default workload and
+its warm-up behavior remain unchanged when `--sessions` is absent.
 
 ### Live header reflection
 

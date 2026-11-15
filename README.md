@@ -187,7 +187,7 @@ without the feature.
 | [Statistics](doc/statistics.md) | Quantile precision and retention |
 | [Architecture](doc/architecture.md) | Modules, receiver backends, packet processing, TLV reference |
 | [Conformance](doc/conformance/README.md) | Per-clause evidence for each RFC and draft |
-| [Benchmarks](doc/benchmarks.md) | Throughput/latency tools, including live `--headers`, `--header-bytes` and `--headers-denied` workloads |
+| [Benchmarks](doc/benchmarks.md) | Throughput/latency tools, including live `--sessions`, `--headers`, `--header-bytes` and `--headers-denied` workloads |
 | [Release verification](doc/release-evidence.md) | Platform and integration checks run before a release |
 | [Contributing](CONTRIBUTING.md) | Building, testing, linting and submitting changes |
 | [Vulnerability reporting](SECURITY.md) | How to report a security problem |

@@ -15,6 +15,10 @@ mod burst;
 #[path = "live_udp_bench/headers.rs"]
 mod headers;
 
+#[cfg(target_os = "linux")]
+#[path = "live_udp_bench/sessions.rs"]
+mod sessions;
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("live_udp_bench requires Linux /proc CPU accounting");
@@ -32,6 +36,7 @@ mod linux {
     use super::burst::{Copies, Profile as Burst, Verdict};
     use super::headers::{Mode as HeaderMode, Profile as Headers};
     use super::latency::{Samples, SendTimes};
+    use super::sessions::{Profile as Sessions, Replies as SessionReplies};
     use clap::Parser;
     use serde::Serialize;
     use serde_json::json;
@@ -109,6 +114,9 @@ mod linux {
         /// Keep child header reflection denied while still attaching requested options.
         #[arg(long, requires = "headers")]
         headers_denied: bool,
+        /// Measured SSIDs on one UDP tuple, excluding warm-up SSID 7; include creation.
+        #[arg(long, requires="stateful", conflicts_with_all=["ber_padding","burst_count","headers"], value_parser=clap::value_parser!(u16).range(1..=65534))]
+        sessions: Option<u16>,
     }
 
     struct Reflector(Child);
@@ -243,7 +251,11 @@ mod linux {
         ber: Option<&Profile>,
         burst: Option<&Burst>,
         headers: Option<&Headers>,
+        sessions: Option<&Sessions>,
     ) -> Vec<u8> {
+        if let Some(sessions) = sessions {
+            return sessions.request(seq, STAMP, key);
+        }
         let mut bytes = request(seq, key, ber);
         if let Some(burst) = burst {
             burst.append(&mut bytes, key);
@@ -260,7 +272,11 @@ mod linux {
         ber: Option<&Profile>,
         burst: Option<&Burst>,
         headers: Option<&Headers>,
+        sessions: Option<&Sessions>,
     ) -> Option<u32> {
+        if let Some(sessions) = sessions {
+            return sessions.response(buf, STAMP, key);
+        }
         if let Some(headers) = headers {
             let base = if key.is_some() { 112 } else { 44 };
             let seq = reply_sequence(buf.get(..base)?, key)?;
@@ -285,7 +301,7 @@ mod linux {
     ) -> Result<()> {
         if let Some(headers) = headers {
             let start = Instant::now();
-            let request = workload_request(seq, key, None, None, Some(headers));
+            let request = workload_request(seq, key, None, None, Some(headers), None);
             let mut buf = [0; 2048];
             while start.elapsed() < Duration::from_secs(5) {
                 child.check()?;
@@ -294,7 +310,7 @@ mod linux {
                 }
                 match socket.recv(&mut buf) {
                     Ok(n)
-                        if workload_response(&buf[..n], key, None, None, Some(headers))
+                        if workload_response(&buf[..n], key, None, None, Some(headers), None)
                             == Some(seq) =>
                     {
                         return Ok(())
@@ -313,7 +329,7 @@ mod linux {
         };
         let start = Instant::now();
         let mut next_send = start;
-        let request = workload_request(seq, key, None, Some(burst), None);
+        let request = workload_request(seq, key, None, Some(burst), None, None);
         let mut sequences = Vec::new();
         let mut buf = [0; 2048];
         while start.elapsed() < Duration::from_secs(5) {
@@ -326,7 +342,8 @@ mod linux {
             }
             match socket.recv(&mut buf) {
                 Ok(n)
-                    if workload_response(&buf[..n], key, None, Some(burst), None) == Some(seq) =>
+                    if workload_response(&buf[..n], key, None, Some(burst), None, None)
+                        == Some(seq) =>
                 {
                     let nonce = u32::from_be_bytes(buf[..4].try_into()?);
                     if !sequences.contains(&nonce) {
@@ -407,6 +424,8 @@ mod linux {
         rtt: Option<Samples>,
         #[serde(skip)]
         copies: Option<Copies>,
+        #[serde(skip)]
+        sessions: Option<SessionReplies>,
     }
     impl Replies {
         fn record(&mut self, seq: Option<u32>, during_load: bool) -> bool {
@@ -441,6 +460,9 @@ mod linux {
             }
             if !self.record(seq, during_load) {
                 return Ok(());
+            }
+            if let Some(sessions) = &mut self.sessions {
+                sessions.record(seq.ok_or("missing session sequence")?)?;
             }
             if let Some(samples) = &mut self.rtt {
                 let (times, received_ns) = timing.ok_or("missing receive observation")?;
@@ -502,6 +524,10 @@ mod linux {
         headers: Option<&Headers>,
         hz: u64,
     ) -> Result<serde_json::Value> {
+        let sessions = args
+            .sessions
+            .map(|count| Sessions::new(count, u64::from(args.rate) * u64::from(args.seconds)))
+            .transpose()?;
         let ip = if args.ipv6 { "::1" } else { "127.0.0.1" };
         let reserve = UdpSocket::bind((ip, 0))?;
         let destination = reserve.local_addr()?;
@@ -541,6 +567,9 @@ mod linux {
         if let Some(headers) = headers {
             headers.configure(&mut command, ip);
         }
+        if let Some(sessions) = &sessions {
+            sessions.configure(&mut command);
+        }
         let command_line = format!("{command:?}");
         drop(reserve); // Bind race fails visibly via child status; never retry a different server.
         let mut child = Reflector(command.spawn()?);
@@ -556,6 +585,7 @@ mod linux {
         let send_times = args.latency.then(|| SendTimes::new(capacity)).transpose()?;
         let mut replies = Replies {
             seen: vec![false; capacity],
+            sessions: sessions.as_ref().map(SessionReplies::new),
             rtt: args.latency.then(Samples::default),
             copies: burst
                 .map(|profile| Copies::new(profile, capacity))
@@ -578,7 +608,14 @@ mod linux {
                                 // only an admitted first reply contributes the sample.
                                 let received_ns =
                                     send_times.as_ref().map(|_| elapsed_ns(start)).transpose()?;
-                                let seq = workload_response(&buf[..n], key, ber, burst, headers);
+                                let seq = workload_response(
+                                    &buf[..n],
+                                    key,
+                                    ber,
+                                    burst,
+                                    headers,
+                                    sessions.as_ref(),
+                                );
                                 if seq != Some(0) {
                                     let timing = send_times.as_ref().zip(received_ns);
                                     if burst.is_some() {
@@ -622,7 +659,8 @@ mod linux {
                         if Instant::now() >= deadline {
                             break;
                         }
-                        let request = workload_request(sent + 1, key, ber, burst, headers);
+                        let request =
+                            workload_request(sent + 1, key, ber, burst, headers, sessions.as_ref());
                         if let Some(times) = &send_times {
                             // Publish before the syscall: a fast reply can be read
                             // while send() is still returning on the sender thread.
@@ -660,6 +698,17 @@ mod linux {
         {
             return Err("latency samples do not match unique valid replies".into());
         }
+        let session_summary = replies
+            .sessions
+            .as_ref()
+            .map(|sessions| sessions.summary(sent))
+            .transpose()?;
+        if session_summary
+            .as_ref()
+            .is_some_and(|summary| summary.unique_replies != unique)
+        {
+            return Err("session totals disagree with unique reply accounting".into());
+        }
         let idle_after = idle(&mut child, args.idle_seconds, hz)?;
         let burst_summary = replies
             .copies
@@ -677,6 +726,7 @@ mod linux {
             "reflector_command": command_line, "sent": sent, "replies": replies,
             "observed_rtt": observed_rtt,
             "burst":burst_summary,
+            "sessions": session_summary,
             "unique_reply_copy_pps_during_load":burst_summary.as_ref().map(|summary|summary.unique_during_load as f64/args.seconds as f64),
             "missing_after_drain": sent as u64 - unique,
             "loss_percent": 100.0 * (sent as u64 - unique) as f64 / sent as f64,
@@ -694,6 +744,10 @@ mod linux {
     }
     fn run_inner() -> Result<()> {
         let mut args = Args::parse();
+        let sessions = args
+            .sessions
+            .map(|count| Sessions::new(count, u64::from(args.rate) * u64::from(args.seconds)))
+            .transpose()?;
         let headers = args
             .headers
             .map(|mode| Headers::new(mode, args.ipv6, args.header_bytes, args.headers_denied))
@@ -752,10 +806,11 @@ mod linux {
             serde_json::to_string_pretty(&json!({
                 "schema_version": 1, "settings": args, "trials": trials,
                 "completed": failure.is_none(), "error": failure,
-                "request_payload_octets": workload_request(0, key.as_ref(), ber.as_ref(),burst.as_ref(),headers.as_ref()).len(),
+                "request_payload_octets": workload_request(0, key.as_ref(), ber.as_ref(),burst.as_ref(),headers.as_ref(), sessions.as_ref()).len(),
                 "ber_profile": ber.as_ref().map(Profile::summary),
                 "burst_profile":burst.as_ref().map(Burst::summary),
                 "header_profile":headers.as_ref().map(Headers::summary),
+                "session_profile": sessions.as_ref().map(Sessions::summary),
                 "cpu_ticks_per_second": hz,
                 "reflector_sha256": binary_hash(args.reflector.clone())?,
                 "generator_sha256": binary_hash(std::env::current_exe()?)?,
@@ -779,6 +834,72 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn session_workload_requires_stateful_and_excludes_tlv_profiles() {
+            for args in [
+                vec!["bench", "--sessions", "2"],
+                vec!["bench", "--stateful", "--sessions", "0"],
+                vec!["bench", "--stateful", "--sessions", "65535"],
+                vec![
+                    "bench",
+                    "--stateful",
+                    "--sessions",
+                    "2",
+                    "--ber-padding",
+                    "120",
+                ],
+                vec![
+                    "bench",
+                    "--stateful",
+                    "--sessions",
+                    "2",
+                    "--burst-count",
+                    "2",
+                ],
+                vec![
+                    "bench",
+                    "--stateful",
+                    "--sessions",
+                    "2",
+                    "--headers",
+                    "fixed",
+                ],
+            ] {
+                assert!(Args::try_parse_from(args).is_err());
+            }
+            let args = Args::try_parse_from([
+                "bench",
+                "--stateful",
+                "--sessions",
+                "65534",
+                "--latency",
+                "--ipv6",
+                "--authenticated",
+            ])
+            .unwrap();
+            assert_eq!(args.sessions, Some(65534));
+        }
+
+        #[test]
+        fn session_accounting_uses_only_admitted_unique_replies() {
+            let profile = Sessions::new(2, 4).unwrap();
+            let mut replies = Replies {
+                seen: vec![false; 5],
+                sessions: Some(SessionReplies::new(&profile)),
+                ..Default::default()
+            };
+            for seq in [Some(0), Some(2), Some(1), Some(2), None, Some(5), Some(3)] {
+                replies.record_received(seq, true, None).unwrap();
+            }
+            let summary = replies.sessions.as_ref().unwrap().summary(4).unwrap();
+            assert_eq!(summary.unique_replies, 3);
+            assert_eq!(summary.fully_replied_sessions, 1);
+            assert_eq!(summary.partially_replied_sessions, 1);
+            assert_eq!(replies.unique_during_load, 3);
+            assert_eq!(replies.duplicates, 1);
+            assert_eq!(replies.invalid, 2);
+        }
 
         #[test]
         fn header_options_require_a_mode_and_exclude_other_workloads() {
@@ -855,11 +976,11 @@ mod linux {
                 }
                 bytes.extend(list.to_bytes());
                 assert_eq!(
-                    workload_response(&bytes, key.as_ref(), None, None, Some(&profile)),
+                    workload_response(&bytes, key.as_ref(), None, None, Some(&profile), None),
                     Some(3)
                 );
                 assert_eq!(
-                    workload_response(&bytes, key.as_ref(), None, None, None),
+                    workload_response(&bytes, key.as_ref(), None, None, None, None),
                     None
                 );
                 for offset in [ssid, timestamp, estimate] {
@@ -870,14 +991,14 @@ mod linux {
                         wrong[96..112].copy_from_slice(&digest);
                     }
                     assert_eq!(
-                        workload_response(&wrong, key.as_ref(), None, None, Some(&profile)),
+                        workload_response(&wrong, key.as_ref(), None, None, Some(&profile), None),
                         None
                     );
                 }
                 if auth {
                     bytes[96] ^= 1;
                     assert_eq!(
-                        workload_response(&bytes, key.as_ref(), None, None, Some(&profile)),
+                        workload_response(&bytes, key.as_ref(), None, None, Some(&profile), None),
                         None
                     );
                 }
@@ -997,11 +1118,11 @@ mod linux {
                 }
                 bytes.extend(list.to_bytes());
                 assert_eq!(
-                    workload_response(&bytes, key.as_ref(), None, Some(&profile), None),
+                    workload_response(&bytes, key.as_ref(), None, Some(&profile), None, None),
                     Some(3)
                 );
                 assert_eq!(
-                    workload_response(&bytes, key.as_ref(), None, None, None),
+                    workload_response(&bytes, key.as_ref(), None, None, None, None),
                     None
                 );
                 for offset in [ssid, timestamp, estimate] {
@@ -1012,14 +1133,14 @@ mod linux {
                         wrong[96..112].copy_from_slice(&digest);
                     }
                     assert_eq!(
-                        workload_response(&wrong, key.as_ref(), None, Some(&profile), None),
+                        workload_response(&wrong, key.as_ref(), None, Some(&profile), None, None),
                         None
                     );
                 }
                 if auth {
                     bytes[96] ^= 1;
                     assert_eq!(
-                        workload_response(&bytes, key.as_ref(), None, Some(&profile), None),
+                        workload_response(&bytes, key.as_ref(), None, Some(&profile), None, None),
                         None
                     );
                 }
