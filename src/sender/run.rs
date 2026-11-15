@@ -941,22 +941,16 @@ impl SenderRun {
     }
 
     fn wait_over(&self, wait: &Wait<'_>) -> bool {
-        if self.shutdown.is_cancelled() {
+        if self.stopping() {
             return true;
         }
         match wait {
             Wait::NextSend { .. } => false,
-            Wait::Drain => {
-                self.stopped_on_zero_ssid()
-                    || (self.pending.is_empty() && !self.measurements.needs_burst_wait())
-            }
-            Wait::AccessReport => {
-                self.stopped_on_zero_ssid()
-                    || self
-                        .access_report_state
-                        .as_ref()
-                        .is_none_or(|state| state.armed_deadline().is_none())
-            }
+            Wait::Drain => self.pending.is_empty() && !self.measurements.needs_burst_wait(),
+            Wait::AccessReport => self
+                .access_report_state
+                .as_ref()
+                .is_none_or(|state| state.armed_deadline().is_none()),
         }
     }
 

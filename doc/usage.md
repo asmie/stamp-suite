@@ -342,6 +342,10 @@ Report or applies congestion feedback. A reply with a zero SSID is handled by
 [RFC 8972 §3](https://www.rfc-editor.org/rfc/rfc8972.html#section-3) permits.
 After a zero-SSID reply under `continue`, later nonzero replies are still
 checked. Without `--ssid`, or with `--ssid 0`, the sender does not check SSIDs.
+The `stop` policy interrupts the pending probe wait immediately, including
+ECN-extended waits. It skips the reply drain and Access Report retries;
+unanswered probes remain lost in the final report. Unknown sequences or
+mismatched echoed timestamps cannot trigger this stop.
 
 **TLV integrity.** Access Report acknowledgement and ECN congestion control
 work the same regardless of `-R`, logging and output format. A TLV HMAC that is

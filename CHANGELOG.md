@@ -194,6 +194,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Make `--on-zero-ssid stop` interrupt the current probe wait immediately,
+  avoiding delayed exit with long send intervals or ECN backoff. Preserve
+  reply identity checks, loss accounting and the `continue` policy.
+
 - Apply ECN backoff to the next probe's pending deadline immediately, including
   Poisson spacing, while preserving the duration limit. Clean feedback cannot
   cancel an already scheduled backoff.

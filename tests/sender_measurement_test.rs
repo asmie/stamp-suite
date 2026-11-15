@@ -832,3 +832,105 @@ fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
         }
     }
 }
+
+#[test]
+fn zero_ssid_stop_interrupts_a_long_probe_wait_after_identity_validation() {
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            for extensions in [false, true] {
+                let peer = UdpSocket::bind((ip, 0)).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut extra = vec![
+                    "--send-delay",
+                    "10s",
+                    "--ssid",
+                    "42",
+                    "--on-zero-ssid",
+                    "stop",
+                ];
+                if extensions {
+                    extra.extend(["--access-report", "1"]);
+                }
+                let sender = Sender::start_profile(&peer, auth, 10, 1, extensions, &extra);
+                let mut request = [0; 2048];
+                let (length, source) = peer.recv_from(&mut request).unwrap();
+                let mut zero_ssid = request[..length].to_vec();
+                let (timestamp, ssid) = if auth { (16, 26) } else { (4, 14) };
+                zero_ssid[ssid..ssid + 2].fill(0);
+                let transmit = |input: &[u8]| {
+                    peer.send_to(&reply_with_extensions(input, auth, &[]), source)
+                        .unwrap();
+                };
+                // Neither an unknown sequence nor a stale timestamp may stop
+                // the run, even when the reply has a valid base HMAC.
+                let mut unknown = zero_ssid.clone();
+                unknown[..4].copy_from_slice(&99u32.to_be_bytes());
+                transmit(&unknown);
+                let mut stale = zero_ssid.clone();
+                stale[timestamp] ^= 1;
+                transmit(&stale);
+                let started = Instant::now();
+                transmit(&zero_ssid);
+                let stats = sender.finish();
+                assert!(
+                    started.elapsed() < Duration::from_secs(2),
+                    "{ip} auth={auth} ext={extensions}"
+                );
+                assert_eq!(stats["packets_sent"], 1);
+                assert_eq!(stats["packets_received"], 0);
+                assert_eq!(stats["packets_lost"], 1);
+                assert_eq!(stats["measurements"]["unknown_replies"], 1);
+                assert_eq!(stats["measurements"]["mismatched_replies"], 1);
+                if extensions {
+                    assert_eq!(stats["access_report"]["retransmissions"], 0);
+                    assert_eq!(stats["access_report"]["outcome"], "pending");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn zero_ssid_continue_keeps_sending_and_accepts_the_next_matching_reply() {
+    for ip in ["127.0.0.1", "::1"] {
+        for auth in [false, true] {
+            for extensions in [false, true] {
+                let peer = UdpSocket::bind((ip, 0)).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let sender = Sender::start_profile(
+                    &peer,
+                    auth,
+                    2,
+                    1,
+                    extensions,
+                    &[
+                        "--send-delay",
+                        "100",
+                        "--ssid",
+                        "42",
+                        "--on-zero-ssid",
+                        "continue",
+                    ],
+                );
+                for index in 0..2 {
+                    let mut request = [0; 2048];
+                    let (length, source) = peer.recv_from(&mut request).unwrap();
+                    let ssid = if auth { 26 } else { 14 };
+                    assert_eq!(&request[ssid..ssid + 2], &42u16.to_be_bytes());
+                    if index == 0 {
+                        request[ssid..ssid + 2].fill(0);
+                    }
+                    peer.send_to(
+                        &reply_with_extensions(&request[..length], auth, &[]),
+                        source,
+                    )
+                    .unwrap();
+                }
+                let stats = sender.finish();
+                assert_eq!(stats["packets_sent"], 2);
+                assert_eq!(stats["packets_received"], 2);
+                assert_eq!(stats["packets_lost"], 0);
+            }
+        }
+    }
+}
