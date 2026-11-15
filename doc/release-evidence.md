@@ -108,6 +108,42 @@ is enabled. Updates to those inputs fail validation until the policy is reviewed
 
 ## Procedures
 
+### Linux package installation
+
+The CI packaging job and both Linux release package jobs run
+`scripts/check_package_install.py` against the actual DEB and RPM artifacts.
+Linux package builds use Ubuntu 24.04 runners to preserve that glibc baseline.
+The checks require Docker with native Linux containers and Python 3.10+:
+
+```sh
+python3 scripts/check_package_install.py --package target/debian/stamp-suite_1.0.0-1_amd64.deb --report /tmp/package-install-deb.json
+python3 scripts/check_package_install.py --package target/generate-rpm/stamp-suite-1.0.0-1.x86_64.rpm --report /tmp/package-install-rpm.json
+```
+
+Use the paths and versions produced by the build. The script builds its test
+images from `dist/package-check/`: Ubuntu 24.04 for DEB and Fedora's current
+image for RPM. Image builds need network access; installation and service
+checks run with networking disabled except for the container's own loopback.
+`--image NAME` reuses an already prepared test image. Reports record image ID,
+architecture, OS release, package hash, native package-manager output and wire
+exchanges. CI uploads available reports even when a check fails.
+
+Each disposable container installs and reinstalls the package with dependency
+checks enabled, verifies the service account remains non-root with unchanged
+UID/GID, and validates the packaged unit with `systemd-analyze verify`. It then
+runs the installed reflector as that account with only `CAP_NET_BIND_SERVICE`
+and `NoNewPrivileges`, checks IPv4/IPv6 open and authenticated reflection on
+port 862, validates reply identity/HMACs, and checks graceful termination.
+A negative control requires binding to fail without that capability. Removal
+must remove the binary; DEB removal preserves the account until purge, which
+must delete it. No host accounts or services are changed.
+
+The RPM fixture skips signature trust for the locally built unsigned package;
+dependency and payload digest checks stay enabled. This does not establish
+distribution signing trust. The service checks validate unit syntax and the
+stated process privileges; they do not boot systemd or exercise all its sandbox
+directives. Full service-manager boot remains a separate deployment check.
+
 ### Authenticated control and a reference SNMP master
 
 On Linux with Python 3.10+, OpenSSL and the Net-SNMP tools (`snmpd`,

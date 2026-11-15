@@ -93,7 +93,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
     steps:
@@ -118,6 +118,17 @@ jobs:
         run: cargo deb --no-build --target ${{ matrix.target }}
       - name: Build RPM
         run: cargo generate-rpm --auto-req find-requires --target ${{ matrix.target }}
+      - name: Test DEB installation and service identity
+        run: python3 scripts/check_package_install.py --package target/${{ matrix.target }}/debian/*.deb --report "${{ runner.temp }}/package-install-deb.json"
+      - name: Test RPM installation and service identity
+        run: python3 scripts/check_package_install.py --package target/${{ matrix.target }}/generate-rpm/*.rpm --report "${{ runner.temp }}/package-install-rpm.json"
+      - name: Upload package installation reports
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: package-install-${{ matrix.target }}
+          path: ${{ runner.temp }}/package-install-*.json
+          if-no-files-found: warn
       - name: Assemble tarball
         shell: bash
         run: |

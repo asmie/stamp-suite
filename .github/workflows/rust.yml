@@ -370,7 +370,8 @@ jobs:
 
   package:
     name: Package DEB and RPM
-    runs-on: ubuntu-latest
+    # Keep the Linux package ABI compatible with the tested Ubuntu baseline.
+    runs-on: ubuntu-24.04
     needs: [test, third-party-notices]
     steps:
       - uses: actions/checkout@v7.0.1
@@ -414,6 +415,17 @@ jobs:
           rpm -qlp "$RPM" | grep -q STAMP-SUITE-MIB.mib
           rpm -qlp "$RPM" | grep -q /usr/share/doc/stamp-suite/examples/sender.toml
           rpm -qlp "$RPM" | grep -q /usr/share/doc/stamp-suite/examples/reflector.toml
+      - name: Test DEB installation and service identity
+        run: python3 scripts/check_package_install.py --package target/debian/*.deb --report "${{ runner.temp }}/package-install-deb.json"
+      - name: Test RPM installation and service identity
+        run: python3 scripts/check_package_install.py --package target/generate-rpm/*.rpm --report "${{ runner.temp }}/package-install-rpm.json"
+      - name: Upload package installation reports
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: package-install-ci
+          path: ${{ runner.temp }}/package-install-*.json
+          if-no-files-found: warn
 
   nix-build:
     name: Nix Build

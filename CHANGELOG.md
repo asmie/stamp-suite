@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Require disposable-container DEB/RPM install, reinstall, privileged-port
+  reflection and uninstall checks in CI and Linux release packaging. Preserve
+  failure reports and pin Linux package builds to the tested Ubuntu 24.04 ABI.
+
 - Add concurrent full and paginated session-inventory workloads to live UDP
   benchmarks, with an idle control API baseline, bounded response validation,
   and HTTP activity and latency reports alongside packet measurements.
