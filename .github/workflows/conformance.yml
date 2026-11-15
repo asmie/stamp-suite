@@ -122,7 +122,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Install wire-test tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 tcpdump util-linux ethtool
+        run: sudo apt-get update && sudo apt-get install -y iproute2 tcpdump util-linux ethtool nftables
       - name: Build pnet fixture and tests without root
         run: |
           cargo build --locked --no-default-features --features ttl-pnet --target-dir target/pnet
@@ -148,13 +148,22 @@ jobs:
           cargo test --locked --test zero_checksum_test --test sender_zero_checksum_test --no-run --message-format=json > zero-udp-artifacts.json
           python3 scripts/run_privileged_test.py zero-udp-artifacts.json zero_checksum_test 4 sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
           python3 scripts/run_privileged_test.py zero-udp-artifacts.json sender_zero_checksum_test 1 sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
+      - name: Require default-profile directional ECN rewrites
+        run: |
+          cargo test --locked --test ecn_path_test --no-run --message-format=json > ecn-artifacts.json
+          python3 scripts/run_privileged_test.py ecn-artifacts.json ecn_path_test 1 sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ECN_NETNS_TESTS=1 STAMP_ECN_CAPTURE_DIR="$PWD/ecn-captures/default" TOKIO_WORKER_THREADS=2
       - name: Require pnet-profile zero-checksum sender
         run: >-
           python3 scripts/run_privileged_test.py pnet-artifacts.json sender_zero_checksum_test 1
           sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)"
           STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
       - name: Build nix namespace tests without root
-        run: cargo test --locked --all-features --test netns_conformance --test route_mtu_test --test header_request_wire_test --test header_reflection_wire_test --test zero_checksum_test --test sender_zero_checksum_test --no-run --message-format=json > netns-artifacts.json
+        run: cargo test --locked --all-features --test netns_conformance --test route_mtu_test --test header_request_wire_test --test header_reflection_wire_test --test zero_checksum_test --test sender_zero_checksum_test --test ecn_path_test --no-run --message-format=json > netns-artifacts.json
+      - name: Require all-features directional ECN rewrites
+        run: >-
+          python3 scripts/run_privileged_test.py netns-artifacts.json ecn_path_test 1
+          sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)"
+          STAMP_ECN_NETNS_TESTS=1 STAMP_ECN_CAPTURE_DIR="$PWD/ecn-captures/all" TOKIO_WORKER_THREADS=2
       - name: Require all-features IPv4 zero-checksum ingress
         run: >-
           python3 scripts/run_privileged_test.py netns-artifacts.json zero_checksum_test 4
@@ -191,3 +200,4 @@ jobs:
             *-artifacts.json
             netns.log
             netns-captures/*.pcap
+            ecn-captures/

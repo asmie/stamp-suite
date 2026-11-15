@@ -7,6 +7,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Require controlled Linux ECN rewrite tests for the default and all-feature
+  nix profiles. Compare real endpoint reports with raw IP/TLV captures and
+  signatures across both IP families, three key modes and policy refusals;
+  retain optional pcap/report evidence in conformance CI.
+
 - Add paired forward/reverse ECN diagnostics with transition matrices,
   bleaching, ECT-to-CE and other remarking counts, plus explicit unknown
   reasons. Preserve raw observations, CSV columns and AIMD behavior.

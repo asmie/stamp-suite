@@ -91,6 +91,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `pending_probe_limit_test.rs` | Independent sender peers: bounded retention, silent loss, late/duplicate replies, cancellation, Access Report retries and per-target budgets; IPv4/IPv6 and open/authenticated modes. | always; multi-target case Linux only |
 | `reflector_launcher_test.rs` | Continuously held port contention, kernel-selected ports, metadata setup before first send without readiness traffic, clean receiver exit, startup stderr/status bounds, timeout cleanup and child reaping. Linux also checks original socket closure and retained duplicates independently of endpoint occupancy. | Unix, nix; kernel socket-identity checks on Linux only |
 | `cos_ecn_wire_test.rs` | Actual ingress/reply IP markings, raw CoS fields, global/scoped admission, ECN refusal, burst/ordinary isolation and independent signatures. | Linux, nix |
+| `ecn_path_test.rs` | Real sender/reflector diagnostics under independent forward/reverse kernel ECN rewrites, raw IP/TLV capture, signatures, policy refusals and matching report matrices. | Linux, nix; one ignored namespace test |
 | `session_ssid_validation_test.rs` | Sender SSID checks and zero-SSID policies against an independent peer; IPv4/IPv6, open/authenticated. | always |
 | `sender_zero_checksum_test.rs` | Actual CLI sender capture, zero/nonzero checksum fields, NTP/PTP, default/five-byte BER patterns, independent base/TLV digests and samples, plus kernel rejection of invalid-checksum signed replies. | Linux, any backend profile; one ignored namespace test |
 | `zero_checksum_test.rs` | Captured IPv4 checksum-zero ingress, kernel checksum-drop controls, BER padding repair and signatures, strict/provisioned admission and authenticated base corruption. | Linux, nix; four ignored namespace tests |
@@ -135,6 +136,7 @@ missing.
 | --- | --- | --- | --- |
 | `pnet_loopback_test` | `ttl-pnet` build | `CAP_NET_RAW` | Skips, or fails in required mode |
 | `netns_conformance` | `STAMP_NETNS_TESTS=1` | Root or mapped root, `ip`, `tcpdump`, `ethtool` | Skips, or fails in required mode |
+| `ecn_path_test` | `STAMP_ECN_NETNS_TESTS=1`, `STAMP_PARENT_NETNS` | Private network namespace, `ip`, `nft`, CAP_NET_RAW/NET_ADMIN | Fails |
 | `route_mtu_test` | `STAMP_MTU_NETNS_TESTS=1` | User namespaces, `ip`, `unshare`, `nsenter` | Fails |
 | `scoped_ipv6_test` | `STAMP_SCOPE_NETNS_TESTS=1` | User namespaces, `ip`, `unshare`, `nsenter` | Fails |
 | `ext_hdr_nix_test` | `STAMP_EXTHDR_NETNS_TESTS=1` | User namespaces, `ip` | Skips without the variable |
@@ -302,7 +304,8 @@ without root, then uses `scripts/run_privileged_test.py` to require the three
 pnet checksum/round-trip tests, three pnet endpoint cases, sender and reflector
 header cases, nine namespace scenarios, two route MTU cases and four IPv4
 zero-checksum cases in each of the default and all-features profiles.
-It also requires the sender case in all three profiles.
+It also requires the sender case in all three profiles and the directional
+ECN rewrite fixture in default and all-feature nix profiles.
 The script rejects an executable whose ignored-test count is wrong or zero, so
 a build with the wrong backend cannot pass with an empty suite.
 `scoped_ipv6_test` and `ext_hdr_nix_test` are not run in CI.
@@ -401,3 +404,25 @@ files in this directory.
   checks the live benchmark's reply validation and loss, duplicate and
   reordering accounting. See [benchmarks.md](../doc/benchmarks.md).
 - **Fuzzing.** See [fuzz/README.md](../fuzz/README.md).
+
+### Directional ECN rewrite evidence
+
+`ecn_path_test` uses the actual sender and reflector CLI processes and changes
+only ECN bits in their private namespace's nftables output hook. Twelve cases
+cover preservation, bleaching, CE marking, ECT swaps, already-CE/Not-ECT inputs,
+independent changes in each direction and reflector policy refusal, including
+refusal followed by IP CE rewriting. Each runs over IPv4/IPv6 and open, keyed
+open and authenticated modes: 72 cases and 216 request/reply pairs per profile.
+
+The fixture checks raw IP markings, unchanged DSCP, IPv4 header checksums,
+independently decoded CoS bytes, echo identity, base/TLV signatures, nft rule
+counters, sender loss and directional summaries. Loopback may expose partial
+UDP checksums before offload, so it does not claim final UDP checksum capture
+validation. Missing tools, privileges, packet captures or reply evidence fail;
+the parent namespace identity must be supplied and must differ from the current
+namespace before the fixture changes any networking.
+
+See [running the ECN rewrite test](../doc/testing-netns.md#directional-ecn-rewrites)
+for commands and optional pcap/report retention. CI requires the fixture in
+both default and all-feature nix profiles. The pnet-only reflector profile is
+not covered by this test; the runner rejects an empty/wrong-backend suite.

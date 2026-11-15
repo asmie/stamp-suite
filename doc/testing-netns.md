@@ -191,3 +191,46 @@ Scenario 3 captures both sides of a real transit router: 12 SRH replies and 12
 interleaved ordinary replies across open and authenticated modes. Keep the test
 log, executable manifest, commit, build features and capture hashes with the
 pcaps. These tests verify virtual Linux routing, not a physical SRv6 fabric.
+
+## Directional ECN rewrites
+
+`tests/ecn_path_test.rs` verifies the sender's directional diagnostics against
+real kernel ECN changes and real reflector processing. It uses a single private
+network namespace and loopback, with independent nftables output rules matching
+the reflector's assigned UDP port. Each rule changes only the two ECN bits;
+DSCP preservation is checked separately. Neither endpoint's packet payload is
+fabricated or altered by the fixture.
+
+Build without privileges, then enter a fresh user/network namespace. Install
+`iproute2`, `nftables` and `util-linux`; the kernel must support nftables ECN
+rewriting and packet sockets. User namespaces must be permitted for this form:
+
+```sh
+cargo test --locked --test ecn_path_test --no-run --message-format=json > /tmp/ecn-artifacts.json
+python3 scripts/run_privileged_test.py /tmp/ecn-artifacts.json ecn_path_test 1 \
+  unshare -Urn env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" \
+  STAMP_ECN_NETNS_TESTS=1 STAMP_ECN_CAPTURE_DIR="$PWD/ecn-captures" TOKIO_WORKER_THREADS=2
+```
+
+Alternatively, use `sudo -n unshare --net --fork env ...` with the same variables.
+The parent namespace is recorded before entry; the fixture refuses to operate
+in that namespace. All rules and sockets belong to the fresh namespace. Builds
+with `--all-features` select nix and use the same command; pnet-only builds do
+not contain this fixture. The runner requires exactly one ignored test.
+
+The 72-case matrix covers 12 scenarios in both IP families and three key modes
+(open, keyed open and authenticated). Three probes per case keep the traffic
+bounded. It captures both directions through an independent AF_PACKET socket,
+validates IP and CoS fields plus base/TLV signatures, and compares the actual
+sender JSON with the captured transformations. A reflector's RPE=2 policy
+refusal must stay unknown even if the reply is subsequently marked CE.
+Existing AIMD feedback remains enabled and its CE observations are checked.
+
+When `STAMP_ECN_CAPTURE_DIR` is set, each case writes a raw-IP `.pcap` and a
+`.json` containing the sender report and nftables counters. CI retains both
+profiles' captures in its privileged-test artifacts. Capture timestamps are
+userspace dequeue times, not latency evidence. Failed cases can leave partial
+pcaps; only a successful test run establishes all assertions. Inspect a capture
+with `tcpdump -nn -vv -r FILE.pcap` and correlate with its matching JSON report.
+This demonstrates controlled Linux kernel rewriting on loopback, not physical
+hop localization, multi-host routing or native Windows/macOS behavior.

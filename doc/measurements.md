@@ -400,3 +400,11 @@ intermediate processing can affect either comparison. Equal endpoint values
 can also hide intermediate changes. Correlate with independent captures and
 [ECN deployment guidance](usage.md#ecn-deployment-and-interpretation). AIMD
 feedback, admission rules and integrity requirements are unchanged.
+
+
+The [controlled ECN rewrite fixture](testing-netns.md#directional-ecn-rewrites)
+exercises these reports with real sender/reflector processes, independent
+kernel changes in each direction, packet captures and policy-refusal controls.
+Its loopback evidence does not identify where a change occurred on an external
+path; use the captured IP fields and matching report to check interpretation
+before applying the same analysis to a deployment.
