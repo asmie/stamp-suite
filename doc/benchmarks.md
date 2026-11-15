@@ -21,9 +21,10 @@ target/release/examples/live_udp_bench --rate 10000 --ipv6 --authenticated \
 Each invocation runs three fresh reflectors, sequentially. Each trial uses
 one loopback session: readiness probe, 2 s idle, probe, 3 s load, 500 ms drain,
 2 s idle, then a final verified probe. Probe traffic is excluded from load
-counts. Packets are 44 bytes open or 112 authenticated, without TLVs, bursts
-or kernel/NIC timestamps. A fixed timestamp checks echoes; delays are not
-measured. The HMAC key is public test data.
+counts. By default packets are 44 bytes open or 112 authenticated, without
+TLVs. Optional BER workloads add metadata, padding and an authenticated-mode
+TLV HMAC. Bursts and kernel/NIC timestamps are excluded. A fixed timestamp
+checks echoes; delays are not measured. The HMAC key is public test data.
 
 Options (`live_udp_bench --help` lists limits and defaults):
 
@@ -41,6 +42,8 @@ Options (`live_udp_bench --help` lists limits and defaults):
 | `--workers N` | Reflector Tokio workers, 1–256; default 2. |
 | `--hwtstamp MODE` | Reflector `--hwtstamp` mode: `off` (default), `auto` or `on`. `auto` is the reflector's own default and adds TX timestamp work when the binary is built with `hwtstamp`. |
 | `--metrics` | Start the reflector with `--metrics` on an ephemeral loopback port, to include the metrics cost. The reflector binary must be built with the `metrics` feature, or it fails at startup. |
+| `--ber-padding OCTETS` | Include combined BER metadata and 16–1,200 padding octets, in complete four-octet default patterns. |
+| `--ber-damaged` | Require `--ber-padding`; inject five padding bit errors, including a four-bit run across an octet boundary. |
 
 The generator sends 1 ms batches, skips missed pacing slots, and drains replies
 on a separate thread. Bookkeeping is bounded by `rate × seconds + 1` slots
@@ -52,6 +55,22 @@ Replies must match the connected source, packet length, echoed fields, sequence
 range, and HMAC. Duplicates and invalid replies are counted separately. Loss is
 reported even if the process exits successfully. Save stderr diagnostics with
 the JSON on stdout. These checks validate benchmark accounting, not conformance.
+BER replies additionally require exact counter/burst values, repaired padding,
+processed flags, expected TLV layout and valid applicable base/TLV HMACs.
+Authenticated BER padding is outside the TLV HMAC coverage, so controlled
+corruption exercises successful authentication followed by measurement/repair.
+All sockets use ordinary UDP checksums; this is not a zero-checksum wire test.
+
+```bash
+target/release/examples/live_udp_bench --rate 5000 --ber-padding 120
+target/release/examples/live_udp_bench --rate 5000 --ber-padding 1200 \
+  --ber-damaged --authenticated --ipv6
+```
+
+JSON adds request payload size, expected BER profile and a `completed` flag.
+If a trial returns a runtime error, prior completed trials and the error are
+printed before a nonzero exit. Startup metadata/hash failures or a panic can
+still prevent a report. Always check both the exit code and completion flag.
 
 ### Reading the results
 
@@ -89,8 +108,11 @@ Sweep IPv4/IPv6 and both authentication modes at 5,000, 25,000 and 100,000 pps.
 Add `--stateful` to measure session costs. Hold workers, CPU affinity, features
 and host load constant; use more repeats on a quiet host. This single-session
 loopback test can be limited by either process or the kernel. It does not
-measure NIC throughput, multi-client scaling, latency, TLVs, bursts or hardware
-timestamps, and requires matched before/after runs to assess an optimization.
+measure NIC throughput, multi-client scaling, latency, non-BER TLVs, bursts or
+hardware timestamps, and requires matched before/after runs to assess an
+optimization. BER adds request serialization, bit-pattern checks and TLV HMAC
+work to the generator as well as the reflector; compare generator CPU and
+achieved send rate before attributing a limit to the reflector.
 
 For pnet, build with `--no-default-features --features ttl-pnet` and run with
 `CAP_NET_RAW` in an isolated network namespace. Raw capture requires complete

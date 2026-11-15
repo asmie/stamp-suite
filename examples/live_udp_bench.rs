@@ -1,4 +1,8 @@
 //! Linux live loopback benchmark. See doc/benchmarks.md for measurement limits.
+#[cfg(target_os = "linux")]
+#[path = "live_udp_bench/ber.rs"]
+mod ber;
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("live_udp_bench requires Linux /proc CPU accounting");
@@ -12,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use super::ber::Profile;
     use clap::Parser;
     use serde::Serialize;
     use serde_json::json;
@@ -65,6 +70,12 @@ mod linux {
         /// Run the reflector with `--metrics` on an ephemeral loopback port.
         #[arg(long)]
         metrics: bool,
+        /// Include BER with this many padding octets (16–1200, multiple of four).
+        #[arg(long, value_parser = clap::value_parser!(u16).range(16..=1200))]
+        ber_padding: Option<u16>,
+        /// Inject five padding bit errors, including one four-bit burst.
+        #[arg(long, requires = "ber_padding")]
+        ber_damaged: bool,
     }
 
     struct Reflector(Child);
@@ -168,6 +179,23 @@ mod linux {
         (timestamp == STAMP && estimate == 1 && ssid == SSID).then_some(seq)
     }
 
+    fn request(seq: u32, key: Option<&HmacKey>, ber: Option<&Profile>) -> Vec<u8> {
+        let mut bytes = packet(seq, key);
+        if let Some(ber) = ber {
+            ber.append(&mut bytes, key);
+        }
+        bytes
+    }
+
+    fn response_sequence(buf: &[u8], key: Option<&HmacKey>, ber: Option<&Profile>) -> Option<u32> {
+        let Some(ber) = ber else {
+            return reply_sequence(buf, key);
+        };
+        let base = if key.is_some() { 112 } else { 44 };
+        let seq = reply_sequence(buf.get(..base)?, key)?;
+        ber.validate(buf, base, key).then_some(seq)
+    }
+
     fn socket(destination: SocketAddr) -> Result<UdpSocket> {
         let socket = UdpSocket::bind((destination.ip(), 0))?;
         socket.connect(destination)?;
@@ -180,16 +208,17 @@ mod linux {
         child: &mut Reflector,
         socket: &UdpSocket,
         key: Option<&HmacKey>,
+        ber: Option<&Profile>,
         seq: u32,
     ) -> Result<()> {
         let start = Instant::now();
-        let request = packet(seq, key);
+        let request = request(seq, key, ber);
         let mut buf = [0; 2048];
         while start.elapsed() < Duration::from_secs(5) {
             child.check()?;
             socket.send(&request)?;
             match socket.recv(&mut buf) {
-                Ok(n) if reply_sequence(&buf[..n], key) == Some(seq) => return Ok(()),
+                Ok(n) if response_sequence(&buf[..n], key, ber) == Some(seq) => return Ok(()),
                 Ok(_) => {}
                 Err(e) if transient(&e) || e.kind() == std::io::ErrorKind::ConnectionRefused => {}
                 Err(e) => return Err(e.into()),
@@ -242,7 +271,12 @@ mod linux {
         }
     }
 
-    fn trial(args: &Args, key: Option<&HmacKey>, hz: u64) -> Result<serde_json::Value> {
+    fn trial(
+        args: &Args,
+        key: Option<&HmacKey>,
+        ber: Option<&Profile>,
+        hz: u64,
+    ) -> Result<serde_json::Value> {
         let ip = if args.ipv6 { "::1" } else { "127.0.0.1" };
         let reserve = UdpSocket::bind((ip, 0))?;
         let destination = reserve.local_addr()?;
@@ -275,12 +309,12 @@ mod linux {
         drop(reserve); // Bind race fails visibly via child status; never retry a different server.
         let mut child = Reflector(command.spawn()?);
         let probe_socket = socket(destination)?;
-        probe(&mut child, &probe_socket, key, 0)?;
+        probe(&mut child, &probe_socket, key, ber, 0)?;
         thread::sleep(Duration::from_millis(100));
         let idle_before = idle(&mut child, args.idle_seconds, hz)?;
         let socket = socket(destination)?;
         // Warm the measured session and validate that readiness resumed after idle.
-        probe(&mut child, &socket, key, 0)?;
+        probe(&mut child, &socket, key, ber, 0)?;
         // Load sequences start at 1; slot zero is reserved for delayed warm-up replies.
         let capacity = args.rate as usize * args.seconds as usize + 1;
         let mut replies = Replies {
@@ -299,7 +333,7 @@ mod linux {
                     while Instant::now() < receive_deadline {
                         match socket.recv(&mut buf) {
                             Ok(n) => {
-                                let seq = reply_sequence(&buf[..n], key);
+                                let seq = response_sequence(&buf[..n], key, ber);
                                 if seq != Some(0) {
                                     replies.record(seq, Instant::now() < deadline);
                                 }
@@ -322,7 +356,7 @@ mod linux {
                         if Instant::now() >= deadline {
                             break;
                         }
-                        let request = packet(sent + 1, key);
+                        let request = request(sent + 1, key, ber);
                         if socket.send(&request)? != request.len() {
                             return Err("incomplete UDP send".into());
                         }
@@ -349,7 +383,7 @@ mod linux {
             return Err("no valid responses during the load/drain sample".into());
         }
         let idle_after = idle(&mut child, args.idle_seconds, hz)?;
-        probe(&mut child, &socket, key, sent + 1)?;
+        probe(&mut child, &socket, key, ber, sent + 1)?;
         Ok(json!({
             "reflector_command": command_line, "sent": sent, "replies": replies,
             "missing_after_drain": sent as u64 - unique,
@@ -368,6 +402,10 @@ mod linux {
     }
     fn run_inner() -> Result<()> {
         let mut args = Args::parse();
+        let ber = args
+            .ber_padding
+            .map(|bytes| Profile::new(usize::from(bytes), args.ber_damaged))
+            .transpose()?;
         args.reflector = fs::canonicalize(&args.reflector)?;
         // SAFETY: sysconf takes an integer name and no pointers; it has no memory-safety
         // preconditions.
@@ -380,9 +418,16 @@ mod linux {
             .then(|| HmacKey::from_hex(KEY))
             .transpose()?;
         let mut trials = Vec::new();
+        let mut failure = None;
         for index in 0..args.repeats {
             eprintln!("live UDP trial {}/{}", index + 1, args.repeats);
-            trials.push(trial(&args, key.as_ref(), hz as u64)?);
+            match trial(&args, key.as_ref(), ber.as_ref(), hz as u64) {
+                Ok(result) => trials.push(result),
+                Err(error) => {
+                    failure = Some(error.to_string());
+                    break;
+                }
+            }
         }
         let binary_hash =
             |path| -> Result<String> { Ok(hex::encode(Sha256::digest(fs::read(path)?))) };
@@ -390,6 +435,9 @@ mod linux {
             "{}",
             serde_json::to_string_pretty(&json!({
                 "schema_version": 1, "settings": args, "trials": trials,
+                "completed": failure.is_none(), "error": failure,
+                "request_payload_octets": request(0, key.as_ref(), ber.as_ref()).len(),
+                "ber_profile": ber.as_ref().map(Profile::summary),
                 "cpu_ticks_per_second": hz,
                 "reflector_sha256": binary_hash(args.reflector.clone())?,
                 "generator_sha256": binary_hash(std::env::current_exe()?)?,
@@ -404,12 +452,109 @@ mod linux {
                     .find(|line| line.starts_with("Cpus_allowed_list:")).unwrap_or("unavailable"),
             }))?
         );
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
         Ok(())
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn ber_options_require_padding_and_enforce_cli_bounds() {
+            assert!(Args::try_parse_from(["bench", "--ber-damaged"]).is_err());
+            for value in ["0", "15", "1201", "65536", "invalid"] {
+                assert!(Args::try_parse_from(["bench", "--ber-padding", value]).is_err());
+            }
+            for value in ["16", "120", "1200"] {
+                let args = Args::try_parse_from(["bench", "--ber-padding", value, "--ber-damaged"])
+                    .unwrap();
+                assert!(
+                    Profile::new(usize::from(args.ber_padding.unwrap()), args.ber_damaged).is_ok()
+                );
+            }
+        }
+
+        #[test]
+        fn ber_reply_validation_retains_base_identity_and_authentication_checks() {
+            use stamp_suite::tlv::{
+                ExtraPaddingTlv, ResidualBerValue, TlvList, TypedTlv, RESIDUAL_BER_DEFAULT_PATTERN,
+            };
+            for auth in [false, true] {
+                let key = auth.then(|| HmacKey::from_hex(KEY).unwrap());
+                for padding in [16, 120, 1200] {
+                    for damaged in [false, true] {
+                        let profile = Profile::new(padding, damaged).unwrap();
+                        let mut buf = vec![0; if auth { 112 } else { 44 }];
+                        let (ssid, seq, timestamp, estimate) = if auth {
+                            (26, 48, 64, 72)
+                        } else {
+                            (14, 24, 28, 36)
+                        };
+                        // Stateful reflector sequence differs from the echoed sender sequence.
+                        buf[..4].copy_from_slice(&9u32.to_be_bytes());
+                        buf[ssid..ssid + 2].copy_from_slice(&SSID.to_be_bytes());
+                        buf[seq..seq + 4].copy_from_slice(&3u32.to_be_bytes());
+                        buf[timestamp..timestamp + 8].copy_from_slice(&STAMP.to_be_bytes());
+                        buf[estimate..estimate + 2].copy_from_slice(&1u16.to_be_bytes());
+                        let (count, max_burst) = if damaged { (5, 4) } else { (0, 0) };
+                        let mut tlvs = TlvList::new();
+                        tlvs.push(
+                            ResidualBerValue {
+                                count,
+                                max_burst,
+                                sub_tlvs: vec![],
+                            }
+                            .to_raw()
+                            .unwrap(),
+                        )
+                        .unwrap();
+                        tlvs.push(
+                            ExtraPaddingTlv {
+                                padding: RESIDUAL_BER_DEFAULT_PATTERN.repeat(padding / 4),
+                            }
+                            .to_raw(),
+                        )
+                        .unwrap();
+                        tlvs.clear_reflector_flags();
+                        if let Some(key) = &key {
+                            let digest = key.compute(&buf[..96]);
+                            buf[96..112].copy_from_slice(&digest);
+                            assert!(tlvs.set_hmac_response(key, &buf[..4]));
+                        }
+                        buf.extend(tlvs.to_bytes());
+                        assert_eq!(
+                            response_sequence(&buf, key.as_ref(), Some(&profile)),
+                            Some(3)
+                        );
+                        assert_eq!(response_sequence(&buf, key.as_ref(), None), None);
+                        let wrong_profile = Profile::new(padding, !damaged).unwrap();
+                        assert_eq!(
+                            response_sequence(&buf, key.as_ref(), Some(&wrong_profile)),
+                            None
+                        );
+                        for offset in [ssid, timestamp, estimate] {
+                            let mut wrong = buf.clone();
+                            wrong[offset] ^= 1;
+                            if let Some(key) = &key {
+                                let digest = key.compute(&wrong[..96]);
+                                wrong[96..112].copy_from_slice(&digest);
+                            }
+                            assert_eq!(
+                                response_sequence(&wrong, key.as_ref(), Some(&profile)),
+                                None
+                            );
+                        }
+                        if auth {
+                            buf[96] ^= 1;
+                            assert_eq!(response_sequence(&buf, key.as_ref(), Some(&profile)), None);
+                        }
+                    }
+                }
+            }
+        }
 
         #[test]
         fn accounting_excludes_duplicates_and_invalid_sequences() {

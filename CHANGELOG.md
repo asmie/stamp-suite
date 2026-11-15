@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add live UDP BER benchmark workloads with verified counters, repaired padding
+  and HMACs, bounded padding and controlled corruption. Preserve completed
+  trial reports on runtime errors and report payload size/profile metadata.
+
 - Add validated in-process header-reflection benchmarks for IPv4 stacks,
   IPv6 fixed/extension headers, selector matching and capture/policy refusals,
   in open and authenticated modes. Reuse Linux CI's fixture checks.
