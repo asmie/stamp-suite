@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add concurrent full and paginated session-inventory workloads to live UDP
+  benchmarks, with an idle control API baseline, bounded response validation,
+  and HTTP activity and latency reports alongside packet measurements.
+
 - Add opt-in process memory observations to live UDP benchmarks, reporting
   reflector and generator RSS/PSS before load, after drain and after idle.
   Keep collection outside timed CPU windows and fail on unavailable data.

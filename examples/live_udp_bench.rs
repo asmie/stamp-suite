@@ -23,6 +23,10 @@ mod sessions;
 #[path = "live_udp_bench/memory.rs"]
 mod memory;
 
+#[cfg(target_os = "linux")]
+#[path = "live_udp_bench/inventory.rs"]
+mod inventory;
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("live_udp_bench requires Linux /proc CPU accounting");
@@ -39,6 +43,7 @@ mod linux {
     use super::ber::Profile;
     use super::burst::{Copies, Profile as Burst, Verdict};
     use super::headers::{Mode as HeaderMode, Profile as Headers};
+    use super::inventory::{Mode as InventoryMode, Profile as Inventory};
     use super::latency::{Samples, SendTimes};
     use super::memory;
     use super::sessions::{Profile as Sessions, Replies as SessionReplies};
@@ -125,6 +130,9 @@ mod linux {
         /// Measured SSIDs on one UDP tuple, excluding warm-up SSID 7; include creation.
         #[arg(long, requires="stateful", conflicts_with_all=["ber_padding","burst_count","headers"], value_parser=clap::value_parser!(u16).range(1..=65534))]
         sessions: Option<u16>,
+        /// Concurrent HTTP inventory workload; require sessions and a control build.
+        #[arg(long, value_enum, requires = "sessions")]
+        inventory: Option<InventoryMode>,
     }
 
     struct Reflector(Child);
@@ -578,11 +586,24 @@ mod linux {
         if let Some(sessions) = &sessions {
             sessions.configure(&mut command);
         }
+        let mut inventory = args
+            .inventory
+            .map(|mode| Inventory::new(mode, args.sessions.expect("clap requires sessions")))
+            .transpose()?;
+        if let Some(inventory) = &inventory {
+            inventory.configure(&mut command);
+        }
         let command_line = format!("{command:?}");
+        if let Some(inventory) = &mut inventory {
+            inventory.release_port();
+        }
         drop(reserve); // Bind race fails visibly via child status; never retry a different server.
         let mut child = Reflector(command.spawn()?);
         let probe_socket = workload_socket(destination, headers)?;
         workload_probe(&mut child, &probe_socket, key, ber, burst, headers, 0)?;
+        if let Some(inventory) = &inventory {
+            inventory.ready()?;
+        }
         thread::sleep(Duration::from_millis(100));
         let idle_before = idle(&mut child, args.idle_seconds, hz)?;
         let socket = workload_socket(destination, headers)?;
@@ -606,8 +627,11 @@ mod linux {
         let start = Instant::now();
         let deadline = start + Duration::from_secs(args.seconds.into());
         let receive_deadline = deadline + Duration::from_millis(args.drain_ms.into());
-        let (sent, skipped_slots, replies, reflector_cpu, generator_cpu) =
+        let (sent, skipped_slots, replies, reflector_cpu, generator_cpu, inventory_summary) =
             thread::scope(|scope| -> Result<_> {
+                let inventory_worker = inventory
+                    .as_ref()
+                    .map(|profile| scope.spawn(move || profile.run(deadline)));
                 let receiver = scope.spawn(|| -> Result<Replies> {
                     let mut buf = [0; 2048];
                     while Instant::now() < receive_deadline {
@@ -689,8 +713,18 @@ mod linux {
                 let generator_cpu =
                     cpu_sample(generator_before, cpu_ticks(std::process::id())?, wall, hz);
                 let replies = receiver.join().map_err(|_| "receiver thread panicked")??;
+                let inventory_summary = inventory_worker
+                    .map(|worker| worker.join().map_err(|_| "inventory thread panicked")?)
+                    .transpose()?;
                 let skipped_slots = (capacity - 1) as u64 - sent as u64;
-                Ok((sent, skipped_slots, replies, reflector_cpu, generator_cpu))
+                Ok((
+                    sent,
+                    skipped_slots,
+                    replies,
+                    reflector_cpu,
+                    generator_cpu,
+                    inventory_summary,
+                ))
             })?;
         child.check()?;
         let memory_after_drain = memory::snapshot(args.memory, child.0.id())?;
@@ -744,6 +778,7 @@ mod linux {
             "observed_rtt": observed_rtt,
             "burst":burst_summary,
             "sessions": session_summary,
+            "inventory": inventory_summary,
             "unique_reply_copy_pps_during_load":burst_summary.as_ref().map(|summary|summary.unique_during_load as f64/args.seconds as f64),
             "missing_after_drain": sent as u64 - unique,
             "loss_percent": 100.0 * (sent as u64 - unique) as f64 / sent as f64,
@@ -761,6 +796,9 @@ mod linux {
     }
     fn run_inner() -> Result<()> {
         let mut args = Args::parse();
+        if args.inventory.is_some() && !cfg!(feature = "control") {
+            return Err("inventory workloads require the control build feature".into());
+        }
         let sessions = args
             .sessions
             .map(|count| Sessions::new(count, u64::from(args.rate) * u64::from(args.seconds)))
@@ -851,6 +889,32 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn inventory_requires_a_bounded_session_workload() {
+            assert!(Args::try_parse_from(["bench", "--inventory", "full"]).is_err());
+            for mode in ["idle", "full", "page100", "page500"] {
+                let args = Args::try_parse_from([
+                    "bench",
+                    "--stateful",
+                    "--sessions",
+                    "100",
+                    "--inventory",
+                    mode,
+                ])
+                .unwrap();
+                assert!(args.inventory.is_some());
+            }
+            assert!(Args::try_parse_from([
+                "bench",
+                "--stateful",
+                "--sessions",
+                "100",
+                "--inventory",
+                "page999"
+            ])
+            .is_err());
+        }
 
         #[test]
         fn session_workload_requires_stateful_and_excludes_tlv_profiles() {

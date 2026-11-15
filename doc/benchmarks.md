@@ -54,6 +54,7 @@ Options (`live_udp_bench --help` lists limits and defaults):
 | `--header-bytes OCTETS` | Require an extension mode; 16–256 Destination Options octets aligned to eight, default 16. |
 | `--headers-denied` | Require `--headers`; keep reflection denied on the temporary child while still attaching requested forward options. |
 | `--sessions N` | Cycle through 1–65,534 measured SSIDs on one UDP tuple. Require `--stateful`; conflict with BER, bursts and headers. Include first-use session creation, disable expiry and reserve separate warm-up identities. |
+| `--inventory MODE` | Require `--sessions` and the `control` build feature. Enable an idle control API (`idle`), full reads (`full`), or cursor walks (`page100`, `page500`) alongside UDP load. |
 
 The generator sends 1 ms batches, skips missed pacing slots, and drains replies
 on a separate thread. Bookkeeping is bounded by `rate × seconds + 1` slots
@@ -91,7 +92,8 @@ target/release/examples/live_udp_bench --stateful --sessions 65534 \
 
 With `--memory`, each trial's `memory` object contains three snapshots:
 `before_load` after warm-up and bookkeeping allocation, `after_drain` after
-the receiver joins, and `after_idle` before the final readiness probe. Each
+the receiver and any inventory worker join, and `after_idle` before the final
+readiness probe. Each
 snapshot contains reflector and generator PIDs, RSS, PSS, private/shared
 clean-plus-dirty memory and swap in bytes, plus total `collection_seconds`.
 The [Linux proc documentation](https://docs.kernel.org/filesystems/proc.html)
@@ -154,6 +156,53 @@ answered identities are not a direct snapshot of the reflector's session table.
 Use repeated matched builds and record generator CPU/pacing shortfalls before
 attributing a difference to reflector session costs. The default workload and
 its warm-up behavior remain unchanged when `--sessions` is absent.
+
+### Concurrent session inventory
+
+```bash
+cargo build --locked --release --features control --bin stamp-suite --example live_udp_bench
+target/release/examples/live_udp_bench --stateful --sessions 65534 \
+  --rate 40000 --seconds 2 --latency --memory --inventory full
+target/release/examples/live_udp_bench --stateful --sessions 65534 \
+  --rate 40000 --seconds 2 --latency --memory --inventory page100
+```
+
+Use identical builds and traffic settings to compare no `--inventory` (control
+server disabled), `idle` (server and inventory index enabled, no load-time HTTP
+requests), `full`, `page100` and `page500`. These workloads include initial
+session creation; inventory walks during creation can finish below the eventual
+table size. Expiry stays disabled through `--sessions`.
+
+The child binds its control API on an ephemeral IPv4 loopback TCP port, even
+when UDP uses IPv6. A temporary mode-0600 file holds a random bearer token and
+is removed when the trial ends. A status request checks readiness before load.
+The benchmark never uses an existing server or changes its configuration.
+
+One generator thread makes sequential HTTP/1.1 requests over fresh TCP
+connections, pausing 10 ms after each validated response. It starts no new
+requests after the load deadline; the last request may finish during or after
+UDP drain. Each request has a two-second I/O deadline and a 32 MiB response
+limit. Unexpected status/framing, malformed JSON identities, oversized pages,
+duplicate session identities in a walk, or invalid/nonadvancing cursors fail
+the trial. This small client supports the application's fixed-length JSON
+responses; it does not support redirects, TLS or chunked responses.
+
+Each trial's `inventory` object records request/row/body-byte totals, largest
+response row count, completed and incomplete walks, completion beyond the load
+deadline, tail duration, and observed request latency. Latency includes TCP,
+HTTP, JSON parsing and identity validation; its bounded quantile precision is
+reported. Full reads count as complete walks. Paginated walks follow the
+creation boundary and restart only after a null cursor. Identity tracking is
+bounded by the configured session cap, including two warm-up sessions. It
+checks walk consistency, not counter values or a frozen inventory snapshot.
+
+UDP counts and first-reply RTT keep their existing scope. Load CPU includes
+the concurrent HTTP client/server work until the UDP load ends, but excludes
+any later HTTP tail; memory after drain includes that tail. Generator HTTP
+buffers, identity tracking and decoding also affect memory/CPU. Closed-loop
+requests achieve different rates as response costs change; inspect actual
+request/row rates before comparing modes. This is a live ingest baseline,
+not isolated lock-hold timing or an independent-arrival saturation test.
 
 ### Live header reflection
 
