@@ -88,9 +88,11 @@ checksums and also check that corrupt packets are rejected.
 `--attach-ext-hdr` attaches one Hop-by-Hop and one Destination Options header
 to IPv6 probes on Linux. Header requests (`--attach-ext-hdr`,
 `--reflected-ipv6-ext-hdr`, `--reflected-fixed-hdr`) need a known egress route
-MTU, which the sender reads on Linux and Windows (`egress_mtu` in
-`src/sender/socket.rs` and `src/sender/socket/windows.rs`); on other platforms
-the sender refuses to start with them. Windows supports fixed-header requests;
+MTU, which the sender reads on Linux, Windows and supported macOS IPv6 sockets
+(`egress_mtu` in `src/sender/socket.rs` and its platform modules). macOS supports
+connected native unicast IPv6 without explicit interface pinning, including the
+socket minimum-MTU policy. Unsupported sockets refuse header-request startup.
+Windows and macOS support fixed-header requests;
 IPv6 extension-header attachment remains Linux-only. Sender source ports are
 random dynamic ports by default, and explicit local and remote ports must differ.
 Both endpoints send with TTL/Hop
@@ -302,11 +304,11 @@ oversized mandatory packet before attempting a send. A failed route lookup
 also refuses the probe; it does not reuse the previous budget. Dynamic control,
 Direct Measurement, Access Report, diagnostic bytes and the originated HMAC
 are reserved before trimming. Header requests can return after the MTU grows,
-even if startup removed every request. On Linux and Windows it sets Don't Fragment, so a
+even if startup removed every request. On supported Linux, Windows and macOS IPv6 sockets it sets Don't Fragment, so a
 route change cannot fragment a probe. The reflector sizes each reply against the actual
 destination route before signing (`src/receiver/mtu.rs`,
 `src/receiver/transmit.rs::fit_reply`); an unknown budget fails closed. Header
-requests need a known route MTU, provided by Linux and Windows senders;
+requests need a known route MTU, provided by Linux, Windows and supported macOS IPv6 senders;
 reflector lookup is also available on Linux and Windows. That limits where the feature runs;
 it never permits an oversized packet.
 
@@ -416,3 +418,9 @@ Source SHA-256 (downloaded 2026-10-26):
 
 - Revision 15: `5c7337d11e1c9beffe1ce5a26438aa1d6f3411df8e280f3e022c27c363cd71e7`.
 - Revision 25: `cbb4b1682184ba6ff49b64f7e562cd74a5f0074df04b4ccd0ff00d01da70bb16`.
+
+macOS sender regressions in `src/sender/run/macos_mtu_tests.rs` cover connected
+IPv6 queries, minimum-MTU policy changes, optional header removal/restoration,
+mandatory oversize refusal, BER initial fitting and independent signatures.
+They are selected by the native macOS CI jobs; cross-compilation alone does not
+establish native behavior or physical fragmentation enforcement.

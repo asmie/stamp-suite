@@ -7,6 +7,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Read connected native unicast IPv6 MTU estimates on macOS for sender header
+  requests and initial BER fitting. Honor minimum-MTU socket policy, refresh
+  before each header-request send, and disable fragmentation for these probes.
+  IPv4, mapped peers, explicit interface pinning and reflector MTU lookup remain
+  outside this macOS adapter's scope.
+
 - Query Windows reflector path/interface MTU estimates for Type 12, header and
   BER replies. Refuse unknown budgets, fit and sign each datagram, and restore
   ordinary fragmentation policy after controlled replies.

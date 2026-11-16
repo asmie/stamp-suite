@@ -204,7 +204,7 @@ impl SenderRun {
                     ));
                 }
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             enable_mtu_discovery(&socket, conf.remote_ip())
                 .map_err(|e| crate::StartupError::io("Sender PMTU setup", e))?;
         }
@@ -640,7 +640,7 @@ impl SenderRun {
         };
 
         // Trim Types 246/247 to the egress MTU using the worst-case packet size
-        // (ext-hdr-26 §§4.2, 6.2). Linux/Windows query the route with getsockopt;
+        // (ext-hdr-26 §§4.2, 6.2). Supported sockets query MTU with getsockopt;
         // header requests fail if the MTU is unknown. This rule removes only
         // header TLVs; it does not trim other extensions.
         let header_requests = !conf.attach_ext_hdr.is_empty()
@@ -1689,6 +1689,10 @@ mod mtu_tests;
 #[cfg(all(test, target_os = "windows"))]
 #[path = "run/windows_mtu_tests.rs"]
 mod windows_mtu_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "run/macos_mtu_tests.rs"]
+mod macos_mtu_tests;
 
 #[cfg(all(test, target_os = "windows"))]
 #[path = "run/windows_receive_error_tests.rs"]

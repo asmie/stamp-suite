@@ -21,7 +21,7 @@
 //! Library modules are public for integration tests, benchmarks, and fuzzing;
 //! they are internal and may change in any 1.x release. MSRV: Rust 1.87.
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
 #[path = "../tests/common/wire_hmac.rs"]
 mod test_wire_hmac;
 

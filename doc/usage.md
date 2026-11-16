@@ -1003,13 +1003,15 @@ stamp-suite --remote-addr 2001:db8::20 --local-addr 2001:db8::10 --attach-ext-hd
   Requests must match attached headers in wire order.
 - `--reflected-fixed-hdr [SELECTORHEX]` requests the received fixed IP header.
 - Header requests need a known egress route MTU, which the sender reads on
-  Linux and Windows before startup and each send. An unknown budget or
+  Linux, Windows and supported macOS IPv6 sockets before startup and each send. An unknown budget or
   oversized mandatory packet ends the run with an error before sending. Header TLVs that do not fit
   are removed from the probe and a warning is logged. Each probe starts from
   the configured requests, so they return when the MTU increases.
-  Both platforms disable fragmentation for these probes. Windows also honors
-  any socket-local MTU cap. These are kernel estimates, not active end-to-end
-  path-MTU measurements. Windows support covers fixed-header requests;
+  These platforms disable fragmentation for these probes. Windows also honors
+  any socket-local MTU cap. macOS supports connected native unicast IPv6,
+  honors the socket's minimum-MTU setting, and declines estimates for explicitly
+  pinned interfaces, IPv4 and IPv4-mapped peers. These are kernel estimates, not active end-to-end
+  path-MTU measurements. Windows and macOS support fixed-header requests;
   attaching IPv6 extension headers still requires Linux.
 
 Type 246 has an eight-byte Requested field; Type 247 has a four-byte one. A

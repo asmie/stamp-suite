@@ -1258,7 +1258,8 @@ pub struct Configuration {
     /// Zero octets are wildcards; mutable DSCP/ECN octets must be zero (IPv4 byte 1,
     /// IPv6 bytes 0 and 1). A nonzero selector must match a unique header.
     /// The nix reflector cannot read fixed headers and returns C. Header requests
-    /// require a known egress route MTU (Linux or Windows sender).
+    /// require a known egress route MTU (Linux, Windows, or unpinned native
+    /// unicast IPv6 on macOS).
     #[clap(
         long,
         value_name = "[SELECTORHEX]",

@@ -1,7 +1,7 @@
 //! Sender socket options: egress IP options, attached IPv6 extension headers,
 //! route MTU, and reply TOS reception.
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use super::*;
 
 #[cfg(all(test, target_os = "linux"))]
@@ -11,6 +11,11 @@ mod tests;
 mod windows;
 #[cfg(target_os = "windows")]
 pub(super) use windows::{egress_mtu, enable_mtu_discovery};
+
+#[cfg(target_os = "macos")]
+pub(super) mod macos;
+#[cfg(target_os = "macos")]
+pub(super) use macos::{egress_mtu, enable_mtu_discovery};
 
 /// Disable IPv4 UDP TX checksums only. Kernel receive validation is unchanged.
 #[cfg(target_os = "linux")]
@@ -184,7 +189,7 @@ pub(super) fn egress_mtu(socket: &UdpSocket) -> Option<u32> {
     (rc == 0 && mtu > 0).then_some(mtu as u32)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub(super) fn egress_mtu(_socket: &UdpSocket) -> Option<u32> {
     None
 }
