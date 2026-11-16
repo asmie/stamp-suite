@@ -217,6 +217,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Prevent delayed reflector workers from duplicating token refill credit in
+  source and shared overflow buckets. Preserve recent source activity for idle
+  expiry when workers acquire the lock out of order.
+
 - Apply reflector rate and burst changes atomically. Concurrent partial control
   API updates preserve the other field, and admission and status reads use a
   coherent rate/burst pair.

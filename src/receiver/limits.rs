@@ -300,6 +300,9 @@ impl RateLimiter {
             sources, overflow, ..
         } = &mut *state;
         let bucket = sources.get_mut(&src).unwrap_or(overflow);
+        // Workers sample time before locking. An older sample can acquire the
+        // lock later; never rewind refill/activity and credit an interval twice.
+        let now = now.max(bucket.last_refill);
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * rate).min(burst);
         bucket.last_refill = now;
@@ -460,6 +463,75 @@ mod tests {
         assert!(limiter.allow_at(ip(10_001), expired));
         assert_eq!(limiter.state.lock().unwrap().sources.len(), 2);
         assert!(!limiter.state.lock().unwrap().sources.contains_key(&ip(1)));
+    }
+
+    #[test]
+    fn delayed_admission_does_not_refill_an_interval_twice() {
+        for src in ["192.0.2.1", "2001:db8::1"] {
+            for (overflow, burst) in [(false, 1), (false, 2), (true, 1), (true, 2)] {
+                let limiter = RateLimiter::with_capacity(1, burst, 1);
+                let start = Instant::now();
+                if overflow {
+                    assert!(limiter.allow_at("198.51.100.1".parse().unwrap(), start));
+                }
+                let src = src.parse().unwrap();
+                assert!(limiter.allow_at(src, start));
+                let later = start + Duration::from_secs(1);
+                assert!(limiter.allow_at(src, later));
+                // A worker sampled `start`, then lost the mutex race to the
+                // worker with `later`. It must not rewind either timestamp,
+                // but can still consume any existing token in a larger burst.
+                assert_eq!(limiter.allow_at(src, start), burst == 2);
+                for delayed in [start, start + Duration::from_millis(500), start] {
+                    assert!(!limiter.allow_at(src, delayed));
+                }
+                assert!(
+                    !limiter.allow_at(src, later),
+                    "a delayed worker duplicated refill credit: src={src}, overflow={overflow}"
+                );
+                // Fractional credit survives both a denial and another stale
+                // worker, but no full token appears until a new second elapses.
+                assert!(!limiter.allow_at(src, later + Duration::from_millis(500)));
+                assert!(!limiter.allow_at(src, start));
+                assert!(limiter.allow_at(src, later + Duration::from_secs(1)));
+                assert!(!limiter.allow_at(src, later + Duration::from_secs(1)));
+                if overflow {
+                    // Overflow sources share one clock and budget, even when
+                    // they use different IP families.
+                    let other = if src.is_ipv4() {
+                        "2001:db8::2"
+                    } else {
+                        "192.0.2.2"
+                    };
+                    assert!(!limiter.allow_at(other.parse().unwrap(), start));
+                    assert!(
+                        !limiter.allow_at(other.parse().unwrap(), later + Duration::from_secs(1))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_admission_does_not_expire_an_active_source() {
+        for src in ["192.0.2.1", "2001:db8::1"] {
+            let limiter = RateLimiter::with_burst(1, 1);
+            let start = Instant::now();
+            let src = src.parse().unwrap();
+            assert!(limiter.allow_at(src, start));
+            let active = start + Duration::from_secs(50);
+            assert!(limiter.allow_at(src, active));
+            assert!(!limiter.allow_at(src, start));
+            let trigger = "198.51.100.1".parse().unwrap();
+            assert!(limiter.allow_at(trigger, start + Duration::from_secs(61)));
+            assert!(
+                limiter.state.lock().unwrap().sources.contains_key(&src),
+                "a delayed worker backdated the source's last activity"
+            );
+            // The correction must not disable normal idle expiry.
+            assert!(limiter.allow_at(trigger, active + RateLimiter::BUCKET_TTL));
+            assert!(!limiter.state.lock().unwrap().sources.contains_key(&src));
+        }
     }
 
     #[test]
