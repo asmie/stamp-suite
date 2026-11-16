@@ -194,6 +194,10 @@ pub async fn run_receiver(
     // Bound shutdown polling independently of session expiry, including timeout=0.
     let read_timeout = Some(Duration::from_millis(100));
     let config = Config {
+        // A full non-jumbo IPv6 packet can exceed 64 KiB once its fixed
+        // header and link/capture headers are included. The 4 KiB default
+        // truncates valid large probes before IP/UDP validation sees them.
+        read_buffer_size: 128 * 1024,
         read_timeout,
         #[cfg(target_os = "linux")]
         socket_fd: incoming_only_capture_socket(),

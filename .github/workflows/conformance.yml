@@ -133,9 +133,9 @@ jobs:
         run: python3 scripts/run_privileged_test.py pnet-artifacts.json header_request_wire_test 1 sudo -n unshare --net --fork env STAMP_HEADER_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
       - name: Require pnet header reflection policy and control
         run: python3 scripts/run_privileged_test.py pnet-artifacts.json header_reflection_wire_test 1 sudo -n unshare --net --fork env STAMP_HEADER_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
-      - name: Require pnet assigned endpoints and family startup failures
+      - name: Require pnet endpoints, large packets and family startup failures
         run: >-
-          python3 scripts/run_privileged_test.py pnet-artifacts.json pnet_endpoint_test 3
+          python3 scripts/run_privileged_test.py pnet-artifacts.json pnet_endpoint_test 4
           sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)"
           STAMP_PNET_ENDPOINT_TESTS=1 TOKIO_WORKER_THREADS=2
       - name: Require nested IP capture and header reflection

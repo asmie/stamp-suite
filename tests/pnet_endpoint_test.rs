@@ -329,3 +329,91 @@ fn pnet_ipv4_works_with_ipv6_disabled_and_ipv6_startup_fails() {
         finish(child);
     }
 }
+
+#[test]
+#[ignore = "requires STAMP_PNET_ENDPOINT_TESTS=1 inside unshare -Urn"]
+fn pnet_large_packets_preserve_payload_and_signatures() {
+    let _namespace = namespace();
+    // Maximum-size IPv6 UDP packets exceed lo's usual 65536-byte MTU.
+    // namespace() verifies isolation before changing this test-only interface.
+    assert!(std::process::Command::new("ip")
+        .args(["link", "set", "lo", "mtu", "131072"])
+        .status()
+        .unwrap()
+        .success());
+    for ip in ["127.0.0.1", "::1"] {
+        let ipv6 = ip.contains(':');
+        // Ethernet + IP + UDP used to exhaust the 4096-byte capture buffer.
+        let old_limit = if ipv6 { 4034 } else { 4054 };
+        let maximum = if ipv6 { 65527 } else { 65507 };
+        for mode in 0..3 {
+            let child = reflector::Reflector::spawn(command(ip, 0, mode)).unwrap();
+            let peer = std::net::UdpSocket::bind((ip, 0)).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let base = if mode == 2 { 112 } else { 44 };
+            let hmac_size = if mode == 0 { 0 } else { 20 };
+            let mut reply = vec![0; 65535];
+            for (index, size) in [1500, old_limit, old_limit + 1, 8192, maximum, 1500]
+                .into_iter()
+                .enumerate()
+            {
+                let sequence = (index as u32 + 1).to_be_bytes();
+                let timestamp = if mode == 2 { 16 } else { 4 };
+                let mut packet = vec![0; base];
+                packet[..4].copy_from_slice(&sequence);
+                packet[timestamp..timestamp + 8]
+                    .copy_from_slice(&0xeed0_0000_8000_0000u64.to_be_bytes());
+                packet[timestamp + 9] = 1;
+                let padding = size - base - hmac_size - 4;
+                packet.extend_from_slice(&[0x80, 1]);
+                packet.extend_from_slice(&(padding as u16).to_be_bytes());
+                // Nonzero content checks the entire captured payload, including
+                // its tail, rather than just a reply's reported length.
+                packet.extend((0..padding).map(|i| (i % 251 + 1) as u8));
+                let padding_end = packet.len();
+                if mode != 0 {
+                    let covered = [&packet[..4], &packet[base..]].concat();
+                    packet.extend_from_slice(&[0x80, 8, 0, 16]);
+                    packet.extend_from_slice(&wire_hmac::digest(&KEY, &covered));
+                }
+                if mode == 2 {
+                    let digest = wire_hmac::digest(&KEY, &packet[..96]);
+                    packet[96..112].copy_from_slice(&digest);
+                }
+                inject(peer.local_addr().unwrap(), child.address, &packet);
+                let (received, source) = peer.recv_from(&mut reply).unwrap_or_else(|error| {
+                    panic!(
+                        "{ip} mode={mode} size={size}: {error}: {}",
+                        child.diagnostics()
+                    )
+                });
+                assert_eq!(source, child.address);
+                assert_eq!(received, size, "{ip} mode={mode} truncated reply");
+                let echo = if mode == 2 { 48 } else { 24 };
+                let echo_timestamp = if mode == 2 { 64 } else { 28 };
+                assert_eq!(&reply[echo..echo + 4], &sequence);
+                assert_eq!(
+                    &reply[echo_timestamp..echo_timestamp + 10],
+                    &packet[timestamp..timestamp + 10]
+                );
+                assert_eq!(reply[base], 0, "padding must be processed without U/M/I");
+                assert_eq!(
+                    &reply[base + 1..padding_end],
+                    &packet[base + 1..padding_end]
+                );
+                if mode != 0 {
+                    assert_eq!(&reply[padding_end..padding_end + 4], &[0, 8, 0, 16]);
+                    let covered = [&reply[..4], &reply[base..padding_end]].concat();
+                    assert_eq!(
+                        &reply[padding_end + 4..received],
+                        &wire_hmac::digest(&KEY, &covered)
+                    );
+                }
+                if mode == 2 {
+                    assert_eq!(&reply[96..112], &wire_hmac::digest(&KEY, &reply[..96]));
+                }
+            }
+            finish(child);
+        }
+    }
+}
