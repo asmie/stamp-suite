@@ -538,6 +538,7 @@ mod tests {
     use std::time::Instant;
     fn packet() -> PendingPacket {
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,

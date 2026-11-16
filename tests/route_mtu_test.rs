@@ -578,7 +578,16 @@ fn sender_wire_tlvs(bytes: &[u8], mode: u8, seq: u32) -> Vec<(u8, Vec<u8>)> {
         let value = &bytes[pos + 4..pos + 4 + size];
         if kind == 8 {
             assert!(mode == 1 || mode == 3);
-            assert_eq!(pos + 4 + size, bytes.len(), "HMAC must stay last");
+            // BER leaves repairable padding outside HMAC coverage.
+            if pos + 4 + size != bytes.len() {
+                assert!(tlvs.iter().any(|(kind, _)| *kind == 243));
+                let tail = &bytes[pos + 4 + size..];
+                assert_eq!(&tail[..2], &[0x80, 1]);
+                assert_eq!(
+                    tail.len(),
+                    4 + u16::from_be_bytes([tail[2], tail[3]]) as usize
+                );
+            }
             let mut covered = bytes[..4].to_vec();
             covered.extend_from_slice(&bytes[base..pos]);
             assert_eq!(value, independent_mac(&covered));
@@ -593,6 +602,186 @@ fn sender_wire_tlvs(bytes: &[u8], mode: u8, seq: u32) -> Vec<(u8, Vec<u8>)> {
     tlvs
 }
 
+// Deliberately construct replies independently of the reflector/packet codecs.
+fn ber_reply(request: &[u8], mode: u8, tlvs: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let (base, ts, err, rx, seq, echo, echo_err, ttl) = if mode == 3 {
+        (112, 16, 24, 32, 48, 64, 72, 80)
+    } else {
+        (44, 4, 12, 16, 24, 28, 36, 40)
+    };
+    let mut reply = vec![0; base];
+    reply[..4].copy_from_slice(&request[..4]);
+    for offset in [ts, rx, echo] {
+        reply[offset..offset + 8].copy_from_slice(&request[ts..ts + 8]);
+    }
+    reply[err..err + 4].copy_from_slice(&request[err..err + 4]);
+    reply[seq..seq + 4].copy_from_slice(&request[..4]);
+    reply[echo_err..echo_err + 2].copy_from_slice(&request[err..err + 2]);
+    reply[ttl] = 64;
+    let mut metadata = tlvs.iter().find(|t| t.0 == 243).unwrap().1.clone();
+    metadata[8] = 0; // Recognize the explicit pattern sub-TLV.
+    reply.extend_from_slice(&[0, 243]);
+    reply.extend_from_slice(&(metadata.len() as u16).to_be_bytes());
+    reply.extend_from_slice(&metadata);
+    if mode != 0 {
+        let mut covered = reply[..4].to_vec();
+        covered.extend_from_slice(&reply[base..]);
+        reply.extend_from_slice(&[0, 8, 0, 16]);
+        reply.extend_from_slice(&independent_mac(&covered));
+    }
+    let padding = &tlvs.iter().find(|t| t.0 == 1).unwrap().1;
+    reply.extend_from_slice(&[0, 1]);
+    reply.extend_from_slice(&(padding.len() as u16).to_be_bytes());
+    reply.extend_from_slice(padding);
+    if mode == 3 {
+        let mac = independent_mac(&reply[..96]);
+        reply[96..112].copy_from_slice(&mac);
+    }
+    reply
+}
+
+async fn sender_ber_tracks_route_mtu(output: &StatsOutput) {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..4 {
+            for headers in [false, true] {
+                let budgets = [1280, 1500, 1280, 1500];
+                loopback_mtu(budgets[0]);
+                let peer = tokio::net::UdpSocket::bind((ip, 0)).await.unwrap();
+                let address = peer.local_addr().unwrap();
+                let mut conf = sender_mtu_conf(address, mode, 0, budgets.len() as u32);
+                conf.extra_padding = None;
+                conf.ber = true;
+                conf.ber_pattern = Some("123456789a".into());
+                conf.ber_padding_size = 2000;
+                conf.timeout = 1;
+                if !headers {
+                    conf.reflected_fixed_hdr.clear();
+                    conf.attach_ext_hdr.clear();
+                }
+                conf.validate().unwrap();
+                let overhead = if address.is_ipv6() {
+                    48 + usize::from(headers) * 8
+                } else {
+                    28
+                };
+                let changes = Arc::new(SenderMtuSteps {
+                    next: budgets[1..].to_vec(),
+                    sent: AtomicUsize::new(0),
+                });
+                let mut observers = SenderObservers::new();
+                observers.push(changes.clone());
+                let out = output.clone();
+                let task = tokio::spawn(async move {
+                    sender::run_sender_with_output(&conf, &out, observers, CancellationToken::new())
+                        .await
+                });
+                let mut replies = Vec::new();
+                let mut lengths = Vec::new();
+                for (seq, budget) in budgets.into_iter().enumerate() {
+                    let mut bytes = [0; 2048];
+                    let (size, source) =
+                        tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut bytes))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert!(
+                        size + overhead <= budget,
+                        "ip={ip} mode={mode} headers={headers} seq={seq}: exceeded MTU"
+                    );
+                    assert!(
+                        budget - size - overhead < 5,
+                        "BER did not use current route budget"
+                    );
+                    let tlvs = sender_wire_tlvs(&bytes[..size], mode, seq as u32);
+                    let padding = &tlvs.iter().find(|t| t.0 == 1).unwrap().1;
+                    assert_eq!(padding.len() % 5, 0);
+                    assert!(padding
+                        .chunks_exact(5)
+                        .all(|p| p == [0x12, 0x34, 0x56, 0x78, 0x9a]));
+                    lengths.push(padding.len());
+                    replies.push((ber_reply(&bytes[..size], mode, &tlvs), source));
+                }
+                assert!(lengths[1] > lengths[0]);
+                assert_eq!(lengths[0], lengths[2]);
+                assert_eq!(lengths[1], lengths[3]);
+                // All probes are pending at the largest budget. Reorder and
+                // duplicate replies to exercise each original denominator.
+                for index in [2, 0, 3, 1, 2] {
+                    peer.send_to(&replies[index].0, replies[index].1)
+                        .await
+                        .unwrap();
+                }
+                let stats = tokio::time::timeout(Duration::from_secs(3), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stats.packets_sent, 4);
+                assert_eq!(stats.packets_received, 4);
+                assert_eq!(changes.sent.load(Ordering::SeqCst), 4);
+                let ber = stats.ber.unwrap();
+                assert_eq!(ber.padding_bytes, lengths[3]);
+                for direction in [ber.forward, ber.reverse] {
+                    assert_eq!(direction.packets_received, 4);
+                    assert_eq!(
+                        direction.padding_bits,
+                        lengths.iter().sum::<usize>() as u64 * 8
+                    );
+                    assert_eq!(direction.bit_errors, 0);
+                }
+                eprintln!("PASS sender BER ip={ip} mode={mode} headers={headers}: grow/shrink/restore, signatures, reordered denominators");
+            }
+
+            // A full pattern and its metadata fit at 1500 but not at 1280.
+            // Refuse the probe before notifying observers or sending bytes.
+            for shrink in [false, true] {
+                loopback_mtu(if shrink { 1500 } else { 1280 });
+                let peer = tokio::net::UdpSocket::bind((ip, 0)).await.unwrap();
+                let mut conf = sender_mtu_conf(peer.local_addr().unwrap(), mode, 0, 2);
+                conf.extra_padding = None;
+                conf.reflected_fixed_hdr.clear();
+                conf.attach_ext_hdr.clear();
+                conf.direct_measurement = false;
+                conf.cos = false;
+                conf.reflected_control_count = 1;
+                conf.ber = true;
+                conf.ber_pattern = Some("12".repeat(600));
+                conf.ber_padding_size = 1200;
+                conf.validate().unwrap();
+                let changes = Arc::new(SenderMtuSteps {
+                    next: vec![1280],
+                    sent: AtomicUsize::new(0),
+                });
+                let mut observers = SenderObservers::new();
+                observers.push(changes.clone());
+                let error = sender::run_sender_with_output(
+                    &conf,
+                    output,
+                    observers,
+                    CancellationToken::new(),
+                )
+                .await
+                .err()
+                .expect("impossible BER budget accepted");
+                assert!(
+                    error.to_string().contains("Cannot fit the BER padding"),
+                    "{error}"
+                );
+                assert_eq!(changes.sent.load(Ordering::SeqCst), usize::from(shrink));
+                if shrink {
+                    peer.recv_from(&mut [0; 2048]).await.unwrap();
+                }
+                assert!(tokio::time::timeout(
+                    Duration::from_millis(20),
+                    peer.recv_from(&mut [0; 2048])
+                )
+                .await
+                .is_err());
+            }
+        }
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires STAMP_MTU_NETNS_TESTS=1 inside unshare -Urn"]
 async fn live_sender_trims_restores_and_refuses_oversized_probes() {
@@ -601,6 +790,7 @@ async fn live_sender_trims_restores_and_refuses_oversized_probes() {
     assert_eq!(unsafe { libc::geteuid() }, 0, "run inside unshare -Urn");
     loopback_mtu(1500);
     let output = StatsOutput::new(OutputFormat::Json).unwrap();
+    sender_ber_tracks_route_mtu(&output).await;
     for ip in ["127.0.0.1", "::1"] {
         for mode in 0..4 {
             let peer = tokio::net::UdpSocket::bind((ip, 0)).await.unwrap();

@@ -92,10 +92,10 @@ pub(super) struct SenderRun {
     access_report_reply_deadline: Option<Instant>,
     /// TLVs sent with every probe; per-probe TLVs are added at build time.
     extra_tlvs: Vec<RawTlv>,
-    /// Untrimmed TLV set when header reflection is requested; each probe
-    /// trims from it for the current route MTU.
-    header_template: Option<Vec<RawTlv>>,
-    header_fixed_overhead: usize,
+    /// Original TLVs for header reflection or BER on a known route; each
+    /// probe fits this template to the current MTU, including after growth.
+    probe_template: Option<Vec<RawTlv>>,
+    probe_fixed_overhead: usize,
     header_trimmed: usize,
     ber: Option<BerCollector>,
     report_timer: Option<tokio::time::Interval>,
@@ -639,15 +639,15 @@ impl SenderRun {
             TlvHmacMode::Off => false,
         };
 
-        // Trim Types 246/247 to the egress MTU using the worst-case packet size
-        // (ext-hdr-26 §§4.2, 6.2). Supported sockets query MTU with getsockopt;
-        // header requests fail if the MTU is unknown. This rule removes only
-        // header TLVs; it does not trim other extensions.
+        // Fit BER padding and Types 246/247 to the egress MTU using the
+        // worst-case packet size (ext-hdr-26 §§4.2, 6.2). Preserve the original
+        // TLVs for per-probe refresh on supported routes. Header requests fail
+        // when MTU is unknown; standalone BER retains its fallback budget.
         let header_requests = !conf.attach_ext_hdr.is_empty()
             || !conf.reflected_fixed_hdr.is_empty()
             || !conf.reflected_ipv6_ext_hdr.is_empty();
-        let header_fixed_overhead;
-        let header_template: Option<Vec<RawTlv>>;
+        let probe_fixed_overhead;
+        let probe_template: Option<Vec<RawTlv>>;
         let header_trimmed;
         {
             let route_mtu = egress_mtu(&socket);
@@ -714,12 +714,13 @@ impl SenderRun {
                 + access
                 + control
                 + malformed;
-            header_fixed_overhead = fixed_overhead;
+            probe_fixed_overhead = fixed_overhead;
+            probe_template =
+                (header_requests || (conf.ber && route_mtu.is_some())).then(|| extra_tlvs.clone());
             if conf.ber {
                 crate::ber::fit_padding(&mut extra_tlvs, mtu, fixed_overhead)
                     .map_err(|e| crate::StartupError::io("Cannot fit the BER padding", e))?;
             }
-            header_template = header_requests.then(|| extra_tlvs.clone());
             let removed = enforce_egress_mtu(&mut extra_tlvs, mtu, fixed_overhead);
             log_header_trim(removed, mtu);
             header_trimmed = removed;
@@ -819,8 +820,8 @@ impl SenderRun {
             access_report_state,
             access_report_reply_deadline: None,
             extra_tlvs,
-            header_template,
-            header_fixed_overhead,
+            probe_template,
+            probe_fixed_overhead,
             header_trimmed,
             ber,
             report_timer,
@@ -828,7 +829,7 @@ impl SenderRun {
             shutdown,
             schedule: Schedule::new(conf.send_schedule),
         };
-        let route_mtu = run.prepare_header_requests()?;
+        let route_mtu = run.prepare_probe_tlvs()?;
         run.validate_probe_size(run.build_probe(0, true).len(), route_mtu)?;
         Ok(run)
     }
@@ -1174,7 +1175,7 @@ impl SenderRun {
 
     /// Builds and sends one probe. Transient errors have a bounded retry budget.
     async fn send_probe(&mut self, attach_access_report: bool) -> Result<(), crate::StartupError> {
-        let route_mtu = self.prepare_header_requests()?;
+        let route_mtu = self.prepare_probe_tlvs()?;
         if let Some(ber) = self.ber.as_mut() {
             ber.advance(Instant::now());
             ber.filter_requests(&mut self.extra_tlvs);
@@ -1304,7 +1305,26 @@ impl SenderRun {
     fn record_sent(&mut self, seq: u32, send_time: Instant, send_timestamp: u64) {
         self.packets_sent += 1;
         self.observers.probe_sent();
+        let ber_padding = self.ber.as_mut().and_then(|ber| {
+            if self
+                .extra_tlvs
+                .iter()
+                .any(|tlv| crate::ber::is_ber(tlv.tlv_type))
+            {
+                let size = self
+                    .extra_tlvs
+                    .iter()
+                    .find(|tlv| tlv.tlv_type == TlvType::ExtraPadding)?
+                    .value
+                    .len();
+                ber.summary.padding_bytes = size;
+                Some(size)
+            } else {
+                None
+            }
+        });
         let probe = PendingPacket {
+            ber_padding,
             send_time,
             send_timestamp,
             wire_timestamp: send_timestamp,
@@ -1498,21 +1518,29 @@ impl SenderRun {
         }
     }
 
-    /// Re-trims Type 246/247 requests for the current route MTU, which can
-    /// change during a run. Each probe starts from the untrimmed set, so a
-    /// temporary MTU drop does not remove requests for the rest of the run.
+    /// Fits BER padding and Type 246/247 requests to the current route MTU.
+    /// Each probe starts from the original TLVs, allowing padding and header
+    /// requests to return after a temporary decrease in the route budget.
     /// A failed lookup refuses the probe; a stale budget cannot authorize it.
-    fn prepare_header_requests(&mut self) -> Result<Option<usize>, crate::StartupError> {
-        let Some(template) = &self.header_template else {
+    fn prepare_probe_tlvs(&mut self) -> Result<Option<usize>, crate::StartupError> {
+        let Some(template) = &self.probe_template else {
             return Ok(None);
         };
         match egress_mtu(&self.socket) {
             Some(mtu) => {
                 self.extra_tlvs.clone_from(template);
+                if self.conf.ber {
+                    crate::ber::fit_padding(
+                        &mut self.extra_tlvs,
+                        mtu as usize,
+                        self.probe_fixed_overhead,
+                    )
+                    .map_err(|e| crate::StartupError::io("Cannot fit the BER padding", e))?;
+                }
                 let removed = enforce_egress_mtu(
                     &mut self.extra_tlvs,
                     mtu as usize,
-                    self.header_fixed_overhead,
+                    self.probe_fixed_overhead,
                 );
                 if removed != self.header_trimmed {
                     log_header_trim(removed, mtu as usize);
@@ -1521,7 +1549,7 @@ impl SenderRun {
                 Ok(Some(mtu as usize))
             }
             None => Err(crate::StartupError::config(
-                "Cannot read the route MTU for header-reflection requests",
+                "Cannot read the route MTU for probe TLVs",
             )),
         }
     }

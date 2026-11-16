@@ -185,6 +185,7 @@ pub struct Alarm {
 pub struct BerSummary {
     pub disabled_by_peer: bool,
     pub interval_ms: u64,
+    /// Padding in the latest successfully sent BER probe, or the startup fit.
     pub padding_bytes: usize,
     pub forward: DirectionSummary,
     pub reverse: DirectionSummary,

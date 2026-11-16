@@ -443,6 +443,7 @@ fn apply_tx_corrections_updates_pending_t1() {
     pending.insert(
         5u32,
         PendingPacket {
+            ber_padding: None,
             send_time: sent,
             send_timestamp: 111,
             wire_timestamp: 111,
@@ -491,6 +492,7 @@ fn delayed_tx_reports_do_not_correct_a_reused_sequence() {
     let mut pending = HashMap::from([(
         7,
         PendingPacket {
+            ber_padding: None,
             send_time: newer,
             send_timestamp: 222,
             wire_timestamp: 222,
@@ -849,6 +851,7 @@ fn unsolicited_msid_cannot_seed_the_reflector_latch() {
     let mut pending = HashMap::from([(
         42,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -939,6 +942,7 @@ fn required_msid_rejects_unusable_reply_without_consuming_state() {
                 let mut pending = HashMap::from([(
                     42,
                     PendingPacket {
+                        ber_padding: None,
                         send_time: Instant::now(),
                         send_timestamp: 0,
                         wire_timestamp: 0,
@@ -1715,6 +1719,7 @@ fn telemetry_control_decisions_do_not_depend_on_formatting() {
             pending.insert(
                 0,
                 PendingPacket {
+                    ber_padding: None,
                     send_time: Instant::now(),
                     send_timestamp: 0,
                     wire_timestamp: 0,
@@ -2191,6 +2196,7 @@ fn test_process_response_acknowledges_access_report_state() {
     pending.insert(
         1,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -2260,6 +2266,7 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
     pending.insert(
         1,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -2383,6 +2390,7 @@ fn test_process_response_forward_path_ce_backs_off_congestion_controller() {
     pending.insert(
         1,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -2441,6 +2449,7 @@ fn test_process_response_reverse_path_ce_backs_off_congestion_controller() {
     pending.insert(
         2,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -2516,6 +2525,7 @@ fn test_process_response_clean_reply_recovers_congestion_controller() {
     pending.insert(
         3,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -2577,6 +2587,7 @@ fn test_process_response_no_panic_when_congestion_inactive() {
     pending.insert(
         4,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -2701,6 +2712,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
     pending.insert(
         seq_num,
         PendingPacket {
+            ber_padding: None,
             send_time,
             send_timestamp,
             wire_timestamp: send_timestamp,
@@ -3342,6 +3354,7 @@ fn check_clock_pair(
         let mut pending = HashMap::from([(
             7,
             PendingPacket {
+                ber_padding: None,
                 send_time: Instant::now(),
                 send_timestamp: if corrected {
                     wire(seconds, 999_000_000, local)
@@ -3482,6 +3495,7 @@ fn test_process_response_records_forward_one_way_delay() {
     pending.insert(
         7,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: t1,
             wire_timestamp: t1,
@@ -3538,6 +3552,7 @@ fn mismatched_ssid_preserves_measurement_and_control_state() {
                 let mut pending = HashMap::from([(
                     42,
                     PendingPacket {
+                        ber_padding: None,
                         send_time: Instant::now(),
                         send_timestamp: t1,
                         wire_timestamp: t1,
@@ -3623,6 +3638,7 @@ fn zero_ssid_policy_applies_in_every_reply_parser() {
                 let mut pending = HashMap::from([(
                     42,
                     PendingPacket {
+                        ber_padding: None,
                         send_time: Instant::now(),
                         send_timestamp: 0,
                         wire_timestamp: 0,
@@ -3663,6 +3679,7 @@ fn zero_ssid_policy_applies_in_every_reply_parser() {
                 ctx.pending.insert(
                     43,
                     PendingPacket {
+                        ber_padding: None,
                         send_time: Instant::now(),
                         send_timestamp: 0,
                         wire_timestamp: 0,
@@ -3758,6 +3775,7 @@ fn test_zero_ssid_policy_stop_discards_reply_and_latches() {
     pending.insert(
         7,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -3833,6 +3851,7 @@ fn test_zero_ssid_policy_continue_still_accounts_the_reply() {
     pending.insert(
         7,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -3909,6 +3928,7 @@ fn test_zero_ssid_policy_inert_without_a_configured_ssid() {
     pending.insert(
         7,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -3987,6 +4007,7 @@ fn test_process_response_drops_packet_on_msid_mismatch() {
     pending.insert(
         42,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -4069,6 +4090,7 @@ fn test_process_response_accepts_packet_on_msid_match() {
     pending.insert(
         42,
         PendingPacket {
+            ber_padding: None,
             send_time: Instant::now(),
             send_timestamp: 0,
             wire_timestamp: 0,
@@ -4419,6 +4441,7 @@ fn tlv_validation_json_reports_real_reply_outcomes_in_both_modes() {
             let mut pending = HashMap::from([(
                 42,
                 PendingPacket {
+                    ber_padding: None,
                     send_time: Instant::now(),
                     send_timestamp: 0,
                     wire_timestamp: 0,
@@ -4531,6 +4554,7 @@ fn tlv_validation_excludes_base_hmac_failures_and_reports_unsigned_open_replies(
         let mut pending = HashMap::from([(
             42,
             PendingPacket {
+                ber_padding: None,
                 send_time: Instant::now(),
                 send_timestamp: 0,
                 wire_timestamp: 0,
@@ -4743,6 +4767,7 @@ fn congestion_recovery_requires_unambiguous_usable_cos() {
                 let mut pending = HashMap::from([(
                     42,
                     PendingPacket {
+                        ber_padding: None,
                         send_time: Instant::now(),
                         send_timestamp: 0,
                         wire_timestamp: 0,

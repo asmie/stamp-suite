@@ -143,6 +143,21 @@ async fn macos_ipv6_mtu_ber_initial_fit_uses_the_connected_budget() {
             .unwrap()
             .unwrap();
         assert_eq!(len, payload);
+        // Per-socket caps exercise the same per-probe refresh without changing host routes.
+        for (index, cap) in [1280, 0, 1280, 0].into_iter().enumerate() {
+            cap_mtu(&sender.socket, cap);
+            let mtu = egress_mtu(&sender.socket).unwrap() as usize;
+            sender.send_probe(false).await.unwrap();
+            let len = tokio::time::timeout(Duration::from_secs(2), peer.recv(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = 4000.min((mtu - fixed) / 5 * 5);
+            assert_eq!(len + 48, fixed + expected);
+            let probe = sender.pending.get(&(index as u32 + 1)).unwrap();
+            assert_eq!(probe.ber_padding, Some(expected));
+            assert_eq!(sender.ber.as_ref().unwrap().summary.padding_bytes, expected);
+        }
     }
 }
 
@@ -218,7 +233,7 @@ async fn macos_ipv6_mtu_trims_restores_and_refuses_oversize_before_send() {
         // the send must fail before counters/pending state are changed.
         cap_mtu(&sender.socket, 1280);
         sender
-            .header_template
+            .probe_template
             .as_mut()
             .unwrap()
             .iter_mut()

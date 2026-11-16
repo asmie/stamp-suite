@@ -72,6 +72,8 @@ struct PendingPacket {
     /// Immutable timestamp serialized into the probe. Kernel TX corrections
     /// update `send_timestamp` for OWD, never the echoed identity.
     wire_timestamp: u64,
+    /// Expected BER padding for this probe, retained across route MTU changes.
+    ber_padding: Option<usize>,
 }
 
 /// Errors a connected UDP socket reports for ICMP feedback on an earlier
@@ -230,6 +232,7 @@ pub fn fuzz_reply(
     for seq in 0..4u32 {
         let timestamp = generate_timestamp(ClockFormat::NTP);
         let probe = PendingPacket {
+            ber_padding: None,
             send_time: now,
             send_timestamp: timestamp,
             wire_timestamp,
@@ -414,7 +417,10 @@ fn process_response(
                         .as_ref()
                         .is_some_and(|t| t.hmac.permits_measurements()),
                     &ber.pattern,
-                    ber.summary.padding_bytes,
+                    ctx.pending
+                        .get(&seq_num)
+                        .and_then(|p| p.ber_padding)
+                        .unwrap_or(ber.summary.padding_bytes),
                 );
             }
 
@@ -517,7 +523,10 @@ fn process_response(
                     .as_ref()
                     .is_some_and(|t| t.hmac.permits_measurements()),
                 &ber.pattern,
-                ber.summary.padding_bytes,
+                ctx.pending
+                    .get(&base.sess_sender_seq_number)
+                    .and_then(|p| p.ber_padding)
+                    .unwrap_or(ber.summary.padding_bytes),
             );
         }
 
