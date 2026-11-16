@@ -866,8 +866,9 @@ async fn live_sender_trims_restores_and_refuses_oversized_probes() {
             assert_eq!(stats.packets_sent, 5);
             assert_eq!(changes.sent.load(Ordering::SeqCst), 5);
 
-            // One mandatory octet over budget must fail before the first send,
-            // and also after a previously successful probe on a larger route.
+            // One mandatory octet over budget fails at startup. After a
+            // successful probe on a larger route, the shrunken route only skips
+            // probes, and the run fails once the send-failure budget is spent.
             for shrink in [false, true] {
                 loopback_mtu(if shrink { 1500 } else { 1280 });
                 let conf = sender_mtu_conf(address, mode, padding + 1, 2);

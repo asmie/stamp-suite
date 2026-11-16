@@ -96,6 +96,19 @@ impl AccessReportRetransmitState {
         true
     }
 
+    /// Postpones a due retransmission whose datagram was not sent by one timer
+    /// period, without spending retry budget. Otherwise the expired deadline
+    /// keeps the report due, and every wait would retry at once until the
+    /// send-error budget ends the run. An unsent original report needs no
+    /// delay: the next scheduled probe carries it.
+    pub(super) fn defer(&mut self, now: Instant) {
+        if let AccessReportPhase::Armed { deadline, .. } = &mut self.phase {
+            if now >= *deadline {
+                *deadline = now + self.timeout;
+            }
+        }
+    }
+
     /// Disarms an armed timer only when the usable echo matches the report
     /// being delivered (RFC 8972 §4.6). Decoding has already ignored Reserved
     /// bits; Access ID and Return Code must both match. Other states are unchanged.
@@ -163,6 +176,34 @@ impl AccessReportRetransmitState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defer_postpones_only_an_expired_attempt_and_keeps_its_budget() {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(3);
+        let mut state = AccessReportRetransmitState::new(timeout, 1, AccessReportTlv::new(1, 1));
+        state.defer(now);
+        assert_eq!(state.phase, AccessReportPhase::NotStarted);
+
+        state.record_sent(now);
+        let armed = state.phase;
+        state.defer(now + Duration::from_secs(1));
+        assert_eq!(state.phase, armed, "a pending timer is left alone");
+
+        let failed_at = now + timeout;
+        assert!(state.due(failed_at));
+        state.defer(failed_at);
+        assert_eq!(
+            state.phase,
+            AccessReportPhase::Armed {
+                attempt: 0,
+                deadline: failed_at + timeout,
+            }
+        );
+        assert!(!state.due(failed_at));
+        assert!(state.due(failed_at + timeout));
+        assert_eq!(state.retransmissions(), 0);
+    }
 
     #[test]
     fn acknowledgement_requires_both_original_report_fields() {

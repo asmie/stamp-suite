@@ -90,6 +90,12 @@ Upgrade both peers together when they use BER or reflected headers.
   - Every received TLV length is validated before reflected values are used.
   - Header-request probes that do not fit the route MTU are refused before
     sending. BER padding follows route MTU changes.
+  - A route MTU that becomes unreadable or too small during a run skips the
+    probe instead of ending the run; eight consecutive skips or send errors
+    still do. On Linux the sender reconnects to refresh a dropped route.
+  - A failed Access Report retransmission waits one report timer before
+    the next attempt, instead of retrying at once until the send-error
+    budget ends the run.
   - Access Report retries start only after a successful send, need a matching
     acknowledgement, and keep their deadlines during probe pacing and the
     final wait.

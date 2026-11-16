@@ -1111,7 +1111,10 @@ stamp-suite --remote-addr 2001:db8::20 --local-addr 2001:db8::10 --attach-ext-hd
 - Header requests need a known egress route MTU. The sender reads it before
   startup and before each send on Linux, on Windows, and on macOS for
   supported IPv6 sockets. If the budget is unknown, or the mandatory part of
-  the packet is too large, the run ends with an error before anything is sent.
+  the packet is too large, startup fails before anything is sent. Later in the
+  run the same conditions skip the probe instead, since the route can change.
+  Skipped probes count toward the limit of eight consecutive send failures,
+  after which the run ends with an error.
   Header TLVs that do not fit are removed from that probe and a warning is
   logged. Each probe starts again from the configured requests, so the removed
   TLVs come back when the MTU grows. These platforms send header probes with

@@ -39,6 +39,8 @@ pub(super) struct SenderRun {
     /// Labels reports when several targets run at once.
     label: Option<String>,
     socket: UdpSocket,
+    /// The connected peer, kept to refresh the route (see `refresh_route`).
+    remote_addr: SocketAddr,
     consecutive_send_errors: u8,
     use_auth: bool,
     use_tlvs: bool,
@@ -783,6 +785,7 @@ impl SenderRun {
             conf: Arc::clone(&shared_conf),
             label: None,
             socket,
+            remote_addr,
             consecutive_send_errors: 0,
             use_auth,
             use_tlvs,
@@ -830,8 +833,10 @@ impl SenderRun {
             shutdown,
             schedule: Schedule::new(conf.send_schedule),
         };
-        let route_mtu = run.prepare_probe_tlvs()?;
-        run.validate_probe_size(run.build_probe(0, true).len(), route_mtu)?;
+        // At startup a probe that cannot fit the route is a configuration
+        // error; during the run the same checks only skip probes.
+        let route_mtu = run.prepare_probe_tlvs().await?;
+        run.validate_probe_size(run.build_probe(0, true).len(), route_mtu)??;
         Ok(run)
     }
 
@@ -1146,11 +1151,14 @@ impl SenderRun {
         }
     }
 
+    /// Checks the probe against the UDP payload limit (fatal: the
+    /// configuration can never fit) and against the current route MTU
+    /// (returned as `Ok(Err(..))`: the route can change during a run).
     fn validate_probe_size(
         &self,
         size: usize,
         route_mtu: Option<usize>,
-    ) -> Result<(), crate::StartupError> {
+    ) -> Result<Result<(), crate::StartupError>, crate::StartupError> {
         let ipv6 = self.conf.remote_ip().is_ipv6();
         let headers = if ipv6 {
             self.conf
@@ -1166,24 +1174,30 @@ impl SenderRun {
         if let Some(mtu) = route_mtu {
             let full_size = size + headers + if ipv6 { 48 } else { 28 };
             if full_size > mtu {
-                return Err(crate::StartupError::config(format!(
+                return Ok(Err(crate::StartupError::config(format!(
                     "Probe is {full_size} bytes including IP/UDP headers; route MTU is {mtu} bytes after removing optional header TLVs"
-                )));
+                ))));
             }
         }
-        Ok(())
+        Ok(Ok(()))
     }
 
-    /// Builds and sends one probe. Transient errors have a bounded retry budget.
+    /// Builds and sends one probe. Transient errors, including a route MTU
+    /// that is unreadable or too small, share a bounded retry budget.
     async fn send_probe(&mut self, attach_access_report: bool) -> Result<(), crate::StartupError> {
-        let route_mtu = self.prepare_probe_tlvs()?;
+        let route_mtu = match self.prepare_probe_tlvs().await {
+            Ok(mtu) => mtu,
+            Err(refusal) => return self.refuse_probe(refusal, attach_access_report),
+        };
         if let Some(ber) = self.ber.as_mut() {
             ber.advance(Instant::now());
             ber.filter_requests(&mut self.extra_tlvs);
         }
         let seq = self.sess.generate_sequence_number();
         let mut packet = self.build_probe(seq, attach_access_report);
-        self.validate_probe_size(packet.len(), route_mtu)?;
+        if let Err(refusal) = self.validate_probe_size(packet.len(), route_mtu)? {
+            return self.refuse_probe(refusal, attach_access_report);
+        }
         // T1 and the RTT start are read after the TLVs are built, so build
         // time is not measured as network delay. Only the base packet (and
         // its HMAC, which covers the timestamp) is written after this point.
@@ -1213,7 +1227,7 @@ impl SenderRun {
     ) -> Result<(), crate::StartupError> {
         match result {
             Err(e) => {
-                self.consecutive_send_errors += 1;
+                self.note_send_failure(attach_access_report);
                 if !retry_send_error(&e, self.consecutive_send_errors) {
                     return Err(crate::StartupError::io(
                         format!("Cannot send probe {seq}"),
@@ -1248,6 +1262,48 @@ impl SenderRun {
         }
         Ok(())
     }
+
+    /// Counts a probe that was not sent as a failure: the shared budget,
+    /// and a later Access Report retry when this probe carried one.
+    fn note_send_failure(&mut self, attach_access_report: bool) {
+        self.consecutive_send_errors = self.consecutive_send_errors.saturating_add(1);
+        if attach_access_report {
+            if let Some(state) = self.access_report_state.as_mut() {
+                state.defer(Instant::now());
+            }
+        }
+    }
+
+    /// Skips a probe refused before sending because the route MTU is
+    /// unreadable or too small. A route change can cause either, so the run
+    /// continues until the send-failure budget is spent, then returns `error`.
+    fn refuse_probe(
+        &mut self,
+        error: crate::StartupError,
+        attach_access_report: bool,
+    ) -> Result<(), crate::StartupError> {
+        self.note_send_failure(attach_access_report);
+        if self.consecutive_send_errors >= MAX_CONSECUTIVE_SEND_FAILURES {
+            return Err(error);
+        }
+        crate::eprintln_throttled!("Probe not sent: {error}");
+        Ok(())
+    }
+
+    /// Reconnects the socket to the same peer so Linux looks up and caches
+    /// the route again. After a failed route lookup during a send, Linux
+    /// keeps no cached route, and `IP_MTU`/`IPV6_MTU` fail with `ENOTCONN`
+    /// until the next send or connect. Refused probes never send, so without
+    /// this the MTU would stay unreadable after the route returns.
+    #[cfg(target_os = "linux")]
+    async fn refresh_route(&self) {
+        if let Err(e) = self.socket.connect(self.remote_addr).await {
+            log::debug!("Cannot refresh the route to {}: {e}", self.remote_addr);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn refresh_route(&self) {}
 
     /// Serializes one probe with a zeroed base packet for `stamp_probe` to
     /// fill. Direct Measurement, an Access Report and an AIMD-scaled
@@ -1549,11 +1605,21 @@ impl SenderRun {
     /// Each probe starts from the original TLVs, allowing padding and header
     /// requests to return after a temporary decrease in the route budget.
     /// A failed lookup refuses the probe; a stale budget cannot authorize it.
-    fn prepare_probe_tlvs(&mut self) -> Result<Option<usize>, crate::StartupError> {
+    async fn prepare_probe_tlvs(&mut self) -> Result<Option<usize>, crate::StartupError> {
+        if self.probe_template.is_none() {
+            return Ok(None);
+        }
+        let mtu = match egress_mtu(&self.socket) {
+            Some(mtu) => Some(mtu),
+            None => {
+                self.refresh_route().await;
+                egress_mtu(&self.socket)
+            }
+        };
         let Some(template) = &self.probe_template else {
             return Ok(None);
         };
-        match egress_mtu(&self.socket) {
+        match mtu {
             Some(mtu) => {
                 self.extra_tlvs.clone_from(template);
                 if self.conf.ber {
@@ -1692,10 +1758,13 @@ fn validate_datagram_size(size: usize, limit: usize) -> Result<(), crate::Startu
     Ok(())
 }
 
+/// Consecutive probe failures (send errors or refused probes) that end a run.
+const MAX_CONSECUTIVE_SEND_FAILURES: u8 = 8;
+
 fn retry_send_error(error: &std::io::Error, failures: u8) -> bool {
     // Invalid buffers/options and permission failures will not improve on retry.
     // Other failures (including ICMP errors and queue pressure) get eight tries.
-    failures < 8
+    failures < MAX_CONSECUTIVE_SEND_FAILURES
         && !matches!(
             error.kind(),
             std::io::ErrorKind::InvalidInput

@@ -319,18 +319,30 @@ async fn report_send_failures_preserve_initial_and_retry_budget() {
                 attempt: 0,
                 deadline: Instant::now() - Duration::from_secs(1),
             };
-            let retry = run.access_report_state.as_ref().unwrap().clone();
+            let before = Instant::now();
             failed_report_send(&mut run, Err(std::io::ErrorKind::ConnectionRefused.into()))
                 .unwrap();
-            assert_eq!(
-                run.access_report_state.as_ref().unwrap(),
-                &retry,
-                "failed retry must keep its budget and deadline"
+            let after = Instant::now();
+            let state = run.access_report_state.as_mut().unwrap();
+            let AccessReportPhase::Armed { attempt, deadline } = state.phase else {
+                panic!("failed retry left the timer: {:?}", state.phase);
+            };
+            assert_eq!(attempt, 0, "failed retry must keep its budget");
+            assert!(
+                deadline >= before + state.timeout && deadline <= after + state.timeout,
+                "failed retry must wait one timer period before trying again"
             );
+            assert!(!state.due(Instant::now()));
+            assert_eq!(state.retransmissions(), 0);
             assert_eq!(run.packets_sent, 1);
             assert_eq!(run.pending.len(), 1);
             assert!(run.access_report_reply_deadline.is_none());
             assert!(peer.try_recv_from(&mut bytes).is_err());
+            // Expire the postponed deadline; the retry is due again.
+            run.access_report_state.as_mut().unwrap().phase = AccessReportPhase::Armed {
+                attempt: 0,
+                deadline: Instant::now() - Duration::from_secs(1),
+            };
             run.send_probe(true).await.unwrap();
             let (len, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut bytes))
                 .await
