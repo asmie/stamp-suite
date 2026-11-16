@@ -2671,6 +2671,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
         verify_tlv_hmac: false,
         strict_packets: false,
         validate_base_fields: false,
+        validate_tlv_framing: false,
         #[cfg(feature = "metrics")]
         metrics_enabled: false,
         received_dscp: 0,
@@ -3089,6 +3090,7 @@ async fn ack_nth_then_watch_for_more(
                 verify_tlv_hmac: false,
                 strict_packets: false,
                 validate_base_fields: false,
+                validate_tlv_framing: false,
                 #[cfg(feature = "metrics")]
                 metrics_enabled: false,
                 received_dscp: 0,

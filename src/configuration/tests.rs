@@ -3302,3 +3302,55 @@ fn retired_ber_workaround_is_rejected_in_toml_even_without_ber_enabled() {
     let error = load_from_args(&["test", "--config", path.to_str().unwrap()]).unwrap_err();
     assert!(error.to_string().contains("retired"));
 }
+
+#[test]
+fn tlv_framing_validation_is_opt_in_and_reflector_only() {
+    assert!(!Configuration::parse_from(["test"]).validate_tlv_framing);
+    assert!(
+        Configuration::parse_from(["test", "--validate-tlv-framing"])
+            .validate()
+            .is_err()
+    );
+    let mut conf = Configuration::parse_from(["test", "--is-reflector", "--validate-tlv-framing"]);
+    assert!(conf.validate_tlv_framing);
+    assert!(
+        !conf.strict_packets,
+        "framing admission does not change base parsing"
+    );
+    conf.validate().unwrap();
+    conf.is_reflector = false;
+    conf.local_port = 0;
+    assert!(conf
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("--is-reflector"));
+}
+
+#[test]
+fn tlv_framing_validation_merges_from_toml_and_matches_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("validation.toml");
+    std::fs::write(&file, "is_reflector = true\nvalidate_tlv_framing = true\n").unwrap();
+    let conf = load_from_args(&["test", "--config", file.to_str().unwrap()]).unwrap();
+    assert!(conf.validate_tlv_framing);
+    conf.validate().unwrap();
+    std::fs::write(&file, "validate_tlv_framing = true\n").unwrap();
+    assert!(load_from_args(&["test", "--config", file.to_str().unwrap()]).is_err());
+    std::fs::write(&file, "is_reflector = true\nvalidate_tlv_framing = false\n").unwrap();
+    let conf = load_from_args(&[
+        "test",
+        "--config",
+        file.to_str().unwrap(),
+        "--validate-tlv-framing",
+    ])
+    .unwrap();
+    assert!(conf.validate_tlv_framing, "explicit CLI overrides TOML");
+    conf.validate().unwrap();
+    let schema: serde_json::Value = serde_json::from_str(CONFIG_JSON_SCHEMA).unwrap();
+    assert_eq!(
+        schema["properties"]["validate_tlv_framing"]["type"],
+        "boolean"
+    );
+    assert!(toml::from_str::<FileConfiguration>("validate_tlv_framing = 'true'").is_err());
+}

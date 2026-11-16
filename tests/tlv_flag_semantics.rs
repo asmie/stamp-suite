@@ -47,6 +47,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         verify_tlv_hmac: hmac_key.is_some(),
         strict_packets: false,
         validate_base_fields: false,
+        validate_tlv_framing: false,
         #[cfg(feature = "metrics")]
         metrics_enabled: false,
         received_dscp: 0,

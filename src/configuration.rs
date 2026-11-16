@@ -570,6 +570,12 @@ pub struct Configuration {
     #[clap(long, help_heading = "Reflector", hide_short_help = true)]
     pub validate_base_fields: bool,
 
+    /// Reflector: discard incomplete TLV headers/values, including known child
+    /// regions, before session updates. Default off; complete TLVs retain normal
+    /// semantic and integrity-error replies. Applies even when TLVs are ignored.
+    #[clap(long, help_heading = "Reflector", hide_short_help = true)]
+    pub validate_tlv_framing: bool,
+
     /// Keep per-session reflector sequence counters (RFC 8762 §4).
     ///
     /// The reflector maintains independent sequence counters for each full session identity instead of echoing
@@ -1628,6 +1634,9 @@ impl Configuration {
     /// parsed here so a typo fails at startup instead of falling back to a
     /// default on every packet.
     fn validate_reflector_policies(&self) -> Result<(), ConfigurationError> {
+        if self.validate_tlv_framing && !self.is_reflector {
+            return Err(invalid("--validate-tlv-framing requires --is-reflector"));
+        }
         if self.validate_base_fields && !self.is_reflector {
             return Err(invalid("--validate-base-fields requires --is-reflector"));
         }
@@ -2330,6 +2339,7 @@ impl Configuration {
             require_hmac,
             strict_packets,
             validate_base_fields,
+            validate_tlv_framing,
             stateful_reflector,
             session_admission,
             reflector_sessions,
@@ -2460,6 +2470,7 @@ impl Configuration {
         merge!(require_hmac);
         merge!(strict_packets);
         merge!(validate_base_fields);
+        merge!(validate_tlv_framing);
         merge!(stateful_reflector);
         merge!(session_admission);
         merge!(reflector_sessions);
@@ -2616,6 +2627,7 @@ pub struct FileConfiguration {
     pub require_hmac: Option<bool>,
     pub strict_packets: Option<bool>,
     pub validate_base_fields: Option<bool>,
+    pub validate_tlv_framing: Option<bool>,
     pub stateful_reflector: Option<bool>,
     pub session_admission: Option<SessionAdmission>,
     pub reflector_sessions: Option<Vec<String>>,
@@ -2747,6 +2759,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "require_hmac":  { "type": "boolean" },
     "strict_packets": { "type": "boolean" },
     "validate_base_fields": { "type": "boolean" },
+    "validate_tlv_framing": { "type": "boolean" },
     "stateful_reflector": { "type": "boolean" },
     "session_admission": { "type": "string", "enum": ["permissive", "provisioned"] },
     "reflector_sessions": { "type": "array", "items": { "type": "string" } },

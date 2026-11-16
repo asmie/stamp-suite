@@ -48,6 +48,10 @@ impl Peer {
     }
 
     fn start_with_validation(mode: u8, validate: bool) -> Self {
+        Self::start_with_policies(mode, validate, false)
+    }
+
+    fn start_with_policies(mode: u8, validate: bool, framing: bool) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -80,6 +84,9 @@ impl Peer {
             }
             if validate {
                 args.push("--validate-base-fields".into());
+            }
+            if framing {
+                args.push("--validate-tlv-framing".into());
             }
             Configuration::parse_from(args)
         });
@@ -191,6 +198,63 @@ impl Peer {
         assert_eq!(after.packets_received, before.packets_received);
         assert_eq!(after.packets_transmitted, before.packets_transmitted);
         assert_eq!(after.last_reflected_seq, before.last_reflected_seq);
+    }
+}
+
+#[test]
+#[ignore = "requires a private Linux network namespace and raw IPv4 socket"]
+fn zero_checksum_framing_admission_preserves_session_state() {
+    let _namespace = namespace();
+    for mode in 0..3 {
+        let peer = Peer::start_with_policies(mode, true, true);
+        let mut malformed = vec![vec![0x80], vec![0x80, 250, 0, 2, 0]];
+        for (kind, prefix) in [(2, 4), (3, 4), (10, 0), (12, 8), (243, 8)] {
+            for child in [&[0x80][..], &[0x80, 250, 0, 2, 0][..]] {
+                let mut bytes = vec![0x80, kind, 0, (prefix + child.len()) as u8];
+                bytes.resize(4 + prefix, 0);
+                bytes.extend_from_slice(child);
+                malformed.push(bytes);
+            }
+        }
+        for sequence in [0, 1] {
+            let valid = peer.packet(sequence, true);
+            let before = (sequence != 0).then(|| peer.summary());
+            for tail in &malformed {
+                let mut invalid = valid.clone();
+                invalid.extend_from_slice(tail);
+                peer.reject(&peer.socket, &invalid);
+                if let Some(before) = &before {
+                    peer.unchanged(before);
+                } else {
+                    assert_eq!(peer.receiver.shared.session_manager.session_count(), 0);
+                }
+            }
+            // The rejected sequence remains usable; normal BER and signed
+            // replies still work when the framing policy is enabled.
+            let response = peer.exchange(&valid);
+            let base = if mode == 2 { 112 } else { 44 };
+            assert_eq!(&response[base..base + 4], &[0, 243, 0, 8]);
+            if mode == 2 {
+                assert_eq!(&response[96..112], wire_hmac::digest(&KEY, &response[..96]));
+            }
+            if mode != 0 {
+                let covered = [&response[..4], &response[base..base + 12]].concat();
+                assert_eq!(
+                    &response[base + 16..base + 32],
+                    wire_hmac::digest(&KEY, &covered)
+                );
+            }
+        }
+        assert_eq!(peer.summary().packets_received, 2);
+        assert_eq!(
+            peer.receiver
+                .shared
+                .counters
+                .packets_replayed
+                .load(Ordering::Relaxed),
+            0
+        );
+        peer.receiver.stop().unwrap();
     }
 }
 

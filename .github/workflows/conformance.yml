@@ -146,7 +146,7 @@ jobs:
       - name: Require default-profile IPv4 zero-checksum ingress
         run: |
           cargo test --locked --test zero_checksum_test --test sender_zero_checksum_test --no-run --message-format=json > zero-udp-artifacts.json
-          python3 scripts/run_privileged_test.py zero-udp-artifacts.json zero_checksum_test 4 sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
+          python3 scripts/run_privileged_test.py zero-udp-artifacts.json zero_checksum_test 5 sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
           python3 scripts/run_privileged_test.py zero-udp-artifacts.json sender_zero_checksum_test 1 sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
       - name: Require default-profile directional ECN rewrites
         run: |
@@ -166,7 +166,7 @@ jobs:
           STAMP_ECN_NETNS_TESTS=1 STAMP_ECN_CAPTURE_DIR="$PWD/ecn-captures/all" TOKIO_WORKER_THREADS=2
       - name: Require all-features IPv4 zero-checksum ingress
         run: >-
-          python3 scripts/run_privileged_test.py netns-artifacts.json zero_checksum_test 4
+          python3 scripts/run_privileged_test.py netns-artifacts.json zero_checksum_test 5
           sudo -n unshare --net --fork env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)"
           STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
       - name: Require all-features zero-checksum sender

@@ -7,6 +7,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Add opt-in reflector `--validate-tlv-framing` admission to discard incomplete
+  outer and known child TLV frames before session updates, with CLI/TOML support.
+  Complete semantic and integrity-error replies retain their existing behavior.
+
 - Size macOS native IPv6 reflector replies using fresh kernel MTU estimates.
   Type 12, reflected-header and standalone BER replies share the budget;
   ordinary replies restore fragmentation policy independently of CoS settings.

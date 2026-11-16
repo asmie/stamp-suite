@@ -52,6 +52,7 @@ fuzz_target!(|data: &[u8]| {
         verify_tlv_hmac: mode & 4 != 0,
         strict_packets: mode & 8 != 0,
         validate_base_fields: mode & 64 != 0,
+        validate_tlv_framing: mode & 128 != 0,
         received_dscp: 0,
         received_ecn: 0,
         reflector_rx_count: Some(1),

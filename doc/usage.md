@@ -543,6 +543,28 @@ checksum handling. It does not enable a zero-checksum sender or establish the
 complete [zero-checksum BER admission profile](ber-migration.md#zero-checksum-ingress-boundary).
 The default is off, preserving the existing lenient base-field handling.
 
+### TLV framing admission
+
+Reflectors can enable `--validate-tlv-framing` (TOML
+`validate_tlv_framing = true`) to discard incomplete TLV headers and values
+before allocating or updating a session. This includes one-to-three-byte
+trailing fragments and incomplete children in Location, Timestamp Information,
+Return Path, Reflected Control and Residual BER TLVs. Unknown layouts and
+child values remain opaque. The check uses bounded, allocation-free scanning.
+
+This is an explicit admission policy, off by default. It applies to both address
+families and backends, including `--tlv-mode ignore`, regardless of UDP checksum
+or received TLV flags. Rejected packets increment aggregate receive/drop counts
+but leave session activity, counters, replay history and queued replies unchanged.
+Unlike the default malformed-TLV echo behavior, incomplete frames are discarded.
+Fully framed semantic errors and failed TLV HMACs retain normal M/I replies;
+complete Type 12 requests retain their ordering-error response.
+
+The option does not validate base fields, timestamp freshness, TLV meaning or
+integrity. Combine it with `--validate-base-fields`, provisioning and configured
+authentication as needed. It does not establish the complete
+[zero-checksum BER admission profile](ber-migration.md#zero-checksum-ingress-boundary).
+
 ### Session provisioning
 
 [RFC 8972 §3](https://www.rfc-editor.org/rfc/rfc8972.html#section-3) requires
@@ -594,7 +616,8 @@ A packet rejected at the base-packet level does not create a session, extend
 its idle timeout, increment its receive count, consume a stateful sequence
 number, or change replay and Follow-Up state. This covers bad base HMACs,
 unknown or revoked per-SSID keys, and short packets rejected by
-`--strict-packets`, plus failures of `--validate-base-fields` when enabled.
+`--strict-packets`, plus failures of `--validate-base-fields` or
+`--validate-tlv-framing` when enabled.
 Such packets still count in the aggregate receive and drop
 counters. A valid base packet with a failed TLV HMAC gets the RFC 8972 I-flag
 reply.

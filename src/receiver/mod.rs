@@ -12,6 +12,8 @@
 mod assemble;
 mod base_validation;
 mod cleanup;
+#[cfg(test)]
+mod framing_admission_tests;
 mod ingest;
 mod keys;
 mod limits;
@@ -241,6 +243,8 @@ pub struct ProcessingContext<'a> {
     pub strict_packets: bool,
     /// Require complete bases and valid Error Estimate/timestamp encodings.
     pub validate_base_fields: bool,
+    /// Discard incomplete outer/known child TLV frames before session mutation.
+    pub validate_tlv_framing: bool,
     /// Whether metrics recording is enabled.
     #[cfg(feature = "metrics")]
     pub metrics_enabled: bool,
@@ -522,8 +526,17 @@ fn process_stamp_packet_inner(
         }
     }
 
+    if ctx.validate_tlv_framing && has_tlvs {
+        if let Err(reason) = crate::tlv::check_tlv_framing(&data[base_size..]) {
+            crate::warn_throttled!("Dropping incomplete TLV framing from {}: {}", src, reason);
+            return None;
+        }
+    }
+
     // No allocation, activity refresh, receive count, or replay classification
-    // occurs before base parsing and the configured authentication have passed.
+    // occurs before base parsing, configured authentication and optional
+    // base-field/framing admission have passed. Complete frames still receive
+    // the ordinary semantic and integrity-error handling after this boundary.
     let mut ctx = ctx.clone();
     let acquired_session = if tracking.is_some() || ctx.stateful_reflector {
         match admission {

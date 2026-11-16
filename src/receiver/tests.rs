@@ -519,6 +519,7 @@ fn tracked_processing_validates_before_any_session_mutation() {
                 hmac_key: Some(&key),
                 strict_packets: strict,
                 validate_base_fields: false,
+                validate_tlv_framing: false,
                 stateful_reflector: stateful,
                 ..test_ctx(0, 0)
             };
@@ -699,6 +700,7 @@ pub(super) fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext
         verify_tlv_hmac: false,
         strict_packets: false,
         validate_base_fields: false,
+        validate_tlv_framing: false,
         #[cfg(feature = "metrics")]
         metrics_enabled: false,
         received_dscp,

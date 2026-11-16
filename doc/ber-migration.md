@@ -112,8 +112,9 @@ This profile characterizes existing controls and remains **Partial** for
 parser zero-fills short bases. Exact provisioning and configured base HMAC
 checks precede runtime session allocation, activity refresh and replay updates.
 The optional replay policy counts a received packet before rejecting a duplicate;
-Type 12 also has its own ordering response. TLV validation and integrity-error
-responses occur after those session updates. Timestamp and Error Estimate
+Type 12 also has its own ordering response. Semantic TLV validation and integrity-error
+responses occur after those session updates. Optional framing admission is
+now available before those updates, as described below. Timestamp and Error Estimate
 fields are decoded, rather than fully validated against a session-specific
 timestamp policy. These flags therefore do not establish a complete open-mode
 zero-checksum admission gate. A normal UDP socket also does not expose the
@@ -138,18 +139,30 @@ opaque. Short complete fixed prefixes, known value lengths, flags, cardinality
 and HMAC validation remain separate semantic checks. A one-to-three-byte tail
 is a framing error to this helper, although the legacy list parser tolerates
 it. The identity reader uses the same frame iterator while preserving its
-existing stop-at-first-incomplete-frame behavior. The helper does not enable
-a new admission/discard policy or upgrade `ber-3-zero-udp`.
+existing stop-at-first-incomplete-frame behavior. Reflectors can now opt into
+`--validate-tlv-framing` to discard these incomplete frames before session
+allocation, activity, receive counts or replay updates. The default is off;
+this policy also applies when TLVs are ignored and does not depend on the
+incoming UDP checksum. Short complete values, semantic errors and failed
+TLV HMACs retain ordinary M/I responses; complete Type 12 requests retain
+their ordering-error response. This is an explicit admission override for
+incomplete frames, not a change to the default malformed-TLV echo profile.
+
+The raw-wire test `zero_checksum_framing_admission_preserves_session_state`
+checks incomplete outer and known child frames before and after session
+creation in open, keyed-open and authenticated modes, followed by valid BER
+requests using the rejected sequence. Portable tests cover both families,
+state modes, ignored TLVs, and retained semantic/integrity/ordering replies.
+These checks do not upgrade `ber-3-zero-udp`.
 
 The draft requires failed open-mode packet/session checks to be discarded, but
 [RFC 8972, sections 4 and 4.8](https://www.rfc-editor.org/rfc/rfc8972.html#section-4)
 specify malformed/integrity-error replies; the BER draft itself specifies M for
-a short BER value. A future admission policy must state which failures cause
-whole-packet discard before state changes and which retain those error replies.
-This fixture does not resolve that standards interaction or change the ordinary
-TLV response policy. A complete claim needs explicit configuration, sequence
-and timestamp rules, bounded top-level/nested framing checks before mutation,
-and malformed zero-checksum wire tests against that contract.
+a short BER value. The optional framing policy makes that distinction for incomplete frames only.
+It does not resolve whether complete but semantically invalid open-mode fields
+must be rejected before state updates, nor validate freshness or session-specific
+timestamp rules. A complete claim still needs that broader admission contract
+and evidence; the ordinary TLV response policy remains the default.
 
 Valid-looking changes to open-mode fields can escape validation. Sequence gaps,
 reordering or an old but representable timestamp alone do not establish

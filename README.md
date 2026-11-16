@@ -74,6 +74,8 @@ untrusted network, restrict access and turn on
 Use `--validate-base-fields` to reject incomplete bases, zero Error Estimate
 multipliers and invalid PTP nanoseconds before session updates. See
 [reflector admission](doc/usage.md#base-field-validation) for its scope.
+Use `--validate-tlv-framing` to discard incomplete extension frames before
+session updates; see [TLV framing admission](doc/usage.md#tlv-framing-admission).
 
 ## What it supports
 

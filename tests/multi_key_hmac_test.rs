@@ -36,6 +36,7 @@ fn make_ctx<'a>(
         verify_tlv_hmac: false,
         strict_packets: false,
         validate_base_fields: false,
+        validate_tlv_framing: false,
         #[cfg(feature = "metrics")]
         metrics_enabled: false,
         received_dscp: 0,
