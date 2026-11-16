@@ -47,11 +47,11 @@ stamp-suite --remote-addr 192.0.2.20 --send-delay 250us --send-schedule poisson 
   --count 0 --duration 600 --output-format json > results.jsonl
 ```
 
-For continuous runs with timed expiry disabled, opt into bounded pending
-retention with `--timeout 0 --max-pending-probes 4096`. At capacity the oldest
-unanswered probe is retired as lost; reports disclose these retirements
-separately. The default limit is zero (unlimited), and send timing is unchanged.
-See [pending-probe retention](doc/usage.md#pending-probe-retention).
+With `--timeout 0` the sender never gives up on a probe, so on a long run every
+lost probe stays in memory. Add `--max-pending-probes 4096` to cap that: once
+the cap is reached, the oldest unanswered probe is counted as lost. Reports list
+these separately. The default, 0, means no cap. See
+[pending-probe retention](doc/usage.md#pending-probe-retention).
 
 For repeated runs, use a TOML file and override individual values on the CLI.
 The [sender](examples/sender.toml) and [reflector](examples/reflector.toml)
@@ -71,11 +71,14 @@ service settings, session provisioning and policies.
 The reflector starts in open mode and answers anyone who can reach it. On an
 untrusted network, restrict access and turn on
 [authenticated mode](doc/security.md#enabling-authenticated-mode-on-the-packaged-unit).
-Use `--validate-base-fields` to reject incomplete bases, zero Error Estimate
-multipliers and invalid PTP nanoseconds before session updates. See
-[reflector admission](doc/usage.md#base-field-validation) for its scope.
-Use `--validate-tlv-framing` to discard incomplete extension frames before
-session updates; see [TLV framing admission](doc/usage.md#tlv-framing-admission).
+
+Two reflector options make it stricter about what it accepts. Both drop the
+packet before it can create or update a session.
+`--validate-base-fields` drops packets with an incomplete base, a zero Error
+Estimate multiplier or an invalid PTP nanoseconds value; see
+[base-field validation](doc/usage.md#base-field-validation).
+`--validate-tlv-framing` drops packets whose TLVs are cut short; see
+[TLV framing admission](doc/usage.md#tlv-framing-admission).
 
 ## What it supports
 
@@ -93,11 +96,13 @@ session updates; see [TLV framing admission](doc/usage.md#tlv-framing-admission)
 - Text, JSON lines and CSV output. Optional Prometheus metrics, SNMP AgentX
   sub-agent and reflector control API.
 
-The [supported profiles and limits](doc/conformance/README.md#known-limits)
-qualify these features: provisioned admission, backend-dependent header
-reflection, Linux route-MTU sizing and read-only AgentX. The matrices link
-each frozen requirement to implementation and test evidence; feature support
-does not mean every requirement or platform is covered.
+Each of these features has limits, listed under
+[supported profiles and limits](doc/conformance/README.md#known-limits). For
+example, RFC admission rules apply only with provisioned sessions, header
+reflection depends on the receiver backend, route-MTU sizing is Linux-only and
+the AgentX sub-agent is read-only. The conformance matrices link each frozen
+requirement to the code and tests that implement it. A listed feature does not
+mean that every requirement or every platform is covered.
 
 ## Installation
 
@@ -123,8 +128,8 @@ for macOS on Apple silicon and Intel, plus a Windows x64 ZIP, source and
 
 ### From source
 
-Rust 1.87 or newer is required. Debian trixie source builds need a newer
-compiler than the stock Rust 1.85 package. Prebuilt packages need no compiler.
+Building needs Rust 1.87 or newer. Debian trixie ships Rust 1.85, which is too
+old, so install a newer toolchain there. The prebuilt packages need no compiler.
 
 ```sh
 cargo install stamp-suite                       # from crates.io
@@ -158,10 +163,11 @@ for building the recipe from local release inputs.
 | Windows | pnet capture | Npcap |
 
 The backend is chosen at build time. Both backends read the received TTL or Hop
-Limit. On Linux the nix backend reflects IPv6 extension headers; reflecting
-fixed IP headers needs the pnet backend. Header disclosure requires explicit
-sender-IP permission using `--reflect-ipv6-ext-header-from` or
-`--reflect-fixed-header-from`. See [header reflection](doc/usage.md#ipv6-extension-headers).
+Limit. On Linux the nix backend can reflect IPv6 extension headers, but
+reflecting the fixed IP header needs the pnet backend. Either way, the
+reflector returns header data only to senders you list with
+`--reflect-ipv6-ext-header-from` or `--reflect-fixed-header-from`. See
+[header reflection](doc/usage.md#ipv6-extension-headers).
 
 No Cargo feature is on by default.
 

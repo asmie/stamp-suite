@@ -1,17 +1,18 @@
 # Usage
 
-Sender and reflector configuration, output and runtime behavior.
-For a quick start, see the [README](../README.md) or `stamp-suite -h`.
-For all options and defaults
-in your build, use `stamp-suite --help` or the [man page](../dist/man/stamp-suite.1).
+How to configure and run the sender and the reflector, and what they report.
+For a quick start, see the [README](../README.md) or `stamp-suite -h`. For
+every option and its default in your build, run `stamp-suite --help` or read
+the [man page](../dist/man/stamp-suite.1).
 
 ## Configuration file
 
 Use `--config <PATH>` to load settings from a TOML file. Settings you omit
 from both the file and the command line use their built-in defaults.
-Keep deployment settings such as provisioned sessions, destination policies,
-resource limits and metrics/SNMP/control settings in the file. CLI flags are
-useful for per-run changes and diagnostics; advanced flags appear in `--help`.
+Put deployment settings in the file: provisioned sessions, destination
+policies, resource limits, and the metrics, SNMP and control settings. Use CLI
+flags for per-run changes and diagnostics. `--help` also lists the advanced
+flags.
 
 ```bash
 stamp-suite --config /etc/stamp/reflector.toml
@@ -22,8 +23,9 @@ stamp-suite --config /etc/stamp/reflector.toml
 A command-line value overrides the environment, the environment overrides the
 file, and the file overrides the built-in default. The only option read from
 the environment is `STAMP_HMAC_KEY`, which supplies the inline HMAC key when
-`--hmac-key` is absent. Key sources are mutually exclusive: an environment key
-combined with a key file or key directory from the TOML file fails startup.
+`--hmac-key` is absent. You can configure only one key source, so a key in the
+environment together with a key file or key directory in the TOML file fails
+startup.
 See [key sourcing and rotation](security.md#key-sourcing-and-rotation).
 
 ### Sender and reflector examples
@@ -101,10 +103,10 @@ editors and validators.
 
 ### Validation
 
-Unknown keys, invalid TOML and wrong types fail startup with line/column
-errors. Merged settings receive the same range and combination checks as CLI
-values. On Unix, group- or other-writable config files warn; see
-[file permissions](security.md#file-permissions).
+Unknown keys, invalid TOML and wrong types fail startup with an error that
+gives the line and column. Values from the file go through the same range and
+combination checks as CLI values. On Unix, a config file that group or others
+can write triggers a warning; see [file permissions](security.md#file-permissions).
 
 ## Sender
 
@@ -127,7 +129,7 @@ control a run:
 | `-c`, `--count` | probes | `1000` | Scheduled probes to send; timer-driven Access Report retries are additional. `0` sends until `--duration` ends or the sender is interrupted. |
 | `--duration` | seconds | none | Stop scheduled probes after this time, even if `--count` probes have not all been sent. Must be at least 1. |
 | `-L`, `--timeout` | seconds (0 to 255) | `5` | How long to wait for a reply before the probe counts as lost. |
-| `--max-pending-probes` | probes per target | `0` (unlimited) | Bound unanswered records by retiring the oldest as lost when a new successful send needs a slot; report `pending_evictions`. |
+| `--max-pending-probes` | probes per target | `0` (unlimited) | Caps the unanswered probes kept per target. When a new successful send needs room, the oldest is counted as lost and added to `pending_evictions`. |
 
 With the defaults a run sends 1000 probes at one per second, so it takes about
 17 minutes. After the last probe the sender waits up to `--timeout` seconds for
@@ -168,42 +170,48 @@ collected so far and exits 0; probes still awaiting a reply count as lost.
 
 ### Pending-probe retention
 
-`--max-pending-probes N` enables an opt-in per-target retention limit. It does
-not pause sends, skip scheduled probes, or alter the count, interval or Access
-Report retry budget. When a successful send needs a slot, the oldest unanswered
-record is retired and counted as lost. A sequence number reused while its old
-record is still pending also retires the old generation, even with limit zero;
-it cannot silently overwrite that probe's loss accounting.
+`--max-pending-probes N` caps how many unanswered probes the sender keeps for
+each target. When a probe is sent successfully and the table is full, the
+oldest unanswered probe is removed and counted as lost. The cap does not slow
+sending: no scheduled probe is skipped, and the count, interval and Access
+Report retry budget stay as configured.
 
-The default limit zero preserves unlimited retention. In particular,
-`--timeout 0` still disables timed expiry and loss-driven session failure,
-so continuous loss can grow the default pending table indefinitely. For example:
+A sequence number that is reused while its old probe is still pending also
+removes the old probe, even with no cap. The old probe is counted as lost
+instead of being overwritten.
+
+The default, 0, means no cap. `--timeout 0` turns off timed expiry and
+loss-driven session failure, so without a cap the pending table keeps growing
+for as long as replies are lost. For example:
 
 ```sh
 stamp-suite --remote-addr 192.0.2.10 --count 0 --duration 600 \
   --timeout 0 --max-pending-probes 4096 --report-interval 60 --output-format json
 ```
 
-JSON `measurements` and the existing CSV `measurements` object expose
-`pending_limit`, `pending_probes` (records retained), `pending_high_watermark`
-and cumulative `pending_evictions`. Text prints these when retention is enabled
-or a sequence-reuse retirement occurred. A first-retirement warning identifies
-the target. With multiple targets each has its own budget: N permits up to
-N × target-count pending records.
+The `measurements` object in JSON and in the CSV `measurements` cell contains
+`pending_limit`, `pending_probes` (probes still pending),
+`pending_high_watermark` and the running total `pending_evictions`. Text
+reports show these when a cap is set or a probe was removed because its
+sequence number was reused. The first removal logs a warning that names the
+target. With several targets each one has its own cap, so N allows up to
+N × number-of-targets pending probes.
 
-Retirement is a local accounting boundary, not proof of network loss. It counts
-once toward packet loss and observer counters. A late reply within retained
-measurement history can increment `late_replies`, but does not restore an RTT/
-OWD/BER probe sample or undo that loss, matching timed-expiry behavior. History
-evictions (`probes_evicted`) are separate. At shutdown, only the records still
-pending add final loss; earlier retirements are not counted twice. Final
-`pending_probes` discloses those retained unresolved records even though the run
-has finished. See [measurement semantics](measurements.md).
+A removed probe means the sender stopped waiting for it, not that the network
+lost it. It counts once toward packet loss and the observer counters. If its
+reply arrives later while the probe is still in measurement history,
+`late_replies` goes up, but the reply adds no RTT, OWD or BER sample and does
+not undo the loss. Timed expiry works the same way. Evictions from measurement
+history (`probes_evicted`) are counted separately. At shutdown only the probes
+still pending are added to the loss, so earlier removals are not counted twice.
+The final `pending_probes` value shows those unresolved probes even though the
+run has finished. See [measurement semantics](measurements.md).
 
-The limit bounds the pending map and its ordered index, not total process RSS.
-With a nonzero timeout the failure monitor still retains its time-based window
-to preserve notification semantics; collector, history, report and platform
-buffers have separate bounds. See [memory limits](statistics.md#report-output-and-pending-probes).
+The cap limits the pending map and its ordered index, not the memory of the
+whole process. With a nonzero timeout the failure monitor keeps its own
+time-based window, which session-state notifications depend on. The collector,
+history, reports and platform buffers have their own limits. See
+[memory limits](statistics.md#report-output-and-pending-probes).
 
 ### Send schedule
 
@@ -212,29 +220,33 @@ buffers have separate bounds. See [memory limits](statistics.md#report-output-an
 a fixed gap (RFC 3432).
 
 Send times follow a fixed timeline, so the time spent building and sending a
-probe does not stretch the gap. Gaps under 1 ms are busy-waited because Tokio
-timers have 1 ms resolution, so rates above 1000 probes per second keep one CPU
-core busy. A sender that falls more than 2 ms behind its timeline restarts the
-timeline instead of sending a burst to catch up.
+probe does not stretch the gap. Tokio timers have 1 ms resolution, so the
+sender busy-waits gaps shorter than 1 ms, and rates above 1000 probes per
+second keep one CPU core busy. A gap of exactly 1 ms uses the timer. If the
+sender falls more than 2 ms behind its timeline, it restarts the timeline
+instead of sending a burst to catch up. At exactly 2 ms behind it stays on the
+original timeline.
 
-On Windows, active senders request 1 ms timer resolution and explicitly ask
-Windows to honor it even when the process is hidden. The prior process timer
-policy is restored after the last sender exits, including cancellation.
+On Windows, active senders request 1 ms timer resolution and ask Windows to
+honor it even when the process is hidden. When the last sender exits, also by
+cancellation, the previous process timer policy is restored.
 
-The first probe is due immediately. Count and duration limits govern when the
-next probe can start; a send already in progress can finish after the duration.
-The wait after each probe is capped by any configured duration, including the wait after
-the final counted probe. Count completion does not remove that last scheduled
-wait. Exactly 2 ms of lateness remains on the original timeline; larger lateness
-resets it. A gap of exactly 1 ms uses the timer rather than busy-waiting.
-Access Report retries can occur between scheduled probes. They do not advance
-the measurement timeline, redraw a Poisson gap or consume the `--count` quota.
-If a scheduled probe is already due, it can carry the report itself. Final
-reply draining and an unfinished Access Report exchange continue after the
-count or duration limit; packet statistics include every successful send.
-After a non-ICMP receive error during pacing, the sender suspends socket reads
-until its next wait. Cancellation, reporting and Access Report timers remain
-active, and the scheduled probe deadline is preserved.
+The first probe goes out immediately. `--count` and `--duration` decide whether
+another probe may start. A send that has already started can finish after the
+duration ends. The duration also cuts short the wait after each probe,
+including the wait after the last counted probe. Reaching the count does not
+skip that last wait.
+
+Access Report retries can go out between scheduled probes. They do not move
+the measurement timeline, draw a new Poisson gap or use up the `--count`
+quota. If a scheduled probe is already due, it can carry the report itself.
+The final reply drain and an unfinished Access Report exchange continue after
+the count or duration limit, and packet statistics include every successful
+send.
+
+After a receive error other than ICMP during pacing, the sender stops reading
+the socket until its next wait. Cancellation, reporting and Access Report
+timers keep running, and the next scheduled probe keeps its deadline.
 
 ```bash
 # 4000 probes per second for ten minutes, with a report every 10 s.
@@ -294,11 +306,11 @@ Measurement counter windows, Follow-Up reverse delays and the session state.
 JSON also exposes TLV HMAC outcomes and per-type U/M/I/C flag counts under
 `measurements.tlv_validation`; see [extension validation diagnostics](measurements.md#extension-validation-diagnostics).
 The `RTT`, `OWD` and probe-loss fields always describe the first reply to each
-probe. Requested reply copies that were never observed include copies the
-reflector declined by policy, so they are not a network-loss count.
+probe. The count of requested reply copies that never arrived includes copies
+the reflector declined by policy, so do not read it as network loss.
 
-RTT and OWD quantiles are exact up to 4096 samples per series and use a bounded
-histogram after that. See [statistics precision and retention](statistics.md).
+RTT and OWD quantiles are exact up to 4096 samples per series and come from a
+fixed-size histogram after that. See [statistics precision and retention](statistics.md).
 
 For the reflector shutdown summary, see
 [Capacity, drain and shutdown](#capacity-drain-and-shutdown). To print reports
@@ -336,59 +348,68 @@ not supported. See the [RFC 9534 scope and gaps](conformance/rfc9534.md).
 
 ### TLV-driven sender features
 
-**Probe identity.** The sender first matches the complete echoed sequence and
-eight-byte sender timestamp against a pending or retained probe. Unknown,
-missing or mismatched echoes cannot complete a probe, affect SSID stop policy,
-acknowledge an Access Report or apply congestion feedback. Reports distinguish
-`measurements.unknown_replies` and `measurements.mismatched_replies`.
-Kernel TX timing corrections never change the original timestamp used for this
-match. Replies may omit trailing fields, but must contain the complete echo.
+**Probe identity.** The sender first matches the echoed sequence number and
+the eight-byte sender timestamp of a reply against its pending and retained
+probes. A reply whose echo is unknown, missing or mismatched cannot complete a
+probe, trigger the SSID stop policy, acknowledge an Access Report or apply
+congestion feedback. Reports count these replies separately in
+`measurements.unknown_replies` and `measurements.mismatched_replies`. Kernel TX
+timestamp corrections never change the original timestamp used for matching.
+A reply may omit trailing fields, but it must contain the complete echo.
 See [reply accounting and limits](measurements.md#probes-reply-copies-and-duplicates).
 
 **SSID checks.** With a nonzero `--ssid`, the sender rejects a reply that
-carries a different nonzero SSID before it records RTT or OWD, completes a
-pending probe, learns a reflector micro-session ID, acknowledges an Access
-Report or applies congestion feedback. A reply with a zero SSID is handled by
-`--on-zero-ssid continue|stop` (default `continue`), as
-[RFC 8972 §3](https://www.rfc-editor.org/rfc/rfc8972.html#section-3) permits.
-After a zero-SSID reply under `continue`, later nonzero replies are still
-checked. Without `--ssid`, or with `--ssid 0`, the sender does not check SSIDs.
-The `stop` policy interrupts the pending probe wait immediately, including
-ECN-extended waits. It skips the reply drain and Access Report retries;
-unanswered probes remain lost in the final report. Unknown sequences or
-mismatched echoed timestamps cannot trigger this stop.
+carries a different nonzero SSID. The reply is rejected before it can record
+RTT or OWD, complete a pending probe, set the learned reflector micro-session
+ID, acknowledge an Access Report or apply congestion feedback.
+[RFC 8972 §3](https://www.rfc-editor.org/rfc/rfc8972.html#section-3) permits a
+reply with a zero SSID, and `--on-zero-ssid continue|stop` (default
+`continue`) decides what the sender does with one. With `continue`, later
+nonzero replies are still checked. Without `--ssid`, or with `--ssid 0`, the
+sender does not check SSIDs.
+
+With `stop`, the sender stops waiting for pending probes at once, including
+waits that ECN backoff has extended. It skips the reply drain and the Access
+Report retries, and the unanswered probes are reported as lost. A reply with
+an unknown sequence number or a mismatched echoed timestamp cannot trigger this
+stop.
 
 **TLV integrity.** Access Report acknowledgement and ECN congestion control
-work the same regardless of `-R`, logging and output format. A TLV HMAC that is
-present but unusable (no key, invalid flags or failed verification) blocks all
-reflected TLV control values. An Access Report with an invalid length cannot
-stop its retry timer. A U flag skips that TLV, an M flag stops processing the
-rest, and an I flag blocks all values. When the HMAC TLV is absent, the sender
-accepts the optional TLVs from peers that do not send one. Required
+work the same with or without `-R`, and with any logging or output format. If
+a TLV HMAC is present but unusable (no key, invalid flags or failed
+verification), the sender ignores every reflected TLV control value. An Access
+Report with an invalid length cannot stop its retry timer. A U flag makes the
+sender skip that TLV, an M flag stops processing of the remaining TLVs, and an
+I flag blocks all values. When the HMAC TLV is absent, the sender still accepts
+the optional TLVs, so peers that do not send one keep working. Required
 Micro-session IDs, BER, Direct Measurement and Follow-Up have stricter rules.
 
-The sender detects returned TLVs from the received packet length even when its
-probe had no extensions. Known outer-TLV lengths are validated independently
-of which values were requested. A malformed unused value also stops later TLVs;
-the diagnostics include locally detected M errors. Signature verification
-continues to cover the original bytes received from the peer.
+The sender finds returned TLVs from the received packet length, even when its
+probe carried no extensions. It checks the length of every known outer TLV,
+whether or not it requested that value. A malformed value it did not ask for
+still stops processing of the TLVs after it, and the diagnostics count the M
+errors the sender detected itself. Signature verification still covers the
+original bytes received from the peer.
 
-Location validation includes its port prefix and all nested headers, declared
-sizes and known-type lengths. A malformed child makes the enclosing Location
-unusable and stops later outer values. The sender also honors a child's M even
-when the peer omitted outer M; nested I is ignored. The reflector validates the
-whole Location before answering any field, and preserves its original size.
-Integrity-failure and structurally malformed signed echoes retain original
-nested value bytes.
+For a Location TLV the sender checks the port prefix and every nested header,
+including declared sizes and the lengths of known types. A malformed child
+makes the whole Location unusable and stops processing of later outer values.
+The sender honors an M flag on a child even when the peer did not set M on the
+outer TLV. An I flag on a nested value is ignored. The reflector validates the
+whole Location before it answers any field, and it keeps the TLV's original
+size. Signed echoes that failed integrity checks or are structurally malformed
+keep their original nested value bytes.
 
-Timestamp Information also requires complete optional child headers and values;
-unknown complete children remain opaque. Invalid framing marks the outer TLV M
-and stops later values. Processed valid Access Reports echo ID/Return Code with
-reserved fields zeroed, and valid Follow-Up replies zero their reserved bytes
-in both stateful and stateless mode. Invalid Access IDs and skipped/integrity
-error values retain their existing copy policy. A malformed Follow-Up zeroes
-the available sequence/timestamp fields when processing is allowed; a copied
-signed error reply preserves its original values through transmission.
+Timestamp Information also needs complete optional child headers and values.
+Unknown children that are complete are passed through without being
+interpreted. Bad framing sets M on the outer TLV and stops processing of later
+values. A valid Access Report that was processed is echoed with its ID and
+Return Code and with the reserved fields zeroed. Valid Follow-Up replies have
+their reserved bytes zeroed in both stateful and stateless mode. Invalid
+Access IDs, and values that were skipped or failed integrity checks, follow
+the usual copy rules. When processing is allowed, a malformed Follow-Up has
+whatever sequence and timestamp fields it contains zeroed. A signed error reply
+that was copied keeps its original values all the way to transmission.
 
 With `-R`, the per-packet line shows TLV results in a fixed order: HMAC, Access
 Report, CE, Micro-session ID, then U/M/I counts. Each result appears once even
@@ -397,109 +418,129 @@ not be verified, `HMAC:fail` a failed verification, and `no-hmac` an absent
 HMAC.
 
 **Access Report retries.** `--access-report-timeout` (default 3 seconds) and
-`--access-report-retries` (default 4) bound the delivery procedure. Retries
-continue after the main send loop until the reflector acknowledges the report
-or the retries run out. A silent peer can extend a short run through the retry
-budget and the final retry's reply window. The Access Report timer runs during both probe
-pacing and the final reply wait, so long scheduled gaps or a longer `--timeout`
-do not postpone retries. Retry timing follows `--access-report-timeout`, even
-when congestion backoff has extended a measurement gap; reflected-burst pacing
-in each retry still uses the current congestion factor. Retries do not restart
-the initial reply-drain deadline; an unfinished exchange continues afterward.
-After acknowledgement or retry exhaustion, the sender collects remaining
-replies within `--timeout` of the last successful retry. This retains later
-burst copies without restarting the window from acknowledgement or exhaustion.
-Collection ends early when every requested reply has arrived; shutdown and
-`--on-zero-ssid stop` still end it immediately.
-The acknowledgement timer starts only after a successful UDP send. Failed or
-short writes do not consume report retries or extend reply collection; they
-still follow the sender's bounded I/O retry and error policy. An initial report
-that was never sent does not start a post-loop delivery exchange.
-Acknowledgement requires exactly one usable Access Report with the original
-Access ID and Return Code. Wrong values or duplicate reports leave the retry
-timer armed; Reserved bits and bytes are ignored. These replies can still
-contribute valid base-packet RTT/loss measurements.
+`--access-report-retries` (default 4) control how the sender delivers an
+Access Report. Retries continue after the main send loop ends, until the
+reflector acknowledges the report or the retries run out. A silent peer can
+therefore make a short run last longer, by the retry budget plus the reply
+window after the final retry. The Access Report timer runs both while probes
+are being paced and during the final reply wait, so long scheduled gaps or a
+longer `--timeout` do not delay retries. Retries follow
+`--access-report-timeout` even when congestion backoff has stretched the
+measurement gap. The pacing of reflected bursts within each retry still uses
+the current congestion factor.
 
-The CoS implementation uses the EC1/RPE extension with ECN capability
-reporting and admitted DSCP fallback from draft-ietf-bpm-stamp-cos-ecn-00.
-See the [successor review](conformance/draft-stamp-cos-ecn.md#bpm-00-successor-changes)
-for differences from RFC 8972 and its IPPM -02 predecessor.
-It zeroes the remaining twelve Reserved bits. EC1/RPE occupy four bits of the
-original RFC 8972 sixteen-bit Reserved field, so the frozen RFC transmit-zero
-rule is scored Partial in the [conformance matrix](conformance/rfc8972.md#cos-format-profiles).
-The draft describes legacy peers ignoring these added bits. Peer support and
-the reported RPE still need to be checked before interpreting reverse ECN.
+Retries do not restart the initial reply-drain deadline; an unfinished
+exchange simply continues after it. Once the report is acknowledged or the
+retries run out, the sender keeps collecting replies until `--timeout` after
+the last successful retry. This catches later burst copies without restarting
+the window at the moment of acknowledgement or exhaustion. Collection ends
+early when every requested reply has arrived. Shutdown and
+`--on-zero-ssid stop` still end it at once.
+
+The acknowledgement timer starts only after a successful UDP send. A failed or
+short write does not use up a report retry or extend reply collection. It goes
+through the sender's normal I/O retry and error handling, which has its own
+limit. If the first report was never sent, no delivery exchange runs after the
+loop.
+
+An acknowledgement must contain exactly one usable Access Report with the
+original Access ID and Return Code. Wrong values or duplicate reports leave the
+retry timer running. Reserved bits and bytes are ignored. Such replies can
+still give valid RTT and loss measurements from the base packet.
+
+The CoS support follows draft-ietf-bpm-stamp-cos-ecn-00: the EC1/RPE extension
+with ECN capability reporting, and DSCP fallback to an admitted value. The
+[successor review](conformance/draft-stamp-cos-ecn.md#bpm-00-successor-changes)
+lists how this differs from RFC 8972 and from the earlier IPPM -02 draft. The
+remaining twelve Reserved bits are sent as zero. EC1 and RPE take four bits of
+the sixteen-bit Reserved field defined in RFC 8972, so the frozen RFC rule that
+these bits are sent as zero is scored Partial in the
+[conformance matrix](conformance/rfc8972.md#cos-format-profiles). The draft
+expects legacy peers to ignore the added bits. Check that the peer supports
+them, and look at the RPE it reports, before you interpret reverse ECN.
 
 **ECN response.** `--cos` with `--ecn 1` or `--ecn 2` turns on AIMD pacing. A
 CE-marked reply multiplies the send interval by `--ecn-backoff-factor`, up to
-`--ecn-max-delay` milliseconds. If multiplication would round back to the same
-interval, backoff adds 1 ns (the duration representation's resolution) without
-exceeding that cap. This prevents factors very close to 1 from stalling; it is
-not a claim of nanosecond wire-timing accuracy.
-Each reply with one usable non-CE CoS report
-and no observed reverse CE shortens it by `--ecn-recovery-step` milliseconds,
-down to `--send-delay`. Missing, ambiguous or unusable CoS feedback holds the
-current interval. With a key configured, recovery requires a verified TLV
-HMAC; an unsigned or unverifiable report cannot increase the send rate.
-These replies can still contribute valid base-packet RTT/loss observations.
-Backoff also extends the pending probe deadline, scaling the already drawn
-gap for a Poisson schedule. Each backoff scales from the original draw and
-its original interval, so repeated small increases do not lose their accumulated
-effect through rounding. Clean feedback cannot shorten that pending wait;
-recovery applies when drawing the following gap. The `--duration` limit still
-caps the wait.
-Forward feedback comes from the CoS TLV's EC2 field. Reverse feedback reads
-the reply's IP ECN bits, which works on Linux and macOS only; other platforms log a warning and
-use forward feedback alone. The same factor scales the Type-12 interval of
-later requests, including Access Report retries; reply counts do not change.
-A zero burst interval uses a 1 ms floor while backed off, then scales by the
-same factor. Control-only requests retain their required zero interval.
-With `--send-delay 0`, that burst floor remains active at a 1 ms ECN cap
-and during partial recovery below 1 ms. It is removed only when the probe
-interval returns to zero.
+`--ecn-max-delay` milliseconds. If the multiplication would round back to the
+same interval, the sender adds 1 ns instead (the resolution of the duration
+type), still without going past the cap. This keeps factors very close to 1
+from stalling. It does not mean the wire timing is accurate to a nanosecond.
+
+Each reply with exactly one usable non-CE CoS report and no reverse CE
+shortens the interval by `--ecn-recovery-step` milliseconds, down to
+`--send-delay`. Missing, ambiguous or unusable CoS feedback leaves the
+interval as it is. With a key configured, recovery needs a verified TLV HMAC,
+so an unsigned or unverifiable report cannot speed up sending. Such replies can
+still give valid RTT and loss observations from the base packet.
+
+Backoff also pushes back the deadline of the next pending probe. With a
+Poisson schedule it scales the gap that was already drawn. Each backoff is
+computed from the original draw and the original interval, so a series of small
+increases is not lost to rounding. Clean feedback does not shorten a wait that
+is already running; recovery takes effect when the next gap is drawn.
+`--duration` still caps the wait.
+
+Forward feedback comes from the EC2 field of the CoS TLV. Reverse feedback
+comes from the IP ECN bits of the reply, which the sender can read only on
+Linux and macOS. Other platforms log a warning and use forward feedback alone.
+
+The same factor scales the Type-12 interval of later requests, including
+Access Report retries. The number of reply copies requested stays the same.
+While the sender is backed off, a zero burst interval is raised to 1 ms and
+then scaled by the same factor. Control-only requests keep their required zero
+interval. With `--send-delay 0`, the 1 ms burst floor stays in force at a 1 ms
+ECN cap and during partial recovery below 1 ms. It goes away only when the
+probe interval is back to zero.
+
 Reports show CE observations, backoffs, and the current and peak intervals.
 
 ### ECN deployment and interpretation
 
-`--cos` includes [ECN observation counters](measurements.md#ecn-observations)
-in text, JSON and CSV reports, with separate CoS and reply IP metadata and
-explicit unknown reverse comparisons. [Directional diagnostics](measurements.md#directional-ecn-diagnostics)
-separate bleaching, ECT-to-CE marking and other remarking, and explain unknown
-comparisons without attributing a faulty hop.
+With `--cos`, text, JSON and CSV reports include
+[ECN observation counters](measurements.md#ecn-observations). They keep the
+CoS TLV values apart from the reply's IP header values, and they say when a
+reverse comparison is unknown.
+[Directional diagnostics](measurements.md#directional-ecn-diagnostics) tell
+bleaching, ECT-to-CE marking and other remarking apart, and explain unknown
+comparisons without blaming a particular hop.
 
-Before measuring ECN, verify that both peers implement the extended CoS TLV
-and capture a short exchange for each address family and codepoint. Confirm
-DSCP, ECN and RPE on the wire: RPE=11 reports EC1 applied, RPE=10 reports
-the Not-ECT fallback, RPE=01 reports that neither EC1 nor Not-ECT could be
-applied, and RPE=00 can indicate a legacy peer. C remains independent of this
-capability report. Windows reflectors report RPE=01 because the current backend
-cannot verify marking; macOS socket-option readback still needs independent
-wire verification.
-Reverse ECN reception requires Linux or macOS. Restrict interpretation to
-the capabilities actually observed; the tool has no automatic legacy-peer
-or bleaching diagnosis.
+Before measuring ECN, check that both peers implement the extended CoS TLV,
+and capture a short exchange for each address family and codepoint. On the
+wire, confirm DSCP, ECN and RPE:
 
-Record `--allowed-dscp`, destination overrides and `--allowed-ecn` policies,
-and coordinate them across network domains. Collect EC2, RPE and the reply's
-IP ECN together using packet capture alongside CE counters. Compare sent ECN
-with EC2 to investigate forward bleaching, and EC1/RPE/C with reply ECN for
-reverse behavior. Check policy rejection and platform inability before
-attributing differences to network remarking. Verify that markings survive
-before comparing delay/loss between codepoints. Traceroute-like diagnostics
-and on-path telemetry require separate tools and participating nodes; a CoS
-TLV alone does not locate the device responsible for a change.
+- RPE=11: EC1 was applied.
+- RPE=10: the Not-ECT fallback was used.
+- RPE=01: neither EC1 nor Not-ECT could be applied.
+- RPE=00: possibly a legacy peer.
 
-Congestion response stays enabled for CoS ECT0/ECT1, including future Type 12
-intervals. The current interval controller provides backoff but has not been
-shown consistent with all RFC 3168/9330 requirements, particularly L4S scalable
+The C flag is separate from this capability report. Windows reflectors report
+RPE=01 because the backend cannot verify the marking. On macOS the marking read
+back from the socket option still has to be checked on the wire. Receiving
+reverse ECN needs Linux or macOS. Draw conclusions only about the capabilities
+you actually observed; the tool does not detect legacy peers or bleaching on
+its own.
+
+Write down your `--allowed-dscp`, destination override and `--allowed-ecn`
+policies, and agree on them with the other network domains involved. Capture
+EC2, RPE and the reply's IP ECN together, next to the CE counters. To look for
+forward bleaching, compare the ECN you sent with EC2. For the reverse path,
+compare EC1, RPE and C with the reply's ECN. Rule out policy rejection and
+platform limits before you blame network remarking. Make sure the markings
+survive before you compare delay or loss between codepoints. Traceroute-style
+diagnostics and on-path telemetry need separate tools and cooperating nodes.
+A CoS TLV alone cannot find the device that changed a marking.
+
+Congestion response stays on for CoS ECT0 and ECT1, and also scales later Type
+12 intervals. The interval controller backs off, but it has not been shown to
+meet every requirement of RFC 3168 and RFC 9330, in particular L4S scalable
 control for ECT(1); see [response limits](conformance/draft-stamp-cos-ecn.md#response-limits).
 Revision 02 allows a fixed traffic pattern despite CE only in a controlled
 environment agreed with the operators of every network under test. This tool
-exposes no override to disable its response. Bound runs with `--duration` or
-`--count`, choose a conservative `--send-delay`, and limit reflected traffic
+has no option to turn its response off. Limit runs with `--duration` or
+`--count`, choose a conservative `--send-delay`, and cap reflected traffic
 with `--reflected-control-max-count`, `--reflected-control-max-rate` and
-`--reflected-control-max-volume`. Isolate tests from traffic outside their
-agreed scope, and include Access Report retries in the operational time budget.
+`--reflected-control-max-volume`. Keep tests away from traffic outside the
+agreed scope, and include Access Report retries in your time budget.
 
 See [ECN security](security.md#ecn-measurement-integrity) for TLV protection
 and destination-port choices.
@@ -514,7 +555,7 @@ stamp-suite -i --local-addr 192.0.2.10
 ```
 
 By default the reflector is stateless: it echoes the sender's sequence number.
-`--stateful-reflector` keeps an independent sequence counter per session, so
+`--stateful-reflector` keeps a separate sequence counter for each session, so
 the sender can detect loss on the reverse path. `--tlv-mode echo` (default)
 processes the TLVs it supports and flags the rest; `--tlv-mode ignore` copies
 everything after the base packet unprocessed. By default a short packet is
@@ -523,50 +564,57 @@ instead (RFC 8762 §4.6).
 
 ### Base-field validation
 
-Reflectors can opt into `--validate-base-fields` (TOML
-`validate_base_fields = true`). This requires a complete 44-byte open or
-112-byte authenticated base, even without `--strict-packets`, and drops a
-packet whose Error Estimate multiplier is zero or whose PTP nanoseconds are
-outside 0–999,999,999. The incoming Error Estimate Z bit selects the timestamp
-format; a PTP sender can use an NTP reflector and conversely. These checks run
-after configured base authentication and before session allocation, activity
-refresh, receive counts or replay classification. Aggregate receive/drop
-counters still include rejected datagrams.
+`--validate-base-fields` (TOML `validate_base_fields = true`) makes a
+reflector check the base packet more strictly. It drops a packet unless the
+base is complete (44 bytes in open mode, 112 in authenticated mode), even
+without `--strict-packets`. It also drops a packet whose Error Estimate
+multiplier is zero or whose PTP nanoseconds value is outside 0–999,999,999.
+The Z bit of the incoming Error Estimate decides which timestamp format is
+checked, so a PTP sender can use an NTP reflector and the other way round. The
+checks run after base authentication, if it is configured, and before the
+reflector allocates a session, refreshes its activity, counts the packet as
+received or classifies it for replay. Rejected datagrams still count in the
+aggregate receive and drop counters.
 
 ```bash
 stamp-suite --is-reflector --local-addr 192.0.2.10 --validate-base-fields
 ```
 
-All NTP encodings, including zero and era wrap, remain representable. The
-policy imposes no timestamp freshness or synchronization threshold. Received
-MBZ fields are ignored. Sequence gaps, reordering and serial wrap retain the
-existing replay policy; `--drop-replayed` is a separate choice. A valid base
-still gets the normal TLV M/I responses when extensions fail validation.
-The option applies to either address family and backend, independently of UDP
-checksum handling. It does not enable a zero-checksum sender or establish the
+Every NTP value passes, including zero and values after the era wrap. The
+option does not check how fresh a timestamp is or whether the clocks are
+synchronized. Received MBZ fields are ignored. Sequence gaps, reordering and
+serial wrap go through the normal replay policy; `--drop-replayed` is a
+separate option. A packet with a valid base still gets the normal TLV M and I
+responses when its extensions fail validation. The option works with both
+address families and both backends, whatever the UDP checksum handling. It
+does not turn on zero-checksum sending, and on its own it does not provide the
 complete [zero-checksum BER admission profile](ber-migration.md#zero-checksum-ingress-boundary).
-The default is off, preserving the existing lenient base-field handling.
+The option is off by default, and the reflector then handles base fields
+leniently.
 
 ### TLV framing admission
 
-Reflectors can enable `--validate-tlv-framing` (TOML
-`validate_tlv_framing = true`) to discard incomplete TLV headers and values
-before allocating or updating a session. This includes one-to-three-byte
-trailing fragments and incomplete children in Location, Timestamp Information,
-Return Path, Reflected Control and Residual BER TLVs. Unknown layouts and
-child values remain opaque. The check uses bounded, allocation-free scanning.
+`--validate-tlv-framing` (TOML `validate_tlv_framing = true`) makes a
+reflector drop packets with incomplete TLV headers or values before it
+allocates or updates a session. That covers trailing fragments of one to three
+bytes, and incomplete children inside Location, Timestamp Information, Return
+Path, Reflected Control and Residual BER TLVs. Unknown layouts and child values
+are not interpreted. The scan does a limited amount of work and allocates no
+memory.
 
-This is an explicit admission policy, off by default. It applies to both address
-families and backends, including `--tlv-mode ignore`, regardless of UDP checksum
-or received TLV flags. Rejected packets increment aggregate receive/drop counts
-but leave session activity, counters, replay history and queued replies unchanged.
-Unlike the default malformed-TLV echo behavior, incomplete frames are discarded.
-Fully framed semantic errors and failed TLV HMACs retain normal M/I replies;
-complete Type 12 requests retain their ordering-error response.
+The option is off by default. It applies to both address families and both
+backends, also with `--tlv-mode ignore`, and whatever the UDP checksum or the
+received TLV flags. A rejected packet counts in the aggregate receive and drop
+counters, but it does not touch session activity, session counters, replay
+history or queued replies. Without the option, a malformed TLV is echoed back
+with flags set. With it, an incomplete frame is dropped instead. TLVs that are
+fully framed but semantically wrong, and failed TLV HMACs, still get the
+normal M or I replies, and a complete Type 12 request still gets its
+ordering-error response.
 
-The option does not validate base fields, timestamp freshness, TLV meaning or
-integrity. Combine it with `--validate-base-fields`, provisioning and configured
-authentication as needed. It does not establish the complete
+The option does not check base fields, timestamp freshness, what a TLV means
+or whether it is intact. Combine it with `--validate-base-fields`, provisioning
+and authentication as needed. On its own it does not provide the complete
 [zero-checksum BER admission profile](ber-migration.md#zero-checksum-ingress-boundary).
 
 ### Session provisioning
@@ -601,10 +649,9 @@ micro-session ID.
 
 An empty provisioned list denies all traffic. Startup fails on invalid or
 duplicate entries, entries that do not fit the bind address, and entries given
-in permissive mode. Per-SSID HMAC keys are independent of admission:
-installing a key does not provision an endpoint. Session timeout and
-control-plane expiry remove runtime counters and replay state, not admission
-rules. Changing the provisioned sessions requires a configuration change and a
+in permissive mode. Per-SSID HMAC keys play no part in admission: installing a
+key does not provision an endpoint. Session timeout and control-plane expiry
+remove runtime counters and replay state, not admission rules. Changing the provisioned sessions requires a configuration change and a
 restart.
 
 In both admission modes, a session is identified by source endpoint,
@@ -621,9 +668,8 @@ its idle timeout, increment its receive count, consume a stateful sequence
 number, or change replay and Follow-Up state. This covers bad base HMACs,
 unknown or revoked per-SSID keys, and short packets rejected by
 `--strict-packets`, plus failures of `--validate-base-fields` or
-`--validate-tlv-framing` when enabled.
-Such packets still count in the aggregate receive and drop
-counters. A valid base packet with a failed TLV HMAC gets the RFC 8972 I-flag
+`--validate-tlv-framing` when enabled. Such packets still count in the
+aggregate receive and drop counters. A valid base packet with a failed TLV HMAC gets the RFC 8972 I-flag
 reply.
 
 ### Capacity, drain and shutdown
@@ -636,7 +682,7 @@ sessions continue normally. Lowering the cap at runtime never evicts them.
 
 Provisioning controls which sessions may be admitted; it does not reserve
 capacity or bypass the cap, so size the cap for the expected number of
-concurrent sessions. Idle cleanup, explicit expiry or a higher cap frees room.
+concurrent sessions. Idle cleanup, manual expiry or a higher cap frees room.
 `--session-timeout SECONDS` (default 300) sets the idle cleanup time, and
 `--session-timeout 0` turns idle cleanup off.
 
@@ -700,9 +746,10 @@ sudo systemctl kill --signal=SIGHUP stamp-suite.service
 `--reflector-rate-burst` sets the token-bucket size in packets; 0 uses the
 `--max-pps` value.
 
-Provision limits for aggregate traffic and expected bursts across sessions.
-The application does not compare receive limits with deployed transmit load
-or capacity; correlate local limiting counters with reported network loss.
+Size these limits for the total traffic and the bursts you expect across all
+sessions. The reflector does not check its limits against the load senders
+actually transmit or against link capacity. When a sender reports loss,
+compare it with the reflector's rate-limiting counters.
 
 ### Burst replies (Type 12)
 
@@ -721,15 +768,16 @@ a 5,000 B/s ceiling. A rate or volume exactly equal to its ceiling is admitted.
 Each well-formed Address Group filter must match a local address; any mismatch
 suppresses the reply even if a later filter matches.
 
-For the authenticated protected profile, configure a key source, `--auth-mode A`
-and `--verify-tlv-hmac` on the reflector before enabling Type 12. Base integrity
-failure is dropped; missing or failed extension integrity prevents burst
-execution. In open mode HMAC remains optional even with `--verify-tlv-hmac`,
-so a key plus that switch does not require signed incoming requests.
+To protect Type 12 with authentication, configure a key source,
+`--auth-mode A` and `--verify-tlv-hmac` on the reflector before you enable it.
+A packet whose base fails the integrity check is dropped. If extension
+integrity is missing or fails, the burst is not sent. In open mode the HMAC
+stays optional even with `--verify-tlv-hmac`, so a key plus that switch does
+not force senders to sign their requests.
 
-An explicit sender burst uses its configured count in the first request.
-Choose conservative first-request parameters for the deployment; the sender
-does not perform an automatic count-one preflight/load-estimation exchange.
+When you configure a burst on the sender, the first request already asks for
+the full count. The sender does not first send a count-one request to estimate
+the load, so pick conservative values for the first request.
 
 Every copy gets its own T3 and, in stateful mode, a sequence number assigned in
 transmission order. T2 and the echoed sender fields identify the original
@@ -749,9 +797,9 @@ this works with wildcard binds and alternate return addresses. The payload
 budget is the smaller of the route MTU and the egress interface MTU, minus the
 IP and UDP headers and any Segment Routing Header. A plain 1500-byte link
 allows 1472 STAMP bytes over IPv4 or 1452 over IPv6. Tunnel MTUs account for
-their outer headers, and supported SRv6 route encapsulation reserves its
-overhead. A route with an unknown encapsulation is rejected rather than
-treated as free.
+their outer headers, and the overhead of supported SRv6 route encapsulation is
+subtracted too. If a route uses an encapsulation the reflector does not know,
+it rejects the route rather than assume the encapsulation adds nothing.
 
 Replies are sent with fragmentation disabled. To fit the budget, the reflector
 can shrink padding and remove optional reflected-header TLVs, and the HMACs
@@ -761,19 +809,21 @@ stays slightly shorter because a TLV header cannot fit. Mandatory fields are
 never truncated: if they cannot fit, or the route MTU is unknown, the reply is
 dropped. Windows reflectors query the selected route, cached path MTU and
 interface MTU through IP Helper on every attempt, including burst copies.
-They use the smaller path/interface value and subtract the IP/UDP headers.
-Missing path entries fail closed; no fixed-size substitute is used. Interface
-pinning and SRv6 remain unsupported on Windows.
+They use the smaller of the path and interface values and subtract the IP and
+UDP headers. If there is no path entry, the reply is dropped; there is no
+fixed-size fallback. Interface pinning and SRv6 are not supported on Windows.
 
-macOS reflectors query native unicast IPv6 destinations on every attempt,
-including burst copies and standalone BER replies. A temporary socket bound to
-the reply source (or wildcard address) reads the kernel estimate without sending
-UDP probes or connecting the live reflector socket. Its ephemeral local port
-means this is a destination-route estimate, not a port-specific policy lookup.
-IPv4, mapped peers, interface pinning and SRv6 remain unsupported by this adapter.
-IPv6 fragmentation policy is set for controlled replies and cleared for ordinary
-replies independently of CoS settings. Other platforms without route MTU lookup
-cannot send size-controlled or reflected-header replies.
+macOS reflectors look up native unicast IPv6 destinations on every attempt,
+including burst copies and standalone BER replies. To read the kernel
+estimate, the reflector binds a temporary socket to the reply source (or the
+wildcard address). It sends no UDP probes and does not connect the live
+reflector socket. The temporary socket has an ephemeral local port, so the
+result is an estimate for the destination route, not a lookup of any
+port-specific policy. This lookup does not support IPv4, IPv4-mapped peers,
+interface pinning or SRv6. The IPv6 fragmentation setting is turned on for
+size-controlled replies and off for ordinary replies, regardless of the CoS
+settings. Other platforms have no route MTU lookup, so they cannot send
+size-controlled or reflected-header replies.
 
 Raising the administrative limit allows larger replies on routes that can
 carry them. `PATCH /v1/caps` changes that limit at runtime; the route limits
@@ -815,18 +865,21 @@ replies. By default all values are allowed. The longest matching destination
 prefix replaces the global DSCP policy. The socket must still support the
 value.
 
-If requested DSCP1 is refused, the reflector uses received DSCP2 only when
-that value is permitted, with RPD=0b01. If both are forbidden, it selects the
-lowest allowed DSCP and reports RPD=0b01 with C; DSCP2 still records ingress.
-`none` suppresses processed CoS replies for that destination. Ordinary no-CoS
-traffic and opaque integrity-failure echoes remain outside this marking policy.
-Return-path retries re-evaluate the policy for the actual reply destination.
+If the requested DSCP1 is refused, the reflector falls back to the received
+DSCP2, but only when that value is permitted, and reports RPD=0b01. If both
+are forbidden, it uses the lowest allowed DSCP, reports RPD=0b01 and sets C.
+DSCP2 still records the ingress value. `none` suppresses processed CoS replies
+for that destination. The marking policy does not apply to ordinary traffic
+without CoS or to opaque echoes of packets that failed integrity checks. When
+a reply is retried on a return path, the policy is checked again for the
+actual reply destination.
 
-Refused ECN uses Not-ECT and RPE=0b10. A backend marking failure retries
-Not-ECT with an admitted DSCP. If marking still fails, a restricted DSCP policy
-suppresses the reply; an unrestricted policy can send with RPE=0b01 and requires
-independent checking of the actual IP marking. Windows cannot enforce restricted
-DSCP policies and therefore suppresses those CoS replies.
+A refused ECN value is replaced by Not-ECT, with RPE=0b10. If the backend
+fails to set the marking, it retries with Not-ECT and an admitted DSCP. If that
+also fails, a restricted DSCP policy suppresses the reply. An unrestricted
+policy can still send it with RPE=0b01, and you then need to check the actual
+IP marking yourself. Windows cannot enforce restricted DSCP policies, so it
+suppresses those CoS replies.
 
 `--location-disclose` controls which Location TLV fields the reflector reports:
 `all` (default), `none`, or a comma-separated list of `src-port`, `dst-port`,
@@ -865,9 +918,9 @@ are described in [key sourcing and rotation](security.md#key-sourcing-and-rotati
 
 `--clock-source NTP|PTP` selects wire encoding (default NTP), not clock
 synchronization. The sender decodes T1/T4 using its setting and T2/T3 using
-the reflector's Error Estimate Z bit (0=NTP, 1=truncated PTP). Formats may
-differ, including in authenticated mode; both convert to Unix time before
-computing T2−T1 and T4−T3.
+the reflector's Error Estimate Z bit (0=NTP, 1=truncated PTP). The two ends
+may use different formats, also in authenticated mode. The sender converts
+both to Unix time before computing T2−T1 and T4−T3.
 
 The 32-bit seconds field is unfolded to the era closest to the local wall
 clock, so the true time must be within about 68 years of the local clock. This
@@ -882,10 +935,11 @@ and unsynchronized NIC hardware clocks need deployment-specific handling.
 ### Remote clock offset
 
 `--reflector-utc-offset SECONDS` subtracts a known clock offset from decoded
-T2/T3; local timestamps and RTT are unchanged. Default 0 matches this suite's
-UTC CLOCK_REALTIME software timestamps in both formats. For a TAI peer, use
-its configured TAI−UTC offset and update it on leap seconds. Z does not encode
-the offset. Example for a peer configured at 37 seconds:
+T2/T3. Local timestamps and RTT are not affected. The default, 0, matches this
+suite's own software timestamps, which come from the UTC CLOCK_REALTIME clock
+in both formats. For a peer that runs on TAI, use its configured TAI−UTC
+offset and update it when a leap second occurs. The Z bit does not carry the
+offset. For a peer configured at 37 seconds:
 
 ```bash
 stamp-suite --remote-addr 192.0.2.1 --clock-source NTP --reflector-utc-offset 37
@@ -951,21 +1005,24 @@ hardware timestamps where the build and platform support them. See the
 
 ### Ports and TTL
 
-Sender local port 0 chooses a random port from 49152–65535, retrying up to
-128 candidates on busy ports or Windows WSAEACCES (10013). Other errors and
-explicit-port failures stop startup. The reflector defaults to 862; sender
-and remote ports must differ. When reusing a reflector config for a sender,
-set `local_port = 0`.
+With local port 0 the sender picks a random port from 49152–65535. If the
+port is busy, or Windows returns WSAEACCES (10013), it tries another one, up to
+128 candidates. Any other error, or a failure to bind a port you set yourself,
+stops startup. The reflector defaults to port 862, and the sender's local and
+remote ports must differ. When you reuse a reflector config for a sender, set
+`local_port = 0`.
 
-Across local IPs, provision sender source ports separately from local reflector
-ports. Different addresses can share a numeric port; the application does not
-inventory other local reflector services or reject that reuse.
+On a host with several local IP addresses, pick sender source ports separately
+from the ports local reflectors use. Different addresses can share a port
+number, and stamp-suite does not look for other local reflector services or
+refuse that reuse.
 
-Reflector `--local-port 0` uses a kernel-assigned port and reports it in the
-startup message. Pnet uses that port for capture and reply sockets in each
-available family. The configured family must bind successfully; an unavailable
-other family leaves the configured one usable. IPv6 wildcard binds use a
-separate IPv6-only socket alongside IPv4.
+With `--local-port 0` the reflector uses a port assigned by the kernel and
+prints it in the startup message. The pnet backend uses that port for its
+capture and reply sockets in every address family available. The configured
+family must bind. If the other family is unavailable, the reflector still runs
+on the configured one. An IPv6 wildcard bind uses a separate IPv6-only socket
+next to the IPv4 one.
 
 Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-26
 requires. `--ttl` accepts only 255. Received packets with a lower hop count are
@@ -998,9 +1055,10 @@ stamp-suite -i --local-addr fe80::2 --local-scope-id 2
 
 Pass numeric zones separately from addresses; `%eth0` is not accepted in
 `--local-addr` or `--remote-addr`. TOML `local_scope_id` and `remote_scope_id`
-are u32, default 0. IPv4 rejects nonzero zones; link-local binds and sender
-destinations require one. Missing interfaces fail at bind/connect. Indices
-are local to each host or namespace and need not match across endpoints.
+are u32, default 0. A nonzero zone is rejected for IPv4, and a link-local bind
+or sender destination needs one. A missing interface fails at bind or connect
+time. Indices are local to each host or namespace, so they need not match
+between the endpoints.
 See [RFC 4007 §11](https://www.rfc-editor.org/rfc/rfc4007.html#section-11).
 
 The nix backend records the link-local source zone and the arrival interface
@@ -1050,17 +1108,19 @@ stamp-suite --remote-addr 2001:db8::20 --local-addr 2001:db8::10 --attach-ext-hd
 - `--reflected-ipv6-ext-hdr LEN[:SELECTORHEX]` replaces the automatic requests.
   Requests must match attached headers in wire order.
 - `--reflected-fixed-hdr [SELECTORHEX]` requests the received fixed IP header.
-- Header requests need a known egress route MTU, which the sender reads on
-  Linux, Windows and supported macOS IPv6 sockets before startup and each send. An unknown budget or
-  oversized mandatory packet ends the run with an error before sending. Header TLVs that do not fit
-  are removed from the probe and a warning is logged. Each probe starts from
-  the configured requests, so they return when the MTU increases.
-  These platforms disable fragmentation for these probes. Windows also honors
-  any socket-local MTU cap. macOS supports connected native unicast IPv6,
-  honors the socket's minimum-MTU setting, and declines estimates for explicitly
-  pinned interfaces, IPv4 and IPv4-mapped peers. These are kernel estimates, not active end-to-end
-  path-MTU measurements. Windows and macOS support fixed-header requests;
-  attaching IPv6 extension headers still requires Linux.
+- Header requests need a known egress route MTU. The sender reads it before
+  startup and before each send on Linux, on Windows, and on macOS for
+  supported IPv6 sockets. If the budget is unknown, or the mandatory part of
+  the packet is too large, the run ends with an error before anything is sent.
+  Header TLVs that do not fit are removed from that probe and a warning is
+  logged. Each probe starts again from the configured requests, so the removed
+  TLVs come back when the MTU grows. These platforms send header probes with
+  fragmentation disabled. Windows also honors an MTU cap set on the socket.
+  On macOS the lookup works for connected native unicast IPv6 and honors the
+  socket's minimum-MTU setting. It gives no estimate for pinned interfaces,
+  IPv4 or IPv4-mapped peers. All of these are kernel estimates, not
+  end-to-end path-MTU measurements. Windows and macOS support fixed-header
+  requests, but attaching IPv6 extension headers still needs Linux.
 
 Type 246 has an eight-byte Requested field; Type 247 has a four-byte one. A
 nonzero Requested value matches only its nonzero octets: zero octets are
@@ -1071,12 +1131,13 @@ is filled with its first bytes in the reply. Selectors must zero every octet
 containing mutable fields: IPv4 byte 1, IPv6 bytes 0–1, or mutable IPv6 option
 data. The CLI rejects ambiguous extension-header selectors and mutable matches.
 
-Requests must not select only part of an indistinguishable equal-length header
-group. This sender originates one fixed header and at most one hbh followed by
-one dest header; CLI and TOML validation enforce that profile and reject ambiguous
-subsets. For captured identical-prefix groups, use one all-zero request per header
-in wire order. Repeating a nonzero selector still returns C under revision 26's
-explicit ambiguity rule; its conflicting example is documented in the
+If several headers have the same length and cannot be told apart, requests
+must not select only some of them. This sender sends one fixed header and at
+most one hbh header followed by one dest header. CLI and TOML validation
+enforce that and reject ambiguous subsets. For a captured group of headers
+with identical prefixes, use one all-zero request per header in wire order. A
+repeated nonzero selector returns C under the ambiguity rule of revision 26.
+The draft's example that conflicts with this rule is discussed in the
 [conformance interpretation](conformance/draft-stamp-ext-hdr.md#revision-26-interpretation).
 
 On Linux, the nix reflector reads IPv6 extension headers from the socket's
@@ -1139,33 +1200,38 @@ are `rate_limited`, `queue_full`, `processing_rejected`, `session_expired`,
 parsing, authentication, admission and replay policy; HMAC failures also have
 their own counter. These totals use the same events as the shutdown summary.
 
-`stamp_reflector_ber_conformance_total{reason="..."}` counts successfully sent
-datagrams with a locally generated BER C condition. The seven fixed reasons
-are also available in control status. Each reason logs its 1st, 10th, 100th,
-and subsequent power-of-ten occurrence independently; suppressed occurrences
-produce no per-packet debug message. Logs contain reason labels and counts,
-without packet contents or session identifiers. See
+`stamp_reflector_ber_conformance_total{reason="..."}` counts datagrams that
+were sent successfully with a BER C condition the reflector raised itself.
+The seven fixed reasons also appear in control status. Each reason is logged
+on its 1st, 10th and 100th occurrence and on every later power of ten, counted
+separately per reason. The occurrences in between produce no per-packet debug
+message. Log entries contain reason labels and counts, but no packet contents
+or session identifiers. See
 [BER conformance diagnostics](ber-migration.md#conformance-diagnostics).
 
-`stamp_reflector_tlv_conformance_total{reason="..."}` applies the same counting
-and logging rules to 20 fixed reasons for Type 12, header-reflection, CoS,
-nested control and preserved peer C in
-[control status](control-plane.md#status), including successful send-time MTU
-shaping. Header reasons count only for offending headers retained in the sent
-reply. The log target is
-`stamp_suite::tlv::conformance`; BER uses `stamp_suite::ber::conformance`.
-Type 12 and BER counters are independent. Runtime-disabled metrics emit no
-series. `cos_marking_unavailable` counts RPE=01 after marking failure;
-`cos_dscp_fallback` counts locally selected third DSCP values with C. Nested
-control counts follow locally generated child C flags. `peer_c_preserved`
-identifies copied peer flags in complete child headers of known container
-layouts, including opaque integrity-failure echoes. It carries no claim that
-the packet was verified or a network fault occurred. Legacy TLV-ignore tails
-remain uninterpreted.
+`stamp_reflector_tlv_conformance_total{reason="..."}` uses the same counting
+and logging rules for 20 fixed reasons. They cover Type 12, header reflection,
+CoS, nested control and preserved peer C flags, appear in
+[control status](control-plane.md#status), and include successful MTU shaping
+at send time. A header reason counts only when the offending header stays in
+the sent reply. The log target is `stamp_suite::tlv::conformance`; BER uses
+`stamp_suite::ber::conformance`. The Type 12 and BER counters are separate.
+Metrics disabled at runtime emit no series.
 
-Report output has a bounded queue and a five-second completion deadline. A
-slow reader can cause interim reports or text packet details to be skipped;
-a final-output failure stops the run with an error. See
+- `cos_marking_unavailable` counts RPE=01 after a marking failure.
+- `cos_dscp_fallback` counts replies where the reflector picked a third DSCP
+  value and set C.
+- The nested control counts follow C flags the reflector set on child TLVs.
+- `peer_c_preserved` counts C flags copied from the peer in complete child
+  headers of known container layouts, including opaque echoes of packets that
+  failed integrity checks. It does not claim that the packet was verified or
+  that a network fault occurred.
+
+The tail that the legacy TLV-ignore mode copies is not interpreted.
+
+Report output goes through a size-limited queue and must finish within five
+seconds. A slow reader can cause interim reports or text packet details to be
+skipped. If the final output fails, the run stops with an error. See
 [report output](statistics.md#report-output-and-pending-probes).
 
 ## See also
@@ -1178,48 +1244,51 @@ a final-output failure stops the run with an error. See
 ## Residual bit error rate
 
 `--ber` uses the combined Residual BER in Padding TLV from
-`draft-ietf-bpm-stamp-ber-01`: experimental outer Type 243 and optional
-pattern sub-TLV Type 241. Both peers must agree on these local allocations.
-Legacy outer Types 240–242 receive U; a peer that returns U for the new TLV
-or one of its sub-TLVs disables BER while delay/loss measurements continue.
+`draft-ietf-bpm-stamp-ber-01`, with the experimental outer Type 243 and an
+optional pattern sub-TLV of Type 241. These are local allocations, so both
+peers must agree on them. The old outer Types 240–242 now get U. If a peer
+returns U for the new TLV or one of its sub-TLVs, the sender turns BER off and
+keeps measuring delay and loss.
 
-The default padding pattern is `ff00ff00`, with no explicit pattern sub-TLV.
-Use `--ber-pattern aa55aa55 --ber-padding-size 64` for a custom pattern.
-Explicit patterns need at least four bytes and padding must contain whole
-repetitions; five-byte patterns also work with an appropriate size. Replace
-legacy two-byte patterns by explicitly repeating them. Remove
-`--ber-omit-burst` or `ber_omit_burst = true`: the successor's fixed burst
-field cannot be omitted and that obsolete request now fails validation.
+The default padding pattern is `ff00ff00`, sent without a pattern sub-TLV.
+For a custom pattern, use `--ber-pattern aa55aa55 --ber-padding-size 64`. A
+pattern you set must be at least four bytes long, and the padding must hold a
+whole number of repetitions; a five-byte pattern works with a matching size.
+To keep an old two-byte pattern, write it out repeated. Remove
+`--ber-omit-burst` and `ber_omit_burst = true` from your setup: the burst field
+in the successor draft is fixed and cannot be omitted, so the old option now
+fails validation.
 
-The JSON/CSV/text BER fields retain their names. Nonzero errors with a zero
-burst field mean burst unavailable, so the count remains usable while burst
-statistics exclude that sample. Invalid parent/nested flags, integrity,
-patterns or resized padding never become clean samples. See
-[measurement semantics](measurements.md#integrity-and-ber) and
-[migration details](ber-migration.md). This wire change targets the next
-minor release, 1.1.0; it is incompatible with the 1.0.x BER profile.
+The BER fields in JSON, CSV and text output keep their names. Nonzero errors
+with a zero burst field mean the burst length is unavailable: the error count
+is still usable, but burst statistics leave that sample out. Invalid parent or
+nested flags, failed integrity, wrong patterns or resized padding never produce
+a clean sample. See [measurement semantics](measurements.md#integrity-and-ber)
+and [migration details](ber-migration.md). This wire change came with release
+1.1.0 and does not work with the 1.0.x BER profile.
 
 ### Zero-checksum BER transmission
 
-Linux IPv4 senders can opt into `--zero-udp-checksum` (TOML
-`zero_udp_checksum = true`) with `--ber --auth-mode A` and a configured key.
-Base and TLV HMACs protect measurement fields; Extra Padding stays outside the
-TLV HMAC so a checksum-zero request can reach a capable reflector despite
-padding bit errors. Open/keyed-open mode, `--tlv-hmac off`, reflector mode,
-IPv6 (including mapped addresses or mixed targets), and other platforms are
-rejected at startup. The default keeps normal transmit checksums.
+On Linux, an IPv4 sender can use `--zero-udp-checksum` (TOML
+`zero_udp_checksum = true`) together with `--ber --auth-mode A` and a
+configured key. The base and TLV HMACs protect the measurement fields. Extra
+Padding is left out of the TLV HMAC, so a checksum-zero request can still reach
+a reflector that accepts it when the padding has bit errors. Startup fails in
+open mode (with or without a key), with `--tlv-hmac off`, in reflector mode,
+with IPv6 (including mapped addresses or a mix of targets) and on other
+platforms. By default the sender sends normal checksums.
 
 ```bash
 stamp-suite --remote-addr 192.0.2.20 --ber --auth-mode A \
   --hmac-key-file /etc/stamp-suite/session.key --zero-udp-checksum
 ```
 
-This affects all probes on each sender socket, including probes after a peer
-disables BER via U. Authentication remains enabled. Receive checksum validation
-and the reflector's reply transport are unchanged; this is a request-direction
-feature, not bidirectional zero-checksum BER. The peer must accept IPv4
-checksum-zero traffic; this application's pnet reflector rejects it, while the
-Linux nix reflector can receive it. Transmission needs no raw-socket privilege.
-The [open-mode admission limitation](ber-migration.md#zero-checksum-ingress-boundary)
-remains Partial, and software-loopback tests do not certify physical-link error
-capture or FEC behavior.
+The option applies to every probe on each sender socket, including probes sent
+after a peer has turned BER off with U. Authentication stays on. Only requests
+are sent with a zero checksum: received packets are still checksum-checked,
+and the reflector sends its replies as usual. The peer must accept IPv4
+traffic with a zero checksum. This application's pnet reflector rejects it;
+the Linux nix reflector accepts it. Sending needs no raw-socket privilege. The
+[open-mode admission limitation](ber-migration.md#zero-checksum-ingress-boundary)
+is still Partial, and the software-loopback tests say nothing about capturing
+errors on a physical link or about FEC behavior.

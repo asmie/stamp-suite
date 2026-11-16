@@ -6,15 +6,16 @@ For options, see [usage](usage.md); for protocol coverage, see
 
 ## Module structure
 
-Backends share a packet pipeline. Sender state machines track the session;
-synchronous observers report events; RAII guards release reply capacity and
-resources. Packet layouts and session admission rules each have one owner.
-The sections below describe the current implementation. Supported behavior is
-qualified by the [profile limits](conformance/README.md#known-limits).
+Both receiver backends feed the same packet pipeline. On the sender, state
+machines track the session and synchronous observers report events as they
+happen. RAII guards hand back reply capacity and other resources. Each packet
+layout and each set of session admission rules is defined in one place. What
+the code supports is subject to the
+[profile limits](conformance/README.md#known-limits).
 
-Paths below are relative to `src/`. Public library modules support tests,
-benchmarks and fuzzing; they are outside the CLI/configuration/wire
-compatibility contract.
+Paths below are relative to `src/`. The library modules are public so that
+tests, benchmarks and fuzz targets can use them. They are not covered by the
+compatibility promise for the CLI, the configuration or the wire format.
 
 ### Entry points and configuration
 
@@ -68,7 +69,7 @@ compatibility contract.
 | `receiver/pnet.rs` | Raw capture backend (pnet datalink) with a separate send worker. |
 | `receiver/assemble.rs` | Reply packet assembly with TLV handling. |
 | `receiver/transmit.rs` | Reply queue and budget, shutdown drain, `DatagramSender`, final per-send timestamps and signing. |
-| `receiver/mtu.rs` | Linux route MTU lookup with a notification-invalidated cache; fresh Windows IP Helper path/interface queries and macOS native IPv6 connected-socket estimates. |
+| `receiver/mtu.rs` | Route MTU lookup. Linux keeps a cache that route notifications invalidate; Windows queries IP Helper for the path and interface on every attempt; macOS estimates IPv6 MTU from a connected native socket. |
 | `receiver/shared.rs` | `ReceiverSharedState` (counters, sessions, keys, caps, shutdown token) and `reload_keys`. |
 | `receiver/limits.rs` | Reflector counters, the per-source rate limiter and runtime Type 12 caps. |
 | `receiver/keys.rs` | Per-packet HMAC key selection. |
@@ -85,12 +86,12 @@ compatibility contract.
 | Module | Purpose |
 | --- | --- |
 | `session.rs` | Session table, counters, replay windows, Follow-Up state and lifetime. |
-| `session/inventory.rs` | Optional ordered index and bounded control-plane session pages. |
+| `session/inventory.rs` | Optional ordered index and size-limited session pages for the control plane. |
 | `session_identity.rs` | Session identity and static reflector admission (RFC 8972 §3). |
 | `net_policy.rs` | Outgoing TTL/Hop Limit 255, interface binding (`--interface`) and sender port selection (draft-ietf-ippm-stamp-ext-hdr-26 §3.1). |
 | `net_scope.rs` | Interface zones for IPv6 link-local endpoints. |
 | `hwtstamp.rs` | Kernel and NIC timestamping with per-packet provenance. |
-| `stats.rs`, `stats/` | Statistics collection and text/JSON/CSV output; `stats/quantiles.rs` holds bounded quantiles and `stats/clock_quality.rs` the declared clock quality. |
+| `stats.rs`, `stats/` | Statistics collection and text/JSON/CSV output; `stats/quantiles.rs` holds the fixed-memory quantiles and `stats/clock_quality.rs` the declared clock quality. |
 | `ber.rs` | Residual bit error measurement (draft-ietf-bpm-stamp-ber-01). |
 | `log_throttle.rs` | Throttled logging for events a remote peer can trigger on every packet. |
 
@@ -123,34 +124,39 @@ selects nix and only matters when `ttl-pnet` is also enabled, so
 `--all-features` builds nix. See [Networking](usage.md#networking) for the
 operator view.
 
-The nix backend receives only traffic delivered to its bound UDP socket and
-passes through the normal host firewall path. Raw capture sees interface
-traffic before UDP delivery, so UDP INPUT filtering alone does not restrict it.
-Pnet replies use UDP sockets bound to the STAMP port, so connected senders
-accept the source port. Pnet captures one interface: it needs a concrete local
-address, or a wildcard address together with `--interface`.
-An unspecified address advertised by a capture API does not identify an
-interface: an unnamed wildcard reports a startup error instead of opening
-capture on that adapter. Concrete addresses must belong to the selected
-interface; an explicit name and IPv6 scope must also match when provided.
+The nix backend only sees traffic that the kernel delivers to its bound UDP
+socket, so the host firewall applies as usual. Raw capture sees traffic on the
+interface before UDP delivery, so UDP filtering in the INPUT chain does not
+stop it. Pnet sends replies from UDP sockets bound to the STAMP port, so
+senders using connected sockets accept the replies' source port. Pnet captures
+on one interface. It needs a concrete local address, or a wildcard address
+together with `--interface`.
+A capture API can list an unspecified address for an adapter, but that address
+does not identify the interface. A wildcard without an interface name is
+therefore a startup error, and pnet does not open capture on that adapter. A
+concrete address must belong to the selected interface. If you also give an
+interface name or an IPv6 scope, they must match as well.
 
-Pnet binds the configured address family first. Port zero selects a kernel
-port that is then used for readiness, capture filtering, received endpoint
-metadata and both reply sockets. The other family binds the same port when
-available; its absence does not stop the configured family. A failure in the
-configured family stops startup before capture. IPv6 reply sockets are
-IPv6-only so IPv4/IPv6 wildcard sockets can coexist without a port handoff.
+Pnet binds the configured address family first. With port zero the kernel
+picks a port, and pnet uses it for readiness, the capture filter, received
+endpoint metadata and both reply sockets. The other family binds the same port
+if it is free. If it is not, the configured family keeps running. A bind
+failure in the configured family stops startup before capture begins. IPv6
+reply sockets are IPv6-only, so IPv4 and IPv6 wildcard sockets can coexist
+without handing a port from one to the other.
 
-Nix `recvmsg` calls run inside `UdpSocket::try_io`. `WouldBlock` clears the
-cached readiness; bypassing this wrapper can make an idle loop spin. The sender
-uses the same pattern for ECN and kernel timestamps.
+Nix `recvmsg` calls run inside `UdpSocket::try_io`, which clears the cached
+readiness on `WouldBlock`. Calling `recvmsg` outside that wrapper can leave an
+idle loop spinning. The sender uses the same pattern for ECN and kernel
+timestamps.
 
 The nix embedding API `receiver::run_receiver_with_socket` takes ownership of
-an already bound, unconnected UDP socket. Its endpoint must match the configured
-bind endpoint; configured port zero accepts the kernel-assigned port. It applies
-the same socket options and receive loop as `run_receiver`, without releasing
-the port. Shared-state and provisioned-session fixtures use this API to remove
-the port handoff race. See [startup fixtures](testing-startup.md).
+a UDP socket that is already bound and not connected. Its endpoint must match
+the configured bind endpoint, and a configured port of zero accepts whatever
+port the kernel assigned. It applies the same socket options and receive loop
+as `run_receiver` without releasing the port in between. The shared-state and
+provisioned-session fixtures use it so there is no race while the port is
+handed over. See [startup fixtures](testing-startup.md).
 
 ## Reflector packet path
 
@@ -159,10 +165,10 @@ the port handoff race. See [startup fixtures](testing-startup.md).
 `receiver/ingest.rs` is the shared path between a backend and the reply queue.
 
 At startup, `ReflectorSettings::from_config` resolves the configuration once.
-A missing key in authenticated mode, or a CoS policy, location disclosure
-setting or error estimate that does not parse, stops startup. `ReflectorCore`
-then holds those settings together with the shared counters, rate limiter,
-session manager, keyset, runtime caps and the reply budget
+Startup stops if authenticated mode has no key, or if a CoS policy, location
+disclosure setting or error estimate does not parse. `ReflectorCore` then
+holds those settings along with the shared counters, rate limiter, session
+manager, keyset, runtime caps and the reply budget
 (`--reflector-queue-capacity` slots).
 
 For each datagram, the backend builds a `ReceivedPacket`: the bytes, source,
@@ -174,16 +180,17 @@ kernel or NIC receive timestamp with its method. `ReflectorCore::ingest` then:
    A limited packet is counted and dropped.
 2. Counts the packet and reserves one `ReplyBudget` slot. A full budget rejects
    the packet before any session state changes (`reply_queue_rejected`).
-3. Takes a read guard on the keyset and builds the `ProcessingContext`. Runtime
-   caps are loaded once per field. Separate atomic loads can observe different
-   control updates; changing several caps is not transactional.
+3. Takes a read guard on the keyset and builds the `ProcessingContext`. Each
+   runtime cap is loaded once. The loads are separate atomic reads, so they
+   can see different control updates. Changing several caps at once is not
+   transactional.
 4. Runs processing inside `catch_unwind`. A panic drops that packet and is
    logged; it does not stop the reflector.
 5. Attaches the reply to the reserved slot and returns it for queuing, or
    counts a drop.
 
-The slot covers validation, handoff, queued deadlines and active sending until
-every copy is sent or discarded.
+The packet keeps its slot through validation, handoff, waiting in the queue
+and sending, until every copy has been sent or discarded.
 
 ### Processing and transmission
 
@@ -201,71 +208,76 @@ every copy is sent or discarded.
    bytes.
 7. A successful send updates the session's transmit and Follow-Up state.
 
-The keyset read guard spans authentication and assembly. The queued reply owns
-the key it selected, so key rotation cannot change the key between acceptance
-and signing. Fallbacks keep the sequence and refresh timestamps and signatures
-after the change. T2 and the echoed sender fields stay those of the original
-request.
+The keyset read guard is held through authentication and assembly. The queued
+reply owns the key it selected, so a key rotation cannot swap the key between
+acceptance and signing. When a send falls back to another path, the reply keeps
+its sequence number, and the timestamps and signatures are refreshed after the
+change. T2 and the echoed sender fields stay those of the original request.
 
 ### TLV ownership and signing
 
-`TlvList` owns each value once. Non-HMAC entries form a prefix and HMAC entries
-form a suffix. Optional indices record the received wire order, including
-malformed chains and Extra Padding after HMAC. Mutation updates the owner;
-serialization uses the indices. Duplicate HMAC partitioning uses linear swaps.
+`TlvList` stores each value once. Non-HMAC entries come first and HMAC
+entries last. Optional indices record the order in which the TLVs arrived,
+including malformed chains and Extra Padding after HMAC. Changes go to the
+stored entry, and serialization follows the indices. Duplicate HMAC entries
+are moved to the end with linear swaps.
 
-Verification hashes the sequence number and the original covered prefix. Only
-Extra Padding may follow HMAC, and it is outside that coverage. New signatures
-use the outgoing order, with BER padding after HMAC. Failure echoes keep the
-received order and digest bytes and set the required flags. Malformed lists are
-not re-signed by normal TLV regeneration. Final signing at send time operates
-on the reply buffer. It traverses complete frames even past semantic M to
-find a generated HMAC before nonzero BER padding. The ownership flag prevents
-that final step from changing copied digests in I-marked failure echoes.
+Verification hashes the sequence number and the covered prefix as received.
+Only Extra Padding may follow HMAC, and the HMAC does not cover it. New
+signatures use the outgoing order, with BER padding after HMAC. Failure echoes
+keep the received order and digest bytes and set the required flags. Normal
+TLV regeneration does not re-sign malformed lists. The final signing step at
+send time works on the reply buffer. It walks complete frames, even past a
+semantic M, to find a generated HMAC that sits before nonzero BER padding. An
+ownership flag stops this step from changing digests copied into I-marked
+failure echoes.
 
 ### Short packets and `--strict-packets`
 
 By default a short base packet is zero-filled before parsing and HMAC
 verification (RFC 8762 §4.6). `--strict-packets` rejects it instead.
-Authentication checks are independent of this setting, and received MBZ fields
-are ignored in both modes.
+Authentication checks work the same either way, and received MBZ fields are
+ignored in both modes.
 
-This reflector request policy is separate from sender reply admission. A
-sender needs the complete echoed sequence and eight-byte wire T1, even when a
-reply's unused trailing fields are zero-filled. It checks this identity against
-pending/retained history before deduplication, SSID policy and semantic state
-changes. Pending probes retain immutable wire T1 separately from the corrected
-T1 used for OWD. TX error-queue mappings carry the monotonic send time and wire
-T1 with the sequence, preventing an older send's report from correcting a newer
-probe after sequence reuse. Reply-copy identities include wire T1.
+That policy covers requests at the reflector. Reply admission on the sender is
+separate. The sender needs the complete echoed sequence number and the
+eight-byte wire T1, even when unused fields at the end of the reply are
+zero-filled. It checks this identity against pending and retained history
+before deduplication, SSID policy and any state changes. Pending probes keep
+the wire T1 as sent, apart from the corrected T1 used for OWD. TX error-queue
+mappings carry the monotonic send time and wire T1 along with the sequence
+number, so a report for an older send cannot correct a newer probe that reused
+the sequence. Reply-copy identities include wire T1.
 
 ## Sender run loop
 
-Incoming extension detection follows the received payload length, independent
-of outgoing TLV configuration. After base integrity verification in authenticated
-mode, the sender derives malformed markers for every known outer-TLV length
-before evaluating flags and optional values. Unused types participate in this
-check. The list carries diagnostic markers; HMAC verification retains the
-original wire slice for coverage.
+The sender decides whether a reply carries extensions from the received
+payload length, not from its own TLV configuration. In authenticated mode it
+first verifies base integrity. It then derives malformed markers for every
+known outer-TLV length before evaluating flags and optional values, including
+types it does not use. The list carries these diagnostic markers, while HMAC
+verification uses the original wire bytes.
 
-Location validation walks the entire nested structure before semantic handling.
-An incomplete child or invalid known length marks the outer Location M, making
-the whole value unusable and marking subsequent outer values U on the reflector.
-When integrity passes and the list permits processing, an identifiable malformed
-child header also receives M. Failed-integrity and structurally malformed signed
-echoes keep every original value byte. The sender additionally promotes received
-child M to the local outer diagnostic,
-ignoring nested I as required by the Location format.
+Location validation walks the whole nested structure before any semantic
+handling. An incomplete child or an invalid known length sets M on the outer
+Location TLV. The whole value is then unusable, and the reflector sets U on the
+outer TLVs that follow. When integrity passes and the list can be processed,
+an identifiable malformed child header also gets M. Signed echoes that failed
+integrity or are structurally malformed keep every original value byte. The
+sender also promotes a received child M to its local outer diagnostic and
+ignores nested I, as the Location format requires.
 
-Timestamp Information validates its four-field prefix and complete optional
-child framing; child values remain opaque. This check is shared by the typed
-decoder and sender/reflector length validation. Semantic handling normalizes
-reserved Access Report and Follow-Up fields only on processable valid values.
-Follow-Up also respects parser M when zeroing malformed sequence/timestamp
-fields, rather than treating the available byte count as a valid declared size.
-At transmission, a copied outer HMAC suppresses telemetry refresh unless the
-reflector generated that HMAC. This keeps assembly's signed-error value-copy
-decision intact while normal processed replies retain per-send refresh/signing.
+Timestamp Information validation checks the four-field prefix and the framing
+of every optional child. Child values stay opaque. The typed decoder and the
+sender and reflector length checks share this code. Semantic handling clears
+reserved Access Report and Follow-Up fields only on valid values that can be
+processed. When Follow-Up zeroes a malformed sequence or timestamp field, it
+also honors the parser's M instead of treating the bytes that happen to be
+present as a valid declared size.
+At send time, a copied outer HMAC stops telemetry from being refreshed unless
+the reflector generated that HMAC. This keeps the decision made during
+assembly to copy the values of a signed error, while normally processed
+replies are still refreshed and signed on every send.
 
 `sender/run.rs` runs one session. `run_senders` (in `sender.rs`) opens one
 `SenderRun` per `--remote-addr` before sending any probe, so a startup error in
@@ -295,11 +307,11 @@ when a key is given.
    On Windows, each sender run requests 1 ms timer resolution through
    [WinMM](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod).
    A scoped guard releases each successful request when the run returns or is
-   dropped, including cancellation and errors. Coarser Windows waits otherwise
-   stretch short probe intervals beyond the 2 ms catch-up budget. The request
-   can increase CPU wakeups and power use while active; it does not guarantee
-   real-time scheduling. An unavailable request logs a warning and the sender
-   continues with the available timer resolution.
+   dropped, including on cancellation and errors. Without the 1 ms request,
+   coarser Windows waits would stretch short probe intervals past the 2 ms catch-up budget.
+   The request can increase CPU wakeups and power use while it is active, and
+   it does not guarantee real-time scheduling. If the request fails, the
+   sender logs a warning and carries on with the timer resolution it has.
 
    Each probe is built in two steps. `build_probe` writes the TLVs straight
    into the packet buffer behind a zeroed base packet (`write_probe_tlvs`, no
@@ -317,40 +329,45 @@ Probes still unanswered at the end count as lost. The run returns a
 `StatsSnapshot`.
 
 `StatsOutput` formats and writes reports on a shared thread. The sender
-collects snapshots after reserving queue space. The queue holds eight reports
-or detail lines; excess interim output is skipped. Final output and flushes
-have a five-second deadline, and runs wait for queued reports before returning.
-The writer preserves queue order and prints one CSV header. Text `-R` uses
-this queue; JSON/CSV diagnostics use stderr. See
+builds a snapshot only after it has reserved queue space. The queue holds
+eight reports or detail lines, and interim output beyond that is skipped.
+Final output and flushes have a five-second deadline, and a run waits for its
+queued reports before it returns. The writer keeps reports in queue order and
+prints a single CSV header. Text `-R` lines go through this queue, and JSON/CSV
+diagnostics go to stderr. See
 [report retention](statistics.md#report-output-and-pending-probes).
 
 ### Sender timestamp arithmetic
 
-T1 and T4 use the sender's configured format; T2 and T3 use the format given by
-the reflector's Error Estimate Z bit. `timestamp_to_unix_nanos` converts both to
-the Unix epoch and unfolds the 32-bit seconds field near a local reference,
-which must be within about 68 years. Integer subtraction keeps small
-differences exact across wraps.
+T1 and T4 use the sender's configured format. T2 and T3 use the format that
+the Z bit in the reflector's Error Estimate selects. `timestamp_to_unix_nanos`
+converts both to the Unix epoch and unfolds the 32-bit seconds field around a
+local reference, which must be within about 68 years. Integer subtraction keeps
+small differences exact across a wrap.
 
-`--reflector-utc-offset` removes a known remote offset after decoding. Software
-timestamps use UTC in both formats. A malformed PTP fractional field omits the
-one-way delay while monotonic RTT accounting continues. Signed one-way delay
-keeps clock skew visible. See [Timestamps and clocks](usage.md#timestamps-and-clocks).
+`--reflector-utc-offset` removes a known remote offset after decoding.
+Software timestamps use UTC in both formats. If a PTP fractional field is
+malformed, the one-way delay is left out, while RTT accounting on the
+monotonic clock continues. One-way delay is signed, so clock skew stays
+visible. See [Timestamps and clocks](usage.md#timestamps-and-clocks).
 
 ### Validated sender telemetry
 
-`validate_reflected_tlvs` returns typed telemetry or a rejection. Control logic
-reads HMAC status, Access Report acknowledgment, CE and Micro-session IDs
-directly; text formatting is only for diagnostics.
+`validate_reflected_tlvs` returns either typed telemetry or a rejection.
+Control logic reads the HMAC status, Access Report acknowledgment, CE and
+Micro-session IDs from the typed result. Text formatting is only for
+diagnostics.
 
-U skips a TLV; M stops processing of the rest; any I flag or an unusable HMAC
-that is present blocks all values. With a key, a required Micro-session ID,
-BER, Direct Measurement and Follow-Up require verified TLV integrity. Optional
-Access Report and CoS handling also accept replies that omit the HMAC. Passing
-structural validation does not make an unsigned reply authenticated.
+U skips a TLV and M stops processing of the rest. Any I flag, or an HMAC that
+is present but unusable, blocks all values. With a key, a required
+Micro-session ID, BER, Direct Measurement and Follow-Up need verified TLV
+integrity. Optional Access Report and CoS handling also accept replies without
+an HMAC. A reply that passes structural validation without a signature is
+still not authenticated.
 
-SSID and pending-probe validation happen before a learned Micro-session ID is
-committed. See [integrity and BER](measurements.md#integrity-and-ber).
+The sender validates the SSID and the pending probe before it commits a
+learned Micro-session ID. See
+[integrity and BER](measurements.md#integrity-and-ber).
 
 ### Sender observers
 
@@ -375,94 +392,103 @@ it returns, so a signal during the rest of startup is not lost.
 - **Sender.** A signal cancels the token. The probe loop and the drain stop at
   once, unanswered probes count as lost, and the statistics so far are printed.
 
-SIGHUP on Unix is separate: it reloads the reflector's HMAC keys
-(`receiver::reload_keys`) and keeps the current keys on error. The SNMP
-sub-agent uses a child of the role token. Its handle cancels the worker on
-drop, including early-return paths. Blocking I/O checks cancellation at
-200 ms intervals; Close acknowledgments get a separate 200 ms deadline. See
+SIGHUP on Unix is handled separately. It reloads the reflector's HMAC keys
+(`receiver::reload_keys`), and if the reload fails the current keys stay in
+use. The SNMP sub-agent uses a child of the role token, and dropping its
+handle cancels the worker, including on early returns. Blocking I/O checks for
+cancellation every 200 ms. Close acknowledgments have their own 200 ms
+deadline. See
 [Capacity, drain and shutdown](usage.md#capacity-drain-and-shutdown).
 
 ## Session management
 
-A session is identified by the source and actual destination UDP endpoints,
-the SSID, and the optional sender Micro-session ID, in both sequencing modes.
-Permissive admission learns identities from traffic; provisioned admission
-requires an exact startup rule. `--stateful-reflector` changes only sequence
-generation: independent reflector sequences instead of echoed sender sequences.
-See [Session provisioning](usage.md#session-provisioning).
+In both sequencing modes, a session is identified by the source UDP endpoint,
+the actual destination UDP endpoint, the SSID and, if present, the sender's
+Micro-session ID. Permissive admission learns identities from traffic.
+Provisioned admission needs an exactly matching rule configured at startup.
+`--stateful-reflector` only changes how sequence numbers are generated: the
+reflector counts its own sequence instead of echoing the sender's. See
+[Session provisioning](usage.md#session-provisioning).
 
-Runtime entries hold counters, replay state and Follow-Up state. Accepted
-packets refresh the idle clock; outgoing copies do not. The default idle
-timeout is 300 seconds, and 0 disables cleanup. A cap or drain rejection
-creates no temporary session and consumes no ID or sequence number. Expiry
-keeps static provisioning.
+Each session entry holds counters, replay state and Follow-Up state. Accepted
+packets reset the idle timer, but outgoing copies do not. The default idle
+timeout is 300 seconds, and 0 turns cleanup off. When the session cap or a
+drain rejects a packet, no temporary session is created and no ID or sequence
+number is used up. When a session expires, its static provisioning stays in
+place.
 
-Each reflector with a nonzero session timeout owns one cleanup worker. It runs
-at half the timeout, with a one-second minimum. The nix backend starts its first
-scan immediately; pnet waits one interval. Later scans wait one interval after
-the previous scan completes, so scans never overlap or accumulate catch-up
-requests. Timeout zero starts no worker. Cleanup no longer runs inline in the
-async receive loop or the pnet capture loop and can progress without traffic.
+Each reflector with a nonzero session timeout runs one cleanup worker. It scans
+every half timeout, with a minimum of one second. The nix backend runs its
+first scan at once, and pnet waits one interval. Each later scan starts one
+interval after the previous one finishes, so scans never overlap and missed
+scans do not pile up. A timeout of zero starts no worker. Cleanup does not run
+inside the async receive loop or the pnet capture loop, so it makes progress
+even when no traffic arrives.
 
-The worker first checks for expiry under a shared table lock, allowing existing
-sessions to refresh activity during retained-only scans. It rechecks possible
-expiry under the exclusive lock before committing to retirement. A committed
-session rejects new acquisitions and queued sends. If no send holds its lifetime
-guard, cleanup removes it immediately. Otherwise its identity and capacity stay
-reserved while cleanup waits for that send outside the table lock. Unrelated
-sessions can be looked up, admitted or controlled during that wait, subject to
-the current cap and drain state. New identities still need exclusive table
-access, and the initial scan can still delay them.
+The worker first looks for expired sessions under a shared lock on the table,
+so existing sessions can still record activity during scans that remove
+nothing. Before it commits to retiring a session, it checks again under the
+exclusive lock. A session committed for retirement rejects new acquisitions
+and queued sends. If no send holds its lifetime guard, cleanup removes it at
+once. Otherwise its identity and capacity stay reserved while cleanup waits for
+that send outside the table lock. During the wait, other sessions can be
+looked up, admitted or controlled, subject to the current cap and drain state.
+New identities still need exclusive access to the table, and the initial scan
+can still delay them.
 
-Inventory and capacity counts include reserved entries until removal. Direct
-lookup/admission returns `None` for a retiring identity; a later request can
-create fresh state after removal. Retirement cannot be undone by refreshing
-activity after that commitment. Control removal uses the same reservation and
-wait protocol. Removal checks the exact retained session reference, so a late
-finisher cannot remove a replacement even if numeric session IDs wrap.
+Inventory and capacity counts include reserved entries until they are
+removed. Direct lookup and admission return `None` for an identity that is
+being retired, and a later request can create fresh state once it is gone.
+Activity after the commit cannot undo the retirement. Removal through the
+control API reserves and waits in the same way. Removal compares the exact
+session reference it holds, so a late finisher cannot remove a replacement,
+even if numeric session IDs wrap.
 
-Cleanup retains a temporary reference to each removed session until the table
-lock is released. Retirement commitment and final removal happen under the
-lock; waiting for busy sends happens outside it. Cleanup releases its extra
-references afterward. This moves destruction of otherwise
-unreferenced sessions and their allocator work outside the lock. Queued replies
-and other owners can retain state longer. The reference buffer grows with the
-number of removals, with additional key/reference storage for busy sessions.
-These buffers add temporary memory and reference bookkeeping. Scanning and
-removal still take the table lock, so this does not establish a packet-latency
-bound or eliminate every source of contention.
+Cleanup keeps a temporary reference to each removed session until it releases
+the table lock. Committing to retirement and the final removal happen under
+the lock, and waiting for busy sends happens outside it. Cleanup drops its
+extra references afterward. Sessions that nothing else references are
+therefore destroyed, along with the allocator work that involves, outside the
+lock. Queued replies and other owners can keep state alive for longer. The
+reference buffer grows with the number of removals, and busy sessions need
+extra key and reference storage, so cleanup uses some temporary memory and
+bookkeeping. Scanning and removal still take the table lock. This does not
+put a limit on packet latency or remove every source of contention.
 
-When the control inventory index is enabled, cleanup removes a small initial
-batch of index entries directly, then buffers further removed ordinals. Sparse
-expiry can finish without an ordinal buffer. If at least three quarters of the
-table disappear and buffered removals remain, cleanup builds an index of the
-survivors and detaches the old tree for destruction after releasing the table lock.
-Survivors include busy retiring reservations and keep their original inventory
-ordinals, so existing page cursors retain their creation boundary and order.
-The ordinal buffer and replacement index add temporary memory during cleanup;
-index-disabled managers allocate neither.
+When the control inventory index is enabled, cleanup removes a small first
+batch of index entries directly and then buffers the ordinals of further
+removals. Sparse expiry can finish without that buffer. If at least three
+quarters of the table has gone and buffered removals remain, cleanup builds a
+new index of the surviving sessions and destroys the old tree after it
+releases the table lock. The survivors include busy sessions that are reserved
+for retirement. They keep their original inventory ordinals, so existing page
+cursors keep their creation boundary and order. The ordinal buffer and the
+replacement index use temporary memory during cleanup. Managers with the index
+disabled allocate neither.
 
-Exit and future cancellation stop and join the cleanup worker before releasing
-its owner. Joining can wait for a scan already in progress, including its send
-retirement waits. A worker startup failure is reported as a startup error. A
-cleanup panic cancels only the affected reflector's child shutdown token and
-is returned as a receiver error after draining; it does not cancel a shared
-parent token or leave the reflector running without periodic expiry.
+On exit, or when the reflector's future is cancelled, the cleanup worker is
+stopped and joined before its owner is released. Joining can wait for a scan
+that is already running, including its waits for sends to retire. If the
+worker fails to start, that is reported as a startup error. A panic in cleanup
+cancels only the affected reflector's child shutdown token and is returned as
+a receiver error after draining. It does not cancel a shared parent token, and
+it does not leave the reflector running without periodic expiry.
 
 ### Session admission and lifetime
 
-The internal admission permit records a provisioning decision for one manager
-and identity. It holds no lock during authentication and reserves no capacity.
-Acquisition rechecks the current cap and drain state under the table write
-lock.
+The internal admission permit records the provisioning decision for one
+manager and identity. It holds no lock during authentication and reserves no
+capacity. Acquisition checks the current cap and drain state again under the
+table write lock.
 
-Each send holds a session lifetime read guard through the syscall and state
-updates. Retirement first sets an irreversible flag under exclusive table
-access. New sends check that flag before and after acquiring the lifetime guard.
-Removal waits for existing guards outside the table lock, then removes only the
-same session instance. The send path never takes the table lock while holding
-its guard. Re-admission creates fresh state and a new internal ID. Acquisition
-APIs return `None` on rejection or retirement in progress.
+Each send holds a read guard on the session's lifetime through the syscall and
+the state updates. Retirement starts by setting a flag, which cannot be
+cleared, under exclusive table access. New sends check that flag before and
+after taking the lifetime guard. Removal waits for existing guards outside the
+table lock and then removes only that same session instance. The send path
+never takes the table lock while it holds its guard. Re-admission creates
+fresh state with a new internal ID. Acquisition APIs return `None` when they
+reject a session or it is being retired.
 
 ## TLV extensions reference
 
@@ -498,9 +524,9 @@ the base packet without processing, as a reflector without TLV support does.
 ### Backward compatibility
 
 Base-only peers get RFC 8762 handling. A sender that requests a nonzero SSID
-rejects replies with another nonzero SSID. Replies with a zero SSID follow
-`--on-zero-ssid continue|stop`; continuing does not disable validation of later
-nonzero SSIDs.
+rejects replies that carry a different nonzero SSID. Replies with a zero SSID
+are handled according to `--on-zero-ssid continue|stop`. With `continue`,
+later nonzero SSIDs are still checked.
 
 ### TLV wire format (RFC 8972 §4)
 
@@ -512,16 +538,17 @@ including Type 12, BER and header reflection. Type-specific layouts are in
 
 ### Class of Service TLV (RFC 8972 §4.4)
 
-The reflector records the received DSCP and ECN in DSCP2 and EC2. Local policy
-decides whether the requested DSCP1 and EC1 are permitted, and socket support
-decides whether they can be applied. A refused DSCP uses received DSCP only if
-permitted, otherwise the lowest admitted value with RPD=01 and C. DSCP2 stays
-an ingress observation. Empty or unenforceable restricted policies suppress
-processed CoS replies. An ECN fallback uses Not-ECT and RPE=10; if neither
-marking can be applied, unrestricted policies report RPE=01. Destination rules
-are re-evaluated for the actual reply destination, including return-path retries. The sender's
-AIMD response is described under
-[TLV-driven sender features](usage.md#tlv-driven-sender-features).
+The reflector records the DSCP and ECN it received in DSCP2 and EC2. Local
+policy decides whether the requested DSCP1 and EC1 are allowed, and socket
+support decides whether they can be applied. If the requested DSCP is refused,
+the reply reports RPD=01 and uses the received DSCP if policy permits it.
+Otherwise it uses the lowest admitted value and also sets C. DSCP2 always
+reports what arrived. A restricted policy that is empty or cannot be enforced suppresses
+processed CoS replies. An ECN fallback uses Not-ECT and reports RPE=10. If
+neither marking can be applied, unrestricted policies report RPE=01.
+Destination rules are checked again for the address the reply actually goes
+to, including return-path retries. The sender's AIMD response is described
+under [TLV-driven sender features](usage.md#tlv-driven-sender-features).
 
 ### Location TLV (RFC 8972 §4.2)
 
@@ -543,8 +570,8 @@ sender's directional loss estimates.
 
 Stateful replies carry the previous reflection's sequence number, timestamp and
 method, including accepted kernel or NIC TX corrections. Stateless replies zero
-the sequence number and timestamp. The sender correlates the independent
-sequence to report
+the sequence number and timestamp. The sender matches the reflector's own
+sequence number against its reply history to report
 [corrected reverse delay](measurements.md#follow-up-corrected-reverse-delay).
 
 ### Timestamp Information TLV (RFC 8972 §4.3)
@@ -573,21 +600,24 @@ the source. This is separate from session admission.
   redirection is unsupported or fails, U is set and the reply goes to the
   original source.
 - `--srv6-return-forwarding` enables SRH forwarding on Linux with nix. The
-  single send owner applies the sticky `IPV6_RTHDR` option, keeps the requested
-  SIDs, reserves the final UDP destination slot, and clears the SRH before
-  ordinary replies. Unsupported paths, including pnet, fall back with U set.
+  one component that owns sending sets the sticky `IPV6_RTHDR` option, keeps
+  the requested SIDs, reserves the last segment slot for the UDP destination,
+  and clears the SRH again before ordinary replies. Paths that cannot do this,
+  including pnet, fall back with U set.
 - SR-MPLS label stack forwarding is unsupported and gets U set.
 
-The first Return Path owns routing. Validate the entire child framing before
-mutating any child; Control Code precedence ignores other well-framed parameter
-values, and otherwise only the first address and segment list are selected.
-Selected child headers clear U/M/I and reserved bits; unknown or ignored
-children get U. A processed Control Code transmits only bit 0. Broken framing
-or an invalid selected length marks the parent M/U and the identifiable child
-M, then stops later extension processing. Sender receipt promotes child M/I
-to local validation before consuming extension values. An unrecognized parent
-is skipped. Failed-integrity and already-skipped copies preserve child bytes;
-the inherited unconditional flag requirement remains Partial. See
+The first Return Path TLV decides routing. The reflector validates the framing
+of every child before it changes any of them. A Control Code takes precedence,
+and other well-framed parameter values are then ignored. Without one, only the
+first address and the first segment list are used. Selected child headers have
+U, M, I and the reserved bits cleared, and unknown or ignored children get U.
+A processed Control Code transmits only bit 0. Broken framing, or an invalid
+length in a selected child, sets M/U on the parent and M on the identifiable
+child, and stops processing of later extensions. When the sender receives a
+child M or I, it promotes it to local validation before it uses any extension
+value. An unrecognized parent is skipped. Copies that failed integrity or were
+already skipped keep their child bytes as received. The inherited requirement
+to set these flags unconditionally is still rated Partial. See
 [nested flag limits](conformance/rfc9503.md#nested-flags).
 
 Source, alternate-address and SRH fallbacks are re-signed with the request's
@@ -615,113 +645,128 @@ volume (`--reflected-control-max-volume`) limit gets one C-flagged reply rather
 than a reduced burst. L2 and L3 Address Groups each require a local match;
 either mismatch drops the packet. Malformed groups are skipped.
 
-Enabled bursts use deadline queues. One request owns one budget slot and a
-fixed transport plan; a fallback on one copy cannot change the policy of later
-copies. Timestamps, stateful sequences, telemetry and route MTU are evaluated
-per copy. `DatagramSender` serializes socket options and sends, and caches
-successful sticky settings separately per address family. Rate limiting or a
-send failure can stop the rest of a burst.
+Enabled bursts use deadline queues. Each request takes one budget slot and
+gets a fixed transport plan, so a fallback on one copy cannot change the
+policy for later copies. Timestamps, stateful sequence numbers, telemetry and
+route MTU are evaluated for each copy. `DatagramSender` serializes socket
+option changes and sends, and caches sticky settings that succeeded separately
+for each address family. Rate limiting or a send failure can stop the rest of
+a burst.
 
-Untrimmed attempts reuse the current copy's buffer. Shaping uses a separate
-buffer so another route can retry the full reply without inheriting a clamp's
-C flag or padding. Every attempt refreshes T3 and generated HMACs; failed sends
-do not consume sequence/counter state. Earlier burst copies keep their original
-template, while the last copy takes ownership of its buffer.
+An attempt that needs no trimming reuses the current copy's buffer. Shaping
+uses a separate buffer, so a retry over another route can send the full reply
+without inheriting a clamp's C flag or padding. Every attempt refreshes T3 and
+generated HMACs, and failed sends do not use up sequence or counter state.
+Earlier burst copies keep the original template, and the last copy takes over
+its buffer.
 
-Linux checks each reply route and subtracts IP, UDP and SRH overhead. Netlink
-notifications, a 250 ms expiry and an `EMSGSIZE` refresh keep the bounded cache
-current. At its 256-entry limit, a second-chance queue replaces one route rather
-than clearing the working set. Hits mark an entry for another chance without
-extending its expiry. Expired stored entries are rejected on lookup or replaced;
-notifications and notification failures clear both entries and queue state.
-Padding and optional reflected-header TLVs may shrink; mandatory
-fields may not. An MTU clamp sets C and stops the burst. An unknown MTU budget
-drops the reply. See [Reply size and route MTU](usage.md#reply-size-and-route-mtu).
+On Linux the reflector looks up the route of each reply and subtracts the IP,
+UDP and SRH overhead. Netlink notifications, a 250 ms expiry and a refresh on
+`EMSGSIZE` keep the cache current. The cache holds at most 256 entries. When
+it is full, a second-chance queue replaces one route instead of clearing the
+whole working set. A hit marks an entry for another chance but does not extend
+its expiry. Expired entries are rejected on lookup or replaced. A notification,
+or a failure to receive notifications, clears both the entries and the queue
+state. Padding and optional reflected-header TLVs may shrink to fit, but
+mandatory fields may not. An MTU clamp sets C and stops the burst. If the MTU
+budget is unknown, the reply is dropped. See
+[Reply size and route MTU](usage.md#reply-size-and-route-mtu).
 
 Drain rejects new session identities. Expiry retires a session's queued sends.
 Shutdown stops intake, allows the configured grace period, then cancels the
-rest. `reply_queue_rejected` counts refused requests and
-`queued_replies_cancelled` counts unsent copies. Aggregate drops count one per
-rejected request or per cancelled request remainder.
+rest. `reply_queue_rejected` counts refused requests, and
+`queued_replies_cancelled` counts copies that were never sent. The aggregate
+drop count goes up by one for each rejected request, and by one for each
+request whose remaining copies were cancelled.
 
 ### Residual BER TLV (draft-ietf-bpm-stamp-ber-01)
 
-Experimental outer Type 243 carries count and maximum burst in eight fixed
-bytes and an optional pattern sub-TLV (experimental Type 241). Without it,
-use `ff00ff00`; an explicit pattern needs at least four bytes. The reflector
-checks delivered padding, reports forward errors and repairs it for reverse
-measurement. Missing/duplicate padding or BER, duplicate patterns and
-misalignment get outer C. Short outer values get M+C; short known pattern
-values get nested M. Unknown nested values are echoed with U.
+Experimental outer Type 243 carries the error count and maximum burst in
+eight fixed bytes, followed by an optional pattern sub-TLV (experimental
+Type 241). Without the sub-TLV the pattern is `ff00ff00`. A pattern carried in
+the sub-TLV must be at least four bytes. The reflector checks the padding it received,
+reports the forward errors, and repairs the padding for the reverse
+measurement. Missing or duplicate padding or BER TLVs, duplicate patterns and
+misalignment get C on the outer TLV. A short outer value gets M+C. A short
+value in a known pattern sub-TLV gets M on the sub-TLV. Unknown nested values
+are echoed with U.
 
-BER padding follows HMAC so corruption stays measurable outside metadata
-coverage. Parent and nested flags and integrity gate sender observations.
-U disables later BER requests; delay/loss measurements continue. Count with
-zero burst can mean burst unavailable and does not become a clean burst
-sample. Legacy Types 240–242 get U; `--ber-omit-burst` is a migration error.
-See [migration and peer compatibility](ber-migration.md).
+BER padding goes after the HMAC, outside the bytes it covers, so corruption in
+the padding can be measured without touching the signed metadata. Parent and
+nested flags and integrity decide whether the sender records an observation.
+After a U, the sender stops requesting BER, and delay and loss measurement
+carries on. A count with a zero burst can mean the burst is unavailable, and
+it is not recorded as a clean burst sample. Legacy Types 240–242 get U, and
+`--ber-omit-burst` is a migration error. See
+[migration and peer compatibility](ber-migration.md).
 
-A BER interval lasts `--ber-interval` × `--send-delay`, fixed at startup even
-under ECN backoff. Thresholds are per million; only completed intervals that
-cross above a threshold raise alarms. Empty windows are omitted, and the
-current partial window does not raise alarms. See
+A BER interval lasts `--ber-interval` × `--send-delay`. The length is fixed at
+startup and stays the same under ECN backoff. Thresholds are per million. Only
+a completed interval that goes above a threshold raises an alarm. Empty
+windows are left out, and the current partial window never raises alarms. See
 [retention](statistics.md#memory-and-ber-history).
 
-On Linux, sender padding shrinks by whole pattern repetitions to fit the route
-MTU. At reflection, Type 12/MTU fitting fills the exact route budget with the
-validated BER pattern, including when semantic resizing already set parent C.
-A controlled reply can end with a partial repetition; BER C marks the resized
-sample unusable.
-Reflected headers are removed before shrinking BER padding. A padding resize
-marks BER metadata with C because the denominator changed; header-only removal
-preserves that denominator. The Type 12 MTU clamp sets its own C and stops the
-burst. Standalone BER trimming retains whole repetitions. Controlled fitting
-requires the mandatory fields and padding header to fit; otherwise it drops
-the reply rather than emitting a malformed TLV tail.
-Use symmetric replies for BER. UDP checksums and link CRC or FEC may
-discard corrupt packets before delivery, so this measures residual delivered
-errors, not raw link BER.
+On Linux the sender shrinks its padding by whole pattern repetitions to fit the
+route MTU. When the reflector fits a reply to the route budget for Type 12 or
+the MTU, it fills the exact budget with the validated BER pattern, even if
+semantic resizing has already set C on the parent. A controlled reply can then
+end with a partial repetition, and C on the BER TLV marks the resized sample
+as unusable.
+Reflected headers are removed before BER padding is shrunk. Resizing the
+padding sets C on the BER metadata because the denominator changed. Removing
+only headers leaves the denominator as it was. The Type 12 MTU clamp sets its
+own C and stops the burst. Standalone BER trimming keeps whole repetitions.
+Controlled fitting needs the mandatory fields and the padding header to fit.
+If they do not, the reply is dropped instead of being sent with a malformed
+TLV tail.
+Use symmetric replies for BER. UDP checksums and link CRC or FEC can discard
+corrupt packets before delivery, so this measures residual errors in
+delivered packets, not raw link BER.
 
-BER, Type 12, header-reflection, CoS and nested control C reasons have fixed
-counters and independently throttled logs after successful transmission.
-Header reasons use fixed provenance metadata to track whether an offending
-header survives size trimming; failed MTU attempts do not affect later retries.
-Administrative trimming counts an existing request HMAC once and reserves space
-for a new HMAC only when needed. The shorter reply preserves complete TLV framing;
-it does not refill removed headers with raw zero bytes after the HMAC.
-The [matrix](conformance/draft-stamp-ber.md) records diagnostics for the
-TLV-enabled profile. All known local C-generation sites have specific reasons;
-`peer_c_preserved` separately records copied C in complete child headers of
-Location, Timestamp Information, Return Path, Type 12 and BER containers. This
-bounded observation reads headers only and stops at incomplete child framing;
-it never decodes values or unknown container formats. It does not validate an
-opaque value or influence packet processing. TLV-ignore legacy tails remain
-uninterpreted.
-Structural short-BER C is generated before HMAC verification and remains
-countable when a later I is added; failed digests and payload bytes stay opaque. Zero-checksum validation, platform MTU and physical
-LAG limitations remain explicit.
+C flags set for BER, Type 12, header reflection, CoS and nested control
+reasons have fixed counters, and each reason is logged with its own throttle
+after the reply has been sent. Header reasons carry fixed provenance metadata
+so the reflector can tell whether the offending header survived size
+trimming. Failed MTU attempts do not affect later retries.
+Administrative trimming counts an existing request HMAC once and reserves room
+for a new HMAC only when one is needed. The shorter reply keeps complete TLV
+framing and does not fill the space of removed headers with raw zero bytes
+after the HMAC.
+The [matrix](conformance/draft-stamp-ber.md) records the diagnostics for the
+TLV-enabled profile. Every known place where the reflector sets C itself has a
+specific reason. `peer_c_preserved` separately counts C copied from the peer
+in complete child headers of Location, Timestamp Information, Return Path,
+Type 12 and BER containers. This count reads headers only and stops at
+incomplete child framing. It never decodes values or unknown container
+formats, does not validate opaque values, and does not affect packet
+processing. Legacy tails in TLV-ignore mode are not interpreted.
+The structural C for a short BER TLV is set before HMAC verification, so it
+can still be counted when an I is added later. Failed digests and payload
+bytes stay opaque. Zero-checksum validation, platform MTU and physical LAG
+remain listed as limitations.
 
 ### Reflected IPv6 Extension and Fixed Header Data TLVs (draft-ietf-ippm-stamp-ext-hdr-26)
 
-Type 246 (IPv6 extension header, §4.1 and §4.2) has an 8-octet Requested field;
-Type 247 (IP fixed header, §6.1 and §6.2) has a 4-octet Requested field. The TLV
-length is the complete size of the target header, and a Type 246 length must be
-a multiple of 8. Each zero Requested octet is a wildcard; nonzero Requested
-must identify exactly one unconsumed header of matching length. An ambiguous
-selector returns C without copying or consuming data. An all-zero Requested
-field selects the first unconsumed header of that length and is filled with
-that header's first octets. Nonzero Requested is preserved and the remaining
-header bytes are copied into Received. Local source-IP allowlists separately
-control fixed and extension header disclosure; both default to deny.
+Type 246 (IPv6 extension header, §4.1 and §4.2) has an 8-octet Requested
+field. Type 247 (IP fixed header, §6.1 and §6.2) has a 4-octet Requested
+field. The TLV length is the full size of the target header, and a Type 246
+length must be a multiple of 8. Each zero octet in Requested is a wildcard. A
+Requested field with nonzero octets must identify exactly one unconsumed header
+of matching length. If it matches more than one, the reply gets C and nothing
+is copied or consumed. An all-zero Requested field selects the first
+unconsumed header of that length and is filled with that header's first
+octets. A nonzero Requested field is left as it is, and the rest of the header
+is copied into Received. Separate allowlists of source IPs control whether
+fixed headers and extension headers are disclosed, and both deny by default.
 Each captured header is reflected by at most one TLV, so successive TLVs pair
-with successive headers. No captured headers or no match sets C and leaves the
-value unchanged. A Type 247 after a Type 246 sets C on every header TLV and
-copies nothing (§7.1).
+with successive headers. If no headers were captured, or none match, C is set
+and the value is left unchanged. A Type 247 after a Type 246 sets C on every
+header TLV, and nothing is copied (§7.1).
 
-Revision 26's identical-prefix example conflicts with its explicit ambiguity
-rules. The shared processor retains the latter: repeated ambiguous nonzero
-selectors get C without consuming a header; all-zero requests select each
-capture once in order. See the [conformance interpretation](conformance/draft-stamp-ext-hdr.md#revision-26-interpretation).
+Revision 26's example with identical prefixes contradicts its own ambiguity
+rules. The shared processor follows the rules: repeated ambiguous nonzero
+selectors get C without consuming a header, and all-zero requests select each
+capture once, in order. See the [conformance interpretation](conformance/draft-stamp-ext-hdr.md#revision-26-interpretation).
 
 Where headers come from:
 
@@ -737,9 +782,9 @@ Both backends set C on Type 12 IPv6 Extension Header Control sub-TLVs (§5.1),
 because inserting headers into replies is unsupported.
 
 On the sender, Linux can attach one Hop-by-Hop and then one Destination Options
-header (`--attach-ext-hdr`). Explicit `--reflected-ipv6-ext-hdr` requests
-replace the automatic requests and must match the attached headers in order;
-an ambiguous subset needs a selector. Type 247 covers the sender's one fixed
+header (`--attach-ext-hdr`). Requests given with `--reflected-ipv6-ext-hdr`
+replace the automatic ones and must match the attached headers in order. If
+they cover an ambiguous subset, they need a selector. Type 247 covers the sender's one fixed
 header. A failure to attach a header or set up the route MTU aborts startup.
 See [IPv6 extension headers](usage.md#ipv6-extension-headers) and the
 [conformance matrix](conformance/draft-stamp-ext-hdr.md).
@@ -789,23 +834,26 @@ The sub-agent is read-only and implements the sub-agent side of
 
 ### Framing and failure handling
 
-`PduReader` retains partial frames across 200 ms read timeouts and checks
-lengths before allocation or indexing. EOF ends the connection. Initial
-connection failure warns without stopping STAMP; later failures trigger
-reconnection and registration with 1–30 s exponential backoff. A supervisor
-logs event-loop panics.
+`PduReader` keeps partial frames across 200 ms read timeouts and checks
+lengths before it allocates or indexes. EOF ends the connection. If the first
+connection attempt fails, the sub-agent logs a warning and STAMP keeps
+running. Later failures trigger reconnection and re-registration with
+exponential backoff from 1 to 30 s. A supervisor logs panics in the event
+loop.
 
-Open and Register validate the eight-byte Response prefix, error status,
-packet ID and (after Open) session ID. Net-SNMP may append the original
-administrative binding; only the matching OID and value are accepted. Administrative transaction
-IDs have no defined value in RFC 2741 and are not compared. Each handshake read
-and frame write has an absolute 30-second deadline and checks role cancellation.
-Independent master tests cover invalid responses, both byte orders and cancellation.
+The Open and Register handshakes check the eight-byte Response prefix, the
+error status, the packet ID and, after Open, the session ID. Net-SNMP may
+append the original administrative binding, and only the matching OID and
+value are accepted. RFC 2741 defines no value for administrative transaction
+IDs, so they are not compared. Each handshake read and frame write has an
+absolute 30-second deadline and checks for role cancellation. Tests against a
+separately written master cover invalid responses, both byte orders and
+cancellation.
 
 ### Tests
 
-- `tests/agentx_protocol_test.rs` runs an independent master over a real Unix
-  socket against the production session and event loop. Its encoder and
+- `tests/agentx_protocol_test.rs` runs a separately written master over a real
+  Unix socket against the production session and event loop. Its encoder and
   decoder do not use production codec helpers. It covers GetBulk ordering and
   end-of-MIB positions, inclusive and exclusive bounds, zero repetitions, header
   and payload fragments that each cross a 1.25 s gap (longer than the read
@@ -820,7 +868,7 @@ Independent master tests cover invalid responses, both byte orders and cancellat
   the binary. See
   [release verification](release-evidence.md#authenticated-control-and-a-reference-snmp-master).
 
-This is evidence for the subset above, not a full SNMP certification.
+These tests cover the subset above. They are not a full SNMP certification.
 
 ## Hardware-assisted timestamping
 
@@ -837,16 +885,16 @@ On Linux, RX timestamps come from `SCM_TIMESTAMPING` and TX timestamps from
 `MSG_ERRQUEUE`, matched by `SOF_TIMESTAMPING_OPT_ID`. On the sender, a TX
 report replaces the stored T1 of its probe. On the reflector, a TX report
 corrects the Follow-Up record. T3 in the current reply stays a software
-timestamp because it is written before transmission. A hardware report may
-upgrade a software record; a later software report cannot downgrade hardware
-provenance.
+timestamp because it is written before transmission. A hardware report can
+replace a software record, but a later software report cannot replace a
+hardware one.
 
 macOS supports software RX timestamps through `SO_TIMESTAMP`. Windows has no
-kernel or NIC timestamp path. A capability probe does not prove that a hardware
-timestamp was used. NIC PHCs must be synchronized with the clocks used at both
-endpoints (for example with ptp4l and phc2sys); the synchronization
-declarations and the S bit do not synchronize anything. See the
-[two-host verification procedure](testing-hardware-timestamps.md).
+kernel or NIC timestamp path. A capability probe does not prove that a
+hardware timestamp was used. NIC PHCs must be synchronized with the clocks
+used at both endpoints, for example with ptp4l and phc2sys. The
+synchronization declarations and the S bit do not synchronize anything. See
+the [two-host verification procedure](testing-hardware-timestamps.md).
 
 ## Benchmarks
 

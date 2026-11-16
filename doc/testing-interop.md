@@ -1,20 +1,23 @@
 # Independent protocol-combination fixtures
 
 [`scripts/interop_apps.py`](../scripts/interop_apps.py) can compare separately
-built applications in compatible roles and modes. The previously cited October
-report is unavailable, so this page makes no claim about that run's case totals
-or results. Record peer revisions, profiles and wire reports for a new run.
+built applications that run in compatible roles and modes. The October report
+this page used to cite is no longer available, so the page makes no claim about
+that run's case totals or results. For a new run, record the peer revisions,
+the profiles and the wire reports.
 
-Independent wire fixtures for testing a reflector and reusing STAMP payloads.
-See the [profile limits](conformance/README.md#known-limits) before interpreting
-an exchange as evidence for another backend, platform or physical link.
+The fixtures below are written separately from the Rust code. They test a
+reflector and provide STAMP payloads that other tools can reuse. Read the
+[profile limits](conformance/README.md#known-limits) before you treat an
+exchange as evidence about another backend, platform or physical link.
 
-[`scripts/interop_stamp.py`](../scripts/interop_stamp.py) drives a real reflector
-with a separate Python standard-library implementation of the wire layout,
-HMAC coverage, reply checks and UDP metadata collection. It does not import the
-Rust crate or call its sender. Linux and Python 3.10+ are required; the profile
-uses the nix backend, loopback IPv4/IPv6, and software timestamps. A missing
-socket capability or failed check is a failure, with no internal skip.
+[`scripts/interop_stamp.py`](../scripts/interop_stamp.py) drives a real
+reflector. It has its own implementation of the wire layout, HMAC coverage,
+reply checks and UDP metadata collection, written with only the Python standard
+library. It does not import the Rust crate or call its sender. It needs Linux
+and Python 3.10 or later. The profile uses the nix backend, IPv4 and IPv6
+loopback, and software timestamps. A missing socket capability or a failed
+check counts as a failure. The script never skips a check internally.
 
 ```sh
 cargo build --locked
@@ -24,53 +27,61 @@ python3 scripts/interop_stamp.py --binary target/debug/stamp-suite --report /tmp
 python3 -m unittest discover -s scripts/tests -v
 ```
 
-Run builds and live suites sequentially: Cargo can replace the executable while
-another suite is using it. `conformance.yml` gates both build variants and uploads
-the JSON wire records. The script launches and reaps its own reflectors, uses
-ephemeral ports, and creates temporary key directories with mode-0600 key files.
-It only sends to loopback. It never changes interface addresses or kernel policy.
+Run the builds and the live suites one after another. Cargo can replace the
+executable while another suite is still using it. `conformance.yml` runs both
+build variants as gates and uploads the JSON wire records. The script starts
+and reaps its own reflectors, uses ephemeral ports, and creates temporary key
+directories with mode-0600 key files. It sends only to loopback and never
+changes interface addresses or kernel policy.
 
 ## Fixture contract and scope
 
-The `loopback-burst-fallback-v1` profile runs 16 configurations: IPv4/IPv6,
-open/authenticated base, NTP/PTP reflector format and stateful/stateless sequencing.
-Each configuration uses a sender timestamp format different from the reflector's.
-Each then exercises SSIDs 42 and 43 with distinct directory keys, and SSID 99
-with the default key: **48 exchanges and 192 validated replies** in a complete
-successful run. Both base modes include a keyed HMAC TLV. The authenticated
-configurations additionally send **24 bases signed with the wrong directory
-entry's key**, expect silence, and verify that the subsequent valid request still
-starts its session sequence/counters at their initial values.
+The `loopback-burst-fallback-v1` profile runs 16 configurations, one for each
+combination of IPv4/IPv6, open/authenticated base packets, NTP/PTP reflector
+timestamp format, and stateful/stateless sequencing. In every configuration the
+sender uses a different timestamp format from the reflector. Each configuration
+then exercises SSIDs 42 and 43, each with its own key from the key directory,
+and SSID 99 with the default key. A complete successful run makes
+**48 exchanges and 192 validated replies**. Both base modes include a keyed
+HMAC TLV. The authenticated configurations also send **24 bases signed with
+the wrong directory entry's key**. They expect no reply to these. They then
+check that the next valid request still starts its session's sequence number
+and counters at their initial values.
 
-Each exchange sends a three-copy burst request containing Type 12, CoS, Direct
-Measurement, Follow-Up, Destination Node Address, SRv6 Return Path and HMAC TLVs.
-After receiving the first copy, it interleaves an ordinary request. Every reply
-is checked for sequence and echoed fields, source endpoint, actual IP traffic
-class, TLV order/flags/values, and HMAC coverage. Later copies must retain T2,
-advance T3, retain the requested CoS/source, and report the intervening send in
-the DM/Follow-Up fields. An extra reply during the final 150 ms guard fails.
+Each exchange sends a request for a burst of three copies. The request carries
+Type 12, CoS, Direct Measurement, Follow-Up, Destination Node Address, SRv6
+Return Path and HMAC TLVs. After the first copy arrives, the script sends an
+ordinary request in between. Every reply is checked for its sequence number and
+echoed fields, its source endpoint, the actual IP traffic class, TLV order,
+flags and values, and HMAC coverage. Later copies must carry the same T2 and a
+later T3, keep the requested CoS and source, and report the ordinary send in
+between in their DM and Follow-Up fields. Any extra reply during the final
+150 ms guard period fails the run.
 
-SRv6 forwarding is disabled: Type 10 must return U=1 with a valid final HMAC.
-Its understood Type 4 child clears U/M/I and reserved header bits, while
-retaining the child type, length and segment bytes. Outer fallback U does not
-permit copying the sender's child flags (RFC 9503 Section 4.1, RFC 8972 flags).
-Source matching uses loopback, so this fixture cannot establish multihomed source
-override. The 120 ms burst gap allows interleaving; it is not a timing benchmark.
-Physical LAG, NIC timestamps, and successful SRH transit need separate tests.
+SRv6 forwarding is disabled, so Type 10 must come back with U=1 and a valid
+final HMAC. Its understood Type 4 child has U, M, I and the reserved header
+bits cleared, but keeps the child type, length and segment bytes. The outer
+fallback U flag does not allow the reflector to copy the sender's child flags
+(RFC 9503 Section 4.1, RFC 8972 flags). Source matching runs over loopback, so
+this fixture cannot show that source override works on a multihomed host. The
+120 ms gap between burst copies leaves room for the interleaved request. It is
+not a timing benchmark. Physical LAG, NIC timestamps and successful SRH
+transit need their own tests.
 
 ## Reusable bytes and oracle checks
 
-[`requests.json`](../tests/fixtures/interop/requests.json) contains 24 named
-parameter sets, each with `burst_hex` and `ordinary_hex`: **48 fixed UDP
-payloads**, with no IP/UDP header or host-dependent field. Timestamps are fixed
-valid wire values so repeated requests are byte-identical. Keys are public test
-values: `ab` repeated 16 times for SSID 42, `cd` for 43, `ef` for the default.
-These payloads can also be consumed by another implementation's test harness;
-its session, key, CoS and burst policies must match this profile. The launcher
-itself expects stamp-suite's CLI.
+[`requests.json`](../tests/fixtures/interop/requests.json) holds 24 named
+parameter sets, each with `burst_hex` and `ordinary_hex`. That gives
+**48 fixed UDP payloads**, with no IP or UDP header and no host-dependent
+field. Timestamps are fixed, valid wire values, so repeated requests are
+identical byte for byte. The keys are public test values: `ab` repeated 16
+times for SSID 42, `cd` for 43 and `ef` for the default key. Another
+implementation's test harness can use these payloads as well, as long as its
+session, key, CoS and burst policies match this profile. The launcher itself
+expects stamp-suite's CLI.
 
-The generator refuses a mismatch between checked-in bytes and its encoding.
-Changing a fixture requires explicit regeneration and review:
+The generator refuses to run if the checked-in bytes differ from what it
+encodes. To change a fixture, regenerate it and review the diff:
 
 ```sh
 python3 scripts/interop_stamp.py --write-vectors
@@ -79,95 +90,108 @@ python3 -m unittest discover -s scripts/tests -v
 ```
 
 [`replies-normalized.json`](../tests/fixtures/interop/replies-normalized.json)
-holds four observed exchanges with normalized Return Path child flags, with
-binary, runner and request hashes and platform provenance.
-These are frozen regression inputs for the checker, not normative timestamp
-values or independent certification. Unit tests replay them and then deliberately
-corrupt sequences, timestamps, clocks, counters, outer/child flags, child
-framing and segments, CoS, endpoints and
-digests. Behavioral mutations are re-signed so their rejection checks semantics
-as well as integrity. The SHA-256 primitive also has the truncated
+holds four observed exchanges with the Return Path child flags normalized. It
+also stores the binary, runner and request hashes and the platform the
+exchanges came from. These are frozen regression inputs for the checker. They
+are not normative timestamp values and not independent certification. The unit
+tests replay them, then corrupt sequences, timestamps, clocks, counters, outer
+and child flags, child framing and segments, CoS, endpoints and digests.
+Mutations that change behavior are re-signed, so the checker has to reject them
+for what they mean and not only for a broken digest. The SHA-256 primitive is
+also checked against the truncated
 [RFC 4231 §4.2 test vector](https://www.rfc-editor.org/rfc/rfc4231.html#section-4.2).
-The historical [`replies.json`](../tests/fixtures/interop/replies.json) remains
-unchanged; its copied child U flags must now fail the oracle. Signed child
-mutations verify that valid HMACs do not hide incorrect nested fields.
+The historical [`replies.json`](../tests/fixtures/interop/replies.json) is kept
+as it was. Its child U flags were copied from the request, so it must now fail
+the oracle. Signed child mutations check that a valid HMAC cannot hide wrong
+nested fields.
 
-The live report records binary, runner and request-fixture SHA-256, platform,
-Python version, UTC start, all measured transmitted/received UDP bytes and
-receive metadata, expected silence, command arguments and reflector stderr.
-Startup readiness exchanges use a separate retained socket and are excluded
-from measurement records. `expected_cases`, `completed`, `passed` and `failed`
-distinguish partial reports from complete runs; exit status is nonzero if any
-case fails. A missing binary, fixture mismatch or unsupported platform fails
-preflight before a case report is created. Reports are rewritten after every
-case. Temporary key paths and UDP ports are recorded for diagnosis, not replayed
-verbatim.
+The live report records the SHA-256 of the binary, the runner and the request
+fixture, the platform, the Python version and the UTC start time. It also
+records every transmitted and received UDP byte it measured with the receive
+metadata, the expected silences, the command arguments and the reflector's
+stderr. Startup readiness exchanges go through a separate socket that stays
+open, and they are left out of the measurement records. `expected_cases`,
+`completed`, `passed` and `failed` tell a partial report apart from a complete
+run. The exit status is nonzero if any case fails. A missing binary, a fixture
+mismatch or an unsupported platform fails the preflight before any case report
+is written. The report is rewritten after every case. Temporary key paths and
+UDP ports are recorded to help with diagnosis. A replay does not reuse them.
 
 ## Independent successor BER profile
 
-[`scripts/interop_ber.py`](../scripts/interop_ber.py) is a separate Python
-standard-library sender and reflector for `draft-ietf-bpm-stamp-ber-01`.
-It uses agreed experimental outer Type 243 and pattern sub-TLV Type 241;
-neither value is an IANA assignment. It imports no Rust code or other peer
-implementation. Run it after each build, sequentially with other live suites:
+[`scripts/interop_ber.py`](../scripts/interop_ber.py) is a separate sender and
+reflector for `draft-ietf-bpm-stamp-ber-01`, written with only the Python
+standard library. It uses the agreed experimental outer Type 243 and pattern
+sub-TLV Type 241. Neither value is an IANA assignment. It imports no Rust code
+and no other peer implementation. Run it after each build, one at a time with
+the other live suites:
 
 ```sh
 python3 scripts/interop_ber.py --binary target/debug/stamp-suite --report /tmp/ber-interop.json
 ```
 
-The `successor-ber-v1` profile requires **60 cases**: both families × three
-integrity profiles (open, keyed open, authenticated) × ten configurations.
-Each group includes stateful/stateless reflector tests and eight sender tests
-(default/explicit five-byte patterns × baseline, invalid observations, parent U
-and child U). Missing capabilities fail rather than skip. Both default and
-all-features builds run this profile in `conformance.yml` and upload reports
-even when a case fails. All-features still selects nix.
+The `successor-ber-v1` profile requires **60 cases**: both address families ×
+three integrity profiles (open, keyed open, authenticated) × ten
+configurations. Each group of ten has the stateful and stateless reflector
+tests and eight sender tests (default or explicit five-byte pattern × baseline,
+invalid observations, parent U and child U). A missing capability fails the
+case instead of skipping it. `conformance.yml` runs this profile on both the
+default and the all-features build, and uploads the reports even when a case
+fails. The all-features build still selects nix.
 
 The [17 request/expected-field vectors](../tests/fixtures/residual-ber/requests.json)
-cover clean/default errors, explicit four/five-byte patterns, unknown children,
-missing/duplicate padding, duplicate BER/pattern, misalignment, short outer and
-nested values, truncated nested headers, acknowledged prefixes, opaque remainders
-and retired legacy outer types. The reference bit counter constructs an XOR bit
-string; deliberate four-bit runs cross byte and pattern boundaries. Keyed cases
-verify HMAC over the actual reflected sequence and metadata prefix, leaving
-padding outside coverage. Invalid extension HMACs must be copied with I and
-their failed digest unchanged (RFC 8972 §4.8); invalid authenticated bases must
-receive no reply.
+cover the default pattern clean and with errors, explicit four- and five-byte patterns,
+unknown children, missing and duplicate padding, duplicate BER and pattern
+TLVs, misalignment, short outer and nested values, truncated nested headers,
+acknowledged prefixes, opaque remainders and the retired legacy outer types.
+The reference bit counter builds an XOR bit string, and the four-bit error runs
+are placed so they cross byte and pattern boundaries. Keyed cases verify the
+HMAC over the actual reflected sequence number and metadata prefix. The padding
+stays outside the HMAC coverage. An invalid extension HMAC must be copied back
+with I set and the failed digest unchanged (RFC 8972 §4.8). An invalid
+authenticated base packet must get no reply.
 
-Sender cases independently decode emitted requests and return crafted replies.
-Baseline sends same-sequence duplicates. The gates scenario returns signed
-M/C/I, duplicate fields, incorrect patterns, impossible counts and resized padding,
-plus a failed digest in keyed modes. These must add no BER samples. A nonzero
-count with burst zero remains a count sample without a burst sample. Reverse
-errors are introduced independently. Summary checks cover directional counts,
-denominators, error totals, burst maximum/average, rates and interval sums.
-After parent or child U, subsequent requests omit BER and delay/loss continues.
+The sender cases decode the emitted requests with their own code and send back
+crafted replies. The baseline case sends duplicates with the same sequence
+number. The gates case returns signed replies with M, C or I set, duplicate
+fields, wrong patterns, impossible counts and resized padding, plus a failed
+digest in the keyed modes. None of these may add a BER sample. A nonzero error
+count with a burst of zero still counts as an error-count sample, but not as a
+burst sample. Errors in the reverse direction are injected separately. The
+summary checks cover per-direction counts, denominators, error totals, burst
+maximum and average, rates and interval sums. After a parent or child U flag,
+later requests leave out BER, and delay and loss measurement carries on.
 
 [`replies.json`](../tests/fixtures/residual-ber/replies.json) freezes all 12
-reflector observations and 48 sender request/summary records from the documented
-default build. Provenance includes binary, runner and vector hashes. These are
-application regression observations, not independent certification. The
-[`oracle tests`](../scripts/tests/test_interop_ber.py) replay them, alter signed
-semantics/digests/echoes/padding and summaries, and check failure-report bookkeeping.
-The HMAC primitive has an RFC 4231 known-answer test. Regeneration of requests
-is explicit (`--write-vectors`) and live preflight rejects unexpected changes.
+reflector observations and 48 sender request/summary records from the default
+build described here. Their provenance includes the binary, runner and vector
+hashes. These are regression observations of this application, not independent
+certification. The [`oracle tests`](../scripts/tests/test_interop_ber.py)
+replay them, alter the signed meaning, digests, echoes, padding and summaries,
+and check how failures are recorded in the report. The HMAC primitive has an
+RFC 4231 known-answer test. Requests are regenerated only when you pass
+`--write-vectors`, and the live preflight rejects unexpected changes.
 
-Reports contain commands, process outcomes, stdout/stderr, UDP bytes/endpoints,
-expected silence, platform/tool versions, UTC time and hashes. A retained warmup
-socket is separate from measurements; reflectors bind a kernel-selected port
-and expose readiness in their startup log. Every case is attempted, reports are
-rewritten after each, and any failure produces a nonzero exit. A report with
-`completed=false` is incomplete evidence. Keys are public fixture values only.
+Reports contain the commands, process outcomes, stdout and stderr, UDP bytes
+and endpoints, expected silences, platform and tool versions, UTC time and
+hashes. The warmup socket stays open for the run but is kept separate from the
+measurements. Reflectors bind a port chosen by the kernel and announce
+readiness in their startup log. Every case is attempted, the report is
+rewritten after each one, and any failure gives a nonzero exit. A report with
+`completed=false` is incomplete evidence. The only keys are public fixture
+values.
 
-These are software-loopback tests with valid UDP checksums. They do not prove
-physical error capture or PMTU discovery. The [9 November report](interop/2026-11-09-ber/REPORT.md)
-also records route-MTU tests and incompatible Teaparty black-box captures; no
-successor exchange with another maintained application has been demonstrated.
+These tests run over software loopback with valid UDP checksums. They do not
+prove that bit errors on a physical link are captured, or that PMTU discovery
+works. The [9 November report](interop/2026-11-09-ber/REPORT.md) also records
+route-MTU tests and black-box captures against Teaparty, which turned out to be
+incompatible. No successor-profile exchange with another maintained
+application has been shown yet.
 
 ## Protocol sources and complementary coverage
 
-The encoder/checker uses the following frozen sources, not generated Rust
-layouts. Draft rows apply to the pinned revision.
+The encoder and checker are built from the frozen sources below, not from
+layouts generated from the Rust code. Draft rows refer to the pinned revision.
 
 | Source | Fields used by the independent profile |
 | --- | --- |
@@ -176,19 +200,20 @@ layouts. Draft rows apply to the pinned revision.
 | [RFC 9503 §§3–4](https://www.rfc-editor.org/rfc/rfc9503.html#section-3) | Destination Node Address (Type 9), Return Path (Type 10), SRv6 segment-list sub-TLV (Type 4), fallback flag |
 | [RFC 10052 §§3, 4.3](https://www.rfc-editor.org/rfc/rfc10052.html#section-3) | Type 12 count, interval, minimum size and composition |
 
-The wire suites below assemble bytes manually and use
-[`common/wire_hmac.rs`](../tests/common/wire_hmac.rs), which calls `hmac`/`sha2`
-directly. Tests may still invoke the production receiver as the system under test.
+The wire suites below build their bytes by hand and use
+[`common/wire_hmac.rs`](../tests/common/wire_hmac.rs), which calls `hmac` and
+`sha2` directly. A test can still run the production receiver as the system
+under test.
 
 | Combination | Reproducible coverage and limits |
 | --- | --- |
-| Key directory + fallback + queued rotation/revocation | `cargo test --locked --test keyset_fallback_test`; IPv4/IPv6, open/auth, per-SSID/default keys; independent wire signing/verification |
-| Bursts + CoS + software/kernel Follow-Up | `cargo test --locked --all-features --test burst_transmission_test`; independent HMAC checks, actual IP traffic class and interleaved ordinary packets |
-| Sessions + cap + authentication/replay/rotation | `cargo test --locked --test session_auth_admission_test --test session_capacity_test`; the former uses the independent HMAC helper; checks rejection before admission/refresh and overload behavior |
-| Required micro-session + absent/U/I TLV | `cargo test --locked --test required_micro_session_test`; real sender vs raw peer, independent signing; [RFC 9534 §3.2](https://www.rfc-editor.org/rfc/rfc9534.html#section-3.2), logical identifiers only |
-| Mixed clocks and advertised clock quality | `cargo test --locked --test mixed_clock_test`; independently encoded/signed peer with explicit time offset and synchronization metadata |
-| Source/SRH fallback failures | `cargo test --locked --lib receiver::transmit`; shared finalizer tests inject combined transport failures and verify final signatures; syscall source tests are Linux-specific |
-| Scoped IPv6, real routing/MTU and SRH | `scoped_ipv6_test`, `route_mtu_test`, `netns_conformance`; separate ignored tiers, see [tests that need privileges](../tests/README.md#tests-that-need-privileges-or-namespaces) and the [namespace guide](testing-netns.md). Inspect SRH capture versus reported fallback; neither a skip nor fallback is successful SRH evidence. These suites still use some production packet/TLV helpers. |
+| Key directory + fallback + queued rotation/revocation | `cargo test --locked --test keyset_fallback_test`; IPv4/IPv6, open/auth, per-SSID and default keys; wire signing and verification done outside the crate |
+| Bursts + CoS + software/kernel Follow-Up | `cargo test --locked --all-features --test burst_transmission_test`; HMACs checked outside the crate, actual IP traffic class and interleaved ordinary packets |
+| Sessions + cap + authentication/replay/rotation | `cargo test --locked --test session_auth_admission_test --test session_capacity_test`; the first uses the independent HMAC helper; checks that rejection happens before admission or refresh, and checks overload behavior |
+| Required micro-session + absent/U/I TLV | `cargo test --locked --test required_micro_session_test`; real sender against a raw peer that signs on its own; [RFC 9534 §3.2](https://www.rfc-editor.org/rfc/rfc9534.html#section-3.2), logical identifiers only |
+| Mixed clocks and advertised clock quality | `cargo test --locked --test mixed_clock_test`; a peer that encodes and signs on its own, with a set time offset and synchronization metadata |
+| Source/SRH fallback failures | `cargo test --locked --lib receiver::transmit`; shared finalizer tests inject combined transport failures and verify the final signatures; the syscall source tests are Linux-specific |
+| Scoped IPv6, real routing/MTU and SRH | `scoped_ipv6_test`, `route_mtu_test`, `netns_conformance`; separate ignored tiers, see [tests that need privileges](../tests/README.md#tests-that-need-privileges-or-namespaces) and the [namespace guide](testing-netns.md). Compare the SRH capture with the reported fallback. Neither a skip nor a fallback counts as successful SRH evidence. These suites still use some production packet and TLV helpers. |
 
-Malformed-input properties, fuzzing, telemetry, and session-identity tests
-cover additional cases; this fixture does not cover every combination.
+Malformed-input properties, fuzzing, telemetry and session-identity tests cover
+more cases. This fixture does not cover every combination.

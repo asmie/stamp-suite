@@ -1,70 +1,77 @@
 # Security
 
-Deployment risks, HMAC keys, rotation, permissions and service hardening.
+How to run stamp-suite safely: what it trusts, how HMAC keys are loaded and
+rotated, which file permissions it checks, and how the packaged service is
+locked down.
 
 ## Threat model
 
-The host filesystem, kernel and clock are trusted. Network traffic is
-untrusted: routers and peers can drop, delay, reorder, duplicate or remark
-packets. A peer that holds a shared HMAC key can forge messages authenticated
+stamp-suite trusts the host's filesystem, kernel and clock. It does not trust
+the network: routers and peers can drop, delay, reorder, duplicate or remark
+packets. Anyone who holds a shared HMAC key can forge messages authenticated
 with that key.
 
-HMAC detects changes to covered bytes and rejects packets injected without
-the key. It does not encrypt traffic, establish freshness, prevent flooding or
-protect against a compromised key holder. IP headers are outside STAMP HMAC
-coverage.
+HMAC detects changes to the bytes it covers and rejects packets injected by
+someone without the key. It does not encrypt traffic, prove that a packet is
+fresh, stop flooding, or help against a compromised key holder. STAMP HMAC
+does not cover IP headers.
 
 ### Reflection and amplification (open mode)
 
-An open reflector can reply to spoofed source addresses. Limit access with
-network policy, and use authenticated mode on untrusted networks.
+An open reflector will reply to spoofed source addresses. Restrict who can
+reach it with network policy, and use authenticated mode on untrusted
+networks.
 
-The Type 12 authenticated protected profile also enables `--verify-tlv-hmac`
-with the key source, protecting the extension that controls amplification.
-An open reflector with optional-HMAC verification still accepts an absent
-HMAC TLV. Such a setup is outside the matrix's protected-profile claim.
+For Type 12, the protected profile combines authenticated mode with
+`--verify-tlv-hmac` and a key source, so the HMAC also covers the extension
+that controls amplification. An open reflector that verifies optional HMACs
+still accepts a request with no HMAC TLV at all. The conformance matrix's
+protected-profile claim does not cover that setup.
 
-The defaults limit additional amplification:
+The defaults keep extra amplification low:
 
 - `--return-path-allow-alternate` is off. Return Address requests get the U
-  flag and replies go to the packet source.
-- `--srv6-return-forwarding` is off. Unsupported return-path requests get the
-  U flag.
-- `--reflected-control-max-count` defaults to 0, which disables Type 12.
-  Such a request gets one normal reply with the U flag, without the requested
-  padding or extra copies. When Type 12 is enabled,
-  `--reflected-control-max-rate` and `--reflected-control-max-volume` bound
-  the bytes each request can generate.
+  flag, and replies go to the packet's source address.
+- `--srv6-return-forwarding` is off. Return-path requests the reflector does
+  not support get the U flag.
+- `--reflected-control-max-count` defaults to 0, which disables Type 12. A
+  Type 12 request then gets one normal reply with the U flag, without the
+  requested padding or extra copies. If you enable Type 12,
+  `--reflected-control-max-rate` and `--reflected-control-max-volume` cap the
+  bytes a single request can generate.
 
-Enable these features only inside a controlled measurement domain.
-Authenticated mode rejects packets with an invalid base HMAC before it
-changes session state or builds a reply. In open mode, TLV integrity does not
-authenticate the base packet.
+Only enable these features inside a measurement domain you control.
+Authenticated mode rejects a packet with an invalid base HMAC before it
+touches session state or builds a reply. In open mode, a valid TLV HMAC does
+not authenticate the base packet.
 
 ### Bounded session state
 
-`--max-sessions` limits tracked session identities (default 65536; 0 means
-unlimited). An identity is both UDP endpoints, the SSID and the optional
-sender Micro-session ID. At capacity, new identities are dropped and existing
-sessions continue. Idle expiry or explicit expiry frees capacity.
+`--max-sessions` limits how many session identities the reflector tracks
+(default 65536; 0 means no limit). An identity is the pair of UDP endpoints,
+the SSID and, if present, the sender Micro-session ID. When the table is full,
+packets that would start a new identity are dropped, and existing sessions
+keep working. Space frees up when a session idles out or is expired by hand.
 
-`--max-pps` charges one token per incoming request before validation and session
-admission, then one for each additional Type 12 reply copy, per source IP. It
-defaults to 0 (unlimited). `--reflector-queue-capacity` (default 1024)
-separately bounds accepted requests waiting for replies, including bursts. It
-counts requests, not bytes. See
+`--max-pps` rate-limits per source IP. Each incoming request costs one token,
+charged before validation and session admission, and each extra Type 12 reply
+copy costs one more. The default is 0 (no limit). `--reflector-queue-capacity`
+(default 1024) is a separate cap on accepted requests that are waiting for
+their replies, bursts included. It counts requests, not bytes. See
 [Capacity, drain and shutdown](usage.md#capacity-drain-and-shutdown).
 
-The rate limiter retains at most 16,384 source-IP buckets, independently of
-`--max-sessions`. New sources beyond that share one overflow budget; existing
-sources keep theirs. Buckets idle for 60 s can expire, with at most four
-entries scanned per request. Type 12 count, size and volume caps still apply.
+The rate limiter keeps at most 16,384 source-IP buckets, whatever
+`--max-sessions` is set to. Sources that arrive after that share a single
+overflow budget, while sources that already have a bucket keep it. A bucket
+that has been idle for 60 s can be removed; each request scans at most four
+entries for removal. The Type 12 count, size and volume caps apply on top of
+this.
 
-Replay detection keeps a 31-entry window per session. A Type 12 request whose
-sequence number is not new gets one reply with the U flag.
-`--drop-replayed` also suppresses ordinary duplicates. Reordering and sender
-restarts can also produce sequence numbers that are not new. See
-[Reflector](usage.md#reflector).
+Replay detection keeps a window of 31 sequence numbers per session. A Type 12
+request with a sequence number the session has already seen gets one reply
+with the U flag. With `--drop-replayed`, ordinary duplicates are dropped too.
+Keep in mind that reordering and sender restarts also produce sequence
+numbers that are not new. See [Reflector](usage.md#reflector).
 
 ## HMAC authentication
 
@@ -72,29 +79,31 @@ Both mechanisms use HMAC-SHA-256 truncated to 16 bytes:
 
 | Mechanism | Coverage and behavior |
 | --- | --- |
-| Base authentication (`--auth-mode A`) | Covers the fixed packet fields (RFC 8762 §4.4). A missing key prevents startup. Packets with an invalid HMAC are dropped. |
-| TLV HMAC (RFC 8972 §4.8, Type 8) | Covers the sequence number and the TLVs before the HMAC TLV. Only Extra Padding may follow it, outside coverage. `--verify-tlv-hmac` turns on verification at the reflector. A failed check produces a reply with the I flag set. |
+| Base authentication (`--auth-mode A`) | Covers the fixed packet fields (RFC 8762 §4.4). Without a key the process does not start. Packets with an invalid HMAC are dropped. |
+| TLV HMAC (RFC 8972 §4.8, Type 8) | Covers the sequence number and every TLV before the HMAC TLV. Only Extra Padding may come after it, and that padding is not covered. The reflector checks it only with `--verify-tlv-hmac`. If the check fails, the reply has the I flag set. |
 
-The sender's `--tlv-hmac auto` (the default) adds an HMAC TLV when a key is
-configured. `on` requires a key. `off` stops the sender from adding one; the
-key is still used to verify reflected TLV HMACs. Authenticated mode rejects
-`off`.
+On the sender, `--tlv-hmac auto` (the default) adds an HMAC TLV whenever a key
+is configured. `on` fails without a key. `off` stops the sender from adding
+the TLV, but the key is still used to verify TLV HMACs in replies.
+Authenticated mode does not accept `off`.
 
 ### ECN measurement integrity
 
-CoS TLV tampering can falsify EC2 or requested reverse marking. Configure a
-shared key, keep the sender's `--tlv-hmac auto` (or use `on`), and enable
-`--verify-tlv-hmac` at the reflector to protect the covered TLVs. The base
-packet HMAC alone does not cover CoS, and the mutable IP ECN bits remain
-outside both HMACs. A key holder can still falsify measurements.
+Someone who tampers with the CoS TLV can fake EC2 or the requested reverse
+marking. To protect it, configure a shared key, leave the sender's
+`--tlv-hmac` at `auto` (or set `on`), and run the reflector with
+`--verify-tlv-hmac`. The base packet HMAC does not cover the CoS TLV, and
+neither HMAC covers the ECN bits in the IP header, which routers are allowed
+to change. A key holder can still fake measurements.
 
 The [CoS/ECN draft §6](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-02.txt)
-also suggests destination UDP ports in the dynamic range (49152–65535) to
-make STAMP less obvious to port-based middleboxes. Configure the reflector's
-`--local-port` and sender's `--remote-port` to the same chosen port, with
-matching firewall/provisioning rules. The application does not randomize the
-destination automatically. Port choice provides no authentication and does
-not prevent a middlebox from identifying or modifying packets.
+also suggests using a destination UDP port from the dynamic range
+(49152–65535), so that port-based middleboxes are less likely to spot STAMP
+traffic. To do that, set the reflector's `--local-port` and the sender's
+`--remote-port` to the same port and open it in your firewall and
+provisioning rules. stamp-suite does not pick a random port for you. A
+different port does not authenticate anything, and a middlebox can still
+identify or modify the packets.
 
 ## Key sourcing and rotation
 
@@ -104,32 +113,32 @@ Configure exactly one key source:
 
 | Source | Use |
 | --- | --- |
-| `--hmac-key HEX` or the `STAMP_HMAC_KEY` environment variable | Testing. The key is visible in process arguments or the process environment. |
-| `--hmac-key-file PATH` | One key for all sessions. Preferred for services. |
+| `--hmac-key HEX` or the `STAMP_HMAC_KEY` environment variable | Testing only. Other users can see the key in the process arguments or environment. |
+| `--hmac-key-file PATH` | One key for all sessions. Use this for services. |
 | `--hmac-key-dir DIR` | Reflector only: one key per SSID, plus an optional default. |
 
-Combining sources fails startup. This also applies across the command line
-and the configuration file: a key on the command line or in the environment
-conflicts with a key file set in TOML instead of overriding it. The TOML
-configuration accepts `hmac_key_file` and `hmac_key_dir` but has no field for
-an inline key.
+If more than one source is set, startup fails. This also holds across the
+command line and the configuration file: a key given on the command line or
+in the environment does not override a key file set in TOML, it conflicts
+with it. The TOML file accepts `hmac_key_file` and `hmac_key_dir`, but has no
+field for an inline key.
 
-A key file holds the key as hex text or as raw bytes, and must decode to at
-least 16 bytes. Use 32 random bytes for new keys:
+A key file contains the key either as hex text or as raw bytes, and it must
+decode to at least 16 bytes. Generate new keys as 32 random bytes:
 
 ```sh
 openssl rand -hex 32
 ```
 
-At startup the reflector loads its source into one keyset. A single key from
-`--hmac-key`, `STAMP_HMAC_KEY` or `--hmac-key-file` becomes the keyset's
-default key. Keys are redacted from debug output and wiped from memory when
-dropped.
+At startup the reflector loads its key source into a single keyset. A single
+key from `--hmac-key`, `STAMP_HMAC_KEY` or `--hmac-key-file` becomes the
+keyset's default key. Keys never appear in debug output, and their memory is
+wiped when they are dropped.
 
 ### Key directories
 
-In a key directory, each file's name without its extension is the SSID in
-hexadecimal, and `default.key` holds the fallback key:
+In a key directory, each file is named after an SSID in hexadecimal (the
+extension is ignored), and `default.key` holds the fallback key:
 
 ```text
 /etc/stamp/keys/
@@ -138,12 +147,13 @@ hexadecimal, and `default.key` holds the fallback key:
 └── default.key   # any other SSID
 ```
 
-A packet uses the key for its SSID, or the default key when there is none.
-In authenticated mode a packet whose SSID matches no key is dropped. Removing
-a per-SSID key does not revoke that SSID while a default key exists.
+A packet is checked with the key for its SSID, or with the default key if its
+SSID has none. In authenticated mode, a packet whose SSID has no key and no
+default to fall back on is dropped. This means that deleting a per-SSID key
+does not lock that SSID out while a default key exists.
 
-Invalid key files and files with other names are logged and skipped. A
-directory with no usable key fails startup.
+Invalid key files, and files with names that do not fit the scheme, are
+logged and skipped. If no usable key is left in the directory, startup fails.
 
 ### File permissions
 
@@ -155,9 +165,9 @@ On Unix, stamp-suite checks permissions when it opens these files:
 | HMAC key file or control token file | Rejects any group or other permission (`0o077`). |
 | Key directory | Rejects group or other write permission. |
 
-Key and token checks use the opened file descriptor, so the file cannot be
-swapped between the check and the read. Symlinks are allowed when their
-targets pass the check.
+Key and token files are checked through the file descriptor that is then read,
+so nobody can swap the file between the check and the read. Symlinks are
+fine as long as their target passes the check.
 
 For the packaged `stamp` service:
 
@@ -169,21 +179,22 @@ sudo chown stamp:stamp /etc/stamp/hmac.key
 sudo chmod 0400 /etc/stamp/hmac.key
 ```
 
-A key with mode 0640 is rejected even when its group is `stamp`. The
-configuration file can use 0640 because its check concerns write access only.
+A key file with mode 0640 is rejected even if its group is `stamp`. The
+configuration file can be 0640 because only write access is checked for it.
 
 ### Rotation
 
-A reflector can change keys without a restart in two ways:
+You can change a reflector's keys without restarting it, in two ways:
 
-- **SIGHUP** (Unix, reflector only) reloads the key file or key directory
-  and replaces the whole keyset, including keys added through the control
-  API. If the reload fails, the reflector logs a warning and keeps its
-  current keys. A reload fails when the key file is unreadable, invalid or
-  has unsafe permissions, or when the directory is unreadable, writable by
-  group or other, or has no usable key. Inside a directory, an invalid file
-  is skipped as at startup, so its SSID loses its key after the reload. A key
-  given with `--hmac-key` or `STAMP_HMAC_KEY` is reloaded unchanged.
+- **SIGHUP** (Unix, reflector only) rereads the key file or key directory and
+  replaces the whole keyset, including any keys added through the control
+  API. If the reload fails, the reflector logs a warning and keeps the keys
+  it had. A reload fails when the key file is unreadable, invalid or has
+  unsafe permissions, or when the directory is unreadable, writable by group
+  or other, or holds no usable key. An invalid file inside a directory is
+  skipped, just as at startup, so its SSID ends up with no key after the
+  reload. A key given with `--hmac-key` or `STAMP_HMAC_KEY` is kept as it
+  is.
 
   ```sh
   sudo systemctl kill --signal=HUP stamp-suite
@@ -191,30 +202,31 @@ A reflector can change keys without a restart in two ways:
 
 - **The control API** (`control` feature) adds, replaces and removes keys
   with `PUT` and `DELETE` on `/v1/keys/{ssid}` and `/v1/keys/default`. These
-  changes last until the process exits or the next SIGHUP. Put lasting keys in
-  the key file or directory. See [Endpoints](control-plane.md#endpoints).
+  changes last until the process exits or the next SIGHUP, so put keys you
+  want to keep in the key file or directory. See
+  [Endpoints](control-plane.md#endpoints).
 
-Restarting the reflector also loads the current files.
+A restart also picks up the current files.
 
-Both ends of a session must use the same key, and a sender loads its key only
-at startup. Packets signed with the old key are dropped once the reflector
-switches, so change the sender and reflector together, or rotate one SSID at a
-time with a key directory. Replies already queued keep the key that was in
-use when their request was accepted.
+Both ends of a session must use the same key, and a sender reads its key only
+at startup. Once the reflector switches keys, it drops packets signed with
+the old one. Change the sender and the reflector together, or use a key
+directory and rotate one SSID at a time. Replies that are already queued are
+signed with the key that was in use when their request was accepted.
 
 ## Service account (`stamp`)
 
-DEB and RPM packages create a non-login `stamp` account without a home
-directory. The service runs as `stamp:stamp`. Purging the DEB package removes
-the account; removing the RPM package keeps it. The account needs read access
-to the configured keys and certificates.
+The DEB and RPM packages create a `stamp` account with no login shell and no
+home directory, and the service runs as `stamp:stamp`. Purging the DEB package
+deletes the account; removing the RPM package leaves it in place. The account
+needs read access to the configured keys and certificates.
 
 ## Systemd unit hardening
 
 The [packaged unit](../dist/systemd/stamp-suite.service) runs
-`stamp-suite --is-reflector` as `stamp:stamp`, restarts it on failure after
-5 seconds, and grants only `CAP_NET_BIND_SERVICE` (as an ambient capability
-and as the whole bounding set). It also sets:
+`stamp-suite --is-reflector` as `stamp:stamp` and restarts it 5 seconds after
+a failure. The only capability it grants is `CAP_NET_BIND_SERVICE`, both as an
+ambient capability and as the entire bounding set. It also sets:
 
 | Setting | Effect |
 | --- | --- |
@@ -222,24 +234,24 @@ and as the whole bounding set). It also sets:
 | `ProtectHome=yes`, `PrivateTmp=yes` | Home directories are hidden; `/tmp` is private. |
 | `PrivateDevices=yes` | Only pseudo devices such as `/dev/null` are visible. |
 | `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes` | The process cannot gain privileges. |
-| `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `ProtectClock` | Kernel settings, modules, cgroups and the system clock cannot be changed. |
-| `RestrictNamespaces`, `RestrictRealtime`, `LockPersonality`, `MemoryDenyWriteExecute` | No new namespaces, realtime scheduling, personality changes or writable executable memory. |
-| `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK` | Linux uses netlink for route-MTU lookups and to list interface addresses. |
+| `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectControlGroups`, `ProtectClock` | The service cannot change kernel settings, modules, cgroups or the system clock. |
+| `RestrictNamespaces`, `RestrictRealtime`, `LockPersonality`, `MemoryDenyWriteExecute` | The service cannot create namespaces, use realtime scheduling, change its personality or map memory that is both writable and executable. |
+| `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK` | Netlink is allowed because Linux uses it to look up route MTUs and list interface addresses. |
 
-Read access still follows Unix ownership and permissions. Some options need
-more than the unit allows:
+Reading files is still governed by normal Unix ownership and permissions.
+Some options need more than the unit allows:
 
 - The pnet backend needs `CAP_NET_RAW` and the `AF_PACKET` address family.
 - `--hwtstamp on` needs `CAP_NET_ADMIN` to configure NIC timestamping.
 
-Add these with a drop-in (`sudo systemctl edit stamp-suite`) and review the
+Add these in a drop-in (`sudo systemctl edit stamp-suite`), then review the
 result with `systemd-analyze security stamp-suite.service`.
 
 ## Enabling authenticated mode on the packaged unit
 
 The packaged service starts in open mode. To turn on authentication:
 
-1. Create an owner-only key:
+1. Create a key that only its owner can read:
 
    ```sh
    sudo install -d -m 0750 -o root -g stamp /etc/stamp
@@ -255,10 +267,10 @@ The packaged service starts in open mode. To turn on authentication:
    ExecStart=/usr/bin/stamp-suite --is-reflector --auth-mode A --hmac-key-file /etc/stamp/hmac.key --verify-tlv-hmac
    ```
 
-   The empty `ExecStart=` line clears the packaged command. Authenticated mode
-   does not start without a usable key.
+   The empty `ExecStart=` line clears the packaged command. In authenticated
+   mode the service will not start without a usable key.
 
-3. Restart the service and check for startup errors:
+3. Restart the service and look for startup errors:
 
    ```sh
    sudo systemctl daemon-reload
@@ -266,18 +278,20 @@ The packaged service starts in open mode. To turn on authentication:
    sudo journalctl -u stamp-suite -n 50
    ```
 
-4. Give authorized senders the same key and run them with `--auth-mode A`.
+4. Give the same key to each authorized sender and run them with
+   `--auth-mode A`.
 
 To change the key later, see [Rotation](#rotation).
 
 ## Capability model
 
-On Linux, binding a port below `net.ipv4.ip_unprivileged_port_start` (1024
-by default) needs `CAP_NET_BIND_SERVICE`. The reflector's default port is 862;
-a port of 1024 or higher avoids the requirement. The nix backend needs no
-raw-socket capability; the pnet backend needs `CAP_NET_RAW`. `--hwtstamp on`
-needs `CAP_NET_ADMIN` and NIC support. The service manager or container
-runtime must also allow these capabilities.
+On Linux, binding to a port below `net.ipv4.ip_unprivileged_port_start` (1024
+by default) needs `CAP_NET_BIND_SERVICE`. The reflector listens on port 862 by
+default; pick a port of 1024 or higher and you do not need the capability.
+The nix backend needs no raw-socket capability, while the pnet backend needs
+`CAP_NET_RAW`. `--hwtstamp on` needs `CAP_NET_ADMIN` and a NIC that supports
+it. Whatever you need, the service manager or container runtime has to allow
+it as well.
 
 ## Reporting vulnerabilities
 

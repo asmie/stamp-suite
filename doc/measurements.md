@@ -1,376 +1,410 @@
 # Sender reply and directional measurements
 
-Reply counts, Direct Measurement, Follow-Up delays, clock quality and session state.
+What the sender reports about replies, Direct Measurement counters, Follow-Up
+delays, clock quality and session state.
 
-JSON reports include `measurements` and `ber` objects; text reports print their
-summaries. CSV embeds JSON in the `ber`, `measurements`, and `owd_clock_quality`
-columns. Read columns by name and use a CSV parser to handle quoted commas.
-`owd_clock_quality` is empty when no OWD samples exist.
+JSON reports include `measurements` and `ber` objects, and text reports print a
+summary of each. CSV embeds JSON in the `ber`, `measurements` and
+`owd_clock_quality` columns. Read CSV columns by name, and use a CSV parser so
+the quoted commas inside the JSON are handled. `owd_clock_quality` is empty
+when there are no OWD samples.
 
 ```bash
 stamp-suite --remote-addr 192.0.2.10 --count 100 --direct-measurement \
   --follow-up-telemetry --reflected-control-count 3 --timeout 2 --output-format json
 ```
 
-The reflector must support the requested extensions. Follow-Up requires a
-stateful reflector. Reflected Test Packet Control (RFC 10052) is off on a
-stock reflector until it sets `--reflected-control-max-count`, and the
-reflector can limit or decline the requested burst. The `--ber` options add
-directional bit and packet error totals under the separate `ber` object.
+The reflector has to support the extensions you request. Follow-Up needs a
+stateful reflector. A stock reflector keeps Reflected Test Packet Control
+(RFC 10052) off until it is started with `--reflected-control-max-count`, and
+it can limit or refuse the burst you ask for. The `--ber` options add bit and
+packet error totals for each direction in a separate `ber` object.
 
 ## Probes, reply copies, and duplicates
 
-`packets_received`, RTT and OWD fields count the first accepted reply
-for each pending probe. `packets_lost` and loss percentage count timed expiry,
-pending-record retirement and unanswered records at run end. A late first
-reply does not undo a finalized probe's loss or add a top-level delay sample.
-Prometheus and SNMP counters and `-R` details also count probes this way.
+`packets_received` and the RTT and OWD fields count the first accepted reply
+to each pending probe. `packets_lost` and the loss percentage count probes
+that timed out, pending records that were retired, and records still
+unanswered when the run ends. If a probe has already been counted as lost, a
+late first reply does not undo the loss or add a top-level delay sample.
+Prometheus and SNMP counters and `-R` details count probes the same way.
 
-Pending retention is optional (`--max-pending-probes`, default 0/unlimited).
-The `measurements` fields `pending_limit`, `pending_probes`,
-`pending_high_watermark` and `pending_evictions` disclose local capacity
-pressure. Sequence reuse also retires the old unanswered generation rather
-than silently replacing its accounting. These retirements are not evidence
-of physical network loss, and do not change send timing or reply denominators.
-See [retention policy](usage.md#pending-probe-retention).
+Limiting the number of pending records is optional (`--max-pending-probes`,
+default 0, meaning no limit). The `measurements` fields `pending_limit`,
+`pending_probes`, `pending_high_watermark` and `pending_evictions` show how
+hard the sender pushed against that local limit. Reusing a sequence number
+also retires the old unanswered generation and counts it, instead of quietly
+overwriting it. These retirements say nothing about loss on the network. They
+do not change send timing or the reply denominators. See
+[retention policy](usage.md#pending-probe-retention).
 
 The reply collector runs after base authentication, TLV validation and session
-admission. It matches the complete echoed sender sequence and all eight wire
-timestamp (T1) bytes against a pending probe or retained history before applying
-SSID policy, learning IDs, acknowledging Access Reports or using CE feedback.
-A known sequence with a missing or different T1 is rejected. Its counters
-distinguish individual reflected packets:
+admission. It matches the full echoed sender sequence number and all eight
+bytes of the wire timestamp (T1) against a pending probe or the retained
+history. Only after that does it apply the SSID policy, learn IDs, acknowledge
+Access Reports or act on CE feedback. A reply with a known sequence number but
+a missing or different T1 is rejected. The collector counts individual
+reflected packets:
 
 | Field | Meaning |
 | --- | --- |
-| `requested_replies` | Successful probes sent multiplied by the configured reply count (at least one). |
-| `unique_replies` | Accepted distinct reply identities within retained history, including late replies. |
+| `requested_replies` | Probes sent successfully, multiplied by the configured reply count (at least one). |
+| `unique_replies` | Distinct accepted replies within the retained history, including late replies. |
 | `answered_probes` | Retained probes with at least one accepted reply, including late first replies. |
-| `additional_replies` | Distinct replies after a probe's first reply. These include requested burst copies. |
-| `late_replies` | First replies for retained probes that are no longer pending. |
-| `duplicate_replies` | Repeated recent `(echoed sender sequence, echoed T1, reflector sequence, T3)` identities. |
-| `unknown_replies` | Replies with neither a retained probe nor a pending probe. |
-| `mismatched_replies` | Known sequences with a missing or mismatched echoed T1; these do not consume a pending probe or update measurements/control state. |
-| `reordered_replies` | Reflector sequence behind the highest observed sequence using 32-bit serial arithmetic. |
-| `unobserved_requested_replies` | Requested copies less observed copies, capped separately per probe. |
-| `reply_rtt` | Count and cumulative minimum/mean/maximum RTT for all unique replies. |
+| `additional_replies` | Distinct replies that arrived after a probe's first reply, including requested burst copies. |
+| `late_replies` | First replies to retained probes that were no longer pending. |
+| `duplicate_replies` | Replies whose `(echoed sender sequence, echoed T1, reflector sequence, T3)` repeats a recent reply. |
+| `unknown_replies` | Replies that match neither a retained probe nor a pending probe. |
+| `mismatched_replies` | Replies with a known sequence number but a missing or different echoed T1. They do not use up a pending probe or update measurement or control state. |
+| `reordered_replies` | Replies whose reflector sequence is behind the highest one seen, compared with 32-bit serial arithmetic. |
+| `unobserved_requested_replies` | Requested copies minus observed copies, capped separately for each probe. |
+| `reply_rtt` | Count and cumulative minimum, mean and maximum RTT over all unique replies. |
 
-`last_reflector_sequence` preserves the latest observed independent sequence;
-`independent_sequence_observations` counts replies where it differs from the
-echoed sender sequence. Neither proves which sequencing mode the peer uses.
-Counter resets can resemble reordering. No directional loss is inferred from
-sequence gaps alone.
+`last_reflector_sequence` holds the most recent reflector sequence number seen.
+`independent_sequence_observations` counts replies where that number differs
+from the echoed sender sequence. Neither shows which sequencing mode the peer
+uses, and a counter reset can look like reordering. The sender does not infer
+directional loss from sequence gaps alone.
 
-Wire T1 stays immutable when a kernel TX timestamp corrects T1 for delay
-calculation. Delayed TX reports also have to match the local send context before
-correcting a pending probe. These checks distinguish reused sequences with
-different wire timestamps; they are not cryptographic replay protection. If a
-peer repeats the same sequence and wire T1, or a clock reset recreates that pair,
-those bytes alone cannot establish freshness. Unauthenticated traffic still
-depends on the deployment's trust boundary.
+When a kernel TX timestamp corrects T1 for delay calculations, the wire T1
+stays as it was sent. A delayed TX report also has to match the local send
+context before it can correct a pending probe. These checks tell apart reused
+sequence numbers that carry different wire timestamps. They are not
+cryptographic replay protection. If a peer repeats the same sequence number
+and wire T1, or a clock reset produces the same pair again, those bytes alone
+cannot show that a reply is fresh. Unauthenticated traffic still relies on the
+deployment's trust boundary.
 
-The session-state monitor replaces an older outstanding deadline when its
-sequence is reused, so that deadline cannot expire the newer probe or remain
-after the newer probe is answered.
+When a sequence number is reused, the session-state monitor replaces the older
+outstanding deadline. The old deadline can then neither expire the newer probe
+nor linger after the newer probe is answered.
 
-Lenient reply parsing can zero-fill unused trailing fields, but cannot invent
-identity bytes. Unauthenticated replies need at least the complete echoed T1
-(36 bytes through its last octet); a 41-byte TWAMP Light reply includes it.
-Authenticated replies must also pass the existing base HMAC check. Short
-reflector requests keep their separate parsing policy. TLV diagnostics are
-counted before this identity check, so a rejected stale reply can still add
-diagnostic observations. Required micro-session binding retains its existing
-rule for accepting first replies to live pending probes or additional copies
-of already answered retained probes.
+Lenient reply parsing can zero-fill unused fields at the end of a short reply,
+but it cannot make up identity bytes. An unauthenticated reply has to include
+the whole echoed T1, which ends at byte 36. A 41-byte TWAMP Light reply does.
+Authenticated replies also have to pass the base HMAC check. Short requests
+arriving at the reflector follow a separate parsing policy. TLV diagnostics
+are counted before this identity check, so a stale reply that is rejected can
+still add diagnostic counts. When a Micro-session ID is required, a reply is
+accepted only as the first reply to a live pending probe or as an additional
+copy for a retained probe that was already answered.
 
-Requested-but-unobserved replies include policy caps, unsupported requests,
-validation rejection, timeout and network loss. **They are not a network-loss
-estimate.** Extra replies to one probe cannot satisfy another probe's request.
-For bursts, the final receive phase continues after the first response, until
-all requested copies have been observed or the final `--timeout` expires.
-An Access Report acknowledgement confirms delivery, not completion of its
-requested reply burst. After delivery is acknowledged or aborted, remaining
-retry replies are collected within `--timeout` of the last successful retry.
-Acknowledgement and retry exhaustion do not restart that window. This also
-covers retries sent near the end of the initial reply drain.
-`--on-zero-ssid stop` ends reception early. A run without bursts finishes
-once every probe has its first accepted reply; packets that arrive after exit
-are unobserved.
+Requested replies can go unobserved because of policy caps, unsupported
+requests, validation rejection, timeouts or network loss. **They are not a
+network-loss estimate.** Extra replies to one probe cannot make up for
+another probe's missing ones. With bursts, the final receive phase keeps
+running after the first reply until every requested copy has arrived or the
+final `--timeout` expires. An Access Report acknowledgement confirms that the
+report was delivered, not that the reply burst it asked for is complete. Once
+delivery is acknowledged or abandoned, replies to the remaining retries are
+collected for up to `--timeout` after the last successful retry. An
+acknowledgement, or running out of retries, does not restart that window. The
+same rule covers retries sent near the end of the initial reply drain.
+`--on-zero-ssid stop` ends reception early. A run without bursts finishes as
+soon as every probe has its first accepted reply. Packets that arrive after
+that are unobserved.
 
-The recent probe and reply identity histories each retain at most **4096**
-entries. `history_limit`, `probes_evicted` and `replies_evicted` disclose this
-bound and evictions. A still-pending probe can supply timing after history eviction,
-but its original Direct Measurement ordinal is then unavailable. Correlation and
-deduplication beyond the retained histories are unavailable. After eviction, an
-old duplicate can appear as an additional reply if its probe is still known.
-Identical stateless burst copies with the same T3 are indistinguishable from
-network duplicates because the wire packet has no separate copy identifier.
+The histories of recent probes and of reply identities each keep at most
+**4096** entries. `history_limit`, `probes_evicted` and `replies_evicted`
+report the limit and how many entries were evicted. A probe that is still
+pending can supply timing after it leaves the history, but its original
+Direct Measurement ordinal is lost. Replies outside the retained histories
+cannot be correlated or deduplicated. After an eviction, an old duplicate can
+show up as an additional reply if its probe is still known. Identical
+stateless burst copies with the same T3 cannot be told apart from network
+duplicates, because the packet has no field that identifies the copy.
 
 ## Extension validation diagnostics
 
-Interim and final JSON reports include `measurements.tlv_validation`; CSV
-embeds it in `measurements`. RTT receipt alone does not confirm extension
-processing or TLV integrity.
+Interim and final JSON reports include `measurements.tlv_validation`, and CSV
+embeds it in the `measurements` column. Getting an RTT back does not show that
+the reflector processed the extensions or that the TLVs arrived intact.
 
 | Field | Meaning |
 | --- | --- |
 | `evaluated_replies` | Replies whose TLVs were evaluated, including required Micro-session ID checks on an empty list. |
-| `rejected_replies` | Evaluated replies discarded by required Micro-session ID validation. |
-| `observed_tlvs` | All parsed TLV occurrences, including HMAC and duplicate HMAC entries retained by lenient parsing. |
-| `hmac` | Reply counts for `not_requested`, `missing`, `verified`, `unverified` and `failed` TLV HMAC outcomes. |
-| `flags` | TLV occurrence counts for `unrecognized` (U), `malformed` (M), `integrity_failed` (I) and `conformant_reflected` (C). M includes locally detected truncation and invalid known-type lengths, even if the peer omitted M. |
-| `by_type` | Occurrence and flag counts grouped by decimal wire type codepoint; for example, `"8"` is HMAC and `"11"` is Micro-session ID. |
+| `rejected_replies` | Evaluated replies discarded because required Micro-session ID validation failed. |
+| `observed_tlvs` | Every parsed TLV occurrence, including HMAC and the duplicate HMAC entries that lenient parsing keeps. |
+| `hmac` | Reply counts for the `not_requested`, `missing`, `verified`, `unverified` and `failed` TLV HMAC outcomes. |
+| `flags` | TLV occurrence counts for `unrecognized` (U), `malformed` (M), `integrity_failed` (I) and `conformant_reflected` (C). M also counts truncation and invalid known-type lengths that the sender found itself, even if the peer did not set M. |
+| `by_type` | Occurrence and flag counts grouped by the decimal wire type codepoint; for example, `"8"` is HMAC and `"11"` is Micro-session ID. |
 
-Counts precede SSID admission and deduplication, so repeats and later-rejected
-replies are included. Packets dropped before evaluation, such as base HMAC
-failures, are excluded. Base-only reception and empty lists without a required
-Micro-session ID add nothing. Counters survive reply-history eviction.
+The counts are taken before SSID admission and deduplication, so they include
+repeats and replies that are rejected later. Packets dropped before
+evaluation, such as those that fail the base HMAC, are not counted. Base-only
+replies add nothing, and neither do empty TLV lists when no Micro-session ID
+is required. The counters survive reply-history eviction.
 
-Extension detection follows the received payload length, including when the
-sender originated a base-only probe. All known outer-TLV lengths are checked
-before values are used, including types this run does not consume. The first
-wire or locally derived M stops later values. HMAC verification uses the
-original received bytes, so local diagnostic markers do not change signature
-coverage. A usable base reply can still contribute RTT when extensions are
-unusable; required identity checks retain their existing rejection policy.
+The sender decides whether a reply carries extensions from the received
+payload length, even when it sent a base-only probe. It checks the length of
+every known outer TLV before using any value, including types this run does
+not use. The first M stops processing of later values, whether the peer set it
+on the wire or the sender derived it. HMAC verification runs over the bytes as
+received, so local diagnostic markers do not change what the signature
+covers. A usable base reply still gives an RTT when the extensions are
+unusable. Replies that fail a required identity check are still rejected.
 
-For Location, an invalid nested header/body or known-type length also derives
-outer M. A received child M is promoted to the local outer diagnostic, stopping
-later outer values; the Location child I bit is ignored. These are outer TLV
-occurrence counts, so nested errors do not add separate child entries to
-`by_type` or `observed_tlvs`.
+For Location, an invalid nested header or body, or an invalid known-type
+length, also sets M on the outer TLV. A child M received from the peer is
+promoted to the local outer diagnostic and stops processing of later outer
+values. The I bit of a Location child is ignored. These counters count outer
+TLV occurrences, so nested errors do not add child entries to `by_type` or
+`observed_tlvs`.
 
-Incomplete optional children in Timestamp Information also derive outer M,
-even when that TLV is unused by this sender. Complete unknown children are
-opaque and do not add child entries to the outer-TLV counters.
+In Timestamp Information, an incomplete optional child also sets M on the
+outer TLV, even when this sender does not use that TLV. Complete unknown
+children are treated as opaque and do not add child entries to the outer-TLV
+counters.
 
-HMAC outcomes: `not_requested` means no HMAC or key; `missing` means an
-optional/exempt HMAC is absent with a key configured. Missing required HMACs
-count as `failed`. `unverified` means verification was unavailable, for example
-without a key or with unusable flags. `verified` confirms the digest, but I
-can still block values. `failed` blocks TLV values; base timing may remain
-usable unless required session binding fails.
+The HMAC outcomes mean:
 
-Flags count parsed occurrences, including parser-added M on truncation,
-not every typed-value error. Flags can overlap. Clear flags or C alone do
-not prove usable values: HMAC and preceding M also matter. Missing reply
-TLVs are not counted as unsupported.
+- `not_requested`: there was no HMAC or no key.
+- `missing`: a key is configured but an optional or exempt HMAC was absent. A
+  missing required HMAC counts as `failed`.
+- `unverified`: the HMAC could not be verified, for example because there is
+  no key or the flags make it unusable.
+- `verified`: the digest matched, but an I flag can still block values.
+- `failed`: TLV values are blocked. Base timing may still be usable unless a
+  required session binding fails.
+
+Flags count parsed occurrences, including the M the parser adds on
+truncation. They do not count every error inside a typed value, and one TLV
+can carry several flags. Clear flags, or C on its own, do not prove the values
+are usable, because the HMAC and any earlier M also matter. A TLV missing from
+the reply is not counted as unsupported.
 
 ## Direct Measurement counter window
 
-The three counters are defined by
-[RFC 8972 §4.5](https://www.rfc-editor.org/rfc/rfc8972.html#section-4.5).
-The following window estimates are this implementation's reporting policy.
-Interpret them only when both endpoints count the same session and packet
-profile; other in-profile traffic or duplicate requests can change the result.
+[RFC 8972 §4.5](https://www.rfc-editor.org/rfc/rfc8972.html#section-4.5)
+defines the three counters. The window estimates below are this
+implementation's own reporting policy. They only make sense when both
+endpoints count the same session and packet profile. Other in-profile traffic
+or duplicate requests can change the result.
 
 `direct_measurement.anchor` is the first usable counter observation in the
-current window; `latest_transmit` is the observation with the highest reflector
-transmit count in that window. Each exposes `sender_tx`, `reflector_rx` and
-`reflector_tx`. Differences use wrapping 32-bit arithmetic, with a half-range
-limit to distinguish plausible forward spans from resets or older epochs.
-The echoed sender counter must match the locally recorded successful-send count.
-All-zero reflector counters do not establish measurement support.
+current window. `latest_transmit` is the observation with the highest
+reflector transmit count in that window. Both contain `sender_tx`,
+`reflector_rx` and `reflector_tx`. Differences use wrapping 32-bit arithmetic.
+A span longer than half the counter range is treated as a reset or an older
+epoch rather than as forward progress. The echoed sender counter must equal
+the number of successful sends the sender recorded. Reflector counters that
+are all zero do not show that the reflector supports the measurement.
 
-After at least two distinct usable observations:
+Once there are at least two distinct usable observations:
 
-- `sender_packets` is the highest observed sender-counter difference from the anchor.
-- `reflector_received` is the highest receive-counter difference observed at an advancing transmit count.
+- `sender_packets` is the largest sender-counter difference from the anchor.
+- `reflector_received` is the largest receive-counter difference seen at an advancing transmit count.
 - `forward_missing` is `sender_packets - reflector_received`, or null if negative.
-- `reflector_transmitted` is the highest transmit-counter difference from the anchor.
+- `reflector_transmitted` is the largest transmit-counter difference from the anchor.
 - `replies_received` counts distinct usable transmit-counter values after the anchor.
 - `reverse_missing` is `reflector_transmitted - replies_received`, or null if negative.
 
-For example, `(S,Rrx,Rtx) = (1,1,0), (3,2,1), (4,3,3)` reports forward missing
-1 and reverse missing 1 over the observed window. A late observation for transmit
-counter 2 closes the reverse gap. Estimates are provisional: in-flight packets,
-reordering and metadata rejection can leave apparent gaps. Reverse missing
-counts absent *usable counter observations*, including replies whose DM metadata
-was missing or rejected; it cannot distinguish those cases from transport loss.
+For example, the observations `(S,Rrx,Rtx) = (1,1,0), (3,2,1), (4,3,3)` give
+forward missing 1 and reverse missing 1 over that window. A late observation
+for transmit counter 2 closes the reverse gap. The estimates are provisional,
+because packets in flight, reordering and rejected metadata can leave gaps
+that later fill in. Reverse missing counts missing *usable counter
+observations*. That includes replies whose DM metadata was missing or
+rejected, and the count cannot tell those apart from transport loss.
 
-The anchor is excluded from the differences. No inference covers packets before
-the anchor, an unobserved tail, or windows discarded on discontinuity. Before
-there is enough usable data, fields are null, not zero. `observations`,
-`unavailable`, `discontinuities` and `reordered` disclose usable/invalid counter
-processing. Repeated transmit counters on distinct replies, backward half-range
-spans and detected resets invalidate the current estimates. The distinct-counter
-set is also bounded at 4096; exceeding it clears the window and sets the sticky
-`history_exceeded` flag. The next usable observation starts a new window. Totals
-across discarded windows are deliberately not accumulated.
+The anchor itself is not part of the differences. Nothing is inferred about
+packets before the anchor, an unobserved tail, or windows discarded after a
+discontinuity. Until there is enough usable data, the fields are null, not
+zero. `observations`, `unavailable`, `discontinuities` and `reordered` count
+how the counter observations were handled, usable or not. Repeated transmit
+counters on distinct replies, backward spans beyond half the range, and
+detected resets invalidate the current estimates. The set of distinct counter
+values holds at most 4096 entries. Going over that clears the window and sets
+the `history_exceeded` flag, which stays set. The next usable observation
+starts a new window. Totals are not carried across discarded windows.
 
 ## Follow-Up corrected reverse delay
 
-[RFC 8972 §4.7](https://www.rfc-editor.org/rfc/rfc8972.html#section-4.7) supplies
-the previous reflection's sequence, timestamp and timestamping method.
-The sender looks up that independent sequence in recent reply history and
-computes `previous T4 - corrected T3`, applying `--reflector-utc-offset`.
-Decoding uses the previous packet's NTP/PTP format, not the current packet's
-format or the Follow-Up timestamping-method byte.
+[RFC 8972 §4.7](https://www.rfc-editor.org/rfc/rfc8972.html#section-4.7) gives
+the sequence number, timestamp and timestamping method of the previous
+reflection. The sender looks up that reflector sequence number in its recent
+reply history and computes `previous T4 - corrected T3`, applying
+`--reflector-utc-offset`. The timestamp is decoded in the NTP or PTP format of
+the previous packet. Neither the current packet's format nor the Follow-Up
+timestamping-method byte affects decoding.
 
-`follow_up.reverse_delay` contains cumulative sample count and minimum/mean/
-maximum signed milliseconds. `matched` counts corrections; `repeated` counts
-further references to an already corrected reply. Only the first usable correction
-for a uniquely identified reply contributes a sample. `unmatched` records a
-reference absent from history, including a reply that has not arrived yet; these
-references are not queued for later resolution. `ambiguous` records reused or
-self-referencing sequences and possible stateless burst identities. Unknown
-methods, zero placeholder timestamps and invalid timestamps are `unavailable`.
-The last reply has no correction unless another reply carries its Follow-Up.
+`follow_up.reverse_delay` holds the cumulative sample count and the minimum,
+mean and maximum in signed milliseconds. `matched` counts corrections.
+`repeated` counts later references to a reply that was already corrected.
+Only the first usable correction for a uniquely identified reply adds a
+sample. `unmatched` counts references to replies that are not in the history,
+including replies that have not arrived yet. These references are not queued
+to be resolved later. `ambiguous` counts reused or self-referencing sequence
+numbers and possible stateless burst identities. Unknown methods, zero
+placeholder timestamps and invalid timestamps count as `unavailable`. The last
+reply gets no correction unless another reply carries a Follow-Up for it.
 
-These timestamps do not establish clock synchronization. Clock skew still affects
-signed reverse delay, and a software Follow-Up is not necessarily more accurate
-than the original timestamp. Follow-Up does not replace the original OWD summary.
+These timestamps do not synchronize the clocks. Clock skew still affects the
+signed reverse delay, and a software Follow-Up timestamp is not necessarily
+more accurate than the original one. Follow-Up does not replace the original
+OWD summary.
 
 ## Integrity and BER
 
-Active BER uses the combined successor TLV (experimental Type 243) and its
-optional pattern sub-TLV (Type 241), with a default four-byte FF00FF00 pattern.
-Parent and nested U/M/I/C checks apply before observations. A nonzero error
-count with zero maximum burst retains its bit/packet error sample but records
-no burst sample; unavailable burst maxima/averages remain null. Legacy outer
-Types 240–242 are not interpreted. See [migration guidance](ber-migration.md).
+Active BER uses the combined successor TLV (experimental Type 243) with an
+optional pattern sub-TLV (Type 241). The default pattern is the four bytes
+FF00FF00. The U, M, I and C checks on the parent and nested TLVs run before
+anything is recorded. A nonzero error count with a maximum burst of zero still
+records its bit and packet error sample but no burst sample. Burst maxima and
+averages that are unavailable stay null. Legacy outer Types 240–242 are not
+interpreted. See [migration guidance](ber-migration.md).
 
-DM and Follow-Up require a unique usable TLV of their type. U skips a value,
-M stops processing the remainder, and any I flag blocks all values. Bad lengths
-stop subsequent value processing. If a key is configured, a verified HMAC TLV
-is required for these measurement values. Missing, invalid or unverifiable
-metadata contributes no directional sample, but the authenticated base reply
-is still counted. Without a key, these measurements are not authenticated.
+DM and Follow-Up need exactly one usable TLV of their type. U skips a value, M
+stops processing of the rest, and any I flag blocks all values. A bad length
+stops processing of later values. With a key configured, these measurement
+values also need a verified HMAC TLV. Missing, invalid or unverifiable
+metadata adds no directional sample, but the authenticated base reply is
+still counted. Without a key, these measurements are not authenticated.
 
-BER records one observation per probe, from the first accepted reply to a
-pending probe. Burst copies therefore do not repeat the forward bit count or
-inflate the reverse BER totals. The directional totals, intervals, alarms and
-omission counts are in the `ber` object; they are not a per-copy BER metric.
-See [BER history](statistics.md#memory-and-ber-history), the
-[TLV reference](architecture.md#tlv-extensions-reference) and the
+BER records one observation per probe, taken from the first accepted reply to
+a pending probe. Burst copies therefore do not count the forward bit errors
+again or inflate the reverse BER totals. The `ber` object holds the
+directional totals, intervals, alarms and omission counts. It is not a
+per-copy BER metric. See [BER history](statistics.md#memory-and-ber-history),
+the [TLV reference](architecture.md#tlv-extensions-reference) and the
 [BER draft conformance](conformance/draft-stamp-ber.md).
 
 ## Clock quality accompanying delay
 
-`owd.clock_quality` in JSON and `owd_clock_quality` in CSV describe exactly the
-original first-pending-reply OWD samples. Text reports their synchronization
-categories and maximum combined advertised error. `measurements.follow_up` has
-its own `clock_quality` object describing only matched correction samples,
-using metadata from the referenced previous reply. Missing/ambiguous references
-and duplicates do not contribute quality samples.
+`owd.clock_quality` in JSON and `owd_clock_quality` in CSV describe exactly
+the original OWD samples, the ones taken from first replies to pending
+probes. Text reports show their synchronization categories and the largest
+combined advertised error. `measurements.follow_up` has its own
+`clock_quality` object. It covers only the matched correction samples and
+uses the metadata of the referenced previous reply. Missing or ambiguous
+references and duplicates add no quality samples.
 
 | Field | Meaning |
 | --- | --- |
-| `samples` | Number of associated delay samples. |
-| `both_synchronized` | Both endpoints asserted S=1 and supplied valid nonzero error multipliers. |
-| `unsynchronized` | Usable error estimates, with at least one endpoint asserting S=0. |
-| `invalid_estimate` | At least one invalid error estimate, such as Multiplier=0. |
-| `unknown` | Local or remote quality metadata unavailable (for example, samples recorded through the library without metadata). |
-| `last_sender`, `last_reflector` | Most recent sample's S bit, NTP/PTP format, Scale, Multiplier and decoded `error_ms`; null when metadata is absent. |
-| `max_combined_error_ms` | Largest sum of two usable advertised errors over the samples; null if none. |
+| `samples` | Number of delay samples described. |
+| `both_synchronized` | Both endpoints set S=1 and sent valid nonzero error multipliers. |
+| `unsynchronized` | The error estimates are usable, and at least one endpoint set S=0. |
+| `invalid_estimate` | At least one error estimate is invalid, such as Multiplier=0. |
+| `unknown` | Local or remote quality metadata is unavailable (for example, samples recorded through the library without metadata). |
+| `last_sender`, `last_reflector` | The most recent sample's S bit, NTP/PTP format, Scale, Multiplier and decoded `error_ms`; null when there is no metadata. |
+| `max_combined_error_ms` | The largest sum of two usable advertised errors over the samples; null if there is none. |
 
-The four categories are mutually exclusive and sum to `samples`. Invalid errors
-are null, never a claim of zero uncertainty. The maximum includes usable estimates
-from unsynchronized clocks, so it is **not a bound on actual OWD accuracy**.
-A later unknown sample clears `last_sender` and `last_reflector`; the
-cumulative counts and the maximum from earlier usable estimates are kept.
+The four categories do not overlap and add up to `samples`. An invalid error
+is reported as null, never as zero uncertainty. The maximum also includes
+usable estimates from unsynchronized clocks, so it is **not a bound on actual
+OWD accuracy**. A later unknown sample clears `last_sender` and
+`last_reflector`, but the cumulative counts and the maximum from earlier
+usable estimates are kept.
 
-The sender uses its configured Error Estimate, rather than the reflector's echoed
-sender field. The remote estimate comes from the accepted base reply. The S bits
-are declarations by the operator and the peer: neither proves that NTP or PTP is
-locked, a PHC is aligned, or the clocks share a timescale. The small default
-scale and multiplier are configured wire values, not a measured timing
-precision. RTT and OWD values are reported even with an unsynchronized or
-invalid declaration; the metadata qualifies the samples and never removes them.
+For its own side the sender uses its configured Error Estimate, not the sender
+field the reflector echoes back. The remote estimate comes from the accepted
+base reply. The S bits are only what the operator and the peer declare.
+Neither proves that NTP or PTP is locked, that a PHC is aligned, or that the
+clocks share a timescale. The small default scale and multiplier are
+configured wire values, not a measured timing precision. RTT and OWD values
+are reported even when a clock is declared unsynchronized or the declaration
+is invalid. The metadata describes the samples and never removes them.
 
 [RFC 8762 §4.2.1](https://www.rfc-editor.org/rfc/rfc8762.html#section-4.2.1)
-uses the error interpretation from
+uses the error formula from
 [RFC 4656 §4.1.2](https://www.rfc-editor.org/rfc/rfc4656.html#section-4.1.2):
-`error_seconds = Multiplier * 2^(Scale - 32)`. Zero Multiplier is invalid. The
-same error units apply to NTP and PTP timestamp encodings. A synchronized S bit
-indicates an external UTC synchronization assertion, independent of the Z bit.
+`error_seconds = Multiplier * 2^(Scale - 32)`. A zero Multiplier is invalid.
+The same error units apply to NTP and PTP timestamps. A set S bit asserts
+synchronization to an external UTC source, whatever the Z bit says.
 
-Configure `--clock-synchronized`, `--error-scale`, `--error-multiplier`, and
-`--reflector-utc-offset` from the endpoints' clock setup. The sender does not
-detect clock discipline or discover timescale offsets.
+Set `--clock-synchronized`, `--error-scale`, `--error-multiplier` and
+`--reflector-utc-offset` to match how the endpoints' clocks are set up. The
+sender does not detect clock discipline or discover timescale offsets.
 
 ## Session-state notifications
 
 These notifications follow draft-ietf-ippm-stamp-ext-hdr-26 §9.2.
 
-The sender logs state changes with target `stamp_suite::session_state` and includes
-`session_state` within `measurements` in summaries. It becomes active after a
-validated reply while transmitting, failed after `--session-loss-threshold`
-consecutive unanswered probes, and active again when replies resume. Each probe's
-`--timeout` supplies its deadline; timeout 0 disables loss-driven failure. A session
-that never received a reply also becomes failed once its loss threshold is reached.
-The sender reports idle when transmission stops; final draining still contributes
-timing/loss statistics but does not reactivate an idle sender. If an Access Report
-retry originates another probe, monitoring resumes and its own loss deadlines
-are serviced until retries finish. Normal errors/cancellation drop the monitor
-and report idle when a transition is needed.
+The sender logs state changes with target `stamp_suite::session_state` and
+includes `session_state` in the `measurements` part of its summaries. The
+session becomes active after a validated reply while the sender is
+transmitting. It becomes failed after `--session-loss-threshold` consecutive
+unanswered probes, and active again when replies come back. Each probe's
+deadline is its `--timeout`, so a timeout of 0 turns off loss-driven failure.
+A session that never got a reply also becomes failed once it reaches the loss
+threshold. The sender reports idle when it stops transmitting. Replies
+collected during the final drain still count toward timing and loss, but they
+do not make an idle sender active again. If an Access Report retry sends
+another probe, monitoring resumes and that probe's loss deadlines are tracked
+until the retries finish. On ordinary errors or cancellation the monitor is
+dropped, and it reports idle if a transition is needed.
 
-Notifications count probes, not requested burst copies. Duplicate, invalid-session
-and unauthenticated replies do not reset failure detection. A newer successful
-probe ends the preceding loss run; older unanswered probes still count as packet
-loss but cannot trigger a fresh failure after recovery. Notification counters
-are cumulative, and individual events are only logged, not stored. Configure
-enough endpoint capacity for the offered traffic, and compare the reflector's
-queue, session-cap and rate-limit counters with failed states: a missing reply
-looks the same whether the reflector was overloaded or the path lost it.
+Notifications count probes, not requested burst copies. Duplicate replies,
+replies for invalid sessions and unauthenticated replies do not reset failure
+detection. A validated reply to a newer probe ends the current loss run. Older
+unanswered probes still count as packet loss but cannot cause a new failure
+after recovery. Notification counters are cumulative. Individual events are
+only logged, not stored. Give the endpoints enough capacity for the traffic
+you send, and compare failed states with the reflector's queue, session-cap
+and rate-limit counters: a missing reply looks the same whether the reflector
+was overloaded or the path lost it.
 
 ## ECN observations
 
-`--cos` adds `measurements.ecn` to JSON and the existing CSV `measurements`
-cell, and prints the same counters in text reports. It is absent when CoS
-was not requested. Counters cover accepted distinct reply copies, including
-retained late replies and additional burst copies; duplicates, wrong SSIDs,
-stale echoed timestamps and rejected replies do not contribute.
+`--cos` adds `measurements.ecn` to JSON and to the CSV `measurements` cell,
+and text reports print the same counters. Without `--cos` the object is
+absent. The counters cover accepted distinct reply copies, including retained
+late replies and additional burst copies. Duplicates, wrong SSIDs, stale
+echoed timestamps and rejected replies are not counted.
 
-`requested_ecn` is the configured EC1 request. `configured_egress_ecn` records
-successful local socket marking, or null when unavailable; a successful socket
-setting does not prove the marking after local traffic policies or on the wire.
-Linux/macOS receive reply IP ECN for all four requested codepoints, including
-Not-ECT and CE. Other platforms report unavailable IP metadata. AIMD still
-activates only for ECT(1)/ECT(0); these observation counters do not drive it.
+`requested_ecn` is the configured EC1 request. `configured_egress_ecn` is the
+marking the local socket accepted, or null when that is unavailable. A
+successful socket setting does not prove the packet keeps that marking after
+local traffic policies, or on the wire. On Linux and macOS the sender reads
+the reply's IP ECN for all four requested codepoints, including Not-ECT and
+CE. Other platforms report the IP metadata as unavailable. AIMD still starts
+only for ECT(1) and ECT(0), and these observation counters do not drive it.
 
 The four entries of `received_ec2`, `echoed_ec1` and `reply_ip_ecn` count
-Not-ECT (0), ECT(1) (1), ECT(0) (2) and CE (3), respectively. `rpe` and `rpd`
-use numeric wire order 0, 1, 2, 3. RPE=0 is compatible with legacy reflectors,
-1 reports inability to apply either EC1 or Not-ECT under
+Not-ECT (0), ECT(1) (1), ECT(0) (2) and CE (3), in that order. `rpe` and `rpd`
+use the numeric wire order 0, 1, 2, 3. RPE=0 is compatible with legacy
+reflectors. Under
 [draft-ietf-bpm-stamp-cos-ecn-00](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-cos-ecn-00.txt),
-2 reports the Not-ECT fallback, and 3 reports EC1 application.
-RPE=2 alone cannot distinguish policy refusal from platform limitations.
-RPD=1 reports DSCP policy refusal; it does not establish an ECN refusal.
-`conformant_reflected` counts CoS C flags independently of RPE.
+1 reports that the reflector could apply neither EC1 nor Not-ECT, 2 reports
+the Not-ECT fallback, and 3 reports that EC1 was applied. RPE=2 alone cannot
+tell a policy refusal from a platform limitation. RPD=1 reports a DSCP policy
+refusal and does not mean ECN was refused. `conformant_reflected` counts CoS
+C flags separately from RPE.
 
-`usable_cos` requires exactly one CoS TLV, reachable under U/M processing,
-without an I flag anywhere in the list, and with verified TLV HMAC when a key
-is configured. Missing, ambiguous, malformed or integrity-unusable CoS counts
-as `unavailable_cos`; no received value is fabricated from its zeros. C does
-not erase the raw observation, but excludes it from reverse comparison.
-Reply IP metadata is outside TLV integrity protection and is retained
-independently, including when CoS is unavailable.
+`usable_cos` needs exactly one CoS TLV that U/M processing reaches, no I flag
+anywhere in the list, and a verified TLV HMAC when a key is configured. A CoS
+TLV that is missing, ambiguous, malformed or failed integrity counts as
+`unavailable_cos`, and the sender does not read received values from its
+zeros. C does not erase the raw observation, but it keeps it out of the
+reverse comparison. Reply IP metadata is not covered by TLV integrity
+protection, and it is recorded on its own, including when CoS is unavailable.
 
-`reverse_comparable` and `reverse_unknown` retain their meanings and equal
-`reverse.comparable` and `reverse.unknown` in the directional diagnostics below.
-The raw histograms are separate totals; use the paired transitions to analyze
-changes. The underlying CoS profile is
+`reverse_comparable` and `reverse_unknown` keep their meaning and equal
+`reverse.comparable` and `reverse.unknown` in the directional diagnostics
+below. The raw histograms are separate totals. Use the paired transitions to
+analyze changes. The underlying CoS profile is
 [draft-ietf-ippm-stamp-cos-ecn-02](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-02.html),
 a work in progress.
 
 ### Directional ECN diagnostics
 
-`measurements.ecn.forward` compares the successful local socket marking with
-validated ingress EC2 from the same reply. If local marking or usable CoS is
-unavailable, that comparison is unknown. RPE, C and echoed EC1 constrain reverse
-marking and do not erase a usable forward ingress observation.
+`measurements.ecn.forward` compares the marking the local socket accepted with
+the validated ingress EC2 from the same reply. If the local marking or a usable
+CoS TLV is missing, the comparison is unknown. RPE, C and the echoed EC1 limit
+what the sender can conclude about reverse marking, but they do not erase a
+usable forward ingress observation.
 
-`measurements.ecn.reverse` compares echoed EC1 with that reply's IP ECN only
-when CoS is usable, C=0, RPE=3, EC1 matches the request and IP metadata exists.
-An RPE=2 refusal with a Not-ECT reply is unknown, not path bleaching. RPD alone
-is a DSCP policy signal and does not prevent ECN comparison.
+`measurements.ecn.reverse` compares the echoed EC1 with that reply's IP ECN
+only when CoS is usable, C=0, RPE=3, EC1 matches the request and IP metadata
+is available. An RPE=2 refusal with a Not-ECT reply counts as unknown, not as
+bleaching on the path. RPD alone is a DSCP policy signal and does not prevent
+the ECN comparison.
 
-Each direction has a bounded 4-by-4 `transitions` matrix. Rows are baseline
+Each direction has a 4-by-4 `transitions` matrix. Rows are baseline
 codepoints and columns are observed codepoints, both in numeric order 0..3.
-Pairs are classified before aggregation, so a refused reply's IP marking
-cannot be associated with another reply's applied EC1. The four outcome
-counters are mutually exclusive and sum to `comparable`:
+Each pair is classified before it is added to the totals, so the IP marking of
+a refused reply cannot be paired with the applied EC1 of another reply. The
+four outcome counters do not overlap and add up to `comparable`:
 
 | Counter | Baseline → observation |
 |---------|------------------------|
@@ -379,42 +413,47 @@ counters are mutually exclusive and sum to `comparable`:
 | `ce_marked` | ECT(1) or ECT(0) → CE |
 | `remarked` | Other unequal pairs, including ECT swaps, Not-ECT → CE and CE → ECT |
 
-`ce_observed` counts comparable pairs ending in CE; it overlaps the outcome
-counters. CE → CE does not establish newly introduced congestion marking, and
-Not-ECT → CE is classified as other remarking. The raw `reply_ip_ecn` histogram
-still retains IP CE observations when directional analysis is unavailable.
+`ce_observed` counts comparable pairs that end in CE, so it overlaps the
+outcome counters. CE → CE does not show that congestion marking was newly
+added, and Not-ECT → CE is classified as other remarking. The raw
+`reply_ip_ecn` histogram still records IP CE when directional analysis is
+unavailable.
 
 `comparable + unknown` equals the number of admitted distinct reply copies.
-`unknown_reasons` assigns one primary reason per unknown comparison, making
-its counters sum to `unknown`. For forward analysis, unusable CoS takes
-precedence over unavailable local marking. Reverse precedence is unusable CoS,
-C, RPE=0 (legacy/unconfirmed), RPE=1 (reflector marking unavailable),
-RPE=2 (reflector unable), echoed EC1 mismatch, then missing/invalid IP metadata. Legacy responses that
-zero EC1 therefore remain legacy/unconfirmed rather than request mismatches. Multiple limitations can
-coexist; the raw RPE/C/IP totals remain independent. RPE=2 cannot identify
-whether policy or platform capability caused the refusal. The
-`reflector_marking_unavailable` reason records RPE=1; `reserved_rpe` is retained
-for report compatibility and stays zero. This interpretation does not establish
-that a peer implements the successor's separate DSCP fallback requirements.
+`unknown_reasons` gives each unknown comparison one primary reason, so its
+counters add up to `unknown`. For forward analysis, unusable CoS takes
+precedence over unavailable local marking. For reverse analysis the order is
+unusable CoS, C, RPE=0 (legacy/unconfirmed), RPE=1 (reflector marking
+unavailable), RPE=2 (reflector unable), echoed EC1 mismatch, then missing or
+invalid IP metadata. A legacy reply that zeroes EC1 is therefore counted as
+legacy/unconfirmed, not as a request mismatch. A reply can have several of
+these limitations at once, and the raw RPE, C and IP totals are kept
+separately. RPE=2 cannot show whether policy or platform capability caused the
+refusal. The `reflector_marking_unavailable` reason records RPE=1.
+`reserved_rpe` is kept for report compatibility and is always zero. None of
+this shows that a peer implements the successor draft's separate DSCP fallback
+requirements.
 
-Text reports print the outcome and unknown-reason counts. JSON and CSV retain
-the complete matrix in the existing `measurements` object; CSV columns and
-previous raw counters are unchanged. For example, use `--cos --ecn 2
---output-format json` to obtain ECT(0) comparisons with separate ECT-to-CE and
+Text reports print the outcome counts and the unknown-reason counts. JSON and
+CSV carry the full matrix in the `measurements` object, and the CSV columns
+and older raw counters stay as they were. For example, `--cos --ecn 2
+--output-format json` gives ECT(0) comparisons with separate ECT-to-CE and
 bleaching totals.
 
-These are endpoint comparisons, not proof of a faulty hop or a cause of
-congestion. The forward baseline is an accepted socket setting, and the
-reverse baseline is the reflector's report; local policies, tunnels and
-intermediate processing can affect either comparison. Equal endpoint values
-can also hide intermediate changes. Correlate with independent captures and
-[ECN deployment guidance](usage.md#ecn-deployment-and-interpretation). AIMD
-feedback, admission rules and integrity requirements are unchanged.
-
+These counters compare what the two endpoints see. They do not prove that a
+particular hop is faulty or show what caused congestion. The forward baseline
+is a socket setting the sender accepted, and the reverse baseline is what the
+reflector reports. Local policies, tunnels and processing along the path can
+affect either comparison, and equal values at the endpoints can hide changes
+in between. Cross-check with independent packet captures and the
+[ECN deployment guidance](usage.md#ecn-deployment-and-interpretation). The
+diagnostics do not affect AIMD feedback, admission rules or integrity
+requirements.
 
 The [controlled ECN rewrite fixture](testing-netns.md#directional-ecn-rewrites)
-exercises these reports with real sender/reflector processes, independent
-kernel changes in each direction, packet captures and policy-refusal controls.
-Its loopback evidence does not identify where a change occurred on an external
-path; use the captured IP fields and matching report to check interpretation
-before applying the same analysis to a deployment.
+checks these reports with real sender and reflector processes, separate
+kernel rewrites in each direction, packet captures and policy-refusal
+controls. It runs on loopback, so it cannot show where a change happened on an
+external path. Use the captured IP fields and the matching report to check
+your reading of the counters before you apply the same analysis to a
+deployment.

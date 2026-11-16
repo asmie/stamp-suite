@@ -1,7 +1,8 @@
 # STAMP protocol overview
 
-STAMP concepts and their use in stamp-suite. See the RFCs and
-[conformance matrices](conformance/README.md) for requirements and coverage.
+A short introduction to STAMP and how stamp-suite uses it. For the exact
+requirements and what stamp-suite covers, see the RFCs and the
+[conformance matrices](conformance/README.md).
 
 ## What STAMP measures
 
@@ -22,8 +23,8 @@ stamp-suite --remote-addr 192.0.2.20 --count 10 --send-delay 100
 ```
 
 A **STAMP session** is the stream of test packets between one sender and one
-reflector. STAMP does not define a protocol to set up or tear down sessions;
-both ends are configured by other means, such as command-line options or a
+reflector. STAMP has no protocol for setting up or tearing down sessions. You
+configure both ends some other way, such as command-line options or a
 configuration file.
 
 ## Test packets and timestamps
@@ -47,10 +48,10 @@ From these the sender computes:
 - **Round-trip time.** stamp-suite reports T4 − T1 measured on the sender's
   monotonic clock, so it includes the reflector's processing time (T3 − T2).
 - **Forward one-way delay**, T2 − T1, and **reverse one-way delay**, T4 − T3.
-  These use timestamps from two different clocks. They are meaningful only
-  when both clocks are synchronized to the same timescale; otherwise the clock
-  offset shifts delay from one direction to the other. Their sum excludes the
-  reflector's processing time.
+  Each subtracts timestamps taken by two different clocks, so the result only
+  means something when both clocks are synchronized to the same timescale.
+  Otherwise the clock offset moves delay from one direction to the other. The
+  sum of the two leaves out the reflector's processing time.
 - **Loss.** A test packet without a reply within `--timeout` seconds counts
   as lost.
 
@@ -79,17 +80,17 @@ RFC 8762 §4 defines two reflector behaviors:
 
 - A **stateless reflector** copies the sender's sequence number into its own
   Sequence Number field. The sender can detect round-trip loss only.
-- A **stateful reflector** keeps an independent sequence counter per session
-  and increments it for each packet it reflects. A test packet lost on the
-  forward path never advances the counter; a reply lost on the reverse path
-  leaves a gap in it. Comparing both sequence numbers therefore separates
-  forward from reverse loss.
+- A **stateful reflector** keeps its own sequence counter for each session
+  and increments it for every packet it reflects. A test packet lost on the
+  forward path never advances the counter. A reply lost on the reverse path
+  leaves a gap in it. Comparing the two sequence numbers tells forward loss
+  apart from reverse loss.
 
-stamp-suite reflects statelessly by default. `--stateful-reflector` selects
-the stateful behavior. In both modes the reflector tracks each session it
-answers, and `--max-sessions` bounds how many it tracks. The stamp-suite
-sender does not infer directional loss from sequence gaps; it reports
-directional counts from the Direct Measurement TLV (see
+stamp-suite reflects statelessly by default, and `--stateful-reflector`
+switches to the stateful behavior. In both modes the reflector keeps track of
+every session it answers, up to the limit set by `--max-sessions`. The
+stamp-suite sender does not work out directional loss from sequence gaps.
+Directional counts come from the Direct Measurement TLV instead (see
 [measurements](measurements.md#direct-measurement-counter-window)).
 
 ## Sessions and the SSID
@@ -100,17 +101,17 @@ reflector. The sender sets it with `--ssid`.
 
 A stamp-suite reflector identifies a session by both UDP endpoints (source
 and destination address and port), the SSID, and the sender's Micro-session
-ID when one is present (RFC 9534). By default it learns sessions from
-incoming traffic. With `--session-admission provisioned` it answers only the
-sessions listed with `--reflector-session`. See
+ID if the packet carries one (RFC 9534). By default it learns sessions from
+the traffic it receives. With `--session-admission provisioned` it answers
+only the sessions listed with `--reflector-session`. See
 [Session provisioning](usage.md#session-provisioning).
 
 ## TLV extensions
 
 RFC 8972 §4 lets a test packet carry optional **TLVs** (Type, Length, Value
-fields) after the base packet. The sender uses TLVs to request extra
-information or behavior; the reflector echoes each TLV, fills in its part and
-sets flags to report problems:
+fields) after the base packet. The sender adds TLVs to ask for extra
+information or behavior. The reflector echoes each TLV back, fills in its part
+and sets flags to report problems:
 
 | Flag | Meaning |
 | --- | --- |
@@ -134,8 +135,8 @@ stamp-suite reflector behaves that way with `--tlv-mode ignore`.
 | draft-ietf-bpm-stamp-cos-ecn-00 | CoS/ECN profile with admitted DSCP fallback, third-value C and RPE=01 capability reporting | [draft-stamp-cos-ecn](conformance/draft-stamp-cos-ecn.md) |
 | draft-ietf-bpm-stamp-ber-01 | Residual BER count/burst with nested pattern (experimental Type 243 / sub-TLV 241) | [matrix and evidence](conformance/draft-stamp-ber.md) |
 
-Types 240 to 251 are experimental codepoints. Both ends must agree on their
-meaning. See [experimental codepoints](conformance/README.md#experimental-codepoints).
+Types 240 to 251 are experimental codepoints, so both ends have to agree on
+what they mean. See [experimental codepoints](conformance/README.md#experimental-codepoints).
 The [TLV extensions reference](architecture.md#tlv-extensions-reference)
 describes how stamp-suite handles each TLV.
 
