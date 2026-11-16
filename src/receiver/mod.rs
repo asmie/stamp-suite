@@ -202,6 +202,12 @@ pub struct StampResponse {
     /// is re-signed at send time; an echoed one (I-flag failure echo, or no
     /// semantic processing) is copied unchanged per RFC 8972 §4.8.
     pub tlv_hmac_generated: bool,
+    /// True when semantic TLV processing ran, so send-time telemetry refresh
+    /// may update the processed Direct Measurement and Follow-Up Telemetry
+    /// TLVs (RFC 8972 §§4.5, 4.7). Echoes (an HMAC failure, a malformed list
+    /// carrying an HMAC) and TLV-ignore mode are sent as assembled, even when
+    /// the sender left U clear.
+    pub tlv_processed: bool,
 }
 
 /// Context for processing STAMP packets, shared between backends.
@@ -644,6 +650,7 @@ fn process_stamp_packet_inner(
                     ber_conformance: Default::default(),
                     tlv_conformance: Default::default(),
                     tlv_hmac_generated: false,
+                    tlv_processed: false,
                 })
             }
         }
@@ -682,6 +689,7 @@ fn process_stamp_packet_inner(
                     ber_conformance: Default::default(),
                     tlv_conformance: Default::default(),
                     tlv_hmac_generated: false,
+                    tlv_processed: false,
                 })
             }
         }

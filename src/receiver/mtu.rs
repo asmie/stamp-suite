@@ -405,7 +405,10 @@ fn route_request(key: &RouteKey) -> Vec<u8> {
 
 #[cfg(target_os = "linux")]
 fn invalid_route() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "invalid route MTU response")
+    super::transmit::local_send_error(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid route MTU response",
+    ))
 }
 
 #[cfg(target_os = "linux")]

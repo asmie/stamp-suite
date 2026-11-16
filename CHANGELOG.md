@@ -29,7 +29,8 @@ Upgrade both peers together when they use BER or reflected headers.
   draft-ietf-bpm-stamp-cos-ecn-00. A reflector that can apply neither the
   requested ECN nor Not-ECT replies with RPE=01.
 - **Minimum Rust version** is 1.87.
-- **Library API.** `StampResponse` has a new `cos_reply_policy` field.
+- **Library API.** `StampResponse` has new `cos_reply_policy` and
+  `tlv_processed` fields.
 
 ### Added
 
@@ -84,6 +85,11 @@ Upgrade both peers together when they use BER or reflected headers.
     patterns survive MTU clamping.
   - Session activity, rate-limit refill and rate/burst control updates stay
     consistent under concurrent workers.
+  - In `--tlv-mode ignore`, Direct Measurement and Follow-Up Telemetry TLVs
+    are sent as received, even when the sender left U clear.
+  - A failed local socket setting (fragmentation policy, send buffer) or an
+    unreadable route-table reply drops the reply. It no longer sets the
+    Return Path U flag or retargets the reply to the sender.
 - Sender:
   - Replies must echo the full sender timestamp; mismatches are counted in
     `measurements.mismatched_replies` instead of matching a pending probe.

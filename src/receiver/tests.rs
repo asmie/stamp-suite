@@ -1908,6 +1908,58 @@ fn test_assemble_unauth_with_tlvs_hmac_failure_preserves_original() {
         !response.tlv_hmac_generated,
         "an echoed HMAC must not be re-signed at send time"
     );
+    assert!(
+        !response.tlv_processed,
+        "a failure echo must not get send-time telemetry"
+    );
+}
+
+#[test]
+fn test_assemble_unauth_marks_only_semantically_processed_tlvs() {
+    use crate::tlv::{RawTlv, TlvList, TlvType};
+
+    let sender_packet = PacketUnauthenticated {
+        sequence_number: 7,
+        timestamp: 100,
+        error_estimate: 10,
+        ssid: 0,
+        mbz: [0; 28],
+    };
+    let base_bytes = sender_packet.to_bytes();
+    // A sender that leaves U clear on a recognized TLV.
+    let mut tlvs = TlvList::new();
+    tlvs.push(RawTlv::new(TlvType::DirectMeasurement, vec![0; 12]))
+        .unwrap();
+    let mut plain = base_bytes.to_vec();
+    plain.extend_from_slice(&tlvs.to_bytes());
+    // The same TLV with an HMAC the reflector has no key for.
+    tlvs.set_hmac(&HmacKey::new(vec![0xAB; 32]).unwrap(), &base_bytes);
+    let mut signed = base_bytes.to_vec();
+    signed.extend_from_slice(&tlvs.to_bytes());
+
+    for (data, mode, processed) in [
+        (&plain, TlvHandlingMode::Echo, true),
+        // TLV-ignore mode copies the TLVs untouched (RFC 8972 §4).
+        (&plain, TlvHandlingMode::Ignore, false),
+        // Without a key, a received HMAC TLV is an integrity failure.
+        (&signed, TlvHandlingMode::Echo, false),
+    ] {
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            mode,
+            None,
+            false,
+            &test_ctx(0, 0),
+        );
+        assert_eq!(response.tlv_processed, processed, "{mode:?}");
+        assert!(!response.tlv_hmac_generated);
+    }
 }
 
 #[test]
@@ -1980,6 +2032,7 @@ fn test_assemble_unauth_with_tlvs_hmac_success_regenerates() {
         "HMAC should be regenerated on successful verification"
     );
     assert!(response.tlv_hmac_generated);
+    assert!(response.tlv_processed);
 }
 
 #[test]

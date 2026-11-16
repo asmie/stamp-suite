@@ -1011,6 +1011,7 @@ mod tests {
                 ber_conformance: Default::default(),
                 tlv_conformance: Default::default(),
                 tlv_hmac_generated: false,
+                tlv_processed: true,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: Some(super::super::ReflectedControlBehavior {
                     max_size: 1500,
@@ -1108,6 +1109,7 @@ mod tests {
                 ber_conformance: Default::default(),
                 tlv_conformance: Default::default(),
                 tlv_hmac_generated: false,
+                tlv_processed: true,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: Some(super::super::ReflectedControlBehavior {
                     max_size: 1500,
@@ -1177,6 +1179,7 @@ mod tests {
                 ber_conformance: Default::default(),
                 tlv_conformance: Default::default(),
                 tlv_hmac_generated: false,
+                tlv_processed: true,
                 return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: controlled.then_some(super::super::ReflectedControlBehavior {
                     max_size: 1500,

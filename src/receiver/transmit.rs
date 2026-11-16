@@ -219,10 +219,9 @@ impl Transmission {
             u32::from_be_bytes(data[..4].try_into().expect("validated response base"))
         };
         data[..4].copy_from_slice(&sequence.to_be_bytes());
-        // A copied HMAC belongs to an error/opaque echo. Assembly deliberately
-        // left those values unchanged; send-time refresh must respect that
-        // decision even for a processable prefix before a malformed tail.
-        if self.response.tlv_hmac_generated || !contains_hmac_tlv(&data, base) {
+        // Echoes keep the values assembly left in them. Refreshing an echo
+        // would change bytes covered by its copied HMAC.
+        if self.response.tlv_processed {
             refresh_telemetry(&mut data, base, &self.session, self.stateful);
         }
         let mut target = plan.target;
@@ -393,8 +392,14 @@ impl Transmission {
                     }
                     options.apply_tos = false;
                 }
-                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                Err(e) if is_reply_too_large(&e) => {
                     log::debug!("reply cannot fit the route MTU: {e}");
+                    break;
+                }
+                Err(e) if is_local_send_error(&e) => {
+                    // The socket, not the reply's route, failed. Changing the
+                    // return path would wrongly report it as unusable.
+                    log::debug!("reflector cannot send to {target}: {e}");
                     break;
                 }
                 Err(e)
@@ -537,12 +542,7 @@ fn fit_reply(
     if data.len() <= cap {
         return Ok(false);
     }
-    let cannot_fit = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "mandatory reply fields exceed payload budget",
-        )
-    };
+    let cannot_fit = || reply_too_large("mandatory reply fields exceed payload budget");
     if base > cap {
         return Err(cannot_fit());
     }
@@ -643,12 +643,7 @@ fn fit_ber_reply(
     controlled: bool,
     reasons: &mut crate::ber::BerConformanceErrors,
 ) -> io::Result<bool> {
-    let cannot_fit = || {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "BER fields exceed payload budget",
-        )
-    };
+    let cannot_fit = || reply_too_large("BER fields exceed payload budget");
     let list = crate::tlv::TlvList::parse(&data[base..]).map_err(|_| cannot_fit())?;
     let mut tlvs: Vec<_> = list.iter().cloned().collect();
     let resized = if controlled {
@@ -690,17 +685,6 @@ fn fit_ber_reply(
     data.truncate(base);
     data.extend_from_slice(&fitted.to_bytes());
     Ok(controlled)
-}
-
-fn contains_hmac_tlv(data: &[u8], base: usize) -> bool {
-    let mut pos = base;
-    while let Some(tlv) = TlvSpan::at(data, pos) {
-        if tlv.tlv_type == TlvType::Hmac {
-            return true;
-        }
-        pos = tlv.end();
-    }
-    false
 }
 
 /// Refreshes send-time Direct Measurement counters and Follow-Up Telemetry
@@ -983,11 +967,13 @@ impl<'a> DatagramSender<'a> {
             // route-MTU-sized reply. Grow only this socket, without changing
             // the already computed payload budget or fragmentation policy.
             let socket = socket2::SockRef::from(&self.fd);
-            self.send_buffer.ensure(
-                payload.len(),
-                || socket.send_buffer_size(),
-                |size| socket.set_send_buffer_size(size),
-            )?;
+            self.send_buffer
+                .ensure(
+                    payload.len(),
+                    || socket.send_buffer_size(),
+                    |size| socket.set_send_buffer_size(size),
+                )
+                .map_err(local_send_error)?;
         }
         #[cfg(unix)]
         {
@@ -1020,7 +1006,8 @@ impl<'a> DatagramSender<'a> {
                 dst,
                 options.dont_fragment,
                 &mut self.settings,
-            )?;
+            )
+            .map_err(local_send_error)?;
             self.socket.send_to(payload, dst)
         }
     }
@@ -1048,6 +1035,53 @@ pub(super) fn cos_apply_error(error: io::Error) -> io::Error {
 
 fn is_cos_apply_error(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|e| e.is::<CosApplyError>())
+}
+
+/// The mandatory reply fields exceed the payload budget. No routing or CoS
+/// fallback can help, so the send loop drops the reply.
+#[derive(Debug)]
+struct ReplyTooLarge(&'static str);
+
+impl std::fmt::Display for ReplyTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for ReplyTooLarge {}
+
+fn reply_too_large(reason: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, ReplyTooLarge(reason))
+}
+
+fn is_reply_too_large(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|e| e.is::<ReplyTooLarge>())
+}
+
+/// A local socket setting or route-table query failed. The reply's return
+/// path is not at fault, so the send loop drops the reply without setting
+/// the Return Path U flag or retargeting it (RFC 9503 §4).
+#[derive(Debug)]
+struct LocalSendError(io::Error);
+
+impl std::fmt::Display for LocalSendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "local send setup failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for LocalSendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+pub(super) fn local_send_error(error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), LocalSendError(error))
+}
+
+fn is_local_send_error(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|e| e.is::<LocalSendError>())
 }
 
 /// Readback catches ignored sticky options. Invalidate on any failure: a
@@ -1165,7 +1199,8 @@ fn send_datagram(
             } else {
                 Err(io::Error::last_os_error())
             }
-        })?;
+        })
+        .map_err(local_send_error)?;
     }
     // SAFETY: `sockaddr_in` and `sockaddr_in6` are plain C structs of integers
     // and byte arrays; all-zero is a valid value for both.
@@ -1250,7 +1285,8 @@ fn send_datagram(
             } else {
                 Ok(())
             }
-        })?;
+        })
+        .map_err(local_send_error)?;
         // IP_TOS / IPV6_TCLASS ancillary data is a host-order c_int holding
         // the whole TOS / Traffic Class byte (DSCP and ECN).
         if options.apply_tos {

@@ -181,6 +181,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
     let mut reply_source: Option<std::net::IpAddr> = None;
     let mut tlv_hmac_generated = false;
+    let mut tlv_processed = false;
     let mut ber_conformance = crate::ber::BerConformanceErrors::default();
     let mut tlv_conformance = crate::tlv::TlvConformanceErrors::default();
 
@@ -241,6 +242,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                             reflected_control = result.reflected_control;
                             reply_source = result.reply_source;
                             tlv_hmac_generated = result.tlv_hmac_generated;
+                            tlv_processed = true;
                             ber_conformance.merge(result.ber_conformance);
                             tlv_conformance.merge(result.tlv_conformance);
                         }
@@ -255,6 +257,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                                 ber_conformance: Default::default(),
                                 tlv_conformance: Default::default(),
                                 tlv_hmac_generated: false,
+                                tlv_processed: false,
                             };
                         }
                     }
@@ -289,6 +292,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
         reflected_control,
         reply_source,
         tlv_hmac_generated,
+        tlv_processed,
         ber_conformance,
         tlv_conformance,
     }
@@ -337,6 +341,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
     let mut reply_source: Option<std::net::IpAddr> = None;
     let mut tlv_hmac_generated = false;
+    let mut tlv_processed = false;
     let mut ber_conformance = crate::ber::BerConformanceErrors::default();
     let mut tlv_conformance = crate::tlv::TlvConformanceErrors::default();
 
@@ -403,6 +408,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                             reflected_control = result.reflected_control;
                             reply_source = result.reply_source;
                             tlv_hmac_generated = result.tlv_hmac_generated;
+                            tlv_processed = true;
                             ber_conformance.merge(result.ber_conformance);
                             tlv_conformance.merge(result.tlv_conformance);
                         }
@@ -417,6 +423,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                                 ber_conformance: Default::default(),
                                 tlv_conformance: Default::default(),
                                 tlv_hmac_generated: false,
+                                tlv_processed: false,
                             };
                         }
                     }
@@ -448,6 +455,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
         reflected_control,
         reply_source,
         tlv_hmac_generated,
+        tlv_processed,
         ber_conformance,
         tlv_conformance,
     }

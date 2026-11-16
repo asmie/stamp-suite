@@ -118,6 +118,7 @@ fn sample(auth: bool, action: ReturnPathAction) -> Transmission {
         ber_conformance: Default::default(),
         tlv_conformance: Default::default(),
         tlv_hmac_generated: auth,
+        tlv_processed: true,
     };
     Transmission::new(
         response,
@@ -558,6 +559,38 @@ fn malformed_tail_stays_opaque_while_prefix_and_hmac_are_refreshed() {
     );
 }
 
+/// Send-time refresh follows the assembly decision, not the TLV flags alone:
+/// an unprocessed reply (TLV-ignore mode, or an echo) keeps a sender's U=0
+/// Direct Measurement TLV exactly as received.
+#[test]
+fn send_time_refresh_updates_only_processed_replies() {
+    for processed in [true, false] {
+        let mut t = sample(false, ReturnPathAction::Normal);
+        t.response.data.truncate(44);
+        t.response.data.extend_from_slice(&[0, 5, 0, 12]);
+        t.response.data.extend_from_slice(&[99; 12]);
+        t.response.tlv_hmac_generated = false;
+        t.response.tlv_processed = processed;
+        let counters = ReflectorCounters::new();
+        let limiter = RateLimiter::new(0);
+        for copy in 0u32..3 {
+            assert!(t
+                .send_next(&counters, &limiter, |data, _, _| {
+                    // S_TxC (value[0..4]) is the sender's and never changes.
+                    assert_eq!(&data[48..52], &[99; 4]);
+                    let r_txc = if processed {
+                        copy.to_be_bytes()
+                    } else {
+                        [99; 4]
+                    };
+                    assert_eq!(&data[56..60], &r_txc, "copy {copy} processed={processed}");
+                    Ok(data.len())
+                })
+                .is_some());
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn every_copy_pins_source_on_the_actual_socket() {
@@ -810,6 +843,77 @@ fn mtu_clamps_ipv4_ipv6_bursts_and_resigns_final_packet() {
             assert_eq!(t.session.get_transmitted_count(), 1);
         }
     }
+}
+
+/// Local socket failures drop the reply. They say nothing about the return
+/// path, so the reply is not retargeted to the sender with U (RFC 9503 §4). The error kind alone no longer decides this: an
+/// unmarked `InvalidData` from the route is an ordinary path failure.
+#[test]
+fn local_send_errors_drop_without_blaming_the_return_path() {
+    let alternate: SocketAddr = "127.0.0.2:4001".parse().unwrap();
+    let local = || {
+        local_send_error(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "setsockopt",
+        ))
+    };
+    for (cap_fails, local_failure, expected_calls) in
+        [(false, true, 1), (true, true, 0), (false, false, 2)]
+    {
+        let mut t = sized_sample(false, 1500);
+        t.response.return_path_action = ReturnPathAction::AlternateAddress(alternate);
+        let counters = ReflectorCounters::new();
+        let mut targets = Vec::new();
+        let result = t.send_next_with_mtu(
+            &counters,
+            &RateLimiter::new(0),
+            |target, _, _| {
+                if cap_fails && target == alternate {
+                    Err(local())
+                } else {
+                    Ok(2000)
+                }
+            },
+            |data, target, _| {
+                targets.push(target);
+                if target != alternate {
+                    return Ok(data.len());
+                }
+                Err(if local_failure {
+                    local()
+                } else {
+                    io::Error::new(io::ErrorKind::InvalidData, "route rejected reply")
+                })
+            },
+        );
+        let label = format!("cap_fails={cap_fails} local={local_failure}");
+        assert_eq!(targets.len(), expected_calls, "{label}");
+        if local_failure {
+            assert_eq!(result, None, "{label}");
+            assert!(targets.iter().all(|t| *t == alternate), "{label}");
+            assert_eq!(counters.packets_dropped.load(Ordering::Relaxed), 1);
+        } else {
+            assert_eq!(result, Some(0), "{label}");
+            assert_eq!(targets.last(), Some(&t.source));
+        }
+    }
+}
+
+#[test]
+fn reply_too_large_is_recognized_by_marker_not_kind() {
+    let mut data = vec![0; 44];
+    data.extend_from_slice(&[0, 1, 0, 8]);
+    data.extend_from_slice(&[0; 8]);
+    let error = fit_reply_for_test(&mut data, 44, 43, false).unwrap_err();
+    assert!(is_reply_too_large(&error));
+    assert!(!is_local_send_error(&error));
+    assert!(!is_reply_too_large(&io::Error::new(
+        io::ErrorKind::InvalidData,
+        "other"
+    )));
+    let local = local_send_error(io::ErrorKind::PermissionDenied.into());
+    assert!(is_local_send_error(&local));
+    assert_eq!(local.kind(), io::ErrorKind::PermissionDenied);
 }
 
 #[test]

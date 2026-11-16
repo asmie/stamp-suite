@@ -40,6 +40,7 @@ pub(super) struct SenderRun {
     label: Option<String>,
     socket: UdpSocket,
     /// The connected peer, kept to refresh the route (see `refresh_route`).
+    #[cfg(target_os = "linux")]
     remote_addr: SocketAddr,
     consecutive_send_errors: u8,
     use_auth: bool,
@@ -785,6 +786,7 @@ impl SenderRun {
             conf: Arc::clone(&shared_conf),
             label: None,
             socket,
+            #[cfg(target_os = "linux")]
             remote_addr,
             consecutive_send_errors: 0,
             use_auth,

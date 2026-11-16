@@ -117,10 +117,10 @@ pub(super) fn route_mtu(key: &RouteKey) -> io::Result<u32> {
     check(unsafe { GetIpInterfaceEntry(&mut interface) })?;
     let mtu = path.PathMtu.min(interface.NlMtu);
     if mtu == 0 {
-        return Err(io::Error::new(
+        return Err(super::super::transmit::local_send_error(io::Error::new(
             io::ErrorKind::InvalidData,
             "Windows returned a zero MTU",
-        ));
+        )));
     }
     Ok(mtu)
 }
