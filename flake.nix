@@ -10,6 +10,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
         # Cargo features compiled into the nix-built binary and exercised
         # by the check phase. Mirrors `cargo build/test --all-features`.
@@ -17,13 +18,13 @@
 
         # Shared by the package and lint derivations. After a Cargo.lock change,
         # temporarily use pkgs.lib.fakeHash, build, then copy the reported hash.
-        cargoDepsHash = "sha256-7w+ahL7N6YM2R9hy1s2LKvt1y/F7XSUFq2d8Da6Axfc=";
+        cargoDepsHash = "sha256-7Sqzrmtb9fZp9VE+kk2pvai74I4206AkPHNjJY/XMUE=";
       in
       {
         packages = {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "stamp-suite";
-            version = "1.0.0";
+            inherit version;
 
             src = self;
 
@@ -69,7 +70,7 @@
 
           clippy = pkgs.rustPlatform.buildRustPackage {
             pname = "stamp-suite-clippy";
-            version = "1.0.0";
+            inherit version;
             src = self;
             cargoHash = cargoDepsHash;
             buildFeatures = allFeatures;

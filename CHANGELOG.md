@@ -227,6 +227,9 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Read the Nix package version from Cargo.toml and refresh the locked vendor
+  hash so package and lint derivations build the 1.1.0 sources consistently.
+
 - Grow undersized macOS reflector UDP send buffers before large replies,
   preserving route MTU limits and fragmentation policy. Correct native key
   rotation tests to expect controlled IPv6 replies on macOS while retaining
