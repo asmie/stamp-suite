@@ -13,9 +13,7 @@ mod windows;
 pub(super) use windows::{egress_mtu, enable_mtu_discovery};
 
 #[cfg(target_os = "macos")]
-pub(super) mod macos;
-#[cfg(target_os = "macos")]
-pub(super) use macos::{egress_mtu, enable_mtu_discovery};
+pub(super) use crate::net_policy::macos_mtu::{egress_mtu, enable_mtu_discovery};
 
 /// Disable IPv4 UDP TX checksums only. Kernel receive validation is unchanged.
 #[cfg(target_os = "linux")]

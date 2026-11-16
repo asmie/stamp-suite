@@ -544,7 +544,7 @@ Default 0 disables Type 12 (RFC 10052 §5): the TLV is treated as unsupported an
 \fB\-\-reflected\-control\-max\-size\fR \fI<REFLECTED_CONTROL_MAX_SIZE>\fR [default: 1500]
 Reflector: maximum padded reply size in bytes (RFC 10052 §3). Requests above the cap get one reply padded to the cap, with C set.
 
-Linux and Windows also check the reply route MTU before each send, including wildcard binds and alternate destinations. IP/UDP and SRH overhead reduce the payload budget (1472 bytes for plain IPv4 at MTU 1500; 1452 for IPv6). Linux uses route notifications and cache expiry; Windows queries the kernel on every attempt. Unknown MTU or mandatory fields that cannot fit cause a drop. Other platforms lack route MTU lookup. Runtime cap updates cannot bypass these send\-time checks.
+Linux, Windows and supported macOS IPv6 sockets also check the reply route MTU before each send, including wildcard binds and alternate destinations. IP/UDP and SRH overhead reduce the payload budget (1472 bytes for plain IPv4 at MTU 1500; 1452 for IPv6). Linux uses route notifications and cache expiry; Windows and macOS IPv6 query the kernel on every attempt. macOS excludes IPv4, mapped peers, interface pinning and SRv6. Unknown MTU or mandatory fields that cannot fit cause a drop. Other platforms lack route MTU lookup. Runtime cap updates cannot bypass these send\-time checks.
 .TP
 \fB\-\-reflected\-control\-min\-interval\-ns\fR \fI<REFLECTED_CONTROL_MIN_INTERVAL_NS>\fR [default: 1000]
 Reflector\-side amplification cap (the per\-request *rate* limit of RFC 10052 §3): minimum inter\-packet interval in nanoseconds. A multi\-packet request with a shorter interval gets a single reflected packet with the C flag set on the echoed TLV. Default 1000 (1 µs)

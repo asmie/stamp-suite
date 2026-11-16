@@ -732,8 +732,17 @@ dropped. Windows reflectors query the selected route, cached path MTU and
 interface MTU through IP Helper on every attempt, including burst copies.
 They use the smaller path/interface value and subtract the IP/UDP headers.
 Missing path entries fail closed; no fixed-size substitute is used. Interface
-pinning and SRv6 remain unsupported on Windows. Other platforms without route
-MTU lookup cannot send size-controlled or reflected-header replies.
+pinning and SRv6 remain unsupported on Windows.
+
+macOS reflectors query native unicast IPv6 destinations on every attempt,
+including burst copies and standalone BER replies. A temporary socket bound to
+the reply source (or wildcard address) reads the kernel estimate without sending
+UDP probes or connecting the live reflector socket. Its ephemeral local port
+means this is a destination-route estimate, not a port-specific policy lookup.
+IPv4, mapped peers, interface pinning and SRv6 remain unsupported by this adapter.
+IPv6 fragmentation policy is set for controlled replies and cleared for ordinary
+replies independently of CoS settings. Other platforms without route MTU lookup
+cannot send size-controlled or reflected-header replies.
 
 Raising the administrative limit allows larger replies on routes that can
 carry them. `PATCH /v1/caps` changes that limit at runtime; the route limits

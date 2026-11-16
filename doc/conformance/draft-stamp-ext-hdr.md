@@ -89,7 +89,8 @@ checksums and also check that corrupt packets are rejected.
 to IPv6 probes on Linux. Header requests (`--attach-ext-hdr`,
 `--reflected-ipv6-ext-hdr`, `--reflected-fixed-hdr`) need a known egress route
 MTU, which the sender reads on Linux, Windows and supported macOS IPv6 sockets
-(`egress_mtu` in `src/sender/socket.rs` and its platform modules). macOS supports
+(`egress_mtu` in `src/sender/socket.rs`, `src/sender/socket/windows.rs` and
+`src/net_policy/macos_mtu.rs`). macOS supports
 connected native unicast IPv6 without explicit interface pinning, including the
 socket minimum-MTU policy. Unsupported sockets refuse header-request startup.
 Windows and macOS support fixed-header requests;
@@ -309,7 +310,7 @@ route change cannot fragment a probe. The reflector sizes each reply against the
 destination route before signing (`src/receiver/mtu.rs`,
 `src/receiver/transmit.rs::fit_reply`); an unknown budget fails closed. Header
 requests need a known route MTU, provided by Linux, Windows and supported macOS IPv6 senders;
-reflector lookup is also available on Linux and Windows. That limits where the feature runs;
+reflector lookup is also available on Linux, Windows and unpinned native unicast IPv6 on macOS. That limits where the feature runs;
 it never permits an oversized packet.
 
 Windows sender tests in `src/sender/run/windows_mtu_tests.rs` query native
@@ -424,3 +425,10 @@ IPv6 queries, minimum-MTU policy changes, optional header removal/restoration,
 mandatory oversize refusal, BER initial fitting and independent signatures.
 They are selected by the native macOS CI jobs; cross-compilation alone does not
 establish native behavior or physical fragmentation enforcement.
+
+macOS reflector regressions in `src/receiver/transmit/macos_tests.rs` cover
+Type 12 sizing, optional-header removal, BER whole-pattern fitting, independent
+signatures and repeated fragmentation/CoS setting transitions. The query tests
+in `src/receiver/mtu/macos.rs` cover wildcard sources, forced refresh and explicit
+unsupported cases. Native macOS execution is required; cross-checks do not
+establish physical fragmentation behavior or actual route-change handling.

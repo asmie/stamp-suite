@@ -1,5 +1,5 @@
 use super::*;
-use crate::sender::socket::macos::IPV6_USE_MIN_MTU;
+use crate::net_policy::macos_mtu::IPV6_USE_MIN_MTU;
 use crate::test_wire_hmac as wire_hmac;
 use clap::Parser;
 use nix::libc;

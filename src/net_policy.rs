@@ -1,4 +1,7 @@
 //! Draft ext-hdr-26 §3.1 endpoint and outgoing-hop policy.
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_mtu;
+
 use std::{
     io,
     net::{SocketAddr, UdpSocket},

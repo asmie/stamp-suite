@@ -4,6 +4,10 @@ use super::*;
 #[path = "windows_tests.rs"]
 mod windows_tests;
 
+#[cfg(target_os = "macos")]
+#[path = "macos_tests.rs"]
+mod macos_tests;
+
 #[test]
 fn reply_budget_covers_handoff_active_send_and_rescheduled_copies() {
     let counters = Arc::new(ReflectorCounters::new());

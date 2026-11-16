@@ -79,6 +79,9 @@ impl TransportPlan {
             dont_fragment: response.reflected_control.is_some()
                 || has_reflected_headers(&response.data, base)
                 || (cfg!(any(target_os = "linux", target_os = "windows"))
+                    && has_ber(&response.data, base))
+                || (cfg!(target_os = "macos")
+                    && matches!(target.ip(), IpAddr::V6(ip) if ip.to_ipv4_mapped().is_none() && !ip.is_multicast())
                     && has_ber(&response.data, base)),
         };
         let mut unsupported_srh = false;
@@ -897,6 +900,8 @@ pub(super) struct DatagramSender<'a> {
     #[cfg(windows)]
     socket: &'a std::net::UdpSocket,
     settings: [Option<i32>; 2],
+    #[cfg(target_os = "macos")]
+    fragmentation: Option<i32>,
     #[cfg(target_os = "linux")]
     srh: Option<Arc<[u8]>>,
 }
@@ -907,6 +912,8 @@ impl<'a> DatagramSender<'a> {
         Self {
             fd: socket.as_fd(),
             settings: [None; 2],
+            #[cfg(target_os = "macos")]
+            fragmentation: None,
             #[cfg(target_os = "linux")]
             srh: None,
         }
@@ -935,6 +942,8 @@ impl<'a> DatagramSender<'a> {
                 dst,
                 options,
                 &mut self.settings,
+                #[cfg(target_os = "macos")]
+                &mut self.fragmentation,
                 #[cfg(target_os = "linux")]
                 &mut self.srh,
             )
@@ -1010,7 +1019,7 @@ fn apply_verified_tos(
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows", test))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos", test))]
 fn update_socket_option(
     cached: &mut Option<i32>,
     requested: i32,
@@ -1074,9 +1083,34 @@ fn send_datagram(
     dst: SocketAddr,
     options: &SendOptions,
     settings: &mut [Option<i32>; 2],
+    #[cfg(target_os = "macos")] fragmentation: &mut Option<i32>,
     #[cfg(target_os = "linux")] srh_setting: &mut Option<Arc<[u8]>>,
 ) -> io::Result<usize> {
     use nix::libc;
+    #[cfg(target_os = "macos")]
+    if dst.is_ipv6() {
+        // Separate from the CoS cache: each sticky setting has one send owner.
+        // Ordinary replies clear the policy left by a controlled reply.
+        let enabled = i32::from(options.dont_fragment);
+        update_socket_option(fragmentation, enabled, || {
+            // SAFETY: fd is borrowed and enabled is a live, correctly sized
+            // integer. Only this socket's IPv6 fragmentation policy changes.
+            let result = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_DONTFRAG,
+                    std::ptr::addr_of!(enabled).cast(),
+                    std::mem::size_of_val(&enabled) as _,
+                )
+            };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        })?;
+    }
     // SAFETY: `sockaddr_in` and `sockaddr_in6` are plain C structs of integers
     // and byte arrays; all-zero is a valid value for both.
     let mut addr4: libc::sockaddr_in = unsafe { std::mem::zeroed() };

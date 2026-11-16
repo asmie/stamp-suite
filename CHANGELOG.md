@@ -7,6 +7,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Added
 
+- Size macOS native IPv6 reflector replies using fresh kernel MTU estimates.
+  Type 12, reflected-header and standalone BER replies share the budget;
+  ordinary replies restore fragmentation policy independently of CoS settings.
+  IPv4, mapped peers, interface pinning and SRv6 remain unsupported by this adapter.
+
 - Read connected native unicast IPv6 MTU estimates on macOS for sender header
   requests and initial BER fitting. Honor minimum-MTU socket policy, refresh
   before each header-request send, and disable fragmentation for these probes.

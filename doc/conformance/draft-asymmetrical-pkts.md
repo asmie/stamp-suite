@@ -35,7 +35,7 @@ trimmed with `...`.
 | asym-3-05 | "the Session-Reflector MUST transmit a sequence of reflected test packets according to the following rules" | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` yields a `ReflectedControlBehavior`; both backends send it through `src/receiver/transmit.rs::ReplyQueue`. Test: `tests/burst_transmission_test.rs`. See [decision order](#type-12-decision-order). |
 | asym-3-06 | "The length of the reflected test packet MUST be the largest of" [base packet without Extra Padding, or the request aligned to four octets] | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` drops echoed Extra Padding, rounds the request up to four octets and pads if larger. Tests: `reflected_control_strips_echoed_extra_padding`, `reflected_control_pads_to_four_octet_aligned_length`. |
 | asym-3-07 | "the Session-Reflector MUST use the Extra Padding TLV ... to increase the length of the reflected test packet" | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` adds `src/tlv/typed/extra_padding.rs::new_zeros`. Tests: `a1_reflected_control_length_padding_within_cap`, `tests/netns_conformance.rs::scenario_6_type12_multi_reply`. |
-| asym-3-08 | "If the calculated length ... exceeds the MTU ..., the Session-Reflector MUST set the C flag ... and MUST transmit a single reflected packet of the length equal to MTU" | MUST | Reflector | Partial | `src/receiver/mtu.rs`, `src/receiver/transmit.rs::fit_reply`; Linux only, see [route MTU](#reply-size-and-route-mtu). Tests: `tests/route_mtu_test.rs`, `a1_reflected_control_length_request_exceeds_cap_sets_c_flag`, [namespace test](../testing-netns.md#reply-route-mtu-regression). |
+| asym-3-08 | "If the calculated length ... exceeds the MTU ..., the Session-Reflector MUST set the C flag ... and MUST transmit a single reflected packet of the length equal to MTU" | MUST | Reflector | Partial | `src/receiver/mtu.rs`, `src/receiver/transmit.rs::fit_reply`; Linux, Windows and supported macOS IPv6 adapters; see [route MTU](#reply-size-and-route-mtu). Tests: `tests/route_mtu_test.rs`, `a1_reflected_control_length_request_exceeds_cap_sets_c_flag`, [namespace test](../testing-netns.md#reply-route-mtu-regression). |
 | asym-3-09 | "Otherwise, the Session-Reflector MUST set the C flag to 0 in each reflected test packet" [MTU context] | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` sets C only on the non-conformant branch. Tests in `tests/tlv_flag_semantics.rs`: `a1_reflected_control_length_padding_within_cap`, `c_flag_clear_when_reflected_control_request_within_caps`. |
 | asym-3-10 | "The number of reflected test packets in the sequence MUST equal the value of the Number of the Reflected Packets field." | MUST | Reflector | Compliant | `Transmission::send_next` and `ReplyQueue::schedule_next` (`src/receiver/transmit.rs`) send the first reply plus the admitted copies. Test: `tests/burst_transmission_test.rs`. A send failure ends a burst early. |
 | asym-3-11 | "the interval between the transmission of two consecutive reflected packets ... MUST be equal to the value in the Interval Between the Reflected Packets field" | MUST | Reflector | Partial | `src/receiver/transmit.rs::ReplyQueue::schedule_next` schedules each copy one configured interval after the preceding successful send completes; OS scheduling and finalization can extend the wire gap. `tests/burst_transmission_test.rs` exercises actual burst dispatch, without proving nanosecond equality. See [Burst timing](#burst-timing). |
@@ -117,12 +117,19 @@ mandatory fields. Route and link notifications plus a 250 ms cache expiry track
 changes; Don't Fragment prevents fragmentation if the route changes between
 lookup and send. A trimmed reply is sent once with C set.
 
+Windows queries path/interface estimates on each attempt. macOS queries native
+unicast IPv6 destinations using temporary connected sockets, without sending
+UDP probes or changing the live reflector's connection. These adapters do not
+reuse cached estimates. macOS excludes IPv4, mapped peers, interface pinning and
+SRv6; its temporary local port does not reproduce port-specific routing policy.
+See [reply route MTU](../usage.md#reply-size-and-route-mtu) for platform limits.
+
 Limits behind the Partial score of asym-3-08:
 
 - When the budget leaves a remainder of 1 to 3 bytes, no TLV header fits, so the
   reply stays slightly short of the MTU.
-- If the route MTU cannot be determined, the reply is dropped. Other platforms
-  have no route MTU lookup, so they drop replies to admitted Type 12 requests.
+- If the route MTU cannot be determined, the reply is dropped. Unsupported
+  platforms and address profiles drop replies to admitted Type 12 requests.
 - This is route MTU lookup, not active path MTU probing.
 
 ### Burst timing

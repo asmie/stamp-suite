@@ -7,12 +7,15 @@ use crate::{
     },
 };
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 #[test]
 fn single_ber_reply_checks_mtu_preserves_patterns_and_resigns() {
     let key = HmacKey::new(vec![0xab; 16]).unwrap();
     for auth in [false, true] {
         for ipv6 in [false, true] {
+            if cfg!(target_os = "macos") && !ipv6 {
+                continue;
+            }
             let base = if auth {
                 AUTH_BASE_SIZE
             } else {

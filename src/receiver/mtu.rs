@@ -3,8 +3,8 @@
 //! Linux route/link/address/rule notifications invalidate the bounded cache; a
 //! 250 ms expiry and EMSGSIZE-triggered refresh provide additional backstops.
 //! Kernel fragmentation prevention closes the race between lookup and send.
-//! Windows queries the route/path/interface on every attempt, without reusing
-//! cached estimates.
+//! Windows and supported macOS IPv6 sockets query on every attempt, without
+//! reusing cached estimates.
 use super::transmit::SendOptions;
 use std::{
     collections::{HashMap, VecDeque},
@@ -20,6 +20,11 @@ const CACHE_TTL: Duration = Duration::from_millis(250);
 mod windows;
 #[cfg(target_os = "windows")]
 use windows::route_mtu;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos::route_mtu;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RouteKey {
@@ -54,10 +59,17 @@ impl MtuCache {
         options: &SendOptions,
         refresh: bool,
     ) -> io::Result<usize> {
+        #[cfg(target_os = "macos")]
+        if options.srh.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "macOS SRH MTU lookup is unavailable",
+            ));
+        }
         let (key, overhead) = route_key(local, target, options)?;
-        // Until Windows route-change notifications are supported, never reuse
+        // Until native route-change notifications are supported, never reuse
         // a cached estimate, including for later copies of a burst.
-        let refresh = refresh || cfg!(target_os = "windows");
+        let refresh = refresh || cfg!(any(target_os = "windows", target_os = "macos"));
         #[cfg(target_os = "linux")]
         let refresh = refresh || !self.invalidate_routes();
         let mtu = self.lookup(key, Instant::now(), refresh, route_mtu)?;
@@ -241,7 +253,7 @@ fn route_key(
     ))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn route_mtu(_: &RouteKey) -> io::Result<u32> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

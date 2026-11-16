@@ -1,13 +1,16 @@
 //! Connected native IPv6 MTU estimates from Darwin. No active path probing.
 
-use std::{io, net::IpAddr, os::fd::AsRawFd};
+use std::{
+    io,
+    net::IpAddr,
+    os::fd::{AsFd, AsRawFd},
+};
 
 use nix::libc;
-use tokio::net::UdpSocket;
 
 // Darwin RFC 3542 ABI, missing from libc's Apple bindings:
 // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet6/in6.h
-pub(in crate::sender) const IPV6_USE_MIN_MTU: libc::c_int = 42;
+pub(crate) const IPV6_USE_MIN_MTU: libc::c_int = 42;
 const IPV6_PATHMTU: libc::c_int = 44;
 
 #[repr(C)]
@@ -16,11 +19,11 @@ struct MtuInfo {
     mtu: u32,
 }
 
-fn native_unicast(ip: IpAddr) -> bool {
+pub(crate) fn native_unicast(ip: IpAddr) -> bool {
     matches!(ip, IpAddr::V6(ip) if ip.to_ipv4_mapped().is_none() && !ip.is_multicast())
 }
 
-fn read_int(socket: &UdpSocket, option: libc::c_int) -> Option<libc::c_int> {
+fn read_int(socket: &socket2::Socket, option: libc::c_int) -> Option<libc::c_int> {
     let mut value: libc::c_int = 0;
     let size = std::mem::size_of_val(&value) as libc::socklen_t;
     let mut len = size;
@@ -41,12 +44,13 @@ fn read_int(socket: &UdpSocket, option: libc::c_int) -> Option<libc::c_int> {
 /// Read the connected peer's kernel estimate on every call. Darwin's PATHMTU
 /// query does not cover all egress overrides, so explicitly pinned interfaces
 /// are unavailable here. Its returned address is zero, not a peer identity.
-pub(in crate::sender) fn egress_mtu(socket: &UdpSocket) -> Option<u32> {
-    if !native_unicast(socket.peer_addr().ok()?.ip()) || read_int(socket, libc::IPV6_BOUND_IF)? != 0
-    {
+pub(crate) fn egress_mtu(socket: &impl AsFd) -> Option<u32> {
+    let socket = socket2::SockRef::from(socket);
+    let peer = socket.peer_addr().ok()?.as_socket()?;
+    if !native_unicast(peer.ip()) || read_int(&socket, libc::IPV6_BOUND_IF)? != 0 {
         return None;
     }
-    let minimum = read_int(socket, IPV6_USE_MIN_MTU)?;
+    let minimum = read_int(&socket, IPV6_USE_MIN_MTU)?;
     if !matches!(minimum, -1..=1) {
         return None;
     }
@@ -77,7 +81,7 @@ pub(in crate::sender) fn egress_mtu(socket: &UdpSocket) -> Option<u32> {
 
 /// Prevent fragmentation for the IPv6 profile supported by this adapter.
 /// Other address families retain their existing unsupported-MTU behavior.
-pub(in crate::sender) fn enable_mtu_discovery(socket: &UdpSocket, peer: IpAddr) -> io::Result<()> {
+pub(crate) fn enable_mtu_discovery(socket: &impl AsFd, peer: IpAddr) -> io::Result<()> {
     if !native_unicast(peer) {
         return Ok(());
     }
@@ -86,7 +90,7 @@ pub(in crate::sender) fn enable_mtu_discovery(socket: &UdpSocket, peer: IpAddr) 
     // synchronous call, which changes only this socket's fragmentation policy.
     let result = unsafe {
         libc::setsockopt(
-            socket.as_raw_fd(),
+            socket.as_fd().as_raw_fd(),
             libc::IPPROTO_IPV6,
             libc::IPV6_DONTFRAG,
             std::ptr::addr_of!(enabled).cast(),
