@@ -286,9 +286,10 @@ async fn delete_default_key(State(s): State<ControlState>) -> Response {
 }
 
 fn caps_json(s: &ControlState) -> serde_json::Value {
+    let (rate, burst) = s.rate_limiter.rate_and_burst();
     serde_json::json!({
-        "max_pps": s.rate_limiter.rate(),
-        "rate_burst": s.rate_limiter.burst(),
+        "max_pps": rate,
+        "rate_burst": burst,
         "max_sessions": s.session_manager.max_sessions(),
         "reflected_control_max_count":
             s.caps.reflected_control_max_count.load(Ordering::Relaxed),
@@ -321,11 +322,7 @@ struct CapsPatch {
 }
 
 async fn patch_caps(State(s): State<ControlState>, Json(p): Json<CapsPatch>) -> Response {
-    if p.max_pps.is_some() || p.rate_burst.is_some() {
-        let rate = p.max_pps.unwrap_or_else(|| s.rate_limiter.rate());
-        let burst = p.rate_burst.unwrap_or_else(|| s.rate_limiter.burst());
-        s.rate_limiter.set_rate(rate, burst);
-    }
+    s.rate_limiter.update_rate(p.max_pps, p.rate_burst);
     if let Some(cap) = p.max_sessions {
         s.session_manager.set_max_sessions(cap);
     }

@@ -576,6 +576,111 @@ async fn key_lifecycle() {
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn caps_concurrent_partial_rate_updates_preserve_both_fields() {
+    let state = test_state();
+    let app = router(state.clone()).unwrap();
+    for round in 0..2000 {
+        state.rate_limiter.set_rate(1, 1);
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let mut tasks = Vec::new();
+        for body in [r#"{"max_pps":2}"#, r#"{"rate_burst":3}"#] {
+            let app = app.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                let request = Request::patch("/v1/caps")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap();
+                barrier.wait().await;
+                app.oneshot(request).await.unwrap().status()
+            }));
+        }
+        barrier.wait().await;
+        for task in tasks {
+            assert_eq!(task.await.unwrap(), StatusCode::OK);
+        }
+        assert_eq!(
+            (state.rate_limiter.rate(), state.rate_limiter.burst()),
+            (2, 3),
+            "partial PATCH lost an unrelated field in round {round}"
+        );
+    }
+}
+
+#[test]
+fn caps_rate_snapshot_never_mixes_configurations() {
+    let state = test_state();
+    state.rate_limiter.set_rate(1, 10);
+    let barrier = std::sync::Barrier::new(2);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let mismatch = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            barrier.wait();
+            for _ in 0..1_000_000 {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                state.rate_limiter.set_rate(2, 20);
+                state.rate_limiter.set_rate(3, 30);
+            }
+        });
+        barrier.wait();
+        let mismatch = (0..10_000).find_map(|_| {
+            let caps = caps_json(&state);
+            let rate = caps["max_pps"].as_u64().unwrap();
+            let burst = caps["rate_burst"].as_u64().unwrap();
+            (burst != rate * 10).then_some((rate, burst))
+        });
+        stop.store(true, Ordering::Relaxed);
+        mismatch
+    });
+    assert_eq!(mismatch, None, "GET combined fields from different updates");
+}
+
+#[tokio::test]
+async fn caps_partial_rate_updates_keep_zero_and_omitted_field_semantics() {
+    let state = test_state();
+    let app = router(state.clone()).unwrap();
+    for (patch, expected) in [
+        (serde_json::json!({}), (0, 0)),
+        (serde_json::json!({"max_pps":100}), (100, 100)),
+        (serde_json::json!({"max_pps":200}), (200, 100)),
+        (serde_json::json!({"rate_burst":0}), (200, 200)),
+        (serde_json::json!({"max_pps":0}), (0, 200)),
+        (serde_json::json!({"max_pps":10}), (10, 200)),
+        (serde_json::json!({"rate_burst":3}), (10, 3)),
+        (serde_json::json!({"max_pps":25,"rate_burst":0}), (25, 25)),
+        (
+            serde_json::json!({"max_pps":u32::MAX,"rate_burst":u32::MAX}),
+            (u32::MAX, u32::MAX),
+        ),
+        (serde_json::json!({"max_pps":0,"rate_burst":0}), (0, 0)),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::patch("/v1/caps")
+                    .header("content-type", "application/json")
+                    .body(Body::from(patch.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let reported: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(reported["max_pps"], expected.0);
+        assert_eq!(reported["rate_burst"], expected.1);
+        assert_eq!(state.rate_limiter.rate_and_burst(), expected);
+        let current = get_json(&app, "/v1/caps").await;
+        assert_eq!(current["max_pps"], expected.0);
+        assert_eq!(current["rate_burst"], expected.1);
+    }
+}
+
 #[tokio::test]
 async fn caps_patch_round_trip() {
     let state = test_state();

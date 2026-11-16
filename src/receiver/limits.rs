@@ -151,11 +151,9 @@ impl Default for ReflectorCounters {
 /// The SSID is not part of the key: a sender chooses it freely, so keying on
 /// it would let one source multiply its budget.
 pub struct RateLimiter {
-    /// Tokens/second; 0 = unlimited (always allow, no bucket allocation).
-    /// Runtime-adjustable via the control plane.
-    rate: AtomicU32,
-    /// Bucket capacity. Kept equal to `rate` when configured as 0.
-    burst: AtomicU32,
+    /// Atomic pair: tokens/second in the high half, effective burst in the low
+    /// half. Readers must not combine fields from separate runtime updates.
+    limits: AtomicU64,
     state: std::sync::Mutex<RateLimiterState>,
     capacity: usize,
 }
@@ -196,8 +194,7 @@ impl RateLimiter {
         let burst = if burst == 0 { rate } else { burst };
         let now = Instant::now();
         RateLimiter {
-            rate: AtomicU32::new(rate),
-            burst: AtomicU32::new(burst),
+            limits: AtomicU64::new(Self::encode_limits(rate, burst)),
             state: std::sync::Mutex::new(RateLimiterState {
                 last_cleanup: now,
                 sources: StdHashMap::new(),
@@ -213,25 +210,62 @@ impl RateLimiter {
         }
     }
 
-    /// Adjusts the rate and burst at runtime (control plane). `burst` of 0
-    /// falls back to `rate`; `rate` of 0 disables limiting entirely.
-    pub fn set_rate(&self, rate: u32, burst: u32) {
+    fn encode_limits(rate: u32, burst: u32) -> u64 {
         let burst = if burst == 0 { rate } else { burst };
-        self.rate.store(rate, std::sync::atomic::Ordering::Relaxed);
-        self.burst
-            .store(burst, std::sync::atomic::Ordering::Relaxed);
+        (u64::from(rate) << 32) | u64::from(burst)
+    }
+
+    /// Adjusts the rate and burst together at runtime (control plane).
+    /// `burst` of 0 falls back to `rate`; `rate` of 0 disables limiting entirely.
+    pub fn set_rate(&self, rate: u32, burst: u32) {
+        self.limits
+            .store(Self::encode_limits(rate, burst), Ordering::Relaxed);
+    }
+
+    /// Updates only supplied fields without overwriting concurrent changes to
+    /// omitted fields. A supplied zero burst uses the rate of the same update.
+    /// An omitted burst retains its nonzero effective capacity; a zero capacity
+    /// falls back to the updated rate, as at initial configuration.
+    pub fn update_rate(&self, rate: Option<u32>, burst: Option<u32>) {
+        if rate.is_none() && burst.is_none() {
+            return;
+        }
+        // Retry from the latest pair if another writer changed either field.
+        let mut current = self.limits.load(Ordering::Relaxed);
+        loop {
+            let updated = Self::encode_limits(
+                rate.unwrap_or((current >> 32) as u32),
+                burst.unwrap_or(current as u32),
+            );
+            match self.limits.compare_exchange_weak(
+                current,
+                updated,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(latest) => current = latest,
+            }
+        }
+    }
+
+    /// Coherent snapshot of the current rate and effective burst capacity.
+    #[must_use]
+    pub fn rate_and_burst(&self) -> (u32, u32) {
+        let limits = self.limits.load(Ordering::Relaxed);
+        ((limits >> 32) as u32, limits as u32)
     }
 
     /// Current rate (tokens/second); 0 = unlimited.
     #[must_use]
     pub fn rate(&self) -> u32 {
-        self.rate.load(std::sync::atomic::Ordering::Relaxed)
+        self.rate_and_burst().0
     }
 
     /// Current burst capacity.
     #[must_use]
     pub fn burst(&self) -> u32 {
-        self.burst.load(std::sync::atomic::Ordering::Relaxed)
+        self.rate_and_burst().1
     }
 
     /// Refills `src`'s bucket and takes one token if available. Denied requests
@@ -241,7 +275,7 @@ impl RateLimiter {
     }
 
     fn allow_at(&self, src: std::net::IpAddr, now: Instant) -> bool {
-        let rate_now = self.rate();
+        let (rate_now, burst_now) = self.rate_and_burst();
         if rate_now == 0 {
             // Unlimited: skip the lock and allocate no buckets.
             return true;
@@ -249,7 +283,7 @@ impl RateLimiter {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         Self::cleanup_expired_buckets(&mut state, now);
 
-        let burst = self.burst() as f64;
+        let burst = f64::from(burst_now);
         let rate = rate_now as f64;
         if !state.sources.contains_key(&src) && state.sources.len() < self.capacity {
             state.sources.insert(
@@ -452,6 +486,64 @@ mod tests {
         assert!(!state.sources.contains_key(&stale));
         assert!(state.sources.contains_key(&fresh));
         assert!(state.sources.contains_key(&trigger));
+    }
+
+    #[test]
+    fn concurrent_rate_updates_preserve_new_source_admission() {
+        // Both complete configurations allow a fresh source immediately.
+        // A mixed pair (positive rate, zero burst) would spuriously reject it.
+        let limiter = RateLimiter::with_burst(u32::MAX, 1);
+        let barrier = std::sync::Barrier::new(2);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let rejected = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                for _ in 0..1_000_000 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    limiter.set_rate(0, 0);
+                    limiter.set_rate(u32::MAX, 1);
+                }
+            });
+            barrier.wait();
+            let rejected = (1..=2048u32)
+                .flat_map(|n| {
+                    [
+                        IpAddr::V4(Ipv4Addr::from(0x0a000000 + n)),
+                        IpAddr::V6(std::net::Ipv6Addr::from(u128::from(n))),
+                    ]
+                })
+                .find(|&src| !limiter.allow(src));
+            stop.store(true, Ordering::Relaxed);
+            rejected
+        });
+        assert_eq!(rejected, None, "admission used mismatched rate and burst");
+    }
+
+    #[test]
+    fn partial_rate_updates_keep_existing_bucket_tokens() {
+        let limiter = RateLimiter::with_burst(10, 2);
+        let now = Instant::now();
+        for src in ["192.0.2.1", "2001:db8::1"] {
+            let src = src.parse().unwrap();
+            assert!(limiter.allow_at(src, now));
+            assert!(limiter.allow_at(src, now));
+            assert!(!limiter.allow_at(src, now));
+            limiter.update_rate(Some(20), None);
+            assert!(
+                !limiter.allow_at(src, now),
+                "changing rate must not refill the bucket"
+            );
+            limiter.update_rate(None, Some(3));
+            assert!(
+                !limiter.allow_at(src, now),
+                "changing burst must not refill the bucket"
+            );
+            assert!(limiter.allow_at(src, now + Duration::from_millis(50)));
+            assert!(!limiter.allow_at(src, now + Duration::from_millis(50)));
+            limiter.set_rate(10, 2);
+        }
     }
 
     /// Rate and burst changes made at runtime take effect immediately:

@@ -351,7 +351,14 @@ curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/js
   copy is also checked against the route MTU on Linux and Windows before it is sent, and
   PATCH cannot bypass that check.
 
-Each field is applied on its own. PATCH does not check combinations of
+`max_pps` and `rate_burst` are updated and read together. Concurrent partial
+PATCH requests preserve changes to the other rate-limit field. Omitting
+`rate_burst` retains its current nonzero effective capacity (zero falls back
+to the new rate); supply `rate_burst: 0` to reset that capacity to the rate in
+the same update. Existing buckets keep their token state and use the new
+limits on their next admission check.
+
+Other fields are applied on their own. PATCH does not check combinations of
 fields, and a request with several fields is not applied as one transaction.
 Requests already queued keep the `reflected_control_max_size` that applied
 when they were accepted.

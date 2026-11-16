@@ -217,6 +217,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Apply reflector rate and burst changes atomically. Concurrent partial control
+  API updates preserve the other field, and admission and status reads use a
+  coherent rate/burst pair.
+
 - Keep Windows sender timer-resolution requests effective for hidden processes,
   restoring the prior timer policy after the last overlapping sender exits or
   is cancelled without overwriting unrelated process power-policy changes.
