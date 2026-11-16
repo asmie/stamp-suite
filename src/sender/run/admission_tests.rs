@@ -305,6 +305,38 @@ async fn ecn_reporting_counts_only_admitted_distinct_copies() {
             assert_eq!(ecn.conformant_reflected, 1);
             assert_eq!(ecn.reverse_comparable, 0);
             assert_eq!(ecn.reverse_unknown, 2);
+
+            // BPM -00 assigns RPE=01 to unavailable reflector marking. A
+            // signed additional copy remains a valid base measurement, but
+            // must not manufacture reverse bleaching or a CE transition.
+            additional[..4].copy_from_slice(&101u32.to_be_bytes());
+            additional[base + 16] = 0;
+            additional[base + 22] = 0x90; // EC1=2, RPE=1.
+            let mut covered = additional[..4].to_vec();
+            covered.extend_from_slice(&additional[base..end]);
+            additional[end + 4..].copy_from_slice(&sign(&covered));
+            if auth {
+                let mac = sign(&additional[..96]);
+                additional[96..112].copy_from_slice(&mac);
+            }
+            receive(&mut sender, &additional);
+            receive(&mut sender, &additional); // exact duplicate is not counted
+            let summary = sender.measurements.snapshot();
+            let ecn = summary.ecn.unwrap();
+            assert_eq!(summary.additional_replies, 2);
+            assert_eq!(ecn.replies, 3);
+            assert_eq!(ecn.rpe, [1, 1, 0, 1]);
+            assert_eq!(ecn.reverse.comparable, 0);
+            assert_eq!(ecn.reverse.bleaching, 0);
+            assert_eq!(ecn.reverse.ce_marked, 0);
+            assert_eq!(ecn.reverse.unknown_reasons.reflector_marking_unavailable, 1);
+            assert_eq!(ecn.reverse.unknown_reasons.reserved_rpe, 0);
+            let json = serde_json::to_value(&ecn).unwrap();
+            assert_eq!(json["reverse"]["unknown_reasons"]["reserved_rpe"], 0);
+            assert_eq!(
+                json["reverse"]["unknown_reasons"]["reflector_marking_unavailable"],
+                1
+            );
         }
     }
 }

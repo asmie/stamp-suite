@@ -5,29 +5,28 @@ CoS and ECN requirements, implementation and tests.
 Revision frozen: draft-ietf-bpm-stamp-cos-ecn-00, 16 November 2026.
 Source: [draft-ietf-bpm-stamp-cos-ecn-00](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-cos-ecn-00.txt).
 
-Summary: 31 clauses: 16 Compliant, 4 Partial, 2 Gap, 9 N-A, 0 Excluded.
+Summary: 31 clauses: 17 Compliant, 4 Partial, 1 Gap, 9 N-A, 0 Excluded.
 
 ## Scope
 
 This is an Internet-Draft; the matrix covers BPM revision -00, which replaces
 IPPM revision -02. The wire layout and congestion-response requirements are
 unchanged, but section 3.2 changes DSCP fallback selection and ECN capability
-reporting. The implementation still uses the IPPM -02 fallback behavior;
-updating the reviewed revision does not establish compliance with the new rules.
+reporting. ECN capability reporting follows BPM -00; DSCP fallback still uses
+IPPM -02 behavior and does not yet enforce the successor's admission rules.
 The changed clauses are paraphrased below, with stable IDs retained for existing
 requirements. Operator SHOULDs are recorded separately from endpoint behavior.
 
-The successor's DSCP fallback and RPE=01 behavior are not yet implemented.
+The successor's DSCP fallback remains unimplemented.
 See [successor changes](#bpm-00-successor-changes).
 
 The supported profile includes the reflector's DSCP and ECN admission policy
 (`--allowed-dscp`, `--allowed-dscp-for`, `--allowed-ecn`) and the sender's
 AIMD rate response to CE marks. The sender reads reverse-path ECN from IP
 metadata on Linux and macOS; on other platforms it uses only the forward-path
-EC2 feedback in the reflected CoS TLV. Windows marking is currently
-reported unavailable with C under the old profile; BPM -00 instead requires
-RPE=01 for this condition. The deprecated Winsock IP_TOS API cannot prove
-wire marking. macOS sticky marking is checked by socket-option readback;
+EC2 feedback in the reflected CoS TLV. Windows marking is
+reported unavailable with RPE=01, preserving any independent C flag. The
+deprecated Winsock IP_TOS API cannot prove wire marking. macOS sticky marking is checked by socket-option readback;
 Linux uses per-message ancillary marking. Microsoft documents the
 [IP_TOS option](https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options)
 as unsuitable for setting ToS. Readback does not prove delivery
@@ -50,7 +49,7 @@ or detect downstream remarking; deployment captures remain necessary.
 | cos-ecn-3.2-6 | "The Session-Reflector MUST set the ECN value in the IP header of the reflected STAMP test packet to the value of the EC1 field, if it is permitted and capable to do so" | MUST | Reflector | Compliant | `CosAdmissionPolicy` (`src/cos_policy.rs`) applies `--allowed-ecn`; a refused value forces Not-ECT and RPE 0b10. `cos_tlv_refused_ecn_forces_not_ect` (`tests/tlv_flag_semantics.rs`), `tests/burst_transmission_test.rs`. Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
 | cos-ecn-3.2-7 | "If the Session-Reflector is able to set the ECN value ... to the EC1 value, it MUST then set the RPE field ... to the value 0b11" | MUST | Reflector | Compliant | `Transmission::send_next` and `send_datagram` (`src/receiver/transmit.rs`), `tests/burst_transmission_test.rs`. See [per-copy CoS](#per-copy-cos). Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
 | cos-ecn-3.2-8 | If EC1 cannot be applied but Not-ECT can, use Not-ECT in the reply IP header and report RPE=10. | MUST | Reflector | Compliant | `cos_unable_fallback_tos` and `set_cos_policy_rejected` (`src/receiver/reply_bytes.rs`), `cos_failure_uses_zero_ecn_fallback_and_resigns` (`src/receiver/transmit/tests.rs`). See [marking fallback](#marking-fallback). |
-| cos-ecn-3.2-9 | Report RPE=01 when neither EC1 nor Not-ECT can be applied. | MUST | Reflector | Gap | `src/receiver/reply_bytes.rs::set_cos_marking_unavailable` currently sets C and retains RPE=10 from the old profile. Existing tests demonstrate that legacy behavior: `unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures`, `failed_not_ect_request_needs_no_identical_marking_retry`, `cos_unavailable_preserves_opaque_echoes_and_received_fields` (`src/receiver/transmit/tests.rs`). They do not establish the successor rule. See [successor changes](#bpm-00-successor-changes). |
+| cos-ecn-3.2-9 | Report RPE=01 when neither EC1 nor Not-ECT can be applied. | MUST | Reflector | Compliant | `src/receiver/reply_bytes.rs::set_cos_marking_unavailable` sets RPE=01 and preserves independent C. Tests in `src/receiver/transmit/tests.rs`: `unavailable_ecn_sets_rpe01_on_every_copy_and_preserves_routing_and_signatures`, `unavailable_ecn_preserves_independent_c_in_signed_bursts`, `failed_not_ect_request_needs_no_identical_marking_retry`, `cos_unavailable_preserves_opaque_echoes_and_received_fields`. These inject capability failure across burst copies and key/family combinations; `windows_sender_sends_cos_unavailable_and_ordinary_replies` exercises the native Windows send path. See [marking fallback](#marking-fallback). |
 | cos-ecn-3.2-10 | If policy permits neither requested nor received DSCP, choose a locally permitted DSCP and report RPD=01 with C set. | MUST | Reflector | Gap | No third-value selection exists in `src/cos_policy.rs::CosAdmissionPolicy` or `src/tlv/typed/cos.rs::ClassOfServiceTlv::effective_dscp`. Current fallback always uses received DSCP. Empty allowed sets also need an explicit policy decision; there is no permitted value to choose. See [successor changes](#bpm-00-successor-changes). |
 | cos-ecn-3.4-1 | Observe EC2 and be capable of reducing the sending rate on CE [multiple CoS packets within an RTT with ECT0 or ECT1] | MUST | Sender | Compliant | `src/sender/validate.rs::validate_reflected_tlvs`, `src/sender.rs::process_response`, `on_ce_observed` (`src/rate_control.rs`). `test_process_response_forward_path_ce_backs_off_congestion_controller` (`src/sender/tests.rs`). See [sender rate response](#sender-rate-response). Binary test: `tests/sender_measurement_test.rs::sender_cos_fields_and_automatic_ect_response_reach_the_wire` verifies automatic ECT0/ECT1 controller activation and a CE backoff with independent peer signatures. |
 | cos-ecn-3.4-2 | Observe reflected IP ECN and be capable of reducing the sending rate on CE [ECT0 or ECT1 in EC1] | MUST | Sender | Partial | `AimdController` (`src/rate_control.rs`). Tests: `test_process_response_forward_path_ce_backs_off_congestion_controller`, `test_process_response_reverse_path_ce_backs_off_congestion_controller` (`src/sender/tests.rs`). Reverse ECN is read on Linux and macOS only. |
@@ -79,24 +78,23 @@ to DSCP fallback, ECN inability signaling and its legacy-interoperability
 explanation, plus replacement of the Type 12 draft reference with RFC 10052.
 The Type 4 layout and section 3.4 congestion requirements are unchanged.
 
-Three implementation changes are needed before claiming the successor behavior:
+DSCP fallback still needs implementation: admit received DSCP2 before using
+it as a fallback. If neither requested nor received DSCP is allowed, select a
+permitted value and set RPD=01 and C. Preserve DSCP2 as the ingress observation.
+A policy allowing no values needs an explicit handling rule rather than an
+invented permitted marking.
 
-- Admit received DSCP2 before using it as a fallback. If neither requested nor
-  received DSCP is allowed, select a permitted value and set RPD=01 and C.
-  Preserve DSCP2 as the ingress observation. A policy allowing no values needs
-  an explicit handling rule rather than an invented permitted marking.
-- Report RPE=01 when neither EC1 nor Not-ECT can be applied. C is now required
-  for the third-DSCP fallback; it is no longer the ECN-inability signal specified
-  by this draft. Preserve independent reasons for C on the same TLV.
-- Update sender diagnostics: `src/sender/ecn.rs::EcnSummary` currently classifies
-  RPE=01 under `reserved_rpe`. It correctly avoids a reverse comparison, but
-  does not yet identify the successor's capability-unavailable condition.
+ECN capability reporting now emits RPE=01 when neither EC1 nor Not-ECT can be
+applied, preserving independent reasons for C. Sender diagnostics classify it
+as `reflector_marking_unavailable`, without inferring reverse bleaching or CE.
+The legacy `reserved_rpe` report field remains present with value zero.
+`src/sender/run/admission_tests.rs::ecn_reporting_counts_only_admitted_distinct_copies`
+checks independently signed replies, duplicate admission and serialized fields.
 
-The current helpers, wire tests and CLI references still describe IPPM -02.
-They remain evidence for unchanged requirements and for the documented legacy
-behavior, not proof of the new fallback rules. Existing congestion-controller
-and platform Partial rows remain open. A successful metadata-monitor run only
-establishes that this reviewed revision is current.
+Existing DSCP wire tests remain evidence for the documented legacy fallback,
+not proof of the new DSCP rules. Congestion-controller and platform Partial
+rows remain open. A successful metadata-monitor run only establishes that this
+reviewed revision is current.
 
 ### Reviewed wire and enablement evidence (10 November 2026)
 
@@ -136,7 +134,7 @@ a third permitted value as BPM -00 requires.
 CoS value to every reply copy. On Linux, `send_datagram` sets IP_TOS or
 IPV6_TCLASS per message. Other Unix platforms set and read back the socket
 option immediately before their single sending task transmits. Windows
-reports marking unavailable with C. `tests/burst_transmission_test.rs`
+reports marking unavailable with RPE=01. `tests/burst_transmission_test.rs`
 checks that on-wire CoS stays correct when a request with a different CoS
 arrives between copies.
 
@@ -152,13 +150,13 @@ a datagram failure, without inventing CoS evidence.
 
 After a marking error, retry with received DSCP and Not-ECT, setting RPD=01
 and RPE=10. If that attempt also cannot apply marking, send without the
-marking operation and set C. If the initial requested byte already equals
-the fallback, its failure establishes both cases without a duplicate retry.
+marking operation and set RPE=01, preserving independent C flags. If the
+initial requested byte already equals the fallback, its failure establishes both cases without a duplicate retry.
 Each attempt is timestamped and signed again; only a full datagram send
-advances counters. C means the reply's wire ECN cannot be guaranteed.
-This is the implemented IPPM -02 fallback; BPM -00 requires RPE=01 when both
-ECN marking attempts fail. Routing, source pinning and MTU policy remain intact
-during these fallbacks.
+advances counters. RPE=01 means the reply's wire ECN cannot be guaranteed.
+The DSCP selection still follows IPPM -02; ECN capability reporting follows
+BPM -00. Routing, source pinning and MTU policy remain intact during these
+fallbacks.
 Windows always takes this conservative path for a processed CoS request;
 ordinary replies bypass the unsupported marking operation.
 
@@ -166,9 +164,12 @@ Tests in `src/receiver/transmit/tests.rs` cover setter and readback failures,
 silently ignored values, cache invalidation, datagram versus option failures,
 opaque echoes, every burst copy, IPv4/IPv6 and both authentication modes.
 `cos_failure_uses_zero_ecn_fallback_and_resigns` checks successful fallback;
-`unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures`
-checks final C and both HMACs. These are injected capability failures;
-`tests/burst_transmission_test.rs` supplies actual Linux wire marking evidence.
+`unavailable_ecn_sets_rpe01_on_every_copy_and_preserves_routing_and_signatures`
+checks final RPE=01 and both HMACs. These are injected capability failures;
+`windows_sender_sends_cos_unavailable_and_ordinary_replies` exercises native
+Windows UDP sends with RPE=01. `tests/burst_transmission_test.rs` supplies actual
+Linux wire marking evidence. Neither test establishes third-party support
+for the successor's RPE=01 meaning.
 
 ### Sender rate response
 

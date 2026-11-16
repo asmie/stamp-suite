@@ -34,7 +34,8 @@ pub(crate) fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usi
     updated
 }
 
-/// The backend cannot apply either EC1 or Not-ECT (cos-ecn-02 §3.2).
+/// The backend cannot apply either EC1 or Not-ECT (BPM cos-ecn-00 §3.2).
+/// Report RPE=01; preserve C from independent conditions or peer provenance.
 /// Opaque U/M/I echoes must remain byte-for-byte unchanged. Returns whether
 /// any locally processed CoS TLV was marked, for successful-send diagnostics.
 pub(super) fn set_cos_marking_unavailable(response: &mut [u8], base: usize) -> bool {
@@ -48,7 +49,8 @@ pub(super) fn set_cos_marking_unavailable(response: &mut [u8], base: usize) -> b
             && tlv.len == COS_TLV_VALUE_SIZE
             && tlv.flags.processed()
         {
-            response[tlv.start] |= TlvFlags::C;
+            let value = tlv.value_start();
+            response[value + 2] = (response[value + 2] & 0xCF) | (0b01 << 4);
             updated = true;
         }
         pos = tlv.end();

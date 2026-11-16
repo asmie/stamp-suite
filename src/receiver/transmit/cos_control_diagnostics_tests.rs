@@ -184,7 +184,7 @@ fn nested_control_reports_follow_actual_mutations_across_parents_and_later_u() {
 }
 
 #[test]
-fn cos_reason_requires_actual_marking_c_and_a_complete_successful_send() {
+fn cos_reason_requires_rpe01_and_a_complete_successful_send() {
     for auth in [false, true] {
         for ipv6 in [false, true] {
             for failures in 0..=2 {
@@ -205,11 +205,14 @@ fn cos_reason_requires_actual_marking_c_and_a_complete_successful_send() {
                                 .iter()
                                 .find(|t| t.tlv_type == TlvType::ClassOfService)
                                 .unwrap();
-                            assert_eq!(cos.flags.conformant_reflected, failures == 2);
+                            assert!(!cos.flags.conformant_reflected);
                             assert_eq!(options.apply_tos, failures != 2);
                             if failures > 0 {
                                 assert_eq!(cos.value[1] & 3, 1);
-                                assert_eq!((cos.value[2] >> 4) & 3, 2);
+                                assert_eq!(
+                                    (cos.value[2] >> 4) & 3,
+                                    if failures == 2 { 1 } else { 2 }
+                                );
                                 assert_eq!(options.tos, 40);
                             }
                             if successful {
@@ -322,7 +325,10 @@ fn cos_reason_survives_mtu_and_routing_retries_but_failed_sends_do_not_count() {
                             .iter()
                             .find(|t| t.tlv_type == TlvType::ClassOfService)
                             .unwrap();
-                        assert_eq!(cos.flags.conformant_reflected, attempts >= 3);
+                        assert!(!cos.flags.conformant_reflected);
+                        if attempts >= 3 {
+                            assert_eq!((cos.value[2] >> 4) & 3, 1);
+                        }
                         assert_counts(&counters, &[], 0);
                         match attempts {
                             1 | 2 => Err(cos_apply_error(io::ErrorKind::Unsupported.into())),
@@ -380,13 +386,12 @@ fn simultaneous_cos_nested_header_and_ber_reasons_count_each_successful_copy() {
                         return Err(cos_apply_error(io::ErrorKind::Unsupported.into()));
                     }
                     let list = verified(bytes, auth);
-                    assert!(
-                        list.iter()
-                            .find(|t| t.tlv_type == TlvType::ClassOfService)
-                            .unwrap()
-                            .flags
-                            .conformant_reflected
-                    );
+                    let cos = list
+                        .iter()
+                        .find(|t| t.tlv_type == TlvType::ClassOfService)
+                        .unwrap();
+                    assert!(!cos.flags.conformant_reflected);
+                    assert_eq!((cos.value[2] >> 4) & 3, 1);
                     Ok(bytes.len())
                 })
                 .unwrap();

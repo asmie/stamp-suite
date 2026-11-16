@@ -28,7 +28,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub(super) struct SendOptions {
     pub tos: u8,
-    /// False only when marking is unavailable; a processed CoS TLV then carries C.
+    /// False when marking is unavailable (CoS RPE=01), or not requested on Windows.
     pub apply_tos: bool,
     pub source: Option<IpAddr>,
     /// Egress interface for RFC 9503 same-link replies (Linux only).
@@ -352,7 +352,7 @@ impl Transmission {
                             continue;
                         }
                         // Neither EC1 nor the Not-ECT fallback can be applied
-                        // (cos-ecn-02 §3.2). Preserve routing and sign C below.
+                        // (BPM cos-ecn-00 §3.2). Preserve routing and sign RPE=01.
                         cos_marking_unavailable |=
                             super::reply_bytes::set_cos_marking_unavailable(&mut data, base);
                     }

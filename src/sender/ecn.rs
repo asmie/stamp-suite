@@ -57,7 +57,10 @@ pub struct EcnUnknownSummary {
     pub conformant_reflected: u64,
     pub request_mismatch: u64,
     pub legacy_or_unconfirmed: u64,
+    /// Retained for report compatibility; all two-bit RPE values are now assigned.
     pub reserved_rpe: u64,
+    /// RPE=1: the reflector could apply neither EC1 nor Not-ECT (BPM -00).
+    pub reflector_marking_unavailable: u64,
     /// RPE=2 cannot distinguish policy refusal from platform limitations.
     pub reflector_unable: u64,
     pub reply_ip_unavailable: u64,
@@ -69,7 +72,7 @@ enum UnknownReason {
     ConformantReflected,
     RequestMismatch,
     LegacyOrUnconfirmed,
-    ReservedRpe,
+    ReflectorMarkingUnavailable,
     ReflectorUnable,
     ReplyIpUnavailable,
 }
@@ -89,7 +92,9 @@ impl EcnDirectionSummary {
                     UnknownReason::ConformantReflected => &mut reasons.conformant_reflected,
                     UnknownReason::RequestMismatch => &mut reasons.request_mismatch,
                     UnknownReason::LegacyOrUnconfirmed => &mut reasons.legacy_or_unconfirmed,
-                    UnknownReason::ReservedRpe => &mut reasons.reserved_rpe,
+                    UnknownReason::ReflectorMarkingUnavailable => {
+                        &mut reasons.reflector_marking_unavailable
+                    }
                     UnknownReason::ReflectorUnable => &mut reasons.reflector_unable,
                     UnknownReason::ReplyIpUnavailable => &mut reasons.reply_ip_unavailable,
                 };
@@ -163,7 +168,7 @@ impl EcnSummary {
             } else {
                 match cos.rpe {
                     0 => Err(UnknownReason::LegacyOrUnconfirmed),
-                    1 => Err(UnknownReason::ReservedRpe),
+                    1 => Err(UnknownReason::ReflectorMarkingUnavailable),
                     2 => Err(UnknownReason::ReflectorUnable),
                     _ if cos.ecn1 != self.requested_ecn => Err(UnknownReason::RequestMismatch),
                     _ => reply_ecn

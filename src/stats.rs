@@ -691,16 +691,16 @@ impl StatsSnapshot {
                     e.configured_egress_ecn.map_or_else(|| "unknown".into(), |v| v.to_string()))?;
                 writeln!(out, "{prefix}ECN codepoint counts [Not-ECT, ECT(1), ECT(0), CE]: EC2 {:?}, echoed EC1 {:?}, reply IP {:?} ({} unavailable)",
                     e.received_ec2, e.echoed_ec1, e.reply_ip_ecn, e.unavailable_reply_ip_ecn)?;
-                writeln!(out, "{prefix}ECN reflector reports: RPE [legacy/unknown, reserved, unable, applied] {:?}, RPD [00, 01, 10, 11] {:?}, C {}; reverse comparable {}, unknown {}",
+                writeln!(out, "{prefix}ECN reflector reports: RPE [legacy/unknown, marking unavailable, Not-ECT fallback, applied] {:?}, RPD [00, 01, 10, 11] {:?}, C {}; reverse comparable {}, unknown {}",
                     e.rpe, e.rpd, e.conformant_reflected, e.reverse_comparable, e.reverse_unknown)?;
                 for (direction, d) in [("forward", &e.forward), ("reverse", &e.reverse)] {
                     writeln!(out, "{prefix}ECN {direction}: {} comparable, {} unknown; {} unchanged, {} bleaching, {} ECT-to-CE, {} other remarking; {} observed CE (endpoint comparisons)",
                         d.comparable, d.unknown, d.unchanged, d.bleaching, d.ce_marked, d.remarked, d.ce_observed)?;
                     if d.unknown != 0 {
                         let r = &d.unknown_reasons;
-                        writeln!(out, "{prefix}ECN {direction} unknown reasons: CoS unavailable {}, local marking unavailable {}, C {}, EC1 mismatch {}, legacy/unconfirmed {}, reserved RPE {}, reflector unable {}, IP metadata unavailable {}",
+                        writeln!(out, "{prefix}ECN {direction} unknown reasons: CoS unavailable {}, local marking unavailable {}, C {}, EC1 mismatch {}, legacy/unconfirmed {}, reflector marking unavailable {}, reflector unable {}, IP metadata unavailable {}",
                             r.cos_unavailable, r.local_marking_unavailable, r.conformant_reflected, r.request_mismatch,
-                            r.legacy_or_unconfirmed, r.reserved_rpe, r.reflector_unable, r.reply_ip_unavailable)?;
+                            r.legacy_or_unconfirmed, r.reflector_marking_unavailable, r.reflector_unable, r.reply_ip_unavailable)?;
                     }
                 }
             }

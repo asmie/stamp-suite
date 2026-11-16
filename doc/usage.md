@@ -420,11 +420,10 @@ Access ID and Return Code. Wrong values or duplicate reports leave the retry
 timer armed; Reserved bits and bytes are ignored. These replies can still
 contribute valid base-packet RTT/loss measurements.
 
-The CoS implementation currently uses draft-ietf-ippm-stamp-cos-ecn-02's
-EC1/RPE extension and fallback behavior. Its successor,
-draft-ietf-bpm-stamp-cos-ecn-00, keeps that layout but changes DSCP fallback
-selection and ECN capability reporting. These changes are not implemented yet;
-see the [successor gaps](conformance/draft-stamp-cos-ecn.md#bpm-00-successor-changes).
+The CoS implementation uses the EC1/RPE extension with ECN capability
+reporting from draft-ietf-bpm-stamp-cos-ecn-00. DSCP fallback still follows
+its IPPM -02 predecessor; policy-approved DSCP fallback remains open in the
+[successor review](conformance/draft-stamp-cos-ecn.md#bpm-00-successor-changes).
 It zeroes the remaining twelve Reserved bits. EC1/RPE occupy four bits of the
 original RFC 8972 sixteen-bit Reserved field, so the frozen RFC transmit-zero
 rule is scored Partial in the [conformance matrix](conformance/rfc8972.md#cos-format-profiles).
@@ -471,10 +470,11 @@ comparisons without attributing a faulty hop.
 Before measuring ECN, verify that both peers implement the extended CoS TLV
 and capture a short exchange for each address family and codepoint. Confirm
 DSCP, ECN and RPE on the wire: RPE=11 reports EC1 applied, RPE=10 reports
-rejection/inability, and RPE=00 can indicate a legacy peer. C reports that
-marking could not be guaranteed even for the Not-ECT fallback. Windows
-reflectors report C because the current backend cannot verify marking;
-macOS socket-option readback still needs independent wire verification.
+the Not-ECT fallback, RPE=01 reports that neither EC1 nor Not-ECT could be
+applied, and RPE=00 can indicate a legacy peer. C remains independent of this
+capability report. Windows reflectors report RPE=01 because the current backend
+cannot verify marking; macOS socket-option readback still needs independent
+wire verification.
 Reverse ECN reception requires Linux or macOS. Restrict interpretation to
 the capabilities actually observed; the tool has no automatic legacy-peer
 or bleaching diagnosis.
@@ -818,7 +818,7 @@ value.
 A refused DSCP leaves the received DSCP on the reply and reports RPD=0b01. A
 refused ECN sends the reply as Not-ECT and reports RPE=0b10. A backend marking
 failure also retries received DSCP/Not-ECT; if it cannot apply that byte,
-the reply carries C and its actual IP marking must be checked independently.
+the reply carries RPE=0b01 and its actual IP marking must be checked independently.
 
 `--location-disclose` controls which Location TLV fields the reflector reports:
 `all` (default), `none`, or a comma-separated list of `src-port`, `dst-port`,
@@ -1147,7 +1147,7 @@ shaping. Header reasons count only for offending headers retained in the sent
 reply. The log target is
 `stamp_suite::tlv::conformance`; BER uses `stamp_suite::ber::conformance`.
 Type 12 and BER counters are independent. Runtime-disabled metrics emit no
-series. CoS counts only when C is actually set after marking failure, and nested
+series. CoS counts only when RPE=01 is set after marking failure, and nested
 control counts follow locally generated child C flags. `peer_c_preserved`
 identifies copied peer flags in complete child headers of known container
 layouts, including opaque integrity-failure echoes. It carries no claim that

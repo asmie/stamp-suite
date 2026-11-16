@@ -173,9 +173,8 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 ### Changed
 
 - Review the CoS/ECN successor draft-ietf-bpm-stamp-cos-ecn-00 and track it
-  in the standards monitor. Record its DSCP fallback and RPE=01 requirements
-  as conformance gaps; runtime fallback behavior remains on IPPM revision 02
-  until those rules and the corresponding sender diagnostics are implemented.
+  in the standards monitor. Record its DSCP fallback requirements as open
+  conformance gaps; DSCP fallback behavior remains on IPPM revision 02.
 
 - Batch inventory-index maintenance during session expiry. Rebuild from the
   survivors after bulk removal and free the detached index outside the table
@@ -225,6 +224,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   CLI/TOML subset validation and authenticated header-consumption behavior.
 
 ### Fixed
+
+- Report CoS RPE=01 when the reflector cannot apply either requested ECN or
+  Not-ECT, following draft-ietf-bpm-stamp-cos-ecn-00. Preserve independent C
+  flags and re-sign every reply copy. Sender diagnostics identify unavailable
+  marking without inferring reverse bleaching or CE; JSON/CSV add
+  `reflector_marking_unavailable` and retain `reserved_rpe` with value zero.
 
 - Start Access Report acknowledgement timers and spend report retry budget only
   after successful UDP sends. Failed or short writes leave delivery state and

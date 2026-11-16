@@ -1016,6 +1016,8 @@ fn ecn_observations_use_existing_report_containers() {
         direction.unknown = 2;
         direction.unknown_reasons.cos_unavailable = 2;
     }
+    ecn.reverse.unknown_reasons.cos_unavailable = 1;
+    ecn.reverse.unknown_reasons.reflector_marking_unavailable = 1;
     let snap = RttCollector::new()
         .snapshot(2, 0)
         .with_measurements(MeasurementSummary {
@@ -1029,7 +1031,9 @@ fn ecn_observations_use_existing_report_containers() {
     assert!(text.contains("configured egress unknown"));
     assert!(text.contains("reverse comparable 0, unknown 2"));
     assert!(text.contains("ECN forward: 0 comparable, 2 unknown"));
-    assert!(text.contains("ECN reverse unknown reasons: CoS unavailable 2"));
+    assert!(text.contains("ECN reverse unknown reasons: CoS unavailable 1"));
+    assert!(text.contains("reflector marking unavailable 1"));
+    assert!(text.contains("RPE [legacy/unknown, marking unavailable, Not-ECT fallback, applied]"));
     let mut json = Vec::new();
     snap.write_report(&mut json, OutputFormat::Json, false, true)
         .unwrap();
@@ -1047,6 +1051,14 @@ fn ecn_observations_use_existing_report_containers() {
         2
     );
     assert_eq!(measurements["ecn"]["reverse"]["unknown"], 2);
+    assert_eq!(
+        measurements["ecn"]["reverse"]["unknown_reasons"]["reflector_marking_unavailable"],
+        1
+    );
+    assert_eq!(
+        measurements["ecn"]["reverse"]["unknown_reasons"]["reserved_rpe"],
+        0
+    );
     let absent = serde_json::to_value(MeasurementSummary::default()).unwrap();
     assert!(absent.get("ecn").is_none());
 }

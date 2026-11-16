@@ -332,7 +332,9 @@ activates only for ECT(1)/ECT(0); these observation counters do not drive it.
 The four entries of `received_ec2`, `echoed_ec1` and `reply_ip_ecn` count
 Not-ECT (0), ECT(1) (1), ECT(0) (2) and CE (3), respectively. `rpe` and `rpd`
 use numeric wire order 0, 1, 2, 3. RPE=0 is compatible with legacy reflectors,
-1 is reserved, 2 reports inability to apply EC1, and 3 reports application.
+1 reports inability to apply either EC1 or Not-ECT under
+[draft-ietf-bpm-stamp-cos-ecn-00](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-cos-ecn-00.txt),
+2 reports the Not-ECT fallback, and 3 reports EC1 application.
 RPE=2 alone cannot distinguish policy refusal from platform limitations.
 RPD=1 reports DSCP policy refusal; it does not establish an ECN refusal.
 `conformant_reflected` counts CoS C flags independently of RPE.
@@ -386,11 +388,14 @@ still retains IP CE observations when directional analysis is unavailable.
 `unknown_reasons` assigns one primary reason per unknown comparison, making
 its counters sum to `unknown`. For forward analysis, unusable CoS takes
 precedence over unavailable local marking. Reverse precedence is unusable CoS,
-C, RPE=0 (legacy/unconfirmed), RPE=1 (reserved), RPE=2 (reflector unable),
-echoed EC1 mismatch, then missing/invalid IP metadata. Legacy responses that
+C, RPE=0 (legacy/unconfirmed), RPE=1 (reflector marking unavailable),
+RPE=2 (reflector unable), echoed EC1 mismatch, then missing/invalid IP metadata. Legacy responses that
 zero EC1 therefore remain legacy/unconfirmed rather than request mismatches. Multiple limitations can
 coexist; the raw RPE/C/IP totals remain independent. RPE=2 cannot identify
-whether policy or platform capability caused the refusal.
+whether policy or platform capability caused the refusal. The
+`reflector_marking_unavailable` reason records RPE=1; `reserved_rpe` is retained
+for report compatibility and stays zero. This interpretation does not establish
+that a peer implements the successor's separate DSCP fallback requirements.
 
 Text reports print the outcome and unknown-reason counts. JSON and CSV retain
 the complete matrix in the existing `measurements` object; CSV columns and

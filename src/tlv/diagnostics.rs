@@ -1,6 +1,6 @@
-//! Fixed-cardinality diagnostics for reflected TLV C conditions and provenance.
+//! Fixed-cardinality diagnostics for reflected TLV conditions and provenance.
 
-/// A reflected C condition, including an explicitly preserved peer flag.
+/// A reflected condition, including ECN marking inability and preserved peer C.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TlvConformanceReason {
@@ -74,7 +74,7 @@ impl TlvConformanceReason {
     }
 }
 
-/// At most one occurrence of each C condition or provenance per reflected datagram.
+/// At most one occurrence of each condition or provenance per reflected datagram.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TlvConformanceErrors {
     bits: u32,

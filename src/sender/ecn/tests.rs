@@ -183,9 +183,12 @@ fn ecn_unknown_reasons_are_exclusive_and_do_not_fabricate_transitions() {
     // Overlapping failures pin priority: C, RPE, request mismatch, then IP.
     for (flags, ec1, rpe, ip, reason) in [
         (0x10, 1, 0, None, "conformant_reflected"),
+        (0x10, 2, 1, Some(3), "conformant_reflected"),
         (0, 1, 3, None, "request_mismatch"),
         (0, 1, 0, None, "legacy_or_unconfirmed"),
-        (0, 2, 1, None, "reserved_rpe"),
+        (0, 2, 1, None, "reflector_marking_unavailable"),
+        (0, 2, 1, Some(0), "reflector_marking_unavailable"),
+        (0, 2, 1, Some(3), "reflector_marking_unavailable"),
         (0, 2, 2, Some(0), "reflector_unable"),
         (0, 2, 3, None, "reply_ip_unavailable"),
         (0, 2, 3, Some(4), "reply_ip_unavailable"),

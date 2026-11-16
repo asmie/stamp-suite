@@ -41,7 +41,8 @@ pub struct ClassOfServiceTlv {
     /// §3.2): 0b11 when the reflector set the reply's ECN to EC1, 0b10 when
     /// it was unable to (the reply's on-wire ECN bits are then forced to
     /// 0b00, see [`ClassOfServiceTlv::reply_wire_tos`]); 0b00 from senders
-    /// and RFC 8972-only reflectors.
+    /// and RFC 8972-only reflectors. BPM cos-ecn-00 assigns 0b01 when the
+    /// reflector cannot apply either EC1 or Not-ECT; no wire ECN is guaranteed.
     pub rpe: u8,
 }
 

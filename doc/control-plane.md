@@ -133,9 +133,9 @@ BER denominator. Opaque echoes and M-only nested errors add no BER C diagnostic.
 The seven keys are fixed and include zero values. See [BER diagnostics](ber-migration.md#conformance-diagnostics).
 
 `counters.tlv_conformance` counts successfully sent datagrams with
-reflected Type 12, header-reflection, CoS and nested control C conditions,
-plus preserved peer C provenance. It uses the same once-per-reason,
-successful-send rules as the BER counters and includes all
+reflected Type 12, header-reflection and nested control C conditions, CoS
+marking unavailability, plus preserved peer C provenance. It uses the same
+once-per-reason, successful-send rules as the BER counters and includes all
 19 fixed keys, including zero values. The Type 12 reasons are:
 
 | Reason | Meaning |
@@ -174,7 +174,7 @@ integrity-failed echoes add no header reason.
 
 | Reason | Meaning |
 | --- | --- |
-| `cos_marking_unavailable` | The backend cannot apply either requested ECN or the Not-ECT fallback, and marks a processed CoS TLV with C. |
+| `cos_marking_unavailable` | The backend cannot apply either requested ECN or the Not-ECT fallback, and reports RPE=01 in a processed CoS TLV. |
 | `reply_header_unsupported` | A processed IPv6 Extension Header Control child receives C because reply-header attachment is unsupported. |
 | `reply_header_duplicate` | A Type 12 parent has multiple complete IPv6 Extension Header Control children and at least one receives C. |
 | `peer_c_preserved` | A complete child header in a known container retains C supplied by the peer, with no corresponding local C-generation cause. |

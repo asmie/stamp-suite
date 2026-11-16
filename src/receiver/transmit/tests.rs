@@ -279,7 +279,7 @@ fn socket_owner_keeps_interleaved_metadata_and_pmtu_policy_isolated() {
             (0, false, false, true),
             (43, true, false, true),
             (43, true, true, true),
-            // The C fallback omits only marking: source and DF stay set.
+            // The unavailable-marking fallback omits only marking: source and DF stay set.
             (185, true, true, false),
             (43, false, false, false),
             (0, false, false, true),
@@ -1182,7 +1182,7 @@ fn failed_tos_setter_and_readback_are_option_errors_and_never_cached() {
 }
 
 #[test]
-fn unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures() {
+fn unavailable_ecn_sets_rpe01_on_every_copy_and_preserves_routing_and_signatures() {
     for auth in [false, true] {
         for ipv6 in [false, true] {
             let mut transmission = sample(auth, ReturnPathAction::Normal);
@@ -1222,9 +1222,9 @@ fn unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures() {
                                     io::ErrorKind::PermissionDenied.into(),
                                 ));
                             }
-                            assert_ne!(data[base] & TlvFlags::C, 0);
+                            assert_eq!(data[base] & TlvFlags::C, 0);
                             assert_eq!(data[base + 5] & 3, 1); // RPD=01.
-                            assert_eq!((data[base + 6] >> 4) & 3, 2); // RPE=10.
+                            assert_eq!((data[base + 6] >> 4) & 3, 1); // RPE=01.
                             assert_eq!(data[base + 6] >> 6, 1); // EC1 preserved.
                             assert_eq!(data[base + 8] & TlvFlags::U, 0); // Return path preserved.
                             if auth {
@@ -1248,6 +1248,27 @@ fn unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures() {
 }
 
 #[test]
+fn unavailable_ecn_preserves_independent_c_in_signed_bursts() {
+    let mut transmission = sample(true, ReturnPathAction::Normal);
+    transmission.response.data[112] |= TlvFlags::C;
+    let counters = ReflectorCounters::new();
+    for sequence in 0..3 {
+        assert_eq!(
+            transmission.send_next(&counters, &RateLimiter::new(0), |data, _, options| {
+                if options.apply_tos {
+                    return Err(cos_apply_error(io::ErrorKind::Unsupported.into()));
+                }
+                assert_ne!(data[112] & TlvFlags::C, 0);
+                assert_eq!((data[118] >> 4) & 3, 1);
+                verify_signatures(data);
+                Ok(data.len())
+            }),
+            Some(sequence)
+        );
+    }
+}
+
+#[test]
 fn failed_not_ect_request_needs_no_identical_marking_retry() {
     let mut transmission = sample(false, ReturnPathAction::Normal);
     transmission.response.reply_source = None;
@@ -1262,7 +1283,8 @@ fn failed_not_ect_request_needs_no_identical_marking_retry() {
                 if options.apply_tos {
                     return Err(cos_apply_error(io::ErrorKind::Unsupported.into()));
                 }
-                assert_ne!(data[44] & TlvFlags::C, 0);
+                assert_eq!(data[44] & TlvFlags::C, 0);
+                assert_eq!((data[50] >> 4) & 3, 1);
                 Ok(data.len())
             }
         )
@@ -1301,13 +1323,22 @@ fn datagram_errors_do_not_trigger_cos_marking_fallback() {
 
 #[test]
 fn cos_unavailable_preserves_opaque_echoes_and_received_fields() {
-    for flags in [0, TlvFlags::U, TlvFlags::M, TlvFlags::I] {
+    for flags in [
+        0,
+        TlvFlags::C,
+        TlvFlags::U,
+        TlvFlags::M,
+        TlvFlags::I,
+        TlvFlags::C | TlvFlags::U,
+        TlvFlags::C | TlvFlags::M,
+        TlvFlags::C | TlvFlags::I,
+    ] {
         let mut data = vec![flags, 4, 0, 4, 185, 0xA3, 0x70, 0];
         let before = data.clone();
         super::super::set_cos_policy_rejected(&mut data, 0);
         super::super::reply_bytes::set_cos_marking_unavailable(&mut data, 0);
-        if flags == 0 {
-            assert_eq!(data, [TlvFlags::C, 4, 0, 4, 185, 0xA1, 0x60, 0]);
+        if flags & (TlvFlags::U | TlvFlags::M | TlvFlags::I) == 0 {
+            assert_eq!(data, [flags, 4, 0, 4, 185, 0xA1, 0x50, 0]);
         } else {
             assert_eq!(data, before);
         }
@@ -1340,8 +1371,8 @@ fn windows_sender_sends_cos_unavailable_and_ordinary_replies() {
             let mut data = [0; 512];
             let (size, _) = receive.recv_from(&mut data).unwrap();
             let base = if auth { 112 } else { 44 };
-            assert_ne!(data[base] & TlvFlags::C, 0);
-            assert_eq!((data[base + 6] >> 4) & 3, 2);
+            assert_eq!(data[base] & TlvFlags::C, 0);
+            assert_eq!((data[base + 6] >> 4) & 3, 1);
             if auth {
                 verify_signatures(&data[..size]);
             }
