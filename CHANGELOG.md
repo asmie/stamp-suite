@@ -206,6 +206,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Keep Windows sender timer-resolution requests effective for hidden processes,
+  restoring the prior timer policy after the last overlapping sender exits or
+  is cancelled without overwriting unrelated process power-policy changes.
+
 - Keep cancellation, Access Report retries and other timers active after a
   non-ICMP receive error during sender pacing. Retry receiving at the next
   wait without advancing the probe deadline or repeatedly polling the failure.

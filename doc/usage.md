@@ -217,6 +217,10 @@ timers have 1 ms resolution, so rates above 1000 probes per second keep one CPU
 core busy. A sender that falls more than 2 ms behind its timeline restarts the
 timeline instead of sending a burst to catch up.
 
+On Windows, active senders request 1 ms timer resolution and explicitly ask
+Windows to honor it even when the process is hidden. The prior process timer
+policy is restored after the last sender exits, including cancellation.
+
 The first probe is due immediately. Count and duration limits govern when the
 next probe can start; a send already in progress can finish after the duration.
 The wait after each probe is capped by any configured duration, including the wait after
