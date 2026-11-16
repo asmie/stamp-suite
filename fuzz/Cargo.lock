@@ -700,6 +700,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "windows-sys",
  "zeroize",
 ]
 
