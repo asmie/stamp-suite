@@ -200,11 +200,18 @@ prints the same list.
 
 ## Versioning
 
-The 1.x compatibility promise covers CLI behavior, the TOML configuration
-schema and default wire behavior. The Rust library API is internal and may
-change in any release. Minor releases may renumber experimental codepoints or
-raise the minimum Rust version; [CHANGELOG.md](CHANGELOG.md) records each such
-change.
+Within 1.x, the RFC-based features keep their CLI options, TOML keys and wire
+behavior: RFC 8762, RFC 8972, RFC 9503, RFC 9534 and RFC 10052.
+
+These can change in a minor release:
+
+- Extensions that follow IETF drafts: BER, CoS/ECN and reflected headers
+  (Types 246/247). Their options, defaults and wire formats follow the draft
+  revision each release implements, and their codepoints are experimental.
+- The minimum supported Rust version.
+- The Rust library API, which is internal.
+
+[CHANGELOG.md](CHANGELOG.md) lists every such change under "Breaking changes".
 
 ## Contributing
 

@@ -7,510 +7,106 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [1.1.0] - 2026-11-16
 
+### Breaking changes
+
+Upgrade both peers together when they use BER or reflected headers.
+[BER migration](doc/ber-migration.md) has the details.
+
+- **BER wire format.** Both roles now use draft-ietf-bpm-stamp-ber-01: outer
+  Type 243 with a pattern sub-TLV of Type 241, both experimental. The old
+  Types 240–242 are answered with U. 1.0.x and 1.1.0 peers cannot measure
+  BER against each other.
+- **BER options.** The default pattern is now `ff00ff00`, and explicit
+  patterns must be at least four bytes. `--ber-pattern ff00` (the old
+  default) and `aa55` are rejected; repeat them, as in `ff00ff00`.
+  `--ber-omit-burst` / `ber_omit_burst` is removed and rejected at startup.
+- **Reflected-header disclosure.** Reflectors return captured header data only
+  to senders listed in `--reflect-fixed-header-from` or
+  `--reflect-ipv6-ext-header-from` (or their TOML arrays). Other senders get C
+  and no header data. Types 246/247 follow draft-ietf-ippm-stamp-ext-hdr-26:
+  zero Requested octets are wildcards and ambiguous selectors are rejected.
+- **CoS/ECN.** DSCP admission and ECN reporting follow
+  draft-ietf-bpm-stamp-cos-ecn-00. A reflector that can apply neither the
+  requested ECN nor Not-ECT replies with RPE=01.
+- **Minimum Rust version** is 1.87.
+- **Library API.** `StampResponse` has a new `cos_reply_policy` field.
+
 ### Added
 
-- Add opt-in reflector `--validate-tlv-framing` admission to discard incomplete
-  outer and known child TLV frames before session updates, with CLI/TOML support.
-  Complete semantic and integrity-error replies retain their existing behavior.
-
-- Size macOS native IPv6 reflector replies using fresh kernel MTU estimates.
-  Type 12, reflected-header and standalone BER replies share the budget;
-  ordinary replies restore fragmentation policy independently of CoS settings.
-  IPv4, mapped peers, interface pinning and SRv6 remain unsupported by this adapter.
-
-- Read connected native unicast IPv6 MTU estimates on macOS for sender header
-  requests and initial BER fitting. Honor minimum-MTU socket policy, refresh
-  before each header-request send, and disable fragmentation for these probes.
-  IPv4, mapped peers and explicit interface pinning remain outside this
-  macOS sender adapter's scope.
-
-- Query Windows reflector path/interface MTU estimates for Type 12, header and
-  BER replies. Refuse unknown budgets, fit and sign each datagram, and restore
-  ordinary fragmentation policy after controlled replies.
-
-- Read connected Windows sender MTU estimates and socket-local caps for
-  fixed-header requests and initial BER fitting. Disable fragmentation for
-  these probes; check native IPv4/IPv6 trimming, restoration and oversize refusal.
-
-- Require disposable-container DEB/RPM install, reinstall, privileged-port
-  reflection and uninstall checks in CI and Linux release packaging. Preserve
-  failure reports and pin Linux package builds to the tested Ubuntu 24.04 ABI.
-
-- Add concurrent full and paginated session-inventory workloads to live UDP
-  benchmarks, with an idle control API baseline, bounded response validation,
-  and HTTP activity and latency reports alongside packet measurements.
-
-- Add opt-in process memory observations to live UDP benchmarks, reporting
-  reflector and generator RSS/PSS before load, after drain and after idle.
-  Keep collection outside timed CPU windows and fail on unavailable data.
-
-- Add bounded multi-session live UDP benchmarks using distinct SSIDs, with
-  sequence/identity/HMAC validation and per-session reply completeness.
-  Separate warm-up identities and make initial creation and disabled expiry
-  explicit in workload metadata.
-
-- Require controlled Linux ECN rewrite tests for the default and all-feature
-  nix profiles. Compare real endpoint reports with raw IP/TLV captures and
-  signatures across both IP families, three key modes and policy refusals;
-  retain optional pcap/report evidence in conformance CI.
-
-- Add paired forward/reverse ECN diagnostics with transition matrices,
-  bleaching, ECT-to-CE and other remarking counts, plus explicit unknown
-  reasons. Preserve raw observations, CSV columns and AIMD behavior.
-
-- Report bounded ECN observations for `--cos` in text, JSON and the existing
-  CSV measurements cell. Retain validated EC1/EC2, RPE/RPD and C separately
-  from reply IP ECN; count accepted distinct copies and identify unavailable
-  reverse comparisons. Receive reply ECN for all four requested codepoints.
-
-- Add live Linux nix header benchmarks for fixed-header C fallback, injected
-  IPv6 Destination Options and policy refusals. Verify returned bytes, flags
-  and HMACs with bounded header sizes and explicit workload metadata.
-
-- Add live Type 12 burst benchmark workloads with bounded per-copy accounting,
-  reply/HMAC validation, complete/partial probe totals and separate copy loss.
-  Drain warm-up bursts and retain first-reply latency sampling.
-
-- Add opt-in round-trip latency observations to the live UDP benchmark, with
-  bounded timestamp storage, first-valid-reply sampling and explicit quantile
-  precision. Keep tracking disabled by default.
-
-- Add live UDP BER benchmark workloads with verified counters, repaired padding
-  and HMACs, bounded padding and controlled corruption. Preserve completed
-  trial reports on runtime errors and report payload size/profile metadata.
-
-- Add validated in-process header-reflection benchmarks for IPv4 stacks,
-  IPv6 fixed/extension headers, selector matching and capture/policy refusals,
-  in open and authenticated modes. Reuse Linux CI's fixture checks.
-
-- Add validated in-process BER benchmarks for clean/damaged padding, default
-  and explicit patterns, two sizes, both authentication modes and IPv4/IPv6
-  metadata. Check reflector benchmark fixtures in Linux CI without timing gates.
-
-- Add deterministic coverage of sender count/duration limits, deadline
-  clamping and catch-up boundaries using the production timing policy.
-  Retain existing periodic/Poisson live rate checks and thresholds.
-
-- Add opt-in `--zero-udp-checksum` for Linux IPv4 authenticated BER senders.
-  Keep base/TLV HMAC protection and kernel receive checksum validation; reject
-  unsupported configurations at startup. Require actual sender wire tests in CI.
-
-- Add allocation-free TLV framing inspection with exact outer/child error
-  offsets and bounded scans of known container layouts. Keep unknown values
-  opaque and preserve the existing reflector reply/discard policy.
-
-- Add opt-in reflector base-field validation through `--validate-base-fields`
-  and TOML. Reject incomplete bases, zero Error Estimate multipliers and invalid
-  PTP nanoseconds before session updates, preserving existing TLV error replies.
-  Cover validly signed invalid fields with required zero-checksum wire tests.
-
-- Add required Linux raw-wire tests for IPv4 zero-checksum BER ingress,
-  strict/provisioned admission and authenticated base-field corruption.
-  Keep full zero-checksum admission conformance Partial.
-
-- Record preserved peer C provenance separately from local conformance causes,
-  using bounded child-header observation in known TLV container layouts.
-  Keep opaque values, failed digests and legacy TLV-ignore tails unchanged.
-
-- Add successful-send diagnostics for CoS marking unavailability and nested
-  unsupported/duplicate reply-header controls, with fixed counters and
-  throttled logs through control status and optional Prometheus.
-
-- Add eight fixed header-reflection conformance reasons to successful-send
-  counters and throttled logs, control status and optional Prometheus metrics.
-  Discard reasons for removed headers and isolate MTU retry attempts.
-
-- Add fixed Type 12 conformance counters and throttled logs for count,
-  interval, size, rate, volume, unencodable padding and route MTU conditions.
-  Count successful replies through control status and optional Prometheus.
-
-- Add per-reason BER conformance counters and throttled local logs after
-  successful reflection, exposed through control status and Prometheus.
-  Cover BER validation and padding resizing without logging packet contents.
-
-- Add bounded control-plane session inventory at `/v1/sessions/page`, with
-  1–500 entries per page and manager-scoped cursors. Preserve the existing
-  `/v1/sessions` array response; document live counters and concurrent changes.
-
-- Add opt-in admission measurements during retained, mixed and full session
-  expiry, separating creation, control retirement and complete cycle costs.
-
-- Add opt-in session-expiry contention measurements for retained, mixed and
-  fully expired tables, including delayed transmission-guard retirement.
-
-- Add opt-in allocation/copy profiling fixtures for reply transmission, including
-  authenticated bursts, MTU shaping and transport/CoS fallbacks.
-
-- Add opt-in release measurements for MTU-cache capacity traces and Linux
-  loopback route-query costs, with IPv4/IPv6 fixture checks in normal tests.
-
-- Add fixed-count session-table profiling with a named operation boundary,
-  excluding setup and reporting validated operation counts for external profilers.
-
-- Add a session allocation example counting allocator requests and requested
-  bytes for lookup, inventory, cleanup and control churn, with accounting checks
-  in CI.
-
-- Add a session contention example reporting foreground, retirement and
-  management-operation latency with concurrent inventory or cleanup, plus
-  functional CI checks without performance thresholds.
-
-- Add session-table scaling benchmarks for IPv4/IPv6 lookup, inventory,
-  cleanup and control-expiry churn at up to 65,536 sessions, with fixture
-  checks in CI.
-
-- Add opt-in `--max-pending-probes` / TOML `max_pending_probes` per-target
-  retention. Retire oldest unanswered records at capacity without changing
-  scheduling or retry budgets; disclose limit, retained/peak counts and
-  retirements in measurement reports. Zero keeps unlimited retention.
-
-- Expose `receiver::run_receiver_with_socket` on the nix backend for embedding
-  with an owned bound UDP socket; validate its endpoint and connection state.
-
-- Add a bounded value codec and fuzz coverage for draft-ietf-bpm-stamp-ber-01,
-  with independent nested-TLV fixtures. This prepares the BER migration;
-  the endpoint cutover is described below.
-  See [migration design and peer findings](doc/ber-migration.md).
+- Route-MTU reply sizing on Windows and on macOS (native unicast IPv6), for
+  Type 12, reflected-header and BER replies. Senders on both platforms read
+  the connected route MTU for header requests and BER padding.
+- Reflector admission options: `--validate-base-fields` rejects incomplete
+  base packets, zero Error Estimate multipliers and invalid PTP nanoseconds;
+  `--validate-tlv-framing` drops packets with incomplete TLV frames. Both
+  run before any session state changes.
+- `--zero-udp-checksum` for authenticated IPv4 BER senders on Linux.
+- `--max-pending-probes` caps unanswered probes kept per target.
+- `/v1/sessions/page`: paginated session inventory (1–500 entries per page).
+- Sender ECN reports for `--cos`: forward/reverse transitions, bleaching,
+  remarking and CE counts in text, JSON and CSV.
+- Reflector conformance counters for BER, Type 12 and reflected headers,
+  exposed through the control API and Prometheus.
+- `receiver::run_receiver_with_socket` (nix backend) for embedding with an
+  owned UDP socket.
+- Session-table, reply-path, BER and header benchmarks; live UDP benchmarks
+  for BER, bursts, headers, latency, multiple sessions and memory use.
+- CI: DEB/RPM install checks in containers, an independent BER wire oracle,
+  required test references for conformance rows, and documentation link
+  checks.
 
 ### Changed
 
-- Review the CoS/ECN successor draft-ietf-bpm-stamp-cos-ecn-00 and track it
-  in the standards monitor. DSCP admission and ECN capability reporting now
-  follow this successor; its differences from frozen RFC 8972 remain explicit.
-
-- Batch inventory-index maintenance during session expiry. Rebuild from the
-  survivors after bulk removal and free the detached index outside the table
-  lock, preserving cursors and busy retiring reservations.
-
-- Wait for active sends outside the session table lock during expiry and control
-  removal. Keep retiring identities and capacity reserved until removal, reject
-  their new acquisitions, and protect replacements from late retirement work.
-
-- Run periodic session cleanup in one worker per reflector, keeping scans out
-  of both receive loops. Stop and join the worker on exit; timeout zero creates
-  no worker, and a cleanup panic stops the affected reflector.
-
-- Release removed session state after unlocking the session table during idle
-  cleanup, keeping retirement serialized with active sends and identity reuse.
-
-- Scan retained sessions under a shared table lock during periodic cleanup,
-  allowing existing sessions to refresh activity while no expiry is needed.
-  Recheck expiry under the exclusive lock before removing any sessions.
-
-- Reuse the untrimmed reply buffer for send attempts that fit the payload budget;
-  copy only for shaping, while preserving full retries, fresh signatures and
-  the template for later burst copies.
-
-- Replace MTU-cache clear-all capacity eviction with a bounded second-chance
-  queue, preserving frequently used routes while keeping the 256-entry limit,
-  original expiry deadlines, forced refresh and notification invalidation.
-
-- Switch both BER endpoints to draft-ietf-bpm-stamp-ber-01 using local
-  experimental outer Type 243 and pattern sub-TLV Type 241. Retire legacy
-  Types 240–242 with U; do not infer format negotiation. Peers must agree on
-  the new profile. This wire change requires a minor release (planned 1.1.0).
-- Use four-byte default BER pattern FF00FF00 and require explicit patterns of
-  at least four bytes. Reject obsolete `--ber-omit-burst` / TOML requests;
-  the combined BER value always includes the burst field. A zero burst with
-  a nonzero count is unavailable, contributing no burst statistic.
-
-- Raise the minimum Rust version to 1.87 for the patched `ctutils` dependency.
-- Update reflected-header extensions to draft-ietf-ippm-stamp-ext-hdr-26.
-  Header disclosure now requires explicit sender-IP permission through
-  `--reflect-fixed-header-from` or `--reflect-ipv6-ext-header-from` (or their
-  TOML arrays). Unlisted senders receive C without captured header data.
-- Treat zero Requested octets as wildcards and reject ambiguous header
-  selectors. Sender selectors must mask mutable header octets.
-- Retain revision 26's explicit ambiguity-rejection rule for repeated nonzero
-  selectors. Document its conflicting all-header example as Partial and verify
-  CLI/TOML subset validation and authenticated header-consumption behavior.
+- Session cleanup runs in one worker thread per reflector instead of in the
+  receive loops. Expiry waits for in-flight sends outside the table lock, and
+  removed sessions are freed after the lock is released.
+- The MTU cache evicts with a second-chance queue instead of clearing all
+  256 entries when full.
+- Replies that fit the payload budget are sent without copying.
+- The standards monitor detects replaced drafts and follows successor chains.
 
 ### Fixed
 
-- Read the Nix package version from Cargo.toml and refresh the locked vendor
-  hash so package and lint derivations build the 1.1.0 sources consistently.
+- Reflector:
+  - Single reflected-header and BER replies now respect the route MTU. 1.0.0
+    could send them oversized.
+  - The pnet capture buffer grows from 4 KiB to 128 KiB. Large probes were
+    truncated and dropped.
+  - pnet uses the assigned port everywhere when started with `--local-port 0`,
+    and rejects wildcard capture without a named interface.
+  - Destination DSCP policy also applies to fallback values and return-path
+    retries; empty or unenforceable policies suppress the CoS reply.
+  - Type 12 rate limits no longer round down excess, and every Address Group
+    mismatch is reported.
+  - Return Path, Location and Timestamp Information children are validated
+    before use; reserved fields are zeroed in processed replies.
+  - BER error replies are signed with the final sequence number, and BER
+    patterns survive MTU clamping.
+  - Session activity, rate-limit refill and rate/burst control updates stay
+    consistent under concurrent workers.
+- Sender:
+  - Replies must echo the full sender timestamp; mismatches are counted in
+    `measurements.mismatched_replies` instead of matching a pending probe.
+  - Every received TLV length is validated before reflected values are used.
+  - Header-request probes that do not fit the route MTU are refused before
+    sending. BER padding follows route MTU changes.
+  - Access Report retries start only after a successful send, need a matching
+    acknowledgement, and keep their deadlines during probe pacing and the
+    final wait.
+  - ECN backoff applies to the already scheduled probe, keeps bursts paced,
+    always grows the interval, and recovers only on usable feedback.
+  - Poisson gaps scale from the original draw during backoff.
+  - `--on-zero-ssid stop` interrupts the current wait.
+  - Windows: 1 ms timer resolution is requested during runs, and pacing keeps
+    running after receive errors.
+  - The loss threshold triggers session failure even before the first reply.
+- Packaging: RPM installation aborts when the service user cannot be created;
+  the Nix package reads its version from Cargo.toml.
 
-- Grow undersized macOS reflector UDP send buffers before large replies,
-  preserving route MTU limits and fragmentation policy. Correct native key
-  rotation tests to expect controlled IPv6 replies on macOS while retaining
-  fail-closed expectations for unsupported IPv4 routes.
+### Security
 
-- Enforce destination DSCP policy on received-value fallback, third-value
-  selection and return-path retries. When both DSCP1 and DSCP2 are forbidden,
-  use the lowest permitted value with RPD=01 and C, preserving ingress fields.
-  Empty or unenforceable restricted policies suppress processed CoS replies.
-  Add the `cos_dscp_fallback` successful-send diagnostic; preserve independent
-  C flags and signatures across burst copies and retries.
-  Library callers constructing `StampResponse` literals must supply the new
-  `cos_reply_policy` field (`None` for manually assembled responses).
-
-- Report CoS RPE=01 when the reflector cannot apply either requested ECN or
-  Not-ECT, following draft-ietf-bpm-stamp-cos-ecn-00. Preserve independent C
-  flags and re-sign every reply copy. Sender diagnostics identify unavailable
-  marking without inferring reverse bleaching or CE; JSON/CSV add
-  `reflector_marking_unavailable` and retain `reserved_rpe` with value zero.
-
-- Start Access Report acknowledgement timers and spend report retry budget only
-  after successful UDP sends. Failed or short writes leave delivery state and
-  retry reply collection windows unchanged.
-
-- Keep session activity monotonic across concurrent reflector workers. A delayed
-  refresh no longer causes premature idle expiry, lost replay/counter state or
-  cancellation of queued replies for an active session.
-
-- Prevent delayed reflector workers from duplicating token refill credit in
-  source and shared overflow buckets. Preserve recent source activity for idle
-  expiry when workers acquire the lock out of order.
-
-- Apply reflector rate and burst changes atomically. Concurrent partial control
-  API updates preserve the other field, and admission and status reads use a
-  coherent rate/burst pair.
-
-- Keep Windows sender timer-resolution requests effective for hidden processes,
-  restoring the prior timer policy after the last overlapping sender exits or
-  is cancelled without overwriting unrelated process power-policy changes.
-
-- Keep cancellation, Access Report retries and other timers active after a
-  non-ICMP receive error during sender pacing. Retry receiving at the next
-  wait without advancing the probe deadline or repeatedly polling the failure.
-
-- Scale pending Poisson gaps from their original draw during congestion backoff.
-  Repeated small increases now accumulate correctly instead of losing their
-  effect through repeated rounding of an already scaled gap.
-
-- Collect later Access Report retry replies after acknowledgement or retry
-  exhaustion, including reflected burst copies. The remaining wait is bounded
-  by `--timeout` from the last successful retry, without restarting on completion.
-
-- Honor Access Report retry deadlines during long probe intervals. Timer-driven
-  retries preserve the scheduled probe count, duration limit, Poisson draw and
-  congestion backoff; packet statistics include the additional transmissions.
-
-- Service Access Report retry deadlines during the final reply wait. A long
-  `--timeout` no longer delays retries; acknowledgement, retry limits and the
-  final-wait deadline remain effective.
-
-- Require a single matching Access Report echo before cancelling retries.
-  Wrong Access IDs, Return Codes and duplicate reports no longer acknowledge
-  delivery; Reserved fields remain ignored and valid RTT samples are retained.
-
-- Prevent valid ECN backoff factors close to 1 from stalling through duration
-  rounding. Every CE observation below the configured cap now increases the
-  stored interval by at least 1 ns; cap and recovery behavior remain intact.
-
-- Keep zero-gap reflected bursts paced while a zero-delay sender remains
-  backed off, including a 1 ms ECN cap and partial recovery below 1 ms.
-  Preserve configured nonzero burst gaps and control-only requests.
-
-- Make `--on-zero-ssid stop` interrupt the current probe wait immediately,
-  avoiding delayed exit with long send intervals or ECN backoff. Preserve
-  reply identity checks, loss accounting and the `continue` policy.
-
-- Apply ECN backoff to the next probe's pending deadline immediately, including
-  Poisson spacing, while preserving the duration limit. Clean feedback cannot
-  cancel an already scheduled backoff.
-
-- Hold ECN backoff when reflected CoS feedback is missing, ambiguous or
-  unusable. Rate recovery now requires a usable non-CE report with verified
-  TLV integrity when keyed; valid base RTT/loss observations remain available.
-
-- Abort RPM installation when creating the service user or group fails,
-  instead of installing a service that cannot start. Require RPM’s dependency
-  scanner in packaging workflows to avoid falling back to incorrect weak-symbol
-  dependencies when RPM tools are missing.
-
-- Fix macOS/Windows compilation of MTU retry diagnostics tests by using
-  platform-gated socket errors without a Linux-only `libc` dependency.
-
-- Count locally generated short-BER C diagnostics when a later HMAC failure
-  adds I, while preserving the failed digest and protected payload bytes.
-
-- Preserve valid signed TLV framing after administrative header trimming.
-  Count an existing request HMAC once in the size budget and leave removed
-  headers out of the reply instead of appending raw zeros after its HMAC.
-
-- Preserve BER padding patterns when Type 12 replies are clamped to a
-  route MTU. Fill the exact budget, remove reflected headers first, re-sign,
-  and avoid marking BER resized when header removal leaves padding unchanged.
-
-- Clear sender flags on Type 12-generated padding so BER finalization repairs
-  the pattern and marks the changed denominator with C.
-
-- Fix Rust 1.100 Clippy failures from a duplicate CLI attribute and a redundant
-  boolean branch in Micro-session ID processing.
-
-- Refresh the shared Nix vendor hash after the patched `rustix` lockfile update.
-
-- Update the locked `rustix` dev dependency to 1.1.6, fixing
-  RUSTSEC-2026-0486 without weakening dependency checks.
-
-- Reject unnamed wildcard pnet capture selection even when an adapter
-  advertises an unspecified address. Preserve concrete address, interface-name
-  and IPv6 scope matching, and avoid entering capture during invalid startup.
-
-- Request 1 ms Windows timer resolution during sender runs and release it on
-  exit, cancellation or errors, preventing coarse waits from reducing periodic
-  and Poisson probe rates. Require the unchanged pacing assertions in Windows
-  CI alongside the other portable sender tests.
-
-- Require normalized Return Path child flags in the independent UDP oracle,
-  including on SRv6 fallback. Preserve legacy observations as rejected cases
-  and add signed child-flag, framing and segment mutation checks.
-
-- Correct the Windows runtime reproduction command to include all
-  required targets and remove broken release-documentation links.
-
-- Require valid citations and explicit test references for normative Compliant
-  rows in conformance CI, retaining the detailed JSON inventory on failure.
-  Standalone citation checks keep their advisory default without the flag.
-
-- Complete the remaining reflected-header evidence review with actual nested
-  pnet capture and outgoing hop checks. Record cross-address local role ports
-  and deployment-wide policing consistency as Partial, with concrete limits.
-
-- Use one actual port for pnet reflector startup, capture filtering, received
-  endpoint metadata and replies when `--local-port 0` is requested. Require
-  the configured family to bind, keep the other family optional and use
-  separate IPv6-only reply sockets so wildcard families can share the port.
-
-- Add reflector wire evidence for per-source header disclosure, global TLV
-  ordering and reverse-header control on nix and pnet. Verify fixed-header
-  matching through shared packet processing and require the new tests in CI.
-
-- Add public-sender wire evidence for header request lengths, selectors,
-  zero-filled Received fields, attachment order, subsets and control-only
-  defaults. Require the namespace cases in nix/pnet CI and the portable
-  control case in Windows CI; retain existing selector validation policy.
-
-- Derive Return Path child flags after integrity verification, validate nested
-  framing and selected parameter lengths before routing, and zero processed
-  Control Code reserved bits. Stop later sender extension values on child M;
-  discard extension values on child I. Preserve failed-integrity/skipped copies.
-
-- Add independent Return Path sender bytes, duplicate-owner routing and empty
-  segment-list evidence. Include the portable sender test in Windows CI.
-  Record copied nested child flags as Partial conformance rather than treating
-  routing success as proof of complete RFC 9503 flag handling.
-
-- Add independent RFC 8762 base-packet evidence for sender sequences,
-  NTP/PTP clocks, authenticated reserved-byte handling, symmetric reflection
-  and default/configured UDP ports. Cover the portable sender in Windows CI.
-
-- Remove released-port selection from startup tests. Retain silent peer
-  sockets and use automatic sender ports so Windows port reuse cannot turn
-  the total-loss check into a local/remote port validation error. Verify
-  the transmitted probe and distinct source port for IPv4 and IPv6.
-
-- Wait for socket metadata setup before shared reflector fixtures send their
-  first request. This prevents macOS from queueing that request without TTL
-  metadata and timing out before session admission. Keep startup traffic-free.
-
-- Repair CI test portability on macOS and Windows: use the Unix `libc`
-  re-export for child reaping and expect source pinning only on Linux. Wait
-  for completed reflector bookkeeping before authentication-state snapshots,
-  with asynchronous TX timestamp correction disabled in that fixture.
-
-- Qualify the original RFC 8972 CoS sixteen-bit Reserved claim for the selected
-  draft-02 EC1/RPE profile. Add independent CoS wire/marking, policy, burst,
-  signature and automatic ECT congestion-response evidence.
-
-- Validate Timestamp Information optional child framing before consuming
-  telemetry. Zero reserved fields in processed Access Reports and stateless
-  Follow-Up replies. Parser-marked truncated Follow-Up values zero available
-  sequence/timestamp fields even when sixteen bytes arrived. Preserve copied
-  signed error values during send-time telemetry refresh. Add independent
-  wire regressions and field-specific conformance evidence.
-
-- Remove released-port rebind assumptions from launcher lifecycle tests. Keep
-  the occupied-port control bound, verify clean receiver shutdown explicitly,
-  and check the original Linux socket identity rather than global endpoint
-  availability. Add duplicate-ownership and startup-error controls.
-
-- Validate the complete nested Location TLV structure before using extension
-  values. Mark malformed Locations and identifiable children, stop later
-  outer TLVs, and honor received child M on the sender while ignoring child I.
-  Preserve original value bytes on failed integrity checks and verify signatures
-  before deriving nested markers. Add endpoint, disclosure and malformed-wire
-  regressions; qualify the Location child-I conformance claim for copied echoes.
-
-- Detect incoming TLVs by received payload length even after a base-only probe.
-  Validate every known outer-TLV length before consuming reflected values,
-  including unused types; malformed entries stop later TLV measurements.
-  Preserve original wire bytes for HMAC checks and add independent U/M/I,
-  echo-order, byte-order and padding regressions for both application roles.
-
-- Enforce Type 12 rate ceilings without rounding down fractional excess, and
-  preserve every Address Group mismatch when multiple filters are present.
-  Add independent sender/reflector wire regressions for C flags, rate/volume
-  boundaries, zero count and protected admission. Qualify identity protection
-  by profile and score exact timing/conservative first-request claims Partial.
-
-- Match replies against their complete echoed sender timestamp before consuming
-  a pending probe or applying SSID policy, learned IDs, Access Report or ECN
-  feedback. Preserve wire T1 across kernel corrections, include it in reply
-  deduplication, and reject delayed TX corrections for reused send contexts.
-  Replace stale session-state deadlines on sequence reuse. Report missing or
-  mismatched echoes as `measurements.mismatched_replies`; lenient replies must
-  contain the full echo even when unused trailing fields are omitted.
-
-- Refuse header-reflection probes before sending when their mandatory fields
-  exceed the current route MTU or the budget cannot be read. Reserve dynamic
-  control and diagnostic bytes during trimming, and restore header requests
-  after MTU growth even when none survived startup. Add required Linux sender
-  wire tests for IPv4/IPv6 and keyed modes, closing the three MTU evidence gaps.
-
-- Report missing test references for normative Compliant conformance rows,
-  with an explicit policy and optional strict enforcement. Review BER, HMAC
-  and admission evidence; require production-path tests for header-MTU claims.
-
-- Count outstanding sequence-reuse retirements once and ignore stale expiry
-  entries for older generations, preserving packet-loss accounting at wrap.
-
-- Remove unavailable review/interoperability/dependency evidence links and
-  qualify historical claims. Add offline documentation link checks to CI,
-  consolidate supported-profile limits, and correct two LAG conformance rows
-  to Partial where numeric/reflector evidence does not establish the requirement.
-
-- Remove UDP port reservation gaps from nine live test suites. Child fixtures
-  discover kernel-selected ports and retain bounded startup stderr/exit status;
-  in-process fixtures keep their bound socket through startup. Bound worker
-  resources and join/reap fixtures on teardown without automatic retries.
-
-- Re-sign generated BER error replies with their actual stateful sequence,
-  including well-framed M-marked metadata before nonzero padding. Preserve
-  original digests on incoming HMAC-failure echoes.
-- Gate both roles with an independent 60-case successor BER wire suite on
-  default/all-features CI builds. Rebuild the conformance matrix and move the
-  standards pin to draft-ietf-bpm-stamp-ber-01, documenting remaining gaps
-  and incompatible Teaparty layouts.
-
-- Preserve nested BER flag/integrity boundaries, repair padding before signing,
-  and size the combined metadata against the MTU. Trim optional reflected
-  headers before reducing BER padding in whole pattern repetitions.
-
-- Reconcile CoS/ECN with draft revision 02: distinguish marking failures from
-  datagram failures, verify sticky ToS options, and return C if requested ECN
-  and Not-ECT cannot be applied. Re-sign every fallback, preserve routing,
-  and report Windows marking as unavailable instead of assuming IP_TOS works.
-  Pace initially zero-gap Type 12 bursts after CE, while retaining zero for
-  control-only requests. Document operator guidance and remaining
-  congestion-control/platform limits.
-
-- Detect inactive and replaced standards drafts, follow bounded successor chains,
-  and cache all metadata for offline replay. Add advisory YANG tracking and a
-  reusable GitHub issue notification for failed or incomplete standards checks.
-  Checker reports now use schema version 2; refresh old draft metadata caches.
-- Enforce route-MTU checks for single reflected-header and BER replies without
-  Type 12 control. This fixes a bug affecting v1.0.0 that could send oversized
-  replies without trimming or fragmentation prevention.
-- Update locked `ctutils`, Tokio, rustls and rustls-webpki dependencies to
-  resolve RustSec advisories, and restore the packet-processing fuzz build.
-- Report session failure after the configured loss threshold even before the
-  first reply, and validate IPv6 Extension Header Control sub-TLV lengths.
-- Use a zero interval when Type 12 only carries the header-control sub-TLV.
-- Trim optional reflected-header TLVs before BER padding when both appear in
-  a reply that exceeds the path MTU.
-- Print the specific review reason in standards-monitor CI logs.
+- Updated `ctutils`, Tokio, rustls, rustls-webpki and `rustix`
+  (RUSTSEC-2026-0486) to resolve RustSec advisories.
 
 ## [1.0.0] - 2026-10-06
 
