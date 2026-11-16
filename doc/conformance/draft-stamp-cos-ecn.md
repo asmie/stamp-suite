@@ -1,25 +1,32 @@
-# draft-ietf-ippm-stamp-cos-ecn conformance
+# draft-ietf-bpm-stamp-cos-ecn conformance
 
 CoS and ECN requirements, implementation and tests.
 
-Revision frozen: draft-ietf-ippm-stamp-cos-ecn-02, 2 November 2026.
-Source: [draft-ietf-ippm-stamp-cos-ecn-02](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-02.txt).
+Revision frozen: draft-ietf-bpm-stamp-cos-ecn-00, 16 November 2026.
+Source: [draft-ietf-bpm-stamp-cos-ecn-00](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-cos-ecn-00.txt).
 
-Summary: 30 clauses: 18 Compliant, 3 Partial, 0 Gap, 9 N-A, 0 Excluded.
+Summary: 31 clauses: 16 Compliant, 4 Partial, 2 Gap, 9 N-A, 0 Excluded.
 
 ## Scope
 
-This is an Internet-Draft; the matrix covers revision -02 only. The
-introductory, example and registry sections add no endpoint requirements.
-New rows paraphrase revision 02; operator SHOULDs are recorded separately
-from endpoint behavior.
+This is an Internet-Draft; the matrix covers BPM revision -00, which replaces
+IPPM revision -02. The wire layout and congestion-response requirements are
+unchanged, but section 3.2 changes DSCP fallback selection and ECN capability
+reporting. The implementation still uses the IPPM -02 fallback behavior;
+updating the reviewed revision does not establish compliance with the new rules.
+The changed clauses are paraphrased below, with stable IDs retained for existing
+requirements. Operator SHOULDs are recorded separately from endpoint behavior.
+
+The successor's DSCP fallback and RPE=01 behavior are not yet implemented.
+See [successor changes](#bpm-00-successor-changes).
 
 The supported profile includes the reflector's DSCP and ECN admission policy
 (`--allowed-dscp`, `--allowed-dscp-for`, `--allowed-ecn`) and the sender's
 AIMD rate response to CE marks. The sender reads reverse-path ECN from IP
 metadata on Linux and macOS; on other platforms it uses only the forward-path
-EC2 feedback in the reflected CoS TLV. Windows marking is conservatively
-reported unavailable with C; the deprecated Winsock IP_TOS API cannot prove
+EC2 feedback in the reflected CoS TLV. Windows marking is currently
+reported unavailable with C under the old profile; BPM -00 instead requires
+RPE=01 for this condition. The deprecated Winsock IP_TOS API cannot prove
 wire marking. macOS sticky marking is checked by socket-option readback;
 Linux uses per-message ancillary marking. Microsoft documents the
 [IP_TOS option](https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options)
@@ -38,12 +45,13 @@ or detect downstream remarking; deployment captures remain necessary.
 | cos-ecn-3.2-1 | "A STAMP Session-Reflector that receives a test packet with the CoS TLV MUST include the CoS TLV in the reflected test packet" | MUST | Reflector | Compliant | Received processable CoS TLVs remain present with the original length. Test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks every copy, including global/destination admission rejection and interleaved ordinary traffic. |
 | cos-ecn-3.2-2 | "The Session-Reflector MUST copy the value of the DSCP and ECN fields of the IP header of the received STAMP test packet into the DSCP2 and EC2 fields" | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` passes the received DSCP and ECN to `src/tlv/list/processing.rs::update_cos_value_in_place`. `test_cos_tlv_draft_figure_cross_vector` (`src/tlv/typed/cos.rs`) checks bytes computed by hand from the draft's Figure 1. Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
 | cos-ecn-3.2-3 | "The Session-Reflector MUST verify whether the use of the value of the DSCP1 field is permitted in the reflected test packet" | MUST | Reflector | Compliant | `CosAdmissionPolicy` (`src/cos_policy.rs`), applied in `src/receiver/mod.rs::apply_semantic_tlv_processing` against the reply destination. `cos_tlv_destination_scoped_policy_decides_per_peer` (`tests/tlv_flag_semantics.rs`). See [admission policy](#admission-policy). Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
-| cos-ecn-3.2-4 | "If it is [permitted], the Session-Reflector MUST set the DSCP field's value in the IP header of the reflected test packet equal to the value of the DSCP1 field" | MUST | Reflector | Compliant | `Transmission::send_next` and `send_datagram` (`src/receiver/transmit.rs`), `tests/burst_transmission_test.rs`. See [per-copy CoS](#per-copy-cos). Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
-| cos-ecn-3.2-5 | "Otherwise, the Session-Reflector MUST use the DSCP value of the received STAMP packet and set the value of the RPD field to 0b01" | MUST | Reflector | Compliant | `cos_unable_fallback_tos` and `set_cos_policy_rejected` (`src/receiver/reply_bytes.rs`), `cos_failure_uses_zero_ecn_fallback_and_resigns` (`src/receiver/transmit/tests.rs`). See [marking fallback](#marking-fallback). Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
+| cos-ecn-3.2-4 | When DSCP1 is permitted, use it in the reply IP header and set RPD=00. | MUST | Reflector | Compliant | `Transmission::send_next` and `send_datagram` (`src/receiver/transmit.rs`), `tests/burst_transmission_test.rs`. See [per-copy CoS](#per-copy-cos). Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
+| cos-ecn-3.2-5 | If DSCP1 is refused, use received DSCP2 as the fallback only when local policy permits it, with RPD=01. | MUST | Reflector | Partial | `src/cos_policy.rs::CosAdmissionPolicy` checks requested DSCP1, but `src/tlv/typed/cos.rs::ClassOfServiceTlv::effective_dscp` falls back to DSCP2 without checking its admission. The allowed-DSCP2 case works; the disallowed case needs a policy-approved replacement (row cos-ecn-3.2-10). Existing behavior: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy`. See [successor changes](#bpm-00-successor-changes). |
 | cos-ecn-3.2-6 | "The Session-Reflector MUST set the ECN value in the IP header of the reflected STAMP test packet to the value of the EC1 field, if it is permitted and capable to do so" | MUST | Reflector | Compliant | `CosAdmissionPolicy` (`src/cos_policy.rs`) applies `--allowed-ecn`; a refused value forces Not-ECT and RPE 0b10. `cos_tlv_refused_ecn_forces_not_ect` (`tests/tlv_flag_semantics.rs`), `tests/burst_transmission_test.rs`. Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
 | cos-ecn-3.2-7 | "If the Session-Reflector is able to set the ECN value ... to the EC1 value, it MUST then set the RPE field ... to the value 0b11" | MUST | Reflector | Compliant | `Transmission::send_next` and `send_datagram` (`src/receiver/transmit.rs`), `tests/burst_transmission_test.rs`. See [per-copy CoS](#per-copy-cos). Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
-| cos-ecn-3.2-8 | "If the Session-Reflector is unable to set the ECN value ... it MUST instead set the ECN value in the IP header to 0b00 and set the RPE field ... to the value 0b10" | MUST | Reflector | Compliant | `cos_unable_fallback_tos` and `set_cos_policy_rejected` (`src/receiver/reply_bytes.rs`), `cos_failure_uses_zero_ecn_fallback_and_resigns` (`src/receiver/transmit/tests.rs`). See [marking fallback](#marking-fallback). |
-| cos-ecn-3.2-9 | Set C when neither EC1 nor Not-ECT can be applied. | MUST | Reflector | Compliant | `src/receiver/reply_bytes.rs::set_cos_marking_unavailable`, `src/receiver/transmit.rs::Transmission::send_next_with_mtu`. Tests: `unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures`, `failed_not_ect_request_needs_no_identical_marking_retry`, `cos_unavailable_preserves_opaque_echoes_and_received_fields` (`src/receiver/transmit/tests.rs`). See [marking fallback](#marking-fallback). |
+| cos-ecn-3.2-8 | If EC1 cannot be applied but Not-ECT can, use Not-ECT in the reply IP header and report RPE=10. | MUST | Reflector | Compliant | `cos_unable_fallback_tos` and `set_cos_policy_rejected` (`src/receiver/reply_bytes.rs`), `cos_failure_uses_zero_ecn_fallback_and_resigns` (`src/receiver/transmit/tests.rs`). See [marking fallback](#marking-fallback). |
+| cos-ecn-3.2-9 | Report RPE=01 when neither EC1 nor Not-ECT can be applied. | MUST | Reflector | Gap | `src/receiver/reply_bytes.rs::set_cos_marking_unavailable` currently sets C and retains RPE=10 from the old profile. Existing tests demonstrate that legacy behavior: `unavailable_ecn_sets_c_on_every_copy_and_preserves_routing_and_signatures`, `failed_not_ect_request_needs_no_identical_marking_retry`, `cos_unavailable_preserves_opaque_echoes_and_received_fields` (`src/receiver/transmit/tests.rs`). They do not establish the successor rule. See [successor changes](#bpm-00-successor-changes). |
+| cos-ecn-3.2-10 | If policy permits neither requested nor received DSCP, choose a locally permitted DSCP and report RPD=01 with C set. | MUST | Reflector | Gap | No third-value selection exists in `src/cos_policy.rs::CosAdmissionPolicy` or `src/tlv/typed/cos.rs::ClassOfServiceTlv::effective_dscp`. Current fallback always uses received DSCP. Empty allowed sets also need an explicit policy decision; there is no permitted value to choose. See [successor changes](#bpm-00-successor-changes). |
 | cos-ecn-3.4-1 | Observe EC2 and be capable of reducing the sending rate on CE [multiple CoS packets within an RTT with ECT0 or ECT1] | MUST | Sender | Compliant | `src/sender/validate.rs::validate_reflected_tlvs`, `src/sender.rs::process_response`, `on_ce_observed` (`src/rate_control.rs`). `test_process_response_forward_path_ce_backs_off_congestion_controller` (`src/sender/tests.rs`). See [sender rate response](#sender-rate-response). Binary test: `tests/sender_measurement_test.rs::sender_cos_fields_and_automatic_ect_response_reach_the_wire` verifies automatic ECT0/ECT1 controller activation and a CE backoff with independent peer signatures. |
 | cos-ecn-3.4-2 | Observe reflected IP ECN and be capable of reducing the sending rate on CE [ECT0 or ECT1 in EC1] | MUST | Sender | Partial | `AimdController` (`src/rate_control.rs`). Tests: `test_process_response_forward_path_ce_backs_off_congestion_controller`, `test_process_response_reverse_path_ce_backs_off_congestion_controller` (`src/sender/tests.rs`). Reverse ECN is read on Linux and macOS only. |
 | cos-ecn-3.4-3 | Observe reflected IP ECN and be capable of adjusting future Reflected Test Packet Control parameters on CE [CoS TLV with Type 12] | MUST | Sender | Partial | Normal sends and Access Report retries scale the Type 12 interval by the current AIMD factor; the reply count is unchanged. `test_wait_phase_retransmit_still_carries_scaled_control_tlv` and `ce_backoff_paces_zero_interval_bursts_but_preserves_control_only_zero` (`src/sender/tests.rs`). Reverse IP ECN is unavailable outside Linux/macOS. |
@@ -62,6 +70,33 @@ or detect downstream remarking; deployment captures remain necessary.
 | cos-ecn-6-1 | Consider HMAC TLVs and dynamic destination ports to mitigate CoS tampering or identification. | Descriptive | Operator | N-A | [ECN security](../security.md#ecn-measurement-integrity) maps existing key/TLV verification and port options; port choice does not authenticate traffic. |
 
 ## Notes
+
+### BPM 00 successor changes
+
+The [IPPM -02 predecessor](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-02.txt)
+was replaced on 16 November 2026. Comparing sections 1 through 6 shows changes
+to DSCP fallback, ECN inability signaling and its legacy-interoperability
+explanation, plus replacement of the Type 12 draft reference with RFC 10052.
+The Type 4 layout and section 3.4 congestion requirements are unchanged.
+
+Three implementation changes are needed before claiming the successor behavior:
+
+- Admit received DSCP2 before using it as a fallback. If neither requested nor
+  received DSCP is allowed, select a permitted value and set RPD=01 and C.
+  Preserve DSCP2 as the ingress observation. A policy allowing no values needs
+  an explicit handling rule rather than an invented permitted marking.
+- Report RPE=01 when neither EC1 nor Not-ECT can be applied. C is now required
+  for the third-DSCP fallback; it is no longer the ECN-inability signal specified
+  by this draft. Preserve independent reasons for C on the same TLV.
+- Update sender diagnostics: `src/sender/ecn.rs::EcnSummary` currently classifies
+  RPE=01 under `reserved_rpe`. It correctly avoids a reverse comparison, but
+  does not yet identify the successor's capability-unavailable condition.
+
+The current helpers, wire tests and CLI references still describe IPPM -02.
+They remain evidence for unchanged requirements and for the documented legacy
+behavior, not proof of the new fallback rules. Existing congestion-controller
+and platform Partial rows remain open. A successful metadata-monitor run only
+establishes that this reviewed revision is current.
 
 ### Reviewed wire and enablement evidence (10 November 2026)
 
@@ -90,9 +125,10 @@ explicitly injected.
 `--allowed-dscp` sets the DSCP values the reflector may copy from DSCP1, and
 `--allowed-dscp-for PREFIX/LEN=SPEC` overrides it for reply destinations in a
 prefix (the longest matching prefix wins). `--allowed-ecn` does the same for
-EC1. The reflector decides permission during semantic TLV processing, before
-the reply is assembled and independently of whether the transport can set the
-value.
+EC1. The reflector currently checks the requested values during semantic TLV
+processing, before reply assembly and independently of transport capability.
+It does not yet check the received DSCP fallback against this policy or choose
+a third permitted value as BPM -00 requires.
 
 ### Per-copy CoS
 
@@ -120,7 +156,9 @@ marking operation and set C. If the initial requested byte already equals
 the fallback, its failure establishes both cases without a duplicate retry.
 Each attempt is timestamped and signed again; only a full datagram send
 advances counters. C means the reply's wire ECN cannot be guaranteed.
-Routing, source pinning and MTU policy remain intact during these fallbacks.
+This is the implemented IPPM -02 fallback; BPM -00 requires RPE=01 when both
+ECN marking attempts fail. Routing, source pinning and MTU policy remain intact
+during these fallbacks.
 Windows always takes this conservative path for a processed CoS request;
 ordinary replies bypass the unsupported marking operation.
 
@@ -194,7 +232,7 @@ This is feedback admission, not an assertion that an unobserved reverse path
 is congestion-free or that non-CE proves the absence of bleaching.
 
 This demonstrates CE response capability. It does not establish all the
-consistency required by revision 02. Recovery subtracts a fixed interval on
+consistency required by section 3.4. Recovery subtracts a fixed interval on
 each clean reply; it does not implement a congestion window, RTT epochs,
 Classic fairness evidence or an L4S scalable controller. In particular,
 using ECT(1) does not establish compliance with the L4S architecture in

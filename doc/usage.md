@@ -420,7 +420,11 @@ Access ID and Return Code. Wrong values or duplicate reports leave the retry
 timer armed; Reserved bits and bytes are ignored. These replies can still
 contribute valid base-packet RTT/loss measurements.
 
-The CoS wire format uses draft-ietf-ippm-stamp-cos-ecn-02's EC1/RPE extension.
+The CoS implementation currently uses draft-ietf-ippm-stamp-cos-ecn-02's
+EC1/RPE extension and fallback behavior. Its successor,
+draft-ietf-bpm-stamp-cos-ecn-00, keeps that layout but changes DSCP fallback
+selection and ECN capability reporting. These changes are not implemented yet;
+see the [successor gaps](conformance/draft-stamp-cos-ecn.md#bpm-00-successor-changes).
 It zeroes the remaining twelve Reserved bits. EC1/RPE occupy four bits of the
 original RFC 8972 sixteen-bit Reserved field, so the frozen RFC transmit-zero
 rule is scored Partial in the [conformance matrix](conformance/rfc8972.md#cos-format-profiles).

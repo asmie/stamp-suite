@@ -172,6 +172,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Changed
 
+- Review the CoS/ECN successor draft-ietf-bpm-stamp-cos-ecn-00 and track it
+  in the standards monitor. Record its DSCP fallback and RPE=01 requirements
+  as conformance gaps; runtime fallback behavior remains on IPPM revision 02
+  until those rules and the corresponding sender diagnostics are implemented.
+
 - Batch inventory-index maintenance during session expiry. Rebuild from the
   survivors after bulk removal and free the detached index outside the table
   lock, preserving cursors and busy retiring reservations.

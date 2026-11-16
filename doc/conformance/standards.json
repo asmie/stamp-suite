@@ -12,8 +12,8 @@
     },
     {
       "kind": "draft",
-      "name": "draft-ietf-ippm-stamp-cos-ecn",
-      "revision": "02",
+      "name": "draft-ietf-bpm-stamp-cos-ecn",
+      "revision": "00",
       "matrix": "doc/conformance/draft-stamp-cos-ecn.md"
     },
     {
