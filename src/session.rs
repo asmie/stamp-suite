@@ -349,6 +349,12 @@ struct SessionEntry {
 }
 
 impl SessionEntry {
+    /// Concurrent table readers can complete timestamp writes out of order.
+    /// Keep the latest sample so a delayed refresh cannot cause early expiry.
+    fn refresh_activity(&self, now_ns: u64) {
+        self.last_active.fetch_max(now_ns, Ordering::Relaxed);
+    }
+
     /// Commit under exclusive table access, serializing with activity refresh.
     fn begin_retirement(&mut self) -> Arc<Session> {
         self.session.begin_retirement();
@@ -617,7 +623,7 @@ impl SessionManager {
                 if !entry.session.is_active() {
                     return None;
                 }
-                entry.last_active.store(self.now_ns(), Ordering::Relaxed);
+                entry.refresh_activity(self.now_ns());
                 return Some(Arc::clone(&entry.session));
             }
         }
@@ -630,7 +636,7 @@ impl SessionManager {
                 if !entry.session.is_active() {
                     return None;
                 }
-                entry.last_active.store(self.now_ns(), Ordering::Relaxed);
+                entry.refresh_activity(self.now_ns());
                 Some(Arc::clone(&entry.session))
             }
             Entry::Vacant(vacant) => {

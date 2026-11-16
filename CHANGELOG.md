@@ -217,6 +217,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Keep session activity monotonic across concurrent reflector workers. A delayed
+  refresh no longer causes premature idle expiry, lost replay/counter state or
+  cancellation of queued replies for an active session.
+
 - Prevent delayed reflector workers from duplicating token refill credit in
   source and shared overflow buckets. Preserve recent source activity for idle
   expiry when workers acquire the lock out of order.

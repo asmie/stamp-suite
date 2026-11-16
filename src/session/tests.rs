@@ -590,6 +590,104 @@ fn retained_cleanup_completes_while_another_table_reader_is_active() {
 }
 
 #[test]
+fn delayed_activity_refresh_preserves_live_session_state() {
+    for source in ["127.0.0.1:4000", "[::1]:4000"] {
+        let timeout = Duration::from_secs(60);
+        let mut manager = SessionManager::new(Some(timeout), Some(1));
+        #[cfg(feature = "control")]
+        manager.enable_session_inventory().unwrap();
+        let key = SessionKey::from(source.parse::<SocketAddr>().unwrap());
+        let session = manager.get_or_create_session(key).unwrap();
+        session.record_received();
+        session.record_transmitted();
+        assert_eq!(session.generate_sequence_number(), 0);
+        assert_eq!(session.check_replay(42), ReplayVerdict::New);
+        let older_sample = manager.now_ns();
+        // Advance the fixture clock without sleeping. A paused reader retains
+        // its old sample while another reader records recent activity.
+        manager.epoch = manager.epoch.checked_sub(timeout * 2).unwrap();
+        let newer_sample = manager.now_ns();
+        {
+            let older_reader = manager.sessions.read().unwrap();
+            thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let newer_reader = manager.sessions.read().unwrap();
+                        newer_reader[&key].refresh_activity(newer_sample);
+                    })
+                    .join()
+                    .unwrap();
+            });
+            older_reader[&key].refresh_activity(older_sample);
+        }
+        assert_eq!(
+            manager.cleanup_stale_sessions(),
+            0,
+            "fresh activity was overwritten"
+        );
+        let retained = manager.get_session(key).unwrap();
+        assert!(Arc::ptr_eq(&session, &retained));
+        assert!(
+            retained.transmission_guard().is_some(),
+            "queued replies must remain eligible"
+        );
+        assert_eq!(retained.get_received_count(), 1);
+        assert_eq!(retained.get_transmitted_count(), 1);
+        assert_eq!(retained.generate_sequence_number(), 1);
+        assert_eq!(retained.check_replay(42), ReplayVerdict::Replay);
+        assert!(
+            manager.get_or_create_session(make_addr(4001)).is_none(),
+            "live entry must still reserve capacity"
+        );
+        let summary = manager.session_summaries_extended();
+        assert_eq!(summary.len(), 1);
+        assert_eq!(
+            summary[0].last_active,
+            manager.epoch + Duration::from_nanos(newer_sample)
+        );
+        #[cfg(feature = "control")]
+        {
+            let page = manager.session_summaries_page(10, None).unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].session_id, session.get_id());
+            assert_eq!(page.items[0].last_active, summary[0].last_active);
+        }
+        // Genuine inactivity still expires the entry and retires retained
+        // handles; monotonic refresh must not make a session immortal.
+        manager.epoch = manager.epoch.checked_sub(timeout * 2).unwrap();
+        assert_eq!(manager.cleanup_stale_sessions(), 1);
+        assert!(session.transmission_guard().is_none());
+        let replacement = manager.get_or_create_session(key).unwrap();
+        assert_ne!(replacement.get_id(), session.get_id());
+        assert_eq!(replacement.generate_sequence_number(), 0);
+    }
+}
+
+#[test]
+fn known_session_acquisition_preserves_a_newer_activity_sample() {
+    for source in ["127.0.0.1:4000", "[::1]:4000"] {
+        let manager = SessionManager::new(Some(Duration::from_secs(60)), Some(1));
+        let key = SessionKey::from(source.parse::<SocketAddr>().unwrap());
+        let session = manager.get_or_create_session(key).unwrap();
+        // Seed a later completed refresh, then exercise the public acquisition
+        // path with its earlier clock sample. No scheduling race is required.
+        let newer = manager.now_ns() + 3_600_000_000_000;
+        manager.sessions.read().unwrap()[&key].refresh_activity(newer);
+        manager.set_draining(true);
+        assert!(Arc::ptr_eq(
+            &session,
+            &manager.get_or_create_session(key).unwrap()
+        ));
+        assert!(
+            manager.session_summaries_extended()[0].last_active
+                >= manager.epoch + Duration::from_nanos(newer)
+        );
+        assert_eq!(manager.cleanup_stale_sessions(), 0);
+        assert!(session.transmission_guard().is_some());
+    }
+}
+
+#[test]
 fn cleanup_handles_activity_newer_than_its_scan_time() {
     let manager = SessionManager::new(Some(Duration::from_secs(60)), None);
     let client = make_addr(4000);
