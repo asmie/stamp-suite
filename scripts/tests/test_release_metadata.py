@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import struct
 import tempfile
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,16 +17,18 @@ class ReleaseMetadataTests(unittest.TestCase):
     def test_versions_and_crate_list(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
+            ebuild_name = f'dist/gentoo/net-analyzer/stamp-suite/stamp-suite-{version}.ebuild'
             for name in ['Cargo.toml', 'Cargo.lock', 'fuzz/Cargo.toml', 'CHANGELOG.md', 'dist/debian/changelog',
                          'dist/openwrt/Makefile', 'dist/man/stamp-suite.1',
-                         'dist/gentoo/net-analyzer/stamp-suite/stamp-suite-1.0.0.ebuild']:
+                         ebuild_name]:
                 dest = root / name
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / name, dest)
-            self.assertEqual(release.check_metadata(root, '1.0.0'), '1.0.0')
+            self.assertEqual(release.check_metadata(root, version), version)
             with self.assertRaises(ValueError):
-                release.check_metadata(root, '1.0.1')
-            ebuild = root / 'dist/gentoo/net-analyzer/stamp-suite/stamp-suite-1.0.0.ebuild'
+                release.check_metadata(root, '0.0.0')
+            ebuild = root / ebuild_name
             ebuild.write_text(ebuild.read_text().replace('CRATES="', 'CRATES="\n\tobsolete@0.1.0'))
             with self.assertRaisesRegex(ValueError, 'CRATES'):
                 release.check_metadata(root)

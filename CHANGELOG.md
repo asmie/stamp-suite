@@ -5,6 +5,8 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-16
+
 ### Added
 
 - Add opt-in reflector `--validate-tlv-framing` admission to discard incomplete
@@ -19,8 +21,8 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 - Read connected native unicast IPv6 MTU estimates on macOS for sender header
   requests and initial BER fitting. Honor minimum-MTU socket policy, refresh
   before each header-request send, and disable fragmentation for these probes.
-  IPv4, mapped peers, explicit interface pinning and reflector MTU lookup remain
-  outside this macOS adapter's scope.
+  IPv4, mapped peers and explicit interface pinning remain outside this
+  macOS sender adapter's scope.
 
 - Query Windows reflector path/interface MTU estimates for Type 12, header and
   BER replies. Refuse unknown budgets, fit and sign each datagram, and restore

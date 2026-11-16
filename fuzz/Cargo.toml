@@ -15,7 +15,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 
 [dependencies.stamp-suite]
-version = "1.0.0"
+version = "1.1.0"
 path = ".."
 # Parsers are backend-independent; snmp exposes the AgentX decoder targets.
 default-features = false

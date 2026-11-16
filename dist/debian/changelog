@@ -1,3 +1,12 @@
+stamp-suite (1.1.0-1) unstable; urgency=medium
+
+  * Add current STAMP extensions, reflector admission policies and diagnostics.
+  * Improve sender measurements, session management and authenticated control.
+  * Harden malformed-packet handling and fix large pnet capture truncation.
+  * Add Windows and macOS MTU handling and refresh release packaging checks.
+
+ -- Piotr Olszewski <asmie@asmie.pl>  Mon, 16 Nov 2026 00:00:00 +0000
+
 stamp-suite (1.0.0-1) unstable; urgency=medium
 
   * First stable release: multi-target measurement, authenticated control API,
