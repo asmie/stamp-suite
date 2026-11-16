@@ -475,7 +475,8 @@ impl SenderRun {
         }
 
         // Access Reports are event-driven (RFC 8972 §4.6).
-        // `tick` attaches the initial report and retries; omit it from static TLVs.
+        // Attach only when due and arm only after a successful send; omit the
+        // report from static TLVs.
         let access_report_state = conf.access_report.map(|access_id| {
             log::info!(
                 "Access Report TLV enabled (id={}, code={}); retransmission timer={}s, \
@@ -857,7 +858,7 @@ impl SenderRun {
             let attach_access_report = self
                 .access_report_state
                 .as_mut()
-                .is_some_and(|state| state.tick(Instant::now()));
+                .is_some_and(|state| state.due(Instant::now()));
             let sent_before = self.packets_sent;
             self.send_probe(attach_access_report).await?;
             scheduled_sent += self.packets_sent - sent_before;
@@ -901,7 +902,7 @@ impl SenderRun {
             if self
                 .access_report_state
                 .as_mut()
-                .is_some_and(|state| state.tick(Instant::now()))
+                .is_some_and(|state| state.due(Instant::now()))
             {
                 self.send_probe(true).await?;
                 continue;
@@ -1128,7 +1129,7 @@ impl SenderRun {
                     if self
                         .access_report_state
                         .as_mut()
-                        .is_some_and(|state| state.tick(Instant::now()))
+                        .is_some_and(|state| state.due(Instant::now()))
                     {
                         self.send_probe(true).await?;
                     }
@@ -1189,7 +1190,28 @@ impl SenderRun {
         let send_time = Instant::now();
         let send_timestamp = generate_timestamp(self.conf.clock_source);
         self.stamp_probe(&mut packet, seq, send_timestamp);
-        match self.socket.send(&packet).await {
+        let result = self.socket.send(&packet).await;
+        self.finish_probe_send(
+            seq,
+            packet.len(),
+            send_time,
+            send_timestamp,
+            attach_access_report,
+            result,
+        )
+    }
+
+    /// Commit probe accounting and report delivery state only for complete sends.
+    fn finish_probe_send(
+        &mut self,
+        seq: u32,
+        packet_len: usize,
+        send_time: Instant,
+        send_timestamp: u64,
+        attach_access_report: bool,
+        result: std::io::Result<usize>,
+    ) -> Result<(), crate::StartupError> {
+        match result {
             Err(e) => {
                 self.consecutive_send_errors += 1;
                 if !retry_send_error(&e, self.consecutive_send_errors) {
@@ -1200,8 +1222,13 @@ impl SenderRun {
                 }
                 crate::eprintln_throttled!("Failed to send packet {seq}: {e}");
             }
-            Ok(n) if n == packet.len() => {
+            Ok(n) if n == packet_len => {
                 self.consecutive_send_errors = 0;
+                if attach_access_report {
+                    if let Some(state) = self.access_report_state.as_mut() {
+                        state.record_sent(Instant::now());
+                    }
+                }
                 self.record_sent(seq, send_time, send_timestamp);
                 if attach_access_report
                     && self

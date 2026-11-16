@@ -249,7 +249,7 @@ pub fn fuzz_reply(
     );
     let mut access_report =
         AccessReportRetransmitState::new(Duration::from_secs(1), 3, AccessReportTlv::new(1, 1));
-    access_report.tick(now);
+    access_report.record_sent(now);
     let mut congestion = CongestionState::new(AimdParams {
         base_interval: Duration::from_millis(10),
         backoff_factor: 2.0,

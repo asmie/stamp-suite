@@ -411,6 +411,10 @@ replies within `--timeout` of the last successful retry. This retains later
 burst copies without restarting the window from acknowledgement or exhaustion.
 Collection ends early when every requested reply has arrived; shutdown and
 `--on-zero-ssid stop` still end it immediately.
+The acknowledgement timer starts only after a successful UDP send. Failed or
+short writes do not consume report retries or extend reply collection; they
+still follow the sender's bounded I/O retry and error policy. An initial report
+that was never sent does not start a post-loop delivery exchange.
 Acknowledgement requires exactly one usable Access Report with the original
 Access ID and Return Code. Wrong values or duplicate reports leave the retry
 timer armed; Reserved bits and bytes are ignored. These replies can still

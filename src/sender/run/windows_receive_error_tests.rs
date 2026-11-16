@@ -108,7 +108,6 @@ async fn windows_receive_error_preserves_report_timers_and_retries_receiving_nex
             let (mut run, peer) = fixture(ip, mode).await;
             let state = run.access_report_state.as_mut().unwrap();
             state.timeout = Duration::from_millis(20);
-            assert!(state.tick(Instant::now()));
             run.send_probe(true).await.unwrap();
             queue_receive_error(&mut run, &peer).await;
             let start = tokio::time::Instant::now();
@@ -182,11 +181,6 @@ async fn windows_receive_error_still_ends_drain_and_report_waits() {
         for mode in 0..3 {
             for wait in [Wait::Drain, Wait::AccessReport] {
                 let (mut run, peer) = fixture(ip, mode).await;
-                assert!(run
-                    .access_report_state
-                    .as_mut()
-                    .unwrap()
-                    .tick(Instant::now()));
                 run.send_probe(true).await.unwrap();
                 queue_receive_error(&mut run, &peer).await;
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

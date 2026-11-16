@@ -50,17 +50,13 @@ async fn open_ecn(
         conf.auth_mode = crate::configuration::AuthMode::Authenticated;
     }
     conf.validate().unwrap();
-    let mut run = SenderRun::open(
+    let run = SenderRun::open(
         Arc::new(conf),
         SenderObservers::new(),
         CancellationToken::new(),
     )
     .await
     .unwrap();
-    run.access_report_state
-        .as_mut()
-        .unwrap()
-        .tick(Instant::now());
     (run, peer)
 }
 

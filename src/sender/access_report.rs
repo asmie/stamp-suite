@@ -10,9 +10,10 @@ pub(crate) const DEFAULT_ACCESS_REPORT_RETRIES: u32 = 4;
 
 /// Access Report retransmission state (RFC 8972 §4.6).
 ///
-/// The send loop supplies time to [`Self::tick`] and calls [`Self::acknowledge`]
-/// on a valid echo. Expiry requests a retransmission until the retry limit;
-/// acknowledgment disarms the timer. No separate task or timer is needed.
+/// The send loop checks [`Self::due`], calls [`Self::record_sent`] after a successful
+/// send, and calls [`Self::acknowledge`] on a valid echo. Expiry requests a
+/// retransmission until the retry limit; acknowledgment disarms the timer.
+/// No separate task or timer is needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AccessReportRetransmitState {
     expected_report: AccessReportTlv,
@@ -55,35 +56,44 @@ impl AccessReportRetransmitState {
         }
     }
 
-    /// Advances retransmission state before a probe is sent.
-    /// Returns `true` for the initial send or an expired retry; `false` while
-    /// waiting or after acknowledgment/abort.
-    pub(super) fn tick(&mut self, now: Instant) -> bool {
+    /// Determines whether the next probe should carry the report. Planning a
+    /// send does not arm its timer or consume retry budget. Exhaustion after
+    /// the last successful attempt still terminates the exchange on expiry.
+    pub(super) fn due(&mut self, now: Instant) -> bool {
         match self.phase {
-            AccessReportPhase::NotStarted => {
-                self.phase = AccessReportPhase::Armed {
-                    attempt: 0,
-                    deadline: now + self.timeout,
-                };
-                true
-            }
-            AccessReportPhase::Armed { attempt, deadline } => {
-                if now < deadline {
-                    false
-                } else if attempt < self.max_retries {
-                    self.retransmissions += 1;
-                    self.phase = AccessReportPhase::Armed {
-                        attempt: attempt + 1,
-                        deadline: now + self.timeout,
-                    };
+            AccessReportPhase::NotStarted => true,
+            AccessReportPhase::Armed { attempt, deadline } if now >= deadline => {
+                if attempt < self.max_retries {
                     true
                 } else {
                     self.phase = AccessReportPhase::Aborted;
                     false
                 }
             }
-            AccessReportPhase::Acknowledged | AccessReportPhase::Aborted => false,
+            _ => false,
         }
+    }
+
+    /// Records a successfully sent report that was due. Call only after the
+    /// complete datagram was accepted by the transport; failed sends leave the
+    /// original deadline and retry budget unchanged.
+    pub(super) fn record_sent(&mut self, now: Instant) -> bool {
+        if !self.due(now) {
+            return false;
+        }
+        let attempt = match self.phase {
+            AccessReportPhase::NotStarted => 0,
+            AccessReportPhase::Armed { attempt, .. } => {
+                self.retransmissions += 1;
+                attempt + 1
+            }
+            _ => return false,
+        };
+        self.phase = AccessReportPhase::Armed {
+            attempt,
+            deadline: now + self.timeout,
+        };
+        true
     }
 
     /// Disarms an armed timer only when the usable echo matches the report
@@ -129,8 +139,8 @@ impl AccessReportRetransmitState {
     }
 
     /// The current retransmission deadline, if still `Armed`. Lets a caller
-    /// that just called [`Self::tick`] and got `false` back (not due yet)
-    /// know how long to sleep before calling `tick` again, instead of busy
+    /// that just called [`Self::due`] and got `false` back (not due yet)
+    /// know how long to sleep before checking `due` again, instead of busy
     /// polling.
     pub(super) fn armed_deadline(&self) -> Option<Instant> {
         match self.phase {
@@ -162,18 +172,18 @@ mod tests {
                 for code in 0..=255 {
                     let mut state =
                         AccessReportRetransmitState::new(Duration::from_secs(1), 1, expected);
-                    state.tick(now);
+                    state.record_sent(now);
                     let deadline = state.armed_deadline();
                     let received = AccessReportTlv::new(id, code);
                     state.acknowledge(received);
                     if received == expected {
                         assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
-                        assert!(!state.tick(now + Duration::from_secs(1)));
+                        assert!(!state.record_sent(now + Duration::from_secs(1)));
                     } else {
                         assert_eq!(state.outcome(), AccessReportOutcome::Pending);
                         assert_eq!(state.armed_deadline(), deadline);
                         assert_eq!(state.retransmissions(), 0);
-                        assert!(state.tick(now + Duration::from_secs(1)));
+                        assert!(state.record_sent(now + Duration::from_secs(1)));
                         assert_eq!(state.retransmissions(), 1);
                         state.acknowledge(expected);
                         assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);

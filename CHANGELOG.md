@@ -217,6 +217,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Start Access Report acknowledgement timers and spend report retry budget only
+  after successful UDP sends. Failed or short writes leave delivery state and
+  retry reply collection windows unchanged.
+
 - Keep session activity monotonic across concurrent reflector workers. A delayed
   refresh no longer causes premature idle expiry, lost replay/counter state or
   cancellation of queued replies for an active session.

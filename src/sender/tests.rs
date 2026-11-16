@@ -204,7 +204,10 @@ fn test_access_report_first_tick_attaches_and_arms() {
     let mut state =
         AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
-    assert!(state.tick(now), "first tick must attach the TLV");
+    assert!(
+        state.record_sent(now),
+        "first successful send must arm the timer"
+    );
     assert_eq!(state.outcome(), AccessReportOutcome::Pending);
     assert_eq!(state.retransmissions(), 0);
 }
@@ -222,8 +225,8 @@ fn test_access_report_fresh_state_has_not_started() {
         !state.has_started() || state.is_terminal(),
         "the post-loop wait guard must be false for a fresh state"
     );
-    // The first tick (the main loop's original send) starts it.
-    assert!(state.tick(Instant::now()));
+    // The main loop's first successful report send starts it.
+    assert!(state.record_sent(Instant::now()));
     assert!(state.has_started());
     assert!(state.has_started() && !state.is_terminal());
 }
@@ -233,9 +236,9 @@ fn test_access_report_tick_before_deadline_does_not_reattach() {
     let mut state =
         AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
-    assert!(state.tick(now));
+    assert!(state.record_sent(now));
     // Still well before the 3s deadline.
-    assert!(!state.tick(now + Duration::from_millis(500)));
+    assert!(!state.record_sent(now + Duration::from_millis(500)));
     assert_eq!(state.retransmissions(), 0);
 }
 
@@ -244,10 +247,10 @@ fn test_access_report_tick_after_deadline_retransmits() {
     let mut state =
         AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
-    assert!(state.tick(now));
+    assert!(state.record_sent(now));
     let after_expiry = now + Duration::from_secs(3) + Duration::from_millis(1);
     assert!(
-        state.tick(after_expiry),
+        state.record_sent(after_expiry),
         "expired timer must trigger a retransmission"
     );
     assert_eq!(state.retransmissions(), 1);
@@ -259,17 +262,20 @@ fn test_access_report_retries_exhausted_then_aborted() {
     let mut state =
         AccessReportRetransmitState::new(Duration::from_secs(1), 2, AccessReportTlv::new(1, 1));
     let mut now = Instant::now();
-    assert!(state.tick(now)); // original send (attempt 0)
+    assert!(state.record_sent(now)); // original send (attempt 0)
     now += Duration::from_secs(1) + Duration::from_millis(1);
-    assert!(state.tick(now)); // retransmission 1
+    assert!(state.record_sent(now)); // retransmission 1
     now += Duration::from_secs(1) + Duration::from_millis(1);
-    assert!(state.tick(now)); // retransmission 2 (== max_retries)
+    assert!(state.record_sent(now)); // retransmission 2 (== max_retries)
     assert_eq!(state.retransmissions(), 2);
     assert_eq!(state.outcome(), AccessReportOutcome::Pending);
 
     // Third expiry past the retry budget aborts the procedure.
     now += Duration::from_secs(1) + Duration::from_millis(1);
-    assert!(!state.tick(now), "aborting must not request another attach");
+    assert!(
+        !state.record_sent(now),
+        "aborting must not request another attach"
+    );
     assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
     assert_eq!(
         state.retransmissions(),
@@ -279,7 +285,7 @@ fn test_access_report_retries_exhausted_then_aborted() {
 
     // Aborted is terminal: further ticks never attach again.
     now += Duration::from_secs(10);
-    assert!(!state.tick(now));
+    assert!(!state.record_sent(now));
     assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
 }
 
@@ -290,9 +296,9 @@ fn test_access_report_zero_retries_aborts_on_first_expiry() {
     let mut state =
         AccessReportRetransmitState::new(Duration::from_secs(1), 0, AccessReportTlv::new(1, 1));
     let now = Instant::now();
-    assert!(state.tick(now));
+    assert!(state.record_sent(now));
     let after_expiry = now + Duration::from_secs(1) + Duration::from_millis(1);
-    assert!(!state.tick(after_expiry));
+    assert!(!state.record_sent(after_expiry));
     assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
     assert_eq!(state.retransmissions(), 0);
 }
@@ -302,13 +308,13 @@ fn test_access_report_acknowledge_before_deadline_disarms() {
     let mut state =
         AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
-    assert!(state.tick(now));
+    assert!(state.record_sent(now));
     state.acknowledge(AccessReportTlv::new(1, 1));
     assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
 
     // Acknowledged is terminal: no further attach, ever, even long past
     // where the original deadline would have expired.
-    assert!(!state.tick(now + Duration::from_secs(30)));
+    assert!(!state.record_sent(now + Duration::from_secs(30)));
     assert_eq!(state.outcome(), AccessReportOutcome::Acknowledged);
 }
 
@@ -317,9 +323,9 @@ fn test_access_report_acknowledge_after_retransmit_disarms_and_stops() {
     let mut state =
         AccessReportRetransmitState::new(Duration::from_secs(1), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
-    assert!(state.tick(now));
+    assert!(state.record_sent(now));
     let after_expiry = now + Duration::from_secs(1) + Duration::from_millis(1);
-    assert!(state.tick(after_expiry)); // retransmission 1
+    assert!(state.record_sent(after_expiry)); // retransmission 1
     assert_eq!(state.retransmissions(), 1);
 
     state.acknowledge(AccessReportTlv::new(1, 1));
@@ -329,7 +335,7 @@ fn test_access_report_acknowledge_after_retransmit_disarms_and_stops() {
         1,
         "retransmission count survives acknowledgment for reporting"
     );
-    assert!(!state.tick(after_expiry + Duration::from_secs(10)));
+    assert!(!state.record_sent(after_expiry + Duration::from_secs(10)));
 }
 
 #[test]
@@ -347,8 +353,8 @@ fn test_access_report_acknowledge_after_aborted_is_noop() {
     let mut state =
         AccessReportRetransmitState::new(Duration::from_secs(1), 0, AccessReportTlv::new(1, 1));
     let now = Instant::now();
-    assert!(state.tick(now));
-    assert!(!state.tick(now + Duration::from_secs(2)));
+    assert!(state.record_sent(now));
+    assert!(!state.record_sent(now + Duration::from_secs(2)));
     assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
 
     state.acknowledge(AccessReportTlv::new(1, 1));
@@ -364,8 +370,8 @@ fn test_access_report_summary_reflects_state() {
     let mut state =
         AccessReportRetransmitState::new(Duration::from_secs(1), 4, AccessReportTlv::new(1, 1));
     let now = Instant::now();
-    assert!(state.tick(now));
-    assert!(state.tick(now + Duration::from_secs(1) + Duration::from_millis(1)));
+    assert!(state.record_sent(now));
+    assert!(state.record_sent(now + Duration::from_secs(1) + Duration::from_millis(1)));
     state.acknowledge(AccessReportTlv::new(1, 1));
     let summary = state.summary();
     assert_eq!(summary.outcome, AccessReportOutcome::Acknowledged);
@@ -865,7 +871,7 @@ fn unsolicited_msid_cannot_seed_the_reflector_latch() {
     let mut congestion = CongestionState::new(congestion_test_params());
     let mut access =
         AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
-    access.tick(Instant::now());
+    access.record_sent(Instant::now());
     for seq in [99u32, 42] {
         let mut reply = vec![0; 44];
         reply[24..28].copy_from_slice(&seq.to_be_bytes());
@@ -1736,7 +1742,7 @@ fn telemetry_control_decisions_do_not_depend_on_formatting() {
                 4,
                 AccessReportTlv::new(1, 1),
             );
-            access.tick(Instant::now());
+            access.record_sent(Instant::now());
             let mut ctx = congestion_process_response_ctx(
                 &mut pending,
                 &mut rtt,
@@ -2208,7 +2214,7 @@ fn test_process_response_acknowledges_access_report_state() {
     let mut latched_reflector_msid = None;
     let mut access_report_state =
         AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
-    access_report_state.tick(Instant::now()); // simulate the original send having armed it
+    access_report_state.record_sent(Instant::now()); // simulate the original send having armed it
     let mut ctx = SenderRecvContext {
         local_error_estimate: None,
         measurements: None,
@@ -2278,7 +2284,7 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
     let mut latched_reflector_msid = None;
     let mut access_report_state =
         AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
-    access_report_state.tick(Instant::now());
+    access_report_state.record_sent(Instant::now());
     let mut ctx = SenderRecvContext {
         local_error_estimate: None,
         measurements: None,
@@ -2639,7 +2645,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
     let mut access_report_state =
         AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let send_time = Instant::now();
-    assert!(access_report_state.tick(send_time));
+    assert!(access_report_state.record_sent(send_time));
 
     let seq_num = 1u32;
     let send_timestamp = generate_timestamp(ClockFormat::NTP);
@@ -2773,11 +2779,11 @@ fn test_access_report_no_reflector_echo_leads_to_retransmit_then_abort() {
         AccessReportRetransmitState::new(Duration::from_secs(3), 4, AccessReportTlv::new(1, 1));
     let mut now = Instant::now();
 
-    assert!(state.tick(now), "iteration 0: original send");
+    assert!(state.record_sent(now), "iteration 0: original send");
     for expected_retransmissions in 1..=4u32 {
         now += Duration::from_secs(3) + Duration::from_millis(1);
         assert!(
-            state.tick(now),
+            state.record_sent(now),
             "iteration {expected_retransmissions}: must retransmit"
         );
         assert_eq!(state.retransmissions(), expected_retransmissions);
@@ -2788,7 +2794,7 @@ fn test_access_report_no_reflector_echo_leads_to_retransmit_then_abort() {
     // (RFC 8972 §4.6: "repeated up to four times before the procedure
     // is aborted").
     now += Duration::from_secs(3) + Duration::from_millis(1);
-    assert!(!state.tick(now), "must not attach after aborting");
+    assert!(!state.record_sent(now), "must not attach after aborting");
     assert_eq!(state.outcome(), AccessReportOutcome::Aborted);
     assert_eq!(state.retransmissions(), 4);
 }
@@ -3569,7 +3575,7 @@ fn mismatched_ssid_preserves_measurement_and_control_state() {
                     4,
                     AccessReportTlv::new(1, 1),
                 );
-                access.tick(Instant::now());
+                access.record_sent(Instant::now());
                 for ssid in [43u16, u16::MAX, 42] {
                     let reply = ssid_test_reply(auth, extensions, ssid, t1, &key);
                     let mut ctx = congestion_process_response_ctx(
