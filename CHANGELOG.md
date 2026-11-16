@@ -225,6 +225,11 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 
 ### Fixed
 
+- Grow undersized macOS reflector UDP send buffers before large replies,
+  preserving route MTU limits and fragmentation policy. Correct native key
+  rotation tests to expect controlled IPv6 replies on macOS while retaining
+  fail-closed expectations for unsupported IPv4 routes.
+
 - Enforce destination DSCP policy on received-value fallback, third-value
   selection and return-path retries. When both DSCP1 and DSCP2 are forbidden,
   use the lowest permitted value with RPD=01 and C, preserving ingress fields.

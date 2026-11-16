@@ -941,6 +941,8 @@ pub(super) struct DatagramSender<'a> {
     socket: &'a std::net::UdpSocket,
     settings: [Option<i32>; 2],
     #[cfg(target_os = "macos")]
+    send_buffer: send_buffer::SendBuffer,
+    #[cfg(target_os = "macos")]
     fragmentation: Option<i32>,
     #[cfg(target_os = "linux")]
     srh: Option<Arc<[u8]>>,
@@ -952,6 +954,8 @@ impl<'a> DatagramSender<'a> {
         Self {
             fd: socket.as_fd(),
             settings: [None; 2],
+            #[cfg(target_os = "macos")]
+            send_buffer: send_buffer::SendBuffer::default(),
             #[cfg(target_os = "macos")]
             fragmentation: None,
             #[cfg(target_os = "linux")]
@@ -973,6 +977,18 @@ impl<'a> DatagramSender<'a> {
         dst: SocketAddr,
         options: &SendOptions,
     ) -> io::Result<usize> {
+        #[cfg(target_os = "macos")]
+        {
+            // Darwin's default UDP send buffer can be smaller than a valid
+            // route-MTU-sized reply. Grow only this socket, without changing
+            // the already computed payload budget or fragmentation policy.
+            let socket = socket2::SockRef::from(&self.fd);
+            self.send_buffer.ensure(
+                payload.len(),
+                || socket.send_buffer_size(),
+                |size| socket.set_send_buffer_size(size),
+            )?;
+        }
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
@@ -1416,3 +1432,6 @@ mod peer_c_diagnostics_tests;
 
 #[cfg(test)]
 mod dscp_tests;
+
+#[cfg(any(target_os = "macos", test))]
+mod send_buffer;

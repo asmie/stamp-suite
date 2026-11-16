@@ -143,7 +143,11 @@ fn macos_ipv6_reflector_shapes_datagrams_and_restores_independent_policies() {
                     &counters,
                     &RateLimiter::new(0),
                     |target, options, refresh| cache.payload_cap(local, target, options, refresh),
-                    |data, target, options| sender.send(data, target, options)
+                    |data, target, options| {
+                        sender.send(data, target, options).inspect_err(|error| {
+                            eprintln!("mode={mode} profile={profile} len={} cap={cap} target={target} send_buffer={:?}: {error}", data.len(), socket2::SockRef::from(&socket).send_buffer_size());
+                        })
+                    }
                 ),
                 Some(0)
             );
@@ -192,5 +196,39 @@ fn macos_ipv6_reflector_shapes_datagrams_and_restores_independent_policies() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn macos_datagram_sender_grows_a_small_buffer_for_large_replies() {
+    for ip in ["127.0.0.1", "::1"] {
+        let peer = UdpSocket::bind((ip, 0)).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let socket = UdpSocket::bind((ip, 0)).unwrap();
+        let sock = socket2::SockRef::from(&socket);
+        sock.set_send_buffer_size(4096).unwrap();
+        let payload = vec![0x5a; 16_000];
+        assert!(sock.send_buffer_size().unwrap() < payload.len());
+        let mut sender = DatagramSender::new(&socket);
+        let options = SendOptions {
+            tos: 0,
+            apply_tos: false,
+            source: None,
+            egress_ifindex: None,
+            srh: None,
+            dont_fragment: false,
+        };
+        for data in [&payload[..], b"ordinary".as_slice(), &payload[..]] {
+            assert_eq!(
+                sender
+                    .send(data, peer.local_addr().unwrap(), &options)
+                    .unwrap(),
+                data.len()
+            );
+            let mut received = vec![0; payload.len()];
+            let (size, _) = peer.recv_from(&mut received).unwrap();
+            assert_eq!(&received[..size], data);
+        }
+        assert!(sock.send_buffer_size().unwrap() >= payload.len());
     }
 }

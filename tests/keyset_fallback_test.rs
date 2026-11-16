@@ -159,6 +159,8 @@ impl Reflector {
 async fn check(auth: bool) {
     for ip in ["127.0.0.1", "::1"] {
         let reflector = Reflector::start(ip, auth).await;
+        let controlled_replies =
+            cfg!(target_os = "linux") || (cfg!(target_os = "macos") && ip == "::1");
         let socket = UdpSocket::bind((ip, 0)).await.unwrap();
         for (ssid, value) in [(42, 0xAB), (43, 0xCD), (99, 0xEF)] {
             for fallback in [false, true] {
@@ -181,11 +183,11 @@ async fn check(auth: bool) {
             .send_to(&request(auth, 42, 0xAB, 2, true, true), reflector.target)
             .await
             .unwrap();
-        if cfg!(target_os = "linux") {
+        if controlled_replies {
             verify(&reflector.recv(&socket).await, auth, 0xAB, true);
         } else {
-            // Size-controlled replies require a known route MTU. This backend
-            // deliberately drops them where route lookup is unsupported.
+            // Size-controlled replies require a known route MTU. macOS
+            // supports native IPv6, but still fails closed for IPv4.
             assert!(
                 timeout(Duration::from_millis(200), socket.recv_from(&mut [0; 2048]))
                     .await
@@ -200,7 +202,7 @@ async fn check(auth: bool) {
                 drops_before + 1
             );
         }
-        // Linux queued copies retain the accepted key. On every platform,
+        // Queued copies on supported routes retain the accepted key. On every platform,
         // newly accepted ordinary requests must use the replacement.
         reflector
             .shared
@@ -210,7 +212,7 @@ async fn check(auth: bool) {
             .as_mut()
             .unwrap()
             .insert(42, key(0x12));
-        if cfg!(target_os = "linux") {
+        if controlled_replies {
             for _ in 0..2 {
                 verify(&reflector.recv(&socket).await, auth, 0xAB, true);
             }
