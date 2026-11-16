@@ -98,6 +98,16 @@ mod tests {
                     .kind(),
                 io::ErrorKind::Unsupported
             );
+            // A reflector bound with --interface is pinned the same way;
+            // Darwin has no estimate for it, so the lookup fails closed.
+            let lo0 = ::nix::net::if_::if_nametoindex("lo0").unwrap();
+            assert_eq!(
+                MtuCache::bound_to(lo0)
+                    .payload_cap(key.local, key.target, &options, false)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::Unsupported
+            );
             let mut srh = options.clone();
             srh.srh = Some(std::sync::Arc::from([0u8; 8]));
             assert_eq!(

@@ -793,7 +793,9 @@ under load. Rate limiting or a send failure can end a burst early.
 `--reflected-control-max-size` (default 1500) is an administrative limit on the
 STAMP payload of a padded reply (RFC 10052 §3). On Linux, both reflector
 backends also look up the reply's route in the kernel before each send, and
-this works with wildcard binds and alternate return addresses. The payload
+this works with wildcard binds and alternate return addresses. With
+`--interface`, the lookup is limited to that interface or VRF, as the reply
+itself is. The payload
 budget is the smaller of the route MTU and the egress interface MTU, minus the
 IP and UDP headers and any Segment Routing Header. A plain 1500-byte link
 allows 1472 STAMP bytes over IPv4 or 1452 over IPv6. Tunnel MTUs account for
@@ -820,7 +822,8 @@ wildcard address). It sends no UDP probes and does not connect the live
 reflector socket. The temporary socket has an ephemeral local port, so the
 result is an estimate for the destination route, not a lookup of any
 port-specific policy. This lookup does not support IPv4, IPv4-mapped peers,
-interface pinning or SRv6. The IPv6 fragmentation setting is turned on for
+interface pinning (including `--interface`) or SRv6, so those
+size-controlled replies are dropped. The IPv6 fragmentation setting is turned on for
 size-controlled replies and off for ordinary replies, regardless of the CoS
 settings. Other platforms have no route MTU lookup, so they cannot send
 size-controlled or reflected-header replies.

@@ -87,6 +87,10 @@ Upgrade both peers together when they use BER or reflected headers.
     consistent under concurrent workers.
   - In `--tlv-mode ignore`, Direct Measurement and Follow-Up Telemetry TLVs
     are sent as received, even when the sender left U clear.
+  - Reply route-MTU lookups follow `--interface`. Linux queries the route
+    through the bound interface or VRF instead of the default table; macOS,
+    which has no estimate for pinned sockets, drops size-controlled replies
+    instead of using another interface's MTU.
   - A failed local socket setting (fragmentation policy, send buffer) or an
     unreadable route-table reply drops the reply. It no longer sets the
     Return Path U flag or retargets the reply to the sender.

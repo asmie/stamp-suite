@@ -80,9 +80,15 @@ pub async fn run_receiver_with_socket(
 
     crate::net_policy::set_hops(&std_socket)
         .map_err(|e| crate::StartupError::io("Cannot set reply TTL/Hop Limit 255", e))?;
+    // Route-MTU lookups for replies must use the interface or VRF the socket
+    // is bound to, not the default routing table.
+    let mut bound_oif = 0;
     if let Some(name) = conf.interface.as_deref() {
         crate::net_policy::bind_to_interface(&std_socket, name)
             .map_err(|e| crate::StartupError::io(format!("Cannot bind to interface {name}"), e))?;
+        bound_oif = ::nix::net::if_::if_nametoindex(name).map_err(|e| {
+            crate::StartupError::io(format!("Cannot find interface {name}"), e.into())
+        })?;
     }
 
     let local_addr = bound;
@@ -322,7 +328,7 @@ pub async fn run_receiver_with_socket(
     let budget = Arc::clone(&core.budget);
     let grace = Duration::from_millis(u64::from(conf.reflector_shutdown_grace_ms));
     let mut drain = ShutdownDrain::default();
-    let mut mtu_cache = super::mtu::MtuCache::default();
+    let mut mtu_cache = super::mtu::MtuCache::bound_to(bound_oif);
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]
     let mut tx_counter = 0u32;
     #[cfg(all(feature = "hwtstamp", target_os = "linux"))]

@@ -39,6 +39,9 @@ use super::{
 struct PnetSendContext {
     send_socket_v4: Option<std::net::UdpSocket>,
     send_socket_v6: Option<std::net::UdpSocket>,
+    /// Interface the reply sockets are bound to with `--interface`, 0 when
+    /// unbound; route-MTU lookups must follow it.
+    bound_oif: u32,
 }
 
 fn bind_reply_socket(address: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
@@ -83,11 +86,13 @@ fn bind_reply_sockets(
         PnetSendContext {
             send_socket_v4: Some(primary),
             send_socket_v6: secondary,
+            bound_oif: 0,
         }
     } else {
         PnetSendContext {
             send_socket_v4: secondary,
             send_socket_v6: Some(primary),
+            bound_oif: 0,
         }
     };
     Ok((sockets, bound))
@@ -142,7 +147,7 @@ pub async fn run_receiver(
 ) -> Result<(), crate::StartupError> {
     // Connected senders require the reply source port to match the selected
     // receive endpoint, including a port assigned by the kernel for zero.
-    let (send_ctx, local_addr) = bind_reply_sockets(conf)?;
+    let (mut send_ctx, local_addr) = bind_reply_sockets(conf)?;
     for socket in send_ctx
         .send_socket_v4
         .iter()
@@ -232,6 +237,11 @@ pub async fn run_receiver(
     let start_time = shared.start_time;
     let output_format = conf.output_format;
 
+    // `--interface` bound the reply sockets to the capture interface, so
+    // route-MTU lookups for replies must use it too.
+    if conf.interface.is_some() {
+        send_ctx.bound_oif = interface.index;
+    }
     let capture_config = CaptureConfig {
         core: ReflectorCore::new(settings, shared, conf.reflector_queue_capacity as usize),
         interface_index: interface.index,
@@ -727,7 +737,7 @@ fn run_transmit_loop(
     budget: &Arc<ReplyBudget>,
     grace: Duration,
 ) {
-    let mut mtu_cache = super::mtu::MtuCache::default();
+    let mut mtu_cache = super::mtu::MtuCache::bound_to(sockets.bound_oif);
     run_transmit_loop_with_mtu(
         receiver,
         sockets,
@@ -998,6 +1008,7 @@ mod tests {
             let sockets = PnetSendContext {
                 send_socket_v4: Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap()),
                 send_socket_v6: None,
+                bound_oif: 0,
             };
             let counters = Arc::new(ReflectorCounters::new());
             let budget = ReplyBudget::new(1, Arc::clone(&counters));
@@ -1075,6 +1086,7 @@ mod tests {
         let sockets = PnetSendContext {
             send_socket_v4: Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap()),
             send_socket_v6: None,
+            bound_oif: 0,
         };
         let counters = Arc::new(ReflectorCounters::new());
         let session = Arc::new(crate::session::Session::new(0));
@@ -1163,6 +1175,7 @@ mod tests {
         let sockets = PnetSendContext {
             send_socket_v4: Some(std::net::UdpSocket::bind("127.0.0.1:0").unwrap()),
             send_socket_v6: None,
+            bound_oif: 0,
         };
         let counters = Arc::new(ReflectorCounters::new());
         let budget = ReplyBudget::new(2, Arc::clone(&counters));

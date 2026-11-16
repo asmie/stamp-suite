@@ -49,9 +49,23 @@ pub(super) struct MtuCache {
     order: VecDeque<RouteKey>,
     #[cfg(target_os = "linux")]
     notifications: Option<std::os::fd::OwnedFd>,
+    /// Interface the reply sockets are bound to with `--interface`, 0 when
+    /// unbound. Every reply leaves through it, so route lookups use it as the
+    /// egress interface unless RFC 9503 §4.1.1 pins the arrival link.
+    bound_oif: u32,
 }
 
 impl MtuCache {
+    /// A cache for reply sockets bound to interface `oif` (0 for unbound).
+    /// Linux looks the route up through that interface or VRF; macOS has no
+    /// estimate for pinned sockets and refuses size-controlled replies.
+    pub fn bound_to(oif: u32) -> Self {
+        Self {
+            bound_oif: oif,
+            ..Self::default()
+        }
+    }
+
     pub fn payload_cap(
         &mut self,
         local: SocketAddr,
@@ -66,7 +80,7 @@ impl MtuCache {
                 "macOS SRH MTU lookup is unavailable",
             ));
         }
-        let (key, overhead) = route_key(local, target, options)?;
+        let (key, overhead) = route_key(local, target, options, self.bound_oif)?;
         // Until native route-change notifications are supported, never reuse
         // a cached estimate, including for later copies of a burst.
         let refresh = refresh || cfg!(any(target_os = "windows", target_os = "macos"));
@@ -227,6 +241,7 @@ fn route_key(
     mut local: SocketAddr,
     mut target: SocketAddr,
     options: &SendOptions,
+    bound_oif: u32,
 ) -> io::Result<(RouteKey, usize)> {
     if let Some(source) = options.source {
         local.set_ip(source);
@@ -247,7 +262,7 @@ fn route_key(
             local,
             target,
             tos: options.tos,
-            oif: options.egress_ifindex.unwrap_or(0),
+            oif: options.egress_ifindex.unwrap_or(bound_oif),
         },
         overhead,
     ))
@@ -257,7 +272,7 @@ fn route_key(
 fn route_mtu(_: &RouteKey) -> io::Result<u32> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "reply route MTU lookup requires Linux or Windows",
+        "reply route MTU lookup requires Linux, Windows or macOS",
     ))
 }
 
@@ -806,7 +821,7 @@ mod tests {
         };
         let local = "127.0.0.1:862".parse().unwrap();
         let target = "127.0.0.1:5000".parse().unwrap();
-        let (route, _) = route_key(local, target, &options).unwrap();
+        let (route, _) = route_key(local, target, &options, 0).unwrap();
         for _ in 0..2 {
             cache
                 .lookup(route.clone(), Instant::now(), true, |_| Ok(1))
@@ -868,6 +883,43 @@ mod tests {
                 .unwrap(),
             1300
         );
+    }
+
+    /// A socket bound with `--interface` sends every reply through that
+    /// device, so the kernel route query must be restricted to it as well.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn route_lookup_follows_the_bound_interface() {
+        let loopback = ::nix::net::if_::if_nametoindex("lo").unwrap();
+        let local: SocketAddr = "127.0.0.1:862".parse().unwrap();
+        let target: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let key = |oif| RouteKey {
+            local,
+            target,
+            tos: 0,
+            oif,
+        };
+        let request = route_request(&key(loopback));
+        let attrs = attributes(&request[28..]).unwrap();
+        assert!(attrs.contains(&(4, &loopback.to_ne_bytes()[..])));
+        let unbound = route_mtu(&key(0)).unwrap();
+        assert_eq!(route_mtu(&key(loopback)).unwrap(), unbound);
+        // No device has this index; the kernel rejects the pinned lookup
+        // instead of falling back to the default table.
+        assert!(route_mtu(&key(u32::MAX >> 1)).is_err());
+
+        let options = SendOptions {
+            apply_tos: false,
+            egress_ifindex: None,
+            tos: 0,
+            source: None,
+            srh: None,
+            dont_fragment: true,
+        };
+        let mut cache = MtuCache::bound_to(u32::MAX >> 1);
+        assert!(cache.payload_cap(local, target, &options, true).is_err());
+        let mut cache = MtuCache::bound_to(loopback);
+        assert!(cache.payload_cap(local, target, &options, true).unwrap() >= 1000);
     }
 
     #[cfg(target_os = "linux")]
@@ -955,7 +1007,7 @@ mod tests {
             .map(std::sync::Arc::from),
             dont_fragment: true,
         };
-        let (key, overhead) = route_key(local, target, &options).unwrap();
+        let (key, overhead) = route_key(local, target, &options, 0).unwrap();
         assert_eq!(key.local, "[2001:db8::2]:862".parse().unwrap());
         assert_eq!(key.target, "[2001:db8::1]:5000".parse().unwrap());
         assert_eq!(
@@ -964,6 +1016,27 @@ mod tests {
         );
         let mut invalid = options;
         invalid.srh = Some(std::sync::Arc::from([]));
-        assert!(route_key(local, target, &invalid).is_err());
+        assert!(route_key(local, target, &invalid, 0).is_err());
+    }
+
+    #[test]
+    fn bound_interface_is_the_egress_unless_the_arrival_link_is_pinned() {
+        let local = "127.0.0.1:862".parse().unwrap();
+        let target = "127.0.0.1:5000".parse().unwrap();
+        let mut options = SendOptions {
+            apply_tos: true,
+            egress_ifindex: None,
+            tos: 0,
+            source: None,
+            srh: None,
+            dont_fragment: true,
+        };
+        for (bound, pinned, expected) in
+            [(0, None, 0), (7, None, 7), (7, Some(3), 3), (0, Some(3), 3)]
+        {
+            options.egress_ifindex = pinned;
+            let (key, _) = route_key(local, target, &options, bound).unwrap();
+            assert_eq!(key.oif, expected, "bound={bound} pinned={pinned:?}");
+        }
     }
 }
