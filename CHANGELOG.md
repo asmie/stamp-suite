@@ -75,6 +75,9 @@ Upgrade both peers together when they use BER or reflected headers.
     truncated and dropped.
   - pnet uses the assigned port everywhere when started with `--local-port 0`,
     and rejects wildcard capture without a named interface.
+  - pnet captures without promiscuous mode and answers only datagrams
+    addressed to this host. Before, a pnet reflector on a shared segment,
+    mirror port or router also answered probes meant for other hosts.
   - Destination DSCP policy also applies to fallback values and return-path
     retries; empty or unenforceable policies suppress the CoS reply.
   - Type 12 rate limits no longer round down excess, and every Address Group

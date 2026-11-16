@@ -98,10 +98,63 @@ fn bind_reply_sockets(
     Ok((sockets, bound))
 }
 
+/// How often an unknown destination may trigger a fresh address enumeration.
+const LOCAL_ADDRESS_REFRESH: Duration = Duration::from_secs(1);
+
+/// Destination addresses the pnet reflector answers.
+///
+/// Capture sees every frame the interface receives, including traffic routed
+/// through this host. A kernel UDP socket only receives datagrams addressed
+/// to the host, so the IP destination must be one of the host's addresses:
+/// the bound address in its own family, or any local address otherwise.
+struct LocalDestinations {
+    bound: IpAddr,
+    host: Vec<IpAddr>,
+    refreshed: Instant,
+    enumerate: fn() -> Vec<IpAddr>,
+}
+
+impl LocalDestinations {
+    fn new(bound: IpAddr, enumerate: fn() -> Vec<IpAddr>, now: Instant) -> Self {
+        let host = enumerate();
+        if host.is_empty() {
+            log::warn!(
+                "Cannot list local addresses; the pnet reflector drops requests \
+                 to addresses other than its bound one until the list can be read"
+            );
+        }
+        Self {
+            bound,
+            host,
+            refreshed: now,
+            enumerate,
+        }
+    }
+
+    /// Addresses can be added while the reflector runs, so a miss re-reads
+    /// the list, at most once per [`LOCAL_ADDRESS_REFRESH`].
+    fn accepts(&mut self, destination: IpAddr, now: Instant) -> bool {
+        if !self.bound.is_unspecified() && self.bound.is_ipv4() == destination.is_ipv4() {
+            return destination == self.bound;
+        }
+        if self.host.contains(&destination) {
+            return true;
+        }
+        if now.saturating_duration_since(self.refreshed) < LOCAL_ADDRESS_REFRESH {
+            return false;
+        }
+        self.host = (self.enumerate)();
+        self.refreshed = now;
+        self.host.contains(&destination)
+    }
+}
+
 /// Everything the blocking capture loop owns.
 struct CaptureConfig {
     core: ReflectorCore,
     interface_index: u32,
+    /// Only the capture thread uses this; a miss may refresh it.
+    destinations: std::cell::RefCell<LocalDestinations>,
     queue_capacity: usize,
     shutdown_grace: Duration,
     local_port: u16,
@@ -204,6 +257,9 @@ pub async fn run_receiver(
         // truncates valid large probes before IP/UDP validation sees them.
         read_buffer_size: 128 * 1024,
         read_timeout,
+        // Frames addressed to other hosts are not for this reflector; see
+        // `LocalDestinations` for traffic routed through this host.
+        promiscuous: false,
         #[cfg(target_os = "linux")]
         socket_fd: incoming_only_capture_socket(),
         ..Default::default()
@@ -245,6 +301,11 @@ pub async fn run_receiver(
     let capture_config = CaptureConfig {
         core: ReflectorCore::new(settings, shared, conf.reflector_queue_capacity as usize),
         interface_index: interface.index,
+        destinations: std::cell::RefCell::new(LocalDestinations::new(
+            conf.local_addr,
+            super::local_addrs::enumerate_interface_addresses,
+            Instant::now(),
+        )),
         queue_capacity: conf.reflector_queue_capacity as usize,
         shutdown_grace: Duration::from_millis(u64::from(conf.reflector_shutdown_grace_ms)),
         local_port: local_addr.port(),
@@ -470,7 +531,12 @@ fn handle_ip_packet(
     let Some((udp, mut pkt)) = checked_udp(ip, version) else {
         return;
     };
-    if udp.get_destination() != config.local_port {
+    if udp.get_destination() != config.local_port
+        || !config
+            .destinations
+            .borrow_mut()
+            .accepts(pkt.dst_addr, Instant::now())
+    {
         return;
     }
     pkt.src =
@@ -1417,46 +1483,9 @@ mod revision13_tests {
                 "--local-addr",
                 if v6 { "::2" } else { "127.0.0.2" },
             ]);
-            let shared = create_shared_state(&conf).unwrap();
-            let settings = ReflectorSettings::from_config(&conf, &shared, false).unwrap();
-            let config = CaptureConfig {
-                core: ReflectorCore::new(settings, &shared, 8),
-                interface_index: 0,
-                queue_capacity: 8,
-                shutdown_grace: Duration::ZERO,
-                local_port: 862,
-                shutdown: CancellationToken::new(),
-            };
+            let (config, shared) = capture_config(&conf, Vec::new);
             let mac = [2, 17, 34, 51, 68, 85];
-            let mut probe = vec![0; 44];
-            // Location request: ports plus an eight-byte Source MAC placeholder.
-            probe.extend([0x80, 2, 0, 16, 0, 0, 0, 0, 0x80, 1, 0, 8]);
-            probe.extend([0; 8]);
-            let mut udp = vec![0xc0, 1, 3, 94, 0, 72, 0, 0];
-            udp.extend(probe);
-            let mut ip = packet(v6);
-            ip.truncate(if v6 { 40 } else { 20 });
-            let mut pseudo = if v6 {
-                ip[4..6].copy_from_slice(&72u16.to_be_bytes());
-                let mut pseudo = ip[8..40].to_vec();
-                pseudo.extend([0, 0, 0, 72, 0, 0, 0, 17]);
-                pseudo
-            } else {
-                ip[2..4].copy_from_slice(&92u16.to_be_bytes());
-                ip[10..12].fill(0);
-                let sum = checksum(&ip);
-                ip[10..12].copy_from_slice(&sum.to_be_bytes());
-                let mut pseudo = ip[12..20].to_vec();
-                pseudo.extend([0, 17, 0, 72]);
-                pseudo
-            };
-            pseudo.extend(&udp);
-            udp[6..8].copy_from_slice(&checksum(&pseudo).to_be_bytes());
-            ip.extend(udp);
-            let mut frame = vec![0; 6];
-            frame.extend(mac);
-            frame.extend(if v6 { [0x86, 0xdd] } else { [0x08, 0x00] });
-            frame.extend(ip);
+            let frame = location_frame(v6, mac, 2);
             let (send, receive) = std::sync::mpsc::sync_channel(8);
             handle_packet(&EthernetPacket::new(&frame).unwrap(), &config, &send);
             let mut queued = receive.try_recv().expect("capture must admit the request");
@@ -1477,6 +1506,129 @@ mod revision13_tests {
             assert_eq!(&reply[62..64], &[0, 0]);
         }
     }
+    /// An Ethernet frame from 127.0.0.1 / ::1 carrying a Location request to
+    /// UDP port 862 at 127.0.0.`last` / ::`last`.
+    fn location_frame(v6: bool, mac: [u8; 6], last: u8) -> Vec<u8> {
+        let mut probe = vec![0; 44];
+        // Location request: ports plus an eight-byte Source MAC placeholder.
+        probe.extend([0x80, 2, 0, 16, 0, 0, 0, 0, 0x80, 1, 0, 8]);
+        probe.extend([0; 8]);
+        let mut udp = vec![0xc0, 1, 3, 94, 0, 72, 0, 0];
+        udp.extend(probe);
+        let mut ip = packet(v6);
+        ip.truncate(if v6 { 40 } else { 20 });
+        ip[if v6 { 39 } else { 19 }] = last;
+        let mut pseudo = if v6 {
+            ip[4..6].copy_from_slice(&72u16.to_be_bytes());
+            let mut pseudo = ip[8..40].to_vec();
+            pseudo.extend([0, 0, 0, 72, 0, 0, 0, 17]);
+            pseudo
+        } else {
+            ip[2..4].copy_from_slice(&92u16.to_be_bytes());
+            ip[10..12].fill(0);
+            let sum = checksum(&ip);
+            ip[10..12].copy_from_slice(&sum.to_be_bytes());
+            let mut pseudo = ip[12..20].to_vec();
+            pseudo.extend([0, 17, 0, 72]);
+            pseudo
+        };
+        pseudo.extend(&udp);
+        udp[6..8].copy_from_slice(&checksum(&pseudo).to_be_bytes());
+        ip.extend(udp);
+        let mut frame = vec![0; 6];
+        frame.extend(mac);
+        frame.extend(if v6 { [0x86, 0xdd] } else { [0x08, 0x00] });
+        frame.extend(ip);
+        frame
+    }
+
+    fn capture_config(
+        conf: &Configuration,
+        host: fn() -> Vec<IpAddr>,
+    ) -> (CaptureConfig, crate::receiver::ReceiverSharedState) {
+        let shared = create_shared_state(conf).unwrap();
+        let settings = ReflectorSettings::from_config(conf, &shared, false).unwrap();
+        let config = CaptureConfig {
+            core: ReflectorCore::new(settings, &shared, 8),
+            interface_index: 0,
+            destinations: std::cell::RefCell::new(LocalDestinations::new(
+                conf.local_addr,
+                host,
+                Instant::now(),
+            )),
+            queue_capacity: 8,
+            shutdown_grace: Duration::ZERO,
+            local_port: 862,
+            shutdown: CancellationToken::new(),
+        };
+        (config, shared)
+    }
+
+    /// Routed traffic and frames for other hosts reach the capture socket.
+    /// Only datagrams addressed to this host may be answered.
+    #[test]
+    fn capture_answers_only_local_destinations() {
+        for v6 in [false, true] {
+            for (bind, host, last, admitted) in [
+                // A specific bind admits only itself in its family.
+                (if v6 { "::2" } else { "127.0.0.2" }, false, 2, true),
+                (if v6 { "::2" } else { "127.0.0.2" }, false, 3, false),
+                (if v6 { "::2" } else { "127.0.0.2" }, true, 3, false),
+                // A wildcard bind admits the host's addresses only.
+                (if v6 { "::" } else { "0.0.0.0" }, true, 2, true),
+                (if v6 { "::" } else { "0.0.0.0" }, true, 3, false),
+                (if v6 { "::" } else { "0.0.0.0" }, false, 2, false),
+            ] {
+                let conf = Configuration::parse_from([
+                    "stamp-suite",
+                    "--is-reflector",
+                    "--local-addr",
+                    bind,
+                ]);
+                let addresses: fn() -> Vec<IpAddr> = if host {
+                    || vec!["127.0.0.2".parse().unwrap(), "::2".parse().unwrap()]
+                } else {
+                    Vec::new
+                };
+                let (config, _shared) = capture_config(&conf, addresses);
+                let frame = location_frame(v6, [2, 0, 0, 0, 0, 1], last);
+                let (send, receive) = std::sync::mpsc::sync_channel(8);
+                handle_packet(&EthernetPacket::new(&frame).unwrap(), &config, &send);
+                assert_eq!(
+                    receive.try_recv().is_ok(),
+                    admitted,
+                    "bind={bind} host={host} destination=.{last}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_destination_refreshes_the_address_list_at_most_once_per_interval() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn enumerate() -> Vec<IpAddr> {
+            match CALLS.fetch_add(1, Ordering::SeqCst) {
+                0 => vec!["192.0.2.1".parse().unwrap()],
+                _ => vec!["192.0.2.1".parse().unwrap(), "192.0.2.7".parse().unwrap()],
+            }
+        }
+        let start = Instant::now();
+        let added: IpAddr = "192.0.2.7".parse().unwrap();
+        let mut destinations = LocalDestinations::new("0.0.0.0".parse().unwrap(), enumerate, start);
+        // A specific address in the other family does not restrict IPv4.
+        assert!(destinations.accepts("192.0.2.1".parse().unwrap(), start));
+        assert!(!destinations.accepts(added, start + LOCAL_ADDRESS_REFRESH / 2));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1, "refreshed too early");
+        assert!(destinations.accepts(added, start + LOCAL_ADDRESS_REFRESH));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+        assert!(destinations.accepts(added, start + LOCAL_ADDRESS_REFRESH));
+
+        let mut mixed = LocalDestinations::new("::2".parse().unwrap(), Vec::new, start);
+        assert!(!mixed.accepts("::3".parse().unwrap(), start + LOCAL_ADDRESS_REFRESH));
+        assert!(mixed.accepts("::2".parse().unwrap(), start));
+    }
+
     fn packet(v6: bool) -> Vec<u8> {
         let mut udp = vec![0xc0, 1, 3, 94, 0, 12, 0, 0, 1, 2, 3, 4];
         let mut ip = if v6 {

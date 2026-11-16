@@ -127,7 +127,11 @@ operator view.
 The nix backend only sees traffic that the kernel delivers to its bound UDP
 socket, so the host firewall applies as usual. Raw capture sees traffic on the
 interface before UDP delivery, so UDP filtering in the INPUT chain does not
-stop it. Pnet sends replies from UDP sockets bound to the STAMP port, so
+stop it. Pnet captures without promiscuous mode and answers only datagrams
+addressed to this host, as a UDP socket would: the bound address in its own
+family, or any local address otherwise. That keeps it from answering probes
+routed through the host to someone else. The address list is read at startup
+and again, at most once a second, when an unknown destination arrives. Pnet sends replies from UDP sockets bound to the STAMP port, so
 senders using connected sockets accept the replies' source port. Pnet captures
 on one interface. It needs a concrete local address, or a wildcard address
 together with `--interface`.
