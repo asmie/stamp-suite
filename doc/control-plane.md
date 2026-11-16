@@ -109,6 +109,7 @@ instead of being ignored.
       "header_selector_no_match": 0,
       "header_length_unavailable": 0,
       "cos_marking_unavailable": 0,
+      "cos_dscp_fallback": 0,
       "reply_header_unsupported": 0,
       "reply_header_duplicate": 0,
       "peer_c_preserved": 0
@@ -134,9 +135,9 @@ The seven keys are fixed and include zero values. See [BER diagnostics](ber-migr
 
 `counters.tlv_conformance` counts successfully sent datagrams with
 reflected Type 12, header-reflection and nested control C conditions, CoS
-marking unavailability, plus preserved peer C provenance. It uses the same
+marking unavailability and third-DSCP fallback, plus preserved peer C provenance. It uses the same
 once-per-reason, successful-send rules as the BER counters and includes all
-19 fixed keys, including zero values. The Type 12 reasons are:
+20 fixed keys, including zero values. The Type 12 reasons are:
 
 | Reason | Meaning |
 | --- | --- |
@@ -175,6 +176,7 @@ integrity-failed echoes add no header reason.
 | Reason | Meaning |
 | --- | --- |
 | `cos_marking_unavailable` | The backend cannot apply either requested ECN or the Not-ECT fallback, and reports RPE=01 in a processed CoS TLV. |
+| `cos_dscp_fallback` | Neither DSCP1 nor DSCP2 is permitted; a successful reply uses a locally permitted third DSCP with RPD=01 and C. |
 | `reply_header_unsupported` | A processed IPv6 Extension Header Control child receives C because reply-header attachment is unsupported. |
 | `reply_header_duplicate` | A Type 12 parent has multiple complete IPv6 Extension Header Control children and at least one receives C. |
 | `peer_c_preserved` | A complete child header in a known container retains C supplied by the peer, with no corresponding local C-generation cause. |

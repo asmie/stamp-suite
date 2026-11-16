@@ -1006,6 +1006,7 @@ mod tests {
             let response = super::super::StampResponse {
                 data: vec![0; 44],
                 cos_request: None,
+                cos_reply_policy: None,
                 reply_source: None,
                 ber_conformance: Default::default(),
                 tlv_conformance: Default::default(),
@@ -1102,6 +1103,7 @@ mod tests {
             let response = super::super::StampResponse {
                 data,
                 cos_request: None,
+                cos_reply_policy: None,
                 reply_source: None,
                 ber_conformance: Default::default(),
                 tlv_conformance: Default::default(),
@@ -1170,6 +1172,7 @@ mod tests {
             let response = super::super::StampResponse {
                 data,
                 cos_request: None,
+                cos_reply_policy: None,
                 reply_source: None,
                 ber_conformance: Default::default(),
                 tlv_conformance: Default::default(),

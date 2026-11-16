@@ -356,12 +356,13 @@ fn cos_tlv_refused_dscp_reports_policy_rejection() {
         "a refused DSCP1 must set RPD=0b01 and change nothing else"
     );
 
+    assert_ne!(response.data[UNAUTH_BASE_SIZE] & 0x10, 0);
     // And the reflector must not ask the backend to apply the refused value:
-    // the reply falls back to the received DSCP with ECN preserved.
+    // neither candidate is permitted, so choose the lowest allowed DSCP.
     assert_eq!(
         response.cos_request,
-        Some((10, 2)),
-        "the refused DSCP1 must be replaced by the received DSCP for the wire"
+        Some((0, 2)),
+        "the reply must use a permitted third DSCP"
     );
 }
 
@@ -446,10 +447,10 @@ fn cos_tlv_destination_scoped_policy_decides_per_peer() {
     });
     let response = process_stamp_packet(&packet, refused_peer, 64, false, &ctx).expect("reflected");
     assert_eq!(
-        response.data[value_start + 1] & 0b11,
-        0b01,
-        "outside it, the same request must be refused with RPD=0b01"
+        response.return_path_action,
+        stamp_suite::tlv::ReturnPathAction::SuppressReply
     );
+    assert!(response.cos_request.is_none());
 }
 
 // ---------------------------------------------------------------------------

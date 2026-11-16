@@ -176,6 +176,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
     let mut response = Vec::with_capacity(capacity);
     response.extend_from_slice(&base_bytes);
     let mut cos_request: Option<(u8, u8)> = None;
+    let mut cos_reply_policy = None;
     let mut return_path_action = ReturnPathAction::Normal;
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
     let mut reply_source: Option<std::net::IpAddr> = None;
@@ -235,6 +236,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                     match apply_semantic_tlv_processing(&mut tlvs, ctx, tlv_hmac_key, &base_bytes) {
                         Some(result) => {
                             cos_request = result.cos_request;
+                            cos_reply_policy = result.cos_reply_policy;
                             return_path_action = result.return_path_action;
                             reflected_control = result.reflected_control;
                             reply_source = result.reply_source;
@@ -246,6 +248,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
                             return StampResponse {
                                 data: response,
                                 cos_request: None,
+                                cos_reply_policy: None,
                                 return_path_action: ReturnPathAction::SuppressReply,
                                 reflected_control: None,
                                 reply_source: None,
@@ -281,6 +284,7 @@ pub(crate) fn assemble_unauth_answer_with_tlvs(
     StampResponse {
         data: response,
         cos_request,
+        cos_reply_policy,
         return_path_action,
         reflected_control,
         reply_source,
@@ -328,6 +332,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
     let mut response = Vec::with_capacity(capacity);
     response.extend_from_slice(&base_bytes);
     let mut cos_request: Option<(u8, u8)> = None;
+    let mut cos_reply_policy = None;
     let mut return_path_action = ReturnPathAction::Normal;
     let mut reflected_control: Option<ReflectedControlBehavior> = None;
     let mut reply_source: Option<std::net::IpAddr> = None;
@@ -393,6 +398,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                     match apply_semantic_tlv_processing(&mut tlvs, ctx, tlv_hmac_key, &base_bytes) {
                         Some(result) => {
                             cos_request = result.cos_request;
+                            cos_reply_policy = result.cos_reply_policy;
                             return_path_action = result.return_path_action;
                             reflected_control = result.reflected_control;
                             reply_source = result.reply_source;
@@ -404,6 +410,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
                             return StampResponse {
                                 data: response,
                                 cos_request: None,
+                                cos_reply_policy: None,
                                 return_path_action: ReturnPathAction::SuppressReply,
                                 reflected_control: None,
                                 reply_source: None,
@@ -436,6 +443,7 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
     StampResponse {
         data: response,
         cos_request,
+        cos_reply_policy,
         return_path_action,
         reflected_control,
         reply_source,

@@ -105,6 +105,14 @@ impl TlvList {
         );
     }
 
+    /// BPM CoS/ECN -00: a third locally admitted DSCP requires C.
+    pub(crate) fn mark_cos_dscp_fallback(&mut self) {
+        self.for_each_matching_tlv(
+            |tlv| tlv.tlv_type == TlvType::ClassOfService && tlv.value.len() == COS_TLV_VALUE_SIZE,
+            |tlv| tlv.set_conformant_reflected(),
+        );
+    }
+
     /// Updates CoS TLV value bytes in-place.
     ///
     /// Modifies DSCP2/EC2/RPD/RPE without allocating a new value buffer,

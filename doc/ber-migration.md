@@ -327,7 +327,7 @@ The draft's section 6.2 wording applies to C on other TLVs/sub-TLVs too.
 Type 12 and header-reflection reasons have separate fixed counters and
 throttled logs, exposed through [control status](control-plane.md#status) and
 Prometheus. Header reasons follow the offending headers through size trimming
-and MTU retries. CoS marking failure and nested unsupported/duplicate reply-header controls also
+and MTU retries. CoS marking failure, third-DSCP fallback and nested unsupported/duplicate reply-header controls also
 have specific reasons. Every known local C-generation site has a diagnostic.
 `peer_c_preserved` covers retained peer C in complete child headers of the five
 known container layouts. It distinguishes an unexpected peer flag from a

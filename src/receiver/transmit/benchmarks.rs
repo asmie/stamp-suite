@@ -176,6 +176,7 @@ fn fixture(case: Case) -> Transmission {
         StampResponse {
             data,
             cos_request: (case.scenario == Scenario::Cos).then_some((46, 1)),
+            cos_reply_policy: None,
             return_path_action: action,
             reflected_control: controlled.then_some(super::super::ReflectedControlBehavior {
                 max_size: PAYLOAD as u16,

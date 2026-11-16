@@ -10,15 +10,15 @@ certify untested behavior.
 | Document | Revision frozen | Clauses | Compliant | Partial | Gap | N-A | Excluded |
 |---|---|---:|---:|---:|---:|---:|---:|
 | [RFC 8762](rfc8762.md): STAMP base protocol | RFC 8762, March 2020 | 62 | 52 | 0 | 0 | 9 | 1 |
-| [RFC 8972](rfc8972.md): STAMP optional extensions | RFC 8972, January 2021 | 151 | 141 | 3 | 0 | 7 | 0 |
+| [RFC 8972](rfc8972.md): STAMP optional extensions | RFC 8972, January 2021 | 151 | 140 | 4 | 0 | 7 | 0 |
 | [RFC 9503](rfc9503.md): Destination Node Address and Return Path | RFC 9503, October 2023 | 27 | 22 | 1 | 0 | 3 | 1 |
 | [RFC 9534](rfc9534.md): Micro-session ID (LAG) | RFC 9534, February 2024 | 18 | 7 | 8 | 1 | 2 | 0 |
 | [RFC 8545](rfc8545.md): OWAMP/TWAMP port allocation | RFC 8545, March 2019 | 8 | 1 | 0 | 0 | 7 | 0 |
 | [RFC 10052](draft-asymmetrical-pkts.md): Reflected Test Packet Control (Type 12) | RFC 10052, September 2026 | 47 | 36 | 3 | 0 | 7 | 1 |
-| [draft-ietf-bpm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -00, 16 November 2026 | 31 | 17 | 4 | 1 | 9 | 0 |
+| [draft-ietf-bpm-stamp-cos-ecn](draft-stamp-cos-ecn.md): CoS and ECN signaling | -00, 16 November 2026 | 31 | 19 | 3 | 0 | 9 | 0 |
 | [draft-ietf-ippm-stamp-ext-hdr](draft-stamp-ext-hdr.md): reflected headers (Types 246, 247) | -26, 27 October 2026 | 75 | 63 | 9 | 0 | 3 | 0 |
 | [draft-ietf-bpm-stamp-ber](draft-stamp-ber.md): Residual BER | -01, 2 November 2026 | 54 | 49 | 4 | 0 | 1 | 0 |
-| **Total** | | **473** | **388** | **32** | **2** | **48** | **3** |
+| **Total** | | **473** | **389** | **32** | **1** | **48** | **3** |
 
 [`standards.json`](standards.json) pins the revision of each document; see
 [Checks](#checks).
@@ -87,7 +87,7 @@ not runtime evidence. Historical reports remain tied to their recorded commit.
 | Return paths | IP/SRv6 support has explicit backend/route constraints. SR-MPLS is Excluded and receives U. Processed child flags and malformed-stop handling are checked; protected/skipped copies can retain original child flags, keeping the inherited requirement Partial. A fallback is not evidence of SRH transit. | [RFC 9503 scope](rfc9503.md#scope), [nested flags](rfc9503.md#nested-flags), [privileged tests](../testing-netns.md) |
 | Management | AgentX is a read-only subagent and is not scored in these protocol matrices; SET is unsupported. A separate master is required. YANG management is not implemented and its expired draft is watch-only. | [Observability](../usage.md#observability), [AgentX](../architecture.md#snmp-agentx-sub-agent) |
 | BER | Four Partial rows cover zero-checksum validation, platform MTU, physical LAG and link-MTU filling. Diagnostics cover local C causes and explicit preserved-peer provenance in defined child layouts for the TLV-enabled profile; arbitrary values and legacy TLV-ignore tails remain uninterpreted. The independent BER peer uses ordinary UDP checksums; separate raw fixtures cover IPv4 checksum-zero ingress and authenticated sender transmission. None establishes raw-link/FEC error capture. A compatible maintained application peer remains unverified. | [BER matrix](draft-stamp-ber.md), [migration evidence](../interop/2026-11-09-ber/REPORT.md) |
-| CoS/ECN | BPM revision 00 ECN capability reporting is implemented: RPE=01 indicates unavailable marking, including on Windows, and sender diagnostics recognize it. Policy-approved DSCP fallback remains a gap; current DSCP fallback follows IPPM -02. RFC 3168/9330 controller consistency remains Partial. Reverse feedback is supported on Linux/macOS. | [Successor changes](draft-stamp-cos-ecn.md#bpm-00-successor-changes) |
+| CoS/ECN | BPM revision 00 ECN capability reporting is implemented: RPE=01 indicates unavailable marking, including on Windows, and sender diagnostics recognize it. DSCP fallback now requires an admitted received value or chooses a permitted third value. Empty or unenforceable restricted policies suppress CoS replies. The frozen RFC 8972 unconditional DSCP2 fallback is Partial for this profile. RFC 3168/9330 controller consistency remains Partial. Reverse feedback is supported on Linux/macOS. | [Successor changes](draft-stamp-cos-ecn.md#bpm-00-successor-changes) |
 | Platforms and hardware | Physical LAG/NIC timestamp evidence is absent. macOS has software receive timestamps; Windows driver-free checks do not establish driver-backed capture. A cross-build is not a native runtime test. | [Release verification](../release-evidence.md), [hardware timestamps](../testing-hardware-timestamps.md) |
 
 ## Experimental codepoints

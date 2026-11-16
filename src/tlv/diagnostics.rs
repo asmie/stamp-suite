@@ -23,10 +23,11 @@ pub enum TlvConformanceReason {
     ReplyHeaderUnsupported,
     ReplyHeaderDuplicate,
     PeerCPreserved,
+    CosDscpFallback,
 }
 
 impl TlvConformanceReason {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Type12CountLimit,
         Self::Type12IntervalLimit,
         Self::Type12SizeLimit,
@@ -46,6 +47,7 @@ impl TlvConformanceReason {
         Self::ReplyHeaderUnsupported,
         Self::ReplyHeaderDuplicate,
         Self::PeerCPreserved,
+        Self::CosDscpFallback,
     ];
 
     /// A fixed counter label, without any peer-supplied value.
@@ -67,6 +69,7 @@ impl TlvConformanceReason {
             Self::HeaderSelectorNoMatch => "header_selector_no_match",
             Self::HeaderLengthUnavailable => "header_length_unavailable",
             Self::CosMarkingUnavailable => "cos_marking_unavailable",
+            Self::CosDscpFallback => "cos_dscp_fallback",
             Self::ReplyHeaderUnsupported => "reply_header_unsupported",
             Self::ReplyHeaderDuplicate => "reply_header_duplicate",
             Self::PeerCPreserved => "peer_c_preserved",

@@ -90,12 +90,12 @@ fn receive(socket: &UdpSocket) -> (Vec<u8>, u8) {
     (data[..length].to_vec(), tos)
 }
 
-fn verify_cos_reply(bytes: &[u8], mode: u8, expected: [u8; 4]) {
+fn verify_cos_reply(bytes: &[u8], mode: u8, expected: [u8; 4], third: bool) {
     let base = if mode == 2 { 112 } else { 44 };
     assert_eq!(
         &bytes[base..base + 8],
         &[
-            0,
+            if third { 0x10 } else { 0 },
             4,
             0,
             4,
@@ -138,6 +138,8 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
                 (4, 51, 0, 0, false, false),
                 (5, 10, 2, 3, true, false),
                 (0, 51, 3, 3, false, false),
+                (6, 10, 1, 2, true, false),
+                (7, 10, 1, 2, true, false),
             ] {
                 let mut command = Reflector::command(ip);
                 command.args([
@@ -169,6 +171,12 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
                 if policy == 5 {
                     command.args(["--allowed-dscp-for", &format!("{prefix}=0")]);
                 }
+                if policy == 6 {
+                    command.args(["--allowed-dscp", "10,34"]);
+                }
+                if policy == 7 {
+                    command.args(["--allowed-dscp", "34"]);
+                }
                 let reflector = Reflector::spawn(command).unwrap();
                 let peer = UdpSocket::bind((peer_ip, 0)).unwrap();
                 peer.connect(reflector.address).unwrap();
@@ -196,13 +204,22 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
                     (requested_ecn << 6) | (if rejected_ecn { 2 } else { 3 } << 4),
                     0,
                 ];
-                let reply_dscp = if rejected_dscp { received_dscp } else { 46 };
+                let third = matches!(policy, 1 | 3 | 5 | 7);
+                let reply_dscp = if policy == 7 {
+                    34
+                } else if third {
+                    0
+                } else if rejected_dscp {
+                    received_dscp
+                } else {
+                    46
+                };
                 let reply_ecn = if rejected_ecn { 0 } else { requested_ecn };
                 let expected_tos = (reply_dscp << 2) | reply_ecn;
                 let echoed = if mode == 2 { 48 } else { 24 };
                 let first = receive(&peer);
                 assert_eq!(&first.0[echoed..echoed + 4], &100u32.to_be_bytes());
-                verify_cos_reply(&first.0, mode, expected_value);
+                verify_cos_reply(&first.0, mode, expected_value, third);
                 assert_eq!(first.1, expected_tos, "{ip} mode={mode} policy={policy}");
                 socket_option(&peer, ipv6, false, 0);
                 peer.send(&request(mode, 200, None)).unwrap();
@@ -215,7 +232,7 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
                         u32::from_be_bytes(bytes[echoed..echoed + 4].try_into().unwrap());
                     if sequence == 100 {
                         assert!(burst < 3);
-                        verify_cos_reply(&bytes, mode, expected_value);
+                        verify_cos_reply(&bytes, mode, expected_value, third);
                         assert_eq!(tos, expected_tos, "each copy retains admitted marking");
                         sequences.push(u32::from_be_bytes(bytes[..4].try_into().unwrap()));
                         burst += 1;
@@ -231,6 +248,47 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
                     }
                 }
                 assert!(sequences.windows(2).all(|p| p[0] < p[1]));
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_dscp_policy_drops_cos_but_keeps_base_sessions_usable() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in 0..3 {
+            let mut command = Reflector::command(ip);
+            command.args(["--hwtstamp", "off", "--allowed-dscp", "none"]);
+            if mode != 0 {
+                command.args([
+                    "--hmac-key",
+                    "abababababababababababababababab",
+                    "--verify-tlv-hmac",
+                ]);
+            }
+            if mode == 2 {
+                command.args(["--auth-mode", "A"]);
+            }
+            let reflector = Reflector::spawn(command).unwrap();
+            let peer = UdpSocket::bind((ip, 0)).unwrap();
+            peer.connect(reflector.address).unwrap();
+            peer.set_read_timeout(Some(Duration::from_millis(150)))
+                .unwrap();
+            peer.send(&request(mode, 100, Some([184, 0, 128, 0])))
+                .unwrap();
+            let mut data = [0; 512];
+            let error = peer.recv(&mut data).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ));
+            peer.send(&request(mode, 101, None)).unwrap();
+            let size = peer.recv(&mut data).expect("ordinary session still usable");
+            assert_eq!(size, if mode == 2 { 112 } else { 44 });
+            let echoed = if mode == 2 { 48 } else { 24 };
+            assert_eq!(&data[echoed..echoed + 4], &101u32.to_be_bytes());
+            if mode == 2 {
+                assert_eq!(&data[96..112], &wire_hmac::digest(&KEY, &data[..96]));
             }
         }
     }

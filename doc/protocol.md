@@ -131,7 +131,7 @@ stamp-suite reflector behaves that way with `--tlv-mode ignore`.
 | RFC 9534 | Micro-session ID TLV (numeric IDs; physical LAG member selection is unsupported) | [rfc9534](conformance/rfc9534.md) |
 | RFC 10052 | Reflected Test Packet Control TLV (Type 12): several or larger replies per test packet | [draft-asymmetrical-pkts](conformance/draft-asymmetrical-pkts.md) |
 | draft-ietf-ippm-stamp-ext-hdr-26 | Reflected IPv6 extension headers (Type 246) and fixed headers (Type 247) | [draft-stamp-ext-hdr](conformance/draft-stamp-ext-hdr.md) |
-| draft-ietf-bpm-stamp-cos-ecn-00 | CoS/ECN review baseline; RPE=01 capability reporting implemented, DSCP fallback remains IPPM -02 with policy gaps | [draft-stamp-cos-ecn](conformance/draft-stamp-cos-ecn.md) |
+| draft-ietf-bpm-stamp-cos-ecn-00 | CoS/ECN profile with admitted DSCP fallback, third-value C and RPE=01 capability reporting | [draft-stamp-cos-ecn](conformance/draft-stamp-cos-ecn.md) |
 | draft-ietf-bpm-stamp-ber-01 | Residual BER count/burst with nested pattern (experimental Type 243 / sub-TLV 241) | [matrix and evidence](conformance/draft-stamp-ber.md) |
 
 Types 240 to 251 are experimental codepoints. Both ends must agree on their

@@ -514,9 +514,12 @@ including Type 12, BER and header reflection. Type-specific layouts are in
 
 The reflector records the received DSCP and ECN in DSCP2 and EC2. Local policy
 decides whether the requested DSCP1 and EC1 are permitted, and socket support
-decides whether they can be applied. A refused DSCP keeps the received DSCP and
-reports RPD=0b01. An ECN that is not applied becomes Not-ECT and reports
-RPE=0b10. Destination rules match the actual reply destination. The sender's
+decides whether they can be applied. A refused DSCP uses received DSCP only if
+permitted, otherwise the lowest admitted value with RPD=01 and C. DSCP2 stays
+an ingress observation. Empty or unenforceable restricted policies suppress
+processed CoS replies. An ECN fallback uses Not-ECT and RPE=10; if neither
+marking can be applied, unrestricted policies report RPE=01. Destination rules
+are re-evaluated for the actual reply destination, including return-path retries. The sender's
 AIMD response is described under
 [TLV-driven sender features](usage.md#tlv-driven-sender-features).
 

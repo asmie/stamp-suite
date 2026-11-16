@@ -615,9 +615,11 @@ pub struct Configuration {
     pub session_timeout: u64,
 
     /// DSCP codepoints permitted on reflector replies (RFC 8972 §4.4/§6,
-    /// cos-ecn-02 §3.2): `all` (default), `none`, or values and inclusive ranges
-    /// such as `0,8,10-14,46`. Rejected DSCP1 requests retain the received DSCP
-    /// and report RPD=0b01. Permitted values still require socket support.
+    /// BPM cos-ecn-00 §3.2): `all` (default), `none`, or values and inclusive
+    /// ranges such as `0,8,10-14,46`. Refused DSCP1 uses received DSCP only if
+    /// permitted; otherwise the lowest allowed value with RPD=01 and C.
+    /// No allowed value, or inability to enforce a restricted set, suppresses
+    /// the CoS reply. Permitted values still require socket support.
     ///
     /// Reflector-side only.
     #[clap(

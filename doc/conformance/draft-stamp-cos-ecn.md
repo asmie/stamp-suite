@@ -5,19 +5,19 @@ CoS and ECN requirements, implementation and tests.
 Revision frozen: draft-ietf-bpm-stamp-cos-ecn-00, 16 November 2026.
 Source: [draft-ietf-bpm-stamp-cos-ecn-00](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-cos-ecn-00.txt).
 
-Summary: 31 clauses: 17 Compliant, 4 Partial, 1 Gap, 9 N-A, 0 Excluded.
+Summary: 31 clauses: 19 Compliant, 3 Partial, 0 Gap, 9 N-A, 0 Excluded.
 
 ## Scope
 
 This is an Internet-Draft; the matrix covers BPM revision -00, which replaces
 IPPM revision -02. The wire layout and congestion-response requirements are
 unchanged, but section 3.2 changes DSCP fallback selection and ECN capability
-reporting. ECN capability reporting follows BPM -00; DSCP fallback still uses
-IPPM -02 behavior and does not yet enforce the successor's admission rules.
+reporting. DSCP fallback and ECN capability reporting follow BPM -00.
+Empty DSCP policies suppress processed CoS replies, as no permitted value
+exists; a restricted policy also requires an enforceable backend marking.
 The changed clauses are paraphrased below, with stable IDs retained for existing
 requirements. Operator SHOULDs are recorded separately from endpoint behavior.
 
-The successor's DSCP fallback remains unimplemented.
 See [successor changes](#bpm-00-successor-changes).
 
 The supported profile includes the reflector's DSCP and ECN admission policy
@@ -45,12 +45,12 @@ or detect downstream remarking; deployment captures remain necessary.
 | cos-ecn-3.2-2 | "The Session-Reflector MUST copy the value of the DSCP and ECN fields of the IP header of the received STAMP test packet into the DSCP2 and EC2 fields" | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` passes the received DSCP and ECN to `src/tlv/list/processing.rs::update_cos_value_in_place`. `test_cos_tlv_draft_figure_cross_vector` (`src/tlv/typed/cos.rs`) checks bytes computed by hand from the draft's Figure 1. Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
 | cos-ecn-3.2-3 | "The Session-Reflector MUST verify whether the use of the value of the DSCP1 field is permitted in the reflected test packet" | MUST | Reflector | Compliant | `CosAdmissionPolicy` (`src/cos_policy.rs`), applied in `src/receiver/mod.rs::apply_semantic_tlv_processing` against the reply destination. `cos_tlv_destination_scoped_policy_decides_per_peer` (`tests/tlv_flag_semantics.rs`). See [admission policy](#admission-policy). Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
 | cos-ecn-3.2-4 | When DSCP1 is permitted, use it in the reply IP header and set RPD=00. | MUST | Reflector | Compliant | `Transmission::send_next` and `send_datagram` (`src/receiver/transmit.rs`), `tests/burst_transmission_test.rs`. See [per-copy CoS](#per-copy-cos). Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
-| cos-ecn-3.2-5 | If DSCP1 is refused, use received DSCP2 as the fallback only when local policy permits it, with RPD=01. | MUST | Reflector | Partial | `src/cos_policy.rs::CosAdmissionPolicy` checks requested DSCP1, but `src/tlv/typed/cos.rs::ClassOfServiceTlv::effective_dscp` falls back to DSCP2 without checking its admission. The allowed-DSCP2 case works; the disallowed case needs a policy-approved replacement (row cos-ecn-3.2-10). Existing behavior: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy`. See [successor changes](#bpm-00-successor-changes). |
+| cos-ecn-3.2-5 | If DSCP1 is refused, use received DSCP2 as the fallback only when local policy permits it, with RPD=01. | MUST | Reflector | Compliant | `src/cos_policy.rs::DscpSet::select` checks both candidates against the effective destination set. `src/receiver/cos.rs::CosReplyPolicy` retains both primary and original-source policies for retries. Tests: `src/cos_policy.rs::selection_tests::dscp_selection_exhausts_candidate_pairs_and_policy_boundaries`, `src/receiver/transmit/dscp_tests.rs::dscp_route_retry_reselects_policy_and_restores_only_locally_generated_c`, `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy`. |
 | cos-ecn-3.2-6 | "The Session-Reflector MUST set the ECN value in the IP header of the reflected STAMP test packet to the value of the EC1 field, if it is permitted and capable to do so" | MUST | Reflector | Compliant | `CosAdmissionPolicy` (`src/cos_policy.rs`) applies `--allowed-ecn`; a refused value forces Not-ECT and RPE 0b10. `cos_tlv_refused_ecn_forces_not_ect` (`tests/tlv_flag_semantics.rs`), `tests/burst_transmission_test.rs`. Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
 | cos-ecn-3.2-7 | "If the Session-Reflector is able to set the ECN value ... to the EC1 value, it MUST then set the RPE field ... to the value 0b11" | MUST | Reflector | Compliant | `Transmission::send_next` and `send_datagram` (`src/receiver/transmit.rs`), `tests/burst_transmission_test.rs`. See [per-copy CoS](#per-copy-cos). Wire test: `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy` checks actual ingress fields, admitted/policy-refused reply markings and RPD/RPE on every copy; capability-failure coverage remains injected. |
 | cos-ecn-3.2-8 | If EC1 cannot be applied but Not-ECT can, use Not-ECT in the reply IP header and report RPE=10. | MUST | Reflector | Compliant | `cos_unable_fallback_tos` and `set_cos_policy_rejected` (`src/receiver/reply_bytes.rs`), `cos_failure_uses_zero_ecn_fallback_and_resigns` (`src/receiver/transmit/tests.rs`). See [marking fallback](#marking-fallback). |
 | cos-ecn-3.2-9 | Report RPE=01 when neither EC1 nor Not-ECT can be applied. | MUST | Reflector | Compliant | `src/receiver/reply_bytes.rs::set_cos_marking_unavailable` sets RPE=01 and preserves independent C. Tests in `src/receiver/transmit/tests.rs`: `unavailable_ecn_sets_rpe01_on_every_copy_and_preserves_routing_and_signatures`, `unavailable_ecn_preserves_independent_c_in_signed_bursts`, `failed_not_ect_request_needs_no_identical_marking_retry`, `cos_unavailable_preserves_opaque_echoes_and_received_fields`. These inject capability failure across burst copies and key/family combinations; `windows_sender_sends_cos_unavailable_and_ordinary_replies` exercises the native Windows send path. See [marking fallback](#marking-fallback). |
-| cos-ecn-3.2-10 | If policy permits neither requested nor received DSCP, choose a locally permitted DSCP and report RPD=01 with C set. | MUST | Reflector | Gap | No third-value selection exists in `src/cos_policy.rs::CosAdmissionPolicy` or `src/tlv/typed/cos.rs::ClassOfServiceTlv::effective_dscp`. Current fallback always uses received DSCP. Empty allowed sets also need an explicit policy decision; there is no permitted value to choose. See [successor changes](#bpm-00-successor-changes). |
+| cos-ecn-3.2-10 | If policy permits neither requested nor received DSCP, choose a locally permitted DSCP and report RPD=01 with C set. | MUST | Reflector | Compliant | Select the lowest admitted value, preserving observed DSCP2/EC2. Empty sets suppress the CoS reply; restricted sets cannot fall through to unmarked sends. Tests: `src/receiver/transmit/dscp_tests.rs::dscp_admission_marks_signed_bursts_and_counts_only_successful_third_values`, `src/receiver/transmit/dscp_tests.rs::dscp_marking_retry_never_uses_forbidden_received_value_or_unmarked_restricted_send`, `src/receiver/transmit/dscp_tests.rs::windows_restricted_dscp_sends_nothing_and_permissive_reply_reports_rpe01`, `tests/cos_ecn_wire_test.rs::empty_dscp_policy_drops_cos_but_keeps_base_sessions_usable`, `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy`. See [admission policy](#admission-policy). |
 | cos-ecn-3.4-1 | Observe EC2 and be capable of reducing the sending rate on CE [multiple CoS packets within an RTT with ECT0 or ECT1] | MUST | Sender | Compliant | `src/sender/validate.rs::validate_reflected_tlvs`, `src/sender.rs::process_response`, `on_ce_observed` (`src/rate_control.rs`). `test_process_response_forward_path_ce_backs_off_congestion_controller` (`src/sender/tests.rs`). See [sender rate response](#sender-rate-response). Binary test: `tests/sender_measurement_test.rs::sender_cos_fields_and_automatic_ect_response_reach_the_wire` verifies automatic ECT0/ECT1 controller activation and a CE backoff with independent peer signatures. |
 | cos-ecn-3.4-2 | Observe reflected IP ECN and be capable of reducing the sending rate on CE [ECT0 or ECT1 in EC1] | MUST | Sender | Partial | `AimdController` (`src/rate_control.rs`). Tests: `test_process_response_forward_path_ce_backs_off_congestion_controller`, `test_process_response_reverse_path_ce_backs_off_congestion_controller` (`src/sender/tests.rs`). Reverse ECN is read on Linux and macOS only. |
 | cos-ecn-3.4-3 | Observe reflected IP ECN and be capable of adjusting future Reflected Test Packet Control parameters on CE [CoS TLV with Type 12] | MUST | Sender | Partial | Normal sends and Access Report retries scale the Type 12 interval by the current AIMD factor; the reply count is unchanged. `test_wait_phase_retransmit_still_carries_scaled_control_tlv` and `ce_backoff_paces_zero_interval_bursts_but_preserves_control_only_zero` (`src/sender/tests.rs`). Reverse IP ECN is unavailable outside Linux/macOS. |
@@ -78,11 +78,11 @@ to DSCP fallback, ECN inability signaling and its legacy-interoperability
 explanation, plus replacement of the Type 12 draft reference with RFC 10052.
 The Type 4 layout and section 3.4 congestion requirements are unchanged.
 
-DSCP fallback still needs implementation: admit received DSCP2 before using
-it as a fallback. If neither requested nor received DSCP is allowed, select a
-permitted value and set RPD=01 and C. Preserve DSCP2 as the ingress observation.
-A policy allowing no values needs an explicit handling rule rather than an
-invented permitted marking.
+DSCP fallback admits received DSCP2 before using it. If neither requested nor
+received DSCP is allowed, it selects the lowest permitted value and sets RPD=01
+and C. DSCP2 remains the ingress observation. An empty allowed set suppresses
+processed CoS replies. A backend that cannot enforce a restricted set also
+suppresses the reply instead of sending with an unknown DSCP.
 
 ECN capability reporting now emits RPE=01 when neither EC1 nor Not-ECT can be
 applied, preserving independent reasons for C. Sender diagnostics classify it
@@ -91,9 +91,9 @@ The legacy `reserved_rpe` report field remains present with value zero.
 `src/sender/run/admission_tests.rs::ecn_reporting_counts_only_admitted_distinct_copies`
 checks independently signed replies, duplicate admission and serialized fields.
 
-Existing DSCP wire tests remain evidence for the documented legacy fallback,
-not proof of the new DSCP rules. Congestion-controller and platform Partial
-rows remain open. A successful metadata-monitor run only establishes that this
+The DSCP wire tests now cover admitted DSCP2 and third-value fallback, including
+both address families and open, keyed-open and authenticated modes.
+Congestion-controller and platform Partial rows remain open. A successful metadata-monitor run only establishes that this
 reviewed revision is current.
 
 ### Reviewed wire and enablement evidence (10 November 2026)
@@ -120,13 +120,16 @@ explicitly injected.
 
 ### Admission policy
 
-`--allowed-dscp` sets the DSCP values the reflector may copy from DSCP1, and
+`--allowed-dscp` sets the DSCP values permitted on processed CoS replies, and
 `--allowed-dscp-for PREFIX/LEN=SPEC` overrides it for reply destinations in a
 prefix (the longest matching prefix wins). `--allowed-ecn` does the same for
-EC1. The reflector currently checks the requested values during semantic TLV
-processing, before reply assembly and independently of transport capability.
-It does not yet check the received DSCP fallback against this policy or choose
-a third permitted value as BPM -00 requires.
+EC1. Semantic processing admits DSCP1, then DSCP2, then the lowest permitted
+value. An empty set suppresses the reply. The two effective DSCP sets are
+retained for the primary destination and original sender; return-path retries
+reselect marking and C before signing. Independent C flags remain intact.
+No-CoS traffic and opaque integrity-failure echoes do not request this policy.
+The `cos_dscp_fallback` counter records successful replies using a third value;
+failed attempts and discarded replies do not count.
 
 ### Per-copy CoS
 
@@ -148,17 +151,19 @@ cache. Linux carries ToS in ancillary data for each datagram; a failed
 `sendmsg` cannot identify which ancillary option failed, so it is handled as
 a datagram failure, without inventing CoS evidence.
 
-After a marking error, retry with received DSCP and Not-ECT, setting RPD=01
-and RPE=10. If that attempt also cannot apply marking, send without the
-marking operation and set RPE=01, preserving independent C flags. If the
-initial requested byte already equals the fallback, its failure establishes both cases without a duplicate retry.
-Each attempt is timestamped and signed again; only a full datagram send
-advances counters. RPE=01 means the reply's wire ECN cannot be guaranteed.
-The DSCP selection still follows IPPM -02; ECN capability reporting follows
-BPM -00. Routing, source pinning and MTU policy remain intact during these
-fallbacks.
-Windows always takes this conservative path for a processed CoS request;
-ordinary replies bypass the unsupported marking operation.
+After a marking error, retry with Not-ECT. Use received DSCP only if admitted;
+otherwise retain an admitted DSCP1 or the locally selected third value. If the
+initial byte already equals the fallback, do not repeat the same operation.
+If marking still cannot be applied, unrestricted DSCP policies can send without
+the marking operation and report RPE=01. Restricted policies suppress the reply,
+since an unknown DSCP cannot be assumed permitted. Each attempt is timestamped
+and signed again; only a full datagram send advances counters. Routing, source
+pinning and MTU policy remain intact. A fallback to the original sender
+re-evaluates its policy, including removing only locally generated CoS C from
+a failed third-value attempt.
+
+Windows therefore reports RPE=01 for unrestricted CoS requests and suppresses
+restricted CoS replies; ordinary replies bypass the unsupported marking operation.
 
 Tests in `src/receiver/transmit/tests.rs` cover setter and readback failures,
 silently ignored values, cache invalidation, datagram versus option failures,

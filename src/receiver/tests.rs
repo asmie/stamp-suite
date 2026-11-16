@@ -2926,7 +2926,7 @@ fn test_cos_policy_evaluated_against_alternate_return_address() {
     let policy: &'static CosAdmissionPolicy = Box::leak(Box::new(CosAdmissionPolicy::new(
         DscpSet::all(),
         EcnSet::all(),
-        vec![("10.0.0.0".parse().unwrap(), 8, DscpSet::none())],
+        vec![("10.0.0.0".parse().unwrap(), 8, DscpSet::parse("0").unwrap())],
     )));
 
     let mut ctx = test_ctx(0, 0);

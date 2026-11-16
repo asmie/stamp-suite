@@ -173,8 +173,8 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 ### Changed
 
 - Review the CoS/ECN successor draft-ietf-bpm-stamp-cos-ecn-00 and track it
-  in the standards monitor. Record its DSCP fallback requirements as open
-  conformance gaps; DSCP fallback behavior remains on IPPM revision 02.
+  in the standards monitor. DSCP admission and ECN capability reporting now
+  follow this successor; its differences from frozen RFC 8972 remain explicit.
 
 - Batch inventory-index maintenance during session expiry. Rebuild from the
   survivors after bulk removal and free the detached index outside the table
@@ -224,6 +224,15 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0/).
   CLI/TOML subset validation and authenticated header-consumption behavior.
 
 ### Fixed
+
+- Enforce destination DSCP policy on received-value fallback, third-value
+  selection and return-path retries. When both DSCP1 and DSCP2 are forbidden,
+  use the lowest permitted value with RPD=01 and C, preserving ingress fields.
+  Empty or unenforceable restricted policies suppress processed CoS replies.
+  Add the `cos_dscp_fallback` successful-send diagnostic; preserve independent
+  C flags and signatures across burst copies and retries.
+  Library callers constructing `StampResponse` literals must supply the new
+  `cos_reply_policy` field (`None` for manually assembled responses).
 
 - Report CoS RPE=01 when the reflector cannot apply either requested ECN or
   Not-ECT, following draft-ietf-bpm-stamp-cos-ecn-00. Preserve independent C

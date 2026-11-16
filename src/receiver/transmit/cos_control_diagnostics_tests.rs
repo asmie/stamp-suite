@@ -28,7 +28,7 @@ fn reflect(raw: &[u8], auth: bool, ipv6: bool) -> Transmission {
     tx
 }
 
-fn verified(bytes: &[u8], auth: bool) -> TlvList {
+pub(super) fn verified(bytes: &[u8], auth: bool) -> TlvList {
     let base = if auth {
         AUTH_BASE_SIZE
     } else {

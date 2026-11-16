@@ -421,9 +421,9 @@ timer armed; Reserved bits and bytes are ignored. These replies can still
 contribute valid base-packet RTT/loss measurements.
 
 The CoS implementation uses the EC1/RPE extension with ECN capability
-reporting from draft-ietf-bpm-stamp-cos-ecn-00. DSCP fallback still follows
-its IPPM -02 predecessor; policy-approved DSCP fallback remains open in the
-[successor review](conformance/draft-stamp-cos-ecn.md#bpm-00-successor-changes).
+reporting and admitted DSCP fallback from draft-ietf-bpm-stamp-cos-ecn-00.
+See the [successor review](conformance/draft-stamp-cos-ecn.md#bpm-00-successor-changes)
+for differences from RFC 8972 and its IPPM -02 predecessor.
 It zeroes the remaining twelve Reserved bits. EC1/RPE occupy four bits of the
 original RFC 8972 sixteen-bit Reserved field, so the frozen RFC transmit-zero
 rule is scored Partial in the [conformance matrix](conformance/rfc8972.md#cos-format-profiles).
@@ -815,10 +815,18 @@ replies. By default all values are allowed. The longest matching destination
 prefix replaces the global DSCP policy. The socket must still support the
 value.
 
-A refused DSCP leaves the received DSCP on the reply and reports RPD=0b01. A
-refused ECN sends the reply as Not-ECT and reports RPE=0b10. A backend marking
-failure also retries received DSCP/Not-ECT; if it cannot apply that byte,
-the reply carries RPE=0b01 and its actual IP marking must be checked independently.
+If requested DSCP1 is refused, the reflector uses received DSCP2 only when
+that value is permitted, with RPD=0b01. If both are forbidden, it selects the
+lowest allowed DSCP and reports RPD=0b01 with C; DSCP2 still records ingress.
+`none` suppresses processed CoS replies for that destination. Ordinary no-CoS
+traffic and opaque integrity-failure echoes remain outside this marking policy.
+Return-path retries re-evaluate the policy for the actual reply destination.
+
+Refused ECN uses Not-ECT and RPE=0b10. A backend marking failure retries
+Not-ECT with an admitted DSCP. If marking still fails, a restricted DSCP policy
+suppresses the reply; an unrestricted policy can send with RPE=0b01 and requires
+independent checking of the actual IP marking. Windows cannot enforce restricted
+DSCP policies and therefore suppresses those CoS replies.
 
 `--location-disclose` controls which Location TLV fields the reflector reports:
 `all` (default), `none`, or a comma-separated list of `src-port`, `dst-port`,
@@ -1140,14 +1148,15 @@ without packet contents or session identifiers. See
 [BER conformance diagnostics](ber-migration.md#conformance-diagnostics).
 
 `stamp_reflector_tlv_conformance_total{reason="..."}` applies the same counting
-and logging rules to 19 fixed reasons for Type 12, header-reflection, CoS,
+and logging rules to 20 fixed reasons for Type 12, header-reflection, CoS,
 nested control and preserved peer C in
 [control status](control-plane.md#status), including successful send-time MTU
 shaping. Header reasons count only for offending headers retained in the sent
 reply. The log target is
 `stamp_suite::tlv::conformance`; BER uses `stamp_suite::ber::conformance`.
 Type 12 and BER counters are independent. Runtime-disabled metrics emit no
-series. CoS counts only when RPE=01 is set after marking failure, and nested
+series. `cos_marking_unavailable` counts RPE=01 after marking failure;
+`cos_dscp_fallback` counts locally selected third DSCP values with C. Nested
 control counts follow locally generated child C flags. `peer_c_preserved`
 identifies copied peer flags in complete child headers of known container
 layouts, including opaque integrity-failure echoes. It carries no claim that

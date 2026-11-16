@@ -1,4 +1,4 @@
-//! Reflector CoS admission policy (RFC 8972 §4.4/§6, cos-ecn-02 §3.2).
+//! Reflector CoS admission policy (RFC 8972 §4.4/§6, BPM cos-ecn-00 §3.2).
 //!
 //! Permission and socket support are separate checks; a reply needs both.
 //! DSCP uses the longest matching destination-prefix rule, falling back to the
@@ -30,6 +30,32 @@ impl DscpSet {
     #[must_use]
     pub const fn contains(&self, dscp: u8) -> bool {
         self.0 & (1u64 << (dscp & 0x3F)) != 0
+    }
+
+    /// Select requested DSCP, then observed DSCP, then the lowest permitted
+    /// codepoint. `None` means no marking satisfies this destination's policy.
+    /// An absent request is used after a socket marking failure.
+    #[must_use]
+    pub fn select(self, requested: Option<u8>, received: u8) -> Option<DscpSelection> {
+        if let Some(requested) = requested.filter(|d| self.contains(*d)) {
+            return Some(DscpSelection {
+                value: requested & 63,
+                rejected: false,
+                third_value: false,
+            });
+        }
+        if self.contains(received) {
+            return Some(DscpSelection {
+                value: received & 63,
+                rejected: true,
+                third_value: false,
+            });
+        }
+        (self.0 != 0).then(|| DscpSelection {
+            value: self.0.trailing_zeros() as u8,
+            rejected: true,
+            third_value: true,
+        })
     }
 
     /// Parses `all`, `none`, or a comma-separated list of codepoints and
@@ -90,6 +116,15 @@ impl DscpSet {
         }
         Ok(Self(bits))
     }
+}
+
+/// Locally admitted reply marking and its CoS report (BPM CoS/ECN -00).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DscpSelection {
+    pub value: u8,
+    pub rejected: bool,
+    /// Neither candidate was admitted; RPD=01 and C must be reported.
+    pub third_value: bool,
 }
 
 fn parse_dscp(s: &str) -> Result<u8, String> {
@@ -193,7 +228,7 @@ struct DestinationRule {
     dscp: DscpSet,
 }
 
-/// The reflector's CoS admission policy (RFC 8972 §4.4/§6, cos-ecn-02 §3.2).
+/// The reflector's CoS admission policy (RFC 8972 §4.4/§6, BPM cos-ecn-00 §3.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CosAdmissionPolicy {
     dscp: DscpSet,
@@ -254,14 +289,20 @@ impl CosAdmissionPolicy {
     /// matches or the destination is unknown.
     #[must_use]
     pub fn permits_dscp(&self, destination: Option<IpAddr>, dscp: u8) -> bool {
+        self.dscp_for(destination).contains(dscp)
+    }
+
+    /// Snapshot the effective set for an actual reply destination.
+    #[must_use]
+    pub fn dscp_for(&self, destination: Option<IpAddr>) -> DscpSet {
         if let Some(dest) = destination {
             for rule in &self.destinations {
                 if prefix_matches(rule.prefix, rule.prefix_len, dest) {
-                    return rule.dscp.contains(dscp);
+                    return rule.dscp;
                 }
             }
         }
-        self.dscp.contains(dscp)
+        self.dscp
     }
 
     /// Whether the global ECN policy permits `ecn`.
@@ -539,5 +580,35 @@ mod tests {
         assert!(parse_destination_rule("192.0.2.0/33=46").is_err());
         assert!(parse_destination_rule("2001:db8::/129=46").is_err());
         assert!(parse_destination_rule("192.0.2.0/24=99").is_err());
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn dscp_selection_exhausts_candidate_pairs_and_policy_boundaries() {
+        for spec in ["none", "all", "0", "63", "1,10,34,46", "8-15,32-63"] {
+            let allowed = DscpSet::parse(spec).unwrap();
+            for requested in 0..64 {
+                for received in 0..64 {
+                    let result = allowed.select(Some(requested), received);
+                    let expected = if allowed.contains(requested) {
+                        Some((requested, false, false))
+                    } else if allowed.contains(received) {
+                        Some((received, true, false))
+                    } else {
+                        (0..64)
+                            .find(|v| allowed.contains(*v))
+                            .map(|v| (v, true, true))
+                    };
+                    assert_eq!(
+                        result.map(|s| (s.value, s.rejected, s.third_value)),
+                        expected
+                    );
+                }
+            }
+        }
     }
 }

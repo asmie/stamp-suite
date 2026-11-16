@@ -106,6 +106,7 @@ fn sample(auth: bool, action: ReturnPathAction) -> Transmission {
     let response = StampResponse {
         data,
         cos_request: Some((46, 0)),
+        cos_reply_policy: None,
         return_path_action: action,
         reflected_control: Some(super::super::ReflectedControlBehavior {
             max_size: 1500,

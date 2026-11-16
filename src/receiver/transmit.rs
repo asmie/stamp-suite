@@ -234,9 +234,33 @@ impl Transmission {
         let mut cos_marking_unavailable = false;
         let mut refresh_mtu = false;
         loop {
+            let mut third_dscp = false;
+            if let Some(policy) = &self.response.cos_reply_policy {
+                let to_source = target == self.source;
+                let Some(selection) = policy.select(to_source, self.received_dscp, cos_fallback)
+                else {
+                    log::debug!("No DSCP permitted for CoS reply to {target}");
+                    break;
+                };
+                // Without a working marking operation, an OS-selected DSCP
+                // cannot be assumed to satisfy a restricted destination set.
+                if !options.apply_tos
+                    && policy.allowed(to_source) != crate::cos_policy::DscpSet::all()
+                {
+                    log::debug!("Cannot enforce restricted DSCP policy for {target}");
+                    break;
+                }
+                let (ecn, rpe) = policy.ecn(cos_fallback, cos_marking_unavailable);
+                options.tos = crate::tos::Tos::new(selection.value, ecn).0;
+                policy.apply(&mut data, base, selection, rpe);
+                third_dscp = selection.third_value;
+            }
             let mut clamped = false;
             let mut ber_conformance = self.response.ber_conformance;
             let mut tlv_conformance = self.response.tlv_conformance;
+            if third_dscp {
+                tlv_conformance.insert(crate::tlv::TlvConformanceReason::CosDscpFallback);
+            }
             if cos_marking_unavailable {
                 tlv_conformance.insert(crate::tlv::TlvConformanceReason::CosMarkingUnavailable);
             }
@@ -343,7 +367,17 @@ impl Transmission {
                 Err(e) if is_cos_apply_error(&e) && options.apply_tos => {
                     // Only an option-setting failure establishes inability to
                     // mark. A datagram/routing failure says nothing about CoS.
-                    let fallback = super::cos_unable_fallback_tos(self.received_dscp);
+                    let fallback_dscp = if let Some(policy) = &self.response.cos_reply_policy {
+                        let Some(selection) =
+                            policy.select(target == self.source, self.received_dscp, true)
+                        else {
+                            break;
+                        };
+                        selection.value
+                    } else {
+                        self.received_dscp
+                    };
+                    let fallback = super::cos_unable_fallback_tos(fallback_dscp);
                     if self.response.cos_request.is_some() {
                         super::set_cos_policy_rejected(&mut data, base);
                         if !cos_fallback && options.tos != fallback {
@@ -353,6 +387,7 @@ impl Transmission {
                         }
                         // Neither EC1 nor the Not-ECT fallback can be applied
                         // (BPM cos-ecn-00 §3.2). Preserve routing and sign RPE=01.
+                        cos_fallback = true;
                         cos_marking_unavailable |=
                             super::reply_bytes::set_cos_marking_unavailable(&mut data, base);
                     }
@@ -384,6 +419,11 @@ impl Transmission {
                         // RFC 9503 source pinning is best-effort.
                     } else if target != self.source {
                         target = self.source;
+                        if self.response.cos_reply_policy.is_some() {
+                            cos_fallback = false;
+                            cos_marking_unavailable = false;
+                            options.apply_tos = true;
+                        }
                         options.source = self.response.reply_source.filter(|s| {
                             crate::reply_source::supported() && s.is_ipv4() == target.is_ipv4()
                         });
@@ -1373,3 +1413,6 @@ mod cos_control_diagnostics_tests;
 
 #[cfg(test)]
 mod peer_c_diagnostics_tests;
+
+#[cfg(test)]
+mod dscp_tests;

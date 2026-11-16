@@ -1,14 +1,14 @@
 //! Class of Service TLV (Type 4) per RFC 8972 §4.4 (with verified erratum
 //! 8199), extended with the reverse-path ECN fields (EC1/RPE) of
-//! draft-ietf-ippm-stamp-cos-ecn-02. Its §3.2 requires the reply's on-wire
-//! ECN bits to be zeroed when EC1 cannot be applied (see
-//! [`ClassOfServiceTlv::reply_wire_tos`]).
+//! draft-ietf-bpm-stamp-cos-ecn-00. Live reply marking uses destination
+//! admission and backend capability; a CoS value alone cannot identify a
+//! locally selected third DSCP or guarantee marking when RPE=01.
 
 use crate::tlv::core::{TlvError, TlvType, COS_TLV_VALUE_SIZE};
 use crate::tlv::traits::TypedTlv;
 
 /// Class of Service TLV (Type 4), using RFC 8972 §4.4 base fields and the
-/// EC1/RPE profile from draft-ietf-ippm-stamp-cos-ecn-02 (work in progress).
+/// EC1/RPE profile from draft-ietf-bpm-stamp-cos-ecn-00 (work in progress).
 /// Legacy decoders ignore the added fields in RFC-reserved bits. The extended
 /// profile can transmit nonzero EC1/RPE, so it does not satisfy the frozen
 /// RFC's original sixteen-bit transmit-zero rule; its remaining Reserved
@@ -35,7 +35,8 @@ pub struct ClassOfServiceTlv {
     /// EC2: ECN value received at the Session-Reflector's ingress (2 bits).
     pub ecn2: u8,
     /// RPD (reverse path DSCP, 2 bits): 0b01 when the reflector's policy
-    /// rejected DSCP1 and the received DSCP was used for the reply instead.
+    /// rejected DSCP1 or the backend fell back from the requested marking.
+    /// DSCP2 remains the ingress observation, including for a third-value reply.
     pub rpd: u8,
     /// RPE (reverse path ECN, 2 bits; draft-ietf-ippm-stamp-cos-ecn-02
     /// §3.2): 0b11 when the reflector set the reply's ECN to EC1, 0b10 when
@@ -110,7 +111,9 @@ impl ClassOfServiceTlv {
         self.rpe == 0b11
     }
 
-    /// Returns the DSCP value that should be used for the reflected packet.
+    /// Legacy two-candidate DSCP interpretation. This helper has no admission
+    /// policy or C flag and cannot recover a BPM -00 third-value selection.
+    /// Live reflector replies use `DscpSet::select` and a saved policy instead.
     #[must_use]
     pub fn effective_dscp(&self, policy_rejected: bool) -> u8 {
         if policy_rejected {
@@ -120,7 +123,9 @@ impl ClassOfServiceTlv {
         }
     }
 
-    /// Returns the reply TOS/Traffic Class from RPD/RPE.
+    /// Legacy two-candidate reply TOS/Traffic Class interpretation.
+    /// This cannot infer a third DSCP or guarantee marking for RPE=01; do not
+    /// use it as a substitute for destination policy and backend capability.
     /// RPE=0b10 forces Not-ECT (draft-ietf-ippm-stamp-cos-ecn-02 §3.2).
     /// DSCP follows RPD via [`ClassOfServiceTlv::effective_dscp`].
     #[must_use]

@@ -12,6 +12,7 @@
 mod assemble;
 mod base_validation;
 mod cleanup;
+mod cos;
 #[cfg(test)]
 mod framing_admission_tests;
 mod ingest;
@@ -27,6 +28,7 @@ mod transmit;
 
 pub use crate::packets::{AUTH_BASE_SIZE, AUTH_HMAC_OFFSET, UNAUTH_BASE_SIZE};
 pub use assemble::*;
+pub use cos::CosReplyPolicy;
 use keys::*;
 pub use limits::*;
 use local_addrs::*;
@@ -174,15 +176,17 @@ impl ProcessingContext<'_> {
 /// Response from STAMP packet processing, including optional CoS request.
 #[derive(Debug)]
 pub struct StampResponse {
-    /// TLV C conditions and peer provenance, counted after a complete successful send.
+    /// TLV conditions and peer provenance, counted after a complete successful send.
     pub tlv_conformance: crate::tlv::TlvConformanceErrors,
     /// Local BER C conditions, counted only when a datagram is sent successfully.
     pub ber_conformance: crate::ber::BerConformanceErrors,
     /// The response packet data to send.
     pub data: Vec<u8>,
-    /// Requested DSCP/ECN from CoS TLV (if present).
-    /// Tuple of (dscp1, ecn1) that should be applied to the outgoing packet.
+    /// Initially admitted DSCP/ECN for the outgoing packet, if CoS is processed.
+    /// The policy snapshot re-evaluates this pair on send-time fallbacks.
     pub cos_request: Option<(u8, u8)>,
+    /// Destination admission and original C provenance for send-time retries.
+    pub cos_reply_policy: Option<CosReplyPolicy>,
     /// Action determined by Return Path TLV processing (RFC 9503 §4).
     pub return_path_action: ReturnPathAction,
     /// Extra-replies descriptor from a Reflected Test Packet Control TLV
@@ -268,7 +272,7 @@ pub struct ProcessingContext<'a> {
     /// Which Location TLV fields this reflector may report (RFC 8972 §4.2.2
     /// field-disclosure policy, `--location-disclose`).
     pub location_disclosure: LocationDisclosure,
-    /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, cos-ecn-02 §3.2): answers
+    /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, BPM cos-ecn-00 §3.2): answers
     /// *permitted*, where the backends' setsockopt answers *capable*.
     pub cos_policy: &'a CosAdmissionPolicy,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §3).
@@ -631,6 +635,7 @@ fn process_stamp_packet_inner(
                         reflector_seq,
                     ),
                     cos_request: None,
+                    cos_reply_policy: None,
                     return_path_action: ReturnPathAction::Normal,
                     reflected_control: None,
                     // The symmetric no-TLV path never parses a Destination Node
@@ -670,6 +675,7 @@ fn process_stamp_packet_inner(
                         reflector_seq,
                     ),
                     cos_request: None,
+                    cos_reply_policy: None,
                     reply_source: None,
                     return_path_action: ReturnPathAction::Normal,
                     reflected_control: None,
@@ -797,6 +803,7 @@ struct SemanticResult {
     tlv_conformance: crate::tlv::TlvConformanceErrors,
     ber_conformance: crate::ber::BerConformanceErrors,
     cos_request: Option<(u8, u8)>,
+    cos_reply_policy: Option<CosReplyPolicy>,
     return_path_action: ReturnPathAction,
     reflected_control: Option<ReflectedControlBehavior>,
     /// RFC 9503 §3: the matched Destination Node Address, to be pinned as the
@@ -885,61 +892,45 @@ fn apply_semantic_tlv_processing(
     // Extract CoS request (DSCP1/ECN1) for outgoing IP_TOS.
     let requested_cos = tlvs.get_cos_request();
 
-    // Check CoS permission before backend socket capability (RFC 8972 §4.4/§6,
-    // cos-ecn-02 §3.2). Run after Return Path processing so destination rules
-    // use any accepted alternate address (RFC 9503 §4).
-    let reply_destination = match &return_path_action {
-        ReturnPathAction::AlternateAddress(addr) => Some(addr.ip()),
-        _ => ctx.packet_addr_info.as_ref().map(|info| info.src_addr),
+    // Resolve both destinations now; a routing fallback must not reuse the
+    // alternate address's admission policy. SRv6's UDP destination also counts.
+    let source = ctx.packet_addr_info.as_ref().map(|info| info.src_addr);
+    let destination = match &return_path_action {
+        ReturnPathAction::AlternateAddress(addr)
+        | ReturnPathAction::Srv6Forward {
+            destination: Some(addr),
+            ..
+        } => Some(addr.ip()),
+        _ => source,
     };
-    let (dscp_permitted, ecn_permitted) = match requested_cos {
-        Some((dscp1, ec1)) => (
-            ctx.cos_policy.permits_dscp(reply_destination, dscp1),
-            ctx.cos_policy.permits_ecn(ec1),
-        ),
-        // Nothing requested: nothing to admit or refuse.
-        None => (true, true),
-    };
-
-    // What the backend should actually put on the wire. A refused DSCP1 falls
-    // back to the received DSCP (DSCP2), matching the RPD=0b01 the TLV now
-    // reports; a refused EC1 forces the reply's ECN bits to 0b00 (Not-ECT)
-    // rather than leaving a value the policy rejected, which is the same
-    // treatment cos-ecn-02 §3.2 mandates for the "unable" case.
-    let cos_request = requested_cos.map(|(dscp1, ec1)| {
-        (
-            if dscp_permitted {
-                dscp1
-            } else {
-                ctx.received_dscp
-            },
-            if ecn_permitted { ec1 } else { 0 },
-        )
-    });
-
+    let mut cos_reply_policy = None;
+    let mut cos_request = None;
+    let mut rejected = false;
+    let mut ecn_permitted = true;
+    let mut third_value = false;
     if let Some((dscp1, ec1)) = requested_cos {
-        if !dscp_permitted {
-            log::debug!(
-                "CoS admission policy refused DSCP1 {dscp1} for a reply to {:?}; \
-                 using the received DSCP {} with RPD=0b01",
-                reply_destination,
-                ctx.received_dscp
-            );
-        }
-        if !ecn_permitted {
-            log::debug!("CoS admission policy refused EC1 {ec1}; reply ECN forced to Not-ECT");
-        }
+        let allowed = ctx.cos_policy.dscp_for(destination);
+        let Some(selection) = allowed.select(Some(dscp1), ctx.received_dscp) else {
+            log::debug!("No DSCP permitted for CoS reply to {destination:?}; suppressing reply");
+            return None;
+        };
+        ecn_permitted = ctx.cos_policy.permits_ecn(ec1);
+        cos_reply_policy = Some(CosReplyPolicy::new(
+            dscp1,
+            allowed,
+            ctx.cos_policy.dscp_for(source),
+            ec1,
+            ecn_permitted,
+            tlvs,
+        ));
+        rejected = selection.rejected;
+        third_value = selection.third_value;
+        cos_request = Some((selection.value, if ecn_permitted { ec1 } else { 0 }));
     }
-
-    // Record the CoS admission decision (RFC 8972 §4.4, cos-ecn-02 §3.2).
-    // A later socket failure overrides RPD/RPE through `set_cos_policy_rejected`
-    // and the IP header through `cos_unable_fallback_tos`.
-    tlvs.update_cos_tlvs(
-        ctx.received_dscp,
-        ctx.received_ecn,
-        !dscp_permitted,
-        ecn_permitted,
-    );
+    tlvs.update_cos_tlvs(ctx.received_dscp, ctx.received_ecn, rejected, ecn_permitted);
+    if third_value {
+        tlvs.mark_cos_dscp_fallback();
+    }
 
     let ber_padding_len = tlvs
         .non_hmac_tlvs()
@@ -1215,6 +1206,7 @@ fn apply_semantic_tlv_processing(
         tlv_conformance,
         ber_conformance,
         cos_request,
+        cos_reply_policy,
         return_path_action,
         reflected_control,
         reply_source,

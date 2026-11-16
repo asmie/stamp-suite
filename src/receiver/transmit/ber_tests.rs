@@ -40,6 +40,7 @@ fn single_ber_reply_checks_mtu_preserves_patterns_and_resigns() {
             let response = StampResponse {
                 data,
                 cos_request: None,
+                cos_reply_policy: None,
                 return_path_action: ReturnPathAction::Normal,
                 reflected_control: None,
                 reply_source: None,
@@ -282,6 +283,7 @@ fn controlled_sample(
     let response = StampResponse {
         data,
         cos_request: None,
+        cos_reply_policy: None,
         return_path_action: ReturnPathAction::Normal,
         reflected_control: Some(super::super::ReflectedControlBehavior {
             max_size: 3000,
