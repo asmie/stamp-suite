@@ -11,8 +11,8 @@ use proptest::prelude::*;
 
 use stamp_suite::packets::{PacketAuthenticated, PacketUnauthenticated};
 use stamp_suite::tlv::{
-    AccessReportTlv, BerBurstTlv, BerCountTlv, ClassOfServiceTlv, DirectMeasurementTlv,
-    ExtraPaddingTlv, MicroSessionIdTlv, RawTlv, TlvFlags, TlvList, TypedTlv,
+    AccessReportTlv, ClassOfServiceTlv, DirectMeasurementTlv, ExtraPaddingTlv, MicroSessionIdTlv,
+    RawTlv, TlvFlags, TlvList, TypedTlv,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,22 +69,6 @@ proptest! {
         };
         let raw = original.to_raw();
         let parsed = MicroSessionIdTlv::from_raw(&raw).expect("Micro-session round-trip");
-        prop_assert_eq!(parsed, original);
-    }
-
-    #[test]
-    fn prop_ber_count_round_trip(count in any::<u32>()) {
-        let original = BerCountTlv { count };
-        let raw = original.to_raw();
-        let parsed = BerCountTlv::from_raw(&raw).expect("BerCount round-trip");
-        prop_assert_eq!(parsed, original);
-    }
-
-    #[test]
-    fn prop_ber_burst_round_trip(max_burst in any::<u32>()) {
-        let original = BerBurstTlv { max_burst };
-        let raw = original.to_raw();
-        let parsed = BerBurstTlv::from_raw(&raw).expect("BerBurst round-trip");
         prop_assert_eq!(parsed, original);
     }
 

@@ -4,26 +4,14 @@
 //! On IANA assignment, update the constant, bump the minor version and
 //! record the wire change in CHANGELOG.md. See doc/conformance/README.md.
 
-/// Bit Pattern in Padding TLV (draft-gandhi-ippm-stamp-ber-07 §5.1).
-/// Experimental Type 240; replace with the IANA assignment when allocated.
-/// BER TLV allocations are independent, so update each constant separately.
-pub const BER_PATTERN_TLV_TYPE: u8 = 240;
-
-/// Bit Error Count in Padding TLV (draft-gandhi-ippm-stamp-ber-07 §5.2).
-/// Experimental Type 241; replace when IANA assigns this TLV's codepoint.
-pub const BER_COUNT_TLV_TYPE: u8 = 241;
-
-/// Max Bit Error Burst Size TLV (draft-gandhi-ippm-stamp-ber-07 §5.3).
-/// Type 242 is this implementation's experimental choice, not a draft allocation.
-///
-/// It conflicts with another implementation's incompatible Heartbeat TLV.
-/// See `doc/conformance/README.md` and `doc/architecture.md` for the disclosure.
-/// Replace this constant when IANA assigns the TLV's codepoint.
-pub const BER_MAX_BURST_TLV_TYPE: u8 = 242;
+// Top-level Types 240–242 carried draft-gandhi-ippm-stamp-ber-07 TLVs up to
+// release 1.0.x (pattern, count, maximum burst). They are retired: endpoints
+// treat them as unrecognized and answer with U. Do not reuse them for another
+// layout without a minor release.
 
 /// Residual BER in Padding, draft-ietf-bpm-stamp-ber-01 §4 (TBA1).
 /// Local experimental outer type; peers must agree on this revision/allocation.
-/// Legacy outer Types 240–242 are retired, never reinterpreted as this format.
+/// The retired outer Types 240–242 are never reinterpreted as this format.
 pub const RESIDUAL_BER_TLV_TYPE: u8 = 243;
 
 /// Bit Pattern in Padding sub-TLV, draft-ietf-bpm-stamp-ber-01 §4.1 (TBA2).
@@ -47,6 +35,6 @@ pub const REFLECTED_FIXED_HDR_TLV_TYPE: u8 = 247;
 ///
 /// Experimental Sub-TLV Type 240 stands in for TBA3; replace on IANA allocation.
 /// This uses the separate STAMP Sub-TLV Types registry, so it does not conflict
-/// with top-level `BER_PATTERN_TLV_TYPE` (also 240).
+/// with the retired top-level Type 240.
 /// Check the related TBA1/TBA2 constants when renumbering.
 pub const REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL: u8 = 240;

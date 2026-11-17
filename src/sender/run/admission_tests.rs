@@ -330,9 +330,7 @@ async fn ecn_reporting_counts_only_admitted_distinct_copies() {
             assert_eq!(ecn.reverse.bleaching, 0);
             assert_eq!(ecn.reverse.ce_marked, 0);
             assert_eq!(ecn.reverse.unknown_reasons.reflector_marking_unavailable, 1);
-            assert_eq!(ecn.reverse.unknown_reasons.reserved_rpe, 0);
             let json = serde_json::to_value(&ecn).unwrap();
-            assert_eq!(json["reverse"]["unknown_reasons"]["reserved_rpe"], 0);
             assert_eq!(
                 json["reverse"]["unknown_reasons"]["reflector_marking_unavailable"],
                 1

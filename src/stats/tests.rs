@@ -1055,10 +1055,6 @@ fn ecn_observations_use_existing_report_containers() {
         measurements["ecn"]["reverse"]["unknown_reasons"]["reflector_marking_unavailable"],
         1
     );
-    assert_eq!(
-        measurements["ecn"]["reverse"]["unknown_reasons"]["reserved_rpe"],
-        0
-    );
     let absent = serde_json::to_value(MeasurementSummary::default()).unwrap();
     assert!(absent.get("ecn").is_none());
 }

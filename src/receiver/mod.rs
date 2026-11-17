@@ -929,7 +929,6 @@ fn apply_semantic_tlv_processing(
             ctx.cos_policy.dscp_for(source),
             ec1,
             ecn_permitted,
-            tlvs,
         ));
         rejected = selection.rejected;
         third_value = selection.third_value;
@@ -1021,7 +1020,7 @@ fn apply_semantic_tlv_processing(
                         l3_matches = Some(l3_matches.unwrap_or(true) && matched);
                     }
                     ReflectedControlSubTlv::Ipv6ExtHdrControl => ipv6_ext_hdr_control_count += 1,
-                    ReflectedControlSubTlv::Unknown { .. } => {}
+                    ReflectedControlSubTlv::Unknown => {}
                 }
             }
             if l2_matches == Some(false) {

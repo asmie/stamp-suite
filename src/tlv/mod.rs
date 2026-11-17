@@ -40,8 +40,7 @@ pub use residual_ber::{
 
 // Core types and constants
 pub use self::core::{
-    RawTlv, TlvError, TlvFlags, TlvSpan, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE,
-    BER_BURST_TLV_VALUE_SIZE, BER_COUNT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE,
+    RawTlv, TlvError, TlvFlags, TlvSpan, TlvType, ACCESS_REPORT_TLV_VALUE_SIZE, COS_TLV_VALUE_SIZE,
     DEST_NODE_ADDR_IPV4_SIZE, DEST_NODE_ADDR_IPV6_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE,
     FOLLOW_UP_TELEMETRY_TLV_VALUE_SIZE, HMAC_TLV_VALUE_SIZE, LOCATION_TLV_MIN_VALUE_SIZE,
     MICRO_SESSION_ID_TLV_VALUE_SIZE, REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL,
@@ -89,15 +88,6 @@ pub use typed::MicroSessionIdTlv;
 
 // Type 12: Reflected Test Packet Control (RFC 10052)
 pub use typed::ReflectedControlTlv;
-
-// Type 240: BER Bit Pattern in Padding (draft-gandhi-ippm-stamp-ber)
-pub use typed::{BerPatternTlv, BER_DEFAULT_PATTERN};
-
-// Type 241: BER Bit Error Count in Padding (draft-gandhi-ippm-stamp-ber)
-pub use typed::BerCountTlv;
-
-// Type 242: BER Max Bit Error Burst Size (draft-gandhi-ippm-stamp-ber)
-pub use typed::BerBurstTlv;
 
 // Type 246: Reflected IPv6 Extension Header Data (draft-ietf-ippm-stamp-ext-hdr)
 pub use typed::{ReflectedIpv6ExtHdrTlv, DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY};

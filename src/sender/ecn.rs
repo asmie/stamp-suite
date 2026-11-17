@@ -57,8 +57,6 @@ pub struct EcnUnknownSummary {
     pub conformant_reflected: u64,
     pub request_mismatch: u64,
     pub legacy_or_unconfirmed: u64,
-    /// Retained for report compatibility; all two-bit RPE values are now assigned.
-    pub reserved_rpe: u64,
     /// RPE=1: the reflector could apply neither EC1 nor Not-ECT (BPM -00).
     pub reflector_marking_unavailable: u64,
     /// RPE=2 cannot distinguish policy refusal from platform limitations.

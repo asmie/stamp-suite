@@ -429,8 +429,7 @@ invalid IP metadata. A legacy reply that zeroes EC1 is therefore counted as
 legacy/unconfirmed, not as a request mismatch. A reply can have several of
 these limitations at once, and the raw RPE, C and IP totals are kept
 separately. RPE=2 cannot show whether policy or platform capability caused the
-refusal. The `reflector_marking_unavailable` reason records RPE=1.
-`reserved_rpe` is kept for report compatibility and is always zero. None of
+refusal. The `reflector_marking_unavailable` reason records RPE=1. None of
 this shows that a peer implements the successor draft's separate DSCP fallback
 requirements.
 

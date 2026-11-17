@@ -878,12 +878,9 @@ impl TlvList {
                 TlvType::Hmac => tlv.value.len() != HMAC_TLV_VALUE_SIZE,
                 TlvType::MicroSessionId => tlv.value.len() != MICRO_SESSION_ID_TLV_VALUE_SIZE,
                 TlvType::ReflectedControl => tlv.value.len() < REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE,
-                // BerPattern: any length parses; BER processing sets C on an
-                // empty one. 246/247: variable Value is valid (request: zeros
-                // sized to header; response: filled).
-                TlvType::BerPattern | TlvType::ReflectedIpv6ExtHdr | TlvType::ReflectedFixedHdr => {
-                    false
-                }
+                // 246/247: variable Value is valid (request: zeros sized to
+                // header; response: filled).
+                TlvType::ReflectedIpv6ExtHdr | TlvType::ReflectedFixedHdr => false,
                 TlvType::ResidualBer if tlv.value.len() < 8 => {
                     // BPM BER-01 §§4, 5.2.1 require both M and C.
                     tlv.set_conformant_reflected();

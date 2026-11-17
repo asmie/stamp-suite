@@ -6,7 +6,6 @@ use thiserror::Error;
 // (see its module docs for the renumbering policy) and re-exported here so
 // `crate::tlv::core::…` import paths resolve.
 pub use super::experimental::{
-    BER_COUNT_TLV_TYPE, BER_MAX_BURST_TLV_TYPE, BER_PATTERN_TLV_TYPE,
     REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL, REFLECTED_FIXED_HDR_TLV_TYPE,
     REFLECTED_IPV6_EXT_HDR_TLV_TYPE, RESIDUAL_BER_PATTERN_SUBTLV_TYPE, RESIDUAL_BER_TLV_TYPE,
 };
@@ -56,14 +55,6 @@ pub const REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE: usize = 12;
 /// Number of fixed bytes at the head of the Reflected Test Packet Control
 /// TLV value field (length(2) + count(2) + interval(4)). Sub-TLVs follow.
 pub const REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE: usize = 8;
-
-/// BER Bit Error Count TLV value size
-/// (draft-gandhi-ippm-stamp-ber-07 §5.2: single u32).
-pub const BER_COUNT_TLV_VALUE_SIZE: usize = 4;
-
-/// BER Max Bit Error Burst Size TLV value size
-/// (draft-gandhi-ippm-stamp-ber-07 §5.3: single u32).
-pub const BER_BURST_TLV_VALUE_SIZE: usize = 4;
 
 /// Errors that can occur during TLV parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
@@ -120,8 +111,6 @@ fn expected_length(kind: TlvType) -> String {
         TlvType::ReturnPath => "at least 4 (one sub-TLV header)".to_string(),
         TlvType::MicroSessionId => MICRO_SESSION_ID_TLV_VALUE_SIZE.to_string(),
         TlvType::ReflectedControl => format!("at least {REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE}"),
-        TlvType::BerCount => BER_COUNT_TLV_VALUE_SIZE.to_string(),
-        TlvType::BerBurst => BER_BURST_TLV_VALUE_SIZE.to_string(),
         TlvType::ResidualBer => "at least 8".to_string(),
         _ => "a different length".to_string(),
     }
@@ -271,19 +260,6 @@ pub enum TlvType {
     MicroSessionId = 11,
     /// Reflected Test Packet Control TLV (12) - RFC 10052 §3.
     ReflectedControl = 12,
-    /// Retired legacy serialization only; endpoints return U.
-    /// BER Bit Pattern in Padding TLV (240) - draft-gandhi-ippm-stamp-ber-07 §5.1.
-    /// Experimental-range stand-in, renumbered via `experimental::BER_PATTERN_TLV_TYPE`.
-    BerPattern = BER_PATTERN_TLV_TYPE,
-    /// Retired legacy serialization only; endpoints return U.
-    /// BER Bit Error Count in Padding TLV (241) - draft-gandhi-ippm-stamp-ber-07 §5.2.
-    /// Experimental-range stand-in, renumbered via `experimental::BER_COUNT_TLV_TYPE`.
-    BerCount = BER_COUNT_TLV_TYPE,
-    /// Retired legacy serialization only; endpoints return U.
-    /// BER Max Bit Error Burst Size TLV (242) - draft-gandhi-ippm-stamp-ber-07 §5.3.
-    /// Experimental-range stand-in that collides with an unrelated TLV in another
-    /// implementation; renumbered via `experimental::BER_MAX_BURST_TLV_TYPE`.
-    BerBurst = BER_MAX_BURST_TLV_TYPE,
     /// Residual BER in Padding (experimental Type 243), BPM BER revision 01.
     ResidualBer = RESIDUAL_BER_TLV_TYPE,
     /// Reflected IPv6 Extension Header Data TLV (246) -
@@ -345,9 +321,6 @@ impl TlvType {
             Self::ReturnPath => 10,
             Self::MicroSessionId => 11,
             Self::ReflectedControl => 12,
-            Self::BerPattern => BER_PATTERN_TLV_TYPE,
-            Self::BerCount => BER_COUNT_TLV_TYPE,
-            Self::BerBurst => BER_MAX_BURST_TLV_TYPE,
             Self::ResidualBer => RESIDUAL_BER_TLV_TYPE,
             Self::ReflectedIpv6ExtHdr => REFLECTED_IPV6_EXT_HDR_TLV_TYPE,
             Self::ReflectedFixedHdr => REFLECTED_FIXED_HDR_TLV_TYPE,
@@ -364,10 +337,7 @@ impl TlvType {
     /// Returns true if this is a known/recognized type.
     #[must_use]
     pub fn is_recognized(self) -> bool {
-        !matches!(
-            self,
-            Self::Unknown(_) | Self::Reserved | Self::BerPattern | Self::BerCount | Self::BerBurst
-        )
+        !matches!(self, Self::Unknown(_) | Self::Reserved)
     }
 }
 

@@ -1,9 +1,6 @@
 //! Typed TLV implementations for each STAMP TLV extension type.
 
 mod access_report;
-mod ber_burst;
-mod ber_count;
-mod ber_pattern;
 mod cos;
 mod destination_node_address;
 mod direct_measurement;
@@ -55,15 +52,6 @@ pub use micro_session::MicroSessionIdTlv;
 
 // Type 12: Reflected Test Packet Control (RFC 10052)
 pub use reflected_control::ReflectedControlTlv;
-
-// Type 240: BER Bit Pattern in Padding (draft-gandhi-ippm-stamp-ber)
-pub use ber_pattern::{BerPatternTlv, BER_DEFAULT_PATTERN};
-
-// Type 241: BER Bit Error Count in Padding (draft-gandhi-ippm-stamp-ber)
-pub use ber_count::BerCountTlv;
-
-// Type 242: BER Max Bit Error Burst Size (draft-gandhi-ippm-stamp-ber)
-pub use ber_burst::BerBurstTlv;
 
 // Type 246: Reflected IPv6 Extension Header Data (draft-ietf-ippm-stamp-ext-hdr)
 pub use reflected_ipv6_ext_hdr::{ReflectedIpv6ExtHdrTlv, DEFAULT_IPV6_EXT_HDR_REQUEST_CAPACITY};

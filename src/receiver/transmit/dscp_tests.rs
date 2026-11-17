@@ -10,7 +10,8 @@ fn reflect(policy: CosAdmissionPolicy, auth: bool, ipv6: bool, peer_c: bool) -> 
     if peer_c {
         cos[0] |= TlvFlags::C;
     }
-    // Three copies; preserve original peer C independently of generated C.
+    // Three copies. A C flag the peer sent is cleared by incoming-flag
+    // normalization, so only a local third-value fallback sets it.
     cos.extend(tlv(12, &[0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0]));
     let mut tx = reflect_configured(&cos, auth, ipv6, false, false, |ctx| {
         ctx.cos_policy = policy;
@@ -31,21 +32,6 @@ fn reflect(policy: CosAdmissionPolicy, auth: bool, ipv6: bool, peer_c: bool) -> 
     })
     .unwrap();
     tx.received_dscp = 10;
-    if peer_c {
-        // Inject an independent local C after incoming-flag normalization.
-        let base = if auth {
-            AUTH_BASE_SIZE
-        } else {
-            UNAUTH_BASE_SIZE
-        };
-        tx.response.data[base] |= TlvFlags::C;
-        let raw = [TlvFlags::C, 4, 0, 4, 184, 0, 128, 0];
-        let list = crate::tlv::TlvList::parse(&raw).unwrap();
-        let allowed = policy.dscp_for(Some(tx.source.ip()));
-        tx.response.cos_reply_policy = Some(super::super::CosReplyPolicy::new(
-            46, allowed, allowed, 2, true, &list,
-        ));
-    }
     tx
 }
 
@@ -81,7 +67,7 @@ fn dscp_admission_marks_signed_bursts_and_counts_only_successful_third_values() 
                         assert!(tx
                             .send_next(&counters, &RateLimiter::new(0), |bytes, _, options| {
                                 assert_eq!(options.tos, (dscp << 2) | 2);
-                                check(bytes, auth, rpd, 3, third || peer_c);
+                                check(bytes, auth, rpd, 3, third);
                                 Ok(bytes.len())
                             })
                             .is_some());
@@ -144,7 +130,7 @@ fn dscp_marking_retry_never_uses_forbidden_received_value_or_unmarked_restricted
 }
 
 #[test]
-fn dscp_route_retry_reselects_policy_and_restores_only_locally_generated_c() {
+fn dscp_route_retry_reselects_policy_and_sets_c_only_for_a_third_value() {
     for auth in [false, true] {
         for ipv6 in [false, true] {
             for peer_c in [false, true] {
@@ -155,18 +141,13 @@ fn dscp_route_retry_reselects_policy_and_restores_only_locally_generated_c() {
                 ] {
                     let mut tx = reflect(policy(primary), auth, ipv6, peer_c);
                     // Install the same immutable snapshot that semantic processing
-                    // builds for alternate/SRv6 destinations, preserving peer C.
-                    let raw = tlv(4, &[184, 0, 128, 0]);
-                    let mut raw = raw;
-                    raw[0] = if peer_c { TlvFlags::C } else { 0 };
-                    let list = crate::tlv::TlvList::parse(&raw).unwrap();
+                    // builds for alternate/SRv6 destinations.
                     tx.response.cos_reply_policy = Some(super::super::CosReplyPolicy::new(
                         46,
                         DscpSet::parse(primary).unwrap(),
                         DscpSet::parse(fallback).unwrap(),
                         2,
                         true,
-                        &list,
                     ));
                     let alternate = if ipv6 { "[::2]:4000" } else { "127.0.0.2:4000" }
                         .parse()
@@ -183,13 +164,13 @@ fn dscp_route_retry_reselects_policy_and_restores_only_locally_generated_c() {
                                 attempts += 1;
                                 if target == alternate {
                                     assert_eq!(options.tos, (first_dscp << 2) | 2);
-                                    check(bytes, auth, u8::from(first_c), 3, first_c || peer_c);
+                                    check(bytes, auth, u8::from(first_c), 3, first_c);
                                     return Err(io::ErrorKind::NetworkUnreachable.into());
                                 }
                                 assert_eq!(target, source);
                                 let dscp = final_dscp.expect("empty policy must not send");
                                 assert_eq!(options.tos, (dscp << 2) | 2);
-                                check(bytes, auth, u8::from(final_c), 3, final_c || peer_c);
+                                check(bytes, auth, u8::from(final_c), 3, final_c);
                                 Ok(bytes.len())
                             },
                         );

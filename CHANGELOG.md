@@ -30,7 +30,9 @@ Upgrade both peers together when they use BER or reflected headers.
   requested ECN nor Not-ECT replies with RPE=01.
 - **Minimum Rust version** is 1.87.
 - **Library API.** `StampResponse` has new `cos_reply_policy` and
-  `tlv_processed` fields.
+  `tlv_processed` fields. The retired BER types `BerPatternTlv`,
+  `BerCountTlv`, `BerBurstTlv`, their `TlvType` variants and constants are
+  removed; Types 240–242 now parse as `TlvType::Unknown`.
 
 ### Added
 

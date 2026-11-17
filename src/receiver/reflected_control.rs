@@ -50,10 +50,7 @@ pub(super) enum ReflectedControlSubTlv {
     Ipv6ExtHdrControl,
     /// Anything else (including the 4-byte zero placeholder that pads the
     /// TLV to the RFC 10052 §3 12-octet minimum). Ignored by the reflector.
-    Unknown {
-        #[allow(dead_code)]
-        type_byte: u8,
-    },
+    Unknown,
 }
 
 /// Parses a chain of Reflected Control sub-TLVs from a raw byte slice. Uses
@@ -101,7 +98,7 @@ pub(super) fn parse_reflected_control_sub_tlvs(body: &[u8]) -> Vec<ReflectedCont
             // An all-zero 4-octet header pads the TLV to its 12-octet minimum
             // (RFC 10052 §3).
             0 if length == 0 => {}
-            other => out.push(ReflectedControlSubTlv::Unknown { type_byte: other }),
+            _ => out.push(ReflectedControlSubTlv::Unknown),
         }
         offset = value_end;
     }

@@ -1,7 +1,7 @@
 //! Destination policy retained across reply routing and marking retries.
 use crate::{
     cos_policy::{DscpSelection, DscpSet},
-    tlv::{TlvFlags, TlvList, TlvSpan, TlvType, COS_TLV_VALUE_SIZE},
+    tlv::{TlvFlags, TlvSpan, TlvType, COS_TLV_VALUE_SIZE},
 };
 
 /// Immutable CoS policy snapshot for this request's two possible destinations.
@@ -12,9 +12,6 @@ pub struct CosReplyPolicy {
     ecn_permitted: bool,
     primary: DscpSet,
     source: DscpSet,
-    // Usually empty. Preserve original peer C separately from a locally
-    // generated third-DSCP C so route retries can remove only our own flag.
-    original_c: Vec<bool>,
 }
 
 impl CosReplyPolicy {
@@ -24,27 +21,13 @@ impl CosReplyPolicy {
         source: DscpSet,
         ecn: u8,
         ecn_permitted: bool,
-        tlvs: &TlvList,
     ) -> Self {
-        let cos = || {
-            tlvs.non_hmac_tlvs().iter().filter(|t| {
-                t.tlv_type == TlvType::ClassOfService
-                    && t.is_processable()
-                    && t.value.len() == COS_TLV_VALUE_SIZE
-            })
-        };
-        let original_c = if cos().any(|t| t.flags.conformant_reflected) {
-            cos().map(|t| t.flags.conformant_reflected).collect()
-        } else {
-            Vec::new()
-        };
         Self {
             requested,
             ecn,
             ecn_permitted,
             primary,
             source,
-            original_c,
         }
     }
 
@@ -83,9 +66,12 @@ impl CosReplyPolicy {
         }
     }
 
+    /// Writes RPD, RPE and C for the selected DSCP into every processed CoS
+    /// TLV. Incoming-flag normalization cleared any C the peer sent, so C
+    /// here means only a local third-value fallback, and a route retry that
+    /// selects the requested DSCP again clears it.
     pub(super) fn apply(&self, data: &mut [u8], base: usize, selection: DscpSelection, rpe: u8) {
         let mut pos = base;
-        let mut index = 0;
         while let Some(tlv) = TlvSpan::at(data, pos) {
             if tlv.flags.malformed {
                 break;
@@ -97,11 +83,12 @@ impl CosReplyPolicy {
                 let value = tlv.value_start();
                 data[value + 1] = (data[value + 1] & 0xfc) | u8::from(selection.rejected);
                 data[value + 2] = (data[value + 2] & 0xcf) | (rpe << 4);
-                let c =
-                    selection.third_value || self.original_c.get(index).copied().unwrap_or(false);
-                data[tlv.start] =
-                    (data[tlv.start] & !TlvFlags::C) | if c { TlvFlags::C } else { 0 };
-                index += 1;
+                let c = if selection.third_value {
+                    TlvFlags::C
+                } else {
+                    0
+                };
+                data[tlv.start] = (data[tlv.start] & !TlvFlags::C) | c;
             }
             pos = tlv.end();
         }
@@ -113,26 +100,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dscp_edits_preserve_opaque_values_and_independent_c_per_tlv() {
+    fn dscp_edits_skip_opaque_values_and_set_c_only_for_a_third_value() {
         for opaque in [TlvFlags::U, TlvFlags::I, TlvFlags::M] {
             let mut data = vec![opaque, 4, 0, 4, 184, 0xac, 0xb0, 0];
-            data.extend([TlvFlags::C, 4, 0, 4, 184, 0xac, 0xb0, 0]);
+            data.extend([0, 4, 0, 4, 184, 0xac, 0xb0, 0]);
             data.extend([0, 4, 0, 4, 184, 0xac, 0xb0, 0]);
             let original = data.clone();
-            let list = TlvList::parse(&data).unwrap();
-            let policy = CosReplyPolicy::new(46, DscpSet::all(), DscpSet::all(), 2, true, &list);
+            let policy = CosReplyPolicy::new(46, DscpSet::all(), DscpSet::all(), 2, true);
             let third = DscpSet::parse("34").unwrap().select(Some(46), 10).unwrap();
             policy.apply(&mut data, 0, third, 2);
-            assert_eq!(&data[..8], &original[..8]);
+            assert_eq!(&data[..8], &original[..8], "opaque TLV changed");
             if opaque == TlvFlags::M {
+                // Processing stops at a malformed TLV.
                 assert_eq!(data, original);
                 continue;
             }
-            assert_eq!(data[8], TlvFlags::C);
-            assert_eq!(data[16], TlvFlags::C);
+            for start in [8, 16] {
+                assert_eq!(data[start], TlvFlags::C);
+                assert_eq!(data[start + 5], 0xad, "RPD=01");
+                assert_eq!(data[start + 6], 0xa0, "RPE=10");
+            }
             let requested = DscpSet::all().select(Some(46), 10).unwrap();
             policy.apply(&mut data, 0, requested, 3);
-            assert_eq!(data, original, "remove only locally generated C on retry");
+            assert_eq!(data[8], 0, "a route retry clears the local C");
+            assert_eq!(data[16], 0);
         }
     }
 }
