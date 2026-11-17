@@ -259,44 +259,41 @@ impl Transmission {
         if self.response.tlv_processed {
             refresh_telemetry(&mut data, base, &self.session, self.stateful);
         }
-        let mut target = plan.target;
-        let mut options = plan.options.clone();
         if plan.unsupported_srh {
             super::set_return_path_u_flag_in_response(&mut data, base);
         }
-        let mut cos_fallback = false;
-        let mut cos_marking_unavailable = false;
-        let mut refresh_mtu = false;
+        let mut attempt = Attempt::new(plan);
         let reason = loop {
-            if options.apply_tos && self.marking_unavailable_for == Some(target) {
-                // Reach the state the marking fallback below ends in, so this
-                // copy is shaped, timestamped and signed once, not three times.
-                if self.response.cos_request.is_some() {
-                    super::set_cos_policy_rejected(&mut data, base);
-                    cos_fallback = true;
-                    cos_marking_unavailable |=
-                        super::reply_bytes::set_cos_marking_unavailable(&mut data, base);
-                }
-                options.apply_tos = false;
+            if attempt.marking != Marking::Unavailable
+                && self.marking_unavailable_for == Some(attempt.target)
+            {
+                // An earlier copy found this target cannot be marked. Start
+                // where that fallback ended, so this copy is shaped,
+                // timestamped and signed once, not three times.
+                attempt.give_up_marking(&mut data, base, self.response.cos_request.is_some());
             }
+            attempt.options.apply_tos = attempt.marking != Marking::Unavailable;
             let mut third_dscp = false;
             if let Some(policy) = &self.response.cos_reply_policy {
-                let to_source = target == self.source;
-                let Some(selection) = policy.select(to_source, self.received_dscp, cos_fallback)
-                else {
-                    log::debug!("No DSCP permitted for CoS reply to {target}");
+                let to_source = attempt.target == self.source;
+                let fallback = attempt.marking != Marking::Requested;
+                let Some(selection) = policy.select(to_source, self.received_dscp, fallback) else {
+                    log::debug!("No DSCP permitted for CoS reply to {}", attempt.target);
                     break "cos_policy";
                 };
                 // Without a working marking operation, an OS-selected DSCP
                 // cannot be assumed to satisfy a restricted destination set.
-                if !options.apply_tos
+                if !attempt.options.apply_tos
                     && policy.allowed(to_source) != crate::cos_policy::DscpSet::all()
                 {
-                    log::debug!("Cannot enforce restricted DSCP policy for {target}");
+                    log::debug!(
+                        "Cannot enforce restricted DSCP policy for {}",
+                        attempt.target
+                    );
                     break "cos_policy";
                 }
-                let (ecn, rpe) = policy.ecn(cos_fallback, cos_marking_unavailable);
-                options.tos = crate::tos::Tos::new(selection.value, ecn).0;
+                let (ecn, rpe) = policy.ecn(fallback, attempt.marking_reported);
+                attempt.options.tos = crate::tos::Tos::new(selection.value, ecn).0;
                 policy.apply(&mut data, base, selection, rpe);
                 third_dscp = selection.third_value;
             }
@@ -306,11 +303,12 @@ impl Transmission {
             if third_dscp {
                 tlv_conformance.insert(crate::tlv::TlvConformanceReason::CosDscpFallback);
             }
-            if cos_marking_unavailable {
+            if attempt.marking_reported {
                 tlv_conformance.insert(crate::tlv::TlvConformanceReason::CosMarkingUnavailable);
             }
+            let (target, options) = (attempt.target, &attempt.options);
             let budget = if options.dont_fragment {
-                payload_cap(target, &options, refresh_mtu)
+                payload_cap(target, options, attempt.mtu_refreshed)
             } else {
                 Ok(usize::MAX)
             };
@@ -374,7 +372,7 @@ impl Transmission {
                         sign_tlvs(attempt, base, key);
                     }
                 }
-                send(attempt, target, &options).and_then(|sent| {
+                send(attempt, target, options).and_then(|sent| {
                     if sent == attempt.len() {
                         Ok(timestamp)
                     } else {
@@ -401,21 +399,20 @@ impl Transmission {
                     self.remaining -= 1;
                     return Ok(sequence);
                 }
-                Err(e) if options.dont_fragment && is_message_too_large(&e) => {
+                Err(e) if attempt.options.dont_fragment && is_message_too_large(&e) => {
                     // MTU races must not strip SRH, source pinning or CoS. A
                     // fresh route query and re-shape gets one bounded retry.
-                    if refresh_mtu {
+                    if attempt.mtu_refreshed {
                         break "mtu_exceeded";
                     }
-                    refresh_mtu = true;
-                    continue;
+                    attempt.mtu_refreshed = true;
                 }
-                Err(e) if is_cos_apply_error(&e) && options.apply_tos => {
+                Err(e) if is_cos_apply_error(&e) && attempt.options.apply_tos => {
                     // Only an option-setting failure establishes inability to
                     // mark. A datagram/routing failure says nothing about CoS.
                     let fallback_dscp = if let Some(policy) = &self.response.cos_reply_policy {
-                        let Some(selection) =
-                            policy.select(target == self.source, self.received_dscp, true)
+                        let to_source = attempt.target == self.source;
+                        let Some(selection) = policy.select(to_source, self.received_dscp, true)
                         else {
                             break "cos_policy";
                         };
@@ -423,22 +420,22 @@ impl Transmission {
                     } else {
                         self.received_dscp
                     };
-                    let fallback = super::cos_unable_fallback_tos(fallback_dscp);
-                    if self.response.cos_request.is_some() {
+                    let not_ect = super::cos_unable_fallback_tos(fallback_dscp);
+                    let cos_requested = self.response.cos_request.is_some();
+                    if cos_requested
+                        && attempt.marking == Marking::Requested
+                        && attempt.options.tos != not_ect
+                    {
                         super::set_cos_policy_rejected(&mut data, base);
-                        if !cos_fallback && options.tos != fallback {
-                            cos_fallback = true;
-                            options.tos = fallback;
-                            continue;
-                        }
+                        attempt.marking = Marking::NotEct;
+                        attempt.options.tos = not_ect;
+                    } else {
                         // Neither EC1 nor the Not-ECT fallback can be applied
-                        // (draft-ietf-bpm-stamp-cos-ecn-00 §3.2). Preserve routing and sign RPE=01.
-                        cos_fallback = true;
-                        cos_marking_unavailable |=
-                            super::reply_bytes::set_cos_marking_unavailable(&mut data, base);
+                        // (draft-ietf-bpm-stamp-cos-ecn-00 §3.2). Preserve
+                        // routing and sign RPE=01.
+                        attempt.give_up_marking(&mut data, base, cos_requested);
+                        self.marking_unavailable_for = Some(attempt.target);
                     }
-                    options.apply_tos = false;
-                    self.marking_unavailable_for = Some(target);
                 }
                 Err(e) if is_reply_too_large(&e) => {
                     log::debug!("reply cannot fit the route MTU: {e}");
@@ -447,7 +444,7 @@ impl Transmission {
                 Err(e) if is_local_send_error(&e) => {
                     // The socket, not the reply's route, failed. Changing the
                     // return path would wrongly report it as unusable.
-                    log::debug!("reflector cannot send to {target}: {e}");
+                    log::debug!("reflector cannot send to {}: {e}", attempt.target);
                     break "send_failed";
                 }
                 Err(e)
@@ -462,33 +459,106 @@ impl Transmission {
                     break "send_failed";
                 }
                 Err(e) => {
-                    refresh_mtu = false;
-                    if options.egress_ifindex.take().is_some() {
-                        // The arrival link cannot carry the reply (RFC 9503 §4).
-                        super::set_return_path_u_flag_in_response(&mut data, base);
-                    } else if options.srh.take().is_some() {
-                        super::set_return_path_u_flag_in_response(&mut data, base);
-                    } else if options.source.take().is_some() {
-                        // RFC 9503 source pinning is best-effort.
-                    } else if target != self.source {
-                        target = self.source;
-                        if self.response.cos_reply_policy.is_some() {
-                            cos_fallback = false;
-                            cos_marking_unavailable = false;
-                            options.apply_tos = true;
-                        }
-                        options.source = self.response.reply_source.filter(|s| {
-                            crate::reply_source::supported() && s.is_ipv4() == target.is_ipv4()
-                        });
-                        super::set_return_path_u_flag_in_response(&mut data, base);
-                    } else {
-                        log::debug!("reflector send to {target} failed: {e}");
+                    if !attempt.fall_back_route(
+                        &mut data,
+                        base,
+                        self.source,
+                        self.response.reply_source,
+                        self.response.cos_reply_policy.is_some(),
+                    ) {
+                        log::debug!("reflector send to {} failed: {e}", attempt.target);
                         break "send_failed";
                     }
                 }
             }
         };
         Err(reason)
+    }
+}
+
+/// How far the CoS marking fallback has gone for the current target
+/// (draft-ietf-bpm-stamp-cos-ecn-00 §3.2). Each option-setting failure moves
+/// one step down; it never moves back for the same target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Marking {
+    /// Apply the admitted DSCP and the requested ECN.
+    Requested,
+    /// The requested marking could not be set: retry with Not-ECT.
+    NotEct,
+    /// No marking can be set: send with the OS default and report RPE=01.
+    Unavailable,
+}
+
+/// Where one copy's send attempts stand. Every retry moves exactly one of
+/// these forward (a marking step, the single MTU refresh, or one route
+/// fallback), which is what bounds the send loop.
+struct Attempt {
+    target: SocketAddr,
+    options: SendOptions,
+    marking: Marking,
+    /// RPE=01 has been written into a processed CoS TLV of this copy.
+    marking_reported: bool,
+    /// The route MTU has been queried afresh after EMSGSIZE on this route.
+    mtu_refreshed: bool,
+}
+
+impl Attempt {
+    fn new(plan: &TransportPlan) -> Self {
+        Self {
+            target: plan.target,
+            options: plan.options.clone(),
+            marking: if plan.options.apply_tos {
+                Marking::Requested
+            } else {
+                Marking::Unavailable
+            },
+            marking_reported: false,
+            mtu_refreshed: false,
+        }
+    }
+
+    /// Stop marking this copy. A CoS reply reports the refused request and
+    /// RPE=01 in its processed CoS TLVs.
+    fn give_up_marking(&mut self, data: &mut [u8], base: usize, cos_requested: bool) {
+        if cos_requested {
+            super::set_cos_policy_rejected(data, base);
+            self.marking_reported |= super::reply_bytes::set_cos_marking_unavailable(data, base);
+        }
+        self.marking = Marking::Unavailable;
+    }
+
+    /// Drop the next routing request the failed send depended on, in RFC 9503
+    /// §4 order: the arrival-link pin, the SRH, source pinning, and finally
+    /// the alternate destination in favour of the sender. Returns false when
+    /// nothing is left to drop.
+    fn fall_back_route(
+        &mut self,
+        data: &mut [u8],
+        base: usize,
+        source: SocketAddr,
+        reply_source: Option<IpAddr>,
+        cos_policy: bool,
+    ) -> bool {
+        self.mtu_refreshed = false;
+        if self.options.egress_ifindex.take().is_some() || self.options.srh.take().is_some() {
+            // The arrival link or segment list cannot carry the reply.
+            super::set_return_path_u_flag_in_response(data, base);
+        } else if self.options.source.take().is_some() {
+            // RFC 9503 source pinning is best-effort.
+        } else if self.target != source {
+            self.target = source;
+            if cos_policy {
+                // The sender's own destination policy applies afresh.
+                self.marking = Marking::Requested;
+                self.marking_reported = false;
+            }
+            self.options.source = reply_source
+                .filter(|s| crate::reply_source::supported() && s.is_ipv4() == source.is_ipv4());
+            super::set_return_path_u_flag_in_response(data, base);
+        } else {
+            return false;
+        }
+        true
     }
 }
 

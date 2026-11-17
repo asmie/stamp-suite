@@ -955,6 +955,57 @@ fn unsent_replies_report_specific_drop_reasons() {
     assert_eq!(counters.packets_dropped.load(Ordering::Relaxed), 1);
 }
 
+/// Each route fallback drops one routing request in RFC 9503 §4 order and the
+/// sequence ends, so the send loop cannot retry forever. Retargeting resets
+/// the marking only when a destination CoS policy must be applied afresh.
+#[test]
+fn attempt_route_fallbacks_are_ordered_and_finite() {
+    let source: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+    let alternate: SocketAddr = "127.0.0.2:4001".parse().unwrap();
+    for cos_policy in [false, true] {
+        let mut attempt = Attempt {
+            target: alternate,
+            options: SendOptions {
+                tos: 0,
+                apply_tos: false,
+                source: Some("127.0.0.3".parse().unwrap()),
+                egress_ifindex: Some(7),
+                srh: Some(Arc::from([0u8; 24])),
+                dont_fragment: true,
+            },
+            marking: Marking::Unavailable,
+            marking_reported: true,
+            mtu_refreshed: true,
+        };
+        let mut data = vec![0; 44];
+        let mut steps = 0;
+        while attempt.fall_back_route(&mut data, 44, source, None, cos_policy) {
+            steps += 1;
+            assert!(
+                !attempt.mtu_refreshed,
+                "each route gets its own MTU refresh"
+            );
+            match steps {
+                1 => assert!(
+                    attempt.options.egress_ifindex.is_none() && attempt.options.srh.is_some()
+                ),
+                2 => assert!(attempt.options.srh.is_none() && attempt.options.source.is_some()),
+                3 => assert!(attempt.options.source.is_none() && attempt.target == alternate),
+                4 => assert_eq!(attempt.target, source),
+                _ => panic!("route fallback did not end"),
+            }
+        }
+        assert_eq!(steps, 4);
+        let expected = if cos_policy {
+            Marking::Requested
+        } else {
+            Marking::Unavailable
+        };
+        assert_eq!(attempt.marking, expected, "cos_policy={cos_policy}");
+        assert_eq!(attempt.marking_reported, !cos_policy);
+    }
+}
+
 #[test]
 fn reply_too_large_is_recognized_by_marker_not_kind() {
     let mut data = vec![0; 44];
