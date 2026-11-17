@@ -896,6 +896,65 @@ fn local_send_errors_drop_without_blaming_the_return_path() {
     }
 }
 
+/// Each way a reply is not sent has its own drop reason, so operators can
+/// tell an MTU problem or a socket failure apart in the metrics.
+#[test]
+fn unsent_replies_report_specific_drop_reasons() {
+    let counters = ReflectorCounters::new();
+    let limiter = RateLimiter::new(0);
+    // The route cannot carry the mandatory fields.
+    let mut t = sized_sample(false, 1500);
+    assert_eq!(
+        t.try_send_next_with_mtu(
+            &counters,
+            &limiter,
+            |_, _, _| Ok(20),
+            |_, _, _| { panic!("an oversized reply must not reach the socket") }
+        ),
+        Err("mtu_exceeded")
+    );
+    // EMSGSIZE persists after a fresh route lookup.
+    let mut t = sized_sample(false, 1500);
+    let mut attempts = 0;
+    assert_eq!(
+        t.try_send_next_with_mtu(
+            &counters,
+            &limiter,
+            |_, _, _| Ok(2000),
+            |_, _, _| {
+                attempts += 1;
+                Err(message_too_large_error())
+            }
+        ),
+        Err("mtu_exceeded")
+    );
+    assert_eq!(attempts, 2, "one refreshed retry");
+    // The socket is out of buffer space.
+    let mut t = sample(false, ReturnPathAction::Normal);
+    assert_eq!(
+        t.try_send_next_with_mtu(
+            &counters,
+            &limiter,
+            |_, _, _| Ok(2000),
+            |_, _, _| { Err(io::ErrorKind::WouldBlock.into()) }
+        ),
+        Err("send_failed")
+    );
+    // The public wrapper ends the burst and counts the drop.
+    let mut t = sized_sample(false, 1500);
+    assert_eq!(
+        t.send_next_with_mtu(
+            &counters,
+            &limiter,
+            |_, _, _| Ok(20),
+            |_, _, _| unreachable!()
+        ),
+        None
+    );
+    assert_eq!(t.remaining, 0);
+    assert_eq!(counters.packets_dropped.load(Ordering::Relaxed), 1);
+}
+
 #[test]
 fn reply_too_large_is_recognized_by_marker_not_kind() {
     let mut data = vec![0; 44];

@@ -50,6 +50,8 @@ Upgrade both peers together when they use BER or reflected headers.
   remarking and CE counts in text, JSON and CSV.
 - Reflector conformance counters for BER, Type 12 and reflected headers,
   exposed through the control API and Prometheus.
+- Prometheus drop reasons `cos_policy` and `mtu_exceeded`, split out of
+  `send_failed`.
 - `receiver::run_receiver_with_socket` (nix backend) for embedding with an
   owned UDP socket.
 - Session-table, reply-path, BER and header benchmarks; live UDP benchmarks

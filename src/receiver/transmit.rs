@@ -167,33 +167,49 @@ impl Transmission {
 
     /// Check the destination budget for every copy and routing fallback, then
     /// shape, timestamp and sign immediately before its actual send attempt.
+    /// A reply that is not sent ends the burst and counts as a drop.
     pub fn send_next_with_mtu(
+        &mut self,
+        counters: &ReflectorCounters,
+        limiter: &RateLimiter,
+        payload_cap: impl FnMut(SocketAddr, &SendOptions, bool) -> io::Result<usize>,
+        send: impl FnMut(&[u8], SocketAddr, &SendOptions) -> io::Result<usize>,
+    ) -> Option<u32> {
+        match self.try_send_next_with_mtu(counters, limiter, payload_cap, send) {
+            Ok(sequence) => Some(sequence),
+            Err(reason) => {
+                counters.record_drop(reason);
+                self.remaining = 0;
+                None
+            }
+        }
+    }
+
+    /// Sends the next copy, or returns the drop reason label: `session_expired`,
+    /// `suppressed`, `rate_limited`, `cos_policy` (no permitted or enforceable
+    /// DSCP), `mtu_exceeded` (the mandatory fields do not fit the route MTU)
+    /// or `send_failed`.
+    fn try_send_next_with_mtu(
         &mut self,
         counters: &ReflectorCounters,
         limiter: &RateLimiter,
         mut payload_cap: impl FnMut(SocketAddr, &SendOptions, bool) -> io::Result<usize>,
         mut send: impl FnMut(&[u8], SocketAddr, &SendOptions) -> io::Result<usize>,
-    ) -> Option<u32> {
+    ) -> Result<u32, &'static str> {
         let Some(_active) = self.session.transmission_guard() else {
-            counters.record_drop("session_expired");
-            self.remaining = 0;
-            return None;
+            return Err("session_expired");
         };
         if matches!(
             self.response.return_path_action,
             ReturnPathAction::SuppressReply
         ) {
-            counters.record_drop("suppressed");
-            self.remaining = 0;
-            return None;
+            return Err("suppressed");
         }
         if !self.first && !limiter.allow(self.source.ip()) {
             counters
                 .packets_rate_limited
                 .fetch_add(1, Ordering::Relaxed);
-            counters.record_drop("rate_limited");
-            self.remaining = 0;
-            return None;
+            return Err("rate_limited");
         }
         self.first = false;
         let base = if self.auth {
@@ -231,14 +247,14 @@ impl Transmission {
         let mut cos_fallback = false;
         let mut cos_marking_unavailable = false;
         let mut refresh_mtu = false;
-        loop {
+        let reason = loop {
             let mut third_dscp = false;
             if let Some(policy) = &self.response.cos_reply_policy {
                 let to_source = target == self.source;
                 let Some(selection) = policy.select(to_source, self.received_dscp, cos_fallback)
                 else {
                     log::debug!("No DSCP permitted for CoS reply to {target}");
-                    break;
+                    break "cos_policy";
                 };
                 // Without a working marking operation, an OS-selected DSCP
                 // cannot be assumed to satisfy a restricted destination set.
@@ -246,7 +262,7 @@ impl Transmission {
                     && policy.allowed(to_source) != crate::cos_policy::DscpSet::all()
                 {
                     log::debug!("Cannot enforce restricted DSCP policy for {target}");
-                    break;
+                    break "cos_policy";
                 }
                 let (ecn, rpe) = policy.ecn(cos_fallback, cos_marking_unavailable);
                 options.tos = crate::tos::Tos::new(selection.value, ecn).0;
@@ -352,13 +368,13 @@ impl Transmission {
                     counters.record_ber_conformance(ber_conformance);
                     counters.record_tlv_conformance(tlv_conformance);
                     self.remaining -= 1;
-                    return Some(sequence);
+                    return Ok(sequence);
                 }
                 Err(e) if options.dont_fragment && is_message_too_large(&e) => {
                     // MTU races must not strip SRH, source pinning or CoS. A
                     // fresh route query and re-shape gets one bounded retry.
                     if refresh_mtu {
-                        break;
+                        break "mtu_exceeded";
                     }
                     refresh_mtu = true;
                     continue;
@@ -370,7 +386,7 @@ impl Transmission {
                         let Some(selection) =
                             policy.select(target == self.source, self.received_dscp, true)
                         else {
-                            break;
+                            break "cos_policy";
                         };
                         selection.value
                     } else {
@@ -394,13 +410,13 @@ impl Transmission {
                 }
                 Err(e) if is_reply_too_large(&e) => {
                     log::debug!("reply cannot fit the route MTU: {e}");
-                    break;
+                    break "mtu_exceeded";
                 }
                 Err(e) if is_local_send_error(&e) => {
                     // The socket, not the reply's route, failed. Changing the
                     // return path would wrongly report it as unusable.
                     log::debug!("reflector cannot send to {target}: {e}");
-                    break;
+                    break "send_failed";
                 }
                 Err(e)
                     if matches!(
@@ -411,7 +427,7 @@ impl Transmission {
                     // UDP queue pressure is a failed transmission, never a
                     // reason to downgrade requested routing/CoS metadata.
                     log::debug!("reflector datagram was not sent: {e}");
-                    break;
+                    break "send_failed";
                 }
                 Err(e) => {
                     refresh_mtu = false;
@@ -435,14 +451,12 @@ impl Transmission {
                         super::set_return_path_u_flag_in_response(&mut data, base);
                     } else {
                         log::debug!("reflector send to {target} failed: {e}");
-                        break;
+                        break "send_failed";
                     }
                 }
             }
-        }
-        counters.record_drop("send_failed");
-        self.remaining = 0;
-        None
+        };
+        Err(reason)
     }
 }
 

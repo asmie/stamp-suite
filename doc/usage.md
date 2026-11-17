@@ -882,7 +882,9 @@ fails to set the marking, it retries with Not-ECT and an admitted DSCP. If that
 also fails, a restricted DSCP policy suppresses the reply. An unrestricted
 policy can still send it with RPE=0b01, and you then need to check the actual
 IP marking yourself. Windows cannot enforce restricted DSCP policies, so it
-suppresses those CoS replies.
+suppresses those CoS replies. Replies dropped at send time because no
+permitted DSCP can be used, including on a return-path retry, are counted
+with the `cos_policy` drop reason.
 
 `--location-disclose` controls which Location TLV fields the reflector reports:
 `all` (default), `none`, or a comma-separated list of `src-port`, `dst-port`,
@@ -1202,7 +1204,10 @@ consecutive failures. Any successful send resets that retry budget.
 
 Prometheus counts each successful reply copy at transmission. Drop reasons
 are `rate_limited`, `queue_full`, `processing_rejected`, `session_expired`,
-`suppressed`, `send_failed` and `cancelled`. Processing rejection includes
+`suppressed`, `cos_policy`, `mtu_exceeded`, `send_failed` and `cancelled`.
+`cos_policy` is a reply the destination DSCP policy forbids at send time,
+`mtu_exceeded` one whose mandatory fields do not fit the route MTU, and
+`send_failed` a socket error. Processing rejection includes
 parsing, authentication, admission and replay policy; HMAC failures also have
 their own counter. These totals use the same events as the shutdown summary.
 

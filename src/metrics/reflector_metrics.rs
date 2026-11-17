@@ -29,7 +29,8 @@ pub(crate) fn record_packet_reflected() {
 /// Records that a packet was dropped with the specified reason.
 ///
 /// `reason` labels the rejection boundary: rate_limited, queue_full,
-/// processing_rejected, session_expired, suppressed, send_failed or cancelled.
+/// processing_rejected, session_expired, suppressed, cos_policy, mtu_exceeded,
+/// send_failed or cancelled.
 pub(crate) fn record_packet_dropped(reason: &'static str) {
     counter!("stamp_reflector_packets_dropped_total", "reason" => reason).increment(1);
 }

@@ -248,3 +248,33 @@ fn windows_restricted_dscp_sends_nothing_and_permissive_reply_reports_rpe01() {
         }
     }
 }
+
+/// A reply that the destination policy forbids is a policy drop, not a
+/// failed send.
+#[test]
+fn forbidden_dscp_after_route_fallback_is_a_cos_policy_drop() {
+    for ipv6 in [false, true] {
+        let mut tx = reflect(policy("34"), false, ipv6, false);
+        tx.response.cos_reply_policy = Some(super::super::CosReplyPolicy::new(
+            46,
+            DscpSet::parse("34").unwrap(),
+            DscpSet::parse("none").unwrap(),
+            2,
+            true,
+        ));
+        let alternate = if ipv6 { "[::2]:4000" } else { "127.0.0.2:4000" }
+            .parse()
+            .unwrap();
+        tx.response.return_path_action = ReturnPathAction::AlternateAddress(alternate);
+        let reason = tx.try_send_next_with_mtu(
+            &ReflectorCounters::new(),
+            &RateLimiter::new(0),
+            |_, _, _| Ok(usize::MAX),
+            |_, target, _| {
+                assert_eq!(target, alternate, "nothing may reach the source");
+                Err(io::ErrorKind::NetworkUnreachable.into())
+            },
+        );
+        assert_eq!(reason, Err("cos_policy"));
+    }
+}
