@@ -65,15 +65,6 @@ pub(crate) const fn reflected_timestamp_offset(auth: bool) -> usize {
     }
 }
 
-/// Offset of the echoed Session-Sender Sequence Number in a reflected packet.
-pub(crate) const fn reflected_sender_seq_offset(auth: bool) -> usize {
-    if auth {
-        REFLECTED_AUTH_SENDER_SEQ_OFFSET
-    } else {
-        REFLECTED_UNAUTH_SENDER_SEQ_OFFSET
-    }
-}
-
 /// Offset of the echoed Session-Sender Timestamp in a reflected packet.
 pub(crate) const fn reflected_sender_timestamp_offset(auth: bool) -> usize {
     if auth {

@@ -445,8 +445,8 @@ fn apply_tx_corrections_updates_pending_t1() {
     tx_map.insert(0u32, (5u32, sent, 111)); // still pending
     tx_map.insert(1u32, (6u32, sent, 111)); // already answered
 
-    let mut pending = std::collections::HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         5u32,
         PendingPacket {
             ber_padding: None,
@@ -495,7 +495,7 @@ fn delayed_tx_reports_do_not_correct_a_reused_sequence() {
     use crate::hwtstamp::TxTimestampReport;
     let sent = Instant::now();
     let newer = sent + Duration::from_nanos(1);
-    let mut pending = HashMap::from([(
+    let mut pending = pending::PendingTable::from_probes([(
         7,
         PendingPacket {
             ber_padding: None,
@@ -854,7 +854,7 @@ fn test_create_extended_auth_packet_with_ssid() {
 
 #[test]
 fn unsolicited_msid_cannot_seed_the_reflector_latch() {
-    let mut pending = HashMap::from([(
+    let mut pending = pending::PendingTable::from_probes([(
         42,
         PendingPacket {
             ber_padding: None,
@@ -945,7 +945,7 @@ fn required_msid_rejects_unusable_reply_without_consuming_state() {
                     continue;
                 }
                 let key = HmacKey::new(vec![0xAB; 16]).unwrap();
-                let mut pending = HashMap::from([(
+                let mut pending = pending::PendingTable::from_probes([(
                     42,
                     PendingPacket {
                         ber_padding: None,
@@ -1721,8 +1721,8 @@ fn telemetry_control_decisions_do_not_depend_on_formatting() {
             }
             let mut data = vec![0; 44];
             tlvs.write_to(&mut data);
-            let mut pending = HashMap::new();
-            pending.insert(
+            let mut pending = pending::PendingTable::new(0);
+            pending.insert_probe(
                 0,
                 PendingPacket {
                     ber_padding: None,
@@ -2198,8 +2198,8 @@ fn test_process_response_acknowledges_access_report_state() {
     let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
     let buf = ext.to_bytes();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         1,
         PendingPacket {
             ber_padding: None,
@@ -2268,8 +2268,8 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
     let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, TlvList::new());
     let buf = ext.to_bytes();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         1,
         PendingPacket {
             ber_padding: None,
@@ -2327,7 +2327,7 @@ fn congestion_test_params() -> AimdParams {
 }
 
 fn congestion_process_response_ctx<'a>(
-    pending: &'a mut HashMap<u32, PendingPacket>,
+    pending: &'a mut pending::PendingTable,
     rtt_collector: &'a mut RttCollector,
     owd_collector: &'a mut OwdCollector,
     packets_received: &'a mut u64,
@@ -2392,8 +2392,8 @@ fn test_process_response_forward_path_ce_backs_off_congestion_controller() {
     let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
     let buf = ext.to_bytes();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         1,
         PendingPacket {
             ber_padding: None,
@@ -2451,8 +2451,8 @@ fn test_process_response_reverse_path_ce_backs_off_congestion_controller() {
     let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, TlvList::new());
     let buf = ext.to_bytes();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         2,
         PendingPacket {
             ber_padding: None,
@@ -2527,8 +2527,8 @@ fn test_process_response_clean_reply_recovers_congestion_controller() {
     let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
     let buf = ext.to_bytes();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         3,
         PendingPacket {
             ber_padding: None,
@@ -2589,8 +2589,8 @@ fn test_process_response_no_panic_when_congestion_inactive() {
     let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, TlvList::new());
     let buf = ext.to_bytes();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         4,
         PendingPacket {
             ber_padding: None,
@@ -2715,8 +2715,8 @@ fn test_access_report_loopback_acked_on_first_reply() {
 
     // --- Sender side: process the reflected reply exactly as the send
     // loop's receive path would ---
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         seq_num,
         PendingPacket {
             ber_padding: None,
@@ -3359,7 +3359,7 @@ fn check_clock_pair(
         data[96..112].copy_from_slice(&hmac);
     }
     for corrected in [false, true] {
-        let mut pending = HashMap::from([(
+        let mut pending = pending::PendingTable::from_probes([(
             7,
             PendingPacket {
                 ber_padding: None,
@@ -3499,8 +3499,8 @@ fn test_process_response_records_forward_one_way_delay() {
     };
     let buf = reflected.to_bytes();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         7,
         PendingPacket {
             ber_padding: None,
@@ -3557,7 +3557,7 @@ fn mismatched_ssid_preserves_measurement_and_control_state() {
             for policy in [ZeroSsidAction::Continue, ZeroSsidAction::Stop] {
                 let key = HmacKey::new(vec![0xAB; 16]).unwrap();
                 let t1 = generate_timestamp(ClockFormat::NTP);
-                let mut pending = HashMap::from([(
+                let mut pending = pending::PendingTable::from_probes([(
                     42,
                     PendingPacket {
                         ber_padding: None,
@@ -3643,7 +3643,7 @@ fn zero_ssid_policy_applies_in_every_reply_parser() {
         for extensions in [false, true] {
             for policy in [ZeroSsidAction::Continue, ZeroSsidAction::Stop] {
                 let key = HmacKey::new(vec![0xAB; 16]).unwrap();
-                let mut pending = HashMap::from([(
+                let mut pending = pending::PendingTable::from_probes([(
                     42,
                     PendingPacket {
                         ber_padding: None,
@@ -3684,7 +3684,7 @@ fn zero_ssid_policy_applies_in_every_reply_parser() {
                 assert_eq!(*ctx.packets_received, u64::from(accepted));
                 assert_eq!(ctx.pending.contains_key(&42), !accepted);
                 // Seeing a legacy zero must not disable subsequent SSID validation.
-                ctx.pending.insert(
+                ctx.pending.insert_probe(
                     43,
                     PendingPacket {
                         ber_padding: None,
@@ -3779,8 +3779,8 @@ fn test_zero_ssid_policy_stop_discards_reply_and_latches() {
     };
     let buf = reflected.to_bytes().to_vec();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         7,
         PendingPacket {
             ber_padding: None,
@@ -3855,8 +3855,8 @@ fn test_zero_ssid_policy_continue_still_accounts_the_reply() {
     };
     let buf = reflected.to_bytes().to_vec();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         7,
         PendingPacket {
             ber_padding: None,
@@ -3932,8 +3932,8 @@ fn test_zero_ssid_policy_inert_without_a_configured_ssid() {
     };
     let buf = reflected.to_bytes().to_vec();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         7,
         PendingPacket {
             ber_padding: None,
@@ -4011,8 +4011,8 @@ fn test_process_response_drops_packet_on_msid_mismatch() {
     let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
     let buf = ext.to_bytes();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         42,
         PendingPacket {
             ber_padding: None,
@@ -4094,8 +4094,8 @@ fn test_process_response_accepts_packet_on_msid_match() {
     let ext = ExtendedReflectedPacketUnauthenticated::with_tlvs(reflected, tlvs);
     let buf = ext.to_bytes();
 
-    let mut pending = HashMap::new();
-    pending.insert(
+    let mut pending = pending::PendingTable::new(0);
+    pending.insert_probe(
         42,
         PendingPacket {
             ber_padding: None,
@@ -4446,7 +4446,7 @@ fn tlv_validation_json_reports_real_reply_outcomes_in_both_modes() {
                 let mac = compute_packet_hmac(&key, &wire, AUTH_HMAC_OFFSET);
                 wire[AUTH_HMAC_OFFSET..AUTH_BASE_SIZE].copy_from_slice(&mac);
             }
-            let mut pending = HashMap::from([(
+            let mut pending = pending::PendingTable::from_probes([(
                 42,
                 PendingPacket {
                     ber_padding: None,
@@ -4559,7 +4559,7 @@ fn tlv_validation_excludes_base_hmac_failures_and_reports_unsigned_open_replies(
         if auth {
             wire[AUTH_HMAC_OFFSET] ^= 1;
         }
-        let mut pending = HashMap::from([(
+        let mut pending = pending::PendingTable::from_probes([(
             42,
             PendingPacket {
                 ber_padding: None,
@@ -4772,7 +4772,7 @@ fn congestion_recovery_requires_unambiguous_usable_cos() {
                         *wire.last_mut().unwrap() ^= 1;
                     }
                 }
-                let mut pending = HashMap::from([(
+                let mut pending = pending::PendingTable::from_probes([(
                     42,
                     PendingPacket {
                         ber_padding: None,

@@ -1,7 +1,7 @@
 //! One sender run: setup, the probe schedule, the final reply drain, and
 //! Access Report retransmissions (RFC 8972 §4.6).
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use super::schedule::{Schedule, SendTimeline};
 use super::*;
@@ -63,18 +63,9 @@ pub(super) struct SenderRun {
     error_estimate_wire: u16,
     hmac_key: Option<HmacKey>,
     sess: Session,
-    pending: HashMap<u32, PendingPacket>,
-    /// Only enabled for bounded retention. Successful-send ordinals preserve
-    /// age across timestamp ties and sequence wrap. Both indexes contain
-    /// exactly the live pending generations and are bounded by the same cap.
-    pending_order: BTreeMap<u64, (Instant, u32)>,
-    pending_generation: HashMap<u32, u64>,
-    pending_high_watermark: usize,
+    pending: super::pending::PendingTable,
     pending_evictions: u64,
     measurements: Measurements,
-    /// `(deadline, seq)` in send order, for O(1) loss expiry with lazy
-    /// deletion of answered probes.
-    expiry_queue: VecDeque<(Instant, u32)>,
     rtt_collector: RttCollector,
     owd_collector: OwdCollector,
     packets_sent: u64,
@@ -398,7 +389,6 @@ impl SenderRun {
         }
 
         let sess = Session::new(0);
-        let pending: HashMap<u32, PendingPacket> = HashMap::new();
         let mut measurements = Measurements::new(conf.reflected_control_count);
         if conf.cos {
             measurements.enable_ecn(conf.ecn, configured_egress_ecn);
@@ -407,9 +397,6 @@ impl SenderRun {
             conf.session_loss_threshold,
             Duration::from_secs(u64::from(conf.timeout)),
         ));
-        // Probes are sent in order, so their (deadline, seq) entries are already
-        // sorted. Answered probes are skipped lazily when they reach the front.
-        let expiry_queue: VecDeque<(Instant, u32)> = VecDeque::new();
         let rtt_collector = RttCollector::new();
         let owd_collector = OwdCollector::new();
         let packets_sent: u64 = 0;
@@ -810,13 +797,9 @@ impl SenderRun {
             error_estimate_wire,
             hmac_key,
             sess,
-            pending,
-            pending_order: BTreeMap::new(),
-            pending_generation: HashMap::new(),
-            pending_high_watermark: 0,
+            pending: super::pending::PendingTable::new(conf.max_pending_probes),
             pending_evictions: 0,
             measurements,
-            expiry_queue,
             rtt_collector,
             owd_collector,
             packets_sent,
@@ -1426,42 +1409,17 @@ impl SenderRun {
             send_timestamp,
             wire_timestamp: send_timestamp,
         };
-        // A reused sequence cannot represent both generations. Disclose its
-        // retirement even with an unlimited cap rather than silently dropping
-        // the older probe from final loss accounting.
-        if self.pending.remove(&seq).is_some() {
-            if self.conf.max_pending_probes != 0 {
-                let generation = self
-                    .pending_generation
-                    .remove(&seq)
-                    .expect("indexed generation");
-                self.pending_order
-                    .remove(&generation)
-                    .expect("indexed pending probe");
-            }
+        // Displaced probes are reported as lost even with an unlimited cap,
+        // never silently dropped from final loss accounting.
+        let displaced = self
+            .pending
+            .insert(seq, probe, self.packets_sent, self.timeout);
+        if displaced.sequence_reused {
             self.retire_pending("sequence reused");
         }
-        if self.conf.max_pending_probes != 0 {
-            if self.pending.len() >= self.conf.max_pending_probes as usize {
-                let (generation, (old_time, old_seq)) = self
-                    .pending_order
-                    .pop_first()
-                    .expect("indexed pending probe");
-                let old = self
-                    .pending
-                    .remove(&old_seq)
-                    .expect("indexed pending probe");
-                debug_assert_eq!(old.send_time, old_time);
-                let indexed = self.pending_generation.remove(&old_seq);
-                debug_assert_eq!(indexed, Some(generation));
-                self.retire_pending("limit reached");
-            }
-            self.pending_order
-                .insert(self.packets_sent, (send_time, seq));
-            self.pending_generation.insert(seq, self.packets_sent);
+        if displaced.limit_reached {
+            self.retire_pending("limit reached");
         }
-        self.pending.insert(seq, probe);
-        self.pending_high_watermark = self.pending_high_watermark.max(self.pending.len());
         // The ordinal follows the 32-bit Direct Measurement counter.
         self.measurements.sent(seq, probe, self.packets_sent as u32);
         // Pair this send's kernel OPT_ID with the sequence number so a later
@@ -1475,9 +1433,6 @@ impl SenderRun {
                 // TX timestamps stopped arriving; do not grow without bound.
                 self.tx_id_to_seq.clear();
             }
-        }
-        if !self.timeout.is_zero() && self.conf.max_pending_probes == 0 {
-            self.expiry_queue.push_back((send_time + self.timeout, seq));
         }
     }
 
@@ -1516,24 +1471,6 @@ impl SenderRun {
         reply_ecn: Option<u8>,
     ) {
         let conf = Arc::clone(&self.conf);
-        // Reply processing removes a pending record only after admission.
-        // Remember its generation so the bounded index never keeps answered
-        // records or accidentally removes another generation after wrap.
-        let echoed = crate::packets::reflected_sender_seq_offset(self.use_auth);
-        let candidate = if conf.max_pending_probes != 0 {
-            // Admission requires the full echo; never inspect stale buffer
-            // bytes or invent a sequence from a missing field.
-            self.recv_buf[..len]
-                .get(echoed..echoed + 4)
-                .and_then(|bytes| {
-                    let seq = u32::from_be_bytes(bytes.try_into().unwrap());
-                    self.pending_generation
-                        .get(&seq)
-                        .map(|&generation| (generation, seq))
-                })
-        } else {
-            None
-        };
         let mut ctx = SenderRecvContext {
             local_error_estimate: Some(self.error_estimate),
             measurements: Some(&mut self.measurements),
@@ -1566,12 +1503,6 @@ impl SenderRun {
             reply_ecn,
             &mut ctx,
         );
-        if let Some((generation, seq)) = candidate {
-            if !self.pending.contains_key(&seq) {
-                self.pending_order.remove(&generation);
-                self.pending_generation.remove(&seq);
-            }
-        }
     }
 
     /// Counts probes whose reply timeout has passed as lost. The queue is in
@@ -1581,37 +1512,10 @@ impl SenderRun {
     }
 
     fn expire_at(&mut self, now: Instant) {
-        if self.conf.max_pending_probes != 0 {
-            if !self.timeout.is_zero() {
-                while let Some((&generation, &(sent, seq))) = self.pending_order.first_key_value() {
-                    if sent + self.timeout > now {
-                        break;
-                    }
-                    self.pending_order.pop_first();
-                    let indexed = self.pending_generation.remove(&seq);
-                    debug_assert_eq!(indexed, Some(generation));
-                    self.pending.remove(&seq).expect("indexed pending probe");
-                    self.packets_lost += 1;
-                    self.observers.probes_lost(1);
-                }
-            }
-            return;
-        }
-        while let Some(&(deadline, seq)) = self.expiry_queue.front() {
-            if deadline > now {
-                break;
-            }
-            self.expiry_queue.pop_front();
-            // Answered probes were already removed from `pending`.
-            if self
-                .pending
-                .get(&seq)
-                .is_some_and(|p| p.send_time + self.timeout == deadline)
-            {
-                self.pending.remove(&seq);
-                self.packets_lost += 1;
-                self.observers.probes_lost(1);
-            }
+        let lost = self.pending.expire(now, self.timeout);
+        if lost > 0 {
+            self.packets_lost += u64::from(lost);
+            self.observers.probes_lost(lost);
         }
     }
 
@@ -1665,7 +1569,7 @@ impl SenderRun {
         let mut measurements = self.measurements.snapshot();
         measurements.pending_limit = self.conf.max_pending_probes;
         measurements.pending_probes = self.pending.len();
-        measurements.pending_high_watermark = self.pending_high_watermark;
+        measurements.pending_high_watermark = self.pending.high_watermark();
         measurements.pending_evictions = self.pending_evictions;
         self.rtt_collector
             .snapshot(self.packets_sent, self.packets_lost)
@@ -1693,7 +1597,7 @@ impl SenderRun {
 pub(super) fn apply_tx_corrections(
     reports: &[crate::hwtstamp::TxTimestampReport],
     tx_id_to_seq: &mut HashMap<u32, (u32, Instant, u64)>,
-    pending: &mut HashMap<u32, PendingPacket>,
+    pending: &mut super::pending::PendingTable,
 ) -> usize {
     let mut applied = 0;
     for report in reports {

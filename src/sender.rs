@@ -4,6 +4,7 @@ pub(crate) mod ecn;
 pub(crate) mod measurements;
 mod observer;
 mod packet;
+mod pending;
 mod run;
 mod schedule;
 pub(crate) mod session_state;
@@ -24,8 +25,10 @@ use measurements::{Measurements, ReplyKey, ReplyObservation};
 
 use telemetry::{FlagCounts, HmacStatus, TlvTelemetry};
 
+// Kernel TX-timestamp bookkeeping in `run` and its tests key by OPT_ID.
+#[cfg(all(feature = "hwtstamp", target_os = "linux"))]
+use std::collections::HashMap;
 use std::{
-    collections::{HashMap, VecDeque},
     net::SocketAddr,
     time::{Duration, Instant},
 };
@@ -97,7 +100,7 @@ struct SenderRecvContext<'a> {
     ber: Option<&'a mut BerCollector>,
     /// Configured remote timescale offset in seconds, removed after decoding.
     reflector_utc_offset: i32,
-    pending: &'a mut HashMap<u32, PendingPacket>,
+    pending: &'a mut pending::PendingTable,
     rtt_collector: &'a mut RttCollector,
     owd_collector: &'a mut OwdCollector,
     packets_received: &'a mut u64,
@@ -223,7 +226,7 @@ pub fn fuzz_reply(
     expect_msid: bool,
 ) {
     let now = Instant::now();
-    let mut pending = HashMap::new();
+    let mut pending = pending::PendingTable::new(0);
     let mut measurements = Measurements::new(3);
     // Seed a matching echo so fuzzing can reach measurement/control paths;
     // real admission (including mismatches/reuse) is covered by regressions.
@@ -239,7 +242,7 @@ pub fn fuzz_reply(
             send_timestamp: timestamp,
             wire_timestamp,
         };
-        pending.insert(seq, probe);
+        pending.insert(seq, probe, u64::from(seq), Duration::ZERO);
         measurements.sent(seq, probe, seq + 1);
     }
     let mut ber = BerCollector::new(

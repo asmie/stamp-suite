@@ -137,7 +137,7 @@ async fn reused_sequence_rejects_old_signed_echo_before_measurement_or_control_s
                     receive(&mut sender, &reflected(&old, auth, 1));
                     assert_eq!(sender.packets_received, 0, "stale echo consumed a newer probe: {ip} auth={auth} limit={limit} clock={clock:?}");
                     assert!(sender.pending.contains_key(&0));
-                    assert_eq!(sender.pending_order.len(), usize::from(limit != 0));
+                    assert_eq!(sender.pending.index_lens().0, usize::from(limit != 0));
                     assert_eq!(sender.latched_reflector_msid, None);
                     assert_eq!(
                         sender.access_report_state.as_ref().unwrap().outcome(),
@@ -156,7 +156,8 @@ async fn reused_sequence_rejects_old_signed_echo_before_measurement_or_control_s
                     assert_eq!(sender.packets_received, 1);
                     assert!(sender.pending.is_empty());
                     assert!(
-                        sender.pending_order.is_empty() && sender.pending_generation.is_empty()
+                        (sender.pending.index_lens().0 == 0)
+                            && (sender.pending.index_lens().1 == 0)
                     );
                     assert_eq!(sender.latched_reflector_msid, Some(9));
                     assert_eq!(
@@ -192,7 +193,7 @@ async fn retained_late_and_additional_copies_require_the_original_echo() {
             let request = probe(&mut sender, &peer).await;
             sender.timeout = Duration::from_secs(1);
             sender.expire_at(Instant::now() + Duration::from_secs(2));
-            assert!(sender.pending.is_empty() && sender.pending_order.is_empty());
+            assert!(sender.pending.is_empty() && (sender.pending.index_lens().0 == 0));
             let valid = reflected(&request, auth, 1);
             receive(&mut sender, &valid);
             let summary = sender.measurements.snapshot();

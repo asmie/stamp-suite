@@ -49,6 +49,7 @@ compatibility promise for the CLI, the configuration or the wire format.
 | `sender.rs` | Public entry points (`run_sender`, `run_sender_with_output`, `run_senders`), reply processing, and `fuzz_reply` for the fuzz target. |
 | `sender/run.rs` | One sender run: socket setup, probe schedule, final reply drain and Access Report retries. |
 | `sender/schedule.rs` | Probe spacing: periodic or Poisson. |
+| `sender/pending.rs` | `PendingTable`: probes awaiting a reply, retired by age under `--max-pending-probes` or expired after `--timeout`, with indexes kept in step on every removal. |
 | `sender/packet.rs` | Test packet and request TLV construction. |
 | `sender/socket.rs` | Sender socket options: egress TOS, attached IPv6 extension headers, route MTU and reply TOS reception. |
 | `sender/validate.rs` | Validation of reflected TLVs before any value is used. |

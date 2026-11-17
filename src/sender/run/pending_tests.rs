@@ -82,12 +82,12 @@ async fn sustained_loss_bounds_both_pending_structures_without_timed_expiry() {
             start + Duration::from_nanos(u64::from(seq)),
         );
         assert!(sender.pending.len() <= 7);
-        assert_eq!(sender.pending_order.len(), sender.pending.len());
-        assert_eq!(sender.pending_generation.len(), sender.pending.len());
+        assert_eq!(sender.pending.index_lens().0, sender.pending.len());
+        assert_eq!(sender.pending.index_lens().1, sender.pending.len());
     }
     sender.expire_at(start + Duration::from_secs(1_000_000));
     assert_eq!(sender.pending.len(), 7);
-    assert!(sender.expiry_queue.is_empty());
+    assert!((sender.pending.deadline_len() == 0));
     assert_eq!(sender.pending_evictions, 99_993);
     assert_eq!(sender.packets_lost, 99_993);
     let stats = sender
@@ -114,15 +114,15 @@ async fn replies_release_slots_but_invalid_and_late_or_duplicate_replies_do_not(
     }
     reply(&mut sender, 3, false);
     assert_eq!(sender.pending.len(), 2);
-    assert_eq!(sender.pending_order.len(), 2);
+    assert_eq!(sender.pending.index_lens().0, 2);
     reply(&mut sender, 1, true); // retained measurement history, retired pending context
     let out = crate::stats::StatsOutput::new(crate::stats::OutputFormat::Json).unwrap();
     sender.on_reply(&out, 44, None, None); // exact duplicate bytes
     assert_eq!(sender.packets_received, 0);
-    assert_eq!(sender.pending_order.len(), 2);
+    assert_eq!(sender.pending.index_lens().0, 2);
     reply(&mut sender, 2, true);
     assert_eq!(sender.packets_received, 1);
-    assert_eq!(sender.pending_order.len(), 1);
+    assert_eq!(sender.pending.index_lens().0, 1);
     record(&mut sender, 4, Instant::now());
     assert_eq!(sender.pending_evictions, 1);
     assert!(sender.pending.contains_key(&3) && sender.pending.contains_key(&4));
@@ -144,12 +144,12 @@ async fn short_reply_cannot_consume_pending_state_or_read_previous_buffer_bytes(
     let out = crate::stats::StatsOutput::new(crate::stats::OutputFormat::Json).unwrap();
     sender.on_reply(&out, 0, None, None);
     assert!(sender.pending.contains_key(&0) && sender.pending.contains_key(&99));
-    assert_eq!(sender.pending_order.len(), 2);
+    assert_eq!(sender.pending.index_lens().0, 2);
     assert_eq!(sender.measurements.snapshot().mismatched_replies, 1);
     reply(&mut sender, 0, true);
     assert!(!sender.pending.contains_key(&0));
-    assert_eq!(sender.pending_order.len(), 1);
-    assert_eq!(sender.pending_order.first_key_value().unwrap().1 .1, 99);
+    assert_eq!(sender.pending.index_lens().0, 1);
+    assert_eq!(sender.pending.oldest_seq().unwrap(), 99);
 }
 
 #[tokio::test]
@@ -165,11 +165,11 @@ async fn wrap_and_reused_sequences_keep_the_order_and_loss_accounting_consistent
     assert!(sender.pending.contains_key(&0) && sender.pending.contains_key(&1));
     assert!(!sender.pending.contains_key(&u32::MAX));
     record(&mut sender, 1, start);
-    assert_eq!(sender.pending_order.len(), 2);
+    assert_eq!(sender.pending.index_lens().0, 2);
     assert_eq!(sender.pending_evictions, 3);
     assert_eq!(sender.packets_lost, 3);
-    assert_eq!(*sender.pending_order.last_key_value().unwrap().0, 5);
-    assert_eq!(sender.pending_generation.len(), 2);
+    assert_eq!(sender.pending.newest_ordinal().unwrap(), 5);
+    assert_eq!(sender.pending.index_lens().1, 2);
 }
 
 #[tokio::test]
@@ -185,9 +185,9 @@ async fn bounded_expiry_only_expires_retained_generations_at_their_actual_deadli
     assert_eq!(sender.pending.len(), 1);
     assert!(sender.pending.contains_key(&7));
     sender.expire_at(start + Duration::from_millis(1002));
-    assert!(sender.pending.is_empty() && sender.pending_order.is_empty());
-    assert!(sender.pending_generation.is_empty());
-    assert!(sender.expiry_queue.is_empty());
+    assert!(sender.pending.is_empty() && (sender.pending.index_lens().0 == 0));
+    assert!((sender.pending.index_lens().1 == 0));
+    assert!((sender.pending.deadline_len() == 0));
     assert_eq!(sender.packets_lost, 3);
     assert_eq!(sender.pending_evictions, 1);
 }
@@ -199,7 +199,7 @@ async fn default_retention_stays_unlimited_and_stale_expiry_cannot_remove_a_reus
         record(&mut sender, seq, Instant::now());
     }
     assert_eq!(sender.pending.len(), 5000);
-    assert!(sender.pending_order.is_empty() && sender.expiry_queue.is_empty());
+    assert!((sender.pending.index_lens().0 == 0) && (sender.pending.deadline_len() == 0));
     assert_eq!(sender.pending_evictions, 0);
     let (mut sender, _peer) = run(0, 1).await;
     let start = Instant::now();

@@ -94,8 +94,8 @@ async fn refused_probes_share_the_send_failure_budget_without_pending_state() {
     }
     assert_eq!(sender.packets_sent, 0);
     assert!(sender.pending.is_empty());
-    assert!(sender.pending_order.is_empty());
-    assert!(sender.pending_generation.is_empty());
+    assert!((sender.pending.index_lens().0 == 0));
+    assert!((sender.pending.index_lens().1 == 0));
     assert!(
         tokio::time::timeout(Duration::from_millis(10), peer.recv_from(&mut [0; 256]))
             .await
