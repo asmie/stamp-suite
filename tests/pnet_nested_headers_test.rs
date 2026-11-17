@@ -1,5 +1,7 @@
 //! Nested IP capture through the actual pnet receiver and independent bytes.
 #![cfg(all(target_os = "linux", feature = "ttl-pnet", not(feature = "ttl-nix")))]
+#[path = "common/case.rs"]
+mod case;
 #[path = "common/hops.rs"]
 mod hops;
 #[path = "common/inet.rs"]
@@ -8,12 +10,15 @@ mod inet;
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
 
+use case::Case;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     time::Duration,
 };
-const KEY: [u8; 16] = [0xab; 16];
+use wire_mode::{Mode, KEY};
 
 fn frame(value: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0x80, 247];
@@ -21,23 +26,13 @@ fn frame(value: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(value);
     bytes
 }
-fn request(mode: u8, seq: u32, lengths: &[usize]) -> Vec<u8> {
-    let base = if mode == 2 { 112 } else { 44 };
-    let mut bytes = vec![0; base];
-    bytes[..4].copy_from_slice(&seq.to_be_bytes());
-    bytes[if mode == 2 { 25 } else { 13 }] = 1;
+fn request(mode: Mode, seq: u32, lengths: &[usize]) -> Vec<u8> {
+    let mut bytes = mode.request(seq);
     for len in lengths {
         bytes.extend(frame(&vec![0; *len]));
     }
-    if mode != 0 {
-        let covered = [&bytes[..4], &bytes[base..]].concat();
-        bytes.extend_from_slice(&[0x80, 8, 0, 16]);
-        bytes.extend_from_slice(&wire_hmac::digest(&KEY, &covered));
-    }
-    if mode == 2 {
-        let digest = wire_hmac::digest(&KEY, &bytes[..96]);
-        bytes[96..112].copy_from_slice(&digest);
-    }
+    mode.append_hmac_tlv(&mut bytes);
+    mode.seal(&mut bytes);
     bytes
 }
 
@@ -138,7 +133,7 @@ fn inject(version: u8, wire: &[u8]) {
     assert_eq!(socket.send_to(wire, &target.into()).unwrap(), wire.len());
 }
 
-fn verify(peer: &UdpSocket, port: u16, mode: u8, seq: u32, headers: &[Vec<u8>]) {
+fn verify(peer: &UdpSocket, port: u16, mode: Mode, seq: u32, headers: &[Vec<u8>]) {
     peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     let (reply, source, hops) = hops::receive(peer);
     assert_eq!(
@@ -146,21 +141,17 @@ fn verify(peer: &UdpSocket, port: u16, mode: u8, seq: u32, headers: &[Vec<u8>]) 
         SocketAddr::new(peer.local_addr().unwrap().ip(), port)
     );
     assert_eq!(hops, 255);
-    let base = if mode == 2 { 112 } else { 44 };
-    let offset = if mode == 2 { 48 } else { 24 };
+    let base = mode.base();
+    let offset = mode.sender_sequence();
     assert_eq!(&reply[offset..offset + 4], &seq.to_be_bytes());
-    assert_eq!(
-        reply[if mode == 2 { 80 } else { 40 }],
-        37,
-        "innermost hop count"
-    );
+    assert_eq!(reply[mode.sender_ttl()], 37, "innermost hop count");
     let mut expected = Vec::new();
     for header in headers {
         let mut tlv = frame(header);
         tlv[0] = 0;
         expected.extend(tlv);
     }
-    if mode != 0 {
+    if mode.keyed() {
         let covered = [&reply[..4], &expected].concat();
         expected.extend_from_slice(&[0, 8, 0, 16]);
         expected.extend_from_slice(&wire_hmac::digest(&KEY, &covered));
@@ -170,9 +161,7 @@ fn verify(peer: &UdpSocket, port: u16, mode: u8, seq: u32, headers: &[Vec<u8>]) 
         expected,
         "outer-to-inner fixed header bytes must survive capture and dispatch"
     );
-    if mode == 2 {
-        assert_eq!(&reply[96..112], &wire_hmac::digest(&KEY, &reply[..96]));
-    }
+    mode.assert_sealed(&reply);
 }
 
 fn quiet(peer: &UdpSocket) {
@@ -205,8 +194,9 @@ fn actual_nested_capture_reflects_outer_to_inner_and_rejects_bad_checksums_and_d
             .unwrap()
             .success());
     }
-    for mode in 0..3 {
+    for mode in Mode::ALL {
         for strict in [false, true] {
+            let _case = Case::new(format!("{mode:?} strict={strict}"));
             let mut command = reflector::Reflector::command("::1");
             command.args([
                 "--interface",
@@ -218,15 +208,9 @@ fn actual_nested_capture_reflects_outer_to_inner_and_rejects_bad_checksums_and_d
                 "--reflect-fixed-header-from",
                 "::1",
             ]);
-            if mode != 0 {
-                command.args([
-                    "--hmac-key",
-                    "abababababababababababababababab",
-                    "--verify-tlv-hmac",
-                ]);
-            }
-            if mode == 2 {
-                command.args(["--auth-mode", "A"]);
+            command.args(mode.key_args());
+            if mode.keyed() {
+                command.arg("--verify-tlv-hmac");
             }
             if strict {
                 command.arg("--strict-packets");

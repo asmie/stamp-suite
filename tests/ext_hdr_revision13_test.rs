@@ -1,6 +1,8 @@
 //! Independent loopback peer for draft-ietf-ippm-stamp-ext-hdr-26 rules: source
 //! ports, TTL/Hop Limit 255 and session state notifications.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "common/case.rs"]
+mod case;
 #[path = "common/child.rs"]
 mod child;
 #[path = "common/hops.rs"]
@@ -10,12 +12,16 @@ mod hops;
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
+use case::Case;
 use child::ChildProcess;
 use hops::{receive, socket};
 use std::{
     process::{Command, Stdio},
     time::Duration,
 };
+use wire_mode::Mode;
 
 /// Long enough for the slowest sender here: four Access Report attempts with
 /// a one-second timer, plus the final reply wait.
@@ -32,7 +38,8 @@ fn reflected(request: &[u8]) -> Vec<u8> {
 #[test]
 fn sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
+            let _case = Case::new(format!("{ip} {mode:?}"));
             let peer = socket(ip);
             let local_reflector = socket(ip); // Held throughout both attempts.
             let command = |port: u16| {
@@ -60,12 +67,7 @@ fn sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys()
                     .env("TOKIO_WORKER_THREADS", "2")
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
-                if mode != 0 {
-                    command.args(["--hmac-key", "abababababababababababababababab"]);
-                }
-                if mode == 2 {
-                    command.args(["--auth-mode", "A"]);
-                }
+                command.args(mode.key_args());
                 command
             };
             let output =
@@ -89,12 +91,7 @@ fn sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys()
             assert_eq!(hops, 255);
             assert_ne!(source.port(), local_reflector.local_addr().unwrap().port());
             assert_ne!(source.port(), peer.local_addr().unwrap().port());
-            if mode == 2 {
-                assert_eq!(
-                    &request[96..112],
-                    &wire_hmac::digest(&[0xab; 16], &request[..96])
-                );
-            }
+            mode.assert_sealed(&request);
             let output = process.finish(EXIT_TIMEOUT);
             assert!(
                 output.status.success(),
@@ -171,16 +168,12 @@ fn sender_random_ports_hops_and_state_notifications_over_both_families() {
 #[cfg(any(feature = "ttl-nix", not(feature = "ttl-pnet")))]
 fn reflector_transmits_255_and_accepts_lower_received_hops() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
+            let _case = Case::new(format!("{ip} {mode:?}"));
             let peer = socket(ip);
             let mut command = reflector::Reflector::command(ip);
             command.args(["--hwtstamp", "off"]);
-            if mode != 0 {
-                command.args(["--hmac-key", "abababababababababababababababab"]);
-            }
-            if mode == 2 {
-                command.args(["--auth-mode", "A"]);
-            }
+            command.args(mode.key_args());
             let child = reflector::Reflector::spawn(command).unwrap();
             let sock = socket2::SockRef::from(&peer);
             if ip.contains(':') {
@@ -188,24 +181,14 @@ fn reflector_transmits_255_and_accepts_lower_received_hops() {
             } else {
                 sock.set_ttl_v4(37).unwrap();
             }
-            let mut request = vec![0; if mode == 2 { 112 } else { 44 }];
-            request[..4].copy_from_slice(&42u32.to_be_bytes());
-            request[if mode == 2 { 25 } else { 13 }] = 1;
-            if mode == 2 {
-                let digest = wire_hmac::digest(&[0xab; 16], &request[..96]);
-                request[96..112].copy_from_slice(&digest);
-            }
+            let mut request = mode.request(42);
+            mode.seal(&mut request);
             peer.send_to(&request, child.address).unwrap();
             let (reply, source, hops) = receive(&peer);
             assert_eq!(source, child.address);
             assert_eq!(hops, 255);
-            assert_eq!(reply[if mode == 2 { 80 } else { 40 }], 37);
-            if mode == 2 {
-                assert_eq!(
-                    &reply[96..112],
-                    &wire_hmac::digest(&[0xab; 16], &reply[..96])
-                );
-            }
+            assert_eq!(reply[mode.sender_ttl()], 37);
+            mode.assert_sealed(&reply);
         }
     }
 }

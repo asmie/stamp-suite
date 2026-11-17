@@ -4,12 +4,16 @@
     any(feature = "ttl-nix", not(feature = "ttl-pnet"))
 ))]
 
+#[path = "common/case.rs"]
+mod case;
 #[path = "common/inet.rs"]
 mod inet;
 #[path = "common/receiver.rs"]
 mod receiver_fixture;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
 
 use clap::Parser;
 use stamp_suite::{configuration::Configuration, session::SessionSummary};
@@ -19,7 +23,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const KEY: [u8; 16] = [0xab; 16];
+use case::Case;
+use wire_mode::Mode;
 static NAMESPACE: Mutex<()> = Mutex::new(());
 
 fn namespace() -> std::sync::MutexGuard<'static, ()> {
@@ -41,19 +46,19 @@ fn namespace() -> std::sync::MutexGuard<'static, ()> {
 struct Peer {
     receiver: receiver_fixture::Receiver,
     socket: UdpSocket,
-    mode: u8,
+    mode: Mode,
 }
 
 impl Peer {
-    fn start(mode: u8) -> Self {
+    fn start(mode: Mode) -> Self {
         Self::start_with_validation(mode, false)
     }
 
-    fn start_with_validation(mode: u8, validate: bool) -> Self {
+    fn start_with_validation(mode: Mode, validate: bool) -> Self {
         Self::start_with_policies(mode, validate, false)
     }
 
-    fn start_with_policies(mode: u8, validate: bool, framing: bool) -> Self {
+    fn start_with_policies(mode: Mode, validate: bool, framing: bool) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -78,12 +83,7 @@ impl Peer {
                 "--hwtstamp".into(),
                 "off".into(),
             ];
-            if mode != 0 {
-                args.extend(["--hmac-key".into(), hex::encode(KEY)]);
-            }
-            if mode == 2 {
-                args.extend(["--auth-mode".into(), "A".into()]);
-            }
+            args.extend(mode.key_args().iter().map(|arg| arg.to_string()));
             if validate {
                 args.push("--validate-base-fields".into());
             }
@@ -100,8 +100,8 @@ impl Peer {
     }
 
     fn packet(&self, seq: u32, ber: bool) -> Vec<u8> {
-        let base = if self.mode == 2 { 112 } else { 44 };
-        let timestamp = if self.mode == 2 { 16 } else { 4 };
+        let base = self.mode.base();
+        let timestamp = self.mode.timestamp();
         let mut packet = vec![0; base];
         packet[..4].copy_from_slice(&seq.to_be_bytes());
         // An independently encoded, representable NTP timestamp; no wall-clock
@@ -109,18 +109,11 @@ impl Peer {
         packet[timestamp..timestamp + 8].copy_from_slice(&0xeed0000080000000u64.to_be_bytes());
         packet[timestamp + 9] = 1; // nonzero Error Estimate multiplier
         packet[timestamp + 10..timestamp + 12].copy_from_slice(&42u16.to_be_bytes());
-        if self.mode == 2 {
-            let digest = wire_hmac::digest(&KEY, &packet[..96]);
-            packet[96..112].copy_from_slice(&digest);
-        }
+        self.mode.seal(&mut packet);
         if ber {
             packet.extend_from_slice(&[0x80, 243, 0, 8]);
             packet.extend_from_slice(&[0; 8]);
-            if self.mode != 0 {
-                let digest = wire_hmac::digest(&KEY, &[&packet[..4], &packet[base..]].concat());
-                packet.extend_from_slice(&[0x80, 8, 0, 16]);
-                packet.extend_from_slice(&digest);
-            }
+            self.mode.append_hmac_tlv(&mut packet);
             // Padding follows HMAC and is deliberately outside its coverage.
             packet.extend_from_slice(&[0x80, 1, 0, 8, 0xff, 0, 0xff, 0, 0xff, 0, 0xff, 0]);
         }
@@ -151,7 +144,7 @@ impl Peer {
         let mut reply = [0; 2048];
         let (len, source) = self.socket.recv_from(&mut reply).unwrap();
         assert_eq!(source, self.receiver.address);
-        let (sequence, timestamp, estimate, request_timestamp) = if self.mode == 2 {
+        let (sequence, timestamp, estimate, request_timestamp) = if self.mode.authenticated() {
             (48, 64, 72, 16)
         } else {
             (24, 28, 36, 4)
@@ -207,7 +200,8 @@ impl Peer {
 #[ignore = "requires a private Linux network namespace and raw IPv4 socket"]
 fn zero_checksum_framing_admission_preserves_session_state() {
     let _namespace = namespace();
-    for mode in 0..3 {
+    for mode in Mode::ALL {
+        let _case = Case::new(format!("{mode:?}"));
         let peer = Peer::start_with_policies(mode, true, true);
         let mut malformed = vec![vec![0x80], vec![0x80, 250, 0, 2, 0]];
         for (kind, prefix) in [(2, 4), (3, 4), (10, 0), (12, 8), (243, 8)] {
@@ -234,16 +228,13 @@ fn zero_checksum_framing_admission_preserves_session_state() {
             // The rejected sequence remains usable; normal BER and signed
             // replies still work when the framing policy is enabled.
             let response = peer.exchange(&valid);
-            let base = if mode == 2 { 112 } else { 44 };
+            let base = mode.base();
             assert_eq!(&response[base..base + 4], &[0, 243, 0, 8]);
-            if mode == 2 {
-                assert_eq!(&response[96..112], wire_hmac::digest(&KEY, &response[..96]));
-            }
-            if mode != 0 {
-                let covered = [&response[..4], &response[base..base + 12]].concat();
+            mode.assert_sealed(&response);
+            if mode.keyed() {
                 assert_eq!(
                     &response[base + 16..base + 32],
-                    wire_hmac::digest(&KEY, &covered)
+                    mode.tlv_digest(&response[..base + 12])
                 );
             }
         }
@@ -361,7 +352,8 @@ fn inject(source: SocketAddr, destination: SocketAddr, payload: &[u8], original:
 #[ignore = "requires a private network namespace and CAP_NET_RAW"]
 fn zero_checksum_padding_errors_survive_kernel_checks_and_preserve_hmac() {
     let _namespace = namespace();
-    for mode in 0..=2 {
+    for mode in Mode::ALL {
+        let _case = Case::new(format!("{mode:?}"));
         let peer = Peer::start(mode);
         let clean = peer.packet(0, true);
         // Positive nonzero-checksum control proves that the raw checksum oracle works.
@@ -409,7 +401,7 @@ fn zero_checksum_padding_errors_survive_kernel_checks_and_preserve_hmac() {
             "kernel must discard a nonzero-checksum packet with changed padding"
         );
         let reply = peer.exchange(&corrupt);
-        let base = if mode == 2 { 112 } else { 44 };
+        let base = mode.base();
         assert_eq!(
             &reply[base..base + 12],
             &[0, 243, 0, 8, 0, 0, 0, 4, 0, 0, 0, 4]
@@ -418,17 +410,12 @@ fn zero_checksum_padding_errors_survive_kernel_checks_and_preserve_hmac() {
             &reply[reply.len() - 8..],
             &[0xff, 0, 0xff, 0, 0xff, 0, 0xff, 0]
         );
-        if mode != 0 {
+        if mode.keyed() {
             let at = base + 12;
             assert_eq!(&reply[at..at + 4], &[0, 8, 0, 16]);
-            assert_eq!(
-                &reply[at + 4..at + 20],
-                &wire_hmac::digest(&KEY, &[&reply[..4], &reply[base..at]].concat())
-            );
+            assert_eq!(&reply[at + 4..at + 20], &mode.tlv_digest(&reply[..at]));
         }
-        if mode == 2 {
-            assert_eq!(&reply[96..112], &wire_hmac::digest(&KEY, &reply[..96]));
-        }
+        mode.assert_sealed(&reply);
         assert_eq!(peer.summary().packets_received, 2);
         peer.receiver.stop().unwrap();
     }
@@ -438,12 +425,13 @@ fn zero_checksum_padding_errors_survive_kernel_checks_and_preserve_hmac() {
 #[ignore = "requires a private network namespace and CAP_NET_RAW"]
 fn zero_checksum_strict_and_provisioned_rejections_precede_session_mutation() {
     let _namespace = namespace();
-    for mode in [0, 2] {
+    for mode in [Mode::Open, Mode::Authenticated] {
+        let _case = Case::new(format!("{mode:?}"));
         let peer = Peer::start(mode);
         let valid = peer.packet(0, false);
         peer.reject(&peer.socket, &valid[..valid.len() - 1]);
         let mut wrong_ssid = valid.clone();
-        wrong_ssid[if mode == 2 { 27 } else { 15 }] ^= 1;
+        wrong_ssid[mode.ssid() + 1] ^= 1;
         peer.reject(&peer.socket, &wrong_ssid);
         let stranger = UdpSocket::bind("127.0.0.1:0").unwrap();
         peer.reject(&stranger, &valid);
@@ -467,7 +455,7 @@ fn zero_checksum_strict_and_provisioned_rejections_precede_session_mutation() {
 #[ignore = "requires a private network namespace and CAP_NET_RAW"]
 fn zero_checksum_authenticated_base_corruption_does_not_advance_session() {
     let _namespace = namespace();
-    let peer = Peer::start(2);
+    let peer = Peer::start(Mode::Authenticated);
     peer.exchange(&peer.packet(0, false));
     let before = peer.summary();
     let next = peer.packet(1, false);
@@ -486,13 +474,14 @@ fn zero_checksum_authenticated_base_corruption_does_not_advance_session() {
 #[ignore = "requires a private network namespace and CAP_NET_RAW"]
 fn zero_checksum_base_field_policy_rejects_validly_signed_invalid_fields() {
     let _namespace = namespace();
-    for mode in 0..=2 {
+    for mode in Mode::ALL {
+        let _case = Case::new(format!("{mode:?}"));
         let peer = Peer::start_with_validation(mode, true);
         for sequence in [0, 1] {
             let valid = peer.packet(sequence, true);
             for bad_ptp in [false, true] {
                 let mut invalid = valid.clone();
-                let estimate = if mode == 2 { 24 } else { 12 };
+                let estimate = mode.error_estimate();
                 if bad_ptp {
                     // The NTP fraction 0x80000000 is outside PTP's nanosecond
                     // range. Switching only Z makes the timestamp invalid.
@@ -500,10 +489,7 @@ fn zero_checksum_base_field_policy_rejects_validly_signed_invalid_fields() {
                 } else {
                     invalid[estimate + 1] = 0;
                 }
-                if mode == 2 {
-                    let digest = wire_hmac::digest(&KEY, &invalid[..96]);
-                    invalid[96..112].copy_from_slice(&digest);
-                }
+                mode.seal(&mut invalid);
                 // Extension coverage excludes these base fields: both base
                 // and extension HMACs remain valid when configured.
                 let before = (sequence != 0).then(|| peer.summary());

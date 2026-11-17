@@ -3,12 +3,15 @@
 mod child;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
 use child::ChildProcess;
 use std::{
     net::UdpSocket,
     process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use wire_mode::Mode;
 
 struct Sender(ChildProcess);
 impl Sender {
@@ -323,8 +326,8 @@ fn sender_validates_return_path_children_before_consuming_extension_values() {
 #[test]
 fn sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
-            let auth = mode == 2;
+        for mode in Mode::ALL {
+            let auth = mode.authenticated();
             let peer = UdpSocket::bind((ip, 0)).unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut extra = vec![
@@ -338,7 +341,7 @@ fn sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear() {
                 "1",
                 "--follow-up-telemetry",
             ];
-            if mode == 1 {
+            if mode == Mode::Keyed {
                 extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
             }
             let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
@@ -407,14 +410,14 @@ fn sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear() {
             kinds.sort_unstable();
             assert_eq!(
                 kinds,
-                if mode == 0 {
+                if mode == Mode::Open {
                     (1..=7).collect::<Vec<_>>()
                 } else {
                     (1..=8).collect()
                 }
             );
             let mut response = reply_with_extensions(request, auth, &echo);
-            if mode == 1 {
+            if mode == Mode::Keyed {
                 let digest = sign(&[&response[..4], &response[base..]]);
                 response.extend_from_slice(&[0, 8, 0, 16]);
                 response.extend_from_slice(&digest);
@@ -430,12 +433,12 @@ fn sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear() {
 #[test]
 fn sender_direct_measurement_counts_actual_probes_and_zeroes_peer_fields() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
-            let auth = mode == 2;
+        for mode in Mode::ALL {
+            let auth = mode.authenticated();
             let peer = UdpSocket::bind((ip, 0)).unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut extra = vec!["--timestamp-info"];
-            if mode == 1 {
+            if mode == Mode::Keyed {
                 extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
             }
             let sender = Sender::start_profile(&peer, auth, 3, 1, true, &extra);
@@ -485,7 +488,7 @@ fn sender_direct_measurement_counts_actual_probes_and_zeroes_peer_fields() {
 #[test]
 fn sender_cos_fields_and_automatic_ect_response_reach_the_wire() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for (include_cos, ecn) in [(false, 0u8), (true, 0), (true, 1), (true, 2), (true, 3)] {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
                 peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -494,10 +497,10 @@ fn sender_cos_fields_and_automatic_ect_response_reach_the_wire() {
                 if include_cos {
                     extra.push("--cos");
                 }
-                if mode == 1 {
+                if mode == Mode::Keyed {
                     extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
                 }
-                let auth = mode == 2;
+                let auth = mode.authenticated();
                 let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
                 let mut request = [0; 2048];
                 let (length, source) = peer.recv_from(&mut request).unwrap();
@@ -534,7 +537,7 @@ fn sender_cos_fields_and_automatic_ect_response_reach_the_wire() {
                     auth,
                     &[0, 4, 0, 4, 184, 12, (ecn << 6) | 0x30, 0],
                 );
-                if mode == 1 {
+                if mode == Mode::Keyed {
                     let digest = sign(&[&response[..4], &response[base..]]);
                     response.extend_from_slice(&[0, 8, 0, 16]);
                     response.extend_from_slice(&digest);
@@ -714,15 +717,15 @@ fn ipv6_authenticated_directional_counter_window() {
 #[test]
 fn sender_holds_ecn_backoff_until_usable_non_ce_feedback_returns() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for case in ["clean", "missing", "bad_hmac", "duplicate"] {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
                 peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut extra = vec!["--cos", "--ecn", "2", "--ecn-recovery-step", "10"];
-                if mode == 1 {
+                if mode == Mode::Keyed {
                     extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
                 }
-                let auth = mode == 2;
+                let auth = mode.authenticated();
                 let sender = Sender::start_profile(&peer, auth, 3, 1, false, &extra);
                 for index in 0..3 {
                     let mut request = [0; 2048];
@@ -740,7 +743,7 @@ fn sender_holds_ecn_backoff_until_usable_non_ce_feedback_returns() {
                     }
                     let mut response = reply_with_extensions(&request[..length], auth, &tail);
                     let base = if auth { 112 } else { 44 };
-                    if !auth && (mode == 1 || (index == 1 && case == "bad_hmac")) {
+                    if !auth && (mode == Mode::Keyed || (index == 1 && case == "bad_hmac")) {
                         let digest = sign(&[&response[..4], &response[base..]]);
                         response.extend_from_slice(&[0, 8, 0, 16]);
                         response.extend_from_slice(&digest);
@@ -751,13 +754,16 @@ fn sender_holds_ecn_backoff_until_usable_non_ce_feedback_returns() {
                     peer.send_to(&response, source).unwrap();
                 }
                 let stats = sender.finish();
-                assert_eq!(stats["packets_received"], 3, "{ip} mode={mode} case={case}");
+                assert_eq!(
+                    stats["packets_received"], 3,
+                    "{ip} mode={mode:?} case={case}"
+                );
                 assert_eq!(stats["congestion"]["ce_replies"], 1);
                 assert_eq!(stats["congestion"]["backoffs_applied"], 1);
                 assert_eq!(
                     stats["congestion"]["current_interval_ms"].as_f64().unwrap(),
                     if case == "clean" { 20.0 } else { 30.0 },
-                    "{ip} mode={mode} case={case}"
+                    "{ip} mode={mode:?} case={case}"
                 );
             }
         }
@@ -767,7 +773,7 @@ fn sender_holds_ecn_backoff_until_usable_non_ce_feedback_returns() {
 #[test]
 fn near_unity_ce_factors_do_not_stall_sender_backoff() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for (delay, factor, base_ms) in [
                 ("1us", "1.0001", 0.001),
                 ("100", "1.0000000000000002", 100.0),
@@ -783,16 +789,16 @@ fn near_unity_ce_factors_do_not_stall_sender_backoff() {
                     "--ecn-backoff-factor",
                     factor,
                 ];
-                if mode == 1 {
+                if mode == Mode::Keyed {
                     extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
                 }
-                let auth = mode == 2;
+                let auth = mode.authenticated();
                 let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
                 let mut request = [0; 2048];
                 let (length, source) = peer.recv_from(&mut request).unwrap();
                 let mut response =
                     reply_with_extensions(&request[..length], auth, &[0, 4, 0, 4, 0, 12, 0xb0, 0]);
-                if mode == 1 {
+                if mode == Mode::Keyed {
                     let digest = sign(&[&response[..4], &response[44..]]);
                     response.extend_from_slice(&[0, 8, 0, 16]);
                     response.extend_from_slice(&digest);
@@ -805,7 +811,7 @@ fn near_unity_ce_factors_do_not_stall_sender_backoff() {
                 let interval = stats["congestion"]["current_interval_ms"].as_f64().unwrap();
                 assert!(
                     (interval - base_ms - 0.000001).abs() < 1e-12,
-                    "{ip} mode={mode} factor={factor}: {interval}"
+                    "{ip} mode={mode:?} factor={factor}: {interval}"
                 );
             }
         }
@@ -897,7 +903,7 @@ fn incomplete_retry_bursts_keep_the_send_based_timeout_after_ack_or_abort() {
 #[test]
 fn access_report_acknowledgement_keeps_later_retry_burst_copies() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for retry_during_drain in [false, true] {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
                 peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -916,14 +922,14 @@ fn access_report_acknowledgement_keeps_later_retry_burst_copies() {
                     "--access-report-retries",
                     "1",
                 ];
-                if mode == 1 {
+                if mode == Mode::Keyed {
                     extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
                 }
-                let auth = mode == 2;
+                let auth = mode.authenticated();
                 let sender = Sender::start_profile(&peer, auth, 1, 3, false, &extra);
                 let encode = |request: &[u8], tail: &[u8]| {
                     let mut response = reply_with_extensions(request, auth, tail);
-                    if mode == 1 && !tail.is_empty() {
+                    if mode == Mode::Keyed && !tail.is_empty() {
                         let digest = sign(&[&response[..4], &response[44..]]);
                         response.extend_from_slice(&[0, 8, 0, 16]);
                         response.extend_from_slice(&digest);
@@ -987,7 +993,7 @@ fn access_report_acknowledgement_keeps_later_retry_burst_copies() {
                 let measurements = &stats["measurements"];
                 assert_eq!(
                     measurements["unique_replies"], 6,
-                    "{ip} mode={mode} drain={retry_during_drain}: {stats}"
+                    "{ip} mode={mode:?} drain={retry_during_drain}: {stats}"
                 );
                 assert_eq!(measurements["additional_replies"], 4);
                 assert_eq!(measurements["duplicate_replies"], 1);
@@ -1001,7 +1007,7 @@ fn access_report_acknowledgement_keeps_later_retry_burst_copies() {
 #[test]
 fn access_report_retries_during_pacing_preserve_scheduled_count_and_duration() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             let peer = UdpSocket::bind((ip, 0)).unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut extra = vec![
@@ -1018,10 +1024,10 @@ fn access_report_retries_during_pacing_preserve_scheduled_count_and_duration() {
                 "--access-report-retries",
                 "2",
             ];
-            if mode == 1 {
+            if mode == Mode::Keyed {
                 extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
             }
-            let auth = mode == 2;
+            let auth = mode.authenticated();
             let sender = Sender::start_profile(&peer, auth, 2, 1, false, &extra);
             let mut buffer = [0; 2048];
             let (length, source) = peer.recv_from(&mut buffer).unwrap();
@@ -1031,7 +1037,7 @@ fn access_report_retries_during_pacing_preserve_scheduled_count_and_duration() {
             assert_eq!(&buffer[base..base + 8], &report);
             let send = |request: &[u8], tail: &[u8]| {
                 let mut response = reply_with_extensions(request, auth, tail);
-                if mode == 1 && !tail.is_empty() {
+                if mode == Mode::Keyed && !tail.is_empty() {
                     let digest = sign(&[&response[..4], &response[44..]]);
                     response.extend_from_slice(&[0, 8, 0, 16]);
                     response.extend_from_slice(&digest);
@@ -1072,7 +1078,7 @@ fn access_report_retries_during_pacing_preserve_scheduled_count_and_duration() {
             let stats = sender.finish();
             // The duration caps the final scheduled wait (otherwise 8 seconds).
             assert!(started.elapsed() < Duration::from_secs(7));
-            assert_eq!(stats["packets_sent"], 3, "{ip} mode={mode}");
+            assert_eq!(stats["packets_sent"], 3, "{ip} mode={mode:?}");
             assert_eq!(stats["packets_received"], 3);
             assert_eq!(stats["packets_lost"], 0);
             assert_eq!(stats["access_report"]["outcome"], "acknowledged");
@@ -1084,7 +1090,7 @@ fn access_report_retries_during_pacing_preserve_scheduled_count_and_duration() {
 #[test]
 fn access_report_retries_during_final_reply_drain() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             let peer = UdpSocket::bind((ip, 0)).unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut extra = vec![
@@ -1099,10 +1105,10 @@ fn access_report_retries_during_final_reply_drain() {
                 "--access-report-retries",
                 "2",
             ];
-            if mode == 1 {
+            if mode == Mode::Keyed {
                 extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
             }
-            let auth = mode == 2;
+            let auth = mode.authenticated();
             let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
             let mut buffer = [0; 2048];
             let (length, source) = peer.recv_from(&mut buffer).unwrap();
@@ -1120,7 +1126,7 @@ fn access_report_retries_during_final_reply_drain() {
             assert_ne!(&first[..4], &buffer[..4], "retry needs a fresh sequence");
             let send = |request: &[u8], tail: &[u8]| {
                 let mut response = reply_with_extensions(request, auth, tail);
-                if mode == 1 && !tail.is_empty() {
+                if mode == Mode::Keyed && !tail.is_empty() {
                     let digest = sign(&[&response[..4], &response[44..]]);
                     response.extend_from_slice(&[0, 8, 0, 16]);
                     response.extend_from_slice(&digest);
@@ -1139,7 +1145,7 @@ fn access_report_retries_during_final_reply_drain() {
             ));
             send(&first, &[]);
             let stats = sender.finish();
-            assert_eq!(stats["packets_sent"], 2, "{ip} mode={mode}");
+            assert_eq!(stats["packets_sent"], 2, "{ip} mode={mode:?}");
             assert_eq!(stats["packets_received"], 2);
             assert_eq!(stats["packets_lost"], 0);
             assert_eq!(stats["access_report"]["outcome"], "acknowledged");
@@ -1151,13 +1157,13 @@ fn access_report_retries_during_final_reply_drain() {
 #[test]
 fn access_report_retries_until_one_matching_unambiguous_echo() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             let peer = UdpSocket::bind((ip, 0)).unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let (id, code) = match mode {
-                0 => (1u8, 1u8),
-                1 => (2, 255),
-                _ => (2, 0),
+                Mode::Open => (1u8, 1u8),
+                Mode::Keyed => (2, 255),
+                Mode::Authenticated => (2, 0),
             };
             let (id_text, code_text) = (id.to_string(), code.to_string());
             let mut extra = vec![
@@ -1170,10 +1176,10 @@ fn access_report_retries_until_one_matching_unambiguous_echo() {
                 "--access-report-retries",
                 "1",
             ];
-            if mode == 1 {
+            if mode == Mode::Keyed {
                 extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
             }
-            let auth = mode == 2;
+            let auth = mode.authenticated();
             let sender = Sender::start_profile(&peer, auth, 1, 1, false, &extra);
             let mut request = [0; 2048];
             let (length, source) = peer.recv_from(&mut request).unwrap();
@@ -1182,7 +1188,7 @@ fn access_report_retries_until_one_matching_unambiguous_echo() {
             assert_eq!(&request[base..base + 8], &originated);
             let send = |request: &[u8], tail: &[u8]| {
                 let mut response = reply_with_extensions(request, auth, tail);
-                if mode == 1 {
+                if mode == Mode::Keyed {
                     let digest = sign(&[&response[..4], &response[44..]]);
                     response.extend_from_slice(&[0, 8, 0, 16]);
                     response.extend_from_slice(&digest);
@@ -1236,7 +1242,7 @@ fn access_report_retries_until_one_matching_unambiguous_echo() {
                 &[0, 6, 0, 4, (id << 4) | 0x0f, code, 0xff, 0xff],
             );
             let stats = sender.finish();
-            assert_eq!(stats["packets_sent"], 2, "{ip} mode={mode}");
+            assert_eq!(stats["packets_sent"], 2, "{ip} mode={mode:?}");
             assert_eq!(stats["packets_received"], 2);
             assert_eq!(stats["packets_lost"], 0);
             assert_eq!(stats["access_report"]["outcome"], "acknowledged");
@@ -1248,7 +1254,7 @@ fn access_report_retries_until_one_matching_unambiguous_echo() {
 #[test]
 fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             let peer = UdpSocket::bind((ip, 0)).unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             // The CE reply must be processed before the already scheduled
@@ -1263,17 +1269,17 @@ fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
                 "--ecn-backoff-factor",
                 "5",
             ];
-            if mode == 1 {
+            if mode == Mode::Keyed {
                 extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
             }
-            let auth = mode == 2;
+            let auth = mode.authenticated();
             let sender = Sender::start_profile(&peer, auth, 2, 1, false, &extra);
             let mut request = [0; 2048];
             let (length, source) = peer.recv_from(&mut request).unwrap();
             let first = Instant::now();
             let mut response =
                 reply_with_extensions(&request[..length], auth, &[0, 4, 0, 4, 0, 12, 0xb0, 0]);
-            if mode == 1 {
+            if mode == Mode::Keyed {
                 let digest = sign(&[&response[..4], &response[44..]]);
                 response.extend_from_slice(&[0, 8, 0, 16]);
                 response.extend_from_slice(&digest);
@@ -1285,7 +1291,7 @@ fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
             // stale 400 ms deadline. Exact timing is covered by timeline tests.
             assert!(
                 gap >= Duration::from_millis(1500),
-                "{ip} mode={mode}: {gap:?}"
+                "{ip} mode={mode:?}: {gap:?}"
             );
             peer.send_to(
                 &reply_with_extensions(&request[..length], auth, &[]),

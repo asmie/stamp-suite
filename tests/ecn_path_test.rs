@@ -15,6 +15,8 @@ mod inet;
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
 
 use std::{
     collections::BTreeMap,
@@ -26,7 +28,7 @@ use std::{
 
 use child::ChildProcess;
 
-const KEY: [u8; 16] = [0xab; 16];
+use wire_mode::Mode;
 const COUNT: u64 = 3;
 const TABLE: &str = "stamp_ecn_diag";
 
@@ -213,23 +215,23 @@ fn packet(bytes: &[u8], ipv6: bool, port: u16) -> Option<Packet> {
     })
 }
 
-fn verify_tlvs(bytes: &[u8], mode: u8, reflected: bool, value: [u8; 4]) {
-    let base = if mode == 2 { 112 } else { 44 };
+fn verify_tlvs(bytes: &[u8], mode: Mode, reflected: bool, value: [u8; 4]) {
+    let base = mode.base();
     let flag = if reflected { 0 } else { 0x80 };
-    assert_eq!(bytes.len(), base + 8 + if mode == 0 { 0 } else { 20 });
+    assert_eq!(
+        bytes.len(),
+        base + 8 + if mode == Mode::Open { 0 } else { 20 }
+    );
     assert_eq!(&bytes[base..base + 4], &[flag, 4, 0, 4]);
     assert_eq!(&bytes[base + 4..base + 8], &value);
-    if mode != 0 {
+    if mode.keyed() {
         assert_eq!(&bytes[base + 8..base + 12], &[flag, 8, 0, 16]);
-        let covered = [&bytes[..4], &bytes[base..base + 8]].concat();
-        assert_eq!(&bytes[base + 12..], &wire_hmac::digest(&KEY, &covered));
+        assert_eq!(&bytes[base + 12..], &mode.tlv_digest(&bytes[..base + 8]));
     }
-    if mode == 2 {
-        assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
-    }
+    mode.assert_sealed(bytes);
 }
 
-fn verify_pair(request: &Packet, reply: &Packet, mode: u8, case: Case) {
+fn verify_pair(request: &Packet, reply: &Packet, mode: Mode, case: Case) {
     let forward = case.forward.unwrap_or(case.requested);
     let reverse = case
         .reverse
@@ -255,7 +257,7 @@ fn verify_pair(request: &Packet, reply: &Packet, mode: u8, case: Case) {
             0,
         ],
     );
-    let (seq, t1, original, ssid) = if mode == 2 {
+    let (seq, t1, original, ssid) = if mode.authenticated() {
         (48, 64, 16, 26)
     } else {
         (24, 28, 4, 14)
@@ -316,16 +318,11 @@ fn check_direction(value: &serde_json::Value, baseline: u8, observed: u8, denied
     }
 }
 
-fn trial(ip: &str, mode: u8, case: Case) {
-    eprintln!("ECN path: {ip} key_mode={mode} {case:?}");
+fn trial(ip: &str, mode: Mode, case: Case) {
+    eprintln!("ECN path: {ip} key_mode={mode:?} {case:?}");
     let mut command = reflector::Reflector::command(ip);
     command.args(["--tlv-mode", "echo", "--hwtstamp", "off"]);
-    if mode != 0 {
-        command.args(["--hmac-key", &hex::encode(KEY)]);
-    }
-    if mode == 2 {
-        command.args(["--auth-mode", "A"]);
-    }
+    command.args(mode.key_args());
     if case.denied {
         command.args(["--allowed-ecn", "0"]);
     }
@@ -333,7 +330,7 @@ fn trial(ip: &str, mode: u8, case: Case) {
     let port = reflector.address.port();
     let rules = Rules::new(ip, port, case);
     let capture = capture();
-    let mut evidence = evidence::Evidence::new(ip == "::1", mode, case.name);
+    let mut evidence = evidence::Evidence::new(ip == "::1", mode as u8, case.name);
     let mut command = Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
     command
         .args([
@@ -366,12 +363,7 @@ fn trial(ip: &str, mode: u8, case: Case) {
         .env_remove("STAMP_HMAC_KEY")
         .env("RUST_LOG", "off")
         .env("TOKIO_WORKER_THREADS", "2");
-    if mode != 0 {
-        command.args(["--hmac-key", &hex::encode(KEY)]);
-    }
-    if mode == 2 {
-        command.args(["--auth-mode", "A"]);
-    }
+    command.args(mode.key_args());
     let mut sender = ChildProcess::spawn(&mut command);
     let mut packets = BTreeMap::new();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -390,7 +382,7 @@ fn trial(ip: &str, mode: u8, case: Case) {
                     }
                     let reply = packet.source == port;
                     let offset = if reply {
-                        if mode == 2 {
+                        if mode.authenticated() {
                             48
                         } else {
                             24
@@ -491,7 +483,7 @@ fn trial(ip: &str, mode: u8, case: Case) {
         evidence.finish(&report, &rule_counters);
     }
     eprintln!(
-        "ECN path verified: {} {ip} key_mode={mode}, {COUNT} packet pairs",
+        "ECN path verified: {} {ip} key_mode={mode:?}, {COUNT} packet pairs",
         case.name
     );
 }
@@ -514,7 +506,7 @@ fn kernel_rewrites_match_captured_packets_and_directional_reports() {
         .unwrap()
         .success());
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for (name, requested, forward, reverse, denied) in [
                 ("preserved", 2, None, None, false),
                 ("forward-bleached", 2, Some(0), None, false),

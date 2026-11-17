@@ -1,9 +1,13 @@
 //! Independent RFC 9503 sender bytes and reflector first-owner routing.
+#[path = "common/case.rs"]
+mod case;
 #[cfg(all(unix, any(feature = "ttl-nix", not(feature = "ttl-pnet"))))]
 #[path = "common/reflector.rs"]
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
 
 use clap::Parser;
 use stamp_suite::{
@@ -11,7 +15,8 @@ use stamp_suite::{
 };
 use std::time::Duration;
 
-const KEY: [u8; 16] = [0xab; 16];
+use case::Case;
+use wire_mode::Mode;
 
 fn frame(kind: u8, value: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0x80, kind];
@@ -33,17 +38,13 @@ fn fields(bytes: &[u8]) -> Vec<(usize, u8, &[u8])> {
     result
 }
 
-fn verify_signatures(bytes: &[u8], mode: u8) {
-    let base = if mode == 2 { 112 } else { 44 };
-    if mode == 2 {
-        assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
-    }
-    if mode != 0 {
+fn verify_signatures(bytes: &[u8], mode: Mode) {
+    let base = mode.base();
+    mode.assert_sealed(bytes);
+    if mode.keyed() {
         let (pos, kind, digest) = *fields(&bytes[base..]).last().unwrap();
         assert_eq!(kind, 8);
-        let mut covered = bytes[..4].to_vec();
-        covered.extend_from_slice(&bytes[base..base + pos]);
-        assert_eq!(digest, &wire_hmac::digest(&KEY, &covered));
+        assert_eq!(digest, &mode.tlv_digest(&bytes[..base + pos]));
     }
 }
 
@@ -88,8 +89,9 @@ async fn sender_emits_one_return_path_with_unique_network_order_children() {
                 [mpls.clone(), address.clone()].concat(),
             ),
         ];
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for (options, expected) in &profiles {
+                let _case = Case::new(format!("{ip} {mode:?} options={options:?}"));
                 let peer = tokio::net::UdpSocket::bind((ip, 0)).await.unwrap();
                 let port = peer.local_addr().unwrap().port().to_string();
                 let mut args = vec![
@@ -108,12 +110,7 @@ async fn sender_emits_one_return_path_with_unique_network_order_children() {
                     "off",
                 ];
                 args.extend(options.iter().copied());
-                if mode != 0 {
-                    args.extend(["--hmac-key", "abababababababababababababababab"]);
-                }
-                if mode == 2 {
-                    args.extend(["--auth-mode", "A"]);
-                }
+                args.extend(mode.key_args());
                 let conf = Configuration::parse_from(args);
                 conf.validate().unwrap();
                 let shutdown = CancellationToken::new();
@@ -122,10 +119,10 @@ async fn sender_emits_one_return_path_with_unique_network_order_children() {
                     let mut request = [0; 512];
                     let (len, source) = peer.recv_from(&mut request).await.unwrap();
                     let bytes = &request[..len];
-                    let base = if mode == 2 { 112 } else { 44 };
+                    let base = mode.base();
                     let top = fields(&bytes[base..]);
                     let paths: Vec<_> = top.iter().filter(|(_, kind, _)| *kind == 10).collect();
-                    assert_eq!(paths.len(), 1, "{ip}, mode={mode}, {options:?}");
+                    assert_eq!(paths.len(), 1, "{ip}, mode={mode:?}, {options:?}");
                     assert_eq!(paths[0].2, expected);
                     let mut counts = [0; 5];
                     for (_, kind, value) in fields(paths[0].2) {
@@ -163,21 +160,11 @@ async fn sender_emits_one_return_path_with_unique_network_order_children() {
 }
 
 #[cfg(all(unix, any(feature = "ttl-nix", not(feature = "ttl-pnet"))))]
-fn packet(mode: u8, seq: u32, tlvs: &[u8]) -> Vec<u8> {
-    let base = if mode == 2 { 112 } else { 44 };
-    let mut bytes = vec![0; base];
-    bytes[..4].copy_from_slice(&seq.to_be_bytes());
-    bytes[if mode == 2 { 25 } else { 13 }] = 1;
+fn packet(mode: Mode, seq: u32, tlvs: &[u8]) -> Vec<u8> {
+    let mut bytes = mode.request(seq);
     bytes.extend_from_slice(tlvs);
-    if mode != 0 {
-        let mut covered = bytes[..4].to_vec();
-        covered.extend_from_slice(tlvs);
-        bytes.extend_from_slice(&frame(8, &wire_hmac::digest(&KEY, &covered)));
-    }
-    if mode == 2 {
-        let digest = wire_hmac::digest(&KEY, &bytes[..96]);
-        bytes[96..112].copy_from_slice(&digest);
-    }
+    mode.append_hmac_tlv(&mut bytes);
+    mode.seal(&mut bytes);
     bytes
 }
 
@@ -189,24 +176,19 @@ fn reflector_first_return_path_owns_routing_even_when_unusable() {
     let same_link = frame(10, &frame(1, &[0, 0, 0, 1]));
     let suppress = frame(10, &frame(1, &[0, 0, 0, 0]));
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
+            let _case = Case::new(format!("{ip} {mode:?}"));
             let mut command = Reflector::command(ip);
             command.args(["--hwtstamp", "off"]);
-            if mode != 0 {
-                command.args([
-                    "--hmac-key",
-                    "abababababababababababababababab",
-                    "--verify-tlv-hmac",
-                ]);
-            }
-            if mode == 2 {
-                command.args(["--auth-mode", "A"]);
+            command.args(mode.key_args());
+            if mode.keyed() {
+                command.arg("--verify-tlv-hmac");
             }
             let child = Reflector::spawn(command).unwrap();
             let peer = UdpSocket::bind((ip, 0)).unwrap();
             peer.connect(child.address).unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-            let base = if mode == 2 { 112 } else { 44 };
+            let base = mode.base();
             for (index, (first, expected_flags)) in [
                 (
                     same_link.clone(),
@@ -298,19 +280,14 @@ fn reflector_normalizes_return_path_children_and_preserves_failure_values() {
         ),
     ];
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for strict in [false, true] {
+                let _case = Case::new(format!("{ip} {mode:?} strict={strict}"));
                 let mut command = Reflector::command(ip);
                 command.args(["--hwtstamp", "off"]);
-                if mode != 0 {
-                    command.args([
-                        "--hmac-key",
-                        "abababababababababababababababab",
-                        "--verify-tlv-hmac",
-                    ]);
-                }
-                if mode == 2 {
-                    command.args(["--auth-mode", "A"]);
+                command.args(mode.key_args());
+                if mode.keyed() {
+                    command.arg("--verify-tlv-hmac");
                 }
                 if strict {
                     command.arg("--strict-packets");
@@ -319,7 +296,7 @@ fn reflector_normalizes_return_path_children_and_preserves_failure_values() {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
                 peer.connect(child.address).unwrap();
                 peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-                let base = if mode == 2 { 112 } else { 44 };
+                let base = mode.base();
                 for (index, (value, expected, malformed)) in cases.iter().enumerate() {
                     let access = frame(6, &[0x1f, 1, 0xa5, 0x5a]);
                     let path = frame(10, value);
@@ -353,11 +330,11 @@ fn reflector_normalizes_return_path_children_and_preserves_failure_values() {
                     assert_eq!(
                         &reply[base + 4..base + path.len()],
                         &expected,
-                        "{ip}, mode={mode}, strict={strict}, case={index}"
+                        "{ip}, mode={mode:?}, strict={strict}, case={index}"
                     );
                     verify_signatures(reply, mode);
                 }
-                if mode != 0 {
+                if mode.keyed() {
                     for value in [&valid, &frame(1, &[0xff, 0xff, 0xff, 0xfe])] {
                         let path = frame(10, value);
                         let mut request = packet(mode, 99, &path);
@@ -370,9 +347,7 @@ fn reflector_normalizes_return_path_children_and_preserves_failure_values() {
                         assert_ne!(reply[base] & 0x20, 0);
                         assert_eq!(&reply[base + 4..base + path.len()], value);
                         assert_eq!(&reply[len - 16..], &request[request.len() - 16..]);
-                        if mode == 2 {
-                            assert_eq!(&reply[96..112], &wire_hmac::digest(&KEY, &reply[..96]));
-                        }
+                        mode.assert_sealed(reply);
                     }
                 }
                 // Ignore the unusable but well-framed list under Control Code 0.

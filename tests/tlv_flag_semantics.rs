@@ -12,6 +12,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 mod context;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
+use wire_mode::{Mode, KEY};
 
 use stamp_suite::crypto::HmacKey;
 use stamp_suite::packets::PacketUnauthenticated;
@@ -2191,51 +2194,36 @@ fn header_frame(flags: u8, kind: u8, value: &[u8]) -> Vec<u8> {
 }
 
 fn check_header_response(
-    mode: u8,
+    mode: Mode,
     strict: bool,
     captured: &CapturedHeaders,
     chain: &[u8],
     expected: &[u8],
 ) {
-    let key_bytes = [0xab; 16];
-    let key = HmacKey::new(key_bytes.to_vec()).unwrap();
-    let base = if mode == 2 { 112 } else { 44 };
-    let mut request = vec![0; base];
-    request[..4].copy_from_slice(&1u32.to_be_bytes());
-    request[if mode == 2 { 25 } else { 13 }] = 1;
-    if mode == 2 {
-        let digest = wire_hmac::digest(&key_bytes, &request[..96]);
-        request[96..112].copy_from_slice(&digest);
-    }
+    let key = HmacKey::new(KEY.to_vec()).unwrap();
+    let base = mode.base();
+    let mut request = mode.request(1);
     request.extend_from_slice(chain);
-    if mode != 0 {
-        let covered = [&request[..4], chain].concat();
-        request.extend(header_frame(
-            0x80,
-            8,
-            &wire_hmac::digest(&key_bytes, &covered),
-        ));
-    }
-    let mut ctx = make_ctx((mode != 0).then_some(&key));
+    mode.append_hmac_tlv(&mut request);
+    mode.seal(&mut request);
+    let mut ctx = make_ctx(mode.keyed().then_some(&key));
     ctx.captured_headers = Some(captured);
     ctx.strict_packets = strict;
-    let response = process_stamp_packet(&request, src(), 64, mode == 2, &ctx).unwrap();
-    let mut expected = expected.to_vec();
-    if mode != 0 {
-        let covered = [&response.data[..4], &expected].concat();
-        expected.extend(header_frame(0, 8, &wire_hmac::digest(&key_bytes, &covered)));
-    }
+    let response = process_stamp_packet(&request, src(), 64, mode.authenticated(), &ctx).unwrap();
+    let label = format!("{mode:?}, strict={strict}");
+    let hmac_tlv = if mode.keyed() { 20 } else { 0 };
     assert_eq!(
-        &response.data[base..],
-        expected,
-        "mode={mode}, strict={strict}"
+        response.data.len(),
+        base + expected.len() + hmac_tlv,
+        "{label}"
     );
-    if mode == 2 {
-        assert_eq!(
-            &response.data[96..112],
-            &wire_hmac::digest(&key_bytes, &response.data[..96])
-        );
-    }
+    assert_eq!(
+        &response.data[base..base + expected.len()],
+        expected,
+        "{label}"
+    );
+    mode.assert_hmac_tlv(&response.data);
+    mode.assert_sealed(&response.data);
 }
 
 #[test]
@@ -2278,7 +2266,7 @@ fn fixed_header_reflection_fills_requested_and_copies_received_in_capture_order(
                 header_frame(0x10, 247, &zero),
             ]
             .concat();
-            for mode in 0..3 {
+            for mode in Mode::ALL {
                 for strict in [false, true] {
                     check_header_response(mode, strict, &captured, &chain, &expected);
                 }
@@ -2312,7 +2300,7 @@ fn global_header_order_refusal_preserves_all_requests_before_copying() {
             header_frame(0x10, 246, &ext_request),
         ]
         .concat();
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for strict in [false, true] {
                 check_header_response(mode, strict, &captured, &chain, &expected);
             }

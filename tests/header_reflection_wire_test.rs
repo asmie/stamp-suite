@@ -1,16 +1,21 @@
 //! Linux ingest/policy/control evidence on UDP ancillary and raw capture backends.
 #![cfg(target_os = "linux")]
+#[path = "common/case.rs"]
+mod case;
 #[path = "common/ipv6_headers.rs"]
 mod ipv6_headers;
 #[path = "common/reflector.rs"]
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
 
 use std::{os::fd::AsRawFd, time::Duration};
 use tokio::net::UdpSocket;
 
-const KEY: [u8; 16] = [0xab; 16];
+use case::Case;
+use wire_mode::{Mode, KEY};
 const PNET: bool = cfg!(all(feature = "ttl-pnet", not(feature = "ttl-nix")));
 
 async fn send(
@@ -99,35 +104,25 @@ fn frame(flags: u8, kind: u8, value: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn packet(mode: u8, seq: u32, chain: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![0; if mode == 2 { 112 } else { 44 }];
-    bytes[..4].copy_from_slice(&seq.to_be_bytes());
-    bytes[if mode == 2 { 25 } else { 13 }] = 1;
-    if mode == 2 {
-        let digest = wire_hmac::digest(&KEY, &bytes[..96]);
-        bytes[96..112].copy_from_slice(&digest);
-    }
+fn packet(mode: Mode, seq: u32, chain: &[u8]) -> Vec<u8> {
+    let mut bytes = mode.request(seq);
+    mode.seal(&mut bytes);
     bytes.extend_from_slice(chain);
-    if mode != 0 {
-        let covered = [&bytes[..4], chain].concat();
-        bytes.extend(frame(0x80, 8, &wire_hmac::digest(&KEY, &covered)));
-    }
+    mode.append_hmac_tlv(&mut bytes);
     bytes
 }
 
-fn check_reply(bytes: &[u8], mode: u8, seq: u32, expected: &[u8]) {
-    let base = if mode == 2 { 112 } else { 44 };
-    let sender_seq = if mode == 2 { 48 } else { 24 };
+fn check_reply(bytes: &[u8], mode: Mode, seq: u32, expected: &[u8]) {
+    let base = mode.base();
+    let sender_seq = mode.sender_sequence();
     assert_eq!(&bytes[sender_seq..sender_seq + 4], &seq.to_be_bytes());
     let mut expected = expected.to_vec();
-    if mode != 0 {
+    if mode.keyed() {
         let covered = [&bytes[..4], &expected].concat();
         expected.extend(frame(0, 8, &wire_hmac::digest(&KEY, &covered)));
     }
     assert_eq!(&bytes[base..], expected);
-    if mode == 2 {
-        assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
-    }
+    mode.assert_sealed(bytes);
 }
 
 #[tokio::test]
@@ -145,8 +140,9 @@ async fn reflector_disclosure_order_and_control_use_actual_headers_without_rever
         .unwrap()
         .success());
     for policy in 0..5 {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for strict in [false, true] {
+                let _case = Case::new(format!("policy={policy} {mode:?} strict={strict}"));
                 let mut command = reflector::Reflector::command("::1");
                 if PNET {
                     command.args(["--interface", "lo"]);
@@ -172,15 +168,9 @@ async fn reflector_disclosure_order_and_control_use_actual_headers_without_rever
                         ]);
                     }
                 }
-                if mode != 0 {
-                    command.args([
-                        "--hmac-key",
-                        "abababababababababababababababab",
-                        "--verify-tlv-hmac",
-                    ]);
-                }
-                if mode == 2 {
-                    command.args(["--auth-mode", "A"]);
+                command.args(mode.key_args());
+                if mode.keyed() {
+                    command.arg("--verify-tlv-hmac");
                 }
                 if strict {
                     command.arg("--strict-packets");
@@ -210,6 +200,7 @@ async fn reflector_disclosure_order_and_control_use_actual_headers_without_rever
                 );
                 for controls in 0..3 {
                     for reversed in [false, true] {
+                        let _case = Case::new(format!("controls={controls} reversed={reversed}"));
                         let mut ext = vec![0; 16];
                         ext[8..].fill(0xa5);
                         let mut fixed = vec![0; 40];
@@ -273,7 +264,7 @@ async fn reflector_disclosure_order_and_control_use_actual_headers_without_rever
                         check_reply(&bytes, mode, seq, &expected);
                     }
                 }
-                if mode != 0 {
+                if mode.keyed() {
                     let value = vec![0; 16];
                     let chain = frame(0x80, 246, &value);
                     let mut request = packet(mode, 99, &chain);
@@ -289,7 +280,7 @@ async fn reflector_disclosure_order_and_control_use_actual_headers_without_rever
                     .unwrap()
                     .unwrap();
                     assert!(headers.is_empty());
-                    let base = if mode == 2 { 112 } else { 44 };
+                    let base = mode.base();
                     let expected = [
                         frame(0x20, 246, &value),
                         frame(0x20, 8, &request[request.len() - 16..]),
@@ -300,9 +291,7 @@ async fn reflector_disclosure_order_and_control_use_actual_headers_without_rever
                         expected,
                         "failed integrity must not expose captured headers"
                     );
-                    if mode == 2 {
-                        assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
-                    }
+                    mode.assert_sealed(&bytes);
                 }
             }
         }

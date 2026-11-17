@@ -1,9 +1,13 @@
 //! Independent sender bytes for the frozen ext-hdr-26 originated profile.
+#[path = "common/case.rs"]
+mod case;
 #[cfg(target_os = "linux")]
 #[path = "common/ipv6_headers.rs"]
 mod ipv6_headers;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
 
 use clap::Parser;
 use stamp_suite::{
@@ -11,7 +15,8 @@ use stamp_suite::{
 };
 use std::time::Duration;
 
-const KEY: [u8; 16] = [0xab; 16];
+use case::Case;
+use wire_mode::Mode;
 
 fn fields(bytes: &[u8]) -> Vec<(u8, &[u8])> {
     let mut result = Vec::new();
@@ -28,29 +33,26 @@ fn fields(bytes: &[u8]) -> Vec<(u8, &[u8])> {
     result
 }
 
-fn check(bytes: &[u8], mode: u8, expected: &[(u8, Vec<u8>)]) {
-    let base = if mode == 2 { 112 } else { 44 };
+fn check(bytes: &[u8], mode: Mode, expected: &[(u8, Vec<u8>)]) {
+    let base = mode.base();
     assert_eq!(&bytes[..4], &[0; 4]);
-    if mode == 2 {
-        assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
-    }
+    mode.assert_sealed(bytes);
     let actual = fields(&bytes[base..]);
     let mut expected: Vec<_> = expected
         .iter()
         .map(|(kind, value)| (*kind, value.as_slice()))
         .collect();
     let digest;
-    if mode != 0 && !expected.is_empty() {
+    if mode.keyed() && !expected.is_empty() {
         assert_eq!(actual.last().unwrap().0, 8);
         let last = bytes.len() - 20;
-        let covered = [&bytes[..4], &bytes[base..last]].concat();
-        digest = wire_hmac::digest(&KEY, &covered);
+        digest = mode.tlv_digest(&bytes[..last]);
         expected.push((8, &digest));
     }
     assert_eq!(actual, expected);
 }
 
-fn configuration(peer: &tokio::net::UdpSocket, mode: u8, extra: &[&str]) -> Configuration {
+fn configuration(peer: &tokio::net::UdpSocket, mode: Mode, extra: &[&str]) -> Configuration {
     let address = peer.local_addr().unwrap();
     let ip = address.ip().to_string();
     let port = address.port().to_string();
@@ -70,12 +72,7 @@ fn configuration(peer: &tokio::net::UdpSocket, mode: u8, extra: &[&str]) -> Conf
         "off",
     ];
     args.extend_from_slice(extra);
-    if mode != 0 {
-        args.extend(["--hmac-key", "abababababababababababababababab"]);
-    }
-    if mode == 2 {
-        args.extend(["--auth-mode", "A"]);
-    }
+    args.extend(mode.key_args());
     let conf = Configuration::try_parse_from(args).expect("sender arguments");
     conf.validate().unwrap();
     conf
@@ -103,8 +100,9 @@ async fn run(
 #[tokio::test]
 async fn sender_control_request_is_unique_zero_length_and_opt_in() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for profile in 0..3 {
+                let _case = Case::new(format!("{ip} {mode:?} profile={profile}"));
                 let peer = tokio::net::UdpSocket::bind((ip, 0)).await.unwrap();
                 let extra: &[&str] = match profile {
                     0 => &[],
@@ -143,8 +141,9 @@ async fn sender_control_request_is_unique_zero_length_and_opt_in() {
 #[tokio::test]
 async fn sender_fixed_header_requests_have_family_length_selector_and_zero_received() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for selector in [false, true] {
+                let _case = Case::new(format!("{ip} {mode:?} selector={selector}"));
                 let peer = tokio::net::UdpSocket::bind((ip, 0)).await.unwrap();
                 let extra = if selector {
                     vec![
@@ -195,8 +194,9 @@ mod linux {
             .status()
             .unwrap()
             .success());
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for profile in 0..7 {
+                let _case = Case::new(format!("{mode:?} profile={profile}"));
                 let peer = tokio::net::UdpSocket::bind(("::1", 0)).await.unwrap();
                 enable_capture(&peer);
                 let (extra, expected, attached): (Vec<&str>, Values, Values) = match profile {
@@ -285,7 +285,7 @@ mod linux {
                         .async_io(tokio::io::Interest::READABLE, || receive(&peer))
                         .await
                         .unwrap();
-                    assert_eq!(headers, attached, "mode={mode}, profile={profile}");
+                    assert_eq!(headers, attached, "mode={mode:?}, profile={profile}");
                     check(&bytes, mode, &expected);
                     stop.cancel();
                 };

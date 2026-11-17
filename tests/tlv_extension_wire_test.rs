@@ -4,14 +4,19 @@
     any(feature = "ttl-nix", not(feature = "ttl-pnet"))
 ))]
 
+#[path = "common/case.rs"]
+mod case;
 #[path = "common/reflector.rs"]
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
 use reflector::Reflector;
 use std::{net::UdpSocket, time::Duration};
 
-const KEY: [u8; 16] = [0xab; 16];
+use case::Case;
+use wire_mode::Mode;
 
 #[derive(Debug)]
 struct Frame {
@@ -45,39 +50,31 @@ fn frames(bytes: &[u8], base: usize) -> Vec<Frame> {
     result
 }
 
-fn request(mode: u8, tail: &[u8], bad_hmac: bool) -> Vec<u8> {
+fn request(mode: Mode, tail: &[u8], bad_hmac: bool) -> Vec<u8> {
     request_with_sequence(mode, tail, bad_hmac, 0x01020304)
 }
 
-fn request_with_sequence(mode: u8, tail: &[u8], bad_hmac: bool, sequence: u32) -> Vec<u8> {
-    let base = if mode == 2 { 112 } else { 44 };
-    let error = if mode == 2 { 24 } else { 12 };
-    let mut bytes = vec![0; base];
-    bytes[..4].copy_from_slice(&sequence.to_be_bytes());
-    bytes[error + 1] = 1;
-    bytes[error + 2..error + 4].copy_from_slice(&42u16.to_be_bytes());
+fn request_with_sequence(mode: Mode, tail: &[u8], bad_hmac: bool, sequence: u32) -> Vec<u8> {
+    let mut bytes = mode.request(sequence);
+    let ssid = mode.ssid();
+    bytes[ssid..ssid + 2].copy_from_slice(&42u16.to_be_bytes());
     bytes.extend_from_slice(tail);
-    if mode != 0 || bad_hmac {
-        let mut covered = bytes[..4].to_vec();
-        covered.extend_from_slice(&bytes[base..]);
-        let mut digest = wire_hmac::digest(&KEY, &covered);
+    if mode.keyed() || bad_hmac {
+        let mut digest = mode.tlv_digest(&bytes);
         if bad_hmac {
             digest[0] ^= 1;
         }
         append(&mut bytes, 0x80, 8, &digest);
     }
-    if mode == 2 {
-        let digest = wire_hmac::digest(&KEY, &bytes[..96]);
-        bytes[96..112].copy_from_slice(&digest);
-    }
+    mode.seal(&mut bytes);
     bytes
 }
 
-fn exchange(ip: &str, mode: u8, bytes: &[u8]) -> (Vec<u8>, u16, u16) {
+fn exchange(ip: &str, mode: Mode, bytes: &[u8]) -> (Vec<u8>, u16, u16) {
     exchange_configured(ip, mode, bytes, &[])
 }
 
-fn exchange_configured(ip: &str, mode: u8, bytes: &[u8], extra: &[&str]) -> (Vec<u8>, u16, u16) {
+fn exchange_configured(ip: &str, mode: Mode, bytes: &[u8], extra: &[&str]) -> (Vec<u8>, u16, u16) {
     let reflector = start_reflector(ip, mode, extra);
     // Distinct IPv4 endpoints make swapped source/destination metadata visible.
     let peer_ip = if ip == "127.0.0.1" { "127.0.0.2" } else { ip };
@@ -103,19 +100,13 @@ fn exchange_configured(ip: &str, mode: u8, bytes: &[u8], extra: &[&str]) -> (Vec
     )
 }
 
-fn start_reflector(ip: &str, mode: u8, extra: &[&str]) -> Reflector {
+fn start_reflector(ip: &str, mode: Mode, extra: &[&str]) -> Reflector {
     let mut command = Reflector::command(ip);
     command.args(["--hwtstamp", "off", "--reflected-control-max-count", "16"]);
     command.args(extra);
-    if mode != 0 {
-        command.args([
-            "--hmac-key",
-            "abababababababababababababababab",
-            "--verify-tlv-hmac",
-        ]);
-    }
-    if mode == 2 {
-        command.args(["--auth-mode", "A"]);
+    command.args(mode.key_args());
+    if mode.keyed() {
+        command.arg("--verify-tlv-hmac");
     }
     Reflector::spawn(command).unwrap()
 }
@@ -123,9 +114,10 @@ fn start_reflector(ip: &str, mode: u8, extra: &[&str]) -> Reflector {
 #[test]
 fn access_reports_preserve_identity_and_code_but_zero_reserved_fields() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for stateful in [false, true] {
                 for id in [1, 2, 0, 3, 15] {
+                    let _case = Case::new(format!("{ip} {mode:?} stateful={stateful} id={id}"));
                     let value = [(id << 4) | 0x0f, 0xa6, 0xbe, 0xef];
                     let mut tail = vec![];
                     append(&mut tail, 0x80, 6, &value);
@@ -136,7 +128,7 @@ fn access_reports_preserve_identity_and_code_but_zero_reserved_fields() {
                     };
                     let (response, _, _) =
                         exchange_configured(ip, mode, &request(mode, &tail, false), extra);
-                    let got = frames(&response, if mode == 2 { 112 } else { 44 });
+                    let got = frames(&response, mode.base());
                     assert_eq!(got[0].kind, 6);
                     assert_eq!(got[0].value.len(), 4);
                     if id == 1 || id == 2 {
@@ -159,8 +151,9 @@ fn access_reports_preserve_identity_and_code_but_zero_reserved_fields() {
 #[test]
 fn timestamp_and_direct_measurement_fields_are_finalized_per_probe() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for stateful in [false, true] {
+                let _case = Case::new(format!("{ip} {mode:?} stateful={stateful}"));
                 let mut extra = vec!["--clock-sync-source", "ntp"];
                 if stateful {
                     extra.push("--stateful-reflector");
@@ -189,7 +182,7 @@ fn timestamp_and_direct_measurement_fields_are_finalized_per_probe() {
                     let (length, source) = peer.recv_from(&mut response).unwrap();
                     assert_eq!(source, reflector.address);
                     let response = &response[..length];
-                    let got = frames(response, if mode == 2 { 112 } else { 44 });
+                    let got = frames(response, mode.base());
                     assert_eq!((got[0].kind, got[1].kind, got[2].kind), (3, 5, 7));
                     assert!(got.iter().all(|f| f.flags == 0));
                     assert_eq!(&got[0].value[..4], &[1, 2, 1, 2]);
@@ -209,7 +202,7 @@ fn timestamp_and_direct_measurement_fields_are_finalized_per_probe() {
                         _ => assert_eq!(&got[2].value[..12], &[0; 12]),
                     }
                     verify_signatures(response, mode);
-                    let timestamp_offset = if mode == 2 { 16 } else { 4 };
+                    let timestamp_offset = mode.timestamp();
                     previous = Some((
                         response[..4].to_vec(),
                         response[timestamp_offset..timestamp_offset + 8].to_vec(),
@@ -223,12 +216,15 @@ fn timestamp_and_direct_measurement_fields_are_finalized_per_probe() {
 #[test]
 fn truncated_follow_up_cannot_report_previous_state_as_a_valid_timestamp() {
     for ip in ["127.0.0.1", "::1"] {
-        let reflector = start_reflector(ip, 0, &["--stateful-reflector"]);
+        let reflector = start_reflector(ip, Mode::Open, &["--stateful-reflector"]);
         let peer = UdpSocket::bind((ip, 0)).unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let mut response = [0; 2048];
-        peer.send_to(&request_with_sequence(0, &[], false, 1), reflector.address)
-            .unwrap();
+        peer.send_to(
+            &request_with_sequence(Mode::Open, &[], false, 1),
+            reflector.address,
+        )
+        .unwrap();
         let (length, _) = peer.recv_from(&mut response).unwrap();
         assert!(length >= 44);
         assert_ne!(
@@ -241,7 +237,7 @@ fn truncated_follow_up_cannot_report_previous_state_as_a_valid_timestamp() {
         let mut tail = vec![0x80, 7, 0, 20];
         tail.extend_from_slice(&[0xa5; 16]);
         peer.send_to(
-            &request_with_sequence(0, &tail, false, 2),
+            &request_with_sequence(Mode::Open, &tail, false, 2),
             reflector.address,
         )
         .unwrap();
@@ -256,7 +252,7 @@ fn truncated_follow_up_cannot_report_previous_state_as_a_valid_timestamp() {
 #[test]
 fn telemetry_known_lengths_mark_m_and_stop_later_values() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for (kind, sizes) in [
                 (3, vec![0, 1, 3, 5, 7, 9]),
                 (5, vec![0, 11, 13]),
@@ -264,12 +260,13 @@ fn telemetry_known_lengths_mark_m_and_stop_later_values() {
                 (7, vec![0, 8, 15, 17]),
             ] {
                 for size in sizes {
+                    let _case = Case::new(format!("{ip} {mode:?} kind={kind} size={size}"));
                     let value = vec![0xa5; size];
                     let mut tail = vec![];
                     append(&mut tail, 0x80, kind, &value);
                     append(&mut tail, 0x80, 5, &[0x55; 12]);
                     let (response, _, _) = exchange(ip, mode, &request(mode, &tail, false));
-                    let got = frames(&response, if mode == 2 { 112 } else { 44 });
+                    let got = frames(&response, mode.base());
                     assert_eq!(got[0].kind, kind);
                     assert_eq!(got[0].flags, 0x40);
                     let mut expected = value;
@@ -289,8 +286,9 @@ fn telemetry_known_lengths_mark_m_and_stop_later_values() {
 #[test]
 fn skipped_and_integrity_failed_telemetry_keeps_all_value_bytes() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for bad_hmac in [false, true] {
+                let _case = Case::new(format!("{ip} {mode:?} bad_hmac={bad_hmac}"));
                 let mut tail = vec![];
                 if !bad_hmac {
                     append(&mut tail, 0x80, 4, &[0xa5; 8]);
@@ -301,7 +299,7 @@ fn skipped_and_integrity_failed_telemetry_keeps_all_value_bytes() {
                 append(&mut tail, 0x80, 7, &[0xa5; 16]);
                 let expected = frames(&tail[start..], 0);
                 let (response, _, _) = exchange(ip, mode, &request(mode, &tail, bad_hmac));
-                let got = frames(&response, if mode == 2 { 112 } else { 44 });
+                let got = frames(&response, mode.base());
                 let skip = usize::from(!bad_hmac);
                 for (frame, sent) in got[skip..].iter().zip(&expected) {
                     assert_eq!(frame.kind, sent.kind);
@@ -311,31 +309,22 @@ fn skipped_and_integrity_failed_telemetry_keeps_all_value_bytes() {
                 if !bad_hmac {
                     verify_signatures(&response, mode);
                 }
-                if mode == 2 {
-                    assert_eq!(
-                        &response[96..112],
-                        &wire_hmac::digest(&KEY, &response[..96])
-                    );
-                }
+                mode.assert_sealed(&response);
             }
         }
     }
 }
 
-fn verify_signatures(bytes: &[u8], mode: u8) {
-    if mode == 2 {
-        assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
-    }
-    let base = if mode == 2 { 112 } else { 44 };
+fn verify_signatures(bytes: &[u8], mode: Mode) {
+    mode.assert_sealed(bytes);
+    let base = mode.base();
     let parsed = frames(bytes, base);
     let hmac: Vec<_> = parsed.iter().filter(|f| f.kind == 8).collect();
-    assert_eq!(hmac.len(), usize::from(mode != 0));
+    assert_eq!(hmac.len(), usize::from(mode.keyed()));
     if let Some(hmac) = hmac.first() {
         assert_eq!(hmac.flags, 0);
         assert_eq!(hmac.start + 20, bytes.len());
-        let mut covered = bytes[..4].to_vec();
-        covered.extend_from_slice(&bytes[base..hmac.start]);
-        assert_eq!(hmac.value, wire_hmac::digest(&KEY, &covered));
+        assert_eq!(hmac.value, mode.tlv_digest(&bytes[..hmac.start]));
     }
 }
 
@@ -345,7 +334,8 @@ fn mixed_tlvs_preserve_order_padding_and_unknown_values_on_the_wire() {
     // A count-zero Type 12 inside an unknown value is opaque, not executable.
     let opaque = [0x80, 12, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
+            let _case = Case::new(format!("{ip} {mode:?}"));
             let mut tail = vec![];
             append(&mut tail, 0xff, 1, &padding); // incoming U/M/I/reserved bits are re-derived
             append(&mut tail, 0xff, 200, &opaque);
@@ -356,10 +346,10 @@ fn mixed_tlvs_preserve_order_padding_and_unknown_values_on_the_wire() {
             append(&mut tail, 0x80, 5, &dm);
             let (response, sender_port, reflector_port) =
                 exchange(ip, mode, &request(mode, &tail, false));
-            let base = if mode == 2 { 112 } else { 44 };
+            let base = mode.base();
             let parsed = frames(&response, base);
             let mut kinds = vec![1, 200, 2, 3, 5];
-            if mode != 0 {
+            if mode.keyed() {
                 kinds.push(8);
             }
             assert_eq!(parsed.iter().map(|f| f.kind).collect::<Vec<_>>(), kinds);
@@ -388,7 +378,8 @@ fn mixed_tlvs_preserve_order_padding_and_unknown_values_on_the_wire() {
 #[test]
 fn malformed_known_tlv_stops_updates_but_copies_remaining_values_and_signs() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
+            let _case = Case::new(format!("{ip} {mode:?}"));
             let mut tail = vec![];
             append(&mut tail, 0x80, 1, &[9, 8, 7, 6]);
             append(&mut tail, 0x80, 4, &[0; 8]); // CoS requires exactly four value octets
@@ -396,10 +387,10 @@ fn malformed_known_tlv_stops_updates_but_copies_remaining_values_and_signs() {
             append(&mut tail, 0x80, 5, &[0x55; 12]);
             append(&mut tail, 0x80, 1, &[3, 2, 1]);
             let (response, _, _) = exchange(ip, mode, &request(mode, &tail, false));
-            let base = if mode == 2 { 112 } else { 44 };
+            let base = mode.base();
             let expected = frames(&[vec![0; base], tail].concat(), base);
             let actual = frames(&response, base);
-            assert_eq!(actual.len(), expected.len() + usize::from(mode != 0));
+            assert_eq!(actual.len(), expected.len() + usize::from(mode.keyed()));
             for (index, (got, sent)) in actual.iter().zip(&expected).enumerate() {
                 assert_eq!(got.kind, sent.kind);
                 assert_eq!(got.value, sent.value, "unprocessed values stay unchanged");
@@ -420,7 +411,8 @@ fn malformed_known_tlv_stops_updates_but_copies_remaining_values_and_signs() {
 #[test]
 fn failed_extension_integrity_preserves_all_values_and_the_failed_digest() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
+            let _case = Case::new(format!("{ip} {mode:?}"));
             let mut tail = vec![];
             append(&mut tail, 0x80, 1, &[1, 2, 3, 4, 5]);
             // A malformed child must not be repaired before integrity passes:
@@ -430,7 +422,7 @@ fn failed_extension_integrity_preserves_all_values_and_the_failed_digest() {
             append(&mut tail, 0x80, 200, &[0xde, 0xad, 0xbe, 0xff]);
             let sent = request(mode, &tail, true);
             let (response, _, _) = exchange(ip, mode, &sent);
-            let base = if mode == 2 { 112 } else { 44 };
+            let base = mode.base();
             let before = frames(&sent, base);
             let after = frames(&response, base);
             assert_eq!(after.len(), before.len());
@@ -446,12 +438,7 @@ fn failed_extension_integrity_preserves_all_values_and_the_failed_digest() {
                     }
                 );
             }
-            if mode == 2 {
-                assert_eq!(
-                    &response[96..112],
-                    &wire_hmac::digest(&KEY, &response[..96])
-                );
-            }
+            mode.assert_sealed(&response);
         }
     }
 }
@@ -459,8 +446,9 @@ fn failed_extension_integrity_preserves_all_values_and_the_failed_digest() {
 #[test]
 fn location_requests_preserve_lengths_and_report_observed_endpoints() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for disclose in ["all", "none"] {
+                let _case = Case::new(format!("{ip} {mode:?} disclose={disclose}"));
                 let mut location = vec![0x11, 0x22, 0x33, 0x44];
                 for (kind, size) in [(1, 8), (4, 16), (7, 16)] {
                     append(&mut location, 0xff, kind, &vec![0xa5; size]);
@@ -483,7 +471,7 @@ fn location_requests_preserve_lengths_and_report_observed_endpoints() {
                     &request(mode, &tail, false),
                     &["--location-disclose", disclose, "--stateful-reflector"],
                 );
-                let base = if mode == 2 { 112 } else { 44 };
+                let base = mode.base();
                 let outer = frames(&response, base);
                 assert_eq!(outer[0].kind, 2);
                 assert_eq!(outer[0].flags, 0);
@@ -538,8 +526,9 @@ fn location_requests_preserve_lengths_and_report_observed_endpoints() {
 #[test]
 fn malformed_signed_list_keeps_nested_location_bytes_and_original_digest() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 1..3 {
+        for mode in [Mode::Keyed, Mode::Authenticated] {
             for follow_length in [16, 17] {
+                let _case = Case::new(format!("{ip} {mode:?} follow_length={follow_length}"));
                 let location = [0, 0, 0, 0, 0xff, 7, 0, 4, 1, 2, 3, 4];
                 let mut tail = vec![];
                 append(&mut tail, 0x80, 6, &[0x1f, 0xa6, 0xbe, 0xef]);
@@ -547,7 +536,7 @@ fn malformed_signed_list_keeps_nested_location_bytes_and_original_digest() {
                 append(&mut tail, 0x80, 5, &[0xa5; 12]);
                 append(&mut tail, 0x80, 2, &location);
                 let mut sent = request(mode, &tail, false);
-                let base = if mode == 2 { 112 } else { 44 };
+                let base = mode.base();
                 let original = frames(&sent, base);
                 let original_digest = &original.last().unwrap().value;
                 // Legal padding position, but structurally truncated. The signed
@@ -575,12 +564,7 @@ fn malformed_signed_list_keeps_nested_location_bytes_and_original_digest() {
                 }
                 assert_eq!(&copied.last().unwrap().value, original_digest);
                 assert_eq!(response.last(), Some(&0xab));
-                if mode == 2 {
-                    assert_eq!(
-                        &response[96..112],
-                        &wire_hmac::digest(&KEY, &response[..96])
-                    );
-                }
+                mode.assert_sealed(&response);
             }
         }
     }
@@ -614,13 +598,14 @@ fn malformed_location_children_stop_later_outer_tlvs_on_the_wire() {
         cases.push((value, Some(malformed)));
     }
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for (location, malformed_child) in &cases {
+                let _case = Case::new(format!("{ip} {mode:?} malformed_child={malformed_child:?}"));
                 let mut tail = vec![];
                 append(&mut tail, 0x80, 2, location);
                 append(&mut tail, 0x80, 5, &[0x55; 12]);
                 let (response, _, _) = exchange(ip, mode, &request(mode, &tail, false));
-                let actual = frames(&response, if mode == 2 { 112 } else { 44 });
+                let actual = frames(&response, mode.base());
                 assert_eq!(
                     actual[0].flags, 0x40,
                     "Location must be marked M: {location:?}"

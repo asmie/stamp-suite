@@ -4,41 +4,33 @@
     any(feature = "ttl-nix", not(feature = "ttl-pnet"))
 ))]
 
+#[path = "common/case.rs"]
+mod case;
 #[path = "common/reflector.rs"]
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
+use case::Case;
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags, SockaddrStorage};
 use reflector::Reflector;
 use std::{net::UdpSocket, os::fd::AsRawFd, time::Duration};
+use wire_mode::Mode;
 
-const KEY: [u8; 16] = [0xab; 16];
-
-fn request(mode: u8, sequence: u32, cos: Option<[u8; 4]>) -> Vec<u8> {
-    let base = if mode == 2 { 112 } else { 44 };
-    let error = if mode == 2 { 24 } else { 12 };
-    let mut bytes = vec![0; base];
-    bytes[..4].copy_from_slice(&sequence.to_be_bytes());
-    bytes[error + 1] = 1;
-    bytes[error + 2..error + 4].copy_from_slice(&42u16.to_be_bytes());
+fn request(mode: Mode, sequence: u32, cos: Option<[u8; 4]>) -> Vec<u8> {
+    let mut bytes = mode.request(sequence);
+    let ssid = mode.ssid();
+    bytes[ssid..ssid + 2].copy_from_slice(&42u16.to_be_bytes());
     if let Some(value) = cos {
         bytes.extend_from_slice(&[0x80, 4, 0, 4]);
         bytes.extend_from_slice(&value);
         bytes.extend_from_slice(&[0x80, 12, 0, 12, 0, 0, 0, 3]);
         bytes.extend_from_slice(&20_000_000u32.to_be_bytes());
         bytes.extend_from_slice(&[0; 4]);
-        if mode != 0 {
-            let mut covered = bytes[..4].to_vec();
-            covered.extend_from_slice(&bytes[base..]);
-            let digest = wire_hmac::digest(&KEY, &covered);
-            bytes.extend_from_slice(&[0x80, 8, 0, 16]);
-            bytes.extend_from_slice(&digest);
-        }
+        mode.append_hmac_tlv(&mut bytes);
     }
-    if mode == 2 {
-        let digest = wire_hmac::digest(&KEY, &bytes[..96]);
-        bytes[96..112].copy_from_slice(&digest);
-    }
+    mode.seal(&mut bytes);
     bytes
 }
 
@@ -90,8 +82,8 @@ fn receive(socket: &UdpSocket) -> (Vec<u8>, u8) {
     (data[..length].to_vec(), tos)
 }
 
-fn verify_cos_reply(bytes: &[u8], mode: u8, expected: [u8; 4], third: bool) {
-    let base = if mode == 2 { 112 } else { 44 };
+fn verify_cos_reply(bytes: &[u8], mode: Mode, expected: [u8; 4], third: bool) {
+    let base = mode.base();
     assert_eq!(
         &bytes[base..base + 8],
         &[
@@ -106,18 +98,10 @@ fn verify_cos_reply(bytes: &[u8], mode: u8, expected: [u8; 4], third: bool) {
         ]
     );
     assert_eq!(&bytes[base + 8..base + 12], &[0, 12, 0, 12]);
-    let expected_length = base + 24 + if mode == 0 { 0 } else { 20 };
+    let expected_length = base + 24 + if mode.keyed() { 20 } else { 0 };
     assert_eq!(bytes.len(), expected_length);
-    if mode != 0 {
-        let pos = bytes.len() - 20;
-        assert_eq!(&bytes[pos..pos + 4], &[0, 8, 0, 16]);
-        let mut covered = bytes[..4].to_vec();
-        covered.extend_from_slice(&bytes[base..pos]);
-        assert_eq!(&bytes[pos + 4..], &wire_hmac::digest(&KEY, &covered));
-    }
-    if mode == 2 {
-        assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
-    }
+    mode.assert_hmac_tlv(bytes);
+    mode.assert_sealed(bytes);
 }
 
 #[test]
@@ -127,7 +111,7 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
         ("::1", "::1", "::1/128"),
     ] {
         let ipv6 = ip == "::1";
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             // Global allow/deny, scoped overrides, all ECN codepoints and
             // both DSCP2 high bits are exercised independently of DSCP1.
             for (policy, received_dscp, received_ecn, requested_ecn, rejected_dscp, rejected_ecn) in [
@@ -141,6 +125,7 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
                 (6, 10, 1, 2, true, false),
                 (7, 10, 1, 2, true, false),
             ] {
+                let _case = Case::new(format!("{ip} {mode:?} policy={policy} dscp={received_dscp} ecn={received_ecn} requested_ecn={requested_ecn}"));
                 let mut command = Reflector::command(ip);
                 command.args([
                     "--hwtstamp",
@@ -149,15 +134,9 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
                     "--reflected-control-max-count",
                     "3",
                 ]);
-                if mode != 0 {
-                    command.args([
-                        "--hmac-key",
-                        "abababababababababababababababab",
-                        "--verify-tlv-hmac",
-                    ]);
-                }
-                if mode == 2 {
-                    command.args(["--auth-mode", "A"]);
+                command.args(mode.key_args());
+                if mode.keyed() {
+                    command.arg("--verify-tlv-hmac");
                 }
                 if matches!(policy, 1 | 3 | 4) {
                     command.args(["--allowed-dscp", "0"]);
@@ -216,11 +195,11 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
                 };
                 let reply_ecn = if rejected_ecn { 0 } else { requested_ecn };
                 let expected_tos = (reply_dscp << 2) | reply_ecn;
-                let echoed = if mode == 2 { 48 } else { 24 };
+                let echoed = mode.sender_sequence();
                 let first = receive(&peer);
                 assert_eq!(&first.0[echoed..echoed + 4], &100u32.to_be_bytes());
                 verify_cos_reply(&first.0, mode, expected_value, third);
-                assert_eq!(first.1, expected_tos, "{ip} mode={mode} policy={policy}");
+                assert_eq!(first.1, expected_tos, "{ip} {mode:?} policy={policy}");
                 socket_option(&peer, ipv6, false, 0);
                 peer.send(&request(mode, 200, None)).unwrap();
                 let mut burst = 1;
@@ -241,10 +220,8 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
                         ordinary += 1;
                         assert_eq!(ordinary, 1);
                         assert_eq!(tos, 0, "CoS must not leak into ordinary traffic");
-                        assert_eq!(bytes.len(), if mode == 2 { 112 } else { 44 });
-                        if mode == 2 {
-                            assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
-                        }
+                        assert_eq!(bytes.len(), mode.base());
+                        mode.assert_sealed(&bytes);
                     }
                 }
                 assert!(sequences.windows(2).all(|p| p[0] < p[1]));
@@ -256,18 +233,13 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
 #[test]
 fn empty_dscp_policy_drops_cos_but_keeps_base_sessions_usable() {
     for ip in ["127.0.0.1", "::1"] {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
+            let _case = Case::new(format!("{ip} {mode:?}"));
             let mut command = Reflector::command(ip);
             command.args(["--hwtstamp", "off", "--allowed-dscp", "none"]);
-            if mode != 0 {
-                command.args([
-                    "--hmac-key",
-                    "abababababababababababababababab",
-                    "--verify-tlv-hmac",
-                ]);
-            }
-            if mode == 2 {
-                command.args(["--auth-mode", "A"]);
+            command.args(mode.key_args());
+            if mode.keyed() {
+                command.arg("--verify-tlv-hmac");
             }
             let reflector = Reflector::spawn(command).unwrap();
             let peer = UdpSocket::bind((ip, 0)).unwrap();
@@ -284,12 +256,10 @@ fn empty_dscp_policy_drops_cos_but_keeps_base_sessions_usable() {
             ));
             peer.send(&request(mode, 101, None)).unwrap();
             let size = peer.recv(&mut data).expect("ordinary session still usable");
-            assert_eq!(size, if mode == 2 { 112 } else { 44 });
-            let echoed = if mode == 2 { 48 } else { 24 };
+            assert_eq!(size, mode.base(), "{ip} {mode:?}");
+            let echoed = mode.sender_sequence();
             assert_eq!(&data[echoed..echoed + 4], &101u32.to_be_bytes());
-            if mode == 2 {
-                assert_eq!(&data[96..112], &wire_hmac::digest(&KEY, &data[..96]));
-            }
+            mode.assert_sealed(&data[..size]);
         }
     }
 }

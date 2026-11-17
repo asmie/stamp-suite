@@ -203,7 +203,11 @@ layouts generated from the Rust code. Draft rows refer to the pinned revision.
 The wire suites below build their bytes by hand and use
 [`common/wire_hmac.rs`](../tests/common/wire_hmac.rs), which calls `hmac` and
 `sha2` directly. A test can still run the production receiver as the system
-under test.
+under test. [`common/wire_mode.rs`](../tests/common/wire_mode.rs) holds the
+open, keyed and authenticated layouts, with offsets written out from the RFCs
+rather than taken from the crate. Matrix loops create a
+[`common/case.rs`](../tests/common/case.rs) guard, so a failed assertion
+prints the combination it failed in.
 
 | Combination | Reproducible coverage and limits |
 | --- | --- |

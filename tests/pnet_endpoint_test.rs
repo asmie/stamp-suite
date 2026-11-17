@@ -1,5 +1,7 @@
 //! Actual pnet endpoint binding, capture filtering, metadata and reply ports.
 #![cfg(all(target_os = "linux", feature = "ttl-pnet", not(feature = "ttl-nix")))]
+#[path = "common/case.rs"]
+mod case;
 #[path = "common/hops.rs"]
 mod hops;
 #[path = "common/inet.rs"]
@@ -8,12 +10,15 @@ mod inet;
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+#[path = "common/wire_mode.rs"]
+mod wire_mode;
 
+use case::Case;
 use std::{
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
-const KEY: [u8; 16] = [0xab; 16];
+use wire_mode::{Mode, KEY};
 static NAMESPACE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn namespace() -> std::sync::MutexGuard<'static, ()> {
@@ -38,7 +43,7 @@ fn namespace() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-fn command(bind: &str, port: u16, mode: u8) -> std::process::Command {
+fn command(bind: &str, port: u16, mode: Mode) -> std::process::Command {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_stamp-suite"));
     command.stdout(std::process::Stdio::null());
     command.args([
@@ -54,15 +59,9 @@ fn command(bind: &str, port: u16, mode: u8) -> std::process::Command {
         "--hwtstamp",
         "off",
     ]);
-    if mode != 0 {
-        command.args([
-            "--hmac-key",
-            "abababababababababababababababab",
-            "--verify-tlv-hmac",
-        ]);
-    }
-    if mode == 2 {
-        command.args(["--auth-mode", "A"]);
+    command.args(mode.key_args());
+    if mode.keyed() {
+        command.arg("--verify-tlv-hmac");
     }
     command
 }
@@ -165,26 +164,17 @@ fn finish(mut child: reflector::Reflector) {
     }
 }
 
-fn exchange(child: &reflector::Reflector, ip: &str, mode: u8, sequence: u32) {
+fn exchange(child: &reflector::Reflector, ip: &str, mode: Mode, sequence: u32) {
     let peer = hops::socket(ip);
     peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     let target = SocketAddr::new(ip.parse().unwrap(), child.address.port());
-    let base = if mode == 2 { 112 } else { 44 };
-    let mut packet = vec![0; base];
-    packet[..4].copy_from_slice(&sequence.to_be_bytes());
-    packet[if mode == 2 { 25 } else { 13 }] = 1;
+    let base = mode.base();
+    let mut packet = mode.request(sequence);
     // Location ports prove that received local endpoint metadata uses the
     // selected port, as well as the capture filter and send socket.
     packet.extend_from_slice(&[0x80, 2, 0, 4, 0, 0, 0, 0]);
-    if mode != 0 {
-        let covered = [&packet[..4], &packet[base..]].concat();
-        packet.extend_from_slice(&[0x80, 8, 0, 16]);
-        packet.extend_from_slice(&wire_hmac::digest(&KEY, &covered));
-    }
-    if mode == 2 {
-        let digest = wire_hmac::digest(&KEY, &packet[..96]);
-        packet[96..112].copy_from_slice(&digest);
-    }
+    mode.append_hmac_tlv(&mut packet);
+    mode.seal(&mut packet);
     inject(peer.local_addr().unwrap(), target, &packet);
     let (reply, source, hops) = hops::receive(&peer);
     assert_eq!(hops, 255, "actual pnet reply TTL/Hop Limit");
@@ -194,27 +184,26 @@ fn exchange(child: &reflector::Reflector, ip: &str, mode: u8, sequence: u32) {
         "reply source must match the advertised port in each family"
     );
     assert_eq!(reply.len(), packet.len());
-    let offset = if mode == 2 { 48 } else { 24 };
+    let offset = mode.sender_sequence();
     assert_eq!(&reply[offset..offset + 4], &sequence.to_be_bytes());
     let mut expected = vec![0, 2, 0, 4];
     expected.extend_from_slice(&target.port().to_be_bytes());
     expected.extend_from_slice(&peer.local_addr().unwrap().port().to_be_bytes());
-    if mode != 0 {
+    if mode.keyed() {
         let covered = [&reply[..4], &expected].concat();
         expected.extend_from_slice(&[0, 8, 0, 16]);
         expected.extend_from_slice(&wire_hmac::digest(&KEY, &covered));
     }
     assert_eq!(&reply[base..], expected);
-    if mode == 2 {
-        assert_eq!(&reply[96..112], &wire_hmac::digest(&KEY, &reply[..96]));
-    }
+    mode.assert_sealed(reply);
 }
 
 fn assigned_ports(binds: &[&str]) {
     let _namespace = namespace();
     for bind in binds {
-        for mode in 0..3 {
+        for mode in Mode::ALL {
             for port in [0, 19862] {
+                let _case = Case::new(format!("{bind} {mode:?} port={port}"));
                 let child = reflector::Reflector::spawn(command(bind, port, mode)).unwrap();
                 assert_eq!(child.address.ip(), bind.parse::<IpAddr>().unwrap());
                 assert_ne!(child.address.port(), 0);
@@ -303,7 +292,7 @@ fn pnet_ipv4_works_with_ipv6_disabled_and_ipv6_startup_fails() {
     }
     let _restore = Restore(path, std::fs::read_to_string(path).unwrap());
     std::fs::write(path, "1").unwrap();
-    for mode in 0..3 {
+    for mode in Mode::ALL {
         let child = reflector::Reflector::spawn(command("127.0.0.1", 0, mode)).unwrap();
         exchange(&child, "127.0.0.1", mode, 1);
         let error = match reflector::Reflector::spawn(command("::1", 0, mode)) {
@@ -332,19 +321,20 @@ fn pnet_large_packets_preserve_payload_and_signatures() {
         // Ethernet + IP + UDP used to exhaust the 4096-byte capture buffer.
         let old_limit = if ipv6 { 4034 } else { 4054 };
         let maximum = if ipv6 { 65527 } else { 65507 };
-        for mode in 0..3 {
+        for mode in Mode::ALL {
+            let _case = Case::new(format!("{ip} {mode:?}"));
             let child = reflector::Reflector::spawn(command(ip, 0, mode)).unwrap();
             let peer = std::net::UdpSocket::bind((ip, 0)).unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-            let base = if mode == 2 { 112 } else { 44 };
-            let hmac_size = if mode == 0 { 0 } else { 20 };
+            let base = mode.base();
+            let hmac_size = if mode == Mode::Open { 0 } else { 20 };
             let mut reply = vec![0; 65535];
             for (index, size) in [1500, old_limit, old_limit + 1, 8192, maximum, 1500]
                 .into_iter()
                 .enumerate()
             {
                 let sequence = (index as u32 + 1).to_be_bytes();
-                let timestamp = if mode == 2 { 16 } else { 4 };
+                let timestamp = mode.timestamp();
                 let mut packet = vec![0; base];
                 packet[..4].copy_from_slice(&sequence);
                 packet[timestamp..timestamp + 8]
@@ -357,26 +347,19 @@ fn pnet_large_packets_preserve_payload_and_signatures() {
                 // its tail, rather than just a reply's reported length.
                 packet.extend((0..padding).map(|i| (i % 251 + 1) as u8));
                 let padding_end = packet.len();
-                if mode != 0 {
-                    let covered = [&packet[..4], &packet[base..]].concat();
-                    packet.extend_from_slice(&[0x80, 8, 0, 16]);
-                    packet.extend_from_slice(&wire_hmac::digest(&KEY, &covered));
-                }
-                if mode == 2 {
-                    let digest = wire_hmac::digest(&KEY, &packet[..96]);
-                    packet[96..112].copy_from_slice(&digest);
-                }
+                mode.append_hmac_tlv(&mut packet);
+                mode.seal(&mut packet);
                 inject(peer.local_addr().unwrap(), child.address, &packet);
                 let (received, source) = peer.recv_from(&mut reply).unwrap_or_else(|error| {
                     panic!(
-                        "{ip} mode={mode} size={size}: {error}: {}",
+                        "{ip} mode={mode:?} size={size}: {error}: {}",
                         child.diagnostics()
                     )
                 });
                 assert_eq!(source, child.address);
-                assert_eq!(received, size, "{ip} mode={mode} truncated reply");
-                let echo = if mode == 2 { 48 } else { 24 };
-                let echo_timestamp = if mode == 2 { 64 } else { 28 };
+                assert_eq!(received, size, "{ip} mode={mode:?} truncated reply");
+                let echo = mode.sender_sequence();
+                let echo_timestamp = mode.sender_timestamp();
                 assert_eq!(&reply[echo..echo + 4], &sequence);
                 assert_eq!(
                     &reply[echo_timestamp..echo_timestamp + 10],
@@ -387,17 +370,14 @@ fn pnet_large_packets_preserve_payload_and_signatures() {
                     &reply[base + 1..padding_end],
                     &packet[base + 1..padding_end]
                 );
-                if mode != 0 {
+                if mode.keyed() {
                     assert_eq!(&reply[padding_end..padding_end + 4], &[0, 8, 0, 16]);
-                    let covered = [&reply[..4], &reply[base..padding_end]].concat();
                     assert_eq!(
                         &reply[padding_end + 4..received],
-                        &wire_hmac::digest(&KEY, &covered)
+                        &mode.tlv_digest(&reply[..padding_end])
                     );
                 }
-                if mode == 2 {
-                    assert_eq!(&reply[96..112], &wire_hmac::digest(&KEY, &reply[..96]));
-                }
+                mode.assert_sealed(&reply);
             }
             finish(child);
         }
