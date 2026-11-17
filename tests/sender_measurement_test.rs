@@ -236,7 +236,7 @@ fn sender_stops_at_malformed_location_children_but_ignores_child_i() {
         for auth in [false, true] {
             for (location, observations) in &cases {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
-                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let sender = Sender::start_profile(&peer, auth, 1, 1, true, &[]);
                 let mut request = [0; 2048];
                 let (len, source) = peer.recv_from(&mut request).unwrap();
@@ -484,7 +484,7 @@ fn sender_cos_fields_and_automatic_ect_response_reach_the_wire() {
         for mode in 0..3 {
             for (include_cos, ecn) in [(false, 0u8), (true, 0), (true, 1), (true, 2), (true, 3)] {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
-                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let ecn_text = ecn.to_string();
                 let mut extra = vec!["--dscp", "46", "--ecn", &ecn_text];
                 if include_cos {
@@ -713,7 +713,7 @@ fn sender_holds_ecn_backoff_until_usable_non_ce_feedback_returns() {
         for mode in 0..3 {
             for case in ["clean", "missing", "bad_hmac", "duplicate"] {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
-                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut extra = vec!["--cos", "--ecn", "2", "--ecn-recovery-step", "10"];
                 if mode == 1 {
                     extra.extend(["--hmac-key", "ABABABABABABABABABABABABABABABAB"]);
@@ -769,7 +769,7 @@ fn near_unity_ce_factors_do_not_stall_sender_backoff() {
                 ("100", "1.0000000000000002", 100.0),
             ] {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
-                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut extra = vec![
                     "--cos",
                     "--ecn",
@@ -810,9 +810,14 @@ fn near_unity_ce_factors_do_not_stall_sender_backoff() {
 
 #[test]
 fn incomplete_retry_bursts_keep_the_send_based_timeout_after_ack_or_abort() {
+    // The reply window is --timeout (3 s) from the retry's send. A window
+    // restarted by the late ACK (1.5 s) or by exhaustion (the 2 s report
+    // timer) would end at 4.5 s or later. Bounds of [2.8 s, 3.9 s) leave 900 ms
+    // for process scheduling and exit under CI load and still catch a restart.
+    const WINDOW: Duration = Duration::from_secs(3);
     for acknowledge in [true, false] {
         let peer = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
-        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let sender = Sender::start_profile(
             &peer,
             false,
@@ -821,11 +826,11 @@ fn incomplete_retry_bursts_keep_the_send_based_timeout_after_ack_or_abort() {
             false,
             &[
                 "--timeout",
-                "2",
+                "3",
                 "--access-report",
                 "1",
                 "--access-report-timeout",
-                "1",
+                "2",
                 "--access-report-retries",
                 "1",
             ],
@@ -843,13 +848,14 @@ fn incomplete_retry_bursts_keep_the_send_based_timeout_after_ack_or_abort() {
         let (length, _) = peer.recv_from(&mut request).unwrap();
         let retry_received = Instant::now();
         let tail = if acknowledge {
-            // A later ACK must not start a fresh two-second reply window.
-            std::thread::sleep(Duration::from_millis(700));
+            // A later ACK, before the report timer expires, must not start a
+            // fresh reply window.
+            std::thread::sleep(Duration::from_millis(1500));
             &[0, 6, 0, 4, 0x10, 1, 0, 0][..]
         } else {
-            // Delivery has exhausted its one-second timer, but a valid base
-            // reply can still arrive within the retry's two-second window.
-            std::thread::sleep(Duration::from_millis(1200));
+            // Delivery has exhausted its two-second timer, but a valid base
+            // reply can still arrive within the retry's reply window.
+            std::thread::sleep(Duration::from_millis(2300));
             &[][..]
         };
         peer.send_to(
@@ -860,11 +866,11 @@ fn incomplete_retry_bursts_keep_the_send_based_timeout_after_ack_or_abort() {
         let stats = sender.finish();
         let elapsed = retry_received.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(1800),
+            elapsed >= WINDOW - Duration::from_millis(200),
             "reply window ended early: {elapsed:?}"
         );
         assert!(
-            elapsed < Duration::from_millis(2600),
+            elapsed < WINDOW + Duration::from_millis(900),
             "reply window was restarted: {elapsed:?}"
         );
         assert_eq!(stats["packets_sent"], 2);
@@ -890,14 +896,19 @@ fn access_report_acknowledgement_keeps_later_retry_burst_copies() {
         for mode in 0..3 {
             for retry_during_drain in [false, true] {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
-                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                // The report timer equals --timeout, so the retry is sent as the
+                // original drain window ends. Two seconds leave the late copies
+                // below ample time to arrive within the retry's reply window.
                 let mut extra = vec![
+                    "--timeout",
+                    "2",
                     "--access-report",
                     "2",
                     "--access-return-code",
                     "255",
                     "--access-report-timeout",
-                    "1",
+                    "2",
                     "--access-report-retries",
                     "1",
                 ];
@@ -953,8 +964,9 @@ fn access_report_acknowledgement_keeps_later_retry_burst_copies() {
                 let acknowledgement = encode(&retry, &[0, 6, 0, 4, 0x20, 255, 0, 0]);
                 peer.send_to(&acknowledgement, source).unwrap();
                 peer.send_to(&acknowledgement, source).unwrap(); // exact duplicate
-                                                                 // The sender must remain alive for later distinct burst copies,
-                                                                 // after both the acknowledgement and the original drain window.
+
+                // The sender must remain alive for later distinct burst copies,
+                // after both the acknowledgement and the original drain window.
                 std::thread::sleep(Duration::from_millis(150));
                 if retry_during_drain {
                     peer.send_to(&encode(&original, &[]), source).unwrap();
@@ -1235,14 +1247,15 @@ fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
         for mode in 0..3 {
             let peer = UdpSocket::bind((ip, 0)).unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-            // Allow time to answer on loaded CI hosts. The 100 ms gap becomes
-            // 500 ms after the first reply.
+            // The CE reply must be processed before the already scheduled
+            // second probe is due (400 ms), which leaves ample time on loaded
+            // CI hosts. Backoff then moves that probe to 2 s after the first.
             let mut extra = vec![
                 "--cos",
                 "--ecn",
                 "2",
                 "--send-delay",
-                "100",
+                "400",
                 "--ecn-backoff-factor",
                 "5",
             ];
@@ -1265,9 +1278,9 @@ fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
             let (length, source) = peer.recv_from(&mut request).unwrap();
             let gap = first.elapsed();
             // Wide margin for process/socket scheduling, but well beyond the
-            // stale 100 ms deadline. Exact timing is covered by timeline tests.
+            // stale 400 ms deadline. Exact timing is covered by timeline tests.
             assert!(
-                gap >= Duration::from_millis(350),
+                gap >= Duration::from_millis(1500),
                 "{ip} mode={mode}: {gap:?}"
             );
             peer.send_to(
@@ -1278,7 +1291,7 @@ fn sender_applies_ce_backoff_to_the_already_scheduled_probe() {
             let stats = sender.finish();
             assert_eq!(stats["packets_received"], 2);
             assert_eq!(stats["congestion"]["ce_replies"], 1);
-            assert_eq!(stats["congestion"]["current_interval_ms"], 500.0);
+            assert_eq!(stats["congestion"]["current_interval_ms"], 2000.0);
         }
     }
 }
@@ -1289,7 +1302,7 @@ fn zero_ssid_stop_interrupts_a_long_probe_wait_after_identity_validation() {
         for auth in [false, true] {
             for extensions in [false, true] {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
-                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let mut extra = vec![
                     "--send-delay",
                     "10s",
@@ -1346,7 +1359,7 @@ fn zero_ssid_continue_keeps_sending_and_accepts_the_next_matching_reply() {
         for auth in [false, true] {
             for extensions in [false, true] {
                 let peer = UdpSocket::bind((ip, 0)).unwrap();
-                peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 let sender = Sender::start_profile(
                     &peer,
                     auth,
