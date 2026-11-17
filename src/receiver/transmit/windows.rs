@@ -22,7 +22,7 @@ pub(super) fn apply_fragmentation_policy(
     // The exclusive DatagramSender owns all option changes and sends. Restore
     // the default policy for ordinary replies after a size-controlled one.
     let family = usize::from(native_ipv6(target.ip()));
-    super::update_socket_option(&mut settings[family], value, || {
+    super::datagram::update_socket_option(&mut settings[family], value, || {
         set_mtu_discover(socket.as_raw_socket(), target.ip(), value)
     })
 }

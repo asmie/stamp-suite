@@ -68,7 +68,11 @@ compatibility promise for the CLI, the configuration or the wire format.
 | `receiver/nix.rs` | UDP socket backend (`recvmsg` with ancillary data). |
 | `receiver/pnet.rs` | Raw capture backend (pnet datalink) with a separate send worker. |
 | `receiver/assemble.rs` | Reply packet assembly with TLV handling. |
-| `receiver/transmit.rs` | Reply queue and budget, shutdown drain, `DatagramSender`, final per-send timestamps and signing. |
+| `receiver/transmit.rs` | `Transmission`: the per-copy send loop with its routing, CoS and MTU fallbacks. |
+| `receiver/transmit/shape.rs` | Fitting a reply to its payload budget, send-time telemetry refresh and TLV signing. |
+| `receiver/transmit/queue.rs` | Reply budget, burst scheduling queue and shutdown drain. |
+| `receiver/transmit/datagram.rs` | `DatagramSender`: the one socket owner that applies per-reply options and sends, with the per-OS code. |
+| `receiver/transmit/errors.rs` | Marker errors (`ReplyTooLarge`, `LocalSendError`, `CosApplyError`) and EMSGSIZE detection that steer the send loop. |
 | `receiver/mtu.rs` | Route MTU lookup. Linux keeps a cache that route notifications invalidate; Windows queries IP Helper for the path and interface on every attempt; macOS estimates IPv6 MTU from a connected native socket. |
 | `receiver/shared.rs` | `ReceiverSharedState` (counters, sessions, keys, caps, shutdown token) and `reload_keys`. |
 | `receiver/limits.rs` | Reflector counters, the per-source rate limiter and runtime Type 12 caps. |

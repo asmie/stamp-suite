@@ -2,7 +2,7 @@
 //!
 //! A matching Destination Node Address TLV selects the reply source. Linux
 //! applies it through per-packet ancillary data in
-//! `receiver::transmit::send_datagram`, including on wildcard binds where
+//! `receiver::transmit::datagram::send_datagram`, including on wildcard binds where
 //! route-based selection may choose another address. Unsupported platforms
 //! and failed sends fall back to kernel source selection.
 

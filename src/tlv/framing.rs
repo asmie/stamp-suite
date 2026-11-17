@@ -102,8 +102,10 @@ pub fn child_region_offset(kind: TlvType) -> Option<usize> {
 
 /// Check complete outer frames and child frames in known container layouts.
 ///
-/// Known child regions start at [`child_region_offset`]. Child values,
-/// unknown layouts, padding and digests remain opaque;
+/// Known child regions start after each container's fixed prefix: Location
+/// (four bytes), Timestamp Information (four), Return Path (zero), Reflected
+/// Control (eight) and Residual BER (eight). Child values, unknown layouts,
+/// padding and digests remain opaque;
 /// child type numbers never cause recursive interpretation of their values.
 ///
 /// A complete outer value shorter than its fixed prefix has no inspectable
