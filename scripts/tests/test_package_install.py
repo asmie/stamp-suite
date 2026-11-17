@@ -21,6 +21,35 @@ class PackageInstallTests(unittest.TestCase):
                 install.inside("deb", [])
             command.assert_not_called()
 
+    def test_sandbox_expectations_come_from_the_shipped_unit(self):
+        settings = install.service_settings((ROOT / "dist/systemd/stamp-suite.service").read_text())
+        self.assertEqual(settings, {
+            "user": "stamp",
+            "group": "stamp",
+            "ambient": ["CAP_NET_BIND_SERVICE"],
+            "bounding": ["CAP_NET_BIND_SERVICE"],
+            "no_new_privs": True,
+        })
+        granted = install.service_command(settings, "::1", False)
+        self.assertEqual(granted[:7], [
+            "setpriv", "--reuid=stamp", "--regid=stamp", "--init-groups",
+            "--bounding-set=-all,+net_bind_service",
+            "--inh-caps=+net_bind_service", "--ambient-caps=+net_bind_service",
+        ])
+        self.assertIn("--no-new-privs", granted)
+        denied = install.service_command(settings, "::1", False, capability=False)
+        self.assertIn("--bounding-set=-all", denied)
+        self.assertFalse(any(arg.startswith(("--inh-caps", "--ambient-caps")) for arg in denied))
+
+    def test_unit_changes_change_the_expectations(self):
+        unit = "[Service]\nUser=probe\nGroup=probe\nAmbientCapabilities=CAP_NET_RAW\n"
+        settings = install.service_settings(unit)
+        self.assertEqual((settings["user"], settings["no_new_privs"]), ("probe", False))
+        self.assertNotIn("--no-new-privs", install.service_command(settings, "127.0.0.1", False))
+        for unit in ["[Service]\nUser=a\n", "[Service]\nUser=a\nGroup=a\nAmbientCapabilities=CAP_SYS_ADMIN\n"]:
+            with self.subTest(unit=unit), self.assertRaises(ValueError):
+                install.service_settings(unit)
+
     def test_reply_identity_and_signature_are_required(self):
         for auth in [False, True]:
             sent = install.request(auth)

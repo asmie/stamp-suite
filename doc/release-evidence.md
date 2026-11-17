@@ -138,7 +138,8 @@ python3 scripts/check_package_install.py --package target/generate-rpm/stamp-sui
 
 Replace the paths and versions with the ones your build produced. The script
 builds its test images from `dist/package-check/`: Ubuntu 24.04 for DEB and
-the current Fedora image for RPM. Building the images needs network access.
+Fedora 45 for RPM. Both are pinned so that a new upstream release cannot change
+the gate; move them forward deliberately. Building the images needs network access.
 The installation and service checks run with networking turned off, apart
 from the container's own loopback. `--image NAME` reuses a test image you have
 already built. The report records the image ID, architecture, OS release,
@@ -148,9 +149,10 @@ uploads whatever reports exist, even when a check fails.
 Each check runs in a throwaway container. It installs the package and then
 reinstalls it, with dependency checks on, and verifies that the service
 account is still non-root and still has the same UID and GID. It validates the
-packaged unit with `systemd-analyze verify`. It then runs the installed
-reflector as the service account, with only `CAP_NET_BIND_SERVICE` and
-`NoNewPrivileges`, and checks open and authenticated reflection on port 862
+packaged unit with `systemd-analyze verify`. It then reads the account,
+capabilities and `NoNewPrivileges` setting from that installed unit, runs the
+reflector under exactly that sandbox, and checks in `/proc` that the process
+got it. It checks open and authenticated reflection on port 862
 over IPv4 and IPv6. It checks that replies carry the right identity and valid
 HMACs, and that the reflector shuts down cleanly. As a negative control, the
 bind must fail without that capability. Removing the package must remove the

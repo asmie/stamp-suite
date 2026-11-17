@@ -14,6 +14,9 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 KEY = bytes([0xab]) * 32  # Public fixture key, never an operator credential.
+UNIT = Path("/usr/lib/systemd/system/stamp-suite.service")
+# capability(7) numbers for the capabilities a STAMP reflector unit may grant.
+CAPABILITY_BITS = {"CAP_NET_BIND_SERVICE": 10, "CAP_NET_ADMIN": 12, "CAP_NET_RAW": 13}
 
 
 def require(condition, message):
@@ -59,22 +62,63 @@ def verify_reply(sent, reply, auth):
                 "invalid reply HMAC")
 
 
-def service_command(ip, auth, capability=True):
-    args = ["setpriv", "--reuid=stamp", "--regid=stamp", "--init-groups",
-            "--bounding-set=-all,+net_bind_service" if capability else "--bounding-set=-all"]
-    if capability:
-        args += ["--inh-caps=+net_bind_service", "--ambient-caps=+net_bind_service"]
-    args += ["--no-new-privs", "/usr/bin/stamp-suite", "--is-reflector",
+def service_settings(text):
+    """The sandbox the shipped unit asks systemd for: account, capabilities
+    and NoNewPrivileges from its [Service] section."""
+    section, values = None, {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("["):
+            section = line
+        elif section == "[Service]" and "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+
+    def capabilities(key):
+        names = values.get(key, "").split()
+        for name in names:
+            require(name in CAPABILITY_BITS, f"unit grants unsupported capability {name}")
+        return names
+
+    require("User" in values and "Group" in values, "unit does not name a service account")
+    return {
+        "user": values["User"],
+        "group": values["Group"],
+        "ambient": capabilities("AmbientCapabilities"),
+        "bounding": capabilities("CapabilityBoundingSet"),
+        "no_new_privs": values.get("NoNewPrivileges", "no").lower() in {"yes", "true", "1", "on"},
+    }
+
+
+def setpriv_capabilities(names):
+    return ",".join("+" + name.removeprefix("CAP_").lower() for name in names)
+
+
+def service_command(settings, ip, auth, capability=True):
+    """Run the reflector as the unit would, or with no capabilities at all."""
+    bounding = settings["bounding"] if capability else []
+    ambient = settings["ambient"] if capability else []
+    args = ["setpriv", f"--reuid={settings['user']}", f"--regid={settings['group']}",
+            "--init-groups", ",".join(["--bounding-set=-all"] + ([setpriv_capabilities(bounding)]
+                                                                   if bounding else []))]
+    if ambient:
+        caps = setpriv_capabilities(ambient)
+        args += [f"--inh-caps={caps}", f"--ambient-caps={caps}"]
+    if settings["no_new_privs"]:
+        args.append("--no-new-privs")
+    args += ["/usr/bin/stamp-suite", "--is-reflector",
              "--local-addr", ip, "--local-port", "862", "--hwtstamp", "off"]
     if auth:
         args += ["--auth-mode", "A", "--hmac-key", KEY.hex()]
     return args
 
 
-def reflect(events, uid, gid, ip, auth):
+def reflect(events, settings, uid, gid, ip, auth):
     environment = {**os.environ, "TOKIO_WORKER_THREADS": "2", "RUST_LOG": "off"}
     environment.pop("STAMP_HMAC_KEY", None)
-    child = subprocess.Popen(service_command(ip, auth), stdout=subprocess.PIPE,
+    child = subprocess.Popen(service_command(settings, ip, auth), stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, env=environment)
     try:
         with socket.socket(socket.AF_INET6 if ":" in ip else socket.AF_INET,
@@ -96,8 +140,11 @@ def reflect(events, uid, gid, ip, auth):
         fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
         require(all(int(value) == uid for value in fields["Uid"].split()), "wrong service UID")
         require(all(int(value) == gid for value in fields["Gid"].split()), "wrong service GID")
-        require(int(fields["CapEff"].strip(), 16) == 0x400, "unexpected effective capabilities")
-        require(fields["NoNewPrivs"].strip() == "1", "NoNewPrivileges is not active")
+        expected_caps = sum(1 << CAPABILITY_BITS[name] for name in settings["ambient"])
+        require(int(fields["CapEff"].strip(), 16) == expected_caps,
+                "effective capabilities differ from the unit's")
+        require(fields["NoNewPrivs"].strip() == ("1" if settings["no_new_privs"] else "0"),
+                "NoNewPrivileges differs from the unit's")
         events.append({"reflection": ip, "authenticated": auth, "uid": uid,
                        "effective_capabilities": fields["CapEff"].strip(),
                        "request": sent.hex(), "reply": reply.hex()})
@@ -130,21 +177,24 @@ def inside(kind, events):
     # payload digest checks remain enforced by the native package manager.
     install = ["dpkg", "--install", package] if kind == "deb" else ["rpm", "--install", "--nosignature", package]
     command(events, install)
-    account = pwd.getpwnam("stamp")
+    settings = service_settings(UNIT.read_text())
+    events.append({"service_settings": settings})
+    account = pwd.getpwnam(settings["user"])
     require(account.pw_uid != 0 and account.pw_gid != 0, "service identity must not be root")
     uid, gid = account.pw_uid, account.pw_gid
     require(Path("/usr/bin/stamp-suite").is_file(), "packaged binary is missing")
     events.append({"binary_sha256": hashlib.sha256(Path("/usr/bin/stamp-suite").read_bytes()).hexdigest()})
     command(events, ["/usr/bin/stamp-suite", "--version"])
-    command(events, ["systemd-analyze", "verify", "/usr/lib/systemd/system/stamp-suite.service"])
+    command(events, ["systemd-analyze", "verify", str(UNIT)])
     reinstall = install if kind == "deb" else ["rpm", "--upgrade", "--replacepkgs", "--nosignature", package]
     command(events, reinstall)
-    account = pwd.getpwnam("stamp")
+    account = pwd.getpwnam(settings["user"])
     require((account.pw_uid, account.pw_gid) == (uid, gid), "reinstall changed the service identity")
     for ip in ["127.0.0.1", "::1"]:
         for auth in [False, True]:
-            reflect(events, uid, gid, ip, auth)
-    denied = command(events, service_command("127.0.0.1", False, capability=False), check=False)
+            reflect(events, settings, uid, gid, ip, auth)
+    denied = command(events, service_command(settings, "127.0.0.1", False, capability=False),
+                     check=False)
     require(denied.returncode != 0 and "Permission denied" in denied.stderr,
             "binding port 862 without the capability was not rejected")
     if kind == "deb":

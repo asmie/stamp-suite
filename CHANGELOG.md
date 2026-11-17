@@ -56,7 +56,9 @@ Upgrade both peers together when they use BER or reflected headers.
   owned UDP socket.
 - Session-table, reply-path, BER and header benchmarks; live UDP benchmarks
   for BER, bursts, headers, latency, multiple sessions and memory use.
-- CI: DEB/RPM install checks in containers, an independent BER wire oracle,
+- CI: DEB/RPM install checks in pinned Ubuntu 24.04 and Fedora 45 containers,
+  which run the reflector under the sandbox the shipped systemd unit declares,
+  an independent BER wire oracle,
   required test references for conformance rows, and documentation link
   checks.
 
