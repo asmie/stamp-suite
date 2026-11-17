@@ -310,10 +310,10 @@ async fn owned_receiver_rejects_mismatched_or_connected_sockets() {
 // The same test executable supplies controlled child behavior without shell,
 // Python or a grandchild that could inherit a pipe and survive parent teardown.
 #[test]
+#[ignore = "child process for the launcher tests; `fixture` runs it with --ignored"]
 fn launcher_fixture() {
-    let Ok(mode) = std::env::var("STAMP_LAUNCHER_FIXTURE") else {
-        return;
-    };
+    let mode = std::env::var("STAMP_LAUNCHER_FIXTURE")
+        .expect("run only as a launcher child with STAMP_LAUNCHER_FIXTURE set");
     match mode.as_str() {
         "exit" => {
             eprintln!("specific startup failure");
@@ -337,6 +337,7 @@ fn fixture(mode: &str) -> Command {
         .args([
             "--exact",
             "launcher_fixture",
+            "--ignored",
             "--nocapture",
             "--test-threads=1",
         ])

@@ -361,6 +361,10 @@ fn sender_origins_rfc8972_tlvs_with_u_set_and_m_i_clear() {
                 kinds.push(kind);
                 if kind == 1 {
                     assert_eq!(&request[pos + 2..pos + 4], &[1, 4], "260-byte value length");
+                    // The sender fills padding from its own pseudorandom
+                    // generator (RFC 8972 §4.1), never leaving it zeroed.
+                    let padding = &request[pos + 4..pos + 4 + size];
+                    assert!(padding.iter().any(|&b| b != 0), "padding is not generated");
                 }
                 if kind == 2 {
                     let mut expected = vec![0; 4];

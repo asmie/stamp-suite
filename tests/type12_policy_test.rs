@@ -70,13 +70,22 @@ fn server(ip: &str, mode: u8) -> Reflector {
     Reflector::spawn(command).unwrap()
 }
 
-fn receive(socket: &UdpSocket, source: SocketAddr) -> Vec<u8> {
+/// Receives one reply to the request with Sequence Number `sequence`. The
+/// echoed Session-Sender Sequence Number (RFC 8762 §4.3) ties the reply to
+/// its request, so a late copy from an earlier case cannot pass for this one.
+fn receive(socket: &UdpSocket, source: SocketAddr, mode: u8, sequence: u32) -> Vec<u8> {
     socket
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     let mut bytes = [0; 2048];
     let (size, from) = socket.recv_from(&mut bytes).unwrap();
     assert_eq!(from, source, "reply must use a node-local source");
+    let echoed = if mode == 2 { 48 } else { 24 };
+    assert_eq!(
+        bytes.get(echoed..echoed + 4),
+        Some(&sequence.to_be_bytes()[..]),
+        "reply to a different request"
+    );
     bytes[..size].to_vec()
 }
 
@@ -144,7 +153,7 @@ fn exact_rate_volume_and_zero_count_decisions_reach_the_wire() {
                     )
                     .unwrap();
                 for _ in 0..replies {
-                    let bytes = receive(&socket, reflector.address);
+                    let bytes = receive(&socket, reflector.address, mode, index as u32 + 1);
                     let base = if mode == 2 { 112 } else { 44 };
                     assert_eq!(bytes.len(), 500);
                     assert_eq!(bytes[base + 1], 12);
@@ -172,7 +181,7 @@ fn protected_type12_profile_rejects_unverified_amplification() {
                 bytes[last] ^= 1;
             }
             socket.send_to(&bytes, reflector.address).unwrap();
-            let reply = receive(&socket, reflector.address);
+            let reply = receive(&socket, reflector.address, 2, seq);
             assert_eq!(
                 reply.len(),
                 bytes.len(),
@@ -197,7 +206,7 @@ fn protected_type12_profile_rejects_unverified_amplification() {
             .send_to(&request(2, 4, 2, 100_000_000, true), reflector.address)
             .unwrap();
         for _ in 0..2 {
-            let reply = receive(&socket, reflector.address);
+            let reply = receive(&socket, reflector.address, 2, 4);
             assert_eq!(reply.len(), 500);
             assert_eq!(reply[112], 0);
             verify_signatures(&reply, 2, false);
@@ -210,7 +219,7 @@ fn protected_type12_profile_rejects_unverified_amplification() {
             .send_to(&request(1, 1, 2, 100_000_000, false), optional.address)
             .unwrap();
         for _ in 0..2 {
-            let reply = receive(&socket, optional.address);
+            let reply = receive(&socket, optional.address, 1, 1);
             assert_eq!(reply[44], 0);
             verify_signatures(&reply, 1, false);
         }
@@ -256,7 +265,7 @@ fn every_l3_group_must_match_before_wire_reflection() {
                 }
                 socket.send_to(&bytes, reflector.address).unwrap();
                 if accepted {
-                    let reply = receive(&socket, reflector.address);
+                    let reply = receive(&socket, reflector.address, mode, index as u32 + 1);
                     assert_eq!(reply.len(), 500);
                     assert_eq!(reply[base], 0);
                     verify_signatures(&reply, mode, false);

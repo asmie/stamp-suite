@@ -81,7 +81,7 @@ the same reserve-drop-rebind problem and now keeps its competing socket bound
 throughout. `explicit_receiver_stop_reports_startup_failure` checks that a
 receiver's startup error reaches the caller.
 
-There are nine launcher tests on Linux and eight on other Unix systems; the
+The suite then had nine launcher tests on Linux and eight on other Unix systems; the
 kernel identity checks need Linux procfs. The fix passed 20 consecutive
 all-features rounds with eight test threads, with no retries.
 
