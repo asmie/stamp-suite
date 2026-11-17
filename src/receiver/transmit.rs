@@ -3,7 +3,10 @@
 #[cfg(target_os = "windows")]
 mod windows;
 
-use super::{RateLimiter, ReflectorCounters, StampResponse, AUTH_BASE_SIZE, UNAUTH_BASE_SIZE};
+use super::{
+    RateLimiter, ReflectorCounters, StampResponse, AUTH_BASE_SIZE, AUTH_HMAC_OFFSET,
+    UNAUTH_BASE_SIZE,
+};
 use crate::{
     clock_format::ClockFormat,
     crypto::HmacKey,
@@ -310,14 +313,15 @@ impl Transmission {
                 let timestamp = crate::time::generate_timestamp(self.clock);
                 // Reflector Timestamp offset: after the 4-byte Sequence Number,
                 // plus 12 MBZ bytes in authenticated mode (RFC 8762 §4.3.2).
-                let offset = if self.auth { 16 } else { 4 };
+                let offset = crate::packets::reflected_timestamp_offset(self.auth);
                 attempt[offset..offset + 8].copy_from_slice(&timestamp.to_be_bytes());
                 if let Some(key) = &self.key {
                     if self.auth {
-                        // The base-packet HMAC covers the first 96 bytes and
-                        // occupies bytes 96..112 (RFC 8762 §4.3.2).
-                        let hmac = crate::crypto::compute_packet_hmac(key, attempt, 96);
-                        attempt[96..112].copy_from_slice(&hmac);
+                        // The base-packet HMAC covers the octets before it
+                        // and ends the base (RFC 8762 §4.3.2).
+                        let hmac =
+                            crate::crypto::compute_packet_hmac(key, attempt, AUTH_HMAC_OFFSET);
+                        attempt[AUTH_HMAC_OFFSET..AUTH_BASE_SIZE].copy_from_slice(&hmac);
                     }
                     if self.response.tlv_hmac_generated {
                         sign_tlvs(attempt, base, key);

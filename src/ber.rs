@@ -16,7 +16,7 @@ pub(crate) const BER_HISTORY_LIMIT: usize = 1024;
 
 use crate::tlv::{
     RawTlv, ResidualBerValue, TlvFlags, TlvList, TlvType, RESIDUAL_BER_DEFAULT_PATTERN,
-    RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
+    RESIDUAL_BER_MIN_PATTERN_SIZE, RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
 };
 
 pub(crate) fn is_ber(kind: TlvType) -> bool {
@@ -107,7 +107,7 @@ pub(crate) fn observation(
         .explicit_pattern(RESIDUAL_BER_PATTERN_SUBTLV_TYPE)
         .ok()?
         .unwrap_or(&RESIDUAL_BER_DEFAULT_PATTERN);
-    if actual_pattern != pattern || pattern.len() < 4 {
+    if actual_pattern != pattern || pattern.len() < RESIDUAL_BER_MIN_PATTERN_SIZE {
         return None;
     }
     let padding = padding?;

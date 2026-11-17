@@ -25,7 +25,12 @@ use pnet::{
 
 use std::sync::Arc;
 
-use crate::{configuration::Configuration, shutdown::CancellationToken};
+use crate::{
+    configuration::Configuration,
+    packets::UDP_HEADER_SIZE,
+    shutdown::CancellationToken,
+    tlv::{IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE},
+};
 
 use super::{
     cleanup::SessionCleanup,
@@ -562,7 +567,7 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
             let ihl = usize::from(ip.get_header_length()) * 4;
             let end = usize::from(ip.get_total_length());
             if ip.get_version() != 4
-                || ihl < 20
+                || ihl < IPV4_FIXED_HEADER_SIZE
                 || end < ihl
                 || end > bytes.len()
                 || ip.get_fragment_offset() != 0
@@ -583,14 +588,16 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
             )
         } else {
             let ip = Ipv6Packet::new(bytes)?;
-            // 40-byte fixed header plus Payload Length. A zero Payload Length
-            // (end == 40) is either empty or a jumbogram; both are rejected.
-            let end = 40 + usize::from(ip.get_payload_length());
-            if ip.get_version() != 6 || end > bytes.len() || end == 40 {
+            // Fixed header plus Payload Length. A zero Payload Length is
+            // either empty or a jumbogram; both are rejected.
+            let end = IPV6_FIXED_HEADER_SIZE + usize::from(ip.get_payload_length());
+            if ip.get_version() != 6 || end > bytes.len() || end == IPV6_FIXED_HEADER_SIZE {
                 return None;
             }
             let ip = Ipv6Packet::new(&bytes[..end])?;
-            captured.fixed_headers.push(bytes[..40].to_vec());
+            captured
+                .fixed_headers
+                .push(bytes[..IPV6_FIXED_HEADER_SIZE].to_vec());
             let (ext, next, offset) = extract_ipv6_ext_headers(&ip);
             if offset > end {
                 return None;
@@ -610,9 +617,9 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
         if proto == IpNextHeaderProtocols::Udp.0 {
             let udp = UdpPacket::new(upper)?;
             let len = usize::from(udp.get_length());
-            // The UDP Length covers the 8-byte header and must match the IP
-            // payload exactly.
-            if len < 8 || len != upper.len() || udp.get_checksum() == 0 {
+            // The UDP Length covers the header and must match the IP payload
+            // exactly.
+            if len < UDP_HEADER_SIZE || len != upper.len() || udp.get_checksum() == 0 {
                 return None;
             }
             let checksum = match (src, dst) {
@@ -672,8 +679,8 @@ fn extract_ipv6_ext_headers(
     (
         out,
         IpNextHeaderProtocol(final_next),
-        // 40-byte fixed header + walked extension-header bytes.
-        40 + walked,
+        // Fixed header plus the walked extension-header bytes.
+        IPV6_FIXED_HEADER_SIZE + walked,
     )
 }
 

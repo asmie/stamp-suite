@@ -969,9 +969,8 @@ fn apply_semantic_tlv_processing(
     // alternate destinations and SRH overhead, before each datagram.
     {
         // An existing HMAC is already in wire_size(); reserve only a new one.
-        // HMAC TLV wire size = 4-byte header + 16-byte value.
         let hmac_reserve = if tlv_hmac_key.is_some() && tlvs.hmac_tlv().is_none() {
-            TLV_HEADER_SIZE + 16
+            TLV_HEADER_SIZE + crate::tlv::HMAC_TLV_VALUE_SIZE
         } else {
             0
         };

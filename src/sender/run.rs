@@ -688,12 +688,20 @@ impl SenderRun {
             // with --tlv-hmac off no HMAC TLV is sent, and reserving for one
             // would trim Type 246/247 requests that actually fit on the wire.
             let hmac_tlv = if hmac_key.is_some() && (use_auth || originate_tlv_hmac) {
-                20
+                TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE
             } else {
                 0
             };
-            let dm = if conf.direct_measurement { 16 } else { 0 };
-            let access = if access_report_state.is_some() { 8 } else { 0 };
+            let dm = if conf.direct_measurement {
+                TLV_HEADER_SIZE + DIRECT_MEASUREMENT_TLV_VALUE_SIZE
+            } else {
+                0
+            };
+            let access = if access_report_state.is_some() {
+                TLV_HEADER_SIZE + ACCESS_REPORT_TLV_VALUE_SIZE
+            } else {
+                0
+            };
             let control = if scale_reflected_control {
                 build_reflected_control_tlv(
                     conf.reflected_control_length,
@@ -708,10 +716,9 @@ impl SenderRun {
             let malformed = conf
                 .malformed
                 .map_or(0, |mode| malformed_tlv_bytes(mode).len());
-            const UDP_HEADER: usize = 8;
             let fixed_overhead = ip_hdr
                 + attached_ext
-                + UDP_HEADER
+                + UDP_HEADER_SIZE
                 + base
                 + hmac_tlv
                 + dm
@@ -1171,10 +1178,15 @@ impl SenderRun {
         } else {
             0
         };
-        let limit = (if ipv6 { 65_527usize } else { 65_507usize }).saturating_sub(headers);
+        let (ip_header, max_payload) = if ipv6 {
+            (IPV6_FIXED_HEADER_SIZE, MAX_UDP_PAYLOAD_IPV6)
+        } else {
+            (IPV4_FIXED_HEADER_SIZE, MAX_UDP_PAYLOAD_IPV4)
+        };
+        let limit = max_payload.saturating_sub(headers);
         validate_datagram_size(size, limit)?;
         if let Some(mtu) = route_mtu {
-            let full_size = size + headers + if ipv6 { 48 } else { 28 };
+            let full_size = size + headers + ip_header + UDP_HEADER_SIZE;
             if full_size > mtu {
                 return Ok(Err(crate::StartupError::config(format!(
                     "Probe is {full_size} bytes including IP/UDP headers; route MTU is {mtu} bytes after removing optional header TLVs"
@@ -1507,7 +1519,7 @@ impl SenderRun {
         // Reply processing removes a pending record only after admission.
         // Remember its generation so the bounded index never keeps answered
         // records or accidentally removes another generation after wrap.
-        let echoed = if self.use_auth { 48 } else { 24 };
+        let echoed = crate::packets::reflected_sender_seq_offset(self.use_auth);
         let candidate = if conf.max_pending_probes != 0 {
             // Admission requires the full echo; never inspect stale buffer
             // bytes or invent a sequence from a missing field.

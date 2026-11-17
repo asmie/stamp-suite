@@ -245,10 +245,15 @@ fn assemble_tlv_reply(
     let base_size = base_bytes.len();
     // Each queued response owns its output buffer; reserve the incoming size
     // and a possible generated TLV HMAC before appending the chain.
-    let capacity = original_data
-        .len()
-        .max(base_size)
-        .saturating_add(if verification.key.is_some() { 20 } else { 0 });
+    let capacity =
+        original_data
+            .len()
+            .max(base_size)
+            .saturating_add(if verification.key.is_some() {
+                TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE
+            } else {
+                0
+            });
     let mut response = Vec::with_capacity(capacity);
     response.extend_from_slice(base_bytes);
     let Some(tlv_data) = original_data.get(base_size..).filter(|d| !d.is_empty()) else {

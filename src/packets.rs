@@ -32,6 +32,57 @@ pub(crate) const UNAUTH_SSID_OFFSET: usize = 14;
 /// Offset of the SSID field in authenticated packets (RFC 8972 §3).
 pub(crate) const AUTH_SSID_OFFSET: usize = 26;
 
+/// UDP header size (RFC 768).
+pub(crate) const UDP_HEADER_SIZE: usize = 8;
+
+/// Largest UDP payload over IPv4: the 16-bit Total Length minus the IPv4 and
+/// UDP headers.
+pub(crate) const MAX_UDP_PAYLOAD_IPV4: usize =
+    65_535 - crate::tlv::IPV4_FIXED_HEADER_SIZE - UDP_HEADER_SIZE;
+
+/// Largest UDP payload over IPv6 without jumbograms: the 16-bit Payload Length
+/// covers only the UDP header and payload.
+pub(crate) const MAX_UDP_PAYLOAD_IPV6: usize = 65_535 - UDP_HEADER_SIZE;
+
+// RFC 768 / RFC 791 / RFC 8200 values, checked independently of the
+// expressions above.
+const _: () = assert!(MAX_UDP_PAYLOAD_IPV4 == 65_507 && MAX_UDP_PAYLOAD_IPV6 == 65_527);
+
+/// Offsets in reflected packets (RFC 8762 §4.3.1, §4.3.2).
+const REFLECTED_UNAUTH_TIMESTAMP_OFFSET: usize = 4;
+const REFLECTED_AUTH_TIMESTAMP_OFFSET: usize = 16;
+const REFLECTED_UNAUTH_SENDER_SEQ_OFFSET: usize = 24;
+const REFLECTED_AUTH_SENDER_SEQ_OFFSET: usize = 48;
+const REFLECTED_UNAUTH_SENDER_TIMESTAMP_OFFSET: usize = 28;
+const REFLECTED_AUTH_SENDER_TIMESTAMP_OFFSET: usize = 64;
+
+/// Offset of the Reflector Timestamp in a reflected packet.
+pub(crate) const fn reflected_timestamp_offset(auth: bool) -> usize {
+    if auth {
+        REFLECTED_AUTH_TIMESTAMP_OFFSET
+    } else {
+        REFLECTED_UNAUTH_TIMESTAMP_OFFSET
+    }
+}
+
+/// Offset of the echoed Session-Sender Sequence Number in a reflected packet.
+pub(crate) const fn reflected_sender_seq_offset(auth: bool) -> usize {
+    if auth {
+        REFLECTED_AUTH_SENDER_SEQ_OFFSET
+    } else {
+        REFLECTED_UNAUTH_SENDER_SEQ_OFFSET
+    }
+}
+
+/// Offset of the echoed Session-Sender Timestamp in a reflected packet.
+pub(crate) const fn reflected_sender_timestamp_offset(auth: bool) -> usize {
+    if auth {
+        REFLECTED_AUTH_SENDER_TIMESTAMP_OFFSET
+    } else {
+        REFLECTED_UNAUTH_SENDER_TIMESTAMP_OFFSET
+    }
+}
+
 /// Errors that can occur during packet parsing or processing.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum PacketError {
@@ -274,7 +325,7 @@ wire_packet! {
         /// Reflector's sequence number.
         sequence_number: u32 = 0,
         /// Timestamp when the reflector sent the response.
-        timestamp: u64 = 4,
+        timestamp: u64 = REFLECTED_UNAUTH_TIMESTAMP_OFFSET,
         /// Reflector's error estimate.
         error_estimate: u16 = 12,
         /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §3).
@@ -282,9 +333,9 @@ wire_packet! {
         /// Timestamp when the reflector received the test packet.
         receive_timestamp: u64 = 16,
         /// Original sender's sequence number (echoed back).
-        sess_sender_seq_number: u32 = 24,
+        sess_sender_seq_number: u32 = REFLECTED_UNAUTH_SENDER_SEQ_OFFSET,
         /// Original sender's timestamp (echoed back).
-        sess_sender_timestamp: u64 = 28,
+        sess_sender_timestamp: u64 = REFLECTED_UNAUTH_SENDER_TIMESTAMP_OFFSET,
         /// Original sender's error estimate (echoed back).
         sess_sender_err_estimate: u16 = 36,
         /// Must Be Zero (RFC 8762 §4.3.1). The reply SSID is only at octets
@@ -333,7 +384,7 @@ wire_packet! {
         /// Must Be Zero.
         mbz0: [u8; 12] = 4,
         /// Timestamp when the reflector sent the response.
-        timestamp: u64 = 16,
+        timestamp: u64 = REFLECTED_AUTH_TIMESTAMP_OFFSET,
         /// Reflector's error estimate.
         error_estimate: u16 = 24,
         /// Session-Sender Identifier echoed/asserted by reflector (RFC 8972 §3).
@@ -345,11 +396,11 @@ wire_packet! {
         /// Must Be Zero.
         mbz2: [u8; 8] = 40,
         /// Original sender's sequence number (echoed back).
-        sess_sender_seq_number: u32 = 48,
+        sess_sender_seq_number: u32 = REFLECTED_AUTH_SENDER_SEQ_OFFSET,
         /// Must Be Zero.
         mbz3: [u8; 12] = 52,
         /// Original sender's timestamp (echoed back).
-        sess_sender_timestamp: u64 = 64,
+        sess_sender_timestamp: u64 = REFLECTED_AUTH_SENDER_TIMESTAMP_OFFSET,
         /// Original sender's error estimate (echoed back).
         sess_sender_err_estimate: u16 = 72,
         /// Must Be Zero (octets 74-79). RFC 8972 §3 places the SSID once per
@@ -360,7 +411,7 @@ wire_packet! {
         /// Must Be Zero.
         mbz5: [u8; 15] = 81,
         /// HMAC over octets 0-95 (RFC 8762 §4.4).
-        hmac: [u8; 16] = 96,
+        hmac: [u8; 16] = AUTH_HMAC_OFFSET,
     }
 }
 

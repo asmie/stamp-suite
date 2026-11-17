@@ -609,18 +609,19 @@ pub(crate) fn interface_mtu(_iface: &str) -> Option<u32> {
 /// No base-size floor: a reply whose mandatory fields cannot fit is dropped.
 #[must_use]
 pub(crate) fn mtu_payload_cap(mtu: u32, is_ipv6: bool) -> u16 {
+    use crate::packets::{MAX_UDP_PAYLOAD_IPV4, MAX_UDP_PAYLOAD_IPV6, UDP_HEADER_SIZE};
     use crate::tlv::{IPV4_FIXED_HEADER_SIZE, IPV6_FIXED_HEADER_SIZE};
-    const UDP_HEADER: u32 = 8;
 
-    let ip_hdr = if is_ipv6 {
-        IPV6_FIXED_HEADER_SIZE as u32
+    let (ip_hdr, protocol_cap) = if is_ipv6 {
+        (IPV6_FIXED_HEADER_SIZE, MAX_UDP_PAYLOAD_IPV6)
     } else {
-        IPV4_FIXED_HEADER_SIZE as u32
+        (IPV4_FIXED_HEADER_SIZE, MAX_UDP_PAYLOAD_IPV4)
     };
-    let payload = mtu.saturating_sub(ip_hdr).saturating_sub(UDP_HEADER);
     // Ordinary UDP/IP lengths exclude jumbograms.
-    let protocol_cap = if is_ipv6 { 65_527 } else { 65_507 };
-    payload.min(protocol_cap) as u16
+    let payload = (mtu as usize)
+        .saturating_sub(ip_hdr + UDP_HEADER_SIZE)
+        .min(protocol_cap);
+    payload as u16
 }
 
 #[cfg(test)]

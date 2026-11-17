@@ -881,7 +881,9 @@ impl TlvList {
                 // 246/247: variable Value is valid (request: zeros sized to
                 // header; response: filled).
                 TlvType::ReflectedIpv6ExtHdr | TlvType::ReflectedFixedHdr => false,
-                TlvType::ResidualBer if tlv.value.len() < 8 => {
+                TlvType::ResidualBer
+                    if tlv.value.len() < crate::tlv::RESIDUAL_BER_FIXED_VALUE_SIZE =>
+                {
                     // BPM BER-01 §§4, 5.2.1 require both M and C.
                     tlv.set_conformant_reflected();
                     true

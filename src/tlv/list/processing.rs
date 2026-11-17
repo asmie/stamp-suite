@@ -651,7 +651,7 @@ impl TlvList {
             t.tlv_type == TlvType::ResidualBer
                 && t.flags.conformant_reflected
                 && !t.flags.unrecognized
-                && t.value.len() < 8
+                && t.value.len() < RESIDUAL_BER_FIXED_VALUE_SIZE
         }) {
             reasons.insert(BerConformanceReason::ShortBerValue);
         }

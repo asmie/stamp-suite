@@ -1770,10 +1770,14 @@ impl Configuration {
             let pattern =
                 crate::ber::parse_pattern(self.ber_pattern.as_deref().unwrap_or("ff00ff00"))
                     .map_err(|e| invalid(format!("Invalid --ber-pattern: {e}")))?;
-            if pattern.len() < 4 {
+            if pattern.len() < crate::tlv::RESIDUAL_BER_MIN_PATTERN_SIZE {
                 return Err(invalid("successor BER requires a pattern of at least four bytes; repeat a legacy pattern explicitly (for example aa55aa55)"));
             }
-            if pattern.len() > usize::from(u16::MAX) - 12 {
+            if pattern.len()
+                > usize::from(u16::MAX)
+                    - crate::tlv::RESIDUAL_BER_FIXED_VALUE_SIZE
+                    - crate::tlv::TLV_HEADER_SIZE
+            {
                 return Err(invalid("BER pattern exceeds the combined TLV length field"));
             }
             if self.ber_padding_size == 0 || !self.ber_padding_size.is_multiple_of(pattern.len()) {
@@ -2874,10 +2878,21 @@ pub fn resolve_log_filter(verbose: u8, env: Option<&str>) -> String {
 
 /// Maximum padding value size for `--extra-padding` and `--ber-padding-size`.
 ///
-/// From the IPv4 UDP payload limit (65507), reserve the authenticated base (112),
-/// padding header (4), HMAC (20), Direct Measurement (16), and Access Report (8).
+/// From the IPv4 UDP payload limit, reserve the authenticated base, the
+/// padding TLV header, and the HMAC, Direct Measurement and Access Report TLVs.
 /// Validate before allocation to reject oversized input.
-pub(crate) const MAX_PADDING_BYTES: usize = 65_507 - 112 - 4 - 20 - 16 - 8;
+pub(crate) const MAX_PADDING_BYTES: usize = {
+    use crate::tlv::{
+        ACCESS_REPORT_TLV_VALUE_SIZE, DIRECT_MEASUREMENT_TLV_VALUE_SIZE, HMAC_TLV_VALUE_SIZE,
+        TLV_HEADER_SIZE,
+    };
+    crate::packets::MAX_UDP_PAYLOAD_IPV4
+        - crate::packets::AUTH_BASE_SIZE
+        - TLV_HEADER_SIZE
+        - (TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE)
+        - (TLV_HEADER_SIZE + DIRECT_MEASUREMENT_TLV_VALUE_SIZE)
+        - (TLV_HEADER_SIZE + ACCESS_REPORT_TLV_VALUE_SIZE)
+};
 
 /// Type 246 Requested field width (draft-ietf-ippm-stamp-ext-hdr-26 §4.1).
 pub(crate) const MAX_IPV6_EXT_HDR_SELECTOR_BYTES: usize = 8;

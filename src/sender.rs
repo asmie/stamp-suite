@@ -44,7 +44,7 @@ use crate::{
         ExtendedReflectedPacketAuthenticated, ExtendedReflectedPacketUnauthenticated,
         PacketAuthenticated, PacketUnauthenticated, ReflectedPacketAuthenticated,
         ReflectedPacketUnauthenticated, AUTH_BASE_SIZE, AUTH_HMAC_OFFSET, MAX_UDP_PAYLOAD,
-        UNAUTH_BASE_SIZE,
+        MAX_UDP_PAYLOAD_IPV4, MAX_UDP_PAYLOAD_IPV6, UDP_HEADER_SIZE, UNAUTH_BASE_SIZE,
     },
     rate_control::{AimdController, AimdParams, AimdStats},
     session::Session,
@@ -57,8 +57,10 @@ use crate::{
         AccessReportTlv, ClassOfServiceTlv, DestinationNodeAddressTlv, DirectMeasurementTlv,
         ExtraPaddingTlv, FollowUpTelemetryTlv, LocationTlv, MicroSessionIdTlv, RawTlv,
         ReflectedControlTlv, ReflectedFixedHdrTlv, ReflectedIpv6ExtHdrTlv, ResidualBerValue,
-        ReturnPathTlv, TimestampInfoTlv, TlvList, TlvType, TypedTlv, IPV4_FIXED_HEADER_SIZE,
+        ReturnPathTlv, TimestampInfoTlv, TlvList, TlvType, TypedTlv, ACCESS_REPORT_TLV_VALUE_SIZE,
+        DIRECT_MEASUREMENT_TLV_VALUE_SIZE, HMAC_TLV_VALUE_SIZE, IPV4_FIXED_HEADER_SIZE,
         IPV6_FIXED_HEADER_SIZE, RESIDUAL_BER_DEFAULT_PATTERN, RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
+        TLV_HEADER_SIZE,
     },
 };
 
@@ -225,7 +227,7 @@ pub fn fuzz_reply(
     let mut measurements = Measurements::new(3);
     // Seed a matching echo so fuzzing can reach measurement/control paths;
     // real admission (including mismatches/reuse) is covered by regressions.
-    let echo = if use_auth { 64 } else { 28 };
+    let echo = crate::packets::reflected_sender_timestamp_offset(use_auth);
     let wire_timestamp = data
         .get(echo..echo + 8)
         .map_or(0, |bytes| u64::from_be_bytes(bytes.try_into().unwrap()));
@@ -570,7 +572,7 @@ fn process_response(
         ctx.observers.reply_rejected();
         return;
     };
-    let echo = if use_auth { 64 } else { 28 };
+    let echo = crate::packets::reflected_sender_timestamp_offset(use_auth);
     if data.get(echo..echo + 8) != Some(probe.wire_timestamp.to_be_bytes().as_slice()) {
         log::debug!("Discarding reflected packet seq={seq_num}: missing or mismatched echoed sender timestamp");
         if let Some(m) = ctx.measurements.as_mut() {
