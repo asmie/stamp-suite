@@ -59,6 +59,13 @@ Options (`live_udp_bench --help` lists limits and defaults):
 | `--sessions N` | Cycle through 1–65,534 measured SSIDs on one UDP tuple. Needs `--stateful` and cannot be combined with BER, bursts or headers. Includes session creation on first use, disables expiry and reserves separate identities for warm-up. |
 | `--inventory MODE` | Needs `--sessions` and the `control` build feature. Runs the control API next to the UDP load: idle (`idle`), full reads (`full`) or cursor walks (`page100`, `page500`). |
 
+Each reflector binds UDP port zero and, with an inventory workload, control
+port zero. The benchmark reads the assigned ports from the reflector's JSON
+startup log, so no port is released and then bound again. That log is copied
+to stderr, filtered to errors plus the startup lines. If the reflector exits
+or does not report its endpoint within ten seconds, the trial fails; it is not
+retried.
+
 The generator sends in 1 ms batches, skips pacing slots it has missed, and
 reads replies on a separate thread. Its bookkeeping holds at most
 `rate × seconds + 1` slots (about 60 MB at the maximum). The startup and
@@ -187,8 +194,8 @@ include session creation, so a walk that runs while sessions are still being
 created can end below the final table size. `--sessions` keeps expiry
 disabled.
 
-The child reflector binds its control API to an ephemeral TCP port on IPv4
-loopback, even when the UDP traffic uses IPv6. A random bearer token is kept in
+The child reflector binds its control API to TCP port zero on IPv4 loopback,
+even when the UDP traffic uses IPv6. A random bearer token is kept in
 a temporary mode-0600 file, which is removed when the trial ends. A status
 request checks that the server is ready before load starts. The benchmark
 never uses an existing server or changes its configuration.

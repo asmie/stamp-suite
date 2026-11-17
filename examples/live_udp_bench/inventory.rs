@@ -6,7 +6,7 @@ use std::{
     collections::HashSet,
     error::Error,
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpStream},
     process::Command,
     thread,
     time::{Duration, Instant},
@@ -39,16 +39,14 @@ impl Mode {
 pub(super) struct Profile {
     mode: Mode,
     capacity: usize,
-    address: SocketAddr,
-    reservation: Option<TcpListener>,
+    /// Assigned by the reflector at startup.
+    address: Option<SocketAddr>,
     token: String,
     token_file: tempfile::NamedTempFile,
 }
 
 impl Profile {
     pub(super) fn new(mode: Mode, sessions: u16) -> Result<Self> {
-        let reservation = TcpListener::bind("127.0.0.1:0")?;
-        let address = reservation.local_addr()?;
         let mut random = [0; 32];
         getrandom::fill(&mut random)?;
         let token = hex::encode(random);
@@ -58,22 +56,26 @@ impl Profile {
         Ok(Self {
             mode,
             capacity: usize::from(sessions) + 2,
-            address,
-            reservation: Some(reservation),
+            address: None,
             token,
             token_file,
         })
     }
 
     pub(super) fn configure(&self, command: &mut Command) {
-        command.args(["--control", "--control-addr", &self.address.to_string()]);
+        command.args(["--control", "--control-addr", "127.0.0.1:0"]);
         command
             .arg("--control-token-file")
             .arg(self.token_file.path());
     }
 
-    pub(super) fn release_port(&mut self) {
-        self.reservation.take();
+    pub(super) fn connect_to(&mut self, address: SocketAddr) {
+        self.address = Some(address);
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.address
+            .expect("control endpoint is read at reflector startup")
     }
 
     pub(super) fn ready(&self) -> Result<()> {
@@ -89,9 +91,10 @@ impl Profile {
     // No redirects, TLS, chunked responses, keepalive, or external destinations.
     fn get(&self, path: &str) -> Result<Vec<u8>> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
-        let mut stream = TcpStream::connect_timeout(&self.address, REQUEST_TIMEOUT)?;
+        let address = self.address();
+        let mut stream = TcpStream::connect_timeout(&address, REQUEST_TIMEOUT)?;
         stream.set_write_timeout(Some(deadline.saturating_duration_since(Instant::now())))?;
-        write!(stream, "GET {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n", self.address, self.token)?;
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n", address, self.token)?;
         let mut response = Vec::new();
         let mut buffer = [0; 8192];
         loop {
@@ -152,7 +155,7 @@ impl Profile {
         }
         Ok(serde_json::json!({
             "mode": self.mode,
-            "control_address": self.address,
+            "control_address": self.address(),
             "inter_request_pause_ms": PAUSE.as_millis(),
             "request_timeout_ms": REQUEST_TIMEOUT.as_millis(),
             "response_limit_bytes": MAX_RESPONSE,

@@ -27,6 +27,10 @@ mod memory;
 #[path = "live_udp_bench/inventory.rs"]
 mod inventory;
 
+#[cfg(target_os = "linux")]
+#[path = "live_udp_bench/startup.rs"]
+mod startup;
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("live_udp_bench requires Linux /proc CPU accounting");
@@ -47,6 +51,7 @@ mod linux {
     use super::latency::{Samples, SendTimes};
     use super::memory;
     use super::sessions::{Profile as Sessions, Replies as SessionReplies};
+    use super::startup;
     use clap::Parser;
     use serde::Serialize;
     use serde_json::json;
@@ -545,8 +550,6 @@ mod linux {
             .map(|count| Sessions::new(count, u64::from(args.rate) * u64::from(args.seconds)))
             .transpose()?;
         let ip = if args.ipv6 { "::1" } else { "127.0.0.1" };
-        let reserve = UdpSocket::bind((ip, 0))?;
-        let destination = reserve.local_addr()?;
         let mut command = Command::new(&args.reflector);
         command
             .args([
@@ -554,15 +557,14 @@ mod linux {
                 "--local-addr",
                 ip,
                 "--local-port",
-                &destination.port().to_string(),
+                "0",
                 "--hwtstamp",
                 &args.hwtstamp,
             ])
             .env_remove("STAMP_HMAC_KEY")
-            .env("RUST_LOG", "error")
             .env("TOKIO_WORKER_THREADS", args.workers.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
+            .stdout(Stdio::null());
+        startup::configure(&mut command);
         if args.authenticated {
             command.args(["-A", "A", "--hmac-key", KEY]);
         }
@@ -594,11 +596,16 @@ mod linux {
             inventory.configure(&mut command);
         }
         let command_line = format!("{command:?}");
-        if let Some(inventory) = &mut inventory {
-            inventory.release_port();
-        }
-        drop(reserve); // Bind race fails visibly via child status; never retry a different server.
         let mut child = Reflector(command.spawn()?);
+        let endpoints = startup::wait(&mut child.0)?;
+        let destination = endpoints.udp;
+        if let Some(inventory) = &mut inventory {
+            inventory.connect_to(
+                endpoints
+                    .control
+                    .ok_or("reflector did not announce its control endpoint")?,
+            );
+        }
         let probe_socket = workload_socket(destination, headers)?;
         workload_probe(&mut child, &probe_socket, key, ber, burst, headers, 0)?;
         if let Some(inventory) = &inventory {
