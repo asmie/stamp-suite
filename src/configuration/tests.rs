@@ -258,6 +258,22 @@ fn reflector_utc_offset_file_default_and_signed_cli_override() {
     }
 }
 #[test]
+fn toml_cannot_set_zero_type12_rate_or_volume_limits() {
+    // The CLI rejects zero with range(1..); a configuration file must too.
+    for line in [
+        "reflected_control_max_rate = 0",
+        "reflected_control_max_volume = 0",
+    ] {
+        let args = ["stamp-suite", "--is-reflector"];
+        let matches = <Configuration as clap::CommandFactory>::command().get_matches_from(args);
+        let mut conf = <Configuration as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
+        conf.merge_file(toml::from_str(line).unwrap(), &matches);
+        let error = conf.validate().unwrap_err().to_string();
+        assert!(error.contains("must be at least 1"), "{line}: {error}");
+    }
+}
+
+#[test]
 fn test_valid_configuration_parsing() {
     let args = vec![
         "test",

@@ -199,13 +199,17 @@ async fn post_expire_session(
     State(s): State<ControlState>,
     Json(req): Json<ExpireRequest>,
 ) -> Response {
-    match s
-        .session_manager
-        .expire_matching(req.client, req.session_id)
-    {
-        Ok(true) => StatusCode::OK.into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, "no matching session"),
-        Err(message) => err(StatusCode::CONFLICT, message),
+    // Retirement waits for an in-flight reply send to finish, on a std lock.
+    // Keep that wait off the async workers.
+    let manager = Arc::clone(&s.session_manager);
+    let result =
+        tokio::task::spawn_blocking(move || manager.expire_matching(req.client, req.session_id))
+            .await;
+    match result {
+        Ok(Ok(true)) => StatusCode::OK.into_response(),
+        Ok(Ok(false)) => err(StatusCode::NOT_FOUND, "no matching session"),
+        Ok(Err(message)) => err(StatusCode::CONFLICT, message),
+        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "session expiry failed"),
     }
 }
 
@@ -322,6 +326,18 @@ struct CapsPatch {
 }
 
 async fn patch_caps(State(s): State<ControlState>, Json(p): Json<CapsPatch>) -> Response {
+    // Validate the resulting limits before changing anything, so a rejected
+    // request leaves every cap as it was.
+    let max_rate = p
+        .reflected_control_max_rate
+        .unwrap_or_else(|| s.caps.reflected_control_max_rate.load(Ordering::Relaxed));
+    let max_volume = p
+        .reflected_control_max_volume
+        .unwrap_or_else(|| s.caps.reflected_control_max_volume.load(Ordering::Relaxed));
+    if let Err(message) = crate::configuration::check_reflected_control_limits(max_rate, max_volume)
+    {
+        return err(StatusCode::BAD_REQUEST, message);
+    }
     s.rate_limiter.update_rate(p.max_pps, p.rate_burst);
     if let Some(cap) = p.max_sessions {
         s.session_manager.set_max_sessions(cap);

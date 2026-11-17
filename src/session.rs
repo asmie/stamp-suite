@@ -494,7 +494,10 @@ impl SessionManager {
         };
         let session = sessions.get_mut(&key).unwrap().begin_retirement();
         drop(sessions);
-        Ok(self.finish_removal(key, session))
+        // The session is retiring from here on. If the cleanup worker removes
+        // it first, it is still gone, so report the expiry either way.
+        self.finish_removal(key, session);
+        Ok(true)
     }
 
     fn finish_removal(&self, key: SessionKey, expected: Arc<Session>) -> bool {

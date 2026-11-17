@@ -53,6 +53,7 @@ send a body, also send `Content-Type: application/json`.
 | --- | --- | --- |
 | 400 | Invalid key (bad hex or shorter than 16 bytes) | `{"error": "invalid key: ..."}` |
 | 400 | Invalid session page query, limit or cursor | `{"error": "..."}` |
+| 400 | `PATCH /v1/caps` would set `reflected_control_max_rate` or `reflected_control_max_volume` to 0 | `{"error": "..."}` |
 | 410 | Session page cursor from another manager or process lifetime | `{"error": "..."}` |
 | 400 | Body is not valid JSON, or the SSID in the path is not a number from 0 to 65535 | Plain text |
 | 401 | Token configured and the header is missing or wrong | `{"error": "missing or invalid bearer token"}` |
@@ -296,7 +297,9 @@ switch to paging, change the path, read `items`, and repeat with
 `POST /v1/sessions/expire` removes one session. You can leave out
 `session_id` if the client address matches exactly one session. If it matches
 several, the call returns 409 and removes nothing. On success it returns 200
-with an empty body. Expiry does not remove provisioning, so later traffic from
+with an empty body, also when the idle-session cleanup happened to finish
+removing the same session first. It returns 404 only if no session matched.
+The call can wait briefly for a reply that is being sent. Expiry does not remove provisioning, so later traffic from
 the same client can create the session again, with fresh counters and a new
 `session_id`. Once the call returns, no queued reply from the old session is
 sent.
@@ -367,7 +370,8 @@ curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/js
 - `reflected_control_max_count` 0 disables Type 12 requests. It does not mean
   unlimited copies. `reflected_control_max_rate` (bytes per second) and
   `reflected_control_max_volume` (bytes) cap what a single request can
-  generate.
+  generate. Both must be at least 1, as on the command line; a request that
+  sets either to 0 gets a 400 and changes no cap.
 - `reflected_control_max_size` is an administrative limit on payload size. On
   Linux and Windows, each reply copy is also checked against the route MTU
   before it is sent, and PATCH cannot turn that check off.

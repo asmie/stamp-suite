@@ -90,6 +90,11 @@ Upgrade both peers together when they use BER or reflected headers.
     patterns survive MTU clamping.
   - Session activity, rate-limit refill and rate/burst control updates stay
     consistent under concurrent workers.
+  - Control API: `PATCH /v1/caps` and configuration files reject a zero
+    Type 12 rate or volume limit, as the CLI already did. Session expiry
+    reports success when the cleanup worker finishes removing the same
+    session first, and no longer blocks an async worker while it waits for
+    an in-flight reply.
   - In `--tlv-mode ignore`, Direct Measurement and Follow-Up Telemetry TLVs
     are sent as received, even when the sender left U clear.
   - Reply route-MTU lookups follow `--interface`. Linux queries the route

@@ -309,6 +309,30 @@ fn test_expire_session() {
     assert!(!mgr.expire_session(addr), "second expire returns false");
 }
 
+/// A control expiry and the cleanup worker can both retire the same session
+/// while a reply is being sent. Whichever removes the entry, the session is
+/// gone, so the expiry must succeed instead of reporting "not found".
+#[test]
+fn expire_succeeds_when_cleanup_removes_the_retiring_session_first() {
+    let addr: SocketAddr = "10.0.0.1:5000".parse().unwrap();
+    for _ in 0..50 {
+        let manager = SessionManager::new(Some(Duration::ZERO), None);
+        let session = manager.get_or_create_session(addr).unwrap();
+        thread::scope(|scope| {
+            let guard = session.transmission_guard().unwrap();
+            let cleanup = scope.spawn(|| manager.cleanup_stale_sessions());
+            wait_for_retirement(&[&session]);
+            let expire = scope.spawn(|| manager.expire_matching(addr, None));
+            // Both removers now wait for the in-flight send.
+            thread::sleep(Duration::from_millis(1));
+            drop(guard);
+            assert_eq!(expire.join().unwrap(), Ok(true));
+            cleanup.join().unwrap();
+        });
+        assert_eq!(manager.session_count(), 0);
+    }
+}
+
 #[test]
 fn test_draining_blocks_new_sessions_only() {
     let mgr = SessionManager::new(None, None);
@@ -977,7 +1001,13 @@ fn concurrent_control_replacement_survives_cleanup_even_with_wrapped_ids() {
             control.join().unwrap();
             let (fresh, control_removed) =
                 fresh.expect("control removal/recreation blocked on unrelated retirement");
-            assert_eq!(removed + usize::from(control_removed), 2);
+            // Cleanup always removes the second session. Control either found
+            // the first one (and reports it expired, even if cleanup finished
+            // the removal), or cleanup had already removed both.
+            assert!(
+                removed == 2 || (removed == 1 && control_removed),
+                "cleanup removed {removed}, control reported {control_removed}"
+            );
             assert!(Arc::ptr_eq(&fresh, &manager.get_session(keys[0]).unwrap()));
             assert!(fresh.transmission_guard().is_some());
             assert_eq!(fresh.peek_sequence_number(), 0);

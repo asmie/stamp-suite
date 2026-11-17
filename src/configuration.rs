@@ -1636,6 +1636,11 @@ impl Configuration {
     /// parsed here so a typo fails at startup instead of falling back to a
     /// default on every packet.
     fn validate_reflector_policies(&self) -> Result<(), ConfigurationError> {
+        check_reflected_control_limits(
+            self.reflected_control_max_rate,
+            self.reflected_control_max_volume,
+        )
+        .map_err(invalid)?;
         if self.validate_tlv_framing && !self.is_reflector {
             return Err(invalid("--validate-tlv-framing requires --is-reflector"));
         }
@@ -2574,6 +2579,22 @@ pub enum ConfigurationError {
 }
 
 /// An [`ConfigurationError::InvalidConfiguration`] with `msg`.
+/// Type 12 rate and volume ceilings must admit at least one byte (RFC 10052
+/// §3); zero would refuse every request while looking like a limit. The CLI
+/// parser, TOML validation and the control API share this check.
+pub(crate) fn check_reflected_control_limits(
+    max_rate: u64,
+    max_volume: u32,
+) -> Result<(), &'static str> {
+    if max_rate == 0 {
+        return Err("reflected_control_max_rate must be at least 1");
+    }
+    if max_volume == 0 {
+        return Err("reflected_control_max_volume must be at least 1");
+    }
+    Ok(())
+}
+
 fn invalid(msg: impl Into<String>) -> ConfigurationError {
     ConfigurationError::InvalidConfiguration(msg.into())
 }

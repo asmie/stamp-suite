@@ -721,6 +721,32 @@ async fn caps_patch_round_trip() {
     assert_eq!(v["reflected_control_max_size"], 1500);
 }
 
+/// Zero Type 12 rate or volume ceilings are rejected, as on the CLI, and a
+/// rejected request changes no cap, including fields that were valid.
+#[tokio::test]
+async fn caps_patch_rejects_zero_type12_limits_without_partial_updates() {
+    let state = test_state();
+    let app = router(state.clone()).unwrap();
+    let before = get_json(&app, "/v1/caps").await;
+    for body in [
+        r#"{"max_pps":500,"reflected_control_max_rate":0}"#,
+        r#"{"reflected_control_max_count":8,"reflected_control_max_volume":0}"#,
+    ] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::patch("/v1/caps")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(get_json(&app, "/v1/caps").await, before, "{body}");
+    }
+}
+
 /// PATCH stores the administrative cap; the send path enforces route MTU.
 #[tokio::test]
 async fn caps_patch_updates_administrative_size_limit() {
