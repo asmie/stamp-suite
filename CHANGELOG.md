@@ -150,6 +150,10 @@ Upgrade both peers together when they use BER or reflected headers.
   - Windows: 1 ms timer resolution is requested during runs, and pacing keeps
     running after receive errors.
   - The loss threshold triggers session failure even before the first reply.
+- Configuration: the warning for a config file writable by group or other is
+  logged again. It was raised before logging started and never shown.
+  `Configuration::load_with_warnings` returns such warnings to a caller that
+  sets up logging from the configuration; `Configuration::load` logs them.
 - Packaging: RPM installation aborts when the service user cannot be created;
   the Nix package reads its version from Cargo.toml. The 1.0.0 Gentoo ebuild
   again lists the crates of its own release, and the metadata check compares

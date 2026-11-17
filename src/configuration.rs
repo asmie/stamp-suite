@@ -2274,13 +2274,34 @@ impl Configuration {
     ///
     /// Precedence (highest first): CLI flag, `STAMP_HMAC_KEY` env var,
     /// TOML file value, hardcoded default.
+    ///
+    /// Warnings found while loading, such as a config file writable by group
+    /// or other, go to the `log` facade, so a logger must already be set.
+    /// A program that configures its logger from this configuration should
+    /// call [`Self::load_with_warnings`] instead.
     pub fn load() -> Result<Self, ConfigurationError> {
+        let (conf, warnings) = Self::load_with_warnings()?;
+        for warning in warnings {
+            log::warn!("{warning}");
+        }
+        Ok(conf)
+    }
+
+    /// [`Self::load`], returning the loading warnings instead of logging
+    /// them, for a caller that can log only once it has the configuration.
+    pub fn load_with_warnings() -> Result<(Self, Vec<String>), ConfigurationError> {
         let matches = <Self as clap::CommandFactory>::command().get_matches();
         Self::load_from_matches(matches)
     }
 
-    /// [`Self::load`] with pre-built `ArgMatches`, so tests can supply their own.
-    fn load_from_matches(matches: clap::ArgMatches) -> Result<Self, ConfigurationError> {
+    /// [`Self::load_with_warnings`] with pre-built `ArgMatches`, so tests can
+    /// supply their own.
+    fn load_from_matches(
+        matches: clap::ArgMatches,
+    ) -> Result<(Self, Vec<String>), ConfigurationError> {
+        // Only the Unix permission check adds warnings so far.
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut warnings = Vec::new();
         let mut conf = <Self as clap::FromArgMatches>::from_arg_matches(&matches)
             .map_err(|e| invalid(e.to_string()))?;
 
@@ -2299,13 +2320,13 @@ impl Configuration {
                 if let Ok(md) = std::fs::metadata(&path) {
                     let mode = md.permissions().mode();
                     if mode & 0o022 != 0 {
-                        log::warn!(
+                        warnings.push(format!(
                             "Config file {:?} is writable by group or other (mode {:o}). \
                              An attacker with write access could change any STAMP setting \
                              including hmac_key_file. Recommended: chmod 600",
                             path,
                             mode & 0o777
-                        );
+                        ));
                     }
                 }
             }
@@ -2323,7 +2344,7 @@ impl Configuration {
             conf.local_port = if conf.is_reflector { 862 } else { 0 };
         }
         conf.validate()?;
-        Ok(conf)
+        Ok((conf, warnings))
     }
 
     /// Overrides fields that were not explicitly set on the command line (or

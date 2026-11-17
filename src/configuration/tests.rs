@@ -1581,7 +1581,7 @@ fn load_from_args(args: &[&str]) -> Result<Configuration, ConfigurationError> {
     let matches = Configuration::command()
         .try_get_matches_from(args)
         .map_err(|e| ConfigurationError::InvalidConfiguration(e.to_string()))?;
-    Configuration::load_from_matches(matches)
+    Configuration::load_from_matches(matches).map(|(conf, _)| conf)
 }
 
 #[test]
@@ -3375,4 +3375,28 @@ fn tlv_framing_validation_merges_from_toml_and_matches_schema() {
         "boolean"
     );
     assert!(toml::from_str::<FileConfiguration>("validate_tlv_framing = 'true'").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn writable_config_file_warning_is_returned_for_logging_after_startup() {
+    // main() can log only after it has read --log-format from this very
+    // configuration, so loading returns the warning instead of logging it.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stamp.toml");
+    std::fs::write(&path, "is_reflector = true\n").unwrap();
+    let path_arg = path.to_str().unwrap();
+    for (mode, warned) in [(0o666, true), (0o620, true), (0o600, false), (0o644, false)] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let matches = Configuration::command()
+            .try_get_matches_from(["test", "--config", path_arg])
+            .unwrap();
+        let (conf, warnings) = Configuration::load_from_matches(matches).unwrap();
+        assert!(conf.is_reflector);
+        assert_eq!(warnings.len(), usize::from(warned), "mode {mode:o}");
+        if warned {
+            assert!(warnings[0].contains("writable by group or other"));
+        }
+    }
 }

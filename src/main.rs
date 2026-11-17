@@ -48,9 +48,10 @@ fn init_logging(format: LogFormat, verbose: u8) {
 #[tokio::main]
 async fn main() {
     // Parse args before initialising logging so we know the user's
-    // --log-format choice. Configuration errors go to stderr directly.
-    let conf = match Configuration::load() {
-        Ok(c) => c,
+    // --log-format choice. Configuration errors go to stderr directly;
+    // loading warnings are logged once logging is up.
+    let (conf, load_warnings) = match Configuration::load_with_warnings() {
+        Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(1);
@@ -64,6 +65,9 @@ async fn main() {
     }
 
     init_logging(conf.log_format, conf.verbose);
+    for warning in load_warnings {
+        log::warn!("{warning}");
+    }
 
     // A role that never got off the ground exits non-zero: the shipped
     // systemd unit restarts on failure and reads exit 0 as a deliberate stop.

@@ -104,3 +104,38 @@ fn merge_via_public_api(
         }
     }
 }
+
+/// The warning is raised while loading, before `--log-format` is known, so the
+/// binary must log it after starting its logger rather than lose it.
+#[cfg(unix)]
+#[test]
+fn binary_logs_the_writable_config_file_warning() {
+    use std::os::unix::fs::PermissionsExt;
+    let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stamp.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "remote_addr = \"127.0.0.1\"\nremote_port = {}\nlocal_addr = \"127.0.0.1\"\n\
+             count = 1\ntimeout = 0\n",
+            peer.local_addr().unwrap().port()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    for format in ["text", "json"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
+            .args(["--config", path.to_str().unwrap(), "--log-format", format])
+            .env_remove("STAMP_HMAC_KEY")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{format}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("writable by group or other"),
+            "{format}: warning missing from stderr:\n{stderr}"
+        );
+    }
+}
