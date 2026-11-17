@@ -1393,7 +1393,9 @@ fn unavailable_ecn_sets_rpe01_on_every_copy_and_preserves_routing_and_signatures
                     Some(seq)
                 );
             }
-            assert_eq!(attempts, 9);
+            // The first copy tries the request, then Not-ECT, then sends
+            // unmarked. Later copies to the same target send unmarked at once.
+            assert_eq!(attempts, 3 + 1 + 1);
             assert_eq!(counters.packets_reflected.load(Ordering::Relaxed), 3);
             assert_eq!(
                 counters

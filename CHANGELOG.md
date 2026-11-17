@@ -68,6 +68,10 @@ Upgrade both peers together when they use BER or reflected headers.
 - The MTU cache evicts with a second-chance queue instead of clearing all
   256 entries when full.
 - Replies that fit the payload budget are sent without copying.
+- Once a reply copy finds that the target cannot be marked, the remaining
+  copies of that burst skip the two failing marking attempts. This matters
+  most on Windows, where every CoS reply ends unmarked. Windows and macOS
+  route-MTU lookups no longer pass through the Linux-only cache.
 - The standards monitor detects replaced drafts and follows successor chains.
 
 ### Fixed

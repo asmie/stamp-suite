@@ -120,6 +120,10 @@ pub(super) struct Transmission {
     pub remaining: u16,
     pub interval: Duration,
     first: bool,
+    /// A target an earlier copy could not mark (option-setting failed for
+    /// both the request and the Not-ECT fallback). Later copies to it start
+    /// in that final state instead of failing the same attempts again.
+    marking_unavailable_for: Option<SocketAddr>,
 }
 
 impl Transmission {
@@ -152,6 +156,7 @@ impl Transmission {
             remaining: extra.saturating_add(1),
             interval,
             first: true,
+            marking_unavailable_for: None,
         }
     }
 
@@ -248,6 +253,17 @@ impl Transmission {
         let mut cos_marking_unavailable = false;
         let mut refresh_mtu = false;
         let reason = loop {
+            if options.apply_tos && self.marking_unavailable_for == Some(target) {
+                // Reach the state the marking fallback below ends in, so this
+                // copy is shaped, timestamped and signed once, not three times.
+                if self.response.cos_request.is_some() {
+                    super::set_cos_policy_rejected(&mut data, base);
+                    cos_fallback = true;
+                    cos_marking_unavailable |=
+                        super::reply_bytes::set_cos_marking_unavailable(&mut data, base);
+                }
+                options.apply_tos = false;
+            }
             let mut third_dscp = false;
             if let Some(policy) = &self.response.cos_reply_policy {
                 let to_source = target == self.source;
@@ -407,6 +423,7 @@ impl Transmission {
                             super::reply_bytes::set_cos_marking_unavailable(&mut data, base);
                     }
                     options.apply_tos = false;
+                    self.marking_unavailable_for = Some(target);
                 }
                 Err(e) if is_reply_too_large(&e) => {
                     log::debug!("reply cannot fit the route MTU: {e}");

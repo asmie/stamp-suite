@@ -4,16 +4,18 @@
 //! 250 ms expiry and EMSGSIZE-triggered refresh provide additional backstops.
 //! Kernel fragmentation prevention closes the race between lookup and send.
 //! Windows and supported macOS IPv6 sockets query on every attempt, without
-//! reusing cached estimates.
+//! the cache, which is compiled there only for its unit tests.
 use super::transmit::SendOptions;
+#[cfg(any(target_os = "linux", test))]
 use std::{
     collections::{HashMap, VecDeque},
-    io,
-    net::SocketAddr,
     time::{Duration, Instant},
 };
+use std::{io, net::SocketAddr};
 
+#[cfg(any(target_os = "linux", test))]
 const CACHE_LIMIT: usize = 256;
+#[cfg(any(target_os = "linux", test))]
 const CACHE_TTL: Duration = Duration::from_millis(250);
 
 #[cfg(target_os = "windows")]
@@ -35,6 +37,7 @@ struct RouteKey {
     oif: u32,
 }
 
+#[cfg(any(target_os = "linux", test))]
 struct CachedMtu {
     until: Instant,
     mtu: u32,
@@ -43,9 +46,11 @@ struct CachedMtu {
 
 #[derive(Default)]
 pub(super) struct MtuCache {
+    #[cfg(any(target_os = "linux", test))]
     entries: HashMap<RouteKey, CachedMtu>,
     // One key per entry; hits only set a bit. Capacity pressure advances this
     // bounded second-chance queue rather than discarding the whole working set.
+    #[cfg(any(target_os = "linux", test))]
     order: VecDeque<RouteKey>,
     #[cfg(target_os = "linux")]
     notifications: Option<std::os::fd::OwnedFd>,
@@ -59,6 +64,8 @@ impl MtuCache {
     /// A cache for reply sockets bound to interface `oif` (0 for unbound).
     /// Linux looks the route up through that interface or VRF; macOS has no
     /// estimate for pinned sockets and refuses size-controlled replies.
+    // Off Linux, outside tests, `bound_oif` is the only field.
+    #[allow(clippy::needless_update)]
     pub fn bound_to(oif: u32) -> Self {
         Self {
             bound_oif: oif,
@@ -81,12 +88,19 @@ impl MtuCache {
             ));
         }
         let (key, overhead) = route_key(local, target, options, self.bound_oif)?;
-        // Until native route-change notifications are supported, never reuse
-        // a cached estimate, including for later copies of a burst.
-        let refresh = refresh || cfg!(any(target_os = "windows", target_os = "macos"));
+        // Only Linux has route-change notifications to invalidate the cache.
+        // Elsewhere an estimate is never reused, including for later copies of
+        // a burst, so query the kernel directly and skip the cache entirely.
         #[cfg(target_os = "linux")]
-        let refresh = refresh || !self.invalidate_routes();
-        let mtu = self.lookup(key, Instant::now(), refresh, route_mtu)?;
+        let mtu = {
+            let refresh = refresh || !self.invalidate_routes();
+            self.lookup(key, Instant::now(), refresh, route_mtu)?
+        };
+        #[cfg(not(target_os = "linux"))]
+        let mtu = {
+            let _ = refresh;
+            route_mtu(&key)?
+        };
         Ok(usize::from(mtu_payload_cap(mtu, target.is_ipv6())).saturating_sub(overhead))
     }
 
@@ -179,6 +193,7 @@ impl MtuCache {
         false
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn lookup(
         &mut self,
         key: RouteKey,
@@ -213,11 +228,13 @@ impl MtuCache {
         Ok(mtu)
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn evict_one(&mut self, now: Instant) {
         while let Some(key) = self.order.pop_front() {
             let Some(entry) = self.entries.get_mut(&key) else {

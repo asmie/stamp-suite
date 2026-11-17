@@ -416,7 +416,9 @@ fn simultaneous_cos_nested_header_and_ber_reasons_count_each_successful_copy() {
                     );
                 }
             }
-            assert_eq!(attempts, 9);
+            // Two failed marking attempts on the first copy only; later copies
+            // to the same target send unmarked at once and count the same.
+            assert_eq!(attempts, 3 + 1 + 1);
         }
     }
 }
