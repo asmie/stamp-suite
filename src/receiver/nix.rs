@@ -175,6 +175,46 @@ pub async fn run_receiver_with_socket(
         );
     }
 
+    // A dual-stack IPv6 socket also receives IPv4 datagrams as IPv4-mapped
+    // addresses. Linux attaches their TTL and TOS only for the IPv4 options,
+    // and without a TTL every IPv4 request would be skipped. Darwin rejects
+    // IPv4 options here and reports mapped traffic through the IPv6 ones.
+    #[cfg(not(target_os = "macos"))]
+    if is_ipv6
+        && !socket2::SockRef::from(&std_socket)
+            .only_v6()
+            .unwrap_or(true)
+    {
+        for (option, name, required) in [
+            (libc::IP_RECVTTL, "IP_RECVTTL", true),
+            (libc::IP_RECVTOS, "IP_RECVTOS", false),
+        ] {
+            // SAFETY: `fd` is the open socket owned by `std_socket`; the value
+            // pointer and length describe the live `enable` c_int.
+            let result = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IP,
+                    option,
+                    &enable as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if result < 0 && required {
+                return Err(crate::StartupError::io(
+                    format!("Failed to set {name} for IPv4 on a dual-stack socket"),
+                    std::io::Error::last_os_error(),
+                ));
+            } else if result < 0 {
+                log::warn!(
+                    "Failed to set {name} for IPv4 on a dual-stack socket: {} \
+                     (IPv4 DSCP/ECN measurement disabled)",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+    }
+
     // IPv6 extension headers arrive as ancillary data, in wire order, for
     // Type 246 reflection (draft-ietf-ippm-stamp-ext-hdr-26 §4.2). Without
     // them those requests get the C flag.
@@ -485,6 +525,10 @@ pub async fn run_receiver_with_socket(
                     let ttl = match extract_ttl_from_cmsgs(&msg) {
                         Some(t) => t,
                         None => {
+                            // Count it, so a missing TTL never drops traffic
+                            // silently.
+                            counters.record_received();
+                            counters.record_drop("processing_rejected");
                             crate::warn_throttled!("Failed to extract TTL from packet, skipping");
                             continue;
                         }

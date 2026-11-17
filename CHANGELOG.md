@@ -85,6 +85,10 @@ Upgrade both peers together when they use BER or reflected headers.
 ### Fixed
 
 - Reflector:
+  - A nix reflector bound to `::` on Linux answers IPv4 clients. It dropped
+    every IPv4 datagram without counting it, because the dual-stack socket
+    did not ask for their TTL. Datagrams without TTL metadata are now counted
+    as dropped.
   - A keyed open-mode reflector no longer copies TWAMP Light padding as raw
     zeros after the HMAC TLV, which a STAMP sender must treat as an HMAC
     failure (RFC 8972 §4.8). The padding is sent as an Extra Padding TLV, and

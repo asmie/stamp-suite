@@ -1031,6 +1031,12 @@ family must bind. If the other family is unavailable, the reflector still runs
 on the configured one. An IPv6 wildcard bind uses a separate IPv6-only socket
 next to the IPv4 one.
 
+With the nix backend, a reflector bound to `::` also answers IPv4 clients,
+which reach it as IPv4-mapped addresses, unless `net.ipv6.bindv6only` is set.
+Their TTL and DSCP/ECN are read as for an IPv4 bind. A datagram that arrives
+without TTL metadata is counted as dropped (`processing_rejected`) rather than
+skipped silently.
+
 Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-26
 requires. `--ttl` accepts only 255. Received packets with a lower hop count are
 accepted.
