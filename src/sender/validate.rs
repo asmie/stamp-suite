@@ -43,11 +43,15 @@ impl std::fmt::Display for TlvRejection {
 }
 
 /// Initial flag and HMAC diagnostics, also retained when required binding fails.
+/// `reply_hmac_expected` is false when an open-mode sender holds a key but
+/// sent no HMAC TLV (`--tlv-hmac off`): a reflector then signs only if it
+/// chooses to (RFC 8972 §4.8), so a missing HMAC TLV is not a gap.
 pub(super) fn reflected_tlv_telemetry(
     tlvs: &TlvList,
     data: &[u8],
     base_size: usize,
     hmac_key: Option<&HmacKey>,
+    reply_hmac_expected: bool,
 ) -> TlvTelemetry {
     let (unrecognized, malformed, integrity_failed) = tlvs.count_error_flags();
     let hmac = match (hmac_key, tlvs.hmac_tlv()) {
@@ -75,8 +79,8 @@ pub(super) fn reflected_tlv_telemetry(
         (Some(_), None) if base_size == AUTH_BASE_SIZE && !tlvs.contains_only_extra_padding() => {
             HmacStatus::Failed
         }
-        (Some(_), None) => HmacStatus::Missing,
-        (None, None) => HmacStatus::NotRequested,
+        (Some(_), None) if reply_hmac_expected => HmacStatus::Missing,
+        (_, None) => HmacStatus::NotRequested,
     };
     TlvTelemetry {
         tlv_count: tlvs.len(),
@@ -98,6 +102,7 @@ pub(super) fn validate_reflected_tlvs(
     data: &[u8],
     base_size: usize,
     hmac_key: Option<&HmacKey>,
+    reply_hmac_expected: bool,
     expected_sender_msid: Option<u16>,
     expected_reflector_msid: Option<u16>,
     latched_reflector_msid: &mut Option<u16>,
@@ -105,7 +110,8 @@ pub(super) fn validate_reflected_tlvs(
     track_access_report: bool,
     track_congestion: bool,
 ) -> Result<TlvTelemetry, TlvRejection> {
-    let mut telemetry = reflected_tlv_telemetry(tlvs, data, base_size, hmac_key);
+    let mut telemetry =
+        reflected_tlv_telemetry(tlvs, data, base_size, hmac_key, reply_hmac_expected);
     let hmac = telemetry.hmac;
     let integrity_failed = telemetry.flags.integrity_failed;
     // Check integrity before U/M processing. Missing optional HMAC follows
@@ -144,10 +150,13 @@ pub(super) fn validate_reflected_tlvs(
         if count > 1 {
             return Err(TlvRejection::MsidAmbiguous);
         }
-        let usable_hmac = hmac_key.is_none()
-            || tlvs.hmac_tlv().is_some_and(|raw| {
-                !raw.is_unrecognized() && !raw.is_malformed() && !raw.is_integrity_failed()
-            });
+        let usable_hmac = match tlvs.hmac_tlv() {
+            None => hmac_key.is_none() || !reply_hmac_expected,
+            Some(raw) => {
+                hmac_key.is_none()
+                    || (!raw.is_unrecognized() && !raw.is_malformed() && !raw.is_integrity_failed())
+            }
+        };
         if count == 0 || !integrity_ok || !usable_hmac {
             return Err(TlvRejection::MsidUnavailable);
         }

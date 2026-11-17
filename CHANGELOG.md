@@ -28,6 +28,12 @@ Upgrade both peers together when they use BER or reflected headers.
 - **CoS/ECN.** DSCP admission and ECN reporting follow
   draft-ietf-bpm-stamp-cos-ecn-00. A reflector that can apply neither the
   requested ECN nor Not-ECT replies with RPE=01.
+- **Open-mode TLV HMAC on the reflector.** A keyed reflector signs an
+  open-mode reply only when the request carried an HMAC TLV (RFC 8972 §4.8),
+  so replies to unsigned probes keep the request's size. `--tlv-hmac on`
+  restores signing every reply that has TLVs; a reflector rejects
+  `--tlv-hmac off`. Authenticated replies are signed as before, except when
+  the only TLV is Extra Padding, which §4.8 exempts.
 - **Minimum Rust version** is 1.87.
 - **Library API.** `StampResponse` has new `cos_reply_policy` and
   `tlv_processed` fields. The retired BER types `BerPatternTlv`,
@@ -79,6 +85,10 @@ Upgrade both peers together when they use BER or reflected headers.
 ### Fixed
 
 - Reflector:
+  - A keyed open-mode reflector no longer copies TWAMP Light padding as raw
+    zeros after the HMAC TLV, which a STAMP sender must treat as an HMAC
+    failure (RFC 8972 §4.8). The padding is sent as an Extra Padding TLV, and
+    short padding is no longer dropped from unsigned replies.
   - Single reflected-header and BER replies now respect the route MTU. 1.0.0
     could send them oversized.
   - The pnet capture buffer grows from 4 KiB to 128 KiB. Large probes were

@@ -1025,6 +1025,7 @@ fn test_validate_reflected_tlvs_auth_reply_without_hmac_tlv_fails() {
             &[0u8; AUTH_BASE_SIZE],
             AUTH_BASE_SIZE,
             Some(&key),
+            true,
             None,
             None,
             &mut None,
@@ -1048,6 +1049,43 @@ fn test_validate_reflected_tlvs_auth_reply_without_hmac_tlv_fails() {
 }
 
 #[test]
+fn open_reply_without_hmac_is_missing_only_when_the_sender_signed() {
+    // RFC 8972 §4.8: in open mode a reflector signs a reply when asked. A
+    // sender with a key that sent its TLVs unsigned (`--tlv-hmac off`) cannot
+    // expect a signed reply, so its measurement values stay usable.
+    let key = HmacKey::new(vec![0xAB; 16]).unwrap();
+    let mut dm = crate::tlv::DirectMeasurementTlv::new(7).to_raw();
+    dm.clear_reflector_flags();
+    let mut tlvs = TlvList::new();
+    tlvs.push(dm).unwrap();
+    let data = [0u8; UNAUTH_BASE_SIZE];
+    for (expected, status, has_dm) in [
+        (true, HmacStatus::Missing, false),
+        (false, HmacStatus::NotRequested, true),
+    ] {
+        let info = validate_reflected_tlvs(
+            &tlvs,
+            &data,
+            UNAUTH_BASE_SIZE,
+            Some(&key),
+            expected,
+            None,
+            None,
+            &mut None,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(info.hmac, status, "expected={expected}");
+        assert_eq!(
+            info.direct_measurement.is_some(),
+            has_dm,
+            "expected={expected}"
+        );
+    }
+}
+
+#[test]
 fn test_validate_reflected_tlvs_msid_match_accepts() {
     // RFC 9534 §3.2: reflected MSID TLV must carry the sender's sender_id
     // unchanged; the reflector fills reflector_micro_session_id.
@@ -1065,6 +1103,7 @@ fn test_validate_reflected_tlvs_msid_match_accepts() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None,
         &mut None,
@@ -1091,6 +1130,7 @@ fn test_validate_reflected_tlvs_msid_mismatch_rejects() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None,
         &mut None,
@@ -1127,6 +1167,7 @@ fn test_validate_reflected_tlvs_msid_malformed_rejects() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(1234),
         None,
         &mut None,
@@ -1146,7 +1187,8 @@ fn test_validate_reflected_tlvs_msid_not_requested() {
     tlvs.push(MicroSessionIdTlv::new(1, 2).to_raw()).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None,
+        false, // track_access_report
         false, // track_congestion
     )
     .expect("no MSID binding requested → accept");
@@ -1189,6 +1231,7 @@ fn test_reflected_reflector_msid_mismatch_rejects() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         Some(0x22), // pre-known reflector id, but reflected 0x11 ≠ 0x22
         &mut latched,
@@ -1226,6 +1269,7 @@ fn test_reflected_reflector_msid_match_accepts() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         Some(0x22),
         &mut latched,
@@ -1268,6 +1312,7 @@ fn test_reflected_reflector_msid_zero_config_latches_first_seen() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None, // no pre-known reflector ID
         &mut latched,
@@ -1291,6 +1336,7 @@ fn test_reflected_reflector_msid_zero_config_latches_first_seen() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None,
         &mut latched,
@@ -1319,6 +1365,7 @@ fn test_reflected_reflector_msid_zero_config_rejects_change_after_latch() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None,
         &mut latched,
@@ -1337,6 +1384,7 @@ fn test_reflected_reflector_msid_zero_config_rejects_change_after_latch() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None,
         &mut latched,
@@ -1370,6 +1418,7 @@ fn test_forged_first_reply_does_not_latch_reflector_msid() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None, // no pre-known reflector ID → zero-config latch path
         &mut latched,
@@ -1394,6 +1443,7 @@ fn test_forged_first_reply_does_not_latch_reflector_msid() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None,
         &mut latched,
@@ -1423,6 +1473,7 @@ fn test_forged_msid_with_i_flag_not_consumed() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None,
         &mut None,
@@ -1448,6 +1499,7 @@ fn test_forged_msid_with_m_flag_not_consumed() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None,
         &mut None,
@@ -1482,6 +1534,7 @@ fn test_forged_msid_ignored_when_tlv_hmac_fails() {
         &data,
         44,
         Some(&key),
+        true,
         Some(7777),
         None,
         &mut None,
@@ -1561,6 +1614,7 @@ fn measurement_telemetry_requires_usable_unambiguous_authenticated_values() {
                     &data,
                     base,
                     matches!(case, "signed" | "bad-hmac" | "missing").then_some(&key),
+                    true,
                     None,
                     None,
                     &mut None,
@@ -1632,7 +1686,7 @@ proptest::proptest! {
         if signed && corrupt { *data.last_mut().unwrap() ^= 1; }
         let parsed = TlvList::parse_lenient(&data[base..]).0;
         let report = validate_reflected_tlvs(
-            &parsed, &data, base, with_key.then_some(&key), None, None,
+            &parsed, &data, base, with_key.then_some(&key), true, None, None,
             &mut None, true, true,
         ).unwrap();
         // Authenticated mode with a key requires the HMAC TLV (RFC 8972 §4.8).
@@ -1666,6 +1720,7 @@ fn telemetry_unusable_hmac_flags_block_all_decisions() {
             &data,
             44,
             Some(&key),
+            true,
             None,
             None,
             &mut None,
@@ -1686,9 +1741,10 @@ fn telemetry_duplicate_hmacs_include_every_integrity_flag() {
     bytes.extend_from_slice(&[0, 8, 0, 16]);
     bytes.extend_from_slice(&[0; 16]);
     let tlvs = TlvList::parse_lenient(&bytes).0;
-    let report =
-        validate_reflected_tlvs(&tlvs, &[0; 44], 44, None, None, None, &mut None, true, true)
-            .unwrap();
+    let report = validate_reflected_tlvs(
+        &tlvs, &[0; 44], 44, None, true, None, None, &mut None, true, true,
+    )
+    .unwrap();
     assert_eq!(report.tlv_count, 2);
     assert_eq!(report.flags.integrity_failed, 1);
     assert_eq!(report.hmac, HmacStatus::Failed);
@@ -1790,6 +1846,7 @@ fn assert_unverifiable_hmac_cannot_acknowledge(with_key: bool) {
         &[0; 44],
         44,
         with_key.then_some(&key),
+        true,
         None,
         None,
         &mut None,
@@ -1807,7 +1864,7 @@ fn telemetry_bad_access_report_length_cannot_acknowledge() {
     raw.clear_reflector_flags();
     tlvs.push(raw).unwrap();
     let status = validate_reflected_tlvs(
-        &tlvs, &[0; 44], 44, None, None, None, &mut None, true, false,
+        &tlvs, &[0; 44], 44, None, true, None, None, &mut None, true, false,
     )
     .unwrap();
     assert!(status.access_report.is_none(), "{status}");
@@ -1821,7 +1878,7 @@ fn test_validate_reflected_tlvs_detects_access_report_ack() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, true,  // track_access_report
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None, true,  // track_access_report
         false, // track_congestion
     )
     .expect("clean Access Report TLV must return Ok");
@@ -1840,7 +1897,8 @@ fn test_validate_reflected_tlvs_ignores_access_report_when_not_tracking() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None,
+        false, // track_access_report
         false, // track_congestion
     )
     .expect("Ok regardless of tracking");
@@ -1858,7 +1916,8 @@ fn test_validate_reflected_tlvs_access_report_u_flagged_not_acked() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, true, false, // track_congestion
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None, true,
+        false, // track_congestion
     )
     .expect("Ok even though unrecognized");
 
@@ -1880,7 +1939,8 @@ fn test_validate_reflected_tlvs_access_report_i_flagged_not_acked() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, true, false, // track_congestion
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None, true,
+        false, // track_congestion
     )
     .expect("Ok even though integrity-failed");
 
@@ -1907,7 +1967,8 @@ fn test_validate_reflected_tlvs_access_report_m_flagged_halts_scan() {
     tlvs.push(good).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, true, false, // track_congestion
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None, true,
+        false, // track_congestion
     )
     .expect("Ok — M just halts the scan, doesn't reject");
 
@@ -1937,6 +1998,7 @@ fn test_validate_reflected_tlvs_access_report_ack_survives_alongside_msid() {
         &[0u8; 44],
         44,
         None,
+        true,
         Some(7777),
         None,
         &mut None,
@@ -1968,7 +2030,8 @@ fn test_validate_reflected_tlvs_detects_cos_ce() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None,
+        false, // track_access_report
         true,  // track_congestion
     )
     .expect("clean CE-marked CoS TLV must return Ok");
@@ -1996,7 +2059,8 @@ fn test_validate_reflected_tlvs_ignores_cos_ce_when_not_tracking() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None,
+        false, // track_access_report
         false, // track_congestion
     )
     .expect("Ok regardless of tracking");
@@ -2021,7 +2085,8 @@ fn test_validate_reflected_tlvs_cos_non_ce_ecn2_not_flagged() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None,
+        false, // track_access_report
         true,  // track_congestion
     )
     .expect("Ok");
@@ -2047,7 +2112,8 @@ fn test_validate_reflected_tlvs_cos_ce_u_flagged_not_reported() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None,
+        false, // track_access_report
         true,  // track_congestion
     )
     .expect("Ok even though unrecognized");
@@ -2078,7 +2144,8 @@ fn test_validate_reflected_tlvs_cos_ce_i_flagged_not_reported() {
     tlvs.push(raw).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None,
+        false, // track_access_report
         true,  // track_congestion
     )
     .expect("Ok even though integrity-failed");
@@ -2113,7 +2180,8 @@ fn test_validate_reflected_tlvs_cos_ce_m_flagged_before_it_halts_scan() {
     tlvs.push(good).unwrap();
 
     let status = validate_reflected_tlvs(
-        &tlvs, &[0u8; 44], 44, None, None, None, &mut None, false, // track_access_report
+        &tlvs, &[0u8; 44], 44, None, true, None, None, &mut None,
+        false, // track_access_report
         true,  // track_congestion
     )
     .expect("Ok — M just halts the scan, doesn't reject");
@@ -2156,6 +2224,7 @@ fn test_validate_reflected_tlvs_cos_ce_suppressed_by_tlv_hmac_failure() {
         &data,
         44,
         Some(&key),
+        true,
         None,
         None,
         &mut None,
@@ -2228,6 +2297,7 @@ fn test_process_response_acknowledges_access_report_state() {
         output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
+        reply_tlv_hmac_expected: true,
         expected_sender_msid: None,
         expected_reflector_msid: None,
         latched_reflector_msid: &mut latched_reflector_msid,
@@ -2298,6 +2368,7 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
         output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
+        reply_tlv_hmac_expected: true,
         expected_sender_msid: None,
         expected_reflector_msid: None,
         latched_reflector_msid: &mut latched_reflector_msid,
@@ -2348,6 +2419,7 @@ fn congestion_process_response_ctx<'a>(
         output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
+        reply_tlv_hmac_expected: true,
         expected_sender_msid: None,
         expected_reflector_msid: None,
         latched_reflector_msid,
@@ -2669,6 +2741,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
         stateful_reflector: false,
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: false,
+        always_sign_tlv_replies: false,
         strict_packets: false,
         validate_base_fields: false,
         validate_tlv_framing: false,
@@ -2742,6 +2815,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
         output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
+        reply_tlv_hmac_expected: true,
         expected_sender_msid: None,
         expected_reflector_msid: None,
         latched_reflector_msid: &mut latched_reflector_msid,
@@ -3088,6 +3162,7 @@ async fn ack_nth_then_watch_for_more(
                 stateful_reflector: false,
                 tlv_mode: TlvHandlingMode::Echo,
                 verify_tlv_hmac: false,
+                always_sign_tlv_replies: false,
                 strict_packets: false,
                 validate_base_fields: false,
                 validate_tlv_framing: false,
@@ -3526,6 +3601,7 @@ fn test_process_response_records_forward_one_way_delay() {
         output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
+        reply_tlv_hmac_expected: true,
         expected_sender_msid: None,
         expected_reflector_msid: None,
         latched_reflector_msid: &mut latched_reflector_msid,
@@ -3808,6 +3884,7 @@ fn test_zero_ssid_policy_stop_discards_reply_and_latches() {
             output: None,
             output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
+            reply_tlv_hmac_expected: true,
             expected_sender_msid: None,
             expected_reflector_msid: None,
             latched_reflector_msid: &mut latched_reflector_msid,
@@ -3884,6 +3961,7 @@ fn test_zero_ssid_policy_continue_still_accounts_the_reply() {
             output: None,
             output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
+            reply_tlv_hmac_expected: true,
             expected_sender_msid: None,
             expected_reflector_msid: None,
             latched_reflector_msid: &mut latched_reflector_msid,
@@ -3961,6 +4039,7 @@ fn test_zero_ssid_policy_inert_without_a_configured_ssid() {
             output: None,
             output_format: crate::stats::OutputFormat::Text,
             hmac_key: None,
+            reply_tlv_hmac_expected: true,
             expected_sender_msid: None,
             expected_reflector_msid: None,
             latched_reflector_msid: &mut latched_reflector_msid,
@@ -4038,6 +4117,7 @@ fn test_process_response_drops_packet_on_msid_mismatch() {
         output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
+        reply_tlv_hmac_expected: true,
         // Sender transmitted with sender_msid=7777; reflector's response
         // carries 0xBAD → session binding fails.
         expected_sender_msid: Some(7777),
@@ -4121,6 +4201,7 @@ fn test_process_response_accepts_packet_on_msid_match() {
         output: None,
         output_format: crate::stats::OutputFormat::Text,
         hmac_key: None,
+        reply_tlv_hmac_expected: true,
         expected_sender_msid: Some(7777),
         expected_reflector_msid: None,
         latched_reflector_msid: &mut latched_reflector_msid,

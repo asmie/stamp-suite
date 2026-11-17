@@ -27,6 +27,7 @@ pub fn reflector_context<'a>() -> ProcessingContext<'a> {
         stateful_reflector: true,
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: false,
+        always_sign_tlv_replies: false,
         strict_packets: false,
         validate_base_fields: false,
         validate_tlv_framing: false,

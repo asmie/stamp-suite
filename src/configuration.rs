@@ -256,23 +256,29 @@ impl fmt::Display for TlvHandlingMode {
     }
 }
 
-/// Controls sender HMAC TLV origination (RFC 8972 §4.8).
+/// Controls HMAC TLV origination in open mode (RFC 8972 §4.8).
 ///
-/// A configured key also serves reply verification and base authentication.
+/// Authenticated packets that carry TLVs always include an HMAC TLV. A
+/// configured key also serves verification and base authentication.
 /// Unauthenticated senders can disable TLV origination while retaining the key.
+/// A reflector signs an open-mode reply when its request carried an HMAC TLV,
+/// or always with `On`.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, serde::Serialize, serde::Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum TlvHmacMode {
-    /// Originate an HMAC TLV whenever a key is configured and TLVs are in use
-    /// (the default).
+    /// The default. A sender originates an HMAC TLV whenever a key is
+    /// configured and TLVs are in use; a reflector signs an open-mode reply
+    /// only when the request carried an HMAC TLV.
     #[default]
     Auto,
-    /// Always originate; startup fails if no key is configured.
+    /// Always originate, on a reflector also in open-mode replies to requests
+    /// without an HMAC TLV; startup fails if no key is configured.
     On,
-    /// Never originate, even with a key configured. The key is then used only
-    /// for base-packet authentication and for verifying reflected TLV HMACs.
+    /// Sender only: never originate, even with a key configured. The key is
+    /// then used only for base-packet authentication and for verifying
+    /// reflected TLV HMACs. A reflector rejects it.
     Off,
 }
 
@@ -1088,9 +1094,11 @@ pub struct Configuration {
     #[clap(long, help_heading = "Bit Error Rate", hide_short_help = true)]
     pub ber_omit_burst: bool,
 
-    /// Whether the sender originates an HMAC TLV (RFC 8972 §4.8):
-    /// `auto` (default, originate when a key is configured), `on` (always;
-    /// requires a key), `off` (never, even with a key).
+    /// HMAC TLV origination in open mode (RFC 8972 §4.8). Sender: `auto`
+    /// (default, originate when a key is configured), `on` (always; requires
+    /// a key), `off` (never, even with a key). Reflector: `auto` signs a reply
+    /// when its request carried an HMAC TLV, `on` signs every reply that has
+    /// TLVs. Authenticated replies are always signed.
     #[clap(long, default_value_t = TlvHmacMode::Auto, value_name = "MODE", help_heading = "Authentication", hide_short_help = true)]
     pub tlv_hmac: TlvHmacMode,
 
@@ -1676,6 +1684,18 @@ impl Configuration {
             return Err(invalid(
                 "tlv_hmac = on requires an HMAC key (--hmac-key, --hmac-key-file \
                  or --hmac-key-dir)",
+            ));
+        }
+
+        // A reflector has nothing to turn off: with `auto` it adds an HMAC
+        // TLV only where RFC 8972 §4.8 requires one or the request carried
+        // one, and dropping a verified request's HMAC would leave a stale
+        // digest in the reply.
+        if self.is_reflector && self.tlv_hmac == TlvHmacMode::Off {
+            return Err(invalid(
+                "tlv_hmac = off applies only to the sender; a reflector with \
+                 tlv_hmac = auto signs open-mode replies only when the request \
+                 carries an HMAC TLV",
             ));
         }
 

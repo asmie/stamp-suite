@@ -268,6 +268,11 @@ pub struct ProcessingContext<'a> {
     pub tlv_mode: TlvHandlingMode,
     /// Whether to verify incoming TLV HMAC.
     pub verify_tlv_hmac: bool,
+    /// Sign every open-mode reply's TLVs, even when the request carried no
+    /// HMAC TLV (`--tlv-hmac on`). Otherwise an open-mode reply carries an
+    /// HMAC TLV only when its request did. Authenticated replies are always
+    /// signed (RFC 8972 §4.8).
+    pub always_sign_tlv_replies: bool,
     /// Whether to use strict packet parsing.
     pub strict_packets: bool,
     /// Require complete bases and valid Error Estimate/timestamp encodings.
@@ -1196,8 +1201,8 @@ fn apply_semantic_tlv_processing(
     };
 
     // Sign after all TLV mutations, using reflector flags (U=0, RFC 8972 §4).
-    // A configured key signs the reply even if the request lacked an HMAC TLV
-    // (see `TlvList::set_hmac_response`, RFC 8972 §4.8).
+    // The caller passes a key only when this reply is to be signed (see
+    // `assemble_tlv_reply` and `TlvList::set_hmac_response`, RFC 8972 §4.8).
     ber_conformance.merge(tlvs.finish_ber_padding(ber_padding_len));
 
     let tlv_hmac_generated =

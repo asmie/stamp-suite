@@ -84,8 +84,15 @@ Both mechanisms use HMAC-SHA-256 truncated to 16 bytes:
 
 On the sender, `--tlv-hmac auto` (the default) adds an HMAC TLV whenever a key
 is configured. `on` fails without a key. `off` stops the sender from adding
-the TLV, but the key is still used to verify TLV HMACs in replies.
-Authenticated mode does not accept `off`.
+the TLV, but the key is still used to verify TLV HMACs in replies, and a
+reply without one is accepted. Authenticated mode does not accept `off`.
+
+A reflector with a key always signs authenticated replies that carry TLVs,
+except when the only TLV is Extra Padding, which RFC 8972 §4.8 exempts. In
+open mode it signs a reply when the request carried an HMAC TLV, so the sender
+decides; with `--tlv-hmac on` it signs every open-mode reply that has TLVs. A
+sender without the key cannot verify those signatures and ignores the reply's
+measurement values. A reflector does not accept `off`.
 
 ### ECN measurement integrity
 

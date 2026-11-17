@@ -976,6 +976,7 @@ impl SenderRun {
             output: Some(output),
             output_format: conf.output_format,
             hmac_key: self.hmac_key.as_ref(),
+            reply_tlv_hmac_expected: !matches!(self.send_mode, SendMode::OpenTlv { tlv_key: None }),
             expected_sender_msid: conf.micro_session_id,
             expected_reflector_msid: conf.reflector_member_link_id,
             latched_reflector_msid: &mut self.latched_reflector_msid,

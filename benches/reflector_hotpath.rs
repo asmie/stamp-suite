@@ -52,6 +52,7 @@ fn make_ctx<'a>(hmac_key: Option<&'a HmacKey>) -> ProcessingContext<'a> {
         stateful_reflector: true,
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: hmac_key.is_some(),
+        always_sign_tlv_replies: false,
         strict_packets: false,
         validate_base_fields: false,
         validate_tlv_framing: false,

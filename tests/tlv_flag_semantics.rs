@@ -1450,8 +1450,9 @@ fn a1_reflected_control_length_padding_within_cap() {
 }
 
 /// Reserve 20 bytes for the reflector's HMAC TLV when sizing padding
-/// (RFC 10052 §3, RFC 8972 §4.8), including when
-/// the request has no HMAC TLV.
+/// (RFC 10052 §3, RFC 8972 §4.8). In open mode a reflector adds one to an
+/// unsigned request only with `--tlv-hmac on`; either way the reply is
+/// exactly the requested length.
 #[test]
 fn a1_reflected_control_length_target_accounts_for_reflector_added_hmac() {
     let key = HmacKey::new(vec![0x5A; 32]).expect("key");
@@ -1462,38 +1463,38 @@ fn a1_reflected_control_length_target_accounts_for_reflector_added_hmac() {
     value.extend_from_slice(&0u32.to_be_bytes()); // interval
     value.extend_from_slice(&[0u8; 4]); // sub-TLV placeholder
 
-    // The request carries NO HMAC TLV of its own; the reflector adds one.
+    // The request carries NO HMAC TLV of its own.
     let raw = RawTlv::new(TlvType::ReflectedControl, value);
     let packet = build_unauth_packet(&raw.to_bytes());
-    let ctx = make_ctx(Some(&key));
+    for always_sign in [false, true] {
+        let mut ctx = make_ctx(Some(&key));
+        ctx.always_sign_tlv_replies = always_sign;
 
-    let response = stamp_suite::receiver::process_stamp_packet(
-        &packet,
-        std::net::SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-            12345,
-        ),
-        64,
-        false,
-        &ctx,
-    )
-    .expect("must reflect");
+        let response = stamp_suite::receiver::process_stamp_packet(
+            &packet,
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+                12345,
+            ),
+            64,
+            false,
+            &ctx,
+        )
+        .expect("must reflect");
 
-    let parsed =
-        TlvList::parse(&response.data[stamp_suite::receiver::UNAUTH_BASE_SIZE..]).expect("parse");
-    assert!(
-        parsed.hmac_tlv().is_some(),
-        "keyed reflector must append its own HMAC TLV (§4.8 per-role reading)"
-    );
-    assert_eq!(
-        response.data.len(),
-        target_length as usize,
-        "reply must be exactly the requested {} octets including the reflector's \
-         own HMAC TLV, not {} (overshoot of {})",
-        target_length,
-        response.data.len(),
-        response.data.len() as isize - target_length as isize
-    );
+        let parsed = TlvList::parse(&response.data[stamp_suite::receiver::UNAUTH_BASE_SIZE..])
+            .expect("parse");
+        assert_eq!(
+            parsed.hmac_tlv().is_some(),
+            always_sign,
+            "a keyed open reflector adds its own HMAC TLV only with --tlv-hmac on"
+        );
+        assert_eq!(
+            response.data.len(),
+            target_length as usize,
+            "always_sign={always_sign}: reply must be exactly the requested length"
+        );
+    }
 }
 
 /// Requested reply length exceeds the cap → C flag is set; we still pad up

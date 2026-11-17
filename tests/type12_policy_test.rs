@@ -204,7 +204,8 @@ fn protected_type12_profile_rejects_unverified_amplification() {
         }
         quiet(&socket);
         // An optional-HMAC open profile is intentionally outside this claim:
-        // verify-tlv-hmac does not require a missing optional HMAC to appear.
+        // verify-tlv-hmac does not require a missing optional HMAC to appear,
+        // and an unsigned open request gets an unsigned reply (RFC 8972 §4.8).
         let optional = server(ip, Mode::Keyed);
         socket
             .send_to(
@@ -215,7 +216,8 @@ fn protected_type12_profile_rejects_unverified_amplification() {
         for _ in 0..2 {
             let reply = receive(&socket, optional.address, Mode::Keyed, 1);
             assert_eq!(reply[44], 0);
-            verify_signatures(&reply, Mode::Keyed, false);
+            // Open layout and no HMAC TLV.
+            verify_signatures(&reply, Mode::Open, false);
         }
         quiet(&socket);
     }

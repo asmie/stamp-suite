@@ -577,12 +577,18 @@ fn auth_mode_with_tlv_hmac_off_is_rejected_for_sender() {
     let conf = Configuration::try_parse_from(sender_args("O", "off")).unwrap();
     assert!(conf.validate().is_ok());
 
-    // A reflector keeps accepting tlv_hmac = off with -A A: the flag
-    // controls sender origination only.
-    let mut args = base_valid_args();
-    args.extend(["--tlv-hmac".to_string(), "off".to_string()]);
-    let conf = Configuration::try_parse_from(args).unwrap();
-    assert!(conf.validate().is_ok());
+    // A reflector rejects off in either mode: it signs open-mode replies only
+    // when asked, so there is nothing to turn off. auto and on are accepted.
+    for auth_mode in ["A", "O"] {
+        for (mode, valid) in [("off", false), ("auto", true), ("on", true)] {
+            let mut args = base_valid_args();
+            let at = args.iter().position(|a| a == "--auth-mode").unwrap();
+            args[at + 1] = auth_mode.to_string();
+            args.extend(["--tlv-hmac".to_string(), mode.to_string()]);
+            let conf = Configuration::try_parse_from(args).unwrap();
+            assert_eq!(conf.validate().is_ok(), valid, "{auth_mode} {mode}");
+        }
+    }
 }
 
 #[test]

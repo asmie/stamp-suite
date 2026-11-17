@@ -50,6 +50,8 @@ fuzz_target!(|data: &[u8]| {
             TlvHandlingMode::Echo
         },
         verify_tlv_hmac: mode & 4 != 0,
+        // Every mode bit is taken; share bit 2 so keyed runs cover both.
+        always_sign_tlv_replies: keyed && mode & 2 != 0,
         strict_packets: mode & 8 != 0,
         validate_base_fields: mode & 64 != 0,
         validate_tlv_framing: mode & 128 != 0,

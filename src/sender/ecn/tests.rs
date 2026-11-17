@@ -6,9 +6,11 @@ fn decode(bytes: &[u8], key: Option<&HmacKey>) -> Option<CosObservation> {
     let (tlvs, _) = TlvList::parse_lenient(bytes);
     let mut data = vec![0; 44];
     data.extend_from_slice(bytes);
-    validate_reflected_tlvs(&tlvs, &data, 44, key, None, None, &mut None, false, false)
-        .unwrap()
-        .cos
+    validate_reflected_tlvs(
+        &tlvs, &data, 44, key, true, None, None, &mut None, false, false,
+    )
+    .unwrap()
+    .cos
 }
 
 #[test]

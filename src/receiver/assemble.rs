@@ -225,7 +225,8 @@ pub(crate) fn assemble_auth_answer_with_tlvs(
 
 /// How the request's TLV HMAC is checked (RFC 8972 §4.8).
 struct TlvVerification<'a> {
-    /// Signs the reply's TLVs, and verifies the request's when `verify` is set.
+    /// Verifies the request's TLVs when `verify` is set, and signs the
+    /// reply's TLVs when `assemble_tlv_reply` decides the reply is signed.
     key: Option<&'a HmacKey>,
     verify: bool,
     /// Treat a missing HMAC TLV as an integrity failure.
@@ -268,6 +269,18 @@ fn assemble_tlv_reply(
 
     // One lenient pass handles valid and malformed TLVs alike.
     let (mut tlvs, _) = TlvList::parse_lenient(tlv_data);
+    // RFC 8972 §4.8: authenticated packets carrying TLVs MUST include an HMAC
+    // TLV. In open mode the HMAC TLV is optional and the sender enables it, so
+    // the reply carries one only when the request did, unless the reflector
+    // is set to sign every reply with TLVs (`--tlv-hmac on`). Adding one
+    // unasked would also break the default symmetrical size (RFC 8762 §4).
+    // A tail without TLVs, such as TWAMP Light padding, has nothing to sign,
+    // and §4.8 exempts an authenticated packet whose only TLV is Extra Padding.
+    let sign_reply = !tlvs.is_empty()
+        && (tlvs.hmac_tlv().is_some()
+            || ctx.always_sign_tlv_replies
+            || (base_size == AUTH_BASE_SIZE && !tlvs.contains_only_extra_padding()));
+    let signing_key = verification.key.filter(|_| sign_reply);
     // Bytes the parser left alone: an all-zero tail or 1-3 octets too short
     // for a TLV header.
     let unparsed_tail = &tlv_data[tlvs.wire_size().min(tlv_data.len())..];
@@ -299,8 +312,7 @@ fn assemble_tlv_reply(
     // TLV, process the TLVs before it; the flags already mark it M and the
     // rest U (RFC 8972 §4).
     if hmac_ok && tlvs.allows_processing() {
-        let Some(result) =
-            apply_semantic_tlv_processing(&mut tlvs, ctx, verification.key, base_bytes)
+        let Some(result) = apply_semantic_tlv_processing(&mut tlvs, ctx, signing_key, base_bytes)
         else {
             return StampResponse {
                 return_path_action: ReturnPathAction::SuppressReply,
@@ -335,7 +347,18 @@ fn assemble_tlv_reply(
         let take = unparsed_tail
             .len()
             .min(original_data.len() - response.len());
-        response.extend_from_slice(&unparsed_tail[..take]);
+        if tlvs.hmac_tlv().is_none() {
+            response.extend_from_slice(&unparsed_tail[..take]);
+        } else if take >= TLV_HEADER_SIZE {
+            // Only Extra Padding may follow the HMAC TLV (RFC 8972 §4.8), so
+            // the zero tail is framed as one to keep the reply symmetrical.
+            // A tail shorter than a TLV header is dropped.
+            let mut padding =
+                crate::tlv::ExtraPaddingTlv::new_zeros(take - TLV_HEADER_SIZE).to_raw();
+            padding.clear_reflector_flags();
+            response.extend_from_slice(&padding.wire_header());
+            response.extend_from_slice(&padding.value);
+        }
     }
     response_info.data = response;
     response_info

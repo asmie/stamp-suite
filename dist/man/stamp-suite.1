@@ -261,18 +261,18 @@ Reflector: drop authenticated packets for which no HMAC key is configured. Authe
 Verify HMAC TLV in incoming packets (RFC 8972). Requires HMAC key
 .TP
 \fB\-\-tlv\-hmac\fR \fI<MODE>\fR [default: auto]
-Whether the sender originates an HMAC TLV (RFC 8972 §4.8): `auto` (default, originate when a key is configured), `on` (always; requires a key), `off` (never, even with a key)
+HMAC TLV origination in open mode (RFC 8972 §4.8). Sender: `auto` (default, originate when a key is configured), `on` (always; requires a key), `off` (never, even with a key). Reflector: `auto` signs a reply when its request carried an HMAC TLV, `on` signs every reply that has TLVs. Authenticated replies are always signed
 .br
 
 .br
 \fIPossible values:\fR
 .RS 14
 .IP \(bu 2
-auto: Originate an HMAC TLV whenever a key is configured and TLVs are in use (the default)
+auto: The default. A sender originates an HMAC TLV whenever a key is configured and TLVs are in use; a reflector signs an open\-mode reply only when the request carried an HMAC TLV
 .IP \(bu 2
-on: Always originate; startup fails if no key is configured
+on: Always originate, on a reflector also in open\-mode replies to requests without an HMAC TLV; startup fails if no key is configured
 .IP \(bu 2
-off: Never originate, even with a key configured. The key is then used only for base\-packet authentication and for verifying reflected TLV HMACs
+off: Sender only: never originate, even with a key configured. The key is then used only for base\-packet authentication and for verifying reflected TLV HMACs. A reflector rejects it
 .RE
 .SH REFLECTOR
 .TP

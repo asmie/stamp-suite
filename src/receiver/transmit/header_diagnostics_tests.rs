@@ -407,6 +407,9 @@ fn administrative_header_trimming_reserves_only_a_new_hmac_and_keeps_framing() {
                     ctx.hmac_key = keyed.then_some(&key);
                     ctx.require_hmac = auth;
                     ctx.verify_tlv_hmac = true;
+                    // Open keyed requests without an HMAC are signed only
+                    // with `--tlv-hmac on`, which generates a new one.
+                    ctx.always_sign_tlv_replies = true;
                     ctx.captured_headers = Some(&captured);
                     let cap = base_size + 24 + if keyed { 20 } else { 0 };
                     ctx.reflected_control_max_size = cap as u16;

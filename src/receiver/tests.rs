@@ -698,6 +698,7 @@ pub(super) fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext
         stateful_reflector: true,
         tlv_mode: TlvHandlingMode::Echo,
         verify_tlv_hmac: false,
+        always_sign_tlv_replies: false,
         strict_packets: false,
         validate_base_fields: false,
         validate_tlv_framing: false,
@@ -1649,13 +1650,9 @@ fn test_stateless_vs_stateful_follow_up_telemetry_reply() {
     assert_eq!(fut.follow_up_timestamp, 0xDEAD_BEEF);
 }
 
-#[test]
-// RFC 8972 §4.8: a configured TLV key protects the reflector's reply
-// independently of whether the sender included an HMAC TLV.
-// See `TlvList::set_hmac_response`.
-fn test_assemble_unauth_with_tlvs_adds_hmac() {
-    use crate::tlv::{RawTlv, TlvType, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
-
+/// An open-mode request carrying `tail` after the base, answered by a keyed
+/// reflector. `always_sign` is `--tlv-hmac on`.
+fn keyed_open_reply(tail: &[u8], always_sign: bool) -> Vec<u8> {
     let sender_packet = PacketUnauthenticated {
         sequence_number: 1,
         timestamp: 100,
@@ -1663,14 +1660,12 @@ fn test_assemble_unauth_with_tlvs_adds_hmac() {
         ssid: 0,
         mbz: [0; 28],
     };
-
-    // Create packet with TLV extension (no HMAC)
     let mut original_data = sender_packet.to_bytes().to_vec();
-    let tlv = RawTlv::new(TlvType::ExtraPadding, vec![0xDD; 4]);
-    original_data.extend_from_slice(&tlv.to_bytes());
-
+    original_data.extend_from_slice(tail);
     let key = HmacKey::new(vec![0xAB; 32]).unwrap();
-    let response = assemble_unauth_answer_with_tlvs(
+    let mut ctx = test_ctx(0, 0);
+    ctx.always_sign_tlv_replies = always_sign;
+    assemble_unauth_answer_with_tlvs(
         &sender_packet,
         &original_data,
         ClockFormat::NTP,
@@ -1680,20 +1675,100 @@ fn test_assemble_unauth_with_tlvs_adds_hmac() {
         None,
         TlvHandlingMode::Echo,
         Some(&key),
-        false,
-        &test_ctx(0, 0),
-    );
+        true,
+        &ctx,
+    )
+    .data
+}
 
-    // Response should include ExtraPadding + HMAC TLV
-    // 44 base + (4 header + 4 value) + (4 header + 16 value)
+#[test]
+// RFC 8972 §4.8: in open mode the HMAC TLV is optional and the sender turns
+// it on. A keyed reflector signs only when the request did, or when it is
+// set to sign every reply (`--tlv-hmac on`).
+fn test_assemble_unauth_with_tlvs_signs_only_when_asked() {
+    use crate::tlv::{RawTlv, TlvList, TlvType, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
+
+    let key = HmacKey::new(vec![0xAB; 32]).unwrap();
+    let padding = RawTlv::new(TlvType::ExtraPadding, vec![0xDD; 4]).to_bytes();
+
+    // Unsigned request: the reply keeps the request's size and has no HMAC.
+    let reply = keyed_open_reply(&padding, false);
+    assert_eq!(reply.len(), 44 + padding.len());
+    assert!(TlvList::parse(&reply[44..]).unwrap().hmac_tlv().is_none());
+
+    // --tlv-hmac on: ExtraPadding plus a new HMAC TLV, last.
+    let reply = keyed_open_reply(&padding, true);
     assert_eq!(
-        response.data.len(),
+        reply.len(),
         44 + TLV_HEADER_SIZE + 4 + TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE
     );
+    assert_eq!(reply[44 + TLV_HEADER_SIZE + 4 + 1], 8);
+    let list = TlvList::parse(&reply[44..]).unwrap();
+    assert!(list.verify_hmac(&key, &reply[..4], &reply[44..]).is_ok());
 
-    // HMAC TLV should be last (type 8 in byte 1 per RFC 8972)
-    let hmac_tlv_start = 44 + TLV_HEADER_SIZE + 4;
-    assert_eq!(response.data[hmac_tlv_start + 1], 8);
+    // Signed request: the reply is re-signed over the reflected TLVs.
+    let mut signed = TlvList::parse(&padding).unwrap();
+    signed.set_hmac(&key, &1u32.to_be_bytes());
+    let request_tail = signed.to_bytes();
+    let reply = keyed_open_reply(&request_tail, false);
+    assert_eq!(reply.len(), 44 + request_tail.len());
+    let list = TlvList::parse(&reply[44..]).unwrap();
+    let hmac = list.hmac_tlv().expect("signed request gets a signed reply");
+    assert!(
+        !hmac.is_unrecognized() && !hmac.is_malformed() && !hmac.is_integrity_failed(),
+        "reflector flags U/M/I clear"
+    );
+    assert!(list.verify_hmac(&key, &reply[..4], &reply[44..]).is_ok());
+}
+
+#[test]
+// RFC 8762 §4.6 copies a TWAMP-Light sender's padding into a reply of the
+// same size. A tail without TLVs is never signed. Only Extra Padding may
+// follow an HMAC TLV (RFC 8972 §4.8), so a zero tail behind a signed TLV list
+// is framed as Extra Padding, never copied raw.
+fn zero_padding_tail_stays_symmetrical_and_never_follows_hmac_raw() {
+    use crate::tlv::{TlvList, HMAC_TLV_VALUE_SIZE, TLV_HEADER_SIZE};
+
+    let hmac_tlv = TLV_HEADER_SIZE + HMAC_TLV_VALUE_SIZE;
+    // Timestamp Information, the only TLV before the zero tail.
+    let tlv = [0x80, 3, 0, 4, 0, 0, 0, 0];
+    for tail_len in [3, 12, 20, 23, 24, 25, 100] {
+        // Padding alone is copied unchanged, even with --tlv-hmac on.
+        for always_sign in [false, true] {
+            let reply = keyed_open_reply(&vec![0; tail_len], always_sign);
+            assert_eq!(reply.len(), 44 + tail_len, "tail {tail_len}");
+            assert!(reply[44..].iter().all(|&b| b == 0), "tail {tail_len}");
+        }
+
+        let mut request = tlv.to_vec();
+        request.resize(tlv.len() + tail_len, 0);
+        // Unsigned TLVs: the tail is copied unchanged after them.
+        let reply = keyed_open_reply(&request, false);
+        assert_eq!(reply.len(), 44 + request.len(), "tail {tail_len}");
+        assert!(reply[44 + tlv.len()..].iter().all(|&b| b == 0));
+
+        // Signed: the TLV, the HMAC TLV, then Extra Padding filling the rest
+        // of the request size when at least a TLV header fits.
+        let reply = keyed_open_reply(&request, true);
+        let hmac_at = 44 + tlv.len();
+        assert_eq!(
+            reply[hmac_at + 1],
+            8,
+            "tail {tail_len}: HMAC TLV after the TLV"
+        );
+        let list = TlvList::parse(&reply[44..]).unwrap();
+        assert!(!list.hmac_misplaced());
+        if tail_len >= hmac_tlv + TLV_HEADER_SIZE {
+            assert_eq!(reply.len(), 44 + request.len(), "tail {tail_len}");
+            let padding = &reply[hmac_at + hmac_tlv..];
+            let value_len = (tail_len - hmac_tlv - TLV_HEADER_SIZE) as u16;
+            assert_eq!(padding[..2], [0, 1], "Extra Padding, reflector flags clear");
+            assert_eq!(padding[2..4], value_len.to_be_bytes());
+            assert!(padding[4..].iter().all(|&b| b == 0));
+        } else {
+            assert_eq!(reply.len(), hmac_at + hmac_tlv, "tail {tail_len}");
+        }
+    }
 }
 
 #[test]
@@ -1748,6 +1823,56 @@ fn test_assemble_auth_with_tlvs_adds_hmac_even_when_request_has_none() {
     );
     let hmac_tlv_start = 112 + TLV_HEADER_SIZE + 4;
     assert_eq!(response.data[hmac_tlv_start + 1], 8); // Type 8 = HMAC
+}
+
+#[test]
+/// RFC 8972 §4.8 exempts an authenticated packet whose only TLV is Extra
+/// Padding, so its reply keeps the request's size and gets no HMAC TLV unless
+/// the request carried one.
+fn auth_reply_with_only_extra_padding_is_not_signed_unless_asked() {
+    use crate::tlv::{RawTlv, TlvList, TlvType};
+
+    let sender_packet = PacketAuthenticated {
+        sequence_number: 1,
+        mbz0: [0; 12],
+        timestamp: 100,
+        error_estimate: 10,
+        ssid: 0,
+        mbz1: [0; 68],
+        hmac: [0; 16],
+    };
+    let tlv_key = HmacKey::new(vec![0xCD; 32]).unwrap();
+    let padding = RawTlv::new(TlvType::ExtraPadding, vec![0; 64]);
+    let mut unsigned = TlvList::new();
+    unsigned.push(padding).unwrap();
+    let mut signed = unsigned.clone();
+    signed.set_hmac(&tlv_key, &1u32.to_be_bytes());
+    for (list, expect_hmac) in [(unsigned, false), (signed, true)] {
+        let mut original_data = sender_packet.to_bytes().to_vec();
+        original_data.extend_from_slice(&list.to_bytes());
+        let response = assemble_auth_answer_with_tlvs(
+            &sender_packet,
+            &original_data,
+            ClockFormat::NTP,
+            200,
+            64,
+            300,
+            None,
+            None,
+            TlvHandlingMode::Echo,
+            Some(&tlv_key),
+            true,
+            &test_ctx(0, 0),
+        );
+        assert_eq!(response.data.len(), original_data.len());
+        let reply = TlvList::parse(&response.data[112..]).unwrap();
+        assert_eq!(reply.hmac_tlv().is_some(), expect_hmac);
+        if expect_hmac {
+            assert!(reply
+                .verify_hmac(&tlv_key, &response.data[..4], &response.data[112..])
+                .is_ok());
+        }
+    }
 }
 
 #[test]

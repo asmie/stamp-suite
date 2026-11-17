@@ -901,7 +901,9 @@ truncated to 16 bytes ([RFC 8762 §4.4](https://www.rfc-editor.org/rfc/rfc8762.h
 `--hmac-key-dir`; without one, startup fails. Both endpoints must use the same
 mode and key. With a key configured, the sender also adds an HMAC TLV that
 protects its TLVs (RFC 8972 §4.8; see `--tlv-hmac`), and a reflector checks it
-with `--verify-tlv-hmac`. In open mode this TLV HMAC does not authenticate the
+with `--verify-tlv-hmac`. A keyed reflector signs an open-mode reply only when
+the request carried an HMAC TLV, unless it runs with `--tlv-hmac on`, so
+replies to unsigned and TWAMP Light probes keep the request's size. In open mode this TLV HMAC does not authenticate the
 base packet and does not give authenticated-mode admission.
 
 ```bash

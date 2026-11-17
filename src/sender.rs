@@ -108,6 +108,10 @@ struct SenderRecvContext<'a> {
     output: Option<&'a crate::stats::StatsOutput>,
     output_format: crate::stats::OutputFormat,
     hmac_key: Option<&'a HmacKey>,
+    /// Whether a reply's TLVs must carry an HMAC TLV when a key is held.
+    /// False for an open-mode sender that sends TLVs unsigned
+    /// (`--tlv-hmac off`), since a reflector signs only when asked.
+    reply_tlv_hmac_expected: bool,
     /// Expected echoed sender Micro-session ID (RFC 9534 §3.2).
     /// None means it was not requested.
     expected_sender_msid: Option<u16>,
@@ -280,6 +284,7 @@ pub fn fuzz_reply(
         output: None,
         output_format: crate::stats::OutputFormat::Json,
         hmac_key: key,
+        reply_tlv_hmac_expected: true,
         expected_sender_msid: expect_msid.then_some(1),
         expected_reflector_msid: None,
         latched_reflector_msid: &mut latched_reflector_msid,
@@ -379,6 +384,7 @@ fn process_response(
                     data,
                     AUTH_BASE_SIZE,
                     ctx.hmac_key,
+                    ctx.reply_tlv_hmac_expected,
                     ctx.expected_sender_msid,
                     ctx.expected_reflector_msid,
                     &mut next_reflector_msid,
@@ -404,6 +410,7 @@ fn process_response(
                                 data,
                                 AUTH_BASE_SIZE,
                                 ctx.hmac_key,
+                                ctx.reply_tlv_hmac_expected,
                             );
                             measurements.record_tlv_validation(&ext_packet.tlvs, &info, true);
                         }
@@ -485,6 +492,7 @@ fn process_response(
                 data,
                 UNAUTH_BASE_SIZE,
                 ctx.hmac_key,
+                ctx.reply_tlv_hmac_expected,
                 ctx.expected_sender_msid,
                 ctx.expected_reflector_msid,
                 &mut next_reflector_msid,
@@ -510,6 +518,7 @@ fn process_response(
                             data,
                             UNAUTH_BASE_SIZE,
                             ctx.hmac_key,
+                            ctx.reply_tlv_hmac_expected,
                         );
                         measurements.record_tlv_validation(&ext_packet.tlvs, &info, true);
                     }
