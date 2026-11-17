@@ -31,7 +31,14 @@ class ReleaseMetadataTests(unittest.TestCase):
             ebuild = root / ebuild_name
             ebuild.write_text(ebuild.read_text().replace('CRATES="', 'CRATES="\n\tobsolete@0.1.0'))
             with self.assertRaisesRegex(ValueError, 'CRATES'):
-                release.check_metadata(root)
+                release.check_metadata(root, version)
+            # Between releases, the last release's ebuild keeps its own crate
+            # list while Cargo.lock moves on; only a release checks it.
+            self.assertEqual(release.check_metadata(root), version)
+            ebuild.write_text(ebuild.read_text().replace('RUST_MIN_VER="', 'RUST_MIN_VER="0'))
+            self.assertEqual(release.check_metadata(root), version)
+            with self.assertRaisesRegex(ValueError, 'RUST_MIN_VER'):
+                release.check_metadata(root, version)
 
     def test_windows_stack_header(self):
         with tempfile.TemporaryDirectory() as directory:

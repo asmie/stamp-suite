@@ -4,7 +4,7 @@
     {
       "ip": "127.0.0.1",
       "command": [
-        "/tmp/stamp-t5c-teaparty-target/debug/teaparty",
+        "teaparty",
         "sender",
         "127.0.0.1",
         "57817",
@@ -40,7 +40,7 @@
     {
       "ip": "::1",
       "command": [
-        "/tmp/stamp-t5c-teaparty-target/debug/teaparty",
+        "teaparty",
         "sender",
         "::1",
         "54912",

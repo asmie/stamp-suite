@@ -14,7 +14,8 @@ numbers and codepoints (Type 12, the C flag, the Address Group sub-TLVs) are the
 same, so row IDs use those section numbers.
 
 Type 12 is disabled on the reflector by default (`--reflected-control-max-count 0`).
-Reply sizing depends on a known route MTU, which only Linux provides; see
+Reply sizing depends on a known route MTU, which Linux, Windows and (for
+native IPv6) macOS provide; see
 [Reply size and route MTU](#reply-size-and-route-mtu). Burst timing is
 best-effort; see [Burst timing](#burst-timing). The IPv6 Extension Header Control
 sub-TLV (240) carried inside Type 12 is covered in the
@@ -110,8 +111,8 @@ counts every copy.
 
 ### Reply size and route MTU
 
-On Linux the reflector looks up the route MTU for the actual reply destination
-before each copy (`src/receiver/mtu.rs`), subtracts IP, UDP and SRH overhead,
+On Linux the reflector looks up the route MTU for the actual reply destination,
+through the `--interface` device or VRF when one is bound, before each copy (`src/receiver/mtu.rs`), subtracts IP, UDP and SRH overhead,
 and trims padding in `fit_reply` (`src/receiver/transmit.rs`) without cutting
 mandatory fields. Route and link notifications plus a 250 ms cache expiry track
 changes; Don't Fragment prevents fragmentation if the route changes between
@@ -120,8 +121,8 @@ lookup and send. A trimmed reply is sent once with C set.
 Windows queries path/interface estimates on each attempt. macOS queries native
 unicast IPv6 destinations using temporary connected sockets, without sending
 UDP probes or changing the live reflector's connection. These adapters do not
-reuse cached estimates. macOS excludes IPv4, mapped peers, interface pinning and
-SRv6; its temporary local port does not reproduce port-specific routing policy.
+reuse cached estimates. macOS excludes IPv4, mapped peers, interface pinning
+(including `--interface`) and SRv6; its temporary local port does not reproduce port-specific routing policy.
 See [reply route MTU](../usage.md#reply-size-and-route-mtu) for platform limits.
 
 Limits behind the Partial score of asym-3-08:

@@ -10,6 +10,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def check_metadata(root, expected=None):
+    """Check that every release file names Cargo.toml's version.
+
+    With `expected` (a release being tagged or prepared), the Gentoo ebuild
+    for that version must also match Cargo.lock and the minimum Rust version.
+    Without it, as on every push, those are not checked: between releases
+    Cargo.toml still names the last release, whose published ebuild must keep
+    the crate list of its own tagged lockfile while dependencies move on.
+    """
     manifest = tomllib.loads((root / 'Cargo.toml').read_text(encoding='utf-8'))
     version = manifest['package']['version']
     if expected is not None and version != expected:
@@ -26,15 +34,9 @@ def check_metadata(root, expected=None):
             raise ValueError(f'{path}: expected version {version}')
     ebuild = root / f'dist/gentoo/net-analyzer/stamp-suite/stamp-suite-{version}.ebuild'
     text = ebuild.read_text(encoding='utf-8')
-    minimum = re.search(r'^RUST_MIN_VER="([^"]+)"', text, re.MULTILINE)
-    if minimum is None or minimum[1] != manifest['package']['rust-version']:
-        raise ValueError('Gentoo RUST_MIN_VER differs from Cargo.toml')
-    crates = re.search(r'^CRATES="(.*?)"', text, re.MULTILINE | re.DOTALL)
     lock = tomllib.loads((root / 'Cargo.lock').read_text(encoding='utf-8'))
-    expected_crates = {f"{p['name']}@{p['version']}" for p in lock['package']
-                       if p.get('source', '').startswith('registry+')}
-    if crates is None or set(crates[1].split()) != expected_crates:
-        raise ValueError('Gentoo CRATES differs from Cargo.lock')
+    if expected is not None:
+        check_ebuild(text, manifest, lock)
     fuzz = tomllib.loads((root / "fuzz/Cargo.toml").read_text(encoding='utf-8'))
     if fuzz["dependencies"]["stamp-suite"]["version"] != version:
         raise ValueError("Fuzz path dependency version differs from Cargo.toml")
@@ -42,6 +44,17 @@ def check_metadata(root, expected=None):
     if package['version'] != version:
         raise ValueError('Cargo.lock version differs from Cargo.toml')
     return version
+
+
+def check_ebuild(text, manifest, lock):
+    minimum = re.search(r'^RUST_MIN_VER="([^"]+)"', text, re.MULTILINE)
+    if minimum is None or minimum[1] != manifest['package']['rust-version']:
+        raise ValueError('Gentoo RUST_MIN_VER differs from Cargo.toml')
+    crates = re.search(r'^CRATES="(.*?)"', text, re.MULTILINE | re.DOTALL)
+    expected_crates = {f"{p['name']}@{p['version']}" for p in lock['package']
+                       if p.get('source', '').startswith('registry+')}
+    if crates is None or set(crates[1].split()) != expected_crates:
+        raise ValueError('Gentoo CRATES differs from Cargo.lock')
 
 
 def check_windows_binary(path):

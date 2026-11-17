@@ -70,7 +70,7 @@ rather than being silently ignored.
 
 ```json
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "uptime_seconds": 12345,
   "draining": false,
   "sessions": 17,

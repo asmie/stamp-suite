@@ -81,7 +81,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `sender_measurement_test.rs` | Independent peer checks sender summaries, burst collection, duplicates, counter gaps and Follow-Up summaries. | always |
 | `base_protocol_wire_test.rs` | Raw base-packet layout, sequence progression, NTP/PTP timestamps, zeroed transmitted and ignored received MBZ, authenticated signatures, stateless echo, stateful controls and symmetric trailers. Uses SSID zero for the base profile. | Sender: always; reflector: Unix, nix |
 | `return_path_wire_test.rs` | One originated Return Path, unique children, SR-MPLS/SRv6 network bytes and signatures; first-owner routing, child flag derivation, complete framing and selected lengths, Control Code precedence and failed-integrity copies. Copy exceptions keep the inherited flag requirement Partial. | Sender: always; reflector: Unix, nix |
-| `header_request_wire_test.rs` | Independent sender bytes for zero-filled Received fields, fixed header family lengths/selectors, opt-in and unique control-only TLVs; actual IPv6 ancillary headers establish request lengths/order, selective subsets and mutable-option masking. | Control: always; fixed: Linux; attachment case: Linux, ignored namespace test |
+| `header_request_wire_test.rs` | Independent sender bytes for zero-filled Received fields, fixed header family lengths/selectors, opt-in and unique control-only TLVs; actual IPv6 ancillary headers establish request lengths/order, selective subsets and mutable-option masking. | Control: always; fixed: Linux and Windows; attachment case: Linux, ignored namespace test |
 | `header_reflection_wire_test.rs` | Actual reflector header disclosure, ordering and reverse-header control; complete-checksum IPv6 injection for pnet, ancillary capture for nix, independent STAMP/HMAC bytes and integrity-failure copies. | Linux, both backends; ignored namespace test |
 | `sender_pacing_test.rs` | A sender keeps its schedule when the reflector port is closed (ICMP errors), and interim reports continue during the final wait. | always |
 | `sender_schedule_test.rs` | `--count 0` with `--duration`, duration before count, sub-millisecond and Poisson intervals, `--interface`. | always; interface test on Linux and macOS |
@@ -90,11 +90,13 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `session_identity_test.rs` | Session identity and static admission on real sockets: SSIDs, Micro-session IDs, source ports and wildcard-bind destinations. | Unix, nix |
 | `pending_probe_limit_test.rs` | Independent sender peers: bounded retention, silent loss, late/duplicate replies, cancellation, Access Report retries and per-target budgets; IPv4/IPv6 and open/authenticated modes. | always; multi-target case Linux only |
 | `reflector_launcher_test.rs` | Continuously held port contention, kernel-selected ports, metadata setup before first send without readiness traffic, clean receiver exit, startup stderr/status bounds, timeout cleanup and child reaping. Linux also checks original socket closure and retained duplicates independently of endpoint occupancy. | Unix, nix; kernel socket-identity checks on Linux only |
+| `tlv_extension_wire_test.rs` | RFC 8972 echo order, U/M/I flags and integrity gates through a real reflector, checked against independently built bytes and HMACs. | Linux, nix |
+| `type12_policy_test.rs` | Type 12 policy decisions (rate, volume, count, Address Groups, protected admission) through real UDP dispatch and independent bytes. | Linux, nix |
 | `cos_ecn_wire_test.rs` | Actual ingress/reply IP markings, raw CoS fields, global/scoped admission, ECN refusal, burst/ordinary isolation and independent signatures. | Linux, nix |
 | `ecn_path_test.rs` | Real sender/reflector diagnostics under independent forward/reverse kernel ECN rewrites, raw IP/TLV capture, signatures, policy refusals and matching report matrices. | Linux, nix; one ignored namespace test |
 | `session_ssid_validation_test.rs` | Sender SSID checks and zero-SSID policies against an independent peer; IPv4/IPv6, open/authenticated. | always |
 | `sender_zero_checksum_test.rs` | Actual CLI sender capture, zero/nonzero checksum fields, NTP/PTP, default/five-byte BER patterns, independent base/TLV digests and samples, plus kernel rejection of invalid-checksum signed replies. | Linux, any backend profile; one ignored namespace test |
-| `zero_checksum_test.rs` | Captured IPv4 checksum-zero ingress, kernel checksum-drop controls, BER padding repair and signatures, strict/provisioned admission and authenticated base corruption. | Linux, nix; four ignored namespace tests |
+| `zero_checksum_test.rs` | Captured IPv4 checksum-zero ingress, kernel checksum-drop controls, BER padding repair and signatures, strict/provisioned admission and authenticated base corruption. | Linux, nix; five ignored namespace tests |
 | `snmp_lifecycle_test.rs` | CLI exits after finite sends, startup failures, signals and silent initial/reconnect handshakes. | Unix, `snmp`; reflector needs nix |
 | `startup_failure_test.rs` | Startup failures (bind, key file, missing key, bad BER pattern, missing interface) return errors; total loss and shutdown do not. Retained silent peers and automatic sender ports avoid released-port races; IPv4/IPv6 total loss verifies the probe and distinct source port. | always; some cases Linux only |
 | `tlv_flag_semantics.rs` | U, M, I and C flag rules (RFC 8972, RFC 10052, draft-ietf-ippm-stamp-ext-hdr-26) through `process_stamp_packet`. | always |
@@ -113,7 +115,7 @@ Shared helpers and data:
 
 ## Reflector startup
 
-Nine live suites share the lifecycle helpers above. Child reflectors bind port
+The live suites share the lifecycle helpers above. Child reflectors bind port
 zero and report their assigned address; in-process fixtures pass an owned
 socket to the nix backend. Neither releases a reserved UDP port before binding.
 Startup failures include status/PID and the last 64 KiB of stderr; stderr is
@@ -237,7 +239,7 @@ STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_PNET_HEADER_TESTS=1 uns
   checks matching reply headers are absent. This is software loopback evidence;
   nested raw capture and physical interfaces remain separate.
 - `pnet_endpoint_test` rejects execution in the recorded parent network
-  namespace. Its three cases serialize to protect private ports and IPv6
+  namespace. Its four cases serialize to protect private ports and IPv6
   sysctls, including when Rust's test runner uses multiple threads. The
   IPv6-disabled case restores its namespace setting. Raw probes carry complete
   checksums, and contenders retain their sockets throughout startup attempts.
@@ -289,7 +291,7 @@ Run the default fixture locally, recording the parent namespace before entry:
 
 ```bash
 cargo test --locked --test zero_checksum_test --no-run --message-format=json > /tmp/zero-udp-artifacts.json
-python3 scripts/run_privileged_test.py /tmp/zero-udp-artifacts.json zero_checksum_test 4 \
+python3 scripts/run_privileged_test.py /tmp/zero-udp-artifacts.json zero_checksum_test 5 \
   unshare -Urn env STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_ZERO_UDP_TESTS=1 TOKIO_WORKER_THREADS=2
 ```
 
@@ -301,8 +303,8 @@ throughout each case and stops/joins every reflector.
 
 The `privileged` job in `.github/workflows/conformance.yml` builds each backend
 without root, then uses `scripts/run_privileged_test.py` to require the three
-pnet checksum/round-trip tests, three pnet endpoint cases, sender and reflector
-header cases, nine namespace scenarios, two route MTU cases and four IPv4
+pnet checksum/round-trip tests, four pnet endpoint cases, sender and reflector
+header cases, nine namespace scenarios, two route MTU cases and five IPv4
 zero-checksum cases in each of the default and all-features profiles.
 It also requires the sender case in all three profiles and the directional
 ECN rewrite fixture in default and all-feature nix profiles.

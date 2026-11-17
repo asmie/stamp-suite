@@ -43,7 +43,7 @@ which is covered by the checksums and attestations. Use that file as the
 feed's `Makefile`. To render it yourself from the same archive:
 
 ```sh
-python3 scripts/render_openwrt.py --archive stamp-suite-1.0.0.tar.gz --output Makefile
+python3 scripts/render_openwrt.py --archive stamp-suite-VERSION.tar.gz --output Makefile
 ```
 
 If the archive has not been published or cannot be fetched, there is no
@@ -132,8 +132,8 @@ baseline. The checks need Docker running native Linux containers, and Python
 3.10 or later:
 
 ```sh
-python3 scripts/check_package_install.py --package target/debian/stamp-suite_1.0.0-1_amd64.deb --report /tmp/package-install-deb.json
-python3 scripts/check_package_install.py --package target/generate-rpm/stamp-suite-1.0.0-1.x86_64.rpm --report /tmp/package-install-rpm.json
+python3 scripts/check_package_install.py --package target/debian/stamp-suite_VERSION-1_amd64.deb --report /tmp/package-install-deb.json
+python3 scripts/check_package_install.py --package target/generate-rpm/stamp-suite-VERSION-1.x86_64.rpm --report /tmp/package-install-rpm.json
 ```
 
 Replace the paths and versions with the ones your build produced. The script

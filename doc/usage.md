@@ -1149,7 +1149,7 @@ The draft's example that conflicts with this rule is discussed in the
 On Linux, the nix reflector reads IPv6 extension headers from the socket's
 ancillary data and reflects them. It cannot read the fixed IP header, so Type
 247 requests get the C flag; use the pnet backend to reflect fixed headers.
-Reflected-header replies need the Linux or Windows route MTU lookup described in
+Reflected-header replies need the Linux, Windows or macOS route MTU lookup described in
 [Reply size and route MTU](#reply-size-and-route-mtu). The pnet capture path
 drops packets with a zero, corrupt or incomplete UDP checksum, so capture where
 the packets carry complete checksums, not before checksum offload fills them
@@ -1240,13 +1240,6 @@ seconds. A slow reader can cause interim reports or text packet details to be
 skipped. If the final output fails, the run stops with an error. See
 [report output](statistics.md#report-output-and-pending-probes).
 
-## See also
-
-- [Architecture](architecture.md)
-- [Measurement semantics](measurements.md) and [statistics precision](statistics.md)
-- [Security](security.md) and [runtime control API](control-plane.md)
-- [Standards conformance](conformance/README.md)
-
 ## Residual bit error rate
 
 `--ber` uses the combined Residual BER in Padding TLV from
@@ -1298,3 +1291,10 @@ the Linux nix reflector accepts it. Sending needs no raw-socket privilege. The
 [open-mode admission limitation](ber-migration.md#zero-checksum-ingress-boundary)
 is still Partial, and the software-loopback tests say nothing about capturing
 errors on a physical link or about FEC behavior.
+
+## See also
+
+- [Architecture](architecture.md)
+- [Measurement semantics](measurements.md) and [statistics precision](statistics.md)
+- [Security](security.md) and [runtime control API](control-plane.md)
+- [Standards conformance](conformance/README.md)

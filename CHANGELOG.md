@@ -120,7 +120,9 @@ Upgrade both peers together when they use BER or reflected headers.
     running after receive errors.
   - The loss threshold triggers session failure even before the first reply.
 - Packaging: RPM installation aborts when the service user cannot be created;
-  the Nix package reads its version from Cargo.toml.
+  the Nix package reads its version from Cargo.toml. The 1.0.0 Gentoo ebuild
+  again lists the crates of its own release, and the metadata check compares
+  an ebuild with `Cargo.lock` only for the release being tagged.
 
 ### Security
 

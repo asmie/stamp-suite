@@ -1,289 +1,140 @@
-# BER successor migration
+# BER migration
 
-T5 migrates from `draft-gandhi-ippm-stamp-ber-07` to
+Since 1.1.0, both roles measure residual bit errors with
 [draft-ietf-bpm-stamp-ber-01](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-ber-01.txt)
-(2 November 2026). The successor identity and revision were checked against
-[Datatracker](https://datatracker.ietf.org/doc/draft-ietf-bpm-stamp-ber/)
-on 9 November 2026. This is an incompatible draft-feature change for the next
-minor release, planned as 1.1.0; it must not enter a 1.0.x compatibility patch.
+(2 November 2026). Releases up to 1.0.x used `draft-gandhi-ippm-stamp-ber-07`.
+The two wire formats are incompatible, so a 1.0.x peer and a 1.1.0 peer
+cannot measure BER against each other.
 
-## Delivery boundaries
+## Upgrading
 
-1. **T5a, codec and design:** add a bounded successor value codec, independent
-   vectors, property tests, malformed nested inputs and a fuzz target. Keep
-   endpoint dispatch, CLI behavior, legacy allocations and the standards pin
-   on the existing profile. That preparatory chunk was committed as `04de534`.
-2. **T5b, endpoint integration:** switch both roles, observation validation,
-   HMAC signing, padding correction, MTU fitting and configuration together.
-   Retire the legacy wire profile explicitly and test the migration boundary.
-   Committed as `3783462`.
-3. **T5c, evidence:** complete independent live wire checks for IPv4/IPv6,
-   open/keyed/authenticated modes and malformed nested TLVs. Rebuild the
-   conformance matrix and change the standards identity/pin only once the
-   endpoints implement the successor. Record independent-peer limitations.
+1. Upgrade the sender and the reflector together. Delay and loss keep working
+   with a mixed pair; only BER stops (see [Old peers](#old-peers)).
+2. Make explicit patterns at least four bytes long by repeating them:
+   `--ber-pattern aa55` becomes `--ber-pattern aa55aa55`. The old default,
+   `ff00`, is rejected too. Without `--ber-pattern` the default is `FF00FF00`,
+   and no pattern sub-TLV is sent.
+3. Choose a padding size that holds whole repetitions of the pattern: a
+   multiple of four for four-byte patterns, of five for five-byte patterns.
+4. Remove `--ber-omit-burst` and `ber_omit_burst`. The new format always
+   carries the burst field, and the option is now a startup error, even when
+   BER is disabled.
 
-## Format comparison and codec contract
+## Wire format
 
 | Revision | BER fields and pattern |
 |---|---|
 | gandhi -07 and ippm -00 | Separate top-level pattern, count and optional maximum-burst TLVs; two-byte default pattern. |
 | ippm -01 | One TLV with a four-byte count; optional pattern and maximum-burst sub-TLVs. Explicit patterns have a length divisible by four. |
-| bpm -01 | One TLV with two fixed four-byte fields: count, then maximum burst. Optional pattern sub-TLV; its value needs at least four bytes. Default pattern is `FF00FF00`. |
+| bpm -01 (current) | One TLV with two fixed four-byte fields: count, then maximum burst. Optional pattern sub-TLV; its value needs at least four bytes. Default pattern is `FF00FF00`. |
 
-The successor's minimum value length is eight. It can carry zero or more
-framed sub-TLVs, with at most one known pattern sub-TLV. A five-byte pattern
-is valid; padding must still contain whole repetitions. A burst value of
-zero can mean that the reflector cannot calculate it, even when the count
-is nonzero; it must not cause the sender to invent a clean burst sample or
-discard an otherwise usable count.
+The BER TLV uses experimental Type 243, and its pattern sub-TLV uses
+experimental Type 241, until IANA assigns TBA1 and TBA2. Both peers must agree
+on these codepoints. They avoid the old Type 242 (which collided with
+Heartbeat) and Types 9 and 10, which RFC 9503 assigns. The allocations are
+listed in `src/tlv/experimental.rs` and the conformance inventory.
 
-`ResidualBerValue` encodes/decodes values without registering any type in
-the endpoint dispatcher. It checks the 16-bit outer length and every nested
-header/value bound. Encoding checks lengths before appending output. Unknown
-sub-TLVs and complete flag octets survive decoding unchanged. A separate
-pattern accessor checks duplicates and the minimum pattern length; absence
-remains distinct from an explicit empty pattern. The codec imposes no count
-versus padding relationship because it has no packet/session context.
+The value is at least eight bytes and may contain any number of sub-TLVs, with
+at most one known pattern sub-TLV. A burst of zero with a nonzero count means
+the reflector could not calculate the burst. The sender then keeps the count
+sample but records no burst sample; JSON and CSV show a null burst and a zero
+burst sample count.
 
-Successful decoding is not revision detection or negotiation. Callers must
-agree on a wire revision and codepoints, apply flag and integrity checks,
-and validate counts against the admitted padding size before using metadata.
-The codec preserves malformed semantic inputs for later flagging; it does
-not itself acknowledge unknown sub-TLVs, compute BER or alter packet flags.
+## Old peers
 
-## Activation and legacy compatibility
+Nothing guesses the format from a TLV's length. A 1.1.0 endpoint answers the
+retired Types 240–242 with U. A peer that does not support Type 243 should
+answer with U too, and the sender then disables BER while delay and loss
+measurements continue. Tests cover both cases.
 
-T5b makes the successor the sole active BER wire profile.
-Do not infer a legacy format from lengths or reuse top-level Types 240–242
-for a different layout. Retired legacy types must receive U rather than be
-silently interpreted as successor BER. A peer that does not support the
-chosen successor type should return U, disabling BER while delay/loss
-measurements continue. Endpoint tests verify that legacy types get U and an unsupported successor
-response disables BER without losing delay/loss measurements.
+## Reflector behavior
 
-The outer TLV uses experimental Type 243; its optional pattern sub-TLV uses
-experimental Type 241 until IANA assigns TBA1/TBA2. Their registries are
-separate.
-Avoid the legacy Type 242/Heartbeat collision and the assigned RFC 9503
-Types 9/10. These are local allocations requiring explicit peer agreement,
-not IANA assignments. They are recorded in `src/tlv/experimental.rs` and the
-conformance inventory. Legacy Rust helper types remain serialization utilities
-for historical fixtures; byte dispatch returns U for their retired types.
+The reflector checks BER before the other TLV updates, after base and TLV
+HMAC verification and session admission:
 
-CLI/TOML validation now enforces the successor format:
-explicit patterns shorter than four bytes return a migration error,
-and the successor always carries the fixed maximum-burst field. The legacy
-`--ber-omit-burst` workaround cannot remove it. The obsolete flag/TOML value
-is rejected with an actionable error, even if BER is disabled. The default pattern is four bytes; empty or unaligned padding
-is rejected. For example, replace `--ber-pattern aa55` with
-`--ber-pattern aa55aa55` and use a padding size divisible by four. Five-byte
-patterns are allowed with padding sizes divisible by five. Omission uses
-`FF00FF00` without sending an explicit pattern sub-TLV.
+- A BER value shorter than eight bytes gets M and C.
+- A short known pattern sub-TLV gets M on that sub-TLV. Processing stops at a
+  malformed boundary and the rest is echoed unchanged; it is never replaced
+  by the default pattern.
+- Unknown sub-TLVs get U and keep their values.
+- Missing or duplicate padding, duplicate BER or pattern TLVs, and padding
+  that is not a whole number of patterns get C on the BER TLV.
+- Values that failed HMAC verification, and their padding, are echoed
+  unchanged.
 
-Reflector integration must distinguish framing errors (M on a short outer
-value or malformed known sub-TLV) from conformance errors (C for missing or
-duplicate padding, duplicate BER or pattern TLVs, and pattern misalignment).
-The draft requires both M and C when the outer length is below eight.
-Unknown sub-TLVs receive U and retain their values. Stop processing at a
-malformed boundary and preserve the opaque remainder; do not convert it to
-the default pattern. Verify HMAC/session admission before counting or repairing
-padding. Apply the same checks to sender observations, including nested U,
-M and I. Re-sign metadata after all edits and mark resized denominators unusable.
+Padding is repaired and the reply is signed after all other changes.
+
+When a reply must shrink to fit the route MTU, the reflector first removes
+optional reflected-header TLVs and then shortens BER padding. A Type 12 reply
+clamped to the MTU fills the exact budget with the pattern, possibly ending in
+a partial repetition, and sets C on the BER TLV because the denominator
+changed. A standalone BER reply keeps whole repetitions. If the mandatory
+fields cannot fit, or the pattern is unusable, the reply is dropped. Route-MTU
+sizing works on Linux, on Windows, and on macOS for native unicast IPv6; see
+[Reply size and route MTU](usage.md#reply-size-and-route-mtu). There is no
+end-to-end path-MTU probing.
+
+## Sender behavior
+
+The sender checks the reflected BER TLV and its sub-TLVs for U, M and I after
+integrity and session checks. It rejects duplicate or mismatched patterns and
+a changed padding size. A U reply disables BER for the rest of the run. Padding
+is sized in whole pattern repetitions after the BER TLV itself is counted, and
+follows the route MTU when it changes.
 
 ## Zero-checksum ingress boundary
 
-The receive-side test profile is Linux IPv4 with the nix backend,
+`--zero-udp-checksum` lets a Linux sender send authenticated IPv4 BER requests
+with a zero UDP checksum; see
+[zero-checksum transmission](usage.md#zero-checksum-ber-transmission). It is
+off by default, rejected in open mode, and keeps base and TLV HMACs and receive
+checksum validation. There is no bidirectional zero-checksum mode and no IPv6
+support: the
+[BER draft, section 3](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-ber-01.txt#section-3)
+excludes IPv6 under RFC 8200. The pnet capture backend rejects zero UDP
+checksums in both families.
+
+On the receive side, the tested profile is a Linux IPv4 nix reflector run with
 `--strict-packets --session-admission provisioned --drop-replayed --tlv-mode echo`,
 an exact `--reflector-session SSID,SOURCE,DESTINATION` and `--hwtstamp off`.
-It covers open, keyed-open and authenticated BER padding processing. The raw
-[fixture](../tests/zero_checksum_test.rs) captures checksum-zero requests and
-uses valid/invalid nonzero-checksum controls. Replies use the normal transport.
-A separate [sender option](usage.md#zero-checksum-ber-transmission) now supports
-Linux IPv4 authenticated BER requests with zero checksum, default off. It rejects
-open mode and keeps base/TLV HMACs and receive checksum validation enabled.
-There is no bidirectional zero-checksum mode. The pnet
-capture backend rejects zero UDP checksums in both address families. No IPv6
-zero-checksum support is claimed; the
-[BER draft, section 3](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-ber-01.txt#section-3)
-excludes it for STAMP under RFC 8200.
+The raw-wire [fixture](../tests/zero_checksum_test.rs) sends checksum-zero
+requests in open, keyed-open and authenticated modes, with valid and invalid
+nonzero-checksum controls.
 
-This profile characterizes existing controls and remains **Partial** for
-`ber-3-zero-udp`. Strict parsing enforces base length, while the default lenient
-parser zero-fills short bases. Exact provisioning and configured base HMAC
-checks precede runtime session allocation, activity refresh and replay updates.
-The optional replay policy counts a received packet before rejecting a duplicate;
-Type 12 also has its own ordering response. Semantic TLV validation and integrity-error
-responses occur after those session updates. Optional framing admission is
-now available before those updates, as described below. Timestamp and Error Estimate
-fields are decoded, rather than fully validated against a session-specific
-timestamp policy. These flags therefore do not establish a complete open-mode
-zero-checksum admission gate. A normal UDP socket also does not expose the
-incoming UDP checksum to that gate.
+Two opt-in reflector options drop damaged requests before they touch session
+state (allocation, activity, receive counts or replay):
 
-The separate opt-in `--validate-base-fields` policy now rejects incomplete
-bases, zero Error Estimate multipliers and out-of-range PTP nanoseconds before
-session updates. Its [contract](usage.md#base-field-validation) accepts both
-incoming timestamp formats via Z, ignores received MBZ and leaves sequence
-ordering to the existing replay policy. It adds no freshness threshold and
-does not alter TLV malformed/integrity-error replies. The fourth raw-wire case
-checks rejected zero-checksum BER requests with valid configured base/extension
-digests, both before allocation and against an established session. Portable
-processing tests also cover IPv4/IPv6, stateful/stateless operation, serial wrap,
-gaps/reordering, opt-out compatibility and retained M/I responses.
+- `--validate-base-fields` rejects incomplete bases, zero Error Estimate
+  multipliers and out-of-range PTP nanoseconds; see
+  [base-field validation](usage.md#base-field-validation).
+- `--validate-tlv-framing` rejects incomplete outer TLVs and incomplete
+  children of the known containers (Location, Timestamp Information, Return
+  Path, Type 12 and BER); see
+  [TLV framing admission](usage.md#tlv-framing-admission).
 
-The shared `check_tlv_framing` helper now distinguishes incomplete outer/child
-headers from values that overrun their containing region, without allocating
-or decoding values. It checks known Location, Timestamp Information, Return
-Path, Type 12 and BER child regions; unknown layouts and child values stay
-opaque. Short complete fixed prefixes, known value lengths, flags, cardinality
-and HMAC validation remain separate semantic checks. A one-to-three-byte tail
-is a framing error to this helper, although the legacy list parser tolerates
-it. The identity reader uses the same frame iterator while preserving its
-existing stop-at-first-incomplete-frame behavior. Reflectors can now opt into
-`--validate-tlv-framing` to discard these incomplete frames before session
-allocation, activity, receive counts or replay updates. The default is off;
-this policy also applies when TLVs are ignored and does not depend on the
-incoming UDP checksum. Short complete values, semantic errors and failed
-TLV HMACs retain ordinary M/I responses; complete Type 12 requests retain
-their ordering-error response. This is an explicit admission override for
-incomplete frames, not a change to the default malformed-TLV echo profile.
+Raw-wire tests send validly signed zero-checksum requests that each option
+must reject, both before a session exists and after. Requests that are complete
+but semantically invalid, and TLVs that fail their HMAC, still get the normal
+M and I replies of RFC 8972 §4 and §4.8.
 
-The raw-wire test `zero_checksum_framing_admission_preserves_session_state`
-checks incomplete outer and known child frames before and after session
-creation in open, keyed-open and authenticated modes, followed by valid BER
-requests using the rejected sequence. Portable tests cover both families,
-state modes, ignored TLVs, and retained semantic/integrity/ordering replies.
-These checks do not upgrade `ber-3-zero-udp`.
-
-The draft requires failed open-mode packet/session checks to be discarded, but
-[RFC 8972, sections 4 and 4.8](https://www.rfc-editor.org/rfc/rfc8972.html#section-4)
-specify malformed/integrity-error replies; the BER draft itself specifies M for
-a short BER value. The optional framing policy makes that distinction for incomplete frames only.
-It does not resolve whether complete but semantically invalid open-mode fields
-must be rejected before state updates, nor validate freshness or session-specific
-timestamp rules. A complete claim still needs that broader admission contract
-and evidence; the ordinary TLV response policy remains the default.
-
-Valid-looking changes to open-mode fields can escape validation. Sequence gaps,
-reordering or an old but representable timestamp alone do not establish
-corruption, and received MBZ fields remain ignored under
-[RFC 8762](https://www.rfc-editor.org/rfc/rfc8762.html#section-4.2).
-Only Extra Padding contributes BER; protected base-field corruption is tested
-as an authentication drop, not a BER sample. These software-loopback tests
-provide no physical-link, FEC or NIC error-capture evidence.
-
-## Independent peer finding
-
-The draft lists Teaparty commit
-[`592558a38dbcf9b273acb2a2fe8ab0d8f16d0709`](https://github.com/cerfcast/teaparty/commit/592558a38dbcf9b273acb2a2fe8ab0d8f16d0709).
-It was built with its pinned nix submodule and run only as a black-box peer;
-no implementation code, tests or comments were copied.
-
-[IPv4 and IPv6 captures](../tests/fixtures/residual-ber/teaparty-592558a.json)
-show Extra Padding Type 1 followed by separate four-byte Types 9 (count) and
-10 (pattern). These are not the successor's combined value; Types 9 and 10
-are assigned to RFC 9503 extensions. The capture is incompatibility evidence,
-not a successful successor exchange or a reason to adopt those codepoints.
-
-Current Teaparty main was also fetched and built on 9 November 2026 at
-[`7fb2bdea48d42875e3237b97718f3c2149995b40`](https://github.com/cerfcast/teaparty/commit/7fb2bdea48d42875e3237b97718f3c2149995b40).
-Its [IPv4/IPv6 captures](../tests/fixtures/residual-ber/teaparty-7fb2bde.json)
-contain separate outer Type 241 (four-byte count) and Type 240 (pattern),
-with Extra Padding Type 1. It still does not send the combined successor
-layout. These black-box captures and binary/lock hashes establish the
-compatibility boundary; no peer implementation, tests or comments were copied.
-Successful BER interoperability with another maintained application remains
-unverified. Cisco IOS XR 26.1.1 is another implementation named by the draft;
-no Cisco device was available for this check.
-
-## Test evidence
-
-[Hand-encoded values](../tests/fixtures/residual-ber/values.json) derive directly
-from the draft's field diagrams. Tests cover network byte order, omitted and
-explicit patterns, five-byte patterns, zero burst with nonzero count, unknown
-sub-TLVs/flags, truncation, duplicates, short patterns and aggregate length
-limits. Property tests exercise arbitrary bytes and generated nested values.
-The `residual_ber_value` fuzz target uses the same framing/semantic boundary;
-its CI corpus is seeded from these independent hex vectors.
-
-The [BER matrix](conformance/draft-stamp-ber.md) now evaluates 54 successor
-clauses: 49 Compliant, four Partial, zero Gap and one N-A. The standards
-manifest tracks `draft-ietf-bpm-stamp-ber-01`; the legacy replacement finding
-is resolved. This records current revision tracking, not full conformance:
-zero-checksum validation, MTU/platform and physical LAG limits remain. The
-draft's SHOULD for per-condition error logs/counters is covered in the
-TLV-enabled profile: local causes have specific reasons, and copied peer C in
-complete child headers has explicit provenance without inferring a local fault.
-
-T5c's [wire report](interop/2026-11-09-ber/REPORT.md) records 60 independently
-validated cases in each of the default and all-features builds. The Python
-peer exercises both roles and verifies three integrity profiles, default and
-five-byte patterns, malformed nested values, known bit errors, support fallback,
-sample admission and interval statistics. Frozen observations and mutation
-tests validate the oracle separately. CI requires both build profiles.
-
-The live stateful checks found a final-signing bug: M-marked BER replies with
-nonzero padding retained an assembly-time sequence-zero TLV digest. A failing
-regression now passes after the signer was changed to walk structurally complete
-frames past semantic M. Failed incoming TLV HMACs still retain their original
-values/digest with I; RFC 8972 requires copying them rather than regenerating
-a digest for the failure echo.
-
-T5a local validation: eight codec tests and the complete all-feature suite
-pass (1,398 tests, 12 privileged tests ignored). Rust 1.87 checks the production
-library; Clippy, Rustdoc, formatting, Python tests and conformance bookkeeping
-pass. A 31-second seeded libFuzzer run completed 9,042,076 executions with
-address and leak checking enabled. This is parser evidence, not live endpoint
-or physical-link BER evidence.
-
-## T5b endpoint behavior
-
-Both roles use the combined value. The sender validates parent and nested
-flags after integrity/session admission, rejects duplicate or mismatched
-patterns and changed padding denominators, and disables BER on an admitted
-U response while keeping delay/loss measurements. Nonzero count with zero
-maximum burst contributes a count sample but no burst sample; JSON/CSV retain
-null burst values and zero burst sample counts when unavailable.
-
-The reflector checks BER before other semantic updates so malformed nested
-framing preserves the outer processing stop boundary. Short known pattern
-values get nested M; unknown sub-TLVs get U and retain their values. Missing or
-duplicate padding/BER/patterns and misalignment get outer C. Short outer values
-get both M and C. Invalid HMAC metadata and padding remain opaque.
-
-The sender fits padding in whole pattern repetitions after accounting for the
-combined metadata. Linux reply fitting handles both a single BER reply and a
-reply with optional reflected headers: remove eligible headers first, then
-reduce BER padding if needed. Resized metadata gets C and is signed again.
-Linux and Windows reflectors use kernel route/path and interface MTU estimates;
-Windows senders use the connected socket's estimate for initial fitting.
-Other platforms retain their existing limits. No end-to-end path-MTU probing or
-physical-link BER accuracy is implied. T5c's independent wire evidence and
-successor conformance scoring remain pending.
-
-T5b local verification: default/all-feature/pnet suites pass 1,307/1,408/1,263
-tests (12/12/13 privileged tests ignored). All three Clippy profiles, Rust 1.87
-all-target checks, Rustdoc, root/fuzz formatting, Python tests and bookkeeping
-pass. Default production cross-checks compile for macOS and Windows; their
-native runtime evidence remains pending. A final seeded reflector fuzz run
-passed 820,478 executions in 31 seconds with ASan/LSan enabled. This validates
-parser/assembly paths; T5c still owns independent live-wire conformance evidence.
+This conformance row (`ber-3-zero-udp`) stays **Partial**. The BER draft wants
+failed open-mode checks discarded, but nothing here validates freshness or
+session-specific timestamp rules, and a normal UDP socket cannot see the
+incoming UDP checksum. Changes that still look valid, such as sequence gaps,
+reordering or an old timestamp, cannot be told apart from corruption, and
+received MBZ fields are ignored as
+[RFC 8762](https://www.rfc-editor.org/rfc/rfc8762.html#section-4.2) requires.
+Only Extra Padding produces BER samples; corrupting an authenticated base
+field is tested as an authentication drop. These loopback tests say nothing
+about physical links, FEC or NIC error capture.
 
 ## Conformance diagnostics
 
-The reflector retains a fixed set of local BER C reasons through packet
-assembly and send-time shaping. Counters advance after a complete successful
-UDP send, once per reason per datagram. Successful burst copies count separately;
-failed/partial sends, cancelled work and suppressed replies add nothing.
-An MTU retry starts again with the template's reasons, so a failed trimmed
-attempt cannot label a later untrimmed reply. Base authentication and TLV
-integrity failures do not produce BER observations. Opaque values are not decoded for diagnostics; bounded child-header observation
-can record `peer_c_preserved` in known container layouts. It never admits a BER
-sample or establishes a verified fault. Nested errors carrying only M add no
-C reason.
-The structural short-value C is generated before HMAC verification and remains
-countable if I is added later. The failed digest and protected values are copied;
-this diagnostic neither accepts a BER sample nor repairs unverified padding.
+The reflector counts the local reasons it sets C on a BER TLV. A counter
+advances once per reason per datagram, after a complete successful UDP send.
+Burst copies count separately; failed or partial sends, cancelled work and
+suppressed replies count nothing. An MTU retry starts again from the template's
+reasons, so a failed trimmed attempt does not label a later untrimmed reply.
 
 | Reason | Meaning |
 | --- | --- |
@@ -295,43 +146,52 @@ this diagnostic neither accepts a BER sample nor repairs unverified padding.
 | `padding_misaligned` | Padding length is not a whole number of patterns. |
 | `padding_resized` | Local Type 12 or MTU shaping changes the BER denominator. |
 
-Multiple detected conditions can increment on one datagram, but repeated
-instances of the same condition do not multiply its count. Validation stops
-retain their existing behavior: these are counts of processed conditions,
-not an exhaustive diagnosis of an invalid packet. Authentication and session admission retain their existing gates. Locally
-generated Type 12 padding now has its sender U flag cleared, allowing BER
-finalization to repair the pattern and return C for the changed denominator.
-Previously that padding was skipped as unprocessed.
+One datagram can raise several reasons, but the same reason counts once.
+Validation still stops where it did before, so these counts are not a complete
+diagnosis of an invalid packet. Errors that carry only M on a sub-TLV add no
+reason. A C flag copied from the peer in a known container is counted
+separately as `peer_c_preserved`; it never admits a BER sample or implies a
+local fault.
 
-Send-time Type 12/MTU clamping fills the exact route budget with the validated
-pattern, including a partial final repetition when necessary, and restores
-those bytes even if earlier semantic resizing already set parent C. It removes reflected headers before shrinking BER padding,
-preserves count/burst fields and signs the resulting reply. A padding resize
-sets BER C; header removal alone preserves its denominator and BER flag while
-setting Type 12 C and stopping the burst. A budget without the mandatory
-fields and padding header, or an ambiguous/unusable pattern, is refused.
-Standalone BER fitting continues to retain whole repetitions. A controlled
-resize sets BER C, so a partial repetition cannot become a valid BER sample. Failed MTU
-attempts do not alter the template used by a later larger-budget retry.
+Counts are lifetime totals for the reflector, kept across session expiry, under
+`counters.ber_conformance` in [control status](control-plane.md#status).
+With runtime metrics, Prometheus exposes
+`stamp_reflector_ber_conformance_total` with only the fixed `reason` label.
+Each reason is logged on its first, tenth, hundredth and every later
+power-of-ten occurrence. Messages contain the reason and its total, never
+packet values, keys, addresses or session identifiers. Type 12, reflected-header
+and CoS reasons have their own counters, described in
+[control status](control-plane.md#status).
 
-Counts are reflector lifetime totals, unaffected by session expiry, available
-under `counters.ber_conformance` in [control status](control-plane.md#status).
-Prometheus exposes `stamp_reflector_ber_conformance_total` with only the fixed
-`reason` label when runtime metrics are enabled. No peer/session labels are
-created. Every reason logs its own first, tenth, hundredth and later
-power-of-ten occurrence; suppressed occurrences emit no per-packet debug log.
-Messages contain only a reason token and its total, without packet values,
-keys, source addresses or session identifiers.
+## Interoperability
 
-The draft's section 6.2 wording applies to C on other TLVs/sub-TLVs too.
-Type 12 and header-reflection reasons have separate fixed counters and
-throttled logs, exposed through [control status](control-plane.md#status) and
-Prometheus. Header reasons follow the offending headers through size trimming
-and MTU retries. CoS marking failure, third-DSCP fallback and nested unsupported/duplicate reply-header controls also
-have specific reasons. Every known local C-generation site has a diagnostic.
-`peer_c_preserved` covers retained peer C in complete child headers of the five
-known container layouts. It distinguishes an unexpected peer flag from a
-locally established conformance failure, including protected opaque echoes,
-without changing their values or digests. The diagnostics row is Compliant for
-the TLV-enabled profile; unknown value formats and legacy TLV-ignore tails have
-no inferred child-field semantics.
+No other maintained application has completed a BER exchange with
+stamp-suite in this format. Teaparty was built and run only as a black-box
+peer; none of its code, tests or comments were used.
+
+- The commit the draft lists,
+  [`592558a`](https://github.com/cerfcast/teaparty/commit/592558a38dbcf9b273acb2a2fe8ab0d8f16d0709),
+  sends Extra Padding followed by separate four-byte Types 9 (count) and 10
+  (pattern), which RFC 9503 assigns to other TLVs
+  ([captures](../tests/fixtures/residual-ber/teaparty-592558a.json)).
+- Its main branch on 9 November 2026,
+  [`7fb2bde`](https://github.com/cerfcast/teaparty/commit/7fb2bdea48d42875e3237b97718f3c2149995b40),
+  sends separate Type 241 (four-byte count) and Type 240 (pattern) TLVs
+  ([captures](../tests/fixtures/residual-ber/teaparty-7fb2bde.json)).
+
+Neither uses the combined value of the current draft. Cisco IOS XR 26.1.1, the
+other implementation the draft names, was not available for testing.
+
+## Evidence
+
+- [Hand-encoded values](../tests/fixtures/residual-ber/values.json) taken from
+  the draft's field diagrams, with tests for byte order, omitted and explicit
+  patterns, zero burst, unknown sub-TLVs, truncation, duplicates and length
+  limits. The `residual_ber_value` fuzz target is seeded from them.
+- An independent Python peer, `scripts/interop_ber.py`, which CI runs against
+  both build profiles in both roles: 60 cases each. The
+  [November 2026 report](interop/2026-11-09-ber/REPORT.md) records the first
+  run and the signing defect it found in stateful BER error replies.
+- The [BER conformance matrix](conformance/draft-stamp-ber.md), which lists the
+  remaining Partial rows: zero-checksum validation, MTU on other platforms and
+  physical LAG.

@@ -11,8 +11,8 @@ This matrix replaces the retired Gandhi -07 profile. Clauses below paraphrase
 the successor. Experimental outer Type 243 and pattern sub-TLV Type 241 stand
 in for TBA1/TBA2 in separate registries. These are local allocations requiring
 peer agreement, not IANA assignments. Legacy outer Types 240–242 receive U;
-length does not negotiate a format. The change belongs in the planned 1.1.0
-minor release, not a 1.0.x patch.
+length does not negotiate a format. The change shipped in the 1.1.0 minor
+release; see the [migration guide](../ber-migration.md).
 
 The [independent BER wire peer](../../scripts/interop_ber.py) imports no crate
 code and implements both roles with Python's standard library. Its 60 cases

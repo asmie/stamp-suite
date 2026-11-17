@@ -1,10 +1,15 @@
 # Successor BER migration evidence — 9 November 2026
 
-T5c validates the active `draft-ietf-bpm-stamp-ber-01` profile after T5b
-(`3783462`), fixes a stateful error-reply signing defect found by the independent
-peer, and moves the standards pin. This report describes local execution with
-the uncommitted T5c changes. Remote CI has not run this change; no release,
-commit, push or external author message was performed.
+These runs checked the `draft-ietf-bpm-stamp-ber-01` profile introduced in
+`3783462`. The independent peer found a signing defect in stateful BER error
+replies; the fix and these results were committed as `0b290a4`. The runs used
+a local working tree with that fix applied to `3783462`, so no commit
+reproduces the recorded binary hashes exactly. All runs were local; the
+conformance workflow has run the same BER profiles on every push and pull
+request since.
+
+Later commits changed some figures below, such as test counts and matrix
+rollups. The [conformance matrices](../../conformance/README.md) are current.
 
 ## Outcome
 
@@ -24,9 +29,8 @@ commit, push or external author message was performed.
 All-features selects the Linux nix backend. The pnet result above is the Cargo
 suite, not the independent live BER profile. Ordinary ignored tests are not
 runtime passes; the MTU test was separately executed with required prerequisites.
-Native Windows/macOS runtime, physical LAG/NIC tests and a new fuzz campaign
-were not performed for this chunk. Codec/reflector fuzz results from T5a/T5b
-remain historical evidence in the [migration guide](../../ber-migration.md).
+Native Windows and macOS runtime, physical LAG and NIC tests, and a new fuzz
+campaign were not part of these runs.
 
 ## Independent wire evidence
 
@@ -85,12 +89,9 @@ Linux 6.18.54.1 WSL2 x86_64, Python 3.14.4, Rust 1.99.1.
 | BER runner | `93e9af2841f41d1ebebc6cbecfbccad10f10919fee71023d65d9478a582acfd0` |
 | Request vectors | `a2721f69b0baf9e9b86ef23cc543c041be5523733cbc07ae19021148d537dc01` |
 
-Full reports from this execution are local temporary artifacts:
-`/tmp/stamp-t5c-ber-default.json`, `/tmp/stamp-t5c-ber-all.json`,
-`/tmp/stamp-t5c-wire-default.json` and `/tmp/stamp-t5c-wire-all.json`.
-Their full BER report hashes are in `runs.json`; frozen UDP observations are
-tracked separately. Temporary artifacts are not a durable CI archive.
-`conformance.yml` now requires both BER build profiles and uploads their full
+The full reports from these runs were not kept; `runs.json` records their
+hashes, and the frozen UDP observations are tracked separately.
+`conformance.yml` requires both BER build profiles and uploads their full
 wire reports alongside the existing suite, including when a case fails.
 
 ## MTU and standards evidence
@@ -98,8 +99,8 @@ wire reports alongside the existing suite, including when a case fails.
 The required route-MTU test ran inside isolated user/network namespaces:
 
 ```sh
-cargo test --locked --all-features --test route_mtu_test --no-run --message-format=json > /tmp/t5c-mtu-artifacts.json
-python3 scripts/run_privileged_test.py /tmp/t5c-mtu-artifacts.json route_mtu_test 1 unshare -Urn env STAMP_MTU_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
+cargo test --locked --all-features --test route_mtu_test --no-run --message-format=json > mtu-artifacts.json
+python3 scripts/run_privileged_test.py mtu-artifacts.json route_mtu_test 1 unshare -Urn env STAMP_MTU_NETNS_TESTS=1 TOKIO_WORKER_THREADS=2
 ```
 
 It passed IPv4/IPv6 × open/authenticated × wildcard/bound source combinations,
@@ -111,15 +112,14 @@ The [rebuilt matrix](../../conformance/draft-stamp-ber.md) has 54 clauses:
 48 Compliant, four Partial, one Gap and one N-A. Partial rows cover validation
 when UDP checksums are zero, MTU across platforms, physical LAG and automatic
 link-MTU filling. Specific BER conformance-error logs/counters remain a SHOULD
-Gap. The overall rollup is 471 clauses: 395 Compliant, 23 Partial, two Gap,
+Gap; later commits added them. The overall rollup at the time was 471 clauses: 395 Compliant, 23 Partial, two Gap,
 48 N-A and three Excluded. Revision tracking being current does not close
 these implementation/evidence limitations.
 
 The manifest now pins `draft-ietf-bpm-stamp-ber-01`. Live authoritative metadata
 and its offline replay both passed; [standards.json](standards.json) records
 the results and source identities. The sole advisory is expired watch-only
-`draft-ietf-ippm-stamp-yang-12`. Local full metadata/report artifacts are
-`/tmp/stamp-t5c-standards-source` and `/tmp/stamp-t5c-standards.json`.
+`draft-ietf-ippm-stamp-yang-12`.
 
 ## Independent application compatibility
 
@@ -144,16 +144,16 @@ binary while a test uses it:
 
 ```sh
 cargo build --locked
-python3 scripts/interop_ber.py --binary target/debug/stamp-suite --report /tmp/ber-default.json
-python3 scripts/interop_stamp.py --binary target/debug/stamp-suite --report /tmp/wire-default.json
+python3 scripts/interop_ber.py --binary target/debug/stamp-suite --report ber-default.json
+python3 scripts/interop_stamp.py --binary target/debug/stamp-suite --report wire-default.json
 cargo build --locked --all-features
-python3 scripts/interop_ber.py --binary target/debug/stamp-suite --report /tmp/ber-all.json
-python3 scripts/interop_stamp.py --binary target/debug/stamp-suite --report /tmp/wire-all.json
+python3 scripts/interop_ber.py --binary target/debug/stamp-suite --report ber-all.json
+python3 scripts/interop_stamp.py --binary target/debug/stamp-suite --report wire-all.json
 python3 -m unittest discover -s scripts/tests -v
 python3 scripts/check_conformance_counts.py
 python3 scripts/check_conformance_citations.py
-python3 scripts/check_standards.py --cache /tmp/ber-standards-source --report /tmp/ber-standards.json
-python3 scripts/check_standards.py --offline /tmp/ber-standards-source --report /tmp/ber-standards-offline.json
+python3 scripts/check_standards.py --cache standards-source --report standards.json
+python3 scripts/check_standards.py --offline standards-source --report standards-offline.json
 ```
 
 These loopback checks transform delivered payloads with valid checksums;

@@ -99,7 +99,8 @@ Estimate multiplier or an invalid PTP nanoseconds value; see
 Each of these features has limits, listed under
 [supported profiles and limits](doc/conformance/README.md#known-limits). For
 example, RFC admission rules apply only with provisioned sessions, header
-reflection depends on the receiver backend, route-MTU sizing is Linux-only and
+reflection depends on the receiver backend, route-MTU sizing needs Linux,
+Windows or (for IPv6) macOS, and
 the AgentX sub-agent is read-only. The conformance matrices link each frozen
 requirement to the code and tests that implement it. A listed feature does not
 mean that every requirement or every platform is covered.

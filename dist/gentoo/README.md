@@ -7,17 +7,28 @@ eclasses and layout follow the main tree and can be copied into
 
 ## Regenerating after a release
 
-1. `CRATES=` and the dependent-crate `LICENSE+=` line are generated from
+1. Copy the previous ebuild to the new version. Do not edit an ebuild that
+   was already released: it must keep the crate list of its own tag.
+   `SRC_URI` uses the release's source archive, which must be published
+   before step 4.
+
+2. `CRATES=` and the dependent-crate `LICENSE+=` line are generated from
    `Cargo.lock` by [pycargoebuild](https://github.com/projg2/pycargoebuild):
 
    ```sh
    pycargoebuild -i net-analyzer/stamp-suite/stamp-suite-<ver>.ebuild <checkout>
    ```
 
-2. Rename the ebuild to the new version. `SRC_URI` uses the release's
-   source archive, which must be published before the next step.
+3. Check the new ebuild against `Cargo.lock` and the minimum Rust version:
 
-3. Generate `Manifest` (needs a Gentoo host or container with the
+   ```sh
+   python3 scripts/check_release_metadata.py --version <ver>
+   ```
+
+   The tag workflow runs the same check. CI on ordinary pushes only checks
+   that the version numbers agree.
+
+4. Generate `Manifest` (needs a Gentoo host or container with the
    overlay registered):
 
    ```sh
