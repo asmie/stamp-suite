@@ -531,7 +531,7 @@ pub struct AccessReportSummary {
     pub retransmissions: u32,
 }
 
-/// AIMD statistics (cos-ecn-02 §3.4), present when --cos requests ECT0/ECT1.
+/// AIMD statistics (draft-ietf-bpm-stamp-cos-ecn-00 §3.4), present when --cos requests ECT0/ECT1.
 /// Built from rate_control::AimdStats.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct CongestionSummary {
@@ -603,7 +603,7 @@ pub struct StatsSnapshot {
     /// `--access-report` was set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_report: Option<AccessReportSummary>,
-    /// AIMD congestion-response summary (draft-ietf-ippm-stamp-cos-ecn-02
+    /// AIMD congestion-response summary (draft-ietf-bpm-stamp-cos-ecn-00
     /// §3.4), present only when the controller was active.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub congestion: Option<CongestionSummary>,
@@ -637,7 +637,7 @@ impl StatsSnapshot {
     }
 
     /// Attaches the AIMD congestion-response summary
-    /// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4) to this snapshot. Pass
+    /// (draft-ietf-bpm-stamp-cos-ecn-00 §3.4) to this snapshot. Pass
     /// `None` when the controller was never active this run.
     #[must_use]
     pub fn with_congestion(mut self, summary: Option<CongestionSummary>) -> Self {
@@ -821,7 +821,7 @@ impl StatsSnapshot {
         if let Some(c) = &self.congestion {
             writeln!(
                 out,
-                "{}Congestion response (draft-ietf-ippm-stamp-cos-ecn-02 §3.4): \
+                "{}Congestion response (draft-ietf-bpm-stamp-cos-ecn-00 §3.4): \
                  ce_replies={} backoffs_applied={} interval={:.1}ms \
                  (base={:.1}ms, peak={:.1}ms)",
                 prefix,

@@ -161,7 +161,7 @@ fn scenario_1_roundtrip_unauth_and_auth() {
 
 // ==========================================================================
 // Scenario 2: on-wire DSCP/ECN reflection + CoS reply-TOS
-// (RFC 8972 §4.4 + erratum 8199 + draft-ietf-ippm-stamp-cos-ecn-02 §3.2).
+// (RFC 8972 §4.4 + erratum 8199 + draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]
@@ -209,7 +209,7 @@ fn scenario_2_cos_dscp_ecn_onwire() {
         .first()
         .expect("at least one reflected reply on the wire");
 
-    // Erratum 8199 + cos-ecn-02 normal case: the reply's on-wire DSCP equals
+    // Erratum 8199 + draft-ietf-bpm-stamp-cos-ecn-00 normal case: the reply's on-wire DSCP equals
     // the requested DSCP1 (34) and its ECN equals EC1 (1, RPE=0b11).
     assert_eq!(
         reply.dscp(),
@@ -233,7 +233,10 @@ fn scenario_2_cos_dscp_ecn_onwire() {
     let rpe = (cos.value[2] >> 4) & 0x03;
     assert_eq!(dscp2, 34, "CoS DSCP2 reflects received DSCP (erratum 8199)");
     assert_eq!(ec2, 1, "CoS EC2 reflects received ECN (erratum 8199)");
-    assert_eq!(rpe, 0b11, "CoS RPE=0b11 (reply ECN set to EC1, cos-ecn-02)");
+    assert_eq!(
+        rpe, 0b11,
+        "CoS RPE=0b11 (reply ECN set to EC1, draft-ietf-bpm-stamp-cos-ecn-00)"
+    );
 
     netns::emit_pass(
         scen,
@@ -727,7 +730,7 @@ fn scenario_6_type12_multi_reply() {
 // ==========================================================================
 // Scenario 7: BER on the wire. The Bit Pattern fills the Extra Padding TLV,
 // and the reflector's Bit Error Count is 0 on a clean channel
-// (draft-gandhi-ippm-stamp-ber-07 §4).
+// (draft-ietf-bpm-stamp-ber-01 §§4, 5).
 // ==========================================================================
 #[test]
 #[ignore = "privileged netns tier: STAMP_NETNS_TESTS=1 + root"]

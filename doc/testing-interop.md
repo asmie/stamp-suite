@@ -62,7 +62,7 @@ SRv6 forwarding is disabled, so Type 10 must come back with U=1 and a valid
 final HMAC. Its understood Type 4 child has U, M, I and the reserved header
 bits cleared, but keeps the child type, length and segment bytes. The outer
 fallback U flag does not allow the reflector to copy the sender's child flags
-(RFC 9503 Section 4.1, RFC 8972 flags). Source matching runs over loopback, so
+(RFC 9503 §4.1, RFC 8972 flags). Source matching runs over loopback, so
 this fixture cannot show that source override works on a multihomed host. The
 120 ms gap between burst copies leaves room for the interleaved request. It is
 not a timing benchmark. Physical LAG, NIC timestamps and successful SRH

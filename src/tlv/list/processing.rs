@@ -78,7 +78,7 @@ impl TlvList {
     }
 
     /// Updates CoS DSCP2/EC2 from ingress metadata and RPD/RPE from the reply
-    /// policy (RFC 8972 §4.4, erratum 8199; draft-ietf-ippm-stamp-cos-ecn-02 §3.2).
+    /// policy (RFC 8972 §4.4, erratum 8199; draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
     /// Preserves requested DSCP1/EC1, zeroes the Reserved bits, and mutates
     /// without allocation.
     ///
@@ -106,7 +106,7 @@ impl TlvList {
         );
     }
 
-    /// BPM CoS/ECN -00: a third locally admitted DSCP requires C.
+    /// draft-ietf-bpm-stamp-cos-ecn-00: a third locally admitted DSCP requires C.
     pub(crate) fn mark_cos_dscp_fallback(&mut self) {
         self.for_each_matching_tlv(
             |tlv| tlv.tlv_type == TlvType::ClassOfService && tlv.value.len() == COS_TLV_VALUE_SIZE,
@@ -136,7 +136,7 @@ impl TlvList {
 
         // Byte 2: keep EC1 (bits 7:6), write RPE, zero Reserved (bits 3:0).
         // Byte 3 is Reserved; reserved bits MUST be zeroed on transmission
-        // (RFC 8972 §4.4, draft-ietf-ippm-stamp-cos-ecn-02 §3.1).
+        // (RFC 8972 §4.4, draft-ietf-bpm-stamp-cos-ecn-00 §3.1).
         let rpe = if reply_ecn_applied { 0b11 } else { 0b10 };
         value[2] = (value[2] & 0xC0) | (rpe << 4);
         value[3] = 0;

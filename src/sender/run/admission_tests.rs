@@ -306,7 +306,7 @@ async fn ecn_reporting_counts_only_admitted_distinct_copies() {
             assert_eq!(ecn.reverse_comparable, 0);
             assert_eq!(ecn.reverse_unknown, 2);
 
-            // BPM -00 assigns RPE=01 to unavailable reflector marking. A
+            // draft-ietf-bpm-stamp-cos-ecn-00 assigns RPE=01 to unavailable reflector marking. A
             // signed additional copy remains a valid base measurement, but
             // must not manufacture reverse bleaching or a CE transition.
             additional[..4].copy_from_slice(&101u32.to_be_bytes());

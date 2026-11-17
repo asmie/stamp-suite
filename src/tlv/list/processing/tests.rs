@@ -1030,7 +1030,7 @@ fn test_update_micro_session_id_tlvs_matching_reflector_id_accepted() {
     assert_eq!(parsed.reflector_micro_session_id, 99);
 }
 
-// --- BER (draft-gandhi-ippm-stamp-ber) tests ---
+// --- BER (draft-ietf-bpm-stamp-ber-01) tests ---
 
 #[test]
 fn test_ber_xor_helper_no_errors() {

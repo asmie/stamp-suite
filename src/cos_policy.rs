@@ -1,4 +1,4 @@
-//! Reflector CoS admission policy (RFC 8972 §4.4/§6, BPM cos-ecn-00 §3.2).
+//! Reflector CoS admission policy (RFC 8972 §4.4/§6, draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
 //!
 //! Permission and socket support are separate checks; a reply needs both.
 //! DSCP uses the longest matching destination-prefix rule, falling back to the
@@ -118,7 +118,7 @@ impl DscpSet {
     }
 }
 
-/// Locally admitted reply marking and its CoS report (BPM CoS/ECN -00).
+/// Locally admitted reply marking and its CoS report (draft-ietf-bpm-stamp-cos-ecn-00).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DscpSelection {
     pub value: u8,
@@ -228,7 +228,7 @@ struct DestinationRule {
     dscp: DscpSet,
 }
 
-/// The reflector's CoS admission policy (RFC 8972 §4.4/§6, BPM cos-ecn-00 §3.2).
+/// The reflector's CoS admission policy (RFC 8972 §4.4/§6, draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CosAdmissionPolicy {
     dscp: DscpSet,

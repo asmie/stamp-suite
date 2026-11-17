@@ -130,7 +130,7 @@ def verify_reply(data, sent, vector, clock, stateful, ordinal, tos, peer,
         original = parse_tlvs(sent, base)
         for kind in (9, 12):
             require(fields[kind][1] == original[kind][1], f"changed Type {kind} value")
-        # RFC 9503 Section 4.1 inherits RFC 8972 child flag procedures.
+        # RFC 9503 §4.1 inherits RFC 8972 child flag procedures.
         # The understood SRv6 child clears U even when forwarding falls back
         # and the outer Return Path carries U. Length and segment stay intact.
         expected_path = struct.pack("!BBH", 0, 4, 16) + socket.inet_pton(socket.AF_INET6, "::1")

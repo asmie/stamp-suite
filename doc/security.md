@@ -96,7 +96,7 @@ marking. To protect it, configure a shared key, leave the sender's
 neither HMAC covers the ECN bits in the IP header, which routers are allowed
 to change. A key holder can still fake measurements.
 
-The [CoS/ECN draft §6](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-02.txt)
+The [CoS/ECN draft §6](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-cos-ecn-00.txt)
 also suggests using a destination UDP port from the dynamic range
 (49152–65535), so that port-based middleboxes are less likely to spot STAMP
 traffic. To do that, set the reflector's `--local-port` and the sender's

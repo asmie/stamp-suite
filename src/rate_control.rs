@@ -1,4 +1,4 @@
-//! Sender congestion response (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
+//! Sender congestion response (draft-ietf-bpm-stamp-cos-ecn-00 §3.4).
 //!
 //! The send loop reports CE from the CoS EC2 field or reply IP header to
 //! `AimdController::on_ce_observed`, and clean replies to
@@ -100,7 +100,7 @@ impl AimdController {
     }
 
     /// Current/base interval ratio, floored at 1.0, for scaling reflected
-    /// burst gaps (cos-ecn-02 §3.4-3).
+    /// burst gaps (draft-ietf-bpm-stamp-cos-ecn-00 §3.4-3).
     /// Uses [`MIN_BACKOFF_FLOOR`] as the denominator when the base is zero,
     /// avoiding division by zero or a zero multiplier.
     #[must_use]
@@ -115,7 +115,7 @@ impl AimdController {
     }
 
     /// Records a CE-marked reply: multiplicatively grows the interval
-    /// (capped at `params.max_interval`), per draft-ietf-ippm-stamp-cos-ecn-02
+    /// (capped at `params.max_interval`), per draft-ietf-bpm-stamp-cos-ecn-00
     /// §3.4 (observe EC2 and be capable of reducing the rate on CE).
     pub fn on_ce_observed(&mut self) {
         self.ce_observations += 1;

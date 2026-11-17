@@ -807,7 +807,7 @@ fn test_timestamp_info_with_sub_tlvs_is_filled() {
     assert_eq!(&reply[8..12], &[0, 9, 0, 0], "sub-TLV bytes copied");
 }
 
-/// RFC 8972 §4.4 / cos-ecn-02 §3.1: Reserved bits are zeroed in the reply.
+/// RFC 8972 §4.4 / draft-ietf-bpm-stamp-cos-ecn-00 §3.1: Reserved bits are zeroed in the reply.
 #[test]
 fn test_cos_reserved_bits_are_zeroed() {
     let tlvs = [0x80, 4, 0, 4, 0xB8, 0, 0x4F, 0xFF];
@@ -2190,7 +2190,7 @@ fn test_assemble_unauth_with_cos_tlv_updates_dscp_ecn() {
     ); // Type
 
     // Parse the value via the typed decoder (single source of truth for
-    // the RFC 8972 + cos-ecn-02 bit layout).
+    // the RFC 8972 + draft-ietf-bpm-stamp-cos-ecn-00 bit layout).
     let value_start = tlv_start + TLV_HEADER_SIZE;
     let raw = crate::tlv::RawTlv::new(
         TlvType::ClassOfService,
@@ -2274,7 +2274,7 @@ fn test_assemble_auth_with_cos_tlv_updates_dscp_ecn() {
 fn test_cos_unable_fallback_tos_zeroes_ecn_and_matches_reply_wire_tos() {
     use crate::tlv::ClassOfServiceTlv;
 
-    // draft-ietf-ippm-stamp-cos-ecn-02 §3.2 MUST rule: the fallback TOS
+    // draft-ietf-bpm-stamp-cos-ecn-00 §3.2 MUST rule: the fallback TOS
     // the backends apply after a failed setsockopt must have its ECN
     // bits forced to 0b00, and must agree with the "unable" state of
     // `ClassOfServiceTlv::reply_wire_tos` (RPD=0b01, RPE=0b10) so the

@@ -107,7 +107,7 @@ pub(super) fn build_reflected_control_tlv(
 }
 
 /// Builds the control TLV with the current AIMD-scaled interval
-/// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
+/// (draft-ietf-bpm-stamp-cos-ecn-00 §3.4).
 ///
 /// `SenderRun::build_probe` calls this for every probe, including Access
 /// Report retries, when `scale_reflected_control` is active, since

@@ -4,7 +4,7 @@ use super::*;
 use crate::tlv::{TlvFlags, TlvSpan, COS_TLV_VALUE_SIZE};
 
 /// Marks CoS application failure: RPD=0b01 (RFC 8972 §4.4) and RPE=0b10
-/// (draft-ietf-ippm-stamp-cos-ecn-02 §3.2). Returns whether a CoS TLV was updated.
+/// (draft-ietf-bpm-stamp-cos-ecn-00 §3.2). Returns whether a CoS TLV was updated.
 ///
 /// The caller must recompute the TLV HMAC and attempt the Not-ECT IP-header
 /// fallback from [`cos_unable_fallback_tos`]. This only updates TLV fields.
@@ -22,7 +22,7 @@ pub(crate) fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usi
         {
             // The backend could not apply DSCP1 and EC1 to the reply:
             // RPD = 0b01 (DSCP1 not used, RFC 8972 §4.4) and RPE = 0b10
-            // (EC1 not applied, cos-ecn-02 §3.2), replacing the 0b11 set
+            // (EC1 not applied, draft-ietf-bpm-stamp-cos-ecn-00 §3.2), replacing the 0b11 set
             // during TLV processing.
             let value = tlv.value_start();
             response[value + 1] = (response[value + 1] & 0xFC) | 0b01;
@@ -34,7 +34,7 @@ pub(crate) fn set_cos_policy_rejected(response: &mut [u8], base_packet_size: usi
     updated
 }
 
-/// The backend cannot apply either EC1 or Not-ECT (BPM cos-ecn-00 §3.2).
+/// The backend cannot apply either EC1 or Not-ECT (draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
 /// Report RPE=01; preserve C from independent conditions or peer provenance.
 /// Opaque U/M/I echoes must remain byte-for-byte unchanged. Returns whether
 /// any locally processed CoS TLV was marked, for successful-send diagnostics.
@@ -59,7 +59,7 @@ pub(super) fn set_cos_marking_unavailable(response: &mut [u8], base: usize) -> b
 }
 
 /// Returns received DSCP with Not-ECT for a failed CoS application
-/// (draft-ietf-ippm-stamp-cos-ecn-02 §3.2).
+/// (draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
 ///
 /// Matches RPD=0b01/RPE=0b10 from [`set_cos_policy_rejected`]. Backends must
 /// attempt this fallback; socket failure can still prevent clearing ECN.

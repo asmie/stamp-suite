@@ -615,7 +615,7 @@ pub struct Configuration {
     pub session_timeout: u64,
 
     /// DSCP codepoints permitted on reflector replies (RFC 8972 §4.4/§6,
-    /// BPM cos-ecn-00 §3.2): `all` (default), `none`, or values and inclusive
+    /// draft-ietf-bpm-stamp-cos-ecn-00 §3.2): `all` (default), `none`, or values and inclusive
     /// ranges such as `0,8,10-14,46`. Refused DSCP1 uses received DSCP only if
     /// permitted; otherwise the lowest allowed value with RPD=01 and C.
     /// No allowed value, or inability to enforce a restricted set, suppresses
@@ -632,7 +632,7 @@ pub struct Configuration {
     pub allowed_dscp: String,
 
     /// ECN codepoints the reflector may apply to a reply's IP header when a
-    /// Class of Service TLV requests them (cos-ecn-02 §3.2).
+    /// Class of Service TLV requests them (draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
     ///
     /// `all` (default), `none`, or a comma-separated list of 0-3. A refused EC1
     /// forces the reply's ECN bits to Not-ECT and the echoed TLV reports
@@ -648,7 +648,7 @@ pub struct Configuration {
     )]
     pub allowed_ecn: String,
 
-    /// Destination DSCP policy overriding `--allowed-dscp` (cos-ecn-02 §3.2).
+    /// Destination DSCP policy overriding `--allowed-dscp` (draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
     /// Repeatable `PREFIX/LEN=SPEC`, e.g. `--allowed-dscp-for 192.0.2.0/24=0,46`.
     /// The longest matching prefix replaces the global set, regardless of order.
     ///
@@ -742,7 +742,7 @@ pub struct Configuration {
     pub ecn: u8,
 
     /// Multiply the send interval by this factor on each CE-marked reply,
-    /// capped at `--ecn-max-delay` (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
+    /// capped at `--ecn-max-delay` (draft-ietf-bpm-stamp-cos-ecn-00 §3.4).
     /// Must exceed 1.0. Active with `--cos` and `--ecn` ECT0 (2) or ECT1 (1).
     /// See `--ecn-recovery-step` for recovery pacing.
     #[clap(
@@ -755,7 +755,7 @@ pub struct Configuration {
 
     /// Upper bound (milliseconds) on the AIMD-controlled send interval: how
     /// far repeated CE observations can back the sender off
-    /// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4). Must be >= `--send-delay`
+    /// (draft-ietf-bpm-stamp-cos-ecn-00 §3.4). Must be >= `--send-delay`
     /// when the controller is active.
     #[clap(
         long,
@@ -767,7 +767,7 @@ pub struct Configuration {
 
     /// AIMD recovery in milliseconds per usable non-CE CoS reply, down to
     /// --send-delay. Missing or unusable CoS holds the interval; observed CE
-    /// still backs off (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
+    /// still backs off (draft-ietf-bpm-stamp-cos-ecn-00 §3.4).
     #[clap(
         long,
         default_value_t = 50,
@@ -1939,7 +1939,7 @@ impl Configuration {
             )));
         }
         // Validate AIMD backoff and recovery parameters even when ECN measurement
-        // is disabled (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
+        // is disabled (draft-ietf-bpm-stamp-cos-ecn-00 §3.4).
         if !self.ecn_backoff_factor.is_finite() || self.ecn_backoff_factor <= 1.0 {
             return Err(invalid(format!(
                 "ecn_backoff_factor value {} must be a finite number greater than 1.0 \

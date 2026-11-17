@@ -1950,7 +1950,7 @@ fn test_validate_reflected_tlvs_access_report_ack_survives_alongside_msid() {
 }
 
 // --- validate_reflected_tlvs: CoS EC2 CE detection
-// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4) ------------------------------
+// (draft-ietf-bpm-stamp-cos-ecn-00 §3.4) ------------------------------
 
 #[test]
 fn test_validate_reflected_tlvs_detects_cos_ce() {
@@ -2315,7 +2315,7 @@ fn test_process_response_does_not_acknowledge_without_access_report_tlv() {
 }
 
 // --- process_response: AIMD congestion-response wiring
-// (draft-ietf-ippm-stamp-cos-ecn-02 §3.4) ---------------------
+// (draft-ietf-bpm-stamp-cos-ecn-00 §3.4) ---------------------
 
 fn congestion_test_params() -> AimdParams {
     AimdParams {
@@ -2994,7 +2994,7 @@ fn access_report_with_scaled_control_config(
 }
 
 /// Wait-phase retries must rebuild the AIMD-scaled control TLV omitted from
-/// `extra_tlvs` (draft-ietf-ippm-stamp-cos-ecn-02 §3.4).
+/// `extra_tlvs` (draft-ietf-bpm-stamp-cos-ecn-00 §3.4).
 #[tokio::test]
 async fn test_wait_phase_retransmit_still_carries_scaled_control_tlv() {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();

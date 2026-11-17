@@ -57,7 +57,7 @@ pub mod log_throttle;
 /// STAMP packet structures and serialization.
 #[doc(hidden)]
 pub mod packets;
-/// AIMD response to CE-marked replies (draft-ietf-ippm-stamp-cos-ecn-02 §3.4),
+/// AIMD response to CE-marked replies (draft-ietf-bpm-stamp-cos-ecn-00 §3.4),
 /// driven by `sender::run_sender`.
 #[doc(hidden)]
 pub mod rate_control;

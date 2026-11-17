@@ -385,7 +385,7 @@ impl Transmission {
                             continue;
                         }
                         // Neither EC1 nor the Not-ECT fallback can be applied
-                        // (BPM cos-ecn-00 §3.2). Preserve routing and sign RPE=01.
+                        // (draft-ietf-bpm-stamp-cos-ecn-00 §3.2). Preserve routing and sign RPE=01.
                         cos_fallback = true;
                         cos_marking_unavailable |=
                             super::reply_bytes::set_cos_marking_unavailable(&mut data, base);

@@ -383,7 +383,7 @@ protection, and it is recorded on its own, including when CoS is unavailable.
 `reverse.comparable` and `reverse.unknown` in the directional diagnostics
 below. The raw histograms are separate totals. Use the paired transitions to
 analyze changes. The underlying CoS profile is
-[draft-ietf-ippm-stamp-cos-ecn-02](https://www.ietf.org/archive/id/draft-ietf-ippm-stamp-cos-ecn-02.html),
+[draft-ietf-bpm-stamp-cos-ecn-00](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-cos-ecn-00.html),
 a work in progress.
 
 ### Directional ECN diagnostics

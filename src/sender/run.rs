@@ -137,7 +137,7 @@ impl SenderRun {
         let local_addr: SocketAddr = conf.local_socket_addr();
         let remote_addr: SocketAddr = conf.remote_socket_addr();
 
-        // Enable AIMD for `--cos` with ECT0/ECT1 (cos-ecn-02 §3.4).
+        // Enable AIMD for `--cos` with ECT0/ECT1 (draft-ietf-bpm-stamp-cos-ecn-00 §3.4).
         // `conf.ecn` sets both the egress ECN and the requested reply EC1.
         let ecn_response_active = conf.cos && matches!(conf.ecn, 1 | 2);
 
@@ -249,7 +249,7 @@ impl SenderRun {
                 }
             }
 
-            // draft-ietf-ippm-stamp-cos-ecn-02 §3.4 reverse-path detection:
+            // draft-ietf-bpm-stamp-cos-ecn-00 §3.4 reverse-path detection:
             // read back the reply packet's own on-wire ECN via recvmsg cmsgs
             // (see `extract_reply_ecn_from_cmsgs`, used from `recv_packet`).
             if conf.cos {
@@ -257,7 +257,7 @@ impl SenderRun {
                 match enable_reply_tos_reception(socket.as_raw_fd(), is_ipv6) {
                     Ok(()) => log::info!(
                         "Reply ECN reception enabled (IP_RECVTOS/IPV6_RECVTCLASS) for \
-                         reverse-path ECN observations (draft-ietf-ippm-stamp-cos-ecn-02)"
+                         reverse-path ECN observations (draft-ietf-bpm-stamp-cos-ecn-00)"
                     ),
                     Err(e) => log::warn!(
                         "Failed to enable reply ECN reception: {e}; reverse-path ECN \
@@ -314,7 +314,7 @@ impl SenderRun {
                 log::warn!(
                     "Reverse-path ECN observations (wire ECN of replies) require \
                      Linux/macOS; only forward-path detection via the reflected CoS TLV's EC2 \
-                     field is active on this platform (draft-ietf-ippm-stamp-cos-ecn-02 §3.4)"
+                     field is active on this platform (draft-ietf-bpm-stamp-cos-ecn-00 §3.4)"
                 );
             }
         }
@@ -425,7 +425,7 @@ impl SenderRun {
         let recv_buf = vec![0u8; MAX_UDP_PAYLOAD];
         let timeout = Duration::from_secs(conf.timeout as u64);
 
-        // Scale the Type-12 burst interval with AIMD (cos-ecn-02 §3.4).
+        // Scale the Type-12 burst interval with AIMD (draft-ietf-bpm-stamp-cos-ecn-00 §3.4).
         // Skip the static TLV when scaling is active; rebuild it on each send.
         let reflected_control_requested =
             conf.reflected_control_count > 1 || conf.reflected_control_no_ext_hdr;
@@ -450,7 +450,7 @@ impl SenderRun {
                 recovery_step: Duration::from_millis(conf.ecn_recovery_step as u64),
             };
             log::info!(
-                "AIMD congestion-response controller enabled (draft-ietf-ippm-stamp-cos-ecn-02 \
+                "AIMD congestion-response controller enabled (draft-ietf-bpm-stamp-cos-ecn-00 \
                  §3.4): base={:?} backoff_factor={} max={}ms recovery_step={}ms{}",
                 conf.send_delay.duration(),
                 conf.ecn_backoff_factor,
@@ -563,7 +563,7 @@ impl SenderRun {
 
         // Build Reflected Test Packet Control TLV (RFC 10052 §3).
         // When `scale_reflected_control` is set, `build_probe` rebuilds it for
-        // every probe with an AIMD-scaled interval (cos-ecn-02 §3.4), so it is
+        // every probe with an AIMD-scaled interval (draft-ietf-bpm-stamp-cos-ecn-00 §3.4), so it is
         // not added to the static set here.
         if let Some(control) = build_reflected_control_tlv(
             conf.reflected_control_length,
@@ -970,7 +970,7 @@ impl SenderRun {
     }
 
     /// Current probe interval: the AIMD interval when congestion response is
-    /// active (cos-ecn-02 §3.4), otherwise `--send-delay`.
+    /// active (draft-ietf-bpm-stamp-cos-ecn-00 §3.4), otherwise `--send-delay`.
     fn send_interval(&self) -> Duration {
         self.congestion
             .as_ref()
@@ -1321,7 +1321,7 @@ impl SenderRun {
 
     /// Serializes one probe with a zeroed base packet for `stamp_probe` to
     /// fill. Direct Measurement, an Access Report and an AIMD-scaled
-    /// Reflected Test Packet Control TLV (cos-ecn-02 §3.4) change per probe;
+    /// Reflected Test Packet Control TLV (draft-ietf-bpm-stamp-cos-ecn-00 §3.4) change per probe;
     /// everything else comes from `extra_tlvs` and is written without a copy.
     fn build_probe(&self, seq: u32, attach_access_report: bool) -> Vec<u8> {
         let conf = &*self.conf;
@@ -1714,7 +1714,7 @@ pub(super) fn apply_tx_corrections(
 /// `kernel_t4` is the kernel receive timestamp (T4) in wire format when
 /// kernel RX timestamping is enabled. `reply_ecn` is the reply's own IP ECN
 /// codepoint when requested, for reverse-path congestion detection
-/// (cos-ecn-02 §3.4). Both come from one `recvmsg` on Linux and macOS; a
+/// (draft-ietf-bpm-stamp-cos-ecn-00 §3.4). Both come from one `recvmsg` on Linux and macOS; a
 /// plain `recv` is used otherwise. May return `WouldBlock` on a spurious
 /// wakeup; `try_io` clears the stale readiness first.
 pub(super) async fn recv_packet(

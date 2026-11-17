@@ -90,7 +90,7 @@ with a zero UDP checksum; see
 off by default, rejected in open mode, and keeps base and TLV HMACs and receive
 checksum validation. There is no bidirectional zero-checksum mode and no IPv6
 support: the
-[BER draft, section 3](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-ber-01.txt#section-3)
+[BER draft §3](https://www.ietf.org/archive/id/draft-ietf-bpm-stamp-ber-01.txt#section-3)
 excludes IPv6 under RFC 8200. The pnet capture backend rejects zero UDP
 checksums in both families.
 

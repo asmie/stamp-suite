@@ -297,7 +297,7 @@ pub struct ProcessingContext<'a> {
     /// Which Location TLV fields this reflector may report (RFC 8972 §4.2.2
     /// field-disclosure policy, `--location-disclose`).
     pub location_disclosure: LocationDisclosure,
-    /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, BPM cos-ecn-00 §3.2): answers
+    /// DSCP/ECN admission policy (RFC 8972 §4.4/§6, draft-ietf-bpm-stamp-cos-ecn-00 §3.2): answers
     /// *permitted*, where the backends' setsockopt answers *capable*.
     pub cos_policy: &'a CosAdmissionPolicy,
     /// Local addresses for Destination Node Address TLV matching (RFC 9503 §3).
