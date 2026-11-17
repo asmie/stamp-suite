@@ -174,9 +174,7 @@ fn fixture(case: Case) -> Transmission {
     session.record_received();
     Transmission::new(
         StampResponse {
-            data,
             cos_request: (case.scenario == Scenario::Cos).then_some((46, 1)),
-            cos_reply_policy: None,
             return_path_action: action,
             reflected_control: controlled.then_some(super::super::ReflectedControlBehavior {
                 max_size: PAYLOAD as u16,
@@ -184,11 +182,9 @@ fn fixture(case: Case) -> Transmission {
                 interval_ns: 1,
                 suppress_reply_ext_headers: false,
             }),
-            reply_source: None,
-            ber_conformance: Default::default(),
-            tlv_conformance: Default::default(),
             tlv_hmac_generated: case.auth && case.scenario != Scenario::Ordinary,
             tlv_processed: true,
+            ..StampResponse::new(data)
         },
         session,
         source,

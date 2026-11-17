@@ -4,6 +4,8 @@
     any(feature = "ttl-nix", not(feature = "ttl-pnet"))
 ))]
 
+#[path = "common/inet.rs"]
+mod inet;
 #[path = "common/receiver.rs"]
 mod receiver_fixture;
 #[path = "common/wire_hmac.rs"]
@@ -272,34 +274,6 @@ fn silence(socket: &UdpSocket) {
         .unwrap();
 }
 
-fn checksum(bytes: &[u8]) -> u16 {
-    let mut sum: u32 = bytes
-        .chunks(2)
-        .map(|pair| (u32::from(pair[0]) << 8) | u32::from(*pair.get(1).unwrap_or(&0)))
-        .sum();
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
-fn udp_checksum_errors() -> u64 {
-    let stats = std::fs::read_to_string("/proc/net/snmp").unwrap();
-    let mut udp = stats.lines().filter_map(|line| line.strip_prefix("Udp: "));
-    let columns: Vec<_> = udp.next().unwrap().split_whitespace().collect();
-    let index = columns
-        .iter()
-        .position(|name| *name == "InCsumErrors")
-        .unwrap();
-    udp.next()
-        .unwrap()
-        .split_whitespace()
-        .nth(index)
-        .unwrap()
-        .parse()
-        .unwrap()
-}
-
 /// Construct and capture the actual IP/UDP request, independently of STAMP codecs.
 /// None emits checksum zero. Some(original) computes the checksum before a
 /// payload mutation, allowing a kernel checksum-drop control on the same bytes.
@@ -335,8 +309,8 @@ fn inject(source: SocketAddr, destination: SocketAddr, payload: &[u8], original:
     pseudo.extend_from_slice(&length.to_be_bytes());
     if let Some(original) = original {
         assert_eq!(original.len(), payload.len());
-        let value = checksum(&[&pseudo[..], &udp, original].concat());
-        udp[6..8].copy_from_slice(&if value == 0 { u16::MAX } else { value }.to_be_bytes());
+        let value = inet::udp_checksum(&[&pseudo[..], &udp, original].concat());
+        udp[6..8].copy_from_slice(&value.to_be_bytes());
     }
     udp.extend_from_slice(payload);
     let mut ip = vec![
@@ -355,7 +329,11 @@ fn inject(source: SocketAddr, destination: SocketAddr, payload: &[u8], original:
         }
         assert_eq!(frame[0], 0x45);
         assert_eq!(&frame[12..20], &[127, 0, 0, 1, 127, 0, 0, 1]);
-        assert_eq!(checksum(&frame[..ihl]), 0, "valid IPv4 header checksum");
+        assert_eq!(
+            inet::checksum(&frame[..ihl]),
+            0,
+            "valid IPv4 header checksum"
+        );
         if original.is_none() {
             assert_eq!(
                 &frame[ihl + 6..ihl + 8],
@@ -365,7 +343,7 @@ fn inject(source: SocketAddr, destination: SocketAddr, payload: &[u8], original:
         } else {
             assert_ne!(&frame[ihl + 6..ihl + 8], &[0, 0]);
             assert_eq!(
-                checksum(&[&pseudo[..], &frame[ihl..size]].concat()) == 0,
+                inet::checksum(&[&pseudo[..], &frame[ihl..size]].concat()) == 0,
                 original == Some(payload),
                 "independent UDP checksum control"
             );
@@ -412,14 +390,14 @@ fn zero_checksum_padding_errors_survive_kernel_checks_and_preserve_hmac() {
             .counters
             .packets_received
             .load(Ordering::Relaxed);
-        let checksum_errors = udp_checksum_errors();
+        let checksum_errors = inet::udp_checksum_errors();
         inject(
             peer.socket.local_addr().unwrap(),
             peer.receiver.address,
             &corrupt,
             Some(&clean),
         );
-        peer.wait(|| udp_checksum_errors() == checksum_errors + 1);
+        peer.wait(|| inet::udp_checksum_errors() == checksum_errors + 1);
         silence(&peer.socket);
         assert_eq!(
             peer.receiver

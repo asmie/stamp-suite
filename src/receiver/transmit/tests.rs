@@ -104,9 +104,7 @@ fn sample(auth: bool, action: ReturnPathAction) -> Transmission {
         data.extend_from_slice(&[0; 9]);
     }
     let response = StampResponse {
-        data,
         cos_request: Some((46, 0)),
-        cos_reply_policy: None,
         return_path_action: action,
         reflected_control: Some(super::super::ReflectedControlBehavior {
             max_size: 1500,
@@ -115,10 +113,9 @@ fn sample(auth: bool, action: ReturnPathAction) -> Transmission {
             suppress_reply_ext_headers: false,
         }),
         reply_source: Some("127.0.0.2".parse().unwrap()),
-        ber_conformance: Default::default(),
-        tlv_conformance: Default::default(),
         tlv_hmac_generated: auth,
         tlv_processed: true,
+        ..StampResponse::new(data)
     };
     Transmission::new(
         response,

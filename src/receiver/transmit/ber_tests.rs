@@ -38,16 +38,9 @@ fn single_ber_reply_checks_mtu_preserves_patterns_and_resigns() {
             let mut data = vec![0; base];
             data.extend_from_slice(&list.to_bytes());
             let response = StampResponse {
-                data,
-                cos_request: None,
-                cos_reply_policy: None,
-                return_path_action: ReturnPathAction::Normal,
-                reflected_control: None,
-                reply_source: None,
-                ber_conformance: Default::default(),
-                tlv_conformance: Default::default(),
                 tlv_hmac_generated: auth,
                 tlv_processed: true,
+                ..StampResponse::new(data)
             };
             let mut t = Transmission::new(
                 response,
@@ -282,21 +275,15 @@ fn controlled_sample(
     let mut data = vec![0; base];
     data.extend_from_slice(&list.to_bytes());
     let response = StampResponse {
-        data,
-        cos_request: None,
-        cos_reply_policy: None,
-        return_path_action: ReturnPathAction::Normal,
         reflected_control: Some(super::super::ReflectedControlBehavior {
             max_size: 3000,
             extra_copies: 2,
             interval_ns: 1000,
             suppress_reply_ext_headers: false,
         }),
-        reply_source: None,
-        ber_conformance: Default::default(),
-        tlv_conformance: Default::default(),
         tlv_hmac_generated: signed,
         tlv_processed: true,
+        ..StampResponse::new(data)
     };
     let source = if ipv6 { "[::1]:4000" } else { "127.0.0.1:4000" }
         .parse()

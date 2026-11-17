@@ -2,6 +2,8 @@
 #![cfg(all(target_os = "linux", feature = "ttl-pnet", not(feature = "ttl-nix")))]
 #[path = "common/hops.rs"]
 mod hops;
+#[path = "common/inet.rs"]
+mod inet;
 #[path = "common/reflector.rs"]
 mod reflector;
 #[path = "common/wire_hmac.rs"]
@@ -13,16 +15,6 @@ use std::{
 };
 const KEY: [u8; 16] = [0xab; 16];
 
-fn checksum(bytes: &[u8]) -> u16 {
-    let mut sum = bytes
-        .chunks(2)
-        .map(|p| (u32::from(p[0]) << 8) + u32::from(*p.get(1).unwrap_or(&0)))
-        .sum::<u32>();
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
-}
 fn frame(value: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0x80, 247];
     bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
@@ -82,8 +74,7 @@ fn envelope(
         .concat(),
     };
     pseudo.extend_from_slice(&udp);
-    let sum = checksum(&pseudo);
-    udp[6..8].copy_from_slice(&if sum == 0 { u16::MAX } else { sum }.to_be_bytes());
+    udp[6..8].copy_from_slice(&inet::udp_checksum(&pseudo).to_be_bytes());
     if bad_checksum {
         udp[6] ^= 0x80;
     }
@@ -108,7 +99,7 @@ fn envelope(
             h[9] = protocol;
             h[12..16].copy_from_slice(&[127, 0, 0, if inner { 1 } else { 2 }]);
             h[16..20].copy_from_slice(&[127, 0, 0, 1]);
-            let sum = checksum(&h);
+            let sum = inet::checksum(&h);
             h[10..12].copy_from_slice(&sum.to_be_bytes());
             h
         } else {

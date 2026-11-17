@@ -1,21 +1,16 @@
 //! Independent wire peer verifies sender summaries and final burst draining.
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+#[path = "common/child.rs"]
+mod child;
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
+use child::ChildProcess;
 use std::{
     net::UdpSocket,
-    process::{Child, Command, Stdio},
+    process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-struct Sender(Option<Child>);
-impl Drop for Sender {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.0 {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
+struct Sender(ChildProcess);
 impl Sender {
     fn start(peer: &UdpSocket, auth: bool, count: u32, copies: u16) -> Self {
         Self::start_profile(peer, auth, count, copies, true, &[])
@@ -70,21 +65,10 @@ impl Sender {
                 "ABABABABABABABABABABABABABABABAB",
             ]);
         }
-        Self(Some(
-            command
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap(),
-        ))
+        Self(ChildProcess::spawn(&mut command))
     }
-    fn finish(mut self) -> serde_json::Value {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while self.0.as_mut().unwrap().try_wait().unwrap().is_none() {
-            assert!(Instant::now() < deadline, "sender failed to exit");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let output = self.0.take().unwrap().wait_with_output().unwrap();
+    fn finish(self) -> serde_json::Value {
+        let output = self.0.finish(Duration::from_secs(5));
         assert!(
             output.status.success(),
             "{}",
@@ -98,11 +82,7 @@ fn ptp_now() -> u64 {
     (now.as_secs() << 32) | u64::from(now.subsec_nanos())
 }
 fn sign(parts: &[&[u8]]) -> [u8; 16] {
-    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&[0xAB; 16]).unwrap();
-    for part in parts {
-        mac.update(part);
-    }
-    mac.finalize().into_bytes()[..16].try_into().unwrap()
+    wire_hmac::digest(&[0xAB; 16], &parts.concat())
 }
 fn reply(
     request: &[u8],

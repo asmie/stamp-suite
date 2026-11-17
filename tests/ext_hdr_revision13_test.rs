@@ -1,6 +1,8 @@
 //! Independent loopback peer for draft-ietf-ippm-stamp-ext-hdr-26 rules: source
 //! ports, TTL/Hop Limit 255 and session state notifications.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "common/child.rs"]
+mod child;
 #[path = "common/hops.rs"]
 mod hops;
 #[cfg(any(feature = "ttl-nix", not(feature = "ttl-pnet")))]
@@ -8,21 +10,16 @@ mod hops;
 mod reflector;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
+use child::ChildProcess;
 use hops::{receive, socket};
 use std::{
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     time::Duration,
 };
 
-struct Process(Option<Child>);
-impl Drop for Process {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.0 {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
+/// Long enough for the slowest sender here: four Access Report attempts with
+/// a one-second timer, plus the final reply wait.
+const EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 fn reflected(request: &[u8]) -> Vec<u8> {
     let mut reply = vec![0; 44];
     reply[..16].copy_from_slice(&request[..16]);
@@ -30,18 +27,6 @@ fn reflected(request: &[u8]) -> Vec<u8> {
     reply[24..38].copy_from_slice(&request[..14]);
     reply[40] = 254;
     reply
-}
-
-fn finish(mut process: Process) -> std::process::Output {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while process.0.as_mut().unwrap().try_wait().unwrap().is_none() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "sender failed to exit"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    process.0.take().unwrap().wait_with_output().unwrap()
 }
 
 #[test]
@@ -83,11 +68,9 @@ fn sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys()
                 }
                 command
             };
-            let output = finish(Process(Some(
-                command(local_reflector.local_addr().unwrap().port())
-                    .spawn()
-                    .unwrap(),
-            )));
+            let output =
+                ChildProcess::spawn(&mut command(local_reflector.local_addr().unwrap().port()))
+                    .finish(EXIT_TIMEOUT);
             assert!(!output.status.success());
             assert!(
                 String::from_utf8_lossy(&output.stderr).contains("bind"),
@@ -101,7 +84,7 @@ fn sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys()
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
             ));
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-            let process = Process(Some(command(0).spawn().unwrap()));
+            let process = ChildProcess::spawn(&mut command(0));
             let (request, source, hops) = receive(&peer);
             assert_eq!(hops, 255);
             assert_ne!(source.port(), local_reflector.local_addr().unwrap().port());
@@ -112,7 +95,7 @@ fn sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys()
                     &wire_hmac::digest(&[0xab; 16], &request[..96])
                 );
             }
-            let output = finish(process);
+            let output = process.finish(EXIT_TIMEOUT);
             assert!(
                 output.status.success(),
                 "{}",
@@ -127,7 +110,7 @@ fn sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys()
 fn sender_random_ports_hops_and_state_notifications_over_both_families() {
     for ip in ["127.0.0.1", "::1"] {
         let peer = socket(ip);
-        let mut child = Process(Some(
+        let child = ChildProcess::spawn(
             Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
                 .args([
                     "--remote-addr",
@@ -151,12 +134,8 @@ fn sender_random_ports_hops_and_state_notifications_over_both_families() {
                 ])
                 .env("RUST_LOG", "info")
                 .env("TOKIO_WORKER_THREADS", "2")
-                .env_remove("STAMP_HMAC_KEY")
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap(),
-        ));
+                .env_remove("STAMP_HMAC_KEY"),
+        );
         for ordinal in 0..12 {
             let (request, source, hops) = receive(&peer);
             assert_eq!(hops, 255);
@@ -172,7 +151,7 @@ fn sender_random_ports_hops_and_state_notifications_over_both_families() {
                 peer.send_to(&wrong, source).unwrap();
             }
         }
-        let output = child.0.take().unwrap().wait_with_output().unwrap();
+        let output = child.finish(EXIT_TIMEOUT);
         assert!(
             output.status.success(),
             "{}",
@@ -234,7 +213,7 @@ fn reflector_transmits_255_and_accepts_lower_received_hops() {
 #[test]
 fn access_report_retry_phase_drives_state_deadlines() {
     let peer = socket("127.0.0.1");
-    let mut child = Process(Some(
+    let child = ChildProcess::spawn(
         Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
             .args([
                 "--remote-addr",
@@ -261,12 +240,8 @@ fn access_report_retry_phase_drives_state_deadlines() {
                 "json",
             ])
             .env("TOKIO_WORKER_THREADS", "2")
-            .env_remove("STAMP_HMAC_KEY")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    ));
+            .env_remove("STAMP_HMAC_KEY"),
+    );
     for n in 0..4 {
         let (request, source, _) = receive(&peer);
         // Reply without acknowledging the Access Report, then lose two retries.
@@ -274,7 +249,7 @@ fn access_report_retry_phase_drives_state_deadlines() {
             peer.send_to(&reflected(&request), source).unwrap();
         }
     }
-    let output = child.0.take().unwrap().wait_with_output().unwrap();
+    let output = child.finish(EXIT_TIMEOUT);
     assert!(
         output.status.success(),
         "{}",
@@ -291,7 +266,7 @@ fn access_report_retry_phase_drives_state_deadlines() {
 #[test]
 fn mapped_ipv4_sender_transmits_ttl_255() {
     let peer = socket("127.0.0.1");
-    let mut child = Process(Some(
+    let child = ChildProcess::spawn(
         Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
             .args([
                 "--local-addr",
@@ -309,16 +284,12 @@ fn mapped_ipv4_sender_transmits_ttl_255() {
                 "--output-format",
                 "json",
             ])
-            .env_remove("STAMP_HMAC_KEY")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    ));
+            .env_remove("STAMP_HMAC_KEY"),
+    );
     let (request, source, ttl) = receive(&peer);
     assert_eq!(ttl, 255, "mapped IPv4 traffic must use the draft's TTL");
     peer.send_to(&reflected(&request), source).unwrap();
-    let output = child.0.take().unwrap().wait_with_output().unwrap();
+    let output = child.finish(EXIT_TIMEOUT);
     assert!(
         output.status.success(),
         "{}",

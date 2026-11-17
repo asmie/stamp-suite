@@ -7,6 +7,10 @@
 #[path = "ecn_path_test/evidence.rs"]
 mod evidence;
 
+#[path = "common/child.rs"]
+mod child;
+#[path = "common/inet.rs"]
+mod inet;
 #[path = "common/reflector.rs"]
 mod reflector;
 #[path = "common/wire_hmac.rs"]
@@ -16,9 +20,11 @@ use std::{
     collections::BTreeMap,
     net::UdpSocket,
     os::fd::AsRawFd,
-    process::{Child, Command, Stdio},
+    process::Command,
     time::{Duration, Instant},
 };
+
+use child::ChildProcess;
 
 const KEY: [u8; 16] = [0xab; 16];
 const COUNT: u64 = 3;
@@ -121,16 +127,6 @@ impl Drop for Rules {
     }
 }
 
-struct Sender(Option<Child>);
-impl Drop for Sender {
-    fn drop(&mut self) {
-        if let Some(child) = self.0.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
 fn capture() -> UdpSocket {
     let socket = socket2::Socket::new(
         socket2::Domain::from(libc::AF_PACKET),
@@ -164,17 +160,6 @@ fn capture() -> UdpSocket {
     socket
 }
 
-fn checksum(bytes: &[u8]) -> u16 {
-    let mut sum: u32 = bytes
-        .chunks_exact(2)
-        .map(|v| u32::from(u16::from_be_bytes([v[0], v[1]])))
-        .sum();
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
 #[derive(Debug, PartialEq, Eq)]
 struct Packet {
     tos: u8,
@@ -199,7 +184,11 @@ fn packet(bytes: &[u8], ipv6: bool, port: u16) -> Option<Packet> {
         }
         let ihl = usize::from(bytes[0] & 15) * 4;
         assert!(ihl >= 20 && bytes.len() >= ihl + 8);
-        assert_eq!(checksum(&bytes[..ihl]), 0, "rewritten IPv4 header checksum");
+        assert_eq!(
+            inet::checksum(&bytes[..ihl]),
+            0,
+            "rewritten IPv4 header checksum"
+        );
         (
             ihl,
             usize::from(u16::from_be_bytes([bytes[2], bytes[3]])),
@@ -376,16 +365,14 @@ fn trial(ip: &str, mode: u8, case: Case) {
         ])
         .env_remove("STAMP_HMAC_KEY")
         .env("RUST_LOG", "off")
-        .env("TOKIO_WORKER_THREADS", "2")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .env("TOKIO_WORKER_THREADS", "2");
     if mode != 0 {
         command.args(["--hmac-key", &hex::encode(KEY)]);
     }
     if mode == 2 {
         command.args(["--auth-mode", "A"]);
     }
-    let mut sender = Sender(Some(command.spawn().unwrap()));
+    let mut sender = ChildProcess::spawn(&mut command);
     let mut packets = BTreeMap::new();
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut buffer = [0; 4096];
@@ -430,14 +417,14 @@ fn trial(ip: &str, mode: u8, case: Case) {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                if sender.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+                if sender.try_wait().is_some() {
                     break;
                 }
             }
             Err(e) => panic!("capture: {e}"),
         }
     }
-    let output = sender.0.take().unwrap().wait_with_output().unwrap();
+    let output = sender.finish(Duration::from_secs(5));
     assert!(
         output.status.success(),
         "{}",

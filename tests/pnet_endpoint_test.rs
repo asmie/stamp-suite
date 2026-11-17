@@ -2,6 +2,8 @@
 #![cfg(all(target_os = "linux", feature = "ttl-pnet", not(feature = "ttl-nix")))]
 #[path = "common/hops.rs"]
 mod hops;
+#[path = "common/inet.rs"]
+mod inet;
 #[path = "common/reflector.rs"]
 mod reflector;
 #[path = "common/wire_hmac.rs"]
@@ -63,22 +65,6 @@ fn command(bind: &str, port: u16, mode: u8) -> std::process::Command {
         command.args(["--auth-mode", "A"]);
     }
     command
-}
-
-fn checksum(bytes: &[u8]) -> u16 {
-    let mut sum = bytes
-        .chunks(2)
-        .map(|p| (u32::from(p[0]) << 8) + u32::from(*p.get(1).unwrap_or(&0)))
-        .sum::<u32>();
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    let result = !(sum as u16);
-    if result == 0 {
-        u16::MAX
-    } else {
-        result
-    }
 }
 
 fn inject(source: SocketAddr, target: SocketAddr, payload: &[u8]) {
@@ -147,7 +133,7 @@ fn inject(source: SocketAddr, target: SocketAddr, payload: &[u8]) {
         _ => panic!("mixed source/destination families"),
     };
     pseudo.extend_from_slice(&udp);
-    udp[6..8].copy_from_slice(&checksum(&pseudo).to_be_bytes());
+    udp[6..8].copy_from_slice(&inet::udp_checksum(&pseudo).to_be_bytes());
     ip.extend_from_slice(&udp);
     let mut raw_target = target;
     raw_target.set_port(0); // Linux raw IPv6 sendto takes no transport port.

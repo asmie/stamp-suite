@@ -1,37 +1,31 @@
 //! Capture actual sender output, independently of the crate's packet codecs.
 #![cfg(target_os = "linux")]
 
+#[path = "common/child.rs"]
+mod child;
+#[path = "common/inet.rs"]
+mod inet;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
 
+use child::ChildProcess;
 use std::{
     net::{SocketAddr, UdpSocket},
-    process::{Child, Command, Output, Stdio},
+    process::{Command, Output},
     time::{Duration, Instant},
 };
 
 const KEY: [u8; 16] = [0xab; 16];
 
-struct Sender(Option<Child>);
+/// The sender child, finished at most once, from the success path or from a
+/// failure that wants its stderr.
+struct Sender(Option<ChildProcess>);
 impl Sender {
     fn finish(&mut self) -> Output {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while self.0.as_mut().unwrap().try_wait().unwrap().is_none() {
-            if Instant::now() >= deadline {
-                self.0.as_mut().unwrap().kill().unwrap();
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        self.0.take().unwrap().wait_with_output().unwrap()
-    }
-}
-impl Drop for Sender {
-    fn drop(&mut self) {
-        if let Some(child) = self.0.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.0
+            .take()
+            .expect("sender already finished")
+            .finish(Duration::from_secs(5))
     }
 }
 
@@ -47,17 +41,6 @@ fn namespace() {
         .status()
         .unwrap()
         .success());
-}
-
-fn checksum(bytes: &[u8]) -> u16 {
-    let mut sum: u32 = bytes
-        .chunks(2)
-        .map(|part| (u32::from(part[0]) << 8) | u32::from(*part.get(1).unwrap_or(&0)))
-        .sum();
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
 }
 
 fn capture() -> UdpSocket {
@@ -113,7 +96,7 @@ fn captured_request(
             udp.len()
         );
         assert_eq!(bytes[8], 255);
-        assert_eq!(checksum(&bytes[..ihl]), 0);
+        assert_eq!(inet::checksum(&bytes[..ihl]), 0);
         // Loopback may expose checksum-offload partial values in the default
         // case. Assert the field is nonzero, not that this capture is a final
         // software-completed UDP checksum. Zero must be exactly zero.
@@ -204,24 +187,6 @@ fn reply(request: &[u8], mut metadata: Vec<u8>, errors: u32) -> Vec<u8> {
     bytes
 }
 
-fn checksum_errors() -> u64 {
-    let text = std::fs::read_to_string("/proc/net/snmp").unwrap();
-    let mut rows = text.lines().filter_map(|line| line.strip_prefix("Udp: "));
-    let index = rows
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .position(|name| name == "InCsumErrors")
-        .unwrap();
-    rows.next()
-        .unwrap()
-        .split_whitespace()
-        .nth(index)
-        .unwrap()
-        .parse()
-        .unwrap()
-}
-
 fn bad_checksum_reply(source: SocketAddr, destination: SocketAddr, payload: &[u8]) {
     let raw = socket2::Socket::new(
         socket2::Domain::IPV4,
@@ -241,7 +206,7 @@ fn bad_checksum_reply(source: SocketAddr, destination: SocketAddr, payload: &[u8
     let mut pseudo = vec![127, 0, 0, 1, 127, 0, 0, 1, 0, 17];
     pseudo.extend_from_slice(&length.to_be_bytes());
     pseudo.extend_from_slice(&udp);
-    let correct = checksum(&pseudo);
+    let correct = inet::checksum(&pseudo);
     let wrong = if correct == 1 { 2u16 } else { 1u16 };
     udp[6..8].copy_from_slice(&wrong.to_be_bytes());
     let mut ip = vec![
@@ -298,9 +263,7 @@ fn authenticated_sender_uses_zero_checksum_only_when_requested() {
                     ])
                     .env("TOKIO_WORKER_THREADS", "2")
                     .env("RUST_LOG", "info")
-                    .env_remove("STAMP_HMAC_KEY")
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
+                    .env_remove("STAMP_HMAC_KEY");
                 if zero {
                     command.arg("--zero-udp-checksum");
                 }
@@ -310,7 +273,7 @@ fn authenticated_sender_uses_zero_checksum_only_when_requested() {
                 if explicit {
                     command.args(["--ber-pattern", "a512f00d33"]);
                 }
-                let mut sender = Sender(Some(command.spawn().unwrap()));
+                let mut sender = Sender(Some(ChildProcess::spawn(&mut command)));
                 for sequence in 0..3 {
                     let mut request = [0; 4096];
                     let (length, source) = peer.recv_from(&mut request).unwrap_or_else(|error| {
@@ -326,10 +289,10 @@ fn authenticated_sender_uses_zero_checksum_only_when_requested() {
                     if sequence == 0 {
                         // Valid base/TLV digests, plausible BER errors, invalid UDP
                         // checksum: TX checksum suppression must not disable RX checks.
-                        let before = checksum_errors();
+                        let before = inet::udp_checksum_errors();
                         bad_checksum_reply(target, source, &reply(request, metadata.clone(), 4));
                         let deadline = Instant::now() + Duration::from_secs(2);
-                        while checksum_errors() != before + 1 {
+                        while inet::udp_checksum_errors() != before + 1 {
                             assert!(
                                 Instant::now() < deadline,
                                 "kernel did not reject bad reply checksum"

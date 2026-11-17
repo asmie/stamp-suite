@@ -1,20 +1,10 @@
 //! A live sender must reject replies without a usable requested Micro-session ID.
+#[path = "common/child.rs"]
+mod child;
 #[path = "common/wire_hmac.rs"]
 mod wire_hmac;
-use std::{
-    net::UdpSocket,
-    process::{Child, Command, Stdio},
-    time::Duration,
-};
-struct Sender(Option<Child>);
-impl Drop for Sender {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.0 {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
+use child::ChildProcess;
+use std::{net::UdpSocket, process::Command, time::Duration};
 fn check(ip: &str, auth: bool, flags: Option<u8>, accepted: bool) {
     let peer = UdpSocket::bind((ip, 0)).unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -51,12 +41,7 @@ fn check(ip: &str, auth: bool, flags: Option<u8>, accepted: bool) {
             "ABABABABABABABABABABABABABABABAB",
         ]);
     }
-    let mut sender = Sender(Some(
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    ));
+    let sender = ChildProcess::spawn(&mut cmd);
     let mut request = [0; 2048];
     let (len, source) = peer.recv_from(&mut request).unwrap();
     let base = if auth { 112 } else { 44 };
@@ -83,7 +68,7 @@ fn check(ip: &str, auth: bool, flags: Option<u8>, accepted: bool) {
         reply[96..112].copy_from_slice(&mac);
     }
     peer.send_to(&reply, source).unwrap();
-    let output = sender.0.take().unwrap().wait_with_output().unwrap();
+    let output = sender.finish(Duration::from_secs(10));
     assert!(
         output.status.success(),
         "{}",

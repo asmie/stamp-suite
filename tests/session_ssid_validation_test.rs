@@ -1,19 +1,10 @@
 //! An independent UDP peer checks sender SSID admission and legacy compatibility.
-use stamp_suite::crypto::{compute_packet_hmac, HmacKey};
-use std::{
-    net::UdpSocket,
-    process::{Child, Command, Stdio},
-    time::Duration,
-};
-struct Sender(Option<Child>);
-impl Drop for Sender {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.0 {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
+#[path = "common/child.rs"]
+mod child;
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
+use child::ChildProcess;
+use std::{net::UdpSocket, process::Command, time::Duration};
 fn check(ip: &str, auth: bool, ssid: u16, policy: &str, accepted: bool) {
     let peer = UdpSocket::bind((ip, 0)).unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -50,12 +41,7 @@ fn check(ip: &str, auth: bool, ssid: u16, policy: &str, accepted: bool) {
             "ABABABABABABABABABABABABABABABAB",
         ]);
     }
-    let mut sender = Sender(Some(
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    ));
+    let sender = ChildProcess::spawn(&mut cmd);
     let mut request = [0; 2048];
     let (len, source) = peer.recv_from(&mut request).unwrap();
     let base = if auth { 112 } else { 44 };
@@ -71,12 +57,11 @@ fn check(ip: &str, auth: bool, ssid: u16, policy: &str, accepted: bool) {
     reply[estimate..estimate + 2].copy_from_slice(&[0, 1]);
     reply[ssid_offset..ssid_offset + 2].copy_from_slice(&ssid.to_be_bytes());
     if auth {
-        let key = HmacKey::new(vec![0xAB; 16]).unwrap();
-        let mac = compute_packet_hmac(&key, &reply, 96);
+        let mac = wire_hmac::digest(&[0xAB; 16], &reply[..96]);
         reply[96..112].copy_from_slice(&mac);
     }
     peer.send_to(&reply, source).unwrap();
-    let output = sender.0.take().unwrap().wait_with_output().unwrap();
+    let output = sender.finish(Duration::from_secs(10));
     assert!(
         output.status.success(),
         "{}",

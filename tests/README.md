@@ -108,6 +108,10 @@ Shared helpers and data:
 | `common/wire_hmac.rs` | HMAC-SHA-256 computed directly with `hmac` and `sha2`, so wire tests do not use the production HMAC or coverage code. |
 | `common/reflector.rs` | Child reflector lifecycle: port 0, JSON readiness, bounded stderr draining and kill/wait cleanup. |
 | `common/receiver.rs` | In-process fixtures retain a bound socket and shared state on a dedicated current-thread runtime; cancel and join on teardown. |
+| `common/child.rs` | A spawned sender or other child with stdout and stderr drained on threads, a bounded `finish` that kills and reports the stderr tail, and kill/wait on drop. |
+| `common/inet.rs` | RFC 1071 Internet checksum, the RFC 768 UDP checksum field, and Linux `InCsumErrors` from `/proc/net/snmp`. |
+| `common/context.rs` | Default `ProcessingContext` for tests that call `process_stamp_packet`; tests override only the fields they exercise. |
+| `common/hops.rs` | Independent reception of IPv4 TTL and IPv6 Hop Limit metadata on Linux and macOS. |
 | `netns/mod.rs` | Namespace fixture for `netns_conformance.rs`: namespaces, veth links, tcpdump capture and pcap parsing. |
 | `privileged/mod.rs` | Shared skip policy: with `STAMP_REQUIRE_PRIVILEGED=1` an unavailable prerequisite fails instead of skipping. |
 | `fixtures/interop/` | Request and reply bytes for the Python wire fixtures; see [testing-interop.md](../doc/testing-interop.md). |

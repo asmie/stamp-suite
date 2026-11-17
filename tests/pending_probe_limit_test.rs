@@ -1,7 +1,7 @@
 //! Independent UDP peers exercise bounded pending retention through real sends.
 use clap::Parser;
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
 use stamp_suite::{
     configuration::Configuration,
     sender,
@@ -94,9 +94,8 @@ fn reply(request: &[u8], auth: bool) -> Vec<u8> {
     data[t1..t1 + 10].copy_from_slice(&request[t3..t3 + 10]);
     data[ttl] = 255;
     if auth {
-        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&[0xab; 16]).unwrap();
-        mac.update(&data[..96]);
-        data[96..112].copy_from_slice(&mac.finalize().into_bytes()[..16]);
+        let digest = wire_hmac::digest(&[0xab; 16], &data[..96]);
+        data[96..112].copy_from_slice(&digest);
     }
     data
 }

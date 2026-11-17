@@ -1081,21 +1081,14 @@ mod tests {
             let shutdown = CancellationToken::new();
             let session = Arc::new(crate::session::Session::new(0));
             let response = super::super::StampResponse {
-                data: vec![0; 44],
-                cos_request: None,
-                cos_reply_policy: None,
-                reply_source: None,
-                ber_conformance: Default::default(),
-                tlv_conformance: Default::default(),
-                tlv_hmac_generated: false,
                 tlv_processed: true,
-                return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: Some(super::super::ReflectedControlBehavior {
                     max_size: 1500,
                     extra_copies: 2,
                     interval_ns: interval,
                     suppress_reply_ext_headers: false,
                 }),
+                ..super::super::StampResponse::new(vec![0; 44])
             };
             let transmission = Transmission::new(
                 response,
@@ -1180,21 +1173,14 @@ mod tests {
             data[24..28].copy_from_slice(&seq.to_be_bytes());
             data[13] = 1;
             let response = super::super::StampResponse {
-                data,
-                cos_request: None,
-                cos_reply_policy: None,
-                reply_source: None,
-                ber_conformance: Default::default(),
-                tlv_conformance: Default::default(),
-                tlv_hmac_generated: false,
                 tlv_processed: true,
-                return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: Some(super::super::ReflectedControlBehavior {
                     max_size: 1500,
                     extra_copies: extra,
                     interval_ns: 120_000_000,
                     suppress_reply_ext_headers: false,
                 }),
+                ..super::super::StampResponse::new(data)
             };
             Transmission::new(
                 response,
@@ -1251,21 +1237,14 @@ mod tests {
             let mut data = vec![0; 44];
             data[24..28].copy_from_slice(&u32::from(controlled).to_be_bytes());
             let response = super::super::StampResponse {
-                data,
-                cos_request: None,
-                cos_reply_policy: None,
-                reply_source: None,
-                ber_conformance: Default::default(),
-                tlv_conformance: Default::default(),
-                tlv_hmac_generated: false,
                 tlv_processed: true,
-                return_path_action: crate::tlv::ReturnPathAction::Normal,
                 reflected_control: controlled.then_some(super::super::ReflectedControlBehavior {
                     max_size: 1500,
                     extra_copies: 2,
                     interval_ns: 0,
                     suppress_reply_ext_headers: false,
                 }),
+                ..super::super::StampResponse::new(data)
             };
             let transmission = Transmission::new(
                 response,

@@ -5,11 +5,10 @@
     any(feature = "ttl-nix", not(feature = "ttl-pnet"))
 ))]
 use clap::Parser;
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
 use stamp_suite::{
     configuration::Configuration,
-    crypto::{compute_packet_hmac, HmacKey},
     sender::{self, SenderObserver, SenderObservers},
     shutdown::CancellationToken,
     stats::{OutputFormat, StatsOutput},
@@ -24,6 +23,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+/// The HMAC key every keyed fixture in this file uses.
+const KEY: [u8; 16] = [0xAB; 16];
 
 struct Process(Child);
 impl Drop for Process {
@@ -70,11 +72,11 @@ fn packet(auth: bool, seq: u32, size: u16, alternate: Option<IpAddr>) -> Vec<u8>
             let mut input = data[..4].to_vec();
             input.extend_from_slice(&data[base..]);
             data.extend_from_slice(&[0x80, 8, 0, 16]);
-            data.extend_from_slice(&HmacKey::new(vec![0xAB; 16]).unwrap().compute(&input));
+            data.extend_from_slice(&wire_hmac::digest(&KEY, &input));
         }
     }
     if auth {
-        let mac = compute_packet_hmac(&HmacKey::new(vec![0xAB; 16]).unwrap(), &data, 96);
+        let mac = wire_hmac::digest(&KEY, &data[..96]);
         data[96..112].copy_from_slice(&mac);
     }
     data
@@ -107,18 +109,12 @@ fn exchange(
         if bytes[pos + 1] == 8 {
             let mut input = bytes[..4].to_vec();
             input.extend_from_slice(&bytes[base..pos]);
-            assert_eq!(
-                &bytes[pos + 4..pos + 20],
-                &HmacKey::new(vec![0xAB; 16]).unwrap().compute(&input)
-            );
+            assert_eq!(&bytes[pos + 4..pos + 20], &wire_hmac::digest(&KEY, &input));
         }
         pos += 4 + size;
     }
     if auth {
-        assert_eq!(
-            &bytes[96..112],
-            &compute_packet_hmac(&HmacKey::new(vec![0xAB; 16]).unwrap(), bytes, 96)
-        );
+        assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
     }
     receiver
         .set_read_timeout(Some(Duration::from_millis(40)))
@@ -145,7 +141,7 @@ fn single_reply_packet(auth: bool, seq: u32, tlvs: &[(u8, Vec<u8>)]) -> Vec<u8> 
         let mut input = data[..4].to_vec();
         input.extend_from_slice(&data[base..]);
         data.extend_from_slice(&[0x80, 8, 0, 16]);
-        data.extend_from_slice(&HmacKey::new(vec![0xAB; 16]).unwrap().compute(&input));
+        data.extend_from_slice(&wire_hmac::digest(&KEY, &input));
     }
     data
 }
@@ -170,9 +166,8 @@ fn exchange_single_reply(
     );
     let bytes = &bytes[..len];
     let base = if auth { 112 } else { 44 };
-    let key = HmacKey::new(vec![0xAB; 16]).unwrap();
     if auth {
-        assert_eq!(&bytes[96..112], &compute_packet_hmac(&key, bytes, 96));
+        assert_eq!(&bytes[96..112], &wire_hmac::digest(&KEY, &bytes[..96]));
     }
     let mut tlvs = Vec::new();
     let mut hmac_seen = false;
@@ -187,7 +182,10 @@ fn exchange_single_reply(
             assert_eq!(size, 16);
             let mut input = bytes[..4].to_vec();
             input.extend_from_slice(&bytes[base..pos]);
-            assert_eq!(&bytes[pos + 4..pos + 4 + size], &key.compute(&input));
+            assert_eq!(
+                &bytes[pos + 4..pos + 4 + size],
+                &wire_hmac::digest(&KEY, &input)
+            );
             hmac_seen = true;
         }
         tlvs.push((kind, bytes[pos], bytes[pos + 4..pos + 4 + size].to_vec()));
@@ -555,10 +553,8 @@ fn sender_mtu_conf(address: SocketAddr, mode: u8, padding: usize, count: u32) ->
     conf
 }
 
-fn independent_mac(input: &[u8]) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&[0xab; 16]).unwrap();
-    mac.update(input);
-    mac.finalize().into_bytes()[..16].to_vec()
+fn independent_mac(input: &[u8]) -> [u8; 16] {
+    wire_hmac::digest(&KEY, input)
 }
 
 fn sender_wire_tlvs(bytes: &[u8], mode: u8, seq: u32) -> Vec<(u8, Vec<u8>)> {

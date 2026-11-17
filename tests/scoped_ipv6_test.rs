@@ -1,8 +1,8 @@
 //! Isolated link-local IPv6: replies, delayed bursts, alternate return and CLI zones.
 //! STAMP_SCOPE_NETNS_TESTS=1 unshare -Urn cargo test --test scoped_ipv6_test -- --ignored --nocapture
 #![cfg(target_os = "linux")]
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
 use stamp_suite::tlv::TypedTlv;
 use std::{
     net::{SocketAddr, UdpSocket},
@@ -33,11 +33,7 @@ fn run(command: &mut Command) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 fn mac(parts: &[&[u8]]) -> [u8; 16] {
-    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&[0xab; 16]).unwrap();
-    for part in parts {
-        mac.update(part);
-    }
-    mac.finalize().into_bytes()[..16].try_into().unwrap()
+    wire_hmac::digest(&[0xab; 16], &parts.concat())
 }
 fn request(auth: bool, seq: u32, burst: bool, alternate: bool) -> Vec<u8> {
     let base = if auth { 112 } else { 44 };

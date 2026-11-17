@@ -29,6 +29,8 @@ use stamp_suite::tlv::{
 };
 
 mod netns;
+#[path = "common/wire_hmac.rs"]
+mod wire_hmac;
 use netns::{CapturedPacket, NetnsFixture};
 
 /// 16-byte HMAC key (hex) used by the authenticated round-trip scenario.
@@ -340,14 +342,8 @@ fn scenario_3_srv6_return_path() {
 
 // Independent wire checks: do not reuse production TLV parsing or signers.
 fn verify_srv6_reply(payload: &[u8], auth: bool, expect_path: bool) {
-    use hmac::{Hmac, KeyInit, Mac};
-    use sha2::Sha256;
     let key = hex::decode(HMAC_HEX).unwrap();
-    let sign = |bytes: &[u8]| {
-        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
-        mac.update(bytes);
-        mac.finalize().into_bytes()
-    };
+    let sign = |bytes: &[u8]| wire_hmac::digest(&key, bytes);
     let base = if auth { 112 } else { 44 };
     if auth {
         assert_eq!(&payload[96..112], &sign(&payload[..96])[..16]);
