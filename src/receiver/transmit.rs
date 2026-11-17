@@ -78,11 +78,7 @@ impl TransportPlan {
             srh: None,
             dont_fragment: response.reflected_control.is_some()
                 || has_reflected_headers(&response.data, base)
-                || (cfg!(any(target_os = "linux", target_os = "windows"))
-                    && has_ber(&response.data, base))
-                || (cfg!(target_os = "macos")
-                    && matches!(target.ip(), IpAddr::V6(ip) if ip.to_ipv4_mapped().is_none() && !ip.is_multicast())
-                    && has_ber(&response.data, base)),
+                || (has_ber(&response.data, base) && ber_route_mtu_supported(target.ip())),
         };
         let mut unsupported_srh = false;
         if let ReturnPathAction::Srv6Forward { sids, .. } = &response.return_path_action {
@@ -446,26 +442,35 @@ impl Transmission {
     }
 }
 
+/// Whether this platform's route-MTU lookup covers a standalone BER reply to
+/// `target`, so the reply can be sized and sent with fragmentation disabled.
+fn ber_route_mtu_supported(target: IpAddr) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::net_policy::macos_mtu::native_unicast(target)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target;
+        cfg!(any(target_os = "linux", target_os = "windows"))
+    }
+}
+
+/// The OS error a datagram send returns when the packet exceeds the route MTU
+/// with fragmentation disabled.
+#[cfg(unix)]
+const MESSAGE_TOO_LARGE: i32 = nix::libc::EMSGSIZE;
+#[cfg(windows)]
+const MESSAGE_TOO_LARGE: i32 = windows_sys::Win32::Networking::WinSock::WSAEMSGSIZE;
+
 fn is_message_too_large(error: &io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        error.raw_os_error() == Some(nix::libc::EMSGSIZE)
-    }
-    #[cfg(not(unix))]
-    {
-        // WSAEMSGSIZE
-        error.raw_os_error() == Some(10040)
-    }
+    error.raw_os_error() == Some(MESSAGE_TOO_LARGE)
 }
 
 /// Produce the same platform error consumed by the production MTU retry path.
 #[cfg(test)]
 fn message_too_large_error() -> io::Error {
-    #[cfg(unix)]
-    let code = nix::libc::EMSGSIZE;
-    #[cfg(not(unix))]
-    let code = 10040; // WSAEMSGSIZE
-    io::Error::from_raw_os_error(code)
+    io::Error::from_raw_os_error(MESSAGE_TOO_LARGE)
 }
 
 /// Inspect the shaped output rather than classifying an opaque incoming C flag.
@@ -1183,22 +1188,7 @@ fn send_datagram(
         // Ordinary replies clear the policy left by a controlled reply.
         let enabled = i32::from(options.dont_fragment);
         update_socket_option(fragmentation, enabled, || {
-            // SAFETY: fd is borrowed and enabled is a live, correctly sized
-            // integer. Only this socket's IPv6 fragmentation policy changes.
-            let result = unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_IPV6,
-                    libc::IPV6_DONTFRAG,
-                    std::ptr::addr_of!(enabled).cast(),
-                    std::mem::size_of_val(&enabled) as _,
-                )
-            };
-            if result == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
+            crate::net_policy::macos_mtu::set_ipv6_dont_fragment(fd, options.dont_fragment)
         })
         .map_err(local_send_error)?;
     }

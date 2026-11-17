@@ -9,9 +9,10 @@ use crate::tlv::core::{
 };
 use crate::tlv::{
     ClassOfServiceTlv, DestinationNodeAddressTlv, LocationDisclosure, LocationSubType,
-    MicroSessionIdTlv, PacketAddressInfo, ReflectedControlTlv, ResidualBerValue, ReturnPathAction,
-    ReturnPathTlv, SegmentList, SyncSource, TimestampMethod, TlvConformanceErrors,
-    TlvConformanceReason, TypedTlv, RESIDUAL_BER_DEFAULT_PATTERN, RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
+    MicroSessionIdTlv, PacketAddressInfo, ReflectedControlTlv, ReturnPathAction, ReturnPathTlv,
+    SegmentList, SyncSource, TimestampMethod, TlvConformanceErrors, TlvConformanceReason,
+    TlvFrames, TypedTlv, RESIDUAL_BER_DEFAULT_PATTERN, RESIDUAL_BER_FIXED_VALUE_SIZE,
+    RESIDUAL_BER_MIN_PATTERN_SIZE, RESIDUAL_BER_PATTERN_SUBTLV_TYPE,
 };
 
 use super::TlvList;
@@ -246,19 +247,13 @@ impl TlvList {
 
         let mut offset = LOCATION_TLV_MIN_VALUE_SIZE;
         while offset + TLV_HEADER_SIZE <= value.len() {
-            let length = u16::from_be_bytes([value[offset + 2], value[offset + 3]]) as usize;
-            let end = match offset
-                .checked_add(TLV_HEADER_SIZE)
-                .and_then(|h| h.checked_add(length))
-            {
-                Some(end) if end <= value.len() => end,
-                // Truncated: the sub-TLV runs past the end of the value.
-                // RFC 8972 §4 M-flag rule → mark malformed and stop.
-                _ => {
-                    set_sub_tlv_flag(&mut value[offset..], LocationSubFlag::Malformed);
-                    break;
-                }
+            let Some(sub) = TlvSpan::at(value, offset) else {
+                // The header fits, so the sub-TLV runs past the end of the
+                // value. RFC 8972 §4 M-flag rule: mark it malformed and stop.
+                set_sub_tlv_flag(&mut value[offset..], LocationSubFlag::Malformed);
+                break;
             };
+            let end = sub.end();
             if Self::answer_location_sub_tlv(&mut value[offset..end], info, policy)
                 == LocationSubOutcome::Malformed
             {
@@ -667,120 +662,97 @@ impl TlvList {
     /// This runs after HMAC admission, before other semantic TLV processing.
     pub fn process_ber(&mut self) -> BerConformanceErrors {
         let mut reasons = BerConformanceErrors::default();
-        let ber_indices: Vec<_> = self
-            .non_hmac_tlvs()
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.tlv_type == TlvType::ResidualBer)
-            .map(|(i, _)| i)
-            .collect();
-        if !ber_indices
-            .iter()
-            .any(|&i| self.non_hmac_tlvs()[i].is_processable())
-        {
+        let (mut ber, mut ber_count, mut ber_processable) = (None, 0, false);
+        let (mut padding, mut padding_count) = (None, 0);
+        for (i, tlv) in self.non_hmac_tlvs().iter().enumerate() {
+            match tlv.tlv_type {
+                TlvType::ResidualBer => {
+                    ber.get_or_insert(i);
+                    ber_count += 1;
+                    ber_processable |= tlv.is_processable();
+                }
+                TlvType::ExtraPadding => {
+                    padding.get_or_insert(i);
+                    padding_count += 1;
+                }
+                _ => {}
+            }
+        }
+        if !ber_processable {
             return reasons;
         }
-        let padding_indices: Vec<_> = self
-            .non_hmac_tlvs()
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.tlv_type == TlvType::ExtraPadding)
-            .map(|(i, _)| i)
-            .collect();
-        if ber_indices.len() != 1 || padding_indices.len() != 1 {
-            if ber_indices.len() > 1 {
+        let (Some(ber), Some(padding), 1, 1) = (ber, padding, ber_count, padding_count) else {
+            if ber_count > 1 {
                 reasons.insert(BerConformanceReason::DuplicateBer);
             }
-            if padding_indices.is_empty() {
+            if padding_count == 0 {
                 reasons.insert(BerConformanceReason::MissingPadding);
             }
-            if padding_indices.len() > 1 {
+            if padding_count > 1 {
                 reasons.insert(BerConformanceReason::DuplicatePadding);
             }
             Self::mark_ber_tlvs_nonconformant(self.non_hmac_tlvs_mut());
             return reasons;
-        }
-        let ber = ber_indices[0];
-        let padding = padding_indices[0];
+        };
         if !self.non_hmac_tlvs()[padding].is_processable() {
             return reasons;
         }
-        // Normalize only complete nested TLVs up to the first malformed
-        // boundary. Whole-value decoding alone would lose the processed prefix
-        // when a later sub-TLV is truncated.
-        let mut pattern_count = 0;
-        let mut malformed = false;
-        let mut framing_error = false;
+        // Normalize the flags of complete sub-TLVs up to the first malformed
+        // boundary, and note where the pattern is. Whole-value decoding would
+        // lose the processed prefix when a later sub-TLV is truncated.
+        let raw = &mut self.non_hmac_tlvs_mut()[ber];
+        if raw.value.len() < RESIDUAL_BER_FIXED_VALUE_SIZE
+            || raw.value.len() > usize::from(u16::MAX)
         {
-            let raw = &mut self.non_hmac_tlvs_mut()[ber];
-            if raw.value.len() < 8 || raw.value.len() > usize::from(u16::MAX) {
-                if raw.value.len() < 8 {
-                    raw.set_conformant_reflected();
-                    reasons.insert(BerConformanceReason::ShortBerValue);
-                }
-                raw.set_malformed();
-                framing_error = true;
-            } else {
-                let mut offset = 8;
-                while offset < raw.value.len() {
-                    if raw.value.len() - offset < TLV_HEADER_SIZE {
-                        raw.set_malformed();
-                        framing_error = true;
-                        break;
-                    }
-                    let known = raw.value[offset + 1] == RESIDUAL_BER_PATTERN_SUBTLV_TYPE;
-                    let length = usize::from(u16::from_be_bytes([
-                        raw.value[offset + 2],
-                        raw.value[offset + 3],
-                    ]));
-                    let flags = if known { 0 } else { TlvFlags::U };
-                    if length > raw.value.len() - offset - TLV_HEADER_SIZE {
-                        raw.value[offset] = flags | TlvFlags::M;
-                        raw.set_malformed();
-                        framing_error = true;
-                        break;
-                    }
-                    if known {
-                        pattern_count += 1;
-                        if length < 4 {
-                            raw.value[offset] = TlvFlags::M;
-                            malformed = true;
-                            break;
-                        }
-                    }
-                    raw.value[offset] = flags;
-                    offset += TLV_HEADER_SIZE + length;
-                }
-            }
-            if pattern_count > 1 {
+            if raw.value.len() < RESIDUAL_BER_FIXED_VALUE_SIZE {
                 raw.set_conformant_reflected();
-                reasons.insert(BerConformanceReason::DuplicatePattern);
+                reasons.insert(BerConformanceReason::ShortBerValue);
             }
-        }
-        if framing_error {
+            raw.set_malformed();
             self.mark_unprocessed_after_malformed();
             return reasons;
         }
-        if malformed || pattern_count > 1 {
+        let mut pattern = None;
+        let mut pattern_count = 0;
+        let mut offset = RESIDUAL_BER_FIXED_VALUE_SIZE;
+        while offset < raw.value.len() {
+            let Some(sub) = TlvSpan::at(&raw.value, offset) else {
+                // A short header, or a value past the end of the BER value.
+                if raw.value.len() - offset >= TLV_HEADER_SIZE {
+                    raw.value[offset] = ber_sub_tlv_flags(&raw.value, offset) | TlvFlags::M;
+                }
+                raw.set_malformed();
+                self.mark_unprocessed_after_malformed();
+                return reasons;
+            };
+            if is_ber_pattern(&raw.value, offset) {
+                pattern_count += 1;
+                if sub.len < RESIDUAL_BER_MIN_PATTERN_SIZE {
+                    raw.value[offset] = TlvFlags::M;
+                    break;
+                }
+                pattern = Some(sub.value());
+            }
+            raw.value[offset] = ber_sub_tlv_flags(&raw.value, offset);
+            offset = sub.end();
+        }
+        if pattern_count > 1 {
+            raw.set_conformant_reflected();
+            reasons.insert(BerConformanceReason::DuplicatePattern);
+        }
+        if offset < raw.value.len() || pattern_count > 1 {
+            // Stopped at a short pattern (M), or the pattern is ambiguous (C).
             return reasons;
         }
-        let value = ResidualBerValue::decode_value(&self.non_hmac_tlvs()[ber].value)
-            .expect("nested framing validated above");
-        let pattern = value
-            .explicit_pattern(RESIDUAL_BER_PATTERN_SUBTLV_TYPE)
-            .expect("pattern size and multiplicity checked")
-            .unwrap_or(&RESIDUAL_BER_DEFAULT_PATTERN);
-        let pad = &mut self.non_hmac_tlvs_mut()[padding].value;
-        if !pad.len().is_multiple_of(pattern.len()) {
-            self.non_hmac_tlvs_mut()[ber].set_conformant_reflected();
+        let (raw, pad) = ber_and_padding_mut(self.non_hmac_tlvs_mut(), ber, padding);
+        let pattern = pattern.map_or(&RESIDUAL_BER_DEFAULT_PATTERN[..], |r| &raw.value[r]);
+        if !pad.value.len().is_multiple_of(pattern.len()) {
+            raw.set_conformant_reflected();
             reasons.insert(BerConformanceReason::PaddingMisaligned);
             return reasons;
         }
-        let (count, burst) = xor_popcount_and_max_burst(pad, pattern);
-        for (i, byte) in pad.iter_mut().enumerate() {
-            *byte = pattern[i % pattern.len()];
-        }
-        let raw = &mut self.non_hmac_tlvs_mut()[ber];
+        let (count, burst) = xor_popcount_and_max_burst(&pad.value, pattern);
+        fill_with_pattern(&mut pad.value, pattern);
         raw.value[..4].copy_from_slice(&count.to_be_bytes());
         raw.value[4..8].copy_from_slice(&burst.to_be_bytes());
         reasons
@@ -801,20 +773,9 @@ impl TlvList {
         if !raw.is_processable() || raw.flags.conformant_reflected {
             return reasons;
         }
-        let Ok(value) = ResidualBerValue::decode_value(&raw.value) else {
+        let Some(pattern) = processed_ber_pattern(&raw.value) else {
             return reasons;
         };
-        if value
-            .sub_tlvs
-            .iter()
-            .any(|s| s.flags & (TlvFlags::M | TlvFlags::I | TlvFlags::C) != 0)
-        {
-            return reasons;
-        }
-        let Ok(pattern) = value.explicit_pattern(RESIDUAL_BER_PATTERN_SUBTLV_TYPE) else {
-            return reasons;
-        };
-        let pattern = pattern.unwrap_or(&RESIDUAL_BER_DEFAULT_PATTERN);
         let Some(padding) = self
             .non_hmac_tlvs()
             .iter()
@@ -831,17 +792,13 @@ impl TlvList {
         if !self.non_hmac_tlvs()[padding].is_processable() {
             return reasons;
         }
-        if Some(self.non_hmac_tlvs()[padding].value.len()) != original_len {
-            self.non_hmac_tlvs_mut()[ber].set_conformant_reflected();
+        let (raw, pad) = ber_and_padding_mut(self.non_hmac_tlvs_mut(), ber, padding);
+        if Some(pad.value.len()) != original_len {
+            raw.set_conformant_reflected();
             reasons.insert(BerConformanceReason::PaddingResized);
         }
-        for (i, byte) in self.non_hmac_tlvs_mut()[padding]
-            .value
-            .iter_mut()
-            .enumerate()
-        {
-            *byte = pattern[i % pattern.len()];
-        }
+        let pattern = pattern.map_or(&RESIDUAL_BER_DEFAULT_PATTERN[..], |r| &raw.value[r]);
+        fill_with_pattern(&mut pad.value, pattern);
         reasons
     }
 
@@ -1346,6 +1303,67 @@ fn log_reflected_hdr_selector_no_match_once() {
              no captured header; echoing with the C flag (Conformance) per \
              draft-ietf-ippm-stamp-ext-hdr-26 §4.1/§6.1."
         );
+    }
+}
+
+/// Whether the sub-TLV at `offset` in a BER value is the pattern sub-TLV.
+fn is_ber_pattern(value: &[u8], offset: usize) -> bool {
+    value[offset + 1] == RESIDUAL_BER_PATTERN_SUBTLV_TYPE
+}
+
+/// Reflector flags for a BER sub-TLV: U for an unknown type (RFC 8972 §4).
+fn ber_sub_tlv_flags(value: &[u8], offset: usize) -> u8 {
+    if is_ber_pattern(value, offset) {
+        0
+    } else {
+        TlvFlags::U
+    }
+}
+
+/// The explicit pattern of a BER value that `process_ber` already accepted:
+/// `Some(None)` uses the default pattern. Returns `None` when the value is
+/// malformed, has a short or duplicate pattern, or a sub-TLV carries M, I or
+/// C, so the padding must not be repaired.
+fn processed_ber_pattern(value: &[u8]) -> Option<Option<std::ops::Range<usize>>> {
+    if value.len() < RESIDUAL_BER_FIXED_VALUE_SIZE {
+        return None;
+    }
+    let mut pattern = None;
+    for sub in TlvFrames::new(value, RESIDUAL_BER_FIXED_VALUE_SIZE) {
+        let sub = sub.ok()?;
+        if sub.flags.malformed || sub.flags.integrity_failed || sub.flags.conformant_reflected {
+            return None;
+        }
+        if is_ber_pattern(value, sub.start) {
+            if pattern.is_some() || sub.len < RESIDUAL_BER_MIN_PATTERN_SIZE {
+                return None;
+            }
+            pattern = Some(sub.value());
+        }
+    }
+    Some(pattern)
+}
+
+/// Mutable access to the BER TLV and its Extra Padding TLV at once.
+fn ber_and_padding_mut(
+    tlvs: &mut [RawTlv],
+    ber: usize,
+    padding: usize,
+) -> (&mut RawTlv, &mut RawTlv) {
+    assert_ne!(ber, padding, "BER and padding are different TLVs");
+    if ber < padding {
+        let (head, tail) = tlvs.split_at_mut(padding);
+        (&mut head[ber], &mut tail[0])
+    } else {
+        let (head, tail) = tlvs.split_at_mut(ber);
+        (&mut tail[0], &mut head[padding])
+    }
+}
+
+/// Overwrite `padding` with whole and partial repetitions of `pattern`.
+fn fill_with_pattern(padding: &mut [u8], pattern: &[u8]) {
+    for (byte, expected) in padding.iter_mut().zip(pattern.iter().cycle()) {
+        *byte = *expected;
     }
 }
 

@@ -85,11 +85,25 @@ impl Iterator for TlvFrames<'_> {
 
 impl std::iter::FusedIterator for TlvFrames<'_> {}
 
+/// Offset of the child TLV region inside a known container's value, after its
+/// fixed prefix: Location (4), Timestamp Information (4), Return Path (0),
+/// Reflected Control (8) and Residual BER (8). Other types have no children.
+#[must_use]
+pub fn child_region_offset(kind: TlvType) -> Option<usize> {
+    match kind {
+        TlvType::Location => Some(LOCATION_TLV_MIN_VALUE_SIZE),
+        TlvType::TimestampInfo => Some(TIMESTAMP_INFO_TLV_VALUE_SIZE),
+        TlvType::ReturnPath => Some(0),
+        TlvType::ReflectedControl => Some(REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE),
+        TlvType::ResidualBer => Some(RESIDUAL_BER_FIXED_VALUE_SIZE),
+        _ => None,
+    }
+}
+
 /// Check complete outer frames and child frames in known container layouts.
 ///
-/// Known child regions are Location (after four bytes), Timestamp Information
-/// (four), Return Path (zero), Reflected Control (eight), and Residual BER
-/// (eight). Child values, unknown layouts, padding and digests remain opaque;
+/// Known child regions start at [`child_region_offset`]. Child values,
+/// unknown layouts, padding and digests remain opaque;
 /// child type numbers never cause recursive interpretation of their values.
 ///
 /// A complete outer value shorter than its fixed prefix has no inspectable
@@ -107,13 +121,8 @@ impl std::iter::FusedIterator for TlvFrames<'_> {}
 pub fn check_tlv_framing(bytes: &[u8]) -> Result<(), TlvFramingError> {
     for parent in TlvFrames::new(bytes, 0) {
         let parent = parent?;
-        let prefix = match parent.tlv_type {
-            TlvType::Location => LOCATION_TLV_MIN_VALUE_SIZE,
-            TlvType::TimestampInfo => TIMESTAMP_INFO_TLV_VALUE_SIZE,
-            TlvType::ReturnPath => 0,
-            TlvType::ReflectedControl => REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE,
-            TlvType::ResidualBer => RESIDUAL_BER_FIXED_VALUE_SIZE,
-            _ => continue,
+        let Some(prefix) = child_region_offset(parent.tlv_type) else {
+            continue;
         };
         if parent.len < prefix {
             continue;

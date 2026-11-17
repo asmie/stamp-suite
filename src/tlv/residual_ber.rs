@@ -7,7 +7,10 @@
 
 use thiserror::Error;
 
-use super::{RawTlv, TlvError, TlvFlags, TlvType, TLV_HEADER_SIZE};
+use super::{
+    framing::{TlvFrames, TlvFramingErrorKind},
+    RawTlv, TlvError, TlvFlags, TlvType, TLV_HEADER_SIZE,
+};
 
 /// Count and maximum burst occupy the first eight value octets (§4).
 pub const RESIDUAL_BER_FIXED_VALUE_SIZE: usize = 8;
@@ -115,22 +118,26 @@ impl ResidualBerValue {
             max_burst: u32::from_be_bytes(value[4..8].try_into().expect("validated fixed fields")),
             sub_tlvs: Vec::new(),
         };
-        let mut offset = RESIDUAL_BER_FIXED_VALUE_SIZE;
-        while offset < value.len() {
-            let remaining = &value[offset..];
-            if remaining.len() < TLV_HEADER_SIZE {
-                return Err(ResidualBerError::ShortSubTlvHeader { offset });
-            }
-            let length = usize::from(u16::from_be_bytes([remaining[2], remaining[3]]));
-            if length > remaining.len() - TLV_HEADER_SIZE {
-                return Err(ResidualBerError::TruncatedSubTlv { offset, length });
-            }
+        for sub in TlvFrames::new(value, RESIDUAL_BER_FIXED_VALUE_SIZE) {
+            let sub = sub.map_err(|error| match error.kind {
+                TlvFramingErrorKind::IncompleteHeader { .. } => {
+                    ResidualBerError::ShortSubTlvHeader {
+                        offset: error.offset,
+                    }
+                }
+                TlvFramingErrorKind::IncompleteValue { declared, .. } => {
+                    ResidualBerError::TruncatedSubTlv {
+                        offset: error.offset,
+                        length: declared,
+                    }
+                }
+            })?;
             result.sub_tlvs.push(ResidualBerSubTlv {
-                flags: remaining[0],
-                kind: remaining[1],
-                value: remaining[TLV_HEADER_SIZE..TLV_HEADER_SIZE + length].to_vec(),
+                // Keep the complete received octet, not the parsed flag bits.
+                flags: value[sub.start],
+                kind: value[sub.start + 1],
+                value: value[sub.value()].to_vec(),
             });
-            offset += TLV_HEADER_SIZE + length;
         }
         Ok(result)
     }

@@ -1,10 +1,8 @@
 //! Observe preserved C provenance without decoding protected child values.
 
 use super::TlvList;
-use crate::tlv::core::{
-    LOCATION_TLV_MIN_VALUE_SIZE, REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL,
-    REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE, TIMESTAMP_INFO_TLV_VALUE_SIZE,
-};
+use crate::tlv::core::REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL;
+use crate::tlv::framing::child_region_offset;
 use crate::tlv::{TlvConformanceErrors, TlvConformanceReason, TlvSpan, TlvType};
 
 impl TlvList {
@@ -18,13 +16,8 @@ impl TlvList {
         let mut report = TlvConformanceErrors::default();
         let mut first_control = true;
         for parent in self.non_hmac_tlvs() {
-            let offset = match parent.tlv_type {
-                TlvType::Location => LOCATION_TLV_MIN_VALUE_SIZE,
-                TlvType::TimestampInfo => TIMESTAMP_INFO_TLV_VALUE_SIZE,
-                TlvType::ReturnPath => 0,
-                TlvType::ReflectedControl => REFLECTED_CONTROL_TLV_FIXED_FIELDS_SIZE,
-                TlvType::ResidualBer => 8,
-                _ => continue,
+            let Some(offset) = child_region_offset(parent.tlv_type) else {
+                continue;
             };
             let local_control = if parent.tlv_type == TlvType::ReflectedControl {
                 let first = std::mem::take(&mut first_control);

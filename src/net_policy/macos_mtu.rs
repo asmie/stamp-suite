@@ -3,7 +3,7 @@
 use std::{
     io,
     net::IpAddr,
-    os::fd::{AsFd, AsRawFd},
+    os::fd::{AsFd, AsRawFd, RawFd},
 };
 
 use nix::libc;
@@ -85,12 +85,17 @@ pub(crate) fn enable_mtu_discovery(socket: &impl AsFd, peer: IpAddr) -> io::Resu
     if !native_unicast(peer) {
         return Ok(());
     }
-    let enabled: libc::c_int = 1;
-    // SAFETY: The socket and correctly sized integer remain live for this
-    // synchronous call, which changes only this socket's fragmentation policy.
+    set_ipv6_dont_fragment(socket.as_fd().as_raw_fd(), true)
+}
+
+/// Sets `IPV6_DONTFRAG` on the socket `fd`. Only this socket changes.
+pub(crate) fn set_ipv6_dont_fragment(fd: RawFd, enabled: bool) -> io::Result<()> {
+    let enabled = libc::c_int::from(enabled);
+    // SAFETY: the caller keeps `fd` open for this synchronous call, and the
+    // correctly sized integer stays live while the kernel reads it.
     let result = unsafe {
         libc::setsockopt(
-            socket.as_fd().as_raw_fd(),
+            fd,
             libc::IPPROTO_IPV6,
             libc::IPV6_DONTFRAG,
             std::ptr::addr_of!(enabled).cast(),

@@ -999,11 +999,7 @@ fn full_attempt_then_trimmed_mtu_retry_restores_larger_fallback_and_burst_templa
                             match calls {
                                 1 => {
                                     assert_eq!(target, alternate);
-                                    #[cfg(unix)]
-                                    let code = nix::libc::EMSGSIZE;
-                                    #[cfg(not(unix))]
-                                    let code = 10040;
-                                    Err(io::Error::from_raw_os_error(code))
+                                    Err(message_too_large_error())
                                 }
                                 2 => {
                                     assert_eq!(target, alternate);

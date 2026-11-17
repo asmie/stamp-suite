@@ -210,6 +210,25 @@ pub struct StampResponse {
     pub tlv_processed: bool,
 }
 
+impl StampResponse {
+    /// A reply with no TLV processing: normal routing, no CoS, no conformance
+    /// reasons and no generated HMAC.
+    pub fn new(data: Vec<u8>) -> Self {
+        Self {
+            tlv_conformance: Default::default(),
+            ber_conformance: Default::default(),
+            data,
+            cos_request: None,
+            cos_reply_policy: None,
+            return_path_action: ReturnPathAction::Normal,
+            reflected_control: None,
+            reply_source: None,
+            tlv_hmac_generated: false,
+            tlv_processed: false,
+        }
+    }
+}
+
 /// Context for processing STAMP packets, shared between backends.
 #[derive(Clone)]
 pub struct ProcessingContext<'a> {
@@ -625,33 +644,22 @@ fn process_stamp_packet_inner(
                     ctx,
                 ))
             } else {
-                Some(StampResponse {
-                    data: assemble_auth_answer_symmetric(
-                        &packet,
-                        data,
-                        ctx.clock_source,
-                        rcvt,
-                        ttl,
-                        ctx.error_estimate_wire,
-                        // use the per-SSID-resolved key (falls back to
-                        // ctx.hmac_key when no HmacKeySet is configured). Using
-                        // ctx.hmac_key directly here would emit unsigned
-                        // responses when --hmac-key-dir is the key source.
-                        resolved_hmac_key,
-                        reflector_seq,
-                    ),
-                    cos_request: None,
-                    cos_reply_policy: None,
-                    return_path_action: ReturnPathAction::Normal,
-                    reflected_control: None,
-                    // The symmetric no-TLV path never parses a Destination Node
-                    // Address TLV, so there is nothing to pin.
-                    reply_source: None,
-                    ber_conformance: Default::default(),
-                    tlv_conformance: Default::default(),
-                    tlv_hmac_generated: false,
-                    tlv_processed: false,
-                })
+                // The symmetric no-TLV path has no Destination Node Address
+                // TLV to pin and nothing to process.
+                Some(StampResponse::new(assemble_auth_answer_symmetric(
+                    &packet,
+                    data,
+                    ctx.clock_source,
+                    rcvt,
+                    ttl,
+                    ctx.error_estimate_wire,
+                    // use the per-SSID-resolved key (falls back to
+                    // ctx.hmac_key when no HmacKeySet is configured). Using
+                    // ctx.hmac_key directly here would emit unsigned
+                    // responses when --hmac-key-dir is the key source.
+                    resolved_hmac_key,
+                    reflector_seq,
+                )))
             }
         }
         ValidatedBase::Open(packet) => {
@@ -671,26 +679,15 @@ fn process_stamp_packet_inner(
                     ctx,
                 ))
             } else {
-                Some(StampResponse {
-                    data: assemble_unauth_answer_symmetric(
-                        &packet,
-                        data,
-                        ctx.clock_source,
-                        rcvt,
-                        ttl,
-                        ctx.error_estimate_wire,
-                        reflector_seq,
-                    ),
-                    cos_request: None,
-                    cos_reply_policy: None,
-                    reply_source: None,
-                    return_path_action: ReturnPathAction::Normal,
-                    reflected_control: None,
-                    ber_conformance: Default::default(),
-                    tlv_conformance: Default::default(),
-                    tlv_hmac_generated: false,
-                    tlv_processed: false,
-                })
+                Some(StampResponse::new(assemble_unauth_answer_symmetric(
+                    &packet,
+                    data,
+                    ctx.clock_source,
+                    rcvt,
+                    ttl,
+                    ctx.error_estimate_wire,
+                    reflector_seq,
+                )))
             }
         }
     };

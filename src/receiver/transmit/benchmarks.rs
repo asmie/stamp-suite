@@ -280,13 +280,7 @@ fn profile_send_region(
                 } else {
                     Err(match case.scenario {
                         Scenario::Cos => cos_apply_error(io::ErrorKind::PermissionDenied.into()),
-                        Scenario::MtuRace => {
-                            #[cfg(unix)]
-                            let code = nix::libc::EMSGSIZE;
-                            #[cfg(not(unix))]
-                            let code = 10040;
-                            io::Error::from_raw_os_error(code)
-                        }
+                        Scenario::MtuRace => super::message_too_large_error(),
                         _ => io::ErrorKind::PermissionDenied.into(),
                     })
                 }
