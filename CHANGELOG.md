@@ -127,6 +127,9 @@ Upgrade both peers together when they use BER or reflected headers.
     unreadable route-table reply drops the reply. It no longer sets the
     Return Path U flag or retargets the reply to the sender.
 - Sender:
+  - Send and receive errors, rejected replies, zero-SSID notices and the
+    burst-pacing advisory are log records. They were printed as plain text,
+    which broke `--log-format json` output and ignored `RUST_LOG`.
   - After its last probe the sender goes straight to the reply drain. It
     waited out one more `--send-delay` gap first, so `-c 1 -d 3600s` took an hour.
   - Replies must echo the full sender timestamp; mismatches are counted in

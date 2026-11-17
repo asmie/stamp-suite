@@ -2,7 +2,7 @@
 //!
 //! An unthrottled warning per bad packet turns a packet flood into a log
 //! flood. Each call site counts its own occurrences and reports the 1st,
-//! 10th, 100th, ... one; the rest go to `debug` (or are dropped for stderr).
+//! 10th, 100th, ... one; the rest go to `debug`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -46,20 +46,6 @@ macro_rules! warn_throttled {
             Some(1) => log::warn!($($arg)+),
             Some(n) => log::warn!("{} ({n} occurrences)", format_args!($($arg)+)),
             None => log::debug!($($arg)+),
-        }
-    }};
-}
-
-/// `eprintln!` on the 1st, 10th, 100th, ... occurrence at this call site.
-#[macro_export]
-#[doc(hidden)]
-macro_rules! eprintln_throttled {
-    ($($arg:tt)+) => {{
-        static THROTTLE: $crate::log_throttle::Throttle = $crate::log_throttle::Throttle::new();
-        match THROTTLE.hit() {
-            Some(1) => eprintln!($($arg)+),
-            Some(n) => eprintln!("{} ({n} occurrences)", format_args!($($arg)+)),
-            None => {}
         }
     }};
 }

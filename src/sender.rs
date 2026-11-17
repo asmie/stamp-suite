@@ -365,7 +365,7 @@ fn process_response(
             // field is used (RFC 8762 §4.4).
             if let Some(key) = ctx.hmac_key {
                 if !verify_packet_hmac(key, &canonical_buf, AUTH_HMAC_OFFSET, &hmac) {
-                    crate::eprintln_throttled!(
+                    crate::warn_throttled!(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num
                     );
@@ -399,7 +399,7 @@ fn process_response(
                         Some(info)
                     }
                     Err(reason) => {
-                        crate::eprintln_throttled!(
+                        crate::warn_throttled!(
                             "Discarding reflected packet seq={}: {}",
                             seq_num,
                             reason
@@ -460,7 +460,7 @@ fn process_response(
             // is present (RFC 8762 §4.4).
             if let Some(key) = ctx.hmac_key {
                 if !verify_packet_hmac(key, &canonical_buf, AUTH_HMAC_OFFSET, &hmac) {
-                    crate::eprintln_throttled!(
+                    crate::warn_throttled!(
                         "HMAC verification failed for reflected packet seq={}",
                         seq_num
                     );
@@ -507,7 +507,7 @@ fn process_response(
                     Some(info)
                 }
                 Err(reason) => {
-                    crate::eprintln_throttled!(
+                    crate::warn_throttled!(
                         "Discarding reflected packet seq={}: {}",
                         base.sess_sender_seq_number,
                         reason
@@ -618,12 +618,12 @@ fn process_response(
             *ctx.zero_ssid_seen = true;
             if first_time {
                 match ctx.on_zero_ssid {
-                    ZeroSsidAction::Continue => eprintln!(
-                        "Warning: reflector returned a zeroed SSID (sent {expected}, \
+                    ZeroSsidAction::Continue => log::warn!(
+                        "Reflector returned a zeroed SSID (sent {expected}, \
                          got 0) — it is not demultiplexing sessions on SSID. \
                          Continuing per --on-zero-ssid=continue (RFC 8972 §3)."
                     ),
-                    ZeroSsidAction::Stop => eprintln!(
+                    ZeroSsidAction::Stop => log::warn!(
                         "Reflector returned a zeroed SSID (sent {expected}, got 0); \
                          stopping the session per --on-zero-ssid=stop (RFC 8972 §3)."
                     ),
@@ -771,7 +771,7 @@ fn process_response(
             }
         }
     } else if ctx.measurements.is_none() {
-        eprintln!("Received response for unknown sequence number: {}", seq_num);
+        crate::warn_throttled!("Received response for unknown sequence number: {}", seq_num);
     }
 }
 

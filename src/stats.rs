@@ -154,7 +154,7 @@ impl StatsOutput {
                 Ok(())
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                crate::eprintln_throttled!(
+                crate::warn_throttled!(
                     "Measurement output is slow; skipping an interim report or packet detail"
                 );
                 Ok(())

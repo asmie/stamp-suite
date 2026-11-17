@@ -368,3 +368,61 @@ fn blocked_stdout_has_a_bounded_exit_and_closed_pipe_is_an_error() {
         }
     }
 }
+
+#[test]
+fn json_logs_carry_sender_reply_diagnostics() {
+    // A peer that answers every authenticated probe with a reply whose base
+    // HMAC is wrong. The sender's per-reply diagnostics must be JSON log
+    // records, not raw text lines, so a log shipper can parse all of stderr.
+    let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let port = peer.local_addr().unwrap().port().to_string();
+    let answer = std::thread::spawn(move || {
+        let mut buf = [0; 2048];
+        for _ in 0..3 {
+            let Ok((len, from)) = peer.recv_from(&mut buf) else {
+                return;
+            };
+            let mut reply = vec![0; len];
+            reply[..4].copy_from_slice(&buf[..4]);
+            peer.send_to(&reply, from).unwrap();
+        }
+    });
+    let (_, stderr) = Process::start(
+        &[
+            "-r",
+            "127.0.0.1",
+            "-p",
+            &port,
+            "--local-addr",
+            "127.0.0.1",
+            "-A",
+            "A",
+            "--hmac-key",
+            "abababababababababababababababab",
+            "-c",
+            "3",
+            "-d",
+            "20ms",
+            "-L",
+            "1",
+            "--log-format",
+            "json",
+            "--output-format",
+            "json",
+        ],
+        false,
+    )
+    .finish(true);
+    answer.join().unwrap();
+    let mut hmac_warnings = 0;
+    for line in stderr.lines().filter(|line| !line.trim().is_empty()) {
+        let record: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("stderr line is not JSON ({e}): {line}"));
+        let message = record["fields"]["message"].as_str().unwrap_or_default();
+        if record["level"] == "WARN" && message.contains("HMAC verification failed") {
+            hmac_warnings += 1;
+        }
+    }
+    assert!(hmac_warnings > 0, "no HMAC failure was logged:\n{stderr}");
+}

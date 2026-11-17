@@ -293,7 +293,10 @@ Diagnostic logs go to stderr. `--log-format text|json` selects their format,
 and `RUST_LOG` or `-v`/`-vv` sets their verbosity. Per-packet details from `-R`
 go to stdout with text output and to stderr with JSON or CSV output. These
 details are plain text and stay visible with `RUST_LOG=off`. Startup and
-validation errors can also be plain text even with `--log-format json`.
+validation errors can also be plain text even with `--log-format json`. Every
+other diagnostic, including send and receive errors and rejected replies, is a
+log record; per-packet ones are throttled to the 1st, 10th, 100th, ...
+occurrence.
 
 ```bash
 stamp-suite --remote-addr 192.0.2.10 --output-format json > measurements.jsonl 2> diagnostics.log

@@ -188,9 +188,8 @@ impl SenderRun {
         let scale_reflected_control = ecn_response_active && reflected_control_requested;
 
         // Warn once about overlapping bursts (RFC 10052 §5).
-        // Use stderr so the advisory is visible regardless of log filtering.
         if let Some(warning) = conf.reflected_burst_pacing_warning() {
-            eprintln!("Warning: {warning}");
+            log::warn!("{warning}");
         }
 
         // RFC 8972 §3 session identification and zeroed-SSID control. Zero means
@@ -599,7 +598,7 @@ impl SenderRun {
                         Wait::Drain => " during final wait",
                         Wait::AccessReport => " while awaiting Access Report ack",
                     };
-                    crate::eprintln_throttled!("Receive error{during}: {e}");
+                    crate::warn_throttled!("Receive error{during}: {e}");
                     if !is_icmp_feedback(&e) {
                         if matches!(wait, Wait::NextSend { .. }) {
                             receive_enabled = false;
@@ -728,7 +727,7 @@ impl SenderRun {
                         e,
                     ));
                 }
-                crate::eprintln_throttled!("Failed to send packet {seq}: {e}");
+                crate::warn_throttled!("Failed to send packet {seq}: {e}");
             }
             Ok(n) if n == packet_len => {
                 self.consecutive_send_errors = 0;
@@ -780,7 +779,7 @@ impl SenderRun {
         if self.consecutive_send_errors >= MAX_CONSECUTIVE_SEND_FAILURES {
             return Err(error);
         }
-        crate::eprintln_throttled!("Probe not sent: {error}");
+        crate::warn_throttled!("Probe not sent: {error}");
         Ok(())
     }
 
