@@ -351,6 +351,11 @@ impl SenderRun {
             let sent_before = self.packets_sent;
             self.send_probe(attach_access_report).await?;
             scheduled_sent += self.packets_sent - sent_before;
+            // After the last probe the reply drain below waits up to
+            // `--timeout`; waiting out another gap first would only delay it.
+            if !timeline.can_send(scheduled_sent, tokio::time::Instant::now) {
+                break;
+            }
             let interval = self.send_interval();
             let gap = self.schedule.next_gap(interval);
             let wait = timeline.after_probe(gap, tokio::time::Instant::now);

@@ -4915,3 +4915,42 @@ fn congestion_recovery_requires_unambiguous_usable_cos() {
         }
     }
 }
+
+#[tokio::test]
+async fn last_probe_goes_straight_to_the_reply_drain() {
+    use clap::Parser;
+    // A ten-second gap after the only probe would hold the run for ten
+    // seconds; the drain alone waits at most `--timeout` (1 s).
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = peer.local_addr().unwrap().port().to_string();
+    let conf = Configuration::parse_from([
+        "stamp-suite",
+        "--remote-addr",
+        "127.0.0.1",
+        "--local-addr",
+        "127.0.0.1",
+        "--local-port",
+        "0",
+        "--remote-port",
+        &port,
+        "--count",
+        "1",
+        "--send-delay",
+        "10s",
+        "--timeout",
+        "1",
+    ]);
+    let start = std::time::Instant::now();
+    let snapshot = tokio::time::timeout(Duration::from_secs(8), run_sender(&conf))
+        .await
+        .expect("the run must not wait out the gap after its last probe")
+        .expect("run_sender must start successfully");
+    let elapsed = start.elapsed();
+    assert_eq!(snapshot.packets_sent, 1);
+    assert_eq!(snapshot.packets_received, 0);
+    assert!(
+        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(4),
+        "one 1 s drain expected, took {elapsed:?}"
+    );
+    peer.recv_from(&mut [0; 512]).await.unwrap();
+}

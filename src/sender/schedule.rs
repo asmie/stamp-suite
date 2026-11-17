@@ -44,8 +44,8 @@ impl SendTimeline {
     }
 
     /// Advance from the previous due time before consulting the clock, matching
-    /// the live loop's order. Each completed probe, including the last counted
-    /// probe, gets this wait. Only the duration limit clamps its deadline.
+    /// the live loop's order. Every probe after which another may start gets
+    /// this wait; the duration limit clamps its deadline.
     pub(super) fn after_probe(
         &mut self,
         gap: Duration,

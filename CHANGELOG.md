@@ -127,6 +127,8 @@ Upgrade both peers together when they use BER or reflected headers.
     unreadable route-table reply drops the reply. It no longer sets the
     Return Path U flag or retargets the reply to the sender.
 - Sender:
+  - After its last probe the sender goes straight to the reply drain. It
+    waited out one more `--send-delay` gap first, so `-c 1 -d 3600s` took an hour.
   - Replies must echo the full sender timestamp; mismatches are counted in
     `measurements.mismatched_replies` instead of matching a pending probe.
   - Every received TLV length is validated before reflected values are used.

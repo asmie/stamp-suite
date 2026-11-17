@@ -233,9 +233,9 @@ cancellation, the previous process timer policy is restored.
 
 The first probe goes out immediately. `--count` and `--duration` decide whether
 another probe may start. A send that has already started can finish after the
-duration ends. The duration also cuts short the wait after each probe,
-including the wait after the last counted probe. Reaching the count does not
-skip that last wait.
+duration ends. The duration also cuts short the wait after each probe. Once
+no further probe may start, the sender goes straight to the reply drain,
+which waits up to `--timeout` and ends as soon as every probe has its reply.
 
 Access Report retries can go out between scheduled probes. They do not move
 the measurement timeline, draw a new Poisson gap or use up the `--count`
