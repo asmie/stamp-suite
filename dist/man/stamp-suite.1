@@ -33,10 +33,10 @@ Session\-Reflector address.
 
 Repeat the option or separate addresses with commas to measure several reflectors at once, each in its own session.
 .TP
-\fB\-S\fR, \fB\-\-local\-addr\fR \fI<LOCAL_ADDR>\fR [default: 0.0.0.0]
+\fB\-S\fR, \fB\-\-local\-addr\fR \fI<LOCAL_ADDR>\fR
 Local address to bind to.
 
-A sender without one binds `0.0.0.0` for an IPv4 target and `::` for an IPv6 target.
+Without one, a reflector binds `0.0.0.0`, and a sender binds `0.0.0.0` for an IPv4 target and `::` for an IPv6 target.
 .TP
 \fB\-\-local\-scope\-id\fR \fI<LOCAL_SCOPE_ID>\fR [default: 0]
 Numeric IPv6 interface zone for the local bind address (0 = default)

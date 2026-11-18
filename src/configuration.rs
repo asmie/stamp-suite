@@ -375,12 +375,15 @@ pub struct Configuration {
     pub remote_addr: Vec<std::net::IpAddr>,
     /// Local address to bind to.
     ///
-    /// A sender without one binds `0.0.0.0` for an IPv4 target and `::` for
-    /// an IPv6 target.
+    /// Without one, a reflector binds `0.0.0.0`, and a sender binds `0.0.0.0`
+    /// for an IPv4 target and `::` for an IPv6 target.
     #[clap(
         short = 'S',
         long,
         default_value = "0.0.0.0",
+        // The sender's default depends on the target, so a fixed
+        // `[default: 0.0.0.0]` would mislead; the text above states both.
+        hide_default_value = true,
         help_heading = "Endpoints"
     )]
     pub local_addr: std::net::IpAddr,
