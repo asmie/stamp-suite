@@ -410,11 +410,14 @@ fn cos_tlv_destination_scoped_policy_decides_per_peer() {
         src_mac: None,
     });
     let response = process_stamp_packet(&packet, refused_peer, 64, false, &ctx).expect("reflected");
-    assert_eq!(
+    // An empty set still answers, on the Default PHB with RPD=0b01 and C.
+    assert_ne!(
         response.return_path_action,
         stamp_suite::tlv::ReturnPathAction::SuppressReply
     );
-    assert!(response.cos_request.is_none());
+    assert_eq!(response.data[value_start + 1] & 0b11, 0b01);
+    assert_ne!(response.data[UNAUTH_BASE_SIZE] & TlvFlags::C, 0);
+    assert_eq!(response.cos_request, Some((0, 2)));
 }
 
 // ---------------------------------------------------------------------------

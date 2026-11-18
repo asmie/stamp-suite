@@ -883,20 +883,23 @@ value.
 If the requested DSCP1 is refused, the reflector falls back to the received
 DSCP2, but only when that value is permitted, and reports RPD=0b01. If both
 are forbidden, it uses the lowest allowed DSCP, reports RPD=0b01 and sets C.
-DSCP2 still records the ingress value. `none` suppresses processed CoS replies
-for that destination. The marking policy does not apply to ordinary traffic
-without CoS or to opaque echoes of packets that failed integrity checks. When
-a reply is retried on a return path, the policy is checked again for the
-actual reply destination.
+DSCP2 still records the ingress value. With `none` nothing is admitted, so the
+reply uses the default DSCP 0 (the marking of ordinary replies), reports
+RPD=0b01 and sets C. The CoS request is still answered, as RFC 8972 §4.4
+requires, so `none` does not block CoS senders. The marking policy does not
+apply to ordinary traffic without CoS or to opaque echoes of packets that
+failed integrity checks. When a reply is retried on a return path, the policy
+is checked again for the actual reply destination.
 
 A refused ECN value is replaced by Not-ECT, with RPE=0b10. If the backend
 fails to set the marking, it retries with Not-ECT and an admitted DSCP. If that
-also fails, a restricted DSCP policy suppresses the reply. An unrestricted
-policy can still send it with RPE=0b01, and you then need to check the actual
-IP marking yourself. Windows cannot enforce restricted DSCP policies, so it
-suppresses those CoS replies. Replies dropped at send time because no
-permitted DSCP can be used, including on a return-path retry, are counted
-with the `cos_policy` drop reason.
+also fails, a restricted DSCP policy, including `none`, suppresses the reply.
+An unrestricted policy can still send it with RPE=0b01, and you then need to
+check the actual IP marking yourself. `--allowed-ecn none` refuses every EC1,
+so CoS replies carry Not-ECT and RPE=0b10. Windows cannot enforce restricted
+DSCP policies, so it suppresses those CoS replies. Replies dropped at send
+time because a restricted DSCP policy cannot be enforced, including on a
+return-path retry, are counted with the `cos_policy` drop reason.
 
 `--location-disclose` controls which Location TLV fields the reflector reports:
 `all` (default), `none`, or a comma-separated list of `src-port`, `dst-port`,
@@ -1237,7 +1240,7 @@ consecutive failures. Any successful send resets that retry budget.
 Prometheus counts each successful reply copy at transmission. Drop reasons
 are `rate_limited`, `queue_full`, `processing_rejected`, `session_expired`,
 `suppressed`, `cos_policy`, `mtu_exceeded`, `send_failed` and `cancelled`.
-`cos_policy` is a reply the destination DSCP policy forbids at send time,
+`cos_policy` is a reply whose restricted DSCP policy cannot be enforced at send time,
 `mtu_exceeded` one whose mandatory fields do not fit the route MTU, and
 `send_failed` a socket error. Processing rejection includes
 parsing, authentication, admission and replay policy; HMAC failures also have

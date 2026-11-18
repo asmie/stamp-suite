@@ -920,10 +920,9 @@ fn apply_semantic_tlv_processing(
     let mut third_value = false;
     if let Some((dscp1, ec1)) = requested_cos {
         let allowed = ctx.cos_policy.dscp_for(destination);
-        let Some(selection) = allowed.select(Some(dscp1), ctx.received_dscp) else {
-            log::debug!("No DSCP permitted for CoS reply to {destination:?}; suppressing reply");
-            return None;
-        };
+        // An empty set still answers, on the Default PHB with RPD=01 and C
+        // (RFC 8972 §4.4, draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
+        let selection = allowed.select(Some(dscp1), ctx.received_dscp);
         ecn_permitted = ctx.cos_policy.permits_ecn(ec1);
         cos_reply_policy = Some(CosReplyPolicy::new(
             dscp1,

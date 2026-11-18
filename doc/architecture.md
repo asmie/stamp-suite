@@ -552,9 +552,9 @@ The reflector records the DSCP and ECN it received in DSCP2 and EC2. Local
 policy decides whether the requested DSCP1 and EC1 are allowed, and socket
 support decides whether they can be applied. If the requested DSCP is refused,
 the reply reports RPD=01 and uses the received DSCP if policy permits it.
-Otherwise it uses the lowest admitted value and also sets C. DSCP2 always
-reports what arrived. A restricted policy that is empty or cannot be enforced suppresses
-processed CoS replies. An ECN fallback uses Not-ECT and reports RPE=10. If
+Otherwise it uses the lowest admitted value and also sets C; an empty policy
+uses the default DSCP 0. DSCP2 always reports what arrived. A restricted policy
+that cannot be enforced suppresses processed CoS replies. An ECN fallback uses Not-ECT and reports RPE=10. If
 neither marking can be applied, unrestricted policies report RPE=01.
 Destination rules are checked again for the address the reply actually goes
 to, including return-path retries. The sender's AIMD response is described

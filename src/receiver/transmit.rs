@@ -206,8 +206,8 @@ impl Transmission {
     }
 
     /// Sends the next copy, or returns the drop reason label: `session_expired`,
-    /// `suppressed`, `rate_limited`, `cos_policy` (no permitted or enforceable
-    /// DSCP), `mtu_exceeded` (the mandatory fields do not fit the route MTU)
+    /// `suppressed`, `rate_limited`, `cos_policy` (a restricted DSCP set that
+    /// the backend cannot enforce), `mtu_exceeded` (the mandatory fields do not fit the route MTU)
     /// or `send_failed`.
     fn try_send_next_with_mtu(
         &mut self,
@@ -277,10 +277,7 @@ impl Transmission {
             if let Some(policy) = &self.response.cos_reply_policy {
                 let to_source = attempt.target == self.source;
                 let fallback = attempt.marking != Marking::Requested;
-                let Some(selection) = policy.select(to_source, self.received_dscp, fallback) else {
-                    log::debug!("No DSCP permitted for CoS reply to {}", attempt.target);
-                    break "cos_policy";
-                };
+                let selection = policy.select(to_source, self.received_dscp, fallback);
                 // Without a working marking operation, an OS-selected DSCP
                 // cannot be assumed to satisfy a restricted destination set.
                 if !attempt.options.apply_tos
@@ -412,11 +409,7 @@ impl Transmission {
                     // mark. A datagram/routing failure says nothing about CoS.
                     let fallback_dscp = if let Some(policy) = &self.response.cos_reply_policy {
                         let to_source = attempt.target == self.source;
-                        let Some(selection) = policy.select(to_source, self.received_dscp, true)
-                        else {
-                            break "cos_policy";
-                        };
-                        selection.value
+                        policy.select(to_source, self.received_dscp, true).value
                     } else {
                         self.received_dscp
                     };

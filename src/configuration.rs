@@ -623,9 +623,10 @@ pub struct Configuration {
     /// DSCP codepoints permitted on reflector replies (RFC 8972 §4.4/§6,
     /// draft-ietf-bpm-stamp-cos-ecn-00 §3.2): `all` (default), `none`, or values and inclusive
     /// ranges such as `0,8,10-14,46`. Refused DSCP1 uses received DSCP only if
-    /// permitted; otherwise the lowest allowed value with RPD=01 and C.
-    /// No allowed value, or inability to enforce a restricted set, suppresses
-    /// the CoS reply. Permitted values still require socket support.
+    /// permitted; otherwise the lowest allowed value with RPD=01 and C. `none`
+    /// answers CoS requests with the default DSCP 0, RPD=01 and C. Inability
+    /// to enforce a restricted set suppresses the CoS reply. Permitted values
+    /// still require socket support.
     ///
     /// Reflector-side only.
     #[clap(

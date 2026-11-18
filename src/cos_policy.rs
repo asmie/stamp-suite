@@ -6,6 +6,10 @@
 
 use std::net::IpAddr;
 
+/// The Default PHB codepoint (RFC 2474 §4.1), used when a policy admits no
+/// DSCP at all. Ordinary replies without a CoS TLV are sent unmarked with it.
+pub const DEFAULT_DSCP: u8 = 0;
+
 /// Set of admissible 6-bit DSCP values, one bit per codepoint.
 ///
 /// 64 codepoints fit exactly in a `u64`, so the per-packet membership check is
@@ -33,29 +37,37 @@ impl DscpSet {
     }
 
     /// Select requested DSCP, then observed DSCP, then the lowest permitted
-    /// codepoint. `None` means no marking satisfies this destination's policy.
-    /// An absent request is used after a socket marking failure.
+    /// codepoint (draft-ietf-bpm-stamp-cos-ecn-00 §3.2). An empty set admits
+    /// no requested or reflected codepoint, so the third value is
+    /// [`DEFAULT_DSCP`], the marking ordinary replies carry: a valid CoS
+    /// request is still answered (RFC 8972 §4.4). An absent request is used
+    /// after a socket marking failure.
     #[must_use]
-    pub fn select(self, requested: Option<u8>, received: u8) -> Option<DscpSelection> {
+    pub fn select(self, requested: Option<u8>, received: u8) -> DscpSelection {
         if let Some(requested) = requested.filter(|d| self.contains(*d)) {
-            return Some(DscpSelection {
+            return DscpSelection {
                 value: requested & 63,
                 rejected: false,
                 third_value: false,
-            });
+            };
         }
         if self.contains(received) {
-            return Some(DscpSelection {
+            return DscpSelection {
                 value: received & 63,
                 rejected: true,
                 third_value: false,
-            });
+            };
         }
-        (self.0 != 0).then(|| DscpSelection {
-            value: self.0.trailing_zeros() as u8,
+        let value = if self.0 == 0 {
+            DEFAULT_DSCP
+        } else {
+            self.0.trailing_zeros() as u8
+        };
+        DscpSelection {
+            value,
             rejected: true,
             third_value: true,
-        })
+        }
     }
 
     /// Parses `all`, `none`, or a comma-separated list of codepoints and
@@ -123,7 +135,8 @@ impl DscpSet {
 pub struct DscpSelection {
     pub value: u8,
     pub rejected: bool,
-    /// Neither candidate was admitted; RPD=01 and C must be reported.
+    /// Neither candidate was admitted (or the set is empty); RPD=01 and C
+    /// must be reported.
     pub third_value: bool,
 }
 
@@ -587,6 +600,20 @@ mod tests {
 mod selection_tests {
     use super::*;
 
+    /// `none` forbids honouring or reflecting a codepoint; the CoS request is
+    /// still answered on the Default PHB with RPD=01 and C
+    /// (draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
+    #[test]
+    fn empty_set_answers_on_the_default_dscp_as_a_third_value() {
+        for (requested, received) in [(Some(46), 10), (Some(0), 0), (None, 63)] {
+            let selection = DscpSet::none().select(requested, received);
+            assert_eq!(
+                (selection.value, selection.rejected, selection.third_value),
+                (DEFAULT_DSCP, true, true)
+            );
+        }
+    }
+
     #[test]
     fn dscp_selection_exhausts_candidate_pairs_and_policy_boundaries() {
         for spec in ["none", "all", "0", "63", "1,10,34,46", "8-15,32-63"] {
@@ -595,16 +622,15 @@ mod selection_tests {
                 for received in 0..64 {
                     let result = allowed.select(Some(requested), received);
                     let expected = if allowed.contains(requested) {
-                        Some((requested, false, false))
+                        (requested, false, false)
                     } else if allowed.contains(received) {
-                        Some((received, true, false))
+                        (received, true, false)
                     } else {
-                        (0..64)
-                            .find(|v| allowed.contains(*v))
-                            .map(|v| (v, true, true))
+                        let third = (0..64).find(|v| allowed.contains(*v));
+                        (third.unwrap_or(DEFAULT_DSCP), true, true)
                     };
                     assert_eq!(
-                        result.map(|s| (s.value, s.rejected, s.third_value)),
+                        (result.value, result.rejected, result.third_value),
                         expected
                     );
                 }

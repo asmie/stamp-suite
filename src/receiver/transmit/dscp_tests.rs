@@ -60,6 +60,7 @@ fn dscp_admission_marks_signed_bursts_and_counts_only_successful_third_values() 
                     ("10,34", 10, 1, false),
                     ("0,34", 0, 1, true),
                     ("34", 34, 1, true),
+                    ("none", 0, 1, true),
                 ] {
                     let mut tx = reflect(policy(values), auth, ipv6, peer_c);
                     let counters = ReflectorCounters::new();
@@ -97,6 +98,7 @@ fn dscp_marking_retry_never_uses_forbidden_received_value_or_unmarked_restricted
                 ("46", 46, 46, 0, false),
                 ("34", 34, 34, 1, true),
                 ("10", 10, 10, 1, false),
+                ("none", 0, 0, 1, true),
             ] {
                 for fails_twice in [false, true] {
                     let mut tx = reflect(policy(values), auth, ipv6, false);
@@ -135,9 +137,9 @@ fn dscp_route_retry_reselects_policy_and_sets_c_only_for_a_third_value() {
         for ipv6 in [false, true] {
             for peer_c in [false, true] {
                 for (primary, fallback, first_dscp, final_dscp, first_c, final_c) in [
-                    ("34", "46", 34, Some(46), true, false),
-                    ("46", "34", 46, Some(34), false, true),
-                    ("34", "none", 34, None, true, false),
+                    ("34", "46", 34, 46, true, false),
+                    ("46", "34", 46, 34, false, true),
+                    ("34", "none", 34, 0, true, true),
                 ] {
                     let mut tx = reflect(policy(primary), auth, ipv6, peer_c);
                     // Install the same immutable snapshot that semantic processing
@@ -168,17 +170,13 @@ fn dscp_route_retry_reselects_policy_and_sets_c_only_for_a_third_value() {
                                     return Err(io::ErrorKind::NetworkUnreachable.into());
                                 }
                                 assert_eq!(target, source);
-                                let dscp = final_dscp.expect("empty policy must not send");
-                                assert_eq!(options.tos, (dscp << 2) | 2);
+                                assert_eq!(options.tos, (final_dscp << 2) | 2);
                                 check(bytes, auth, u8::from(final_c), 3, final_c);
                                 Ok(bytes.len())
                             },
                         );
-                        assert_eq!(sent.is_some(), final_dscp.is_some());
-                        assert_eq!(attempts, if final_dscp.is_some() { 2 } else { 1 });
-                        if final_dscp.is_none() {
-                            break;
-                        }
+                        assert!(sent.is_some());
+                        assert_eq!(attempts, 2);
                     }
                     assert_eq!(
                         counters.tlv_conformance_count(Reason::CosDscpFallback),
@@ -190,22 +188,38 @@ fn dscp_route_retry_reselects_policy_and_sets_c_only_for_a_third_value() {
     }
 }
 
+/// `--allowed-dscp none --allowed-ecn none` still answers a CoS request
+/// (RFC 8972 §4.4): Default PHB, Not-ECT, RPD=01, RPE=10 and C on every
+/// signed copy (draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
 #[test]
-fn empty_dscp_policy_suppresses_processed_cos_without_sending() {
+fn empty_dscp_and_ecn_policy_answers_cos_on_default_marking() {
     for auth in [false, true] {
         for ipv6 in [false, true] {
-            let mut tx = reflect(policy("none"), auth, ipv6, false);
-            assert_eq!(
+            let mut tx = reflect(
+                CosAdmissionPolicy::new(DscpSet::none(), EcnSet::none(), vec![]),
+                auth,
+                ipv6,
+                false,
+            );
+            assert_ne!(
                 tx.response.return_path_action,
                 ReturnPathAction::SuppressReply
             );
-            assert!(tx
-                .send_next(
-                    &ReflectorCounters::new(),
-                    &RateLimiter::new(0),
-                    |_, _, _| panic!("suppressed reply sent")
-                )
-                .is_none());
+            let counters = ReflectorCounters::new();
+            for copy in 1..=3 {
+                assert!(tx
+                    .send_next(&counters, &RateLimiter::new(0), |bytes, _, options| {
+                        assert!(options.apply_tos);
+                        assert_eq!(options.tos, 0);
+                        check(bytes, auth, 1, 2, true);
+                        Ok(bytes.len())
+                    })
+                    .is_some());
+                assert_eq!(
+                    counters.tlv_conformance_count(Reason::CosDscpFallback),
+                    copy
+                );
+            }
         }
     }
 }
@@ -249,10 +263,10 @@ fn windows_restricted_dscp_sends_nothing_and_permissive_reply_reports_rpe01() {
     }
 }
 
-/// A reply that the destination policy forbids is a policy drop, not a
-/// failed send.
+/// A restricted set the backend cannot enforce is a policy drop, not a
+/// failed send, also after a route fallback to an empty-policy source.
 #[test]
-fn forbidden_dscp_after_route_fallback_is_a_cos_policy_drop() {
+fn unenforceable_dscp_after_route_fallback_is_a_cos_policy_drop() {
     for ipv6 in [false, true] {
         let mut tx = reflect(policy("34"), false, ipv6, false);
         tx.response.cos_reply_policy = Some(super::super::CosReplyPolicy::new(
@@ -266,15 +280,23 @@ fn forbidden_dscp_after_route_fallback_is_a_cos_policy_drop() {
             .parse()
             .unwrap();
         tx.response.return_path_action = ReturnPathAction::AlternateAddress(alternate);
+        let mut attempts = 0;
         let reason = tx.try_send_next_with_mtu(
             &ReflectorCounters::new(),
             &RateLimiter::new(0),
             |_, _, _| Ok(usize::MAX),
-            |_, target, _| {
-                assert_eq!(target, alternate, "nothing may reach the source");
-                Err(io::ErrorKind::NetworkUnreachable.into())
+            |_, target, options| {
+                attempts += 1;
+                if target == alternate {
+                    return Err(io::ErrorKind::NetworkUnreachable.into());
+                }
+                // The source admits nothing, so the Default PHB is selected;
+                // the marking operation itself then fails twice.
+                assert_eq!(options.tos >> 2, 0);
+                Err(cos_apply_error(io::ErrorKind::Unsupported.into()))
             },
         );
         assert_eq!(reason, Err("cos_policy"));
+        assert_eq!(attempts, 3);
     }
 }

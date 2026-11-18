@@ -230,13 +230,27 @@ fn reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy() {
     }
 }
 
+/// RFC 8972 §4.4 requires the CoS TLV in the reflected packet; an empty
+/// policy has no permitted value, so the reply uses the Default PHB with
+/// RPD=01 and C, and a refused EC1 gives Not-ECT with RPE=10
+/// (draft-ietf-bpm-stamp-cos-ecn-00 §3.2).
 #[test]
-fn empty_dscp_policy_drops_cos_but_keeps_base_sessions_usable() {
+fn empty_dscp_and_ecn_policy_answers_cos_on_default_marking() {
     for ip in ["127.0.0.1", "::1"] {
+        let ipv6 = ip == "::1";
         for mode in Mode::ALL {
             let _case = Case::new(format!("{ip} {mode:?}"));
             let mut command = Reflector::command(ip);
-            command.args(["--hwtstamp", "off", "--allowed-dscp", "none"]);
+            command.args([
+                "--hwtstamp",
+                "off",
+                "--allowed-dscp",
+                "none",
+                "--allowed-ecn",
+                "none",
+                "--reflected-control-max-count",
+                "3",
+            ]);
             command.args(mode.key_args());
             if mode.keyed() {
                 command.arg("--verify-tlv-hmac");
@@ -244,22 +258,28 @@ fn empty_dscp_policy_drops_cos_but_keeps_base_sessions_usable() {
             let reflector = Reflector::spawn(command).unwrap();
             let peer = UdpSocket::bind((ip, 0)).unwrap();
             peer.connect(reflector.address).unwrap();
-            peer.set_read_timeout(Some(Duration::from_millis(150)))
-                .unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            socket_option(&peer, ipv6, true, 1);
+            // Ingress DSCP 10 and ECT(1); request DSCP1=46, EC1=ECT(0).
+            socket_option(&peer, ipv6, false, (10 << 2) | 1);
             peer.send(&request(mode, 100, Some([184, 0, 128, 0])))
                 .unwrap();
-            let mut data = [0; 512];
-            let error = peer.recv(&mut data).unwrap_err();
-            assert!(matches!(
-                error.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            ));
-            peer.send(&request(mode, 101, None)).unwrap();
-            let size = peer.recv(&mut data).expect("ordinary session still usable");
-            assert_eq!(size, mode.base(), "{ip} {mode:?}");
+            // DSCP2=10, EC2=1, RPD=01; EC1=2, RPE=10.
+            let expected_value = [184, (10 << 4) | (1 << 2) | 1, (2 << 6) | (2 << 4), 0];
             let echoed = mode.sender_sequence();
-            assert_eq!(&data[echoed..echoed + 4], &101u32.to_be_bytes());
-            mode.assert_sealed(&data[..size]);
+            socket_option(&peer, ipv6, false, 0);
+            for _ in 0..3 {
+                let (bytes, tos) = receive(&peer);
+                assert_eq!(&bytes[echoed..echoed + 4], &100u32.to_be_bytes());
+                verify_cos_reply(&bytes, mode, expected_value, true);
+                assert_eq!(tos, 0, "{ip} {mode:?}: Default PHB and Not-ECT");
+            }
+            peer.send(&request(mode, 101, None)).unwrap();
+            let (bytes, tos) = receive(&peer);
+            assert_eq!(bytes.len(), mode.base(), "{ip} {mode:?}");
+            assert_eq!(&bytes[echoed..echoed + 4], &101u32.to_be_bytes());
+            assert_eq!(tos, 0);
+            mode.assert_sealed(&bytes);
         }
     }
 }

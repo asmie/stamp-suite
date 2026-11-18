@@ -85,6 +85,9 @@ Upgrade both peers together when they use BER or reflected headers.
 ### Fixed
 
 - Reflector:
+  - `--allowed-dscp none` (or an empty `--allowed-dscp-for` rule) answers CoS
+    requests on DSCP 0 with RPD=01 and C, as RFC 8972 §4.4 and
+    draft-ietf-bpm-stamp-cos-ecn-00 §3.2 require. It sent no reply at all.
   - Trimming reflected-header TLVs (Types 246/247) to the reply size limit
     takes linear time. It removed and re-measured one TLV at a time, so a
     datagram with 4000 such TLVs took about 100 ms to answer.
@@ -106,7 +109,7 @@ Upgrade both peers together when they use BER or reflected headers.
     addressed to this host. Before, a pnet reflector on a shared segment,
     mirror port or router also answered probes meant for other hosts.
   - Destination DSCP policy also applies to fallback values and return-path
-    retries; empty or unenforceable policies suppress the CoS reply.
+    retries; unenforceable restricted policies suppress the CoS reply.
   - Type 12 rate limits no longer round down excess, and every Address Group
     mismatch is reported.
   - Return Path, Location and Timestamp Information children are validated

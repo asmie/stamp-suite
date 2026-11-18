@@ -44,7 +44,7 @@ impl CosReplyPolicy {
         to_source: bool,
         received: u8,
         marking_failed: bool,
-    ) -> Option<DscpSelection> {
+    ) -> DscpSelection {
         let allowed = self.allowed(to_source);
         // Prefer the received marking on a capability retry only if admitted.
         // Otherwise retain an admitted DSCP1, or the policy's third value.
@@ -107,7 +107,7 @@ mod tests {
             data.extend([0, 4, 0, 4, 184, 0xac, 0xb0, 0]);
             let original = data.clone();
             let policy = CosReplyPolicy::new(46, DscpSet::all(), DscpSet::all(), 2, true);
-            let third = DscpSet::parse("34").unwrap().select(Some(46), 10).unwrap();
+            let third = DscpSet::parse("34").unwrap().select(Some(46), 10);
             policy.apply(&mut data, 0, third, 2);
             assert_eq!(&data[..8], &original[..8], "opaque TLV changed");
             if opaque == TlvFlags::M {
@@ -120,7 +120,7 @@ mod tests {
                 assert_eq!(data[start + 5], 0xad, "RPD=01");
                 assert_eq!(data[start + 6], 0xa0, "RPE=10");
             }
-            let requested = DscpSet::all().select(Some(46), 10).unwrap();
+            let requested = DscpSet::all().select(Some(46), 10);
             policy.apply(&mut data, 0, requested, 3);
             assert_eq!(data[8], 0, "a route retry clears the local C");
             assert_eq!(data[16], 0);
