@@ -8,8 +8,9 @@ Source: [draft-ietf-ippm-stamp-ext-hdr-26](https://www.ietf.org/archive/id/draft
 
 Summary: 75 clauses: 63 Compliant, 9 Partial, 0 Gap, 3 N-A, 0 Excluded.
 
-The Clause column paraphrases the draft. Existing row IDs remain stable where
-possible; ordering and MTU clauses use their revision-26 section numbers.
+The Clause column paraphrases the draft. Row IDs are kept from earlier
+revisions where possible; the ordering and MTU rows use revision 26 section
+numbers.
 
 ## Scope
 
@@ -22,38 +23,40 @@ octets. The request's Length equals the size of the header it selects.
 
 The reflector compares only nonzero Requested octets; each zero octet is a
 wildcard. A nonzero selector must identify exactly one unmatched header of
-the requested length and is returned unchanged. Ambiguous selectors return C
-without copying or consuming a header. An all-zero Requested field selects
-the first unconsumed header of matching length and is filled with that header's
-first eight (Type 246) or four (Type 247) octets. The remaining bytes are copied
-into the Received field (`copy_reflected` in `src/tlv/list/processing.rs`). An
-eight-octet header has no Received tail, so a successful reply to an
-all-zero eight-octet request carries the header in its Requested field.
+the requested length, and the reflector returns it unchanged. An ambiguous
+selector gets C, and no header is copied or consumed. An all-zero Requested
+field selects the first unconsumed header of matching length and is filled
+with that header's first eight (Type 246) or four (Type 247) octets. The
+remaining bytes go into the Received field (`copy_reflected` in
+`src/tlv/list/processing.rs`). An eight-octet header has no Received tail, so
+a successful reply to an all-zero eight-octet request carries the whole header
+in its Requested field.
 
-Revision 26's repeated nonzero identical-prefix example conflicts with its
-explicit ambiguity-rejection rules. This implementation retains those rules;
-the example is scored Partial. See [revision 26 interpretation](#revision-26-interpretation).
+Revision 26 gives an example of repeated nonzero requests with identical
+prefixes that conflicts with its own ambiguity rules. stamp-suite follows the
+rules, and the two rows for the example are Partial. See
+[revision 26 interpretation](#revision-26-interpretation).
 
 ### Interoperability
 
-This is an Internet-Draft. Types 246 and 247 and the Type 12 sub-TLV 240
-(IPv6 Extension Header Control) are local experimental codepoints (see the
-[experimental codepoints](README.md#experimental-codepoints) table); no IANA
-allocation is claimed. Both endpoints must implement this revision. Peers
-built for revisions before 13 use a four-octet Type 246 Requested field and do
-not interoperate. There is no version negotiation, and selectors are not
+Types 246 and 247 and the Type 12 sub-TLV 240 (IPv6 Extension Header
+Control) are local experimental codepoints, listed under
+[experimental codepoints](README.md#experimental-codepoints); IANA has not
+allocated them. Both endpoints must implement this revision. Peers built for
+revisions before 13 use a four-octet Type 246 Requested field and do not
+interoperate. There is no version negotiation, and selectors are not
 reconstructed from replies.
 
 ### Local reflection policy
 
 Header reflection is denied by default. `--reflect-fixed-header-from IP` and
-`--reflect-ipv6-ext-header-from IP` separately authorize fixed and extension
-header data for explicitly provisioned sender IPs; repeat each flag for more
-senders. TOML uses `reflect_fixed_header_from` and
-`reflect_ipv6_ext_header_from` arrays. The common ingest path evaluates the
-original source IP before either backend copies data. IPv4-mapped addresses
-are compared as IPv4. A policy refusal preserves the request value and sets C.
-An enabled UDP endpoint or Type 12 support alone does not grant permission.
+`--reflect-ipv6-ext-header-from IP` allow fixed and extension header data,
+separately, for the listed sender IPs; repeat a flag for more senders. TOML
+uses the `reflect_fixed_header_from` and `reflect_ipv6_ext_header_from`
+arrays. The shared ingest path checks the original source IP before either
+backend copies data, and compares IPv4-mapped addresses as IPv4. A refused
+request keeps its value and gets C. Neither an open UDP port nor Type 12
+support grants permission.
 
 ### Backend support
 
@@ -65,50 +68,50 @@ An enabled UDP endpoint or Type 12 support alone does not grant permission.
 
 The nix backend reads ancillary data in
 `src/receiver/nix.rs::extract_ipv6_ext_headers`. It never sees Fragment
-headers, because the kernel removes them during reassembly, and truncated
-ancillary data yields no headers (the request gets C). Raw capture in
+headers, because the kernel removes them during reassembly. Truncated
+ancillary data yields no headers, so the request gets C. Raw capture in
 `src/receiver/pnet.rs::checked_udp` validates IP framing and the UDP checksum
-of the innermost IP endpoints before STAMP admission.
+for the innermost IP endpoints before STAMP admission.
 
 ### Checksums and capture
 
-Kernel UDP sockets normally generate and verify checksums; the separate
+Kernel UDP sockets generate and verify checksums. The separate
 [authenticated IPv4 BER sender option](../usage.md#zero-checksum-ber-transmission)
-can omit request checksums on Linux. The application never
-enables IPv6 zero-checksum operation (RFC 6936). Raw capture rejects
-truncated, fragmented, corrupt and zero-checksum datagrams, so successful raw
-reflection needs a capture point that sees complete wire checksums. Frames with
-incomplete checksums from TX checksum offload (local loopback traffic, for
-example) are rejected, never treated as verified measurements. The private
-veth tests disable TX checksum offload; the loopback tests inject complete
-checksums and also check that corrupt packets are rejected.
+can omit request checksums on Linux. stamp-suite never enables IPv6
+zero-checksum operation (RFC 6936). Raw capture drops truncated, fragmented,
+corrupt and zero-checksum datagrams; a fragmented request is counted as a
+`fragmented` drop and logged. Raw reflection therefore needs a capture point
+that sees complete wire checksums. Frames with incomplete checksums from TX
+checksum offload, such as local loopback traffic, are dropped, never treated
+as verified. The private veth tests disable TX checksum offload; the loopback
+tests inject complete checksums and check that corrupt packets are dropped.
 
 ### Sender requirements
 
 `--attach-ext-hdr` attaches one Hop-by-Hop and one Destination Options header
 to IPv6 probes on Linux. Header requests (`--attach-ext-hdr`,
 `--reflected-ipv6-ext-hdr`, `--reflected-fixed-hdr`) need a known egress route
-MTU, which the sender reads on Linux, Windows and supported macOS IPv6 sockets
-(`egress_mtu` in `src/sender/socket.rs`, `src/sender/socket/windows.rs` and
-`src/net_policy/macos_mtu.rs`). macOS supports
-connected native unicast IPv6 without explicit interface pinning, including the
-socket minimum-MTU policy. Unsupported sockets refuse header-request startup.
-Windows and macOS support fixed-header requests;
-IPv6 extension-header attachment remains Linux-only. Sender source ports are
-random dynamic ports by default, and explicit local and remote ports must differ.
-Both endpoints send with TTL/Hop
+MTU. The sender reads it on Linux, on Windows, and on macOS for connected
+native unicast IPv6 without interface pinning, honoring the socket minimum-MTU
+policy (`egress_mtu` in `src/sender/socket.rs` and
+`src/sender/socket/windows.rs`, and `src/net_policy/macos_mtu.rs`). On other
+sockets the sender refuses to start with header requests. Windows and macOS
+support fixed-header requests; extension-header attachment is Linux-only.
+Sender source ports are random dynamic ports by default, and an explicit local
+port must differ from the remote port. Both endpoints send with TTL or Hop
 Limit 255.
 
 ### Deployment assumptions
 
-Operators provision both endpoints and Session-IDs, provide processing capacity
-for the offered load, and deploy within the draft's single administrative
-domain. Operators configure aggregate rate and burst limits in both directions,
-including encapsulation and concurrent sessions, and filter traffic at domain
-boundaries. Sender `--send-delay` paces probes; Type 12 rate, volume and interval
-caps bound reflected bursts. Queue, session and burst caps can suppress replies
-under overload; correlate those counters with session-state notifications before attributing
-loss to the network. IOAM processing is not implemented.
+Operators provision both endpoints and Session-IDs, provide processing
+capacity for the offered load, and deploy within the draft's single
+administrative domain. They configure aggregate rate and burst limits in both
+directions, allowing for encapsulation and concurrent sessions, and filter
+traffic at domain boundaries. Sender `--send-delay` paces probes; Type 12
+count, interval, rate, volume and duration caps bound reflected bursts. Queue,
+session and burst caps can suppress replies under overload, so compare those
+counters with session-state notifications before blaming the network for
+loss. IOAM processing is not implemented.
 
 ## Clauses
 
@@ -116,8 +119,8 @@ loss to the network. IOAM processing is not implemented.
 |---|---|---|---|---|---|
 | ext-hdr-3.1-1 | Choose randomized source UDP ports. | Descriptive | Sender | Compliant | `src/net_policy.rs::bind_sender` draws ports from the OS CSPRNG with bounded collision retries. Explicit local ports are an operator override; revision 25 uses lowercase should. |
 | ext-hdr-3.1-2 | Prefer source ports in 49152–65535. | SHOULD | Sender | Compliant | `src/net_policy.rs::bind_sender` binds in the dynamic range by default. Reflector replies use the provisioned listening port, as UDP reply demultiplexing requires. |
-| ext-hdr-3.1-3 | The sender source port must differ from the local reflector port. | MUST NOT | Sender | Partial | `src/net_policy.rs::bind_sender` excludes the remote port and cannot bind an already-held same local endpoint. Test: `tests/ext_hdr_revision13_test.rs::sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys`. A sender on another local IP can reuse the local reflector's numeric port; local role-port inventory is not enforced. See [port and policing limits](#port-and-policing-limits). |
-| ext-hdr-3.1-4 | Set outgoing IPv4 TTL and IPv6 Hop Limit to 255. | MUST | Both | Compliant | `src/net_policy.rs::set_hops` runs before sending in both reflector backends and the sender; failure aborts startup. Tests: `tests/ext_hdr_revision13_test.rs::sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys`, `tests/ext_hdr_revision13_test.rs::reflector_transmits_255_and_accepts_lower_received_hops`, `tests/pnet_endpoint_test.rs::pnet_assigned_ipv4_ports_reach_capture_metadata_and_both_reply_families`, `tests/pnet_endpoint_test.rs::pnet_assigned_ipv6_ports_reach_capture_metadata_and_both_reply_families`. Actual receive ancillary metadata checks IPv4/IPv6 outgoing hops in open/keyed/authenticated modes; pnet runs explicitly in namespaces. Native platform limits remain distinct from source checks. |
+| ext-hdr-3.1-3 | The sender source port must differ from the local reflector port. | MUST NOT | Sender | Partial | `src/net_policy.rs::bind_sender` skips the remote port, and binding fails on a local endpoint that is already held. Test: `tests/ext_hdr_revision13_test.rs::sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys`. A sender on another local IP can still use the local reflector's port number; stamp-suite keeps no inventory of local role ports. See [port and policing limits](#port-and-policing-limits). |
+| ext-hdr-3.1-4 | Set outgoing IPv4 TTL and IPv6 Hop Limit to 255. | MUST | Both | Compliant | `src/net_policy.rs::set_hops` runs before sending in both reflector backends and the sender; a failure stops startup. Tests: `tests/ext_hdr_revision13_test.rs::sender_hops_and_held_local_endpoint_separation_cover_both_families_and_keys`, `tests/ext_hdr_revision13_test.rs::reflector_transmits_255_and_accepts_lower_received_hops`, `tests/pnet_endpoint_test.rs::pnet_assigned_ipv4_ports_reach_capture_metadata_and_both_reply_families`, `tests/pnet_endpoint_test.rs::pnet_assigned_ipv6_ports_reach_capture_metadata_and_both_reply_families`. Received ancillary metadata shows outgoing hops of 255 for IPv4 and IPv6 in open, keyed and authenticated modes; the pnet cases run in network namespaces. |
 | ext-hdr-4.1-A | Packets may contain multiple Type 246 TLVs. | MAY | Both | Compliant | `src/sender/packet.rs::reflected_header_request_tlvs`, `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled`. See [request construction](#request-construction). |
 | ext-hdr-4.1-B | Select extension headers by nonzero Requested octets; zero octets are wildcards. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision25_wildcards_ambiguity_and_policy`. |
 | ext-hdr-4.1-C | An all-zero Requested field selects the first unmatched extension header of the requested length, and the reflector fills Requested with its first eight octets. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision26_identical_headers_use_strict_unmatched_selection`. See [header matching](#header-matching). |
@@ -151,14 +154,14 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-6.2-2 | Omit fixed-header requests when reflection is not requested. | MUST NOT | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs`. Type 247 is opt-in. Tests: `tests/header_request_wire_test.rs::sender_control_request_is_unique_zero_length_and_opt_in`, `tests/header_request_wire_test.rs::sender_fixed_header_requests_have_family_length_selector_and_zero_received`. |
 | ext-hdr-6.2-3 | Do not originate more fixed-header requests than IP headers. | MUST | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs`. At most one request for the one originated IP header. Tests: `tests/header_request_wire_test.rs::sender_fixed_header_requests_have_family_length_selector_and_zero_received`, `src/configuration/tests.rs::revision26_sender_rejects_profiles_with_indistinguishable_originated_headers`. |
 | ext-hdr-6.2-4 | Copy the fixed-header portion after the four-octet Requested field. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`. See [wire format](#wire-format). Tests: `tests/tlv_flag_semantics.rs::fixed_header_reflection_fills_requested_and_copies_received_in_capture_order`, `tests/header_reflection_wire_test.rs::reflector_disclosure_order_and_control_use_actual_headers_without_reverse_attachment`. |
-| ext-hdr-6.2-5 | Process encapsulated fixed headers in outer-to-inner order. | MUST | Reflector | Compliant | `src/receiver/pnet.rs::checked_udp` captures in wire order; `src/tlv/list/processing.rs::apply_reflected_header` consumes matching captures once. Test: `tests/pnet_nested_headers_test.rs::actual_nested_capture_reflects_outer_to_inner_and_rejects_bad_checksums_and_depth`. Actual pnet capture reflects mixed IPv4/IPv6 two/three-layer headers with exact bytes, inner endpoint/hop metadata and independent signatures; bad inner UDP checksums and excessive depth get no reply, followed by fresh valid requests. This is Linux software-loopback capture evidence. |
+| ext-hdr-6.2-5 | Process encapsulated fixed headers in outer-to-inner order. | MUST | Reflector | Compliant | `src/receiver/pnet.rs::checked_udp` captures in wire order; `src/tlv/list/processing.rs::apply_reflected_header` consumes matching captures once. Test: `tests/pnet_nested_headers_test.rs::actual_nested_capture_reflects_outer_to_inner_and_rejects_bad_checksums_and_depth`. pnet capture reflects mixed IPv4/IPv6 headers two and three layers deep with exact bytes, inner endpoint and hop metadata, and signatures checked separately. Bad inner UDP checksums and excessive depth get no reply, and later valid requests still work. The capture is Linux software loopback. |
 | ext-hdr-6.2-6 | Use a four-octet selector for ambiguous same-length fixed headers. | MUST | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs`. The CLI accepts up to four selector octets and zero-pads the rest. Tests: `tests/header_request_wire_test.rs::sender_fixed_header_requests_have_family_length_selector_and_zero_received`, `src/configuration/tests.rs::fixed_hdr_selector_too_long_for_ipv4_is_rejected`. |
 | ext-hdr-6.2-7 | Match each nonzero Requested fixed-header octet exactly, and select only a unique unmatched header. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_header`, `tests/tlv_flag_semantics.rs::revision25_wildcards_ambiguity_and_policy`. |
 | ext-hdr-6.2-subset | Do not use identical first-four-octet prefixes to select only some equal-length fixed headers. | MUST NOT | Sender | Compliant (originated profile) | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/configuration/tests.rs::revision26_sender_rejects_profiles_with_indistinguishable_originated_headers`. The sender originates one fixed IP header and rejects multiple fixed-header requests through both CLI and TOML. |
 | ext-hdr-6.2-identical | Allow all equal-length fixed headers with identical prefixes to be reflected using repeated nonzero requests in packet order. | Descriptive | Reflector | Partial | `tests/tlv_flag_semantics.rs::revision26_identical_headers_use_strict_unmatched_selection`. The same explicit rule 1 and all-zero workaround apply as for Type 246. See [revision 26 interpretation](#revision-26-interpretation). |
 | ext-hdr-7.1-1 | Place Type 247 TLVs before Type 246 TLVs. | MUST | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/sender/packet.rs::reflected_header_request_tlvs` emits fixed-header requests first. Tests: `tests/header_request_wire_test.rs::linux::sender_header_requests_follow_actual_attached_order_and_select_subsets`. |
 | ext-hdr-7.1-2 | Return out-of-order reflected-header TLVs with C set. | MUST | Reflector | Compliant | `src/tlv/list/processing.rs::apply_reflected_headers` checks the global order before copying. Combined-header wire and unit tests cover both orders. Tests: `tests/tlv_flag_semantics.rs::global_header_order_refusal_preserves_all_requests_before_copying`, `tests/header_reflection_wire_test.rs::reflector_disclosure_order_and_control_use_actual_headers_without_reverse_attachment`. |
-| ext-hdr-7-1 | Omit Type 246 reflection requests for IOAM Direct Exporting. | MUST | Sender | N-A | No IOAM DEX processor or exporter is implemented. Arbitrary operator-supplied IPv6 options are outside an IOAM implementation claim. |
+| ext-hdr-7-1 | Omit Type 246 reflection requests for IOAM Direct Exporting. | MUST | Sender | N-A | No IOAM DEX processor or exporter is implemented. Attaching arbitrary operator-supplied IPv6 options does not make stamp-suite an IOAM implementation. |
 | ext-hdr-9-1 | Allow the measurement type to be provisioned as unidirectional or bidirectional. | MUST | Both | Partial | Unidirectional measurement is supported. A bidirectional request (control sub-TLV 240) is answered with C because reply-header attachment is not implemented. |
 | ext-hdr-9-2 | Provide a configurable reflector policy identifying permitted senders and header data. | MUST | Reflector | Compliant | `src/receiver/ingest.rs::ProcessingContext::for_packet`, `src/configuration.rs::Configuration`. Separate source-IP allowlists for Types 246 and 247 default to deny; see [local reflection policy](#local-reflection-policy). Tests: `src/receiver/ingest.rs::tests::header_reflection_policy_is_per_source_and_header_kind`, `tests/header_reflection_wire_test.rs::reflector_disclosure_order_and_control_use_actual_headers_without_reverse_attachment`. |
 | ext-hdr-9.2-1 | Report idle when the sender stops transmitting. | Descriptive | Sender | Compliant | `src/sender/session_state.rs::Monitor`; deadline and state regression tests. |
@@ -167,7 +170,6 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-9.2-4 | Recover from failed to active after a validated reply while transmitting. | Descriptive | Sender | Compliant | `src/sender/session_state.rs::Monitor`. |
 | ext-hdr-9.3-1 | Provision receive policing to accommodate aggregate transmitted traffic and bursts. | MUST NOT | Both | Partial | Ingress limiting is disabled by default and caps are operator-provisioned. Test: `src/configuration/tests.rs::receive_policing_defaults_and_provisioned_cli_toml_values_reach_runtime` verifies defaults, CLI/TOML precedence and actual runtime rate/burst values. The application does not check receive limits against aggregate offered traffic, concurrent sessions and deployment capacity. See [port and policing limits](#port-and-policing-limits). |
 | ext-hdr-10-1 | Do not assign Session-IDs predictably. | MUST NOT | Sender | N-A | The application does not allocate Session-IDs. Nonzero values are provisioned by the operator; an unset SSID is the RFC 8972 zero value. |
-
 | ext-hdr-4.1-type | Use the assigned Type for the extension-header TLV. | MUST | Both | Partial | `src/tlv/experimental.rs::REFLECTED_IPV6_EXT_HDR_TLV_TYPE` uses experimental 246 pending IANA allocation. |
 | ext-hdr-4.2-mutable | Zero every Requested octet containing mutable option data; never depend on matching a zero-valued octet. | MUST / MUST NOT | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags` checks attached Hop-by-Hop and Destination Options header selectors, wildcard uniqueness and option change-en-route bits. The sender does not originate Routing headers. Tests: `tests/header_request_wire_test.rs::linux::sender_header_requests_follow_actual_attached_order_and_select_subsets`, `src/configuration/tests.rs::revision25_extension_selector_masks_mutable_option_data`. |
 | ext-hdr-4.2-policy | Explicitly request extension-header data; enforce reflector policy before copying and return C on refusal. | MUST / MUST NOT | Both | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/receiver/ingest.rs::ProcessingContext::for_packet`, `src/tlv/list/processing.rs::process_reflected_headers_with_policy`. Tests: `tests/header_request_wire_test.rs::linux::sender_header_requests_follow_actual_attached_order_and_select_subsets`, `src/receiver/ingest.rs::tests::header_reflection_policy_is_per_source_and_header_kind`, `tests/header_reflection_wire_test.rs::reflector_disclosure_order_and_control_use_actual_headers_without_reverse_attachment`. |
@@ -179,14 +181,14 @@ loss to the network. IOAM processing is not implemented.
 | ext-hdr-6.2-mutable | Zero every Requested octet containing mutable DSCP/ECN bits; never depend on matching a zero-valued octet. | MUST / MUST NOT | Sender | Compliant | `src/configuration.rs::Configuration::validate_ext_hdr_flags`, `src/configuration/tests.rs::revision25_fixed_selector_masks_mutable_octets`. IPv4 byte 1 and IPv6 bytes 0 and 1 must be zero. |
 | ext-hdr-6.2-policy | Explicitly request fixed-header data; enforce reflector policy before copying and return C on refusal. | MUST / MUST NOT | Both | Compliant | `src/sender/packet.rs::reflected_header_request_tlvs`, `src/receiver/ingest.rs::ProcessingContext::for_packet`, `src/tlv/list/processing.rs::process_reflected_headers_with_policy`. Tests: `tests/header_request_wire_test.rs::sender_fixed_header_requests_have_family_length_selector_and_zero_received`, `src/receiver/ingest.rs::tests::header_reflection_policy_is_per_source_and_header_kind`, `tests/header_reflection_wire_test.rs::reflector_disclosure_order_and_control_use_actual_headers_without_reverse_attachment`. |
 | ext-hdr-7.2-1 | Keep the complete transmitted packet within the applicable path MTU. | MUST | Both | Compliant | `src/sender/packet.rs::enforce_egress_mtu`, `src/receiver/transmit.rs::fit_reply`; tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. See [MTU budget](#mtu-budget). Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. |
-| ext-hdr-7.2-2 | Remove complete reflected-header TLVs from the end, skipping HMAC, until the packet fits. | MUST | Both | Compliant | `src/sender/packet.rs::enforce_egress_mtu`, `src/tlv/list/processing.rs::trim_reflected_headers_to_size`; each uses the last header TLV. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. Administrative trimming: `src/receiver/transmit/header_diagnostics_tests.rs::administrative_header_trimming_reserves_only_a_new_hmac_and_keeps_framing` verifies open/authenticated IPv4/IPv6, keyed/unkeyed requests and existing/new extension HMACs without refilling removed headers. |
+| ext-hdr-7.2-2 | Remove complete reflected-header TLVs from the end, skipping HMAC, until the packet fits. | MUST | Both | Compliant | Sender: `src/sender/packet.rs::enforce_egress_mtu` removes the last header TLV until the probe fits; the HMAC is per-probe overhead and never a candidate. Reflector, administrative limit (`--reflected-control-max-size`): `src/tlv/list/processing.rs::trim_reflected_headers_to_size` selects header TLVs from the end in one pass and removes them in a second pass that leaves the HMAC alone. Reflector, route MTU: `src/receiver/transmit.rs::fit_reply` removes the last processed header TLV until the reply fits. Test: `src/tlv/list/processing/tests.rs::trim_reflected_headers_matches_removing_the_last_header_repeatedly` checks that the two-pass trim removes the same TLVs as repeated last-header removal. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. Administrative trimming: `src/receiver/transmit/header_diagnostics_tests.rs::administrative_header_trimming_reserves_only_a_new_hmac_and_keeps_framing` verifies open/authenticated IPv4/IPv6, keyed/unkeyed requests and existing/new extension HMACs without refilling removed headers. |
 | ext-hdr-7.2-3 | Update the HMAC digest if a preceding TLV was removed. | MUST | Both | Compliant | `src/receiver/transmit.rs::fit_reply`, `src/receiver/transmit.rs::Transmission`; tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `src/receiver/transmit/tests.rs::single_header_reply_refreshes_mtu_and_resigns_after_emsgsize`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. The send path trims before signing each copy. Sender builds and signs after trimming. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. Administrative trimming: `src/receiver/transmit/header_diagnostics_tests.rs::administrative_header_trimming_reserves_only_a_new_hmac_and_keeps_framing` verifies open/authenticated IPv4/IPv6, keyed/unkeyed requests and existing/new extension HMACs without refilling removed headers. |
-| ext-hdr-7.2-4 | Retain the relative order of remaining TLVs, including returned requests. | MUST | Both | Compliant | `src/tlv/list/mod.rs::retain_non_hmac` removes the chosen TLVs in one pass and repairs wire indices; sender removes one vector entry at a time. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `src/tlv/list/processing/tests.rs::trim_reflected_headers_matches_removing_the_last_header_repeatedly`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. |
+| ext-hdr-7.2-4 | Retain the relative order of remaining TLVs, including returned requests. | MUST | Both | Compliant | `src/tlv/list/mod.rs::retain_non_hmac` removes the chosen TLVs in one pass and repairs the wire-order indices. `src/receiver/transmit.rs::fit_reply` and the sender remove one entry at a time from an ordered list. Tests: `src/receiver/transmit/tests.rs::single_header_reply_checks_mtu_trims_and_resigns`, `src/tlv/list/processing/tests.rs::trim_reflected_headers_matches_removing_the_last_header_repeatedly`, `tests/route_mtu_test.rs::live_route_mtu_changes_and_alternate_destinations`. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. |
 | ext-hdr-7.2-5 | Do not transmit when removing all optional header TLVs cannot satisfy the MTU. | MUST NOT | Both | Compliant | `src/sender/run.rs`, `src/receiver/transmit.rs::fit_reply`; test: `src/receiver/transmit/tests.rs::single_header_reply_refuses_missing_mtu_or_oversized_mandatory_fields`. Oversized mandatory packets and unavailable route budgets are refused. Sender dispatch: `tests/route_mtu_test.rs::live_sender_trims_restores_and_refuses_oversized_probes` checks real Linux IPv4/IPv6 budgets, dynamic TLVs, ordered trimming/restoration and final signatures. `src/sender/run/mtu_tests.rs::refused_probes_share_the_send_failure_budget_without_pending_state` checks that a refused probe is not sent; the live test checks mandatory oversize at startup and after a route decrease. |
-| ext-hdr-9-errors | Log each C error condition locally and increment its condition counter. | SHOULD | Reflector | Compliant (TLV-enabled profile) | Type 246/247 parent C conditions and Type 12 limits have fixed counters and independent throttled logs after successful sends. Reasons for removed headers are discarded; retries restore original provenance. Tests: `src/receiver/transmit/header_diagnostics_tests.rs::header_reasons_match_processed_c_flags_and_signed_successful_sends`, `src/receiver/transmit/header_diagnostics_tests.rs::header_diagnostics_follow_only_surviving_headers_after_size_trimming`, `src/receiver/transmit/diagnostics_tests.rs::diagnostics_log_each_reason_independently_without_per_packet_log_floods`. Nested unsupported/duplicate controls also have fixed diagnostics: `src/receiver/transmit/cos_control_diagnostics_tests.rs::nested_control_reasons_count_only_generated_c_and_distinguish_duplicates`, `src/receiver/transmit/cos_control_diagnostics_tests.rs::nested_control_reports_follow_actual_mutations_across_parents_and_later_u`. Preserved peer C in complete child headers of known container layouts has a separate provenance reason, without decoding or mutating opaque values. Tests: `src/receiver/transmit/peer_c_diagnostics_tests.rs::preserved_peer_c_uses_known_layouts_and_preserves_failed_integrity_values`, `src/receiver/transmit/peer_c_diagnostics_tests.rs::preserved_peer_c_observations_require_successful_sends_and_base_admission`. Legacy TLV-ignore tails have no child-field interpretation. |
+| ext-hdr-9-errors | Log each C error condition locally and increment its condition counter. | SHOULD | Reflector | Compliant (TLV-enabled profile) | Type 246/247 C conditions and Type 12 limits have fixed counters and their own throttled logs, updated after successful sends. Reasons for headers removed by trimming are dropped, and an MTU retry starts again from the original reasons. Tests: `src/receiver/transmit/header_diagnostics_tests.rs::header_reasons_match_processed_c_flags_and_signed_successful_sends`, `src/receiver/transmit/header_diagnostics_tests.rs::header_diagnostics_follow_only_surviving_headers_after_size_trimming`, `src/receiver/transmit/diagnostics_tests.rs::diagnostics_log_each_reason_independently_without_per_packet_log_floods`. Nested unsupported/duplicate controls also have fixed diagnostics: `src/receiver/transmit/cos_control_diagnostics_tests.rs::nested_control_reasons_count_only_generated_c_and_distinguish_duplicates`, `src/receiver/transmit/cos_control_diagnostics_tests.rs::nested_control_reports_follow_actual_mutations_across_parents_and_later_u`. A C flag kept from the peer in a complete child header of a known container counts under a separate reason; values are not decoded or changed. Tests: `src/receiver/transmit/peer_c_diagnostics_tests.rs::preserved_peer_c_uses_known_layouts_and_preserves_failed_integrity_values`, `src/receiver/transmit/peer_c_diagnostics_tests.rs::preserved_peer_c_observations_require_successful_sends_and_base_admission`. This does not cover `--tlv-mode ignore`. |
 | ext-hdr-9.2-0 | Optionally generate session state-change notifications. | MAY | Sender | Compliant | `src/sender/session_state.rs::Monitor` exposes structured logs and report summaries. |
 | ext-hdr-9.2-5 | Report failed after N consecutive losses even before the first reply. | Descriptive | Sender | Compliant | `src/sender/session_state.rs::tests::failure_before_first_reply_and_recovery`. |
-| ext-hdr-9.3-2 | Provide configurable transmission rate and burst limits. | SHOULD | Both | Compliant | `--send-delay` and finite probe count bound sender traffic; Type 12 interval, rate, count and volume caps bound reflected bursts. |
+| ext-hdr-9.3-2 | Provide configurable transmission rate and burst limits. | SHOULD | Both | Compliant | `--send-delay` and a finite probe count bound sender traffic; Type 12 count, interval, rate, volume and duration caps bound reflected bursts. |
 | ext-hdr-9.3-3 | Pace packet transmissions to avoid excessive bursts. | SHOULD | Both | Compliant | Sender scheduling and `src/receiver/transmit.rs::Transmission` pace each reply copy. Operators can explicitly request zero-delay test traffic. |
 | ext-hdr-9.3-4 | Allow overload drops or suppressed responses for resource protection. | MAY | Both | Compliant | `src/receiver/ingest.rs::ReflectorCore::ingest`, `src/receiver/transmit.rs`; queue, session and burst limits. |
 | ext-hdr-9.3-5 | Expose local limiting counters or notifications so operators can distinguish local suppression from network loss. | SHOULD | Reflector | Compliant | `src/receiver/limits.rs::ReflectorCounters` separates rate-limited, queue-rejected and cancelled work; control and SNMP expose reflector counters. |
@@ -195,22 +197,21 @@ loss to the network. IOAM processing is not implemented.
 
 ### Port and policing limits
 
-Same-endpoint exclusion is exercised by an actual sender while the local
-reflector socket remains held, across IPv4/IPv6 and three key modes. This does
-not establish numeric role-port separation across different local IPs. A live
-private-namespace control keeps a pnet reflector on `127.0.0.1:56620` while
-the public sender originates from `127.0.0.2:56620` to another port. The peer
-observes the repeated numeric source port and the reflector stays running.
-This failed conformance control exposes a limit, not a passing regression.
-Operators must provision nonoverlapping local role ports across addresses.
+A test runs the sender while the local reflector socket is held, in IPv4 and
+IPv6 and three key modes, and the sender cannot bind that endpoint. This does
+not keep the port numbers apart across local IPs. In a manual run in a private
+namespace, a pnet reflector held `127.0.0.1:56620` while the sender sent from
+`127.0.0.2:56620` to another port; the peer saw the same source port number
+and the reflector kept running. Operators must give the sender and reflector
+different local ports on every address.
 
-Default token-bucket policing is disabled and configured rate/burst values reach
-runtime through CLI/TOML loading. Those checks establish configuration behavior,
-not that a deployed limit accommodates aggregate traffic. Operators must size
-limits for concurrent sessions and bursts and correlate local drop counters
-with loss reports. Aggregate receive/transmit consistency is not automatically
-validated. These two formerly unconditional Compliant claims are Partial;
-their normative levels are retained.
+Receive policing (token bucket) is off by default, and a test checks that
+configured rate and burst values reach the runtime from the CLI and TOML.
+That shows configuration handling, not that a deployed limit fits the
+aggregate traffic. Operators must size limits for concurrent sessions and
+bursts and compare local drop counters with loss reports; stamp-suite does
+not check that receive and transmit limits fit together. Both rows were
+Compliant before and are now Partial.
 
 ### Request construction
 
@@ -220,215 +221,225 @@ widths, attachment lengths and order, and the number of requests at startup.
 Explicit `--reflected-ipv6-ext-hdr` requests replace the automatic requests
 that `--attach-ext-hdr` adds and select a subset of the attached headers.
 
-The public-sender evidence is
+The sender test is
 `tests/header_request_wire_test.rs::linux::sender_header_requests_follow_actual_attached_order_and_select_subsets`.
-In a private Linux namespace, the retained UDP peer inspects actual Hop-by-Hop
-and Destination Options ancillary headers alongside independent expected TLV
-bytes in unkeyed open, keyed open and authenticated modes. It checks automatic
-and explicit requests, equal/unequal lengths, both same-length subsets,
-mutable option data masking, zero Received tails and fixed-before-extension
-order. The case is required in nix/pnet CI; it proves sender origination,
-not reflector dispatch or raw capture. Ordinary Linux fixed-header requests
-and portable control-only defaults have separate tests in that file.
+In a private Linux namespace, a UDP peer reads the Hop-by-Hop and Destination
+Options headers from ancillary data and compares the TLVs with expected bytes
+built separately, in unkeyed open, keyed open and authenticated modes. It
+covers automatic and explicit requests, equal and unequal lengths, both
+same-length subsets, masking of mutable option data, zero Received tails and
+fixed-before-extension order. CI requires the case in the nix and pnet jobs.
+It tests what the sender sends, not reflector dispatch or raw capture. The
+same file has separate tests for Linux fixed-header requests and portable
+control-only defaults.
 
-Selector arguments deliberately require at least one nonzero byte; use a bare
-length to request an all-zero wildcard field. CLI and TOML checks retain this
-rule, reject wrong order/length/count and ambiguous subsets, and permit the
-supported full-group wildcard form. All-zero selector arguments are rejected
-before matching, not evidence of a failed wire wildcard implementation.
+A selector argument must contain at least one nonzero byte; a bare length
+requests an all-zero wildcard field. The CLI and TOML checks enforce this,
+reject a wrong order, length or count and ambiguous subsets, and accept the
+wildcard form that covers the whole group.
 
 ### Header matching
 
 `src/tlv/list/processing.rs::apply_reflected_header` pairs each request with
-a unique unconsumed captured header of the same length matching each nonzero
-selector octet. Zero octets are wildcards. An all-zero selector selects the
-first unconsumed header of matching length. Headers are
-captured in wire order, so successive requests pair outer to inner. A missing or ambiguous match consumes nothing and sets C. Nonzero Requested
-fields remain unchanged; all-zero Requested fields are filled from capture. The regression
+the one unconsumed captured header of the same length that matches every
+nonzero selector octet. Zero octets are wildcards, and an all-zero selector
+takes the first unconsumed header of that length. Headers are captured in wire
+order, so successive requests pair outer to inner. A missing or ambiguous
+match consumes nothing and sets C. Nonzero Requested fields are returned
+unchanged; all-zero ones are filled from the capture. The test
 `revision13_selector_uses_all_eight_octets_and_zero_selector_is_filled`
-(`tests/tlv_flag_semantics.rs`) builds raw bytes independently of the encoder.
+(`tests/tlv_flag_semantics.rs`) builds its raw bytes without the crate's
+encoder.
 
-Signed raw-byte checks through packet processing cover 20/40-octet
-fixed-header formats: all-zero Requested fields are filled in capture order,
-unique selectors preserve their wildcard bytes, Received tails are copied and
-exhausted captures return C without data. A separate global-order regression
-returns C on every header request before any copy. These supplied captures
-establish matching and response assembly. A separate test runs actual
-nested raw capture through the pnet backend (ext-hdr-6.2-5); physical tunnel
-deployment remains outside that software-loopback evidence.
+Signed raw-byte tests through packet processing cover 20- and 40-octet fixed
+headers: all-zero Requested fields are filled in capture order, unique
+selectors keep their wildcard bytes, Received tails are copied, and requests
+left without a capture get C and no data. A separate test checks that an
+out-of-order request list gets C on every header request before anything is
+copied. These tests supply the captured headers. ext-hdr-6.2-5 has a test
+with real nested capture through pnet; it does not cover physical tunnels.
 
 `tests/header_reflection_wire_test.rs::reflector_disclosure_order_and_control_use_actual_headers_without_reverse_attachment`
-checks actual Linux nix/pnet replies in private namespaces. Default deny,
-unmatched-source, fixed-only, extension-only and both-kind policies are applied
-before copying. Matching headers are reflected independently of zero, one or
-two control children, every control child gets C, and reversed Type 246/247
-order preserves both requests with C. Nix cannot supply fixed headers; pnet
-checks both actual IPv6 fixed and extension captures. Independent signatures
-and failed-integrity copies are checked; matching Hop-by-Hop/Destination
-Options headers are absent on replies. This does not establish physical
-interface or nested-tunnel behavior.
+checks Linux nix and pnet replies in private namespaces. Default deny,
+unmatched-source, fixed-only, extension-only and both-kind policies are
+applied before copying. Matching headers are reflected with zero, one or two
+control sub-TLVs, every control sub-TLV gets C, and reversed Type 246/247
+order returns both requests with C. nix cannot supply fixed headers; pnet
+checks both fixed and extension headers captured from IPv6 packets. The test
+checks signatures and failed-integrity copies, and that replies carry no
+matching Hop-by-Hop or Destination Options headers. It does not cover physical
+interfaces or nested tunnels.
 
 ### Revision 26 interpretation
 
-Sections 4.2 and 6.2 describe reflecting all identical-prefix headers with
-successive requests, while their numbered rule 1 and the inability cases in
-Sections 4.1 and 6.1 require C for a nonzero selector matching multiple
-unselected headers. Apply the explicit ambiguity rule until this conflict is
-clarified: repeating the same nonzero selector does not resolve ambiguity and
-does not consume a capture. Ordered all-zero requests do reflect every header.
-After a successful request consumes one header, later selectors consider only
-the remaining captures.
+Sections 4.2 and 6.2 describe reflecting all headers with identical prefixes
+through successive requests. Their numbered rule 1, and the inability cases
+in Sections 4.1 and 6.1, require C for a nonzero selector that matches more
+than one unselected header. Until the authors resolve this, stamp-suite
+applies the explicit ambiguity rule: repeating the same nonzero selector does
+not resolve the ambiguity and does not consume a capture. Ordered all-zero
+requests do reflect every header. Once a request consumes a header, later
+selectors see only the remaining captures.
 
 `tests/tlv_flag_semantics.rs::revision26_identical_headers_use_strict_unmatched_selection`
-uses independently encoded requests for Types 246 and 247 in open and authenticated
-mode, including both HMACs. It verifies ambiguous requests preserve data, all-zero
-requests consume captures once in order, and a subsequent nonzero selector can
-match the remaining unique header. This tests packet processing with supplied
-capture metadata, not physical headers on the wire.
+builds requests for Types 246 and 247 without the crate's encoder, in open and
+authenticated mode with both HMACs. It checks that ambiguous requests keep
+their data, that all-zero requests consume captures once and in order, and
+that a later nonzero selector can match the one remaining header. It tests
+packet processing with supplied capture metadata, not headers on the wire.
 
-The sender's current profile already enforces the new subset restriction:
-it originates one fixed IP header and at most one hbh followed by one dest header.
-The latter two have distinct Next Header octets. Requests that mask away their
-distinguishing octets must still match a unique remaining header; ambiguous
-subsets and duplicate selections are rejected. CLI and TOML tests cover these
-limits. Supporting additional originated header chains will require revisiting
-the restriction before extending the profile.
+The sender already meets the new subset restriction. It originates one fixed
+IP header and at most one Hop-by-Hop header followed by one Destination
+Options header, and those two have different Next Header octets. A request
+that masks those octets must still match exactly one remaining header;
+ambiguous subsets and duplicate selections are rejected, with CLI and TOML
+tests. Originating other header chains would need this restriction checked
+again.
 
-A [clarification request](ext-hdr-26-clarification.md) is prepared for the draft
-authors; maintainer submission and an authoritative answer remain pending.
+A [clarification request](ext-hdr-26-clarification.md) for the draft authors
+has been drafted; it has not been sent and there is no answer yet.
 
 ### MTU budget
 
-The sender rechecks the connected route MTU before each normal send and each
-Access Report retry, removes optional Type 246/247 TLVs to fit, and refuses an
-oversized mandatory packet before attempting a send. A failed route lookup
-also refuses the probe; it does not reuse the previous budget. Dynamic control,
-Direct Measurement, Access Report, diagnostic bytes and the originated HMAC
-are reserved before trimming. Header requests can return after the MTU grows,
-even if startup removed every request. On supported Linux, Windows and macOS IPv6 sockets it sets Don't Fragment, so a
-route change cannot fragment a probe. The reflector sizes each reply against the actual
-destination route before signing (`src/receiver/mtu.rs`,
-`src/receiver/transmit.rs::fit_reply`); an unknown budget fails closed. Header
-requests need a known route MTU, provided by Linux, Windows and supported macOS IPv6 senders;
-reflector lookup is also available on Linux, Windows and unpinned native unicast IPv6 on macOS. That limits where the feature runs;
-it never permits an oversized packet.
+The sender reads the connected route MTU before each send and each Access
+Report retry, removes optional Type 246/247 TLVs to fit, and refuses a probe
+whose mandatory fields do not fit. A failed route lookup also refuses the
+probe; the previous budget is not reused. Space for the Type 12 TLV, Direct
+Measurement, Access Report, the diagnostic trailer and the sender's HMAC is
+reserved before trimming. Each probe starts from the full request list, so
+header requests come back when the MTU grows, even if startup removed all of
+them. On Linux, Windows and supported macOS IPv6 sockets the sender sets
+Don't Fragment, so a route change cannot fragment a probe.
+
+The reflector applies two limits. During TLV processing,
+`src/tlv/list/processing.rs::trim_reflected_headers_to_size` trims header
+TLVs to the administrative `--reflected-control-max-size` (default 1500
+bytes), reserving room for an HMAC it will add. At send time,
+`src/receiver/transmit.rs::fit_reply` sizes the reply against the route to
+the actual destination before signing (`src/receiver/mtu.rs`), and an unknown
+budget drops the reply. Route lookup exists on Linux, Windows and unpinned
+native unicast IPv6 on macOS. Elsewhere header reflection does not work, but
+no oversized packet is sent.
 
 Windows sender tests in `src/sender/run/windows_mtu_tests.rs` query native
 IPv4, IPv6 and IPv4-mapped sockets, apply socket-local caps without changing
-host routes, and check trimming/restoration, mandatory oversize refusal and
-the configured fragmentation policy. Open, keyed-open and authenticated sends
-include independent HMAC checks. The portable fixed-header wire test in
-`tests/header_request_wire_test.rs` also runs on Windows. These exercise kernel
-estimates and socket caps, not active path probing or live host route changes.
-Windows loopback may bypass send-time MTU enforcement even with Don't Fragment
-set; these tests establish application refusal and socket policy, not physical
-fragmentation behavior.
+host routes, and check trimming and restoration, refusal of oversized
+mandatory fields and the fragmentation policy. Open, keyed-open and
+authenticated sends have their HMACs checked. The portable fixed-header wire
+test in `tests/header_request_wire_test.rs` also runs on Windows. These tests
+use kernel estimates and socket caps; they do not probe the path or change
+host routes. Windows loopback may skip MTU enforcement even with Don't
+Fragment set, so they show the application's refusal and socket policy, not
+physical fragmentation.
 
 The Windows reflector reads the selected route, path MTU and interface MTU on
-every attempt, refusing an unavailable budget. Its native tests in
-`src/receiver/mtu/windows.rs` cover bound/wildcard sources, stale-cache bypass,
-unavailable sources and IPv6 zone encoding. The transmit test
+every attempt and drops the reply if no budget is available. Native tests in
+`src/receiver/mtu/windows.rs` cover bound and wildcard sources, bypassing a
+stale cache, unavailable sources and IPv6 zone encoding. The transmit test
 `src/receiver/transmit/windows_tests.rs::windows_reflector_mtu_shapes_native_datagrams_and_restores_policy`
-checks actual IPv4/IPv6 datagrams, Type 12 clamping, header removal, BER whole
-patterns, HMACs and restoring ordinary socket policy. These are transmit-side
-loopback checks, not capture-driver, real route-change or physical-path evidence.
+checks IPv4 and IPv6 datagrams, Type 12 clamping, header removal, whole BER
+patterns, HMACs and restoring the normal socket policy. These are loopback
+send-side tests, without a capture driver, real route changes or a physical
+path.
 
-Single replies without Type 12 initialize their transport policy before moving
-the reply buffer. Transmit regressions cover Types 246/247, IPv4/IPv6, open and
+macOS sender tests in `src/sender/run/macos_mtu_tests.rs` cover connected IPv6
+queries, minimum-MTU policy changes, removing and restoring optional headers,
+refusing oversized mandatory fields, initial BER fitting and signatures. The
+macOS reflector tests in `src/receiver/transmit/macos_tests.rs` cover Type 12
+sizing, optional-header removal, whole-pattern BER fitting, signatures and
+repeated fragmentation and CoS setting changes; the query tests in
+`src/receiver/mtu/macos.rs` cover wildcard sources, forced refresh and
+unsupported cases. These tests run only in native macOS CI; cross-compilation
+does not run them. They do not show physical fragmentation or real route
+changes.
+
+Single replies without Type 12 set their transport policy before the reply
+buffer is moved. Transmit tests cover Types 246/247, IPv4 and IPv6, open and
 authenticated replies, mandatory TLV order, re-signing, missing budgets and
-EMSGSIZE refresh. The live route test verifies single-reply trimming over a
-smaller reverse route, including C-marked header requests with no captured data.
-The sender namespace regression uses the public sender loop with an independent
-UDP peer and HMAC assertions. It covers IPv4/IPv6, open, keyed open (HMAC
-origination on/off) and authenticated modes, including a real IPv6 Hop-by-Hop
-header. It verifies mandatory-packet refusal at startup and after a route
-decrease, and restoration when no header request survived startup. A separate
-shared-sender regression disconnects the socket to exercise a real failed route
-lookup. These tests establish Linux kernel-route behavior, not end-to-end PMTU
-discovery or physical-link behavior. The single-reply policy bug affected
-v1.0.0; these rows describe the fixed code.
+refreshing after EMSGSIZE. The live route test checks single-reply trimming
+over a smaller reverse route, including C-marked header requests with no
+captured data. The sender namespace test runs the public sender loop against
+a separate UDP peer that checks HMACs. It covers IPv4 and IPv6, open, keyed
+open (with and without an originated HMAC) and authenticated modes, including
+a real IPv6 Hop-by-Hop header. It checks refusal of oversized mandatory fields
+at startup and after a route decrease, and restoration when no header request
+survived startup. A separate test disconnects the shared sender socket to
+make a route lookup fail. These tests show Linux kernel-route behavior, not
+end-to-end PMTU discovery or physical links. In 1.0.0 single replies could be
+sent oversized; these rows describe the fixed code.
 
 ### Control sub-TLV
 
 `src/receiver/mod.rs::apply_semantic_tlv_processing` calls
 `src/tlv/list/processing.rs::mark_ipv6_ext_hdr_control_c`, which sets C on
-every IPv6 Extension Header Control sub-TLV in Type 12. This is the draft's
-cannot-add response (§5.1 rule 4), used on both backends because reply-header
-attachment is not implemented. Duplicate sub-TLVs all get C.
+every IPv6 Extension Header Control sub-TLV in Type 12, duplicates included.
+This is the draft's cannot-add response (§5.1 rule 4). Both backends use it,
+because attaching headers to replies is not implemented.
 
 ### Session state
 
-`src/sender/session_state.rs::Monitor` runs after authentication, session and
-duplicate admission in `Measurements`. Structured logs and the
+`src/sender/session_state.rs::Monitor` runs in `Measurements` after the
+authentication, session and duplicate checks. Structured logs and the
 `measurements.session_state` report field show idle, active and failed
-transitions. Each probe has a `--timeout` deadline; `--session-loss-threshold`
-(default 3) consecutive unanswered probes mark a transmitting session failed,
-including before its first valid reply. A validated reply activates or recovers
-it. Invalid-session and duplicate replies do not
-drive recovery. Independent IPv4/IPv6 wire and state tests cover failure,
-recovery and invalid-session replies.
+transitions. Each probe has a `--timeout` deadline. After
+`--session-loss-threshold` (default 3) consecutive unanswered probes, a
+transmitting session is marked failed, even before its first valid reply. A
+validated reply activates or recovers it; duplicates and replies that fail the
+session check do not. IPv4 and IPv6 wire tests and state tests cover failure,
+recovery and replies that fail the session check.
 
 ## Coverage
 
 The table lists the draft's uppercase normative clauses and structural field
-requirements, with the §9.2 MAY expanded into its five descriptive state outcomes.
-Stable clause IDs are retained where possible; control procedure rows reference
-§5.1 in revision 26, and the combined-header ordering rows reference §7.1.
-Figures 6 and 7 are covered by the field width and length rows. Keyword boilerplate, topology examples, IOAM
-descriptions, implementation-status text and IANA procedures add no runtime
-requirement. Revision 25 removes revision 15's zero-checksum section. Checksums
-remain enabled and validated for IPv6; the separate Linux IPv4 authenticated BER
-sender option does not enable an IPv6 zero-checksum mode. Requirements of
-referenced RFCs are covered by their own matrices.
+requirements, with the §9.2 MAY split into its five state outcomes. Control
+procedure rows cite revision 26 §5.1, and the combined-header ordering rows
+cite §7.1. The field width and length rows cover Figures 6 and 7. Keyword
+boilerplate, topology examples, IOAM descriptions, implementation-status text
+and IANA procedures add no runtime requirement. Revision 25 removed revision
+15's zero-checksum section. IPv6 checksums stay enabled and validated; the
+Linux IPv4 authenticated BER sender option has no IPv6 zero-checksum mode.
+Requirements of referenced RFCs are in their own matrices.
 
 See the [namespace tests](../testing-netns.md), [measurement
-semantics](../measurements.md) and [release procedures](../releasing.md).
+semantics](../measurements.md) and [Releasing](../releasing.md).
 
 ## Revision 26 review 2026-11-09
 
-Compared the complete archived revision 25 and 26 texts. The field lengths and
-wire layout are unchanged: Length is the selected header's complete size, with
-its Requested prefix included once. The revised matching text explicitly excludes
-previously selected headers. Existing ordered consumption already implements
-that rule. The new sender restrictions are covered within the supported originated
-profile; the conflicting repeated-nonzero examples add two Partial rows.
-No reflector matching change or experimental codepoint change is made.
+Compared the full archived texts of revisions 25 and 26. Field lengths and
+the wire layout are unchanged: Length is the selected header's full size, with
+its Requested prefix counted once. The revised matching text excludes headers
+that were already selected, which the existing in-order consumption already
+did. The sender's originated profile meets the new sender restrictions. The
+conflicting repeated-nonzero examples add two Partial rows. Reflector matching
+and the experimental codepoints did not change.
 
-The current Datatracker document still identifies revision 26 as Active.
-Archived source SHA-256 values verified for this review:
+On the review date, Datatracker listed revision 26 as Active. Archived source
+SHA-256 values:
 
 - Revision 25: `cbb4b1682184ba6ff49b64f7e562cd74a5f0074df04b4ccd0ff00d01da70bb16`.
 - Revision 26: `75f9d776a3c7f9ed4637a7240dae62922158d28ca34444287e17311587fc6a3e`.
 
 ## Revision 25 review (2026-10-26)
 
-Compared the complete revision 15 and 25 texts from the IETF archive. The
-review covered changes through revision 25, including wildcard selectors and
-ambiguity rejection, mutable-octet masking, explicit sender configuration and
-reflector disclosure policy, control sub-TLV length validation, initial session
-failure, and the expanded rate/burst and overload guidance. MTU and mixed-header
-ordering requirements moved to §§7.1–7.2. Trimming still precedes signing;
+Compared the full revision 15 and 25 texts from the IETF archive. The review
+covered wildcard selectors and ambiguity rejection, masking of mutable octets,
+explicit sender configuration, reflector disclosure policy, control sub-TLV
+length validation, failure before the first reply, and the expanded rate,
+burst and overload guidance. The MTU and mixed-header ordering requirements
+moved to §§7.1–7.2, and the zero-checksum section was removed. Trimming still
+happens before signing.
 `src/receiver/transmit/tests.rs::reflected_headers_are_trimmed_before_ber_padding`
-now covers the mixed BER/header case, which removes header TLVs before BER
-padding and refuses a packet whose remaining mandatory fields cannot fit. The zero-checksum section was removed. IANA values
-remain TBA1/TBA2/TBA3, so the local experimental allocations are retained and
-scored Partial. Reverse-path attachment and backend capture limits remain as
-stated above. Per-condition C error counters are a recorded SHOULD limitation.
+checks that header TLVs are removed before padding is touched and that a reply
+whose remaining fields cannot fit is refused. Its first TLV is the retired
+Type 241, which now parses as unknown, so the test no longer contains a BER
+TLV;
+`src/receiver/transmit/ber_tests.rs::controlled_header_trimming_marks_only_changed_ber_denominators`
+covers header trimming with a real BER TLV. The IANA values are still
+TBA1/TBA2/TBA3, so the experimental codepoints stay and their rows are
+Partial. Per-condition C counters were missing at this review; they were added
+later (ext-hdr-9-errors).
 
 Source SHA-256 (downloaded 2026-10-26):
 
 - Revision 15: `5c7337d11e1c9beffe1ce5a26438aa1d6f3411df8e280f3e022c27c363cd71e7`.
 - Revision 25: `cbb4b1682184ba6ff49b64f7e562cd74a5f0074df04b4ccd0ff00d01da70bb16`.
-
-macOS sender regressions in `src/sender/run/macos_mtu_tests.rs` cover connected
-IPv6 queries, minimum-MTU policy changes, optional header removal/restoration,
-mandatory oversize refusal, BER initial fitting and independent signatures.
-They are selected by the native macOS CI jobs; cross-compilation alone does not
-establish native behavior or physical fragmentation enforcement.
-
-macOS reflector regressions in `src/receiver/transmit/macos_tests.rs` cover
-Type 12 sizing, optional-header removal, BER whole-pattern fitting, independent
-signatures and repeated fragmentation/CoS setting transitions. The query tests
-in `src/receiver/mtu/macos.rs` cover wildcard sources, forced refresh and explicit
-unsupported cases. Native macOS execution is required; cross-checks do not
-establish physical fragmentation behavior or actual route-change handling.

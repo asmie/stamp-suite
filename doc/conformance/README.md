@@ -73,10 +73,9 @@ Documents. Each matrix links the source document it quotes.
 ## Known limits
 
 The README, the architecture guide, the test inventory, the interoperability
-guide and the release checks all refer to this table for the supported
-profiles. A Compliant row holds only within the profile it states. An ignored
-test, or code that compiles, is not evidence of runtime behavior. Older
-reports apply only to the commit they recorded.
+guide and the release guide link here for the supported profiles. A Compliant
+row holds only within the profile it states. An ignored test, or code that
+compiles, is not evidence of runtime behavior.
 
 | Area | Supported profile and boundary | Evidence/details |
 |---|---|---|
@@ -84,13 +83,13 @@ reports apply only to the commit they recorded.
 | Deployment provisioning | A sender cannot bind to a local endpoint the reflector already holds, but a sender on a different local IP can use the same port number as the reflector. Receive caps are configurable, but stamp-suite does not check that the total receive and transmit rates fit together. Both rows are Partial. | [Port and policing limits](draft-stamp-ext-hdr.md#port-and-policing-limits) |
 | Reply correlation | The sender accepts a reply only if it echoes the complete sequence number and the T1 that went out on the wire, even when trailing fields are parsed leniently. A repeated sequence number and T1 pair cannot prove that a reply is fresh. When a kernel TX timestamp corrects T1, matching still uses the T1 from the wire, and only the OWD calculation uses the corrected value. | [Reply accounting and limits](../measurements.md#probes-reply-copies-and-duplicates) |
 | Micro-sessions and LAG | Numeric IDs are encoded, checked and learned. stamp-suite does not tie IDs to physical LAG members, steer traffic out of a given member, or check which member a packet came in on. Reflector demultiplexing does not show that senders can share a port pair. Eight rows are Partial and one is a Gap. | [RFC 9534](rfc9534.md), [sender reply validation](rfc9534.md#sender-reply-validation) |
-| Header reflection | Both header types are reflected only to sender IPs that the operator has allowed. On Linux, the nix backend can reflect Type 246 headers from ancillary data; fixed and nested headers (Type 247) need pnet. On the macOS nix backend, header requests get C, and so do requests to attach headers on the reverse path. An all-features build uses nix. Revision 26 has contradictory examples for repeated selectors, so those rows are Partial. | [Backend support](draft-stamp-ext-hdr.md#backend-support), [revision interpretation](draft-stamp-ext-hdr.md#revision-26-interpretation) |
-| MTU | The sender and reflector size packets from a kernel route lookup on Linux and Windows, and for native unicast IPv6 on macOS. They do not probe the end-to-end PMTU. Where no lookup is available (IPv4 or pinned interfaces on macOS, other platforms), the sender uses fixed size budgets, and size-controlled or header replies that need a route budget are dropped. Sender dispatch has Linux IPv4 and IPv6 tests for trimming, restoring and refusing packets, including with a real Hop-by-Hop header attached. BER sizing per platform is still Partial. | [RFC 10052 sizing](draft-asymmetrical-pkts.md#reply-size-and-route-mtu), [BER matrix](draft-stamp-ber.md), [test-evidence review](test-evidence.md) |
-| Type 12 | Exact intervals on the wire and the conservative choice of the first request are Partial. Identity protection is scored only for authenticated mode with extension HMAC verification. In permissive open mode the HMAC is optional, so a request may carry none. | [RFC 10052 limits and profiles](draft-asymmetrical-pkts.md#identity-protection) |
+| Header reflection | Both header types are reflected only to sender IPs that the operator has allowed. On Linux, the nix backend can reflect Type 246 headers from ancillary data; fixed and nested headers (Type 247) need pnet. On the macOS nix backend, header requests get C. Requests to attach headers on the reverse path get C on every backend. An all-features build uses nix. Revision 26 has contradictory examples for repeated selectors, so those rows are Partial. | [Backend support](draft-stamp-ext-hdr.md#backend-support), [revision interpretation](draft-stamp-ext-hdr.md#revision-26-interpretation) |
+| MTU | The sender and reflector size packets from a kernel route lookup on Linux and Windows, and for native unicast IPv6 on macOS. They do not probe the end-to-end PMTU. Where no lookup is available (IPv4 or pinned interfaces on macOS, other platforms), the sender refuses header requests at startup and sizes BER padding for a fixed 1500-byte (IPv4) or 1280-byte (IPv6) MTU. The reflector drops Type 12 and header replies that need a route budget there. Sender dispatch has Linux IPv4 and IPv6 tests for trimming, restoring and refusing packets, including with a real Hop-by-Hop header attached. BER sizing per platform is Partial. | [RFC 10052 sizing](draft-asymmetrical-pkts.md#reply-size-and-route-mtu), [BER matrix](draft-stamp-ber.md), [test-evidence review](test-evidence.md) |
+| Type 12 | Three rows are Partial: exact intervals on the wire, the conservative choice of the first request, and filling a clamped reply to exactly the MTU. Requests are checked against count, size, interval, rate, volume and duration caps. Identity protection is scored only for authenticated mode with extension HMAC verification. In permissive open mode the HMAC is optional, so a request may carry none. | [RFC 10052 limits](draft-asymmetrical-pkts.md#type-12-limits), [route MTU](draft-asymmetrical-pkts.md#reply-size-and-route-mtu), [identity protection](draft-asymmetrical-pkts.md#identity-protection) |
 | Return paths | IP and SRv6 return paths work only with certain backends and routes. SR-MPLS is Excluded and gets U. Tests check the flags on processed children and that processing stops at malformed data. Copies that are protected or skipped can keep the child flags they arrived with, so the inherited requirement is Partial. A fallback reply does not prove SRH transit. | [RFC 9503 scope](rfc9503.md#scope), [nested flags](rfc9503.md#nested-flags), [privileged tests](../testing-netns.md) |
 | Management | The AgentX sub-agent is read-only (SET is not supported) and is not scored in these protocol matrices. It needs a separate master agent. YANG management is not implemented, and its expired draft is only watched. | [Observability](../usage.md#observability), [AgentX](../architecture.md#snmp-agentx-sub-agent) |
-| BER | Four rows are Partial: zero-checksum validation, platform MTU, physical LAG, and filling up to the link MTU. With TLV processing on, diagnostics report local causes of C and C flags kept from the peer in the defined child layouts. Arbitrary values, and the tails copied in legacy TLV-ignore mode, are not interpreted. The independent BER peer uses ordinary UDP checksums. Separate raw fixtures cover IPv4 packets that arrive with a zero checksum and authenticated sending. None of this shows that errors are captured at the raw link or FEC level. No maintained, compatible application has been tested as a peer yet. | [BER matrix](draft-stamp-ber.md), [BER migration](../ber-migration.md) |
-| CoS/ECN | ECN capability reporting from BPM revision 00 is implemented. RPE=01 says that marking is unavailable, including on Windows, and sender diagnostics recognize it. The DSCP fallback uses the received value only if policy admits it, and otherwise picks a third value that policy permits. If a restricted policy is empty or cannot be enforced, the reflector sends no reply to the CoS request. For this profile, the frozen RFC 8972 text's unconditional fallback to DSCP2 is Partial. Consistency with RFC 3168 and RFC 9330 controllers is also Partial. Reverse feedback works on Linux and macOS. | [Successor changes](draft-stamp-cos-ecn.md#bpm-00-successor-changes) |
+| BER | Four rows are Partial: zero-checksum validation, platform MTU, physical LAG, and filling up to the link MTU. With TLV processing on, diagnostics report local causes of C and C flags kept from the peer in the defined child layouts. Arbitrary values, and the tails copied in legacy TLV-ignore mode, are not interpreted. The independent BER peer uses ordinary UDP checksums. Separate raw fixtures cover IPv4 packets that arrive with a zero checksum and authenticated sending. None of this shows that errors are captured at the raw link or FEC level. No maintained, compatible application has been tested as a peer. | [BER matrix](draft-stamp-ber.md), [BER migration](../ber-migration.md) |
+| CoS/ECN | ECN capability reporting from BPM revision 00 is implemented. RPE=01 says that marking is unavailable, including on Windows, and sender diagnostics recognize it. The DSCP fallback uses the received value only if policy admits it, and otherwise picks a third value that policy permits. An empty policy answers on DSCP 0 with RPD=01 and C. If the backend cannot enforce a restricted policy, the reflector sends no reply to the CoS request. For this profile, the frozen RFC 8972 text's unconditional fallback to DSCP2 is Partial. Consistency with RFC 3168 and RFC 9330 controllers is also Partial. Reverse feedback works on Linux and macOS. | [Successor changes](draft-stamp-cos-ecn.md#bpm-00-successor-changes), [empty policy](draft-stamp-cos-ecn.md#empty-policy) |
 | Platforms and hardware | There is no evidence yet from physical LAGs or NIC timestamps. macOS has software receive timestamps. The Windows checks run without a capture driver, so they show nothing about capture through one. A cross-build is not a native runtime test. | [Release procedures](../releasing.md), [hardware timestamps](../testing-hardware-timestamps.md) |
 
 ## Experimental codepoints
@@ -108,11 +107,11 @@ agree on what they mean.
 | Sub-TLV Type 240 (of Type 12) | STAMP Sub-TLV Types (Experimental, 240-251) | `REFLECTED_CONTROL_SUBTLV_IPV6_EXT_HDR_CONTROL` | draft-ietf-ippm-stamp-ext-hdr-26 §5.1 | IANA allocation of TBA3 |
 
 The old outer Types 240–242 are retired, and requests that use them get U.
-Type 242 used to collide with another implementation's Heartbeat TLV. The
-successor TLV always carries the burst field, so `--ber-omit-burst` is now a
-migration error. The successor's matrix and the standards pin follow BPM
-revision 01. Teaparty's BER layouts are incompatible with the successor
-profile (see [BER migration](../ber-migration.md)).
+Type 242 collided with another implementation's Heartbeat TLV. The successor
+TLV always carries the burst field, so `--ber-omit-burst` is a startup error.
+The BER matrix and the standards pin follow BPM revision 01. Teaparty's BER
+layouts are incompatible with this profile; see
+[BER migration](../ber-migration.md#interoperability).
 
 When a final allocation changes a codepoint on the wire, update its constant,
 note the change in `CHANGELOG.md`, and bump the minor version, as the
@@ -151,7 +150,7 @@ matrix's summary and the [Matrices](#matrices) table.
 
 `--json` gives machine-readable output. Neither script understands the
 protocol. A citation can resolve and still describe the code wrongly, so
-review the affected rows whenever the code changes.
+review the affected rows when the code changes.
 
 The citation checker also lists which normative Compliant rows name a test.
 CI requires every such row to name one, and saves the full list in
@@ -176,7 +175,7 @@ revisions, drafts that are no longer active, and chains of replacement drafts.
 For each implemented draft, it also checks that the `Revision frozen:` line in
 the matrix names the pinned revision. Watch-only entries, such as the expired
 STAMP YANG draft, report changes without claiming an implementation, and a
-change does not fail the check. Missing evidence still fails it, though. When
+change does not fail the check. Missing evidence does fail it. When
 the scheduled workflow fails, it opens or updates an issue asking for review.
 See [Standards revision monitor](../releasing.md#standards-revision-monitor).
 
@@ -193,8 +192,10 @@ See [Standards revision monitor](../releasing.md#standards-revision-monitor).
   SRv6 transit, extension-header reflection on both backends, and changes to
   the route MTU. CI sets `STAMP_REQUIRE_PRIVILEGED=1`, so the job fails if a
   prerequisite is missing or no test runs. A skipped test is not evidence.
+- The [independent BER peer](../testing-interop.md#independent-successor-ber-profile)
+  runs 60 cases in both roles against the default and all-features builds.
 - Property tests run as part of the Cargo tests. The fuzz workflow builds and
-  runs nine targets. Building a fuzz target is not the same as fuzzing it.
-- [Release procedures](../releasing.md) covers authenticated HTTP and
-  HTTPS control, a Net-SNMP master, the platform runtime gates and the
-  standards revision monitor.
+  runs ten targets. Building a fuzz target is not the same as fuzzing it.
+- [Releasing](../releasing.md) covers authenticated HTTP and HTTPS control, a
+  Net-SNMP master, the platform runtime gates and the standards revision
+  monitor.
