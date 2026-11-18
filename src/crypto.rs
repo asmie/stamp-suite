@@ -171,14 +171,23 @@ impl KeySource<'_> {
 
 /// Reads a bearer-token file with the same descriptor-based permission checks
 /// as [`HmacKey::from_file`] (see "Security and failures" in
-/// `doc/control-plane.md`).
+/// `doc/control-plane.md`). Returns the token without surrounding whitespace.
+/// An empty or whitespace-only file is an error: no client could send that
+/// token, so the API would refuse every request without saying why.
 pub fn read_token_file(path: &Path) -> Result<String, HmacError> {
     use std::io::Read;
 
     let mut file = open_owner_only_file(path, "token file is accessible by group or other")?;
     let mut token = String::new();
     file.read_to_string(&mut token)?;
-    Ok(token)
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(HmacError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "token file is empty",
+        )));
+    }
+    Ok(token.to_string())
 }
 
 /// HMAC key for STAMP authentication.
@@ -824,7 +833,19 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = write_key_file(dir.path(), "token", "s3cret-bearer-token\n");
         let token = read_token_file(&path).expect("0600 token must load");
-        assert_eq!(token, "s3cret-bearer-token\n");
+        assert_eq!(token, "s3cret-bearer-token");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_token_file_rejects_an_empty_token() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        for contents in ["", "\n", "  \t\r\n"] {
+            let path = write_key_file(dir.path(), "token", contents);
+            let error = read_token_file(&path).expect_err("empty token must be refused");
+            assert!(error.to_string().contains("empty"), "{contents:?}: {error}");
+            std::fs::remove_file(&path).unwrap();
+        }
     }
 
     #[cfg(unix)]

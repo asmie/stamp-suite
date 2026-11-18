@@ -410,7 +410,8 @@ how queued replies are finished or cancelled, and which options control that.
   HTTPS. You must give both, and both require `--control-token-file`. Client
   certificates (mutual TLS) are not supported.
 - Startup fails if a certificate, key or token file is missing or unreadable,
-  if the token file has any group or other permissions, or if the bind fails.
+  if the token file has any group or other permissions, if the token is empty
+  after surrounding whitespace is removed, or if the bind fails.
   It also fails if you pass `--control` to a binary built without the
   `control` feature, or in sender mode.
 - Binding to a non-loopback address without TLS logs a warning. For remote

@@ -249,9 +249,7 @@ async fn start_control(
         // and shutdown endpoints.
         Some(path) => Some(
             stamp_suite::crypto::read_token_file(path)
-                .map_err(|e| StartupError::service(format!("Cannot read {}", path.display()), e))?
-                .trim()
-                .to_string(),
+                .map_err(|e| StartupError::service(format!("Cannot read {}", path.display()), e))?,
         ),
         None => None,
     };

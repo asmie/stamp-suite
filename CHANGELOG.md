@@ -156,6 +156,8 @@ Upgrade both peers together when they use BER or reflected headers.
   - Windows: 1 ms timer resolution is requested during runs, and pacing keeps
     running after receive errors.
   - The loss threshold triggers session failure even before the first reply.
+- Control API: an empty or whitespace-only `--control-token-file` stops
+  startup with an error. It was accepted, and every request was refused.
 - SNMP: `stampReflListenPort` reports the port the reflector bound. With
   `--local-port 0` it reported 0.
 - SNMP: the session table no longer returns `stampReflSessIndex`, which the
