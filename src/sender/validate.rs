@@ -16,6 +16,12 @@ pub(super) enum TlvRejection {
     MsidMalformed,
     /// Required binding is absent, unusable, or cannot be integrity-validated.
     MsidUnavailable,
+    /// The reflector flagged the Micro-session ID TLV U (RFC 8972 §4): it
+    /// does not support RFC 9534.
+    MsidUnrecognized,
+    /// The reflector returned Reflector Micro-session ID 0, so it has no
+    /// member link identifier to validate (RFC 9534 §3.2).
+    ReflectorMsidUnset,
     /// More than one Micro-session ID makes the binding ambiguous.
     MsidAmbiguous,
 }
@@ -34,6 +40,16 @@ impl std::fmt::Display for TlvRejection {
                 got, expected
             ),
             Self::MsidUnavailable => write!(f, "required Micro-session ID is missing or unusable"),
+            Self::MsidUnrecognized => write!(
+                f,
+                "reflector flagged the Micro-session ID TLV unrecognized (U flag); \
+                 it does not support RFC 9534 micro-sessions"
+            ),
+            Self::ReflectorMsidUnset => write!(
+                f,
+                "reflector returned Reflector Micro-session ID 0: it has no member link ID \
+                 configured (start a stamp-suite reflector with --reflector-member-link-id)"
+            ),
             Self::MsidAmbiguous => write!(f, "multiple Micro-session ID TLVs in reflected packet"),
             Self::MsidMalformed => {
                 write!(f, "malformed Micro-session ID TLV in reflected packet")
@@ -167,6 +183,11 @@ pub(super) fn validate_reflected_tlvs(
                 break; // RFC 8972 §4: M flag halts the remainder.
             }
             if raw.is_unrecognized() {
+                // A required Micro-session ID flagged U cannot bind the reply;
+                // name the cause instead of reporting it missing.
+                if want_msid && raw.tlv_type == TlvType::MicroSessionId {
+                    return Err(TlvRejection::MsidUnrecognized);
+                }
                 continue; // RFC 8972 §4: U flag skips this TLV.
             }
             if track_access_report && raw.tlv_type == crate::tlv::TlvType::AccessReport {
@@ -235,9 +256,6 @@ pub(super) fn validate_reflected_tlvs(
             if want_msid && raw.tlv_type == crate::tlv::TlvType::MicroSessionId {
                 let parsed =
                     MicroSessionIdTlv::from_raw(raw).map_err(|_| TlvRejection::MsidMalformed)?;
-                if parsed.reflector_micro_session_id == 0 {
-                    return Err(TlvRejection::MsidUnavailable);
-                }
                 // RFC 9534 §3.2: our sender_micro_session_id must be echoed
                 // unchanged. A mismatch means the reply belongs to a different
                 // session (or is spoofed); discard.
@@ -248,6 +266,16 @@ pub(super) fn validate_reflected_tlvs(
                             expected,
                         });
                     }
+                }
+                // RFC 9534 §3.2: a sender that does not know the reflector's
+                // member link identifier sends zero, and the reflector "MUST
+                // put the ... Reflector member link identifiers that are
+                // associated with the micro STAMP session" in the reply. Zero
+                // therefore identifies no member link: the sender "MUST use the
+                // Reflector Micro-session ID to validate the Reflector's
+                // behavior" and cannot validate or learn zero, so it discards.
+                if parsed.reflector_micro_session_id == 0 {
+                    return Err(TlvRejection::ReflectorMsidUnset);
                 }
                 // Validate the reflector ID on every usable reply (RFC 9534 §3.2).
                 // A configured ID takes precedence; otherwise use the first accepted ID.

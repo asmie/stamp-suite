@@ -892,6 +892,13 @@ fn apply_semantic_tlv_processing(
             crate::warn_throttled!("Micro-session ID validation failed, discarding packet");
             return None;
         }
+    } else if tlvs.clear_micro_session_reflector_ids() {
+        // No member link ID: reply with Reflector Micro-session ID 0, which a
+        // micro Session-Sender discards (RFC 9534 §3.2).
+        crate::warn_throttled!(
+            "Micro-session ID TLV received but --reflector-member-link-id is not set; \
+             replying with Reflector Micro-session ID 0, which micro-session senders discard"
+        );
     }
 
     // Process Return Path TLV (RFC 9503 §4). Mutable: the

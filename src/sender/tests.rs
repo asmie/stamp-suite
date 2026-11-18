@@ -1460,6 +1460,58 @@ fn test_forged_first_reply_does_not_latch_reflector_msid() {
 }
 
 #[test]
+fn msid_rejections_name_reflector_id_zero_and_u_flag() {
+    // RFC 9534 §3.2: Reflector Micro-session ID 0 identifies no member link,
+    // so it can neither validate nor seed the latch. The rejection names
+    // the reflector option that fixes it.
+    let validate = |raw: crate::tlv::RawTlv, expected_reflector: Option<u16>| {
+        let mut tlvs = TlvList::new();
+        tlvs.push(raw).unwrap();
+        let mut latched = None;
+        let result = validate_reflected_tlvs(
+            &tlvs,
+            &[0u8; 44],
+            44,
+            None,
+            true,
+            Some(7),
+            expected_reflector,
+            &mut latched,
+            false,
+            false,
+        );
+        assert_eq!(latched, None);
+        result.expect_err("reply must be rejected")
+    };
+    for expected_reflector in [None, Some(9)] {
+        let mut zero = MicroSessionIdTlv::new(7, 0).to_raw();
+        zero.clear_reflector_flags();
+        let err = validate(zero, expected_reflector);
+        assert_eq!(err, TlvRejection::ReflectorMsidUnset);
+        assert!(err.to_string().contains("--reflector-member-link-id"));
+    }
+
+    // A wrong sender ID is reported before the zero reflector ID.
+    let mut other = MicroSessionIdTlv::new(8, 0).to_raw();
+    other.clear_reflector_flags();
+    assert_eq!(
+        validate(other, None),
+        TlvRejection::MsidMismatch {
+            got: 8,
+            expected: 7
+        }
+    );
+
+    // RFC 8972 §4: U means the reflector did not understand the TLV.
+    let mut flagged = MicroSessionIdTlv::new(7, 9).to_raw();
+    flagged.clear_reflector_flags();
+    flagged.set_unrecognized();
+    let err = validate(flagged, None);
+    assert_eq!(err, TlvRejection::MsidUnrecognized);
+    assert!(err.to_string().contains("U flag"));
+}
+
+#[test]
 fn test_forged_msid_with_i_flag_not_consumed() {
     // I-flagged MSID values cannot affect session binding
     // (RFC 8972 §4, §4.8), including through a forged mismatch.

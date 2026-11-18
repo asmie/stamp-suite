@@ -600,6 +600,36 @@ impl TlvList {
         Self::apply_micro_session_id(self.non_hmac_tlvs_mut(), reflector_member_link_id)
     }
 
+    /// Writes Reflector Micro-session ID 0 into every processable
+    /// Micro-session ID TLV, for a reflector with no member link identifier.
+    ///
+    /// RFC 9534 §3.2: the reflector "MUST put the Sender and Reflector member
+    /// link identifiers that are associated with the micro STAMP session" in
+    /// the reply. Without a configured identifier none is associated, so the
+    /// field carries zero, the value a sender uses for an unknown identifier,
+    /// rather than echoing the identifier the sender asked for. The sender
+    /// then cannot mistake the echo for a validated reflector ID. The Sender
+    /// Micro-session ID is echoed unchanged.
+    ///
+    /// Returns `true` if any Micro-session ID TLV was present.
+    pub fn clear_micro_session_reflector_ids(&mut self) -> bool {
+        let mut found = false;
+        for tlv in self
+            .non_hmac_tlvs_mut()
+            .iter_mut()
+            .filter(|tlv| tlv.is_processable() && tlv.tlv_type == TlvType::MicroSessionId)
+        {
+            let Ok(msid) = MicroSessionIdTlv::from_raw(tlv) else {
+                continue;
+            };
+            found = true;
+            tlv.value = MicroSessionIdTlv::new(msid.sender_micro_session_id, 0)
+                .to_raw()
+                .value;
+        }
+        found
+    }
+
     /// Returns the first Reflected Test Packet Control TLV request, if present.
     ///
     /// Per RFC 10052 §3, only the first occurrence is

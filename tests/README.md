@@ -75,6 +75,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `replay_control_test.rs` | Type 12 replay handling (RFC 10052 §5): one U-flagged reply for duplicate, reordered or old requests; wraparound, SSID isolation, HMACs, both sequencing modes and drop policies; IPv4/IPv6. | Linux, nix |
 | `reply_queue_test.rs` | Reply queue overload and recovery without consuming sequence numbers; SIGINT/SIGTERM shutdown with immediate or graceful drain of queued bursts. | Linux, nix |
 | `required_micro_session_test.rs` | A sender rejects replies without a usable requested Micro-session ID; IPv4/IPv6, open and authenticated. | always |
+| `micro_session_reflector_test.rs` | A micro-session sender against a real reflector: without `--reflector-member-link-id` the reflector replies with ID 0 and the sender rejects every reply, naming the cause; with it, replies are accepted. | Linux, nix |
 | `route_mtu_test.rs` | Reply route MTU in a second namespace: MTU changes, route metrics, alternate destinations, C-flagged clamps and final HMACs. | Linux, nix; ignored, see [User-namespace tests](#user-namespace-tests) |
 | `same_link_reply_test.rs` | Return Path control code 0x1 (RFC 9503 §4.1.1): the reply leaves on the arrival link, or U is set where that cannot be done. | Unix, nix |
 | `scoped_ipv6_test.rs` | Link-local IPv6 over a veth pair: replies, delayed bursts, alternate return address and CLI zones, on both backends. | Linux; ignored, see [User-namespace tests](#user-namespace-tests) |

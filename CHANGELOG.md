@@ -143,10 +143,16 @@ Upgrade both peers together when they use BER or reflected headers.
   - A failed local socket setting (fragmentation policy, send buffer) or an
     unreadable route-table reply drops the reply. It no longer sets the
     Return Path U flag or retargets the reply to the sender.
+  - Without `--reflector-member-link-id`, Micro-session ID replies carry
+    Reflector ID 0 and the reflector logs a warning. It echoed the sender's
+    requested reflector ID, which the sender then accepted as validated.
 - Sender:
   - Without `--local-addr` the sender binds `::` for an IPv6 target and
     `0.0.0.0` for an IPv4 one, also per target in a mixed run. It always bound
     `0.0.0.0`, so `-r ::1` failed with "Address family not supported".
+  - A reply rejected for Reflector Micro-session ID 0 or a U-flagged
+    Micro-session ID TLV names that cause and, for ID 0, the
+    `--reflector-member-link-id` reflector option.
   - Send and receive errors, rejected replies, zero-SSID notices and the
     burst-pacing advisory are log records. They were printed as plain text,
     which broke `--log-format json` output and ignored `RUST_LOG`.

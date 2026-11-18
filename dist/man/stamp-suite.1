@@ -440,7 +440,7 @@ Enable Follow\-Up Telemetry TLV (RFC 8972 §4.7). The reflector fills in the pre
 Sender Micro\-session ID for RFC 9534 TLV validation; does not select a physical link. When set, includes a Micro\-session ID TLV in test packets. Accepts decimal (e.g. `255`) or `0x`\-prefixed hex (e.g. `0xff`)
 .TP
 \fB\-\-reflector\-member\-link\-id\fR \fI<REFLECTOR_MEMBER_LINK_ID>\fR
-Configured reflector ID for RFC 9534 TLV validation; no physical\-link association. When set, the reflector fills this ID into reflected Micro\-session ID TLVs. Accepts decimal (e.g. `171`) or `0x`\-prefixed hex (e.g. `0xab`)
+Configured reflector ID for RFC 9534 TLV validation; no physical\-link association. When set, the reflector fills this ID into reflected Micro\-session ID TLVs; without it, it replies with ID 0, which micro\-session senders reject. Accepts decimal (e.g. `171`) or `0x`\-prefixed hex (e.g. `0xab`)
 .TP
 \fB\-\-extra\-padding\fR \fI<BYTES>\fR
 Append an Extra Padding TLV with this many value octets (RFC 8972 §4.1). Uses pseudorandom bytes as §4.1 recommends, for MTU or fragmentation tests. With `\-\-ber`, BER measurement supplies the padding and its known pattern

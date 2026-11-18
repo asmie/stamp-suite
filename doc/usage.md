@@ -347,6 +347,22 @@ and rejects any later change. Unsolicited replies are never used for learning.
 Sessions without micro-session options accept replies that carry no
 Micro-session ID TLV.
 
+The reflector needs its own `--reflector-member-link-id`. Without it, the
+reflector answers every Micro-session ID TLV with Reflector ID 0 and logs a
+warning. Zero identifies no member link
+([RFC 9534 §3.2](https://www.rfc-editor.org/rfc/rfc9534.html#section-3.2)),
+so the sender rejects those replies and logs
+`reflector returned Reflector Micro-session ID 0`; every probe is then lost.
+For example:
+
+```bash
+stamp-suite -i --reflector-member-link-id 9
+stamp-suite -r 192.0.2.1 --micro-session-id 5
+```
+
+A reply whose Micro-session ID TLV has the U flag comes from a reflector that
+does not support RFC 9534; the sender logs that cause too.
+
 These options do not bind IDs to interfaces, steer packets over a specific LAG
 member or identify the physical ingress member. Per-member LAG measurement is
 not supported. See the [RFC 9534 scope and gaps](conformance/rfc9534.md).

@@ -1021,7 +1021,8 @@ pub struct Configuration {
     pub micro_session_id: Option<u16>,
 
     /// Configured reflector ID for RFC 9534 TLV validation; no physical-link association.
-    /// When set, the reflector fills this ID into reflected Micro-session ID TLVs.
+    /// When set, the reflector fills this ID into reflected Micro-session ID TLVs;
+    /// without it, it replies with ID 0, which micro-session senders reject.
     /// Accepts decimal (e.g. `171`) or `0x`-prefixed hex (e.g. `0xab`).
     #[clap(long, value_parser = parse_u16_nonzero_dec_or_hex, help_heading = "Sender TLVs", hide_short_help = true)]
     pub reflector_member_link_id: Option<u16>,

@@ -982,6 +982,31 @@ fn test_update_micro_session_id_tlvs_sets_reflector_id() {
 }
 
 #[test]
+fn test_clear_micro_session_reflector_ids_reports_zero() {
+    // RFC 9534 §3.2: without a member link ID the reflector has no
+    // identifier to report, so it writes zero instead of echoing the
+    // sender's requested reflector ID; the sender ID is echoed unchanged.
+    for requested in [0, 50] {
+        let mut list = TlvList::new();
+        list.push(MicroSessionIdTlv::new(42, requested).to_raw())
+            .unwrap();
+        list.clear_reflector_flags();
+        assert!(list.clear_micro_session_reflector_ids());
+        let raw = &list.non_hmac_tlvs()[0];
+        assert!(!raw.is_unrecognized());
+        let parsed = MicroSessionIdTlv::from_raw(raw).unwrap();
+        assert_eq!(parsed.sender_micro_session_id, 42);
+        assert_eq!(parsed.reflector_micro_session_id, 0);
+    }
+
+    let mut list = TlvList::new();
+    list.push(crate::tlv::ExtraPaddingTlv::new_zeros(4).to_raw())
+        .unwrap();
+    list.clear_reflector_flags();
+    assert!(!list.clear_micro_session_reflector_ids());
+}
+
+#[test]
 fn test_update_micro_session_id_tlvs_echoes_sender_id() {
     let msid = MicroSessionIdTlv::new(1234, 0);
     let mut list = TlvList::new();

@@ -3295,6 +3295,55 @@ fn test_unauth_with_micro_session_id_fills_reflector_id() {
 }
 
 #[test]
+fn test_unauth_micro_session_id_without_member_link_reports_zero() {
+    use crate::tlv::{MicroSessionIdTlv, TypedTlv};
+
+    let sender_packet = PacketUnauthenticated {
+        sequence_number: 1,
+        timestamp: 100,
+        error_estimate: 10,
+        ssid: 0,
+        mbz: [0; 28],
+    };
+
+    // RFC 9534 §3.2: a reflector without a member link ID reports Reflector
+    // Micro-session ID 0 with U clear, even when the sender asked for 50.
+    for requested in [0, 50] {
+        let msid_raw = MicroSessionIdTlv::new(42, requested).to_raw();
+        let mut data = sender_packet.to_bytes().to_vec();
+        data.extend_from_slice(&msid_raw.to_bytes());
+
+        let ctx = test_ctx(0, 0);
+        assert_eq!(ctx.reflector_member_link_id, None);
+
+        let response = assemble_unauth_answer_with_tlvs(
+            &sender_packet,
+            &data,
+            ClockFormat::NTP,
+            500,
+            64,
+            0,
+            None,
+            TlvHandlingMode::Echo,
+            None,
+            false,
+            &ctx,
+        );
+        assert!(!matches!(
+            response.return_path_action,
+            ReturnPathAction::SuppressReply
+        ));
+
+        let tlvs = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).unwrap();
+        let msid_tlv = &tlvs.non_hmac_tlvs()[0];
+        assert!(!msid_tlv.is_unrecognized());
+        let parsed = MicroSessionIdTlv::from_raw(msid_tlv).unwrap();
+        assert_eq!(parsed.sender_micro_session_id, 42);
+        assert_eq!(parsed.reflector_micro_session_id, 0);
+    }
+}
+
+#[test]
 fn test_unauth_with_micro_session_id_mismatch_discards() {
     use crate::tlv::{MicroSessionIdTlv, TypedTlv};
 
