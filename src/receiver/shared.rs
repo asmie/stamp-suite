@@ -19,6 +19,10 @@ pub struct ReceiverSharedState {
     /// Cancelled by a signal (see [`crate::shutdown::cancel_on_signal`]) or
     /// the control API. Both backends then drain queued replies and return.
     pub shutdown: crate::shutdown::CancellationToken,
+    /// UDP port the reflector receives on. It starts as the configured port
+    /// and the backend stores the port it actually bound, which differs for
+    /// `--local-port 0`.
+    pub listen_port: Arc<std::sync::atomic::AtomicU16>,
 }
 
 /// Reloads the HMAC keys from the configured key file or directory and
@@ -93,6 +97,7 @@ pub fn create_shared_state(
         hmac_keys: Arc::new(std::sync::RwLock::new(hmac_keys)),
         caps: Arc::new(RuntimeCaps::from_conf(conf)),
         shutdown: crate::shutdown::CancellationToken::new(),
+        listen_port: Arc::new(std::sync::atomic::AtomicU16::new(conf.local_port)),
     })
 }
 

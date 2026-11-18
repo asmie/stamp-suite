@@ -36,7 +36,14 @@ impl StampMibHandler {
             )));
         }
         if *oid == oids::stamp_refl_listen_port() {
-            return Some(VarBindValue::Gauge32(self.state.config.listen_port as u32));
+            let port = self
+                .state
+                .reflector_listen_port
+                .as_ref()
+                .map_or(self.state.config.listen_port, |port| {
+                    port.load(std::sync::atomic::Ordering::Relaxed)
+                });
+            return Some(VarBindValue::Gauge32(u32::from(port)));
         }
         if *oid == oids::stamp_refl_auth_mode() {
             let val = if self.state.config.auth_mode == "A" {
@@ -357,9 +364,37 @@ mod tests {
             },
             reflector_counters: Some(counters),
             session_manager: Some(session_manager),
+            reflector_listen_port: None,
             start_time: Instant::now(),
             sender_stats: Some(sender_stats),
         })
+    }
+
+    #[test]
+    fn listen_port_reports_the_bound_port() {
+        // `--local-port 0`: the configuration says 0, the backend stores the
+        // port the kernel assigned once it has bound.
+        let configured = StampMibHandler::new(make_test_state(true));
+        assert!(matches!(
+            configured.get(&oids::stamp_refl_listen_port()).value,
+            VarBindValue::Gauge32(862)
+        ));
+        let bound = Arc::new(std::sync::atomic::AtomicU16::new(0));
+        let base = Arc::try_unwrap(make_test_state(true)).ok().unwrap();
+        let state = Arc::new(SnmpState {
+            reflector_listen_port: Some(Arc::clone(&bound)),
+            config: SnmpConfig {
+                listen_port: 0,
+                ..base.config
+            },
+            ..base
+        });
+        let handler = StampMibHandler::new(state);
+        bound.store(40_123, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(
+            handler.get(&oids::stamp_refl_listen_port()).value,
+            VarBindValue::Gauge32(40_123)
+        ));
     }
 
     #[test]

@@ -206,6 +206,9 @@ pub async fn run_receiver(
     // Connected senders require the reply source port to match the selected
     // receive endpoint, including a port assigned by the kernel for zero.
     let (mut send_ctx, local_addr) = bind_reply_sockets(conf)?;
+    shared
+        .listen_port
+        .store(local_addr.port(), std::sync::atomic::Ordering::Relaxed);
     for socket in send_ctx
         .send_socket_v4
         .iter()

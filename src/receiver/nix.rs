@@ -77,6 +77,9 @@ pub async fn run_receiver_with_socket(
         ));
     }
     let is_ipv6 = bound.is_ipv6();
+    shared
+        .listen_port
+        .store(bound.port(), std::sync::atomic::Ordering::Relaxed);
 
     crate::net_policy::set_hops(&std_socket)
         .map_err(|e| crate::StartupError::io("Cannot set reply TTL/Hop Limit 255", e))?;

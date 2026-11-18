@@ -156,6 +156,8 @@ Upgrade both peers together when they use BER or reflected headers.
   - Windows: 1 ms timer resolution is requested during runs, and pacing keeps
     running after receive errors.
   - The loss threshold triggers session failure even before the first reply.
+- SNMP: `stampReflListenPort` reports the port the reflector bound. With
+  `--local-port 0` it reported 0.
 - Configuration: the warning for a config file writable by group or other is
   logged again. It was raised before logging started and never shown.
   `Configuration::load_with_warnings` returns such warnings to a caller that

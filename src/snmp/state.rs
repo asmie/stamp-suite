@@ -6,7 +6,7 @@
 use std::{
     net::IpAddr,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::Instant,
@@ -22,6 +22,9 @@ pub struct SnmpState {
     pub reflector_counters: Option<Arc<ReflectorCounters>>,
     /// Session manager (shared with receiver backends). None in sender mode.
     pub session_manager: Option<Arc<SessionManager>>,
+    /// Port the reflector actually bound, which `--local-port 0` leaves to
+    /// the kernel. None in sender mode.
+    pub reflector_listen_port: Option<Arc<AtomicU16>>,
     /// Start time of the application (for uptime calculation).
     pub start_time: Instant,
     /// Sender statistics (updated atomically during run). None in reflector mode.
