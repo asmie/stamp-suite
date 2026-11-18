@@ -85,6 +85,9 @@ Upgrade both peers together when they use BER or reflected headers.
 ### Fixed
 
 - Reflector:
+  - Trimming reflected-header TLVs (Types 246/247) to the reply size limit
+    takes linear time. It removed and re-measured one TLV at a time, so a
+    datagram with 4000 such TLVs took about 100 ms to answer.
   - A nix reflector bound to `::` on Linux answers IPv4 clients. It dropped
     every IPv4 datagram without counting it, because the dual-stack socket
     did not ask for their TTL. Datagrams without TTL metadata are now counted

@@ -1210,6 +1210,73 @@ fn test_trim_reflected_headers_to_size_removes_246_before_247() {
     assert!(44 + list.wire_size() <= 100, "reply now fits the limit");
 }
 
+/// Trimming picks and removes header TLVs in one pass each. It must remove
+/// exactly what dropping the last header TLV and re-measuring would, on
+/// mixed parsed lists whose wire order is preserved.
+#[test]
+fn trim_reflected_headers_matches_removing_the_last_header_repeatedly() {
+    fn reference(list: &mut TlvList, base_len: usize, max: usize) -> usize {
+        let mut removed = 0;
+        while base_len + list.wire_size() > max {
+            let Some(index) = list.non_hmac_tlvs().iter().rposition(|t| {
+                matches!(
+                    t.tlv_type,
+                    TlvType::ReflectedFixedHdr | TlvType::ReflectedIpv6ExtHdr
+                )
+            }) else {
+                break;
+            };
+            let mut seen = 0;
+            list.retain_non_hmac(|_| {
+                seen += 1;
+                seen - 1 != index
+            });
+            removed += 1;
+        }
+        removed
+    }
+
+    // Header TLVs of several sizes, interleaved with padding and CoS.
+    let mut bytes = Vec::new();
+    for i in 0..60u8 {
+        let (kind, len) = match i % 5 {
+            0 => (247, 20 + 4 * usize::from(i % 3)),
+            1 => (246, 8 * usize::from(1 + i % 4)),
+            2 => (1, 4),
+            3 => (4, 4),
+            _ => (246, 16),
+        };
+        bytes.extend_from_slice(&[0x80, kind]);
+        bytes.extend_from_slice(&(len as u16).to_be_bytes());
+        bytes.extend(std::iter::repeat_n(i, len));
+    }
+    let (parsed, malformed) = TlvList::parse_lenient(&bytes);
+    assert!(!malformed);
+    // A zero limit disables trimming; `..._zero_disables` covers it.
+    for max in (44..44 + bytes.len() + 8).step_by(7).chain([45, 60]) {
+        let mut fast = parsed.clone();
+        let mut slow = parsed.clone();
+        let removed = fast.trim_reflected_headers_to_size(44, max);
+        assert_eq!(removed, reference(&mut slow, 44, max), "max {max}");
+        assert_eq!(fast.to_bytes(), slow.to_bytes(), "max {max}");
+    }
+}
+
+/// A single datagram can carry thousands of header TLVs; trimming all of
+/// them must stay linear (it took about 100 ms for 4000 in a debug build).
+#[test]
+fn trim_reflected_headers_handles_thousands_of_tlvs() {
+    let mut bytes = Vec::new();
+    for _ in 0..16_000 {
+        bytes.extend_from_slice(&[0x80, 246, 0, 0]);
+    }
+    let (mut list, _) = TlvList::parse_lenient(&bytes);
+    let start = std::time::Instant::now();
+    assert_eq!(list.trim_reflected_headers_to_size(44, 48), 16_000 - 1);
+    assert_eq!(list.non_hmac_tlvs().len(), 1);
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+}
+
 #[test]
 fn test_trim_reflected_headers_to_size_zero_disables() {
     use crate::tlv::ReflectedFixedHdrTlv;

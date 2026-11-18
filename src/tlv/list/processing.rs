@@ -909,14 +909,31 @@ impl TlvList {
                 TlvType::ReflectedFixedHdr | TlvType::ReflectedIpv6ExtHdr
             )
         };
+        let Some(mut excess) = (base_len + self.wire_size()).checked_sub(max_reply_bytes) else {
+            return 0;
+        };
+        // Choose from the end in one pass, then remove in one pass: removing
+        // and re-measuring one TLV at a time is quadratic in the TLV count,
+        // which a single datagram can make large.
+        let mut drop = vec![false; self.non_hmac_tlvs().len()];
         let mut removed = 0usize;
-        while base_len + self.wire_size() > max_reply_bytes {
-            let Some(idx) = self.non_hmac_tlvs().iter().rposition(is_header) else {
-                break; // No header TLV left to drop; remaining oversize is out of scope.
-            };
-            self.remove_non_hmac(idx);
-
-            removed += 1;
+        for (index, tlv) in self.non_hmac_tlvs().iter().enumerate().rev() {
+            if excess == 0 {
+                break;
+            }
+            if is_header(tlv) {
+                drop[index] = true;
+                excess = excess.saturating_sub(tlv.wire_size());
+                removed += 1;
+            }
+        }
+        // Any oversize left after every header TLV is gone is out of scope.
+        if removed > 0 {
+            let mut index = 0;
+            self.retain_non_hmac(|_| {
+                index += 1;
+                !drop[index - 1]
+            });
         }
         removed
     }

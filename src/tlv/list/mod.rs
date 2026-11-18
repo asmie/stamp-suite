@@ -190,27 +190,6 @@ impl TlvList {
         self.hmac_wire_offset = None;
     }
 
-    fn remove_non_hmac(&mut self, index: usize) {
-        self.entries.remove(index);
-        self.non_hmac_len -= 1;
-        if let Some(order) = &mut self.wire_order {
-            order.retain_mut(|old| {
-                if *old == index {
-                    return false;
-                }
-                if *old > index {
-                    *old -= 1;
-                }
-                true
-            });
-        }
-        self.has_ber = self
-            .non_hmac_tlvs()
-            .iter()
-            .any(|t| crate::ber::is_ber(t.tlv_type));
-        self.hmac_wire_offset = None;
-    }
-
     #[cfg(test)]
     /// Test-only borrowed view of preserved wire order. Production serialization
     /// follows indices without allocating a view or cloning payloads.
