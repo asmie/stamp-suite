@@ -152,7 +152,7 @@ The [Gentoo overlay](dist/gentoo/README.md) maps Cargo features to USE flags
 and installs systemd and OpenRC services. `dist/openwrt/` holds an OpenWrt
 recipe template and procd init script. Use the release asset
 `stamp-suite-VERSION-openwrt.mk` as its `Makefile`; it pins the checksum of that
-release’s source archive. See [release verification](doc/release-evidence.md)
+release’s source archive. See [release procedures](doc/releasing.md)
 for building the recipe from local release inputs.
 
 ## Platforms and Cargo features
@@ -197,7 +197,7 @@ without the feature.
 | [Architecture](doc/architecture.md) | Modules, receiver backends, packet processing, TLV reference |
 | [Conformance](doc/conformance/README.md) | Per-clause evidence for each RFC and draft |
 | [Benchmarks](doc/benchmarks.md) | Throughput/latency tools, live `--memory` observations, and `--inventory`, `--sessions`, `--headers`, `--header-bytes` and `--headers-denied` workloads |
-| [Release verification](doc/release-evidence.md) | Platform and integration checks run before a release |
+| [Release procedures](doc/releasing.md) | Platform and integration checks run before a release |
 | [Contributing](CONTRIBUTING.md) | Building, testing, linting and submitting changes |
 | [Vulnerability reporting](SECURITY.md) | How to report a security problem |
 | [Changelog](CHANGELOG.md) | Changes in each release |
@@ -231,4 +231,4 @@ Maintained by [Piotr Olszewski](https://github.com/asmie), with
 [contributors](https://github.com/asmie/stamp-suite/contributors).
 Licensed under the [MIT license](LICENSE).
 Binary distributions include generated dependency copyright notices and license
-texts in `THIRD_PARTY_NOTICES.txt`. See [release verification](doc/release-evidence.md#third-party-notices).
+texts in `THIRD_PARTY_NOTICES.txt`. See [release procedures](doc/releasing.md#third-party-notices).

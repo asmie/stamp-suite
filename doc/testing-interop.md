@@ -183,10 +183,9 @@ values.
 
 These tests run over software loopback with valid UDP checksums. They do not
 prove that bit errors on a physical link are captured, or that PMTU discovery
-works. The [9 November report](interop/2026-11-09-ber/REPORT.md) also records
-route-MTU tests and black-box captures against Teaparty, which turned out to be
-incompatible. No successor-profile exchange with another maintained
-application has been shown yet.
+works. Black-box captures against Teaparty showed BER layouts incompatible
+with the successor profile, and no successor-profile exchange with another
+maintained application has been shown yet.
 
 ## Protocol sources and complementary coverage
 

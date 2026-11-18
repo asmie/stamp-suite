@@ -884,7 +884,7 @@ cancellation.
   `agentx_decode_oid` fuzz targets feed arbitrary bytes to the decoders.
 - `scripts/release_checks.py` runs a real Net-SNMP master and clients against
   the binary. See
-  [release verification](release-evidence.md#authenticated-control-and-a-reference-snmp-master).
+  [release procedures](releasing.md#authenticated-control-and-a-reference-snmp-master).
 
 These tests cover the subset above. They are not a full SNMP certification.
 

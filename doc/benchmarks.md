@@ -1056,7 +1056,3 @@ includes the tool's overhead. Neither predicts packet throughput. Save the raw
 profiles, the build, compiler, revision and tool metadata, and the process
 reports, and repeat cases before you compare buffer changes.
 
-The [2026-09-10 baseline](performance/2026-09-10-live-udp.md) records 54 live
-trials on both Linux backends, including the duplicate replies seen with pnet
-on loopback. Keep its environment and workload limits in mind when you compare
-results.

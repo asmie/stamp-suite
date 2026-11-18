@@ -82,5 +82,3 @@ for how stamp-suite uses them.
    methods, sample counts, failures and fallbacks, the synchronization
    evidence, and the raw artifacts with their hashes.
 
-Recorded availability checks are listed under
-[Recorded results](release-evidence.md#recorded-results).

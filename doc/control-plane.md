@@ -441,4 +441,4 @@ with a bearer token and over HTTPS with certificate verification, while
 sending UDP packets that the script signs with its own code. It checks that
 bad tokens are rejected, and tests key rotation during queued bursts, key
 deletion, fallback to the default key, that the key list hides key material,
-and shutdown. See [release verification](release-evidence.md).
+and shutdown. See [release procedures](releasing.md).

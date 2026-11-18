@@ -89,9 +89,9 @@ reports apply only to the commit they recorded.
 | Type 12 | Exact intervals on the wire and the conservative choice of the first request are Partial. Identity protection is scored only for authenticated mode with extension HMAC verification. In permissive open mode the HMAC is optional, so a request may carry none. | [RFC 10052 limits and profiles](draft-asymmetrical-pkts.md#identity-protection) |
 | Return paths | IP and SRv6 return paths work only with certain backends and routes. SR-MPLS is Excluded and gets U. Tests check the flags on processed children and that processing stops at malformed data. Copies that are protected or skipped can keep the child flags they arrived with, so the inherited requirement is Partial. A fallback reply does not prove SRH transit. | [RFC 9503 scope](rfc9503.md#scope), [nested flags](rfc9503.md#nested-flags), [privileged tests](../testing-netns.md) |
 | Management | The AgentX sub-agent is read-only (SET is not supported) and is not scored in these protocol matrices. It needs a separate master agent. YANG management is not implemented, and its expired draft is only watched. | [Observability](../usage.md#observability), [AgentX](../architecture.md#snmp-agentx-sub-agent) |
-| BER | Four rows are Partial: zero-checksum validation, platform MTU, physical LAG, and filling up to the link MTU. With TLV processing on, diagnostics report local causes of C and C flags kept from the peer in the defined child layouts. Arbitrary values, and the tails copied in legacy TLV-ignore mode, are not interpreted. The independent BER peer uses ordinary UDP checksums. Separate raw fixtures cover IPv4 packets that arrive with a zero checksum and authenticated sending. None of this shows that errors are captured at the raw link or FEC level. No maintained, compatible application has been tested as a peer yet. | [BER matrix](draft-stamp-ber.md), [migration evidence](../interop/2026-11-09-ber/REPORT.md) |
+| BER | Four rows are Partial: zero-checksum validation, platform MTU, physical LAG, and filling up to the link MTU. With TLV processing on, diagnostics report local causes of C and C flags kept from the peer in the defined child layouts. Arbitrary values, and the tails copied in legacy TLV-ignore mode, are not interpreted. The independent BER peer uses ordinary UDP checksums. Separate raw fixtures cover IPv4 packets that arrive with a zero checksum and authenticated sending. None of this shows that errors are captured at the raw link or FEC level. No maintained, compatible application has been tested as a peer yet. | [BER matrix](draft-stamp-ber.md), [BER migration](../ber-migration.md) |
 | CoS/ECN | ECN capability reporting from BPM revision 00 is implemented. RPE=01 says that marking is unavailable, including on Windows, and sender diagnostics recognize it. The DSCP fallback uses the received value only if policy admits it, and otherwise picks a third value that policy permits. If a restricted policy is empty or cannot be enforced, the reflector sends no reply to the CoS request. For this profile, the frozen RFC 8972 text's unconditional fallback to DSCP2 is Partial. Consistency with RFC 3168 and RFC 9330 controllers is also Partial. Reverse feedback works on Linux and macOS. | [Successor changes](draft-stamp-cos-ecn.md#bpm-00-successor-changes) |
-| Platforms and hardware | There is no evidence yet from physical LAGs or NIC timestamps. macOS has software receive timestamps. The Windows checks run without a capture driver, so they show nothing about capture through one. A cross-build is not a native runtime test. | [Release verification](../release-evidence.md), [hardware timestamps](../testing-hardware-timestamps.md) |
+| Platforms and hardware | There is no evidence yet from physical LAGs or NIC timestamps. macOS has software receive timestamps. The Windows checks run without a capture driver, so they show nothing about capture through one. A cross-build is not a native runtime test. | [Release procedures](../releasing.md), [hardware timestamps](../testing-hardware-timestamps.md) |
 
 ## Experimental codepoints
 
@@ -111,9 +111,8 @@ The old outer Types 240–242 are retired, and requests that use them get U.
 Type 242 used to collide with another implementation's Heartbeat TLV. The
 successor TLV always carries the burst field, so `--ber-omit-burst` is now a
 migration error. The successor's matrix and the standards pin follow BPM
-revision 01. The [migration report](../interop/2026-11-09-ber/REPORT.md)
-records wire evidence from an independent implementation and the incompatible
-layouts seen from Teaparty.
+revision 01. Teaparty's BER layouts are incompatible with the successor
+profile (see [BER migration](../ber-migration.md)).
 
 When a final allocation changes a codepoint on the wire, update its constant,
 note the change in `CHANGELOG.md`, and bump the minor version, as the
@@ -179,7 +178,7 @@ the matrix names the pinned revision. Watch-only entries, such as the expired
 STAMP YANG draft, report changes without claiming an implementation, and a
 change does not fail the check. Missing evidence still fails it, though. When
 the scheduled workflow fails, it opens or updates an issue asking for review.
-See [Standards revision monitor](../release-evidence.md#standards-revision-monitor).
+See [Standards revision monitor](../releasing.md#standards-revision-monitor).
 
 ## Other evidence
 
@@ -196,6 +195,6 @@ See [Standards revision monitor](../release-evidence.md#standards-revision-monit
   prerequisite is missing or no test runs. A skipped test is not evidence.
 - Property tests run as part of the Cargo tests. The fuzz workflow builds and
   runs nine targets. Building a fuzz target is not the same as fuzzing it.
-- [Release verification](../release-evidence.md) covers authenticated HTTP and
+- [Release procedures](../releasing.md) covers authenticated HTTP and
   HTTPS control, a Net-SNMP master, the platform runtime gates and the
   standards revision monitor.

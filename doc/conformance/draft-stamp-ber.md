@@ -18,9 +18,7 @@ The [independent BER wire peer](../../scripts/interop_ber.py) imports no crate
 code and implements both roles with Python's standard library. Its 60 cases
 cover IPv4/IPv6, unkeyed open, keyed open and authenticated base modes,
 stateful/stateless reflection, default/explicit patterns and malformed nested
-values. [Recorded evidence](../interop/2026-11-09-ber/REPORT.md) includes frozen
-observations, oracle mutation tests, both build profiles and route-MTU tests.
-Loopback payload transformations retain valid UDP checksums; they establish
+values. Loopback payload transformations retain valid UDP checksums; they establish
 neither raw-link error capture nor zero-checksum operation, FEC, NIC timestamps
 or physical LAG steering. All-features selects nix, not pnet.
 

@@ -2,7 +2,7 @@
 """Live control/key-rotation and Net-SNMP reference-master release fixtures.
 
 Only owned temporary processes, files and loopback endpoints are used. See
-doc/release-evidence.md for prerequisites, commands and coverage limits.
+doc/releasing.md for prerequisites, commands and coverage limits.
 """
 import argparse
 import contextlib

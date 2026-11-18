@@ -2,7 +2,7 @@
 """Compare frozen protocol revisions with public IETF/RFC Editor metadata.
 
 Exit 0: current (expiry warnings are advisory); 1: review needed; 2: incomplete
-check. Network errors never mean 'unchanged'. See doc/release-evidence.md.
+check. Network errors never mean 'unchanged'. See doc/releasing.md.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor

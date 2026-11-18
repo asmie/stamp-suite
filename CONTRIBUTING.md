@@ -142,7 +142,7 @@ See [test-evidence policy and rollout](doc/conformance/test-evidence.md).
 will enable it only after the remaining rows have been reviewed and resolved.
 
 `scripts/check_standards.py` compares the frozen RFC and draft revisions with
-the published ones. [doc/release-evidence.md](doc/release-evidence.md)
+the published ones. [doc/releasing.md](doc/releasing.md)
 describes it and the other release checks.
 
 ## Man page
@@ -196,5 +196,5 @@ terms. Missing license text and changes to inputs in
 `scripts/licenses/notice-policy.json` require review; do not replace missing
 attribution with a license identifier. Keep
 `RELEASE_PROFILES` in the generator aligned with the release workflow's targets
-and features. See [release verification](doc/release-evidence.md#third-party-notices)
+and features. See [release procedures](doc/releasing.md#third-party-notices)
 for distribution checks.

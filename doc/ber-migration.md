@@ -195,9 +195,8 @@ other implementation the draft names, was not available for testing.
   patterns, zero burst, unknown sub-TLVs, truncation, duplicates and length
   limits. The `residual_ber_value` fuzz target is seeded from them.
 - An independent Python peer, `scripts/interop_ber.py`, which CI runs against
-  both build profiles in both roles: 60 cases each. The
-  [November 2026 report](interop/2026-11-09-ber/REPORT.md) records the first
-  run and the signing defect it found in stateful BER error replies.
+  both build profiles in both roles: 60 cases each. Its first run found a
+  signing defect in stateful BER error replies, since fixed.
 - The [BER conformance matrix](conformance/draft-stamp-ber.md), which lists the
   remaining Partial rows: zero-checksum validation, MTU on other platforms and
   physical LAG.

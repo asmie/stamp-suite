@@ -39,7 +39,7 @@ cargo test --locked --no-default-features --features ttl-pnet --lib
 ```
 
 The library and test targets that CI requires on Windows and macOS are listed
-in [release verification](../doc/release-evidence.md#procedures).
+in [release procedures](../doc/releasing.md#procedures).
 
 ## Test files
 
@@ -389,7 +389,7 @@ files in this directory.
   burst copies keep their accepted key, and on macOS that a size-controlled
   reply is dropped when the route MTU is unknown.
 - **Windows.** CI requires `--lib` and thirteen integration targets (see
-  [Windows runtime gate](../doc/release-evidence.md#windows-runtime-gate)).
+  [Windows runtime gate](../doc/releasing.md#windows-runtime-gate)).
   Burst scheduling and shutdown tests inject a known route MTU; another test
   covers an unavailable route MTU (injected on Linux, real on Windows). Startup
   error tests use wildcard binds and must report port and key failures before
@@ -407,7 +407,7 @@ files in this directory.
   [testing-interop.md](../doc/testing-interop.md).
 - **Release fixtures.** `scripts/release_checks.py` runs authenticated control
   API cases and a real Net-SNMP master. See
-  [release verification](../doc/release-evidence.md).
+  [release procedures](../doc/releasing.md).
 - **Script unit tests.** `python3 -m unittest discover -s scripts/tests -v`
   tests the Python fixtures, the native test runner and the standards monitor.
 - **Benchmark accounting.** `cargo test --locked --example live_udp_bench`

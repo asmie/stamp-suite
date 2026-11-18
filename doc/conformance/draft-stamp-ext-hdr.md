@@ -382,7 +382,7 @@ sender option does not enable an IPv6 zero-checksum mode. Requirements of
 referenced RFCs are covered by their own matrices.
 
 See the [namespace tests](../testing-netns.md), [measurement
-semantics](../measurements.md) and [release verification](../release-evidence.md).
+semantics](../measurements.md) and [release procedures](../releasing.md).
 
 ## Revision 26 review 2026-11-09
 

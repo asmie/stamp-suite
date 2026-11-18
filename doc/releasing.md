@@ -1,15 +1,10 @@
-# Release verification
+# Releasing
 
-The checks to run before a release, the commands to reproduce them, and the
-results recorded so far.
-
-With each result, record the revision, features, platform and wire profile it
-was tested with. The [conformance matrices](conformance/README.md) cover the
-frozen specifications. A test that compiles, or that is listed as ignored,
-says nothing about runtime behavior.
-The [supported profiles and limits](conformance/README.md#known-limits) apply
-to release claims too. A successful build or a green job cannot show that an
-untested capability works, whether that is physical LAG, NIC timestamps, a
+What the release workflow checks, and how to run the same checks yourself.
+The [conformance matrices](conformance/README.md) cover the frozen
+specifications, and the [supported profiles and limits](conformance/README.md#known-limits)
+apply to release claims too: a passing build or job says nothing about a
+capability it does not exercise, such as physical LAG, NIC timestamps, a
 capture driver or PMTU discovery.
 
 ## Release gate boundary
@@ -25,9 +20,7 @@ The independent UDP gates run the
 [successor BER profile](testing-interop.md#independent-successor-ber-profile)
 with stamp-suite in both roles: 60 required cases for the default build and 60
 for the all-features build, on top of the existing protocol-combination
-fixtures. Both reports are uploaded even when cases fail. The
-[migration evidence](interop/2026-11-09-ber/REPORT.md) keeps local runs apart
-from remote CI runs and records the known conformance and peer limitations.
+fixtures. Both reports are uploaded even when cases fail.
 
 Cargo builds in the release jobs and in the container must match the
 lockfile. Debian builds run offline: before running `debian/rules`,
@@ -213,7 +206,7 @@ read-only community can only see the STAMP enterprise subtree. It does not
 read the system's daemon configuration or touch a running service. The real
 stamp-suite sub-agent registers with this master. Net-SNMP clients, which
 share no code with stamp-suite, then check the counters at startup and while
-traffic flows, two session rows across seven columns, the order of
+traffic flows, two session rows across the six readable columns, the order of
 non-repeaters and repeaters in GetBulk, and the end-of-MIB boundary. Next, the
 case stops its master, checks that authenticated STAMP is still reflected,
 starts the master again, and checks that the sub-agent registers again with
@@ -376,94 +369,3 @@ frozen draft revision. The monitor does not check normative text, IANA code
 points or errata. During release review, check the errata page of each RFC and
 keep the result. Watching STAMP YANG does not mean stamp-suite implements YANG,
 and TWAMP-Control stays out of the product's scope.
-
-## Recorded results
-
-Each entry gives the date, commit and platform it applies to. It says nothing
-about later commits until the procedure is run again.
-
-### 1.0.0 preparation, 2026-10-05
-
-These local checks cover uncommitted changes on top of `614a61f1`, on x86_64
-Linux (WSL2), with Rust 1.99 plus a separate check with Rust 1.86. No release
-was tagged or published. The dependency inventory this section used to cite
-was never checked in and no longer exists. The raw local logs behind the table
-below are not in the repository either. Treat these as historical preparation
-notes. They are not evidence for a current release, and they do not claim that
-the dependencies are up to date. Run the procedures above again on the commit
-you intend to release and keep their artifacts.
-
-| Check | Result |
-|---|---|
-| Linux all-features tests | 1,363 passed; 12 privileged tests ignored |
-| Linux default tests | 1,262 passed; 12 privileged tests ignored |
-| Rust 1.86 | Locked all-features, all-targets compilation passed |
-| Clippy | Default, all-features and pnet profiles passed with warnings denied |
-| Formatting and Rustdoc | Passed; Rustdoc warnings denied |
-| Dependency audits | Main and fuzz manifests passed advisories, bans, licenses and sources |
-| Independent UDP fixtures | All 16 IPv4/IPv6, auth/open, clock and state combinations passed |
-| Control and Net-SNMP | All five HTTP/TLS and reference-master cases passed, including reconnection |
-| Sanitizer fuzzing | All nine targets passed a three-second smoke run each |
-| Nix | x86_64-linux package/tests, Clippy and formatting passed |
-| Windows x64 | `ttl-pnet,metrics,control` cross-link and all-targets Clippy passed; PE stack reserve verified at 4 MiB |
-| macOS Intel | All-targets compilation passed with `ttl-nix,ttl-pnet,metrics,snmp,hwtstamp` |
-| Packaging | crates.io package verification and x86_64 DEB/RPM generation passed |
-| Metadata and workflows | Release versions, Gentoo crate list, Python tests and actionlint passed |
-| Standards | All ten frozen draft/RFC metadata records are current |
-
-The DEB was unpacked, and its executable reported `stamp-suite 1.0.0`. Its
-control data lists `libc6 (>= 2.34)`, `adduser` and `init-system-helpers`, and
-the generated maintainer scripts manage the systemd unit. Both Linux packages
-include the manual, the MIB, the release notes and the security guidance.
-
-The [CI run](https://github.com/asmie/stamp-suite/actions/runs/37240020027)
-before these changes failed for four reasons: an outdated Nix hash, the Rustls
-advisory, macOS SNMP test sockets that inherited nonblocking mode, and a stack
-overflow in the Windows CLI. All four are fixed. The
-[integration run](https://github.com/asmie/stamp-suite/actions/runs/37240019965)
-also showed that Net-SNMP echoes administrative AgentX bindings back; the
-sub-agent now accepts echoes that match and rejects malformed or unrelated
-data. Fuzz CI now selects GNU/Linux so that AddressSanitizer can run.
-
-Before tagging, get a fresh native macOS and Windows CI run on the final
-commit, and run the privileged wire gate. A cross-compiled build says nothing
-about runtime behavior. On this host, the Windows application-control policy
-blocked Cargo's build-script executables (OS error 4551), and no native Mac
-was available. Cross-compiling macOS TLS support also needs Apple's SDK. The
-container, Gentoo, OpenWrt and ARM distribution builds were not run locally.
-Generate Gentoo's `Manifest` after the source archive is published; the
-release workflow fills in the OpenWrt hash from that same archive. Physical
-NIC timestamps are still not covered.
-
-### Net-SNMP reference master, 2026-09-11
-
-All five `release_checks.py` cases passed locally on Linux (WSL2). The tools
-came from the Ubuntu packages `5.9.4+dfsg-2ubuntu3`, and the daemon reported
-`5.9.4.pre2`.
-
-### Native macOS, commit of 2026-09-12
-
-Commit `7ae15c3136b475fe184d0c6f73bde33999a0bf8b`,
-[run 34702868546](https://github.com/asmie/stamp-suite/actions/runs/34702868546):
-**1150 default and 1234 all-features tests passed**. Neither profile had any
-failed, ignored or filtered tests. Both ran from clean checkouts on macOS
-26.6.2 arm64 with Rust 1.98.1, each with 35 suite summaries and a Cargo exit
-status of zero. The identities, runner and log hashes and counts in the
-reports were checked against the raw logs.
-
-### Native Windows, commit of 2026-09-12
-
-Commit `2548231aa31644fadd4bb1c634f80c9c7d95dd10` on Windows Server 2025 x64,
-[run 34717692891](https://github.com/asmie/stamp-suite/actions/runs/34717692891):
-**1041 required tests, 120 mixed-clock checks across all 20 repetitions, and
-1140 informational full-suite tests passed**. No log had any failed, ignored
-or filtered tests (9, 20 and 35 suite summaries). The informational step
-succeeded on its own, so these counts do not rely on `continue-on-error`.
-This run also confirmed the `WSAEACCES` source-port retry.
-
-### Hardware timestamp availability, 2026-09-11
-
-No tests with physical NIC timestamps have been run. On WSL2, `eth0` offered
-only software transmit, software receive and the software system clock. There
-was no PHC, and no hardware filter or transmit mode. The kernel timestamp and
-Follow-Up regression tests are evidence for software timestamps only.
