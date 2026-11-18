@@ -247,7 +247,8 @@ async fn windows_mtu_trims_restores_and_refuses_oversize_before_send() {
                 assert_eq!(kinds.iter().filter(|&&k| k == 1).count(), 1);
             }
             // Increase mandatory bytes by one without changing the kernel cap:
-            // the send must fail before counters/pending state are changed.
+            // the probe is skipped and counted as a send failure, without
+            // changing the sent counter or pending state.
             cap_mtu(&sender.socket, ipv6, 1280);
             sender
                 .probe_template
@@ -259,28 +260,23 @@ async fn windows_mtu_trims_restores_and_refuses_oversize_before_send() {
                 .value
                 .push(0);
             let pending = sender.pending.len();
-            let error = sender.send_probe(false).await.unwrap_err();
-            assert!(
-                matches!(error, crate::StartupError::Config(ref message) if message.contains("route MTU"))
-            );
+            sender.send_probe(false).await.unwrap();
             assert_eq!(sender.packets_sent, 3);
             assert_eq!(sender.pending.len(), pending);
-            assert_eq!(sender.consecutive_send_errors, 0);
+            assert_eq!(sender.consecutive_send_errors, 1);
             assert!(
                 tokio::time::timeout(Duration::from_millis(10), peer.recv(&mut [0; 2048]))
                     .await
                     .is_err()
             );
-            // Losing the connected budget must refuse further probes too.
+            // Losing the connected budget must skip further probes too.
             // Native loopback can bypass datagram MTU enforcement, so the
             // policy is read back above rather than treating it as wire proof.
             sender.socket = UdpSocket::bind((ip, 0)).await.unwrap();
-            let error = sender.send_probe(false).await.unwrap_err();
-            assert!(
-                matches!(error, crate::StartupError::Config(ref message) if message.contains("route MTU"))
-            );
+            sender.send_probe(false).await.unwrap();
             assert_eq!(sender.packets_sent, 3);
             assert_eq!(sender.pending.len(), pending);
+            assert_eq!(sender.consecutive_send_errors, 2);
         }
     }
 }

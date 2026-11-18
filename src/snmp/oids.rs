@@ -82,8 +82,10 @@ pub(crate) fn stamp_refl_session_table_prefix() -> Oid {
     Oid(v)
 }
 
-/// Number of columns in the session table.
-pub(crate) const SESSION_TABLE_COLUMNS: u32 = 7;
+/// Session table columns that can be read. Column 1, `stampReflSessIndex`,
+/// is the table's INDEX and `not-accessible` in the MIB (RFC 2578 §7.7): it
+/// appears only as the last sub-identifier of each cell's OID.
+pub(crate) const SESSION_TABLE_COLUMNS: std::ops::RangeInclusive<u32> = 2..=7;
 
 // -- Sender Config (.1.2.1.*) --
 

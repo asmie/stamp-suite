@@ -158,6 +158,8 @@ Upgrade both peers together when they use BER or reflected headers.
   - The loss threshold triggers session failure even before the first reply.
 - SNMP: `stampReflListenPort` reports the port the reflector bound. With
   `--local-port 0` it reported 0.
+- SNMP: the session table no longer returns `stampReflSessIndex`, which the
+  MIB declares not-accessible; the index stays in each cell's OID.
 - Configuration: the warning for a config file writable by group or other is
   logged again. It was raised before logging started and never shown.
   `Configuration::load_with_warnings` returns such warnings to a caller that

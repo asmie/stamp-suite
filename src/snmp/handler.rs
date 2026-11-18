@@ -248,7 +248,7 @@ impl<'a> StampMibView<'a> {
     fn oids(&self) -> &[Oid] {
         self.oids.get_or_init(|| {
             let mut list = oids::all_scalar_oids();
-            for col in 1..=oids::SESSION_TABLE_COLUMNS {
+            for col in oids::SESSION_TABLE_COLUMNS {
                 // BTreeMap keys are already in index order.
                 for &idx in self.sessions().keys() {
                     list.push(oids::stamp_refl_session_entry(col, idx));
@@ -267,7 +267,6 @@ impl<'a> StampMibView<'a> {
         let column = oid.0[prefix.len()];
         let session = self.sessions().get(&oid.0[prefix.len() + 1])?;
         match column {
-            1 => Some(VarBindValue::Gauge32(session.session_id)),
             2 => Some(VarBindValue::OctetString(ip_to_octets(
                 session.client_addr.ip(),
             ))),
@@ -446,7 +445,7 @@ mod tests {
             steps += 1;
             assert!(steps < 10_000, "walk did not terminate");
         }
-        assert!(steps > oids::SESSION_TABLE_COLUMNS as usize * 3);
+        assert!(steps > oids::SESSION_TABLE_COLUMNS.count() * 3);
     }
 
     #[test]
@@ -568,8 +567,40 @@ mod tests {
         let end = Oid(vec![]);
         let vb = handler.get_next(&prefix, &end);
 
-        // Should be the first column (index) of the first session (id=0)
-        assert_eq!(vb.oid, oids::stamp_refl_session_entry(1, 0));
+        // The first readable column (client address) of the first session
+        // (id=0); the index column is not-accessible.
+        assert_eq!(vb.oid, oids::stamp_refl_session_entry(2, 0));
+    }
+
+    #[test]
+    fn session_index_column_is_not_accessible() {
+        let state = make_test_state(true);
+        let client = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5000);
+        state
+            .session_manager
+            .as_ref()
+            .unwrap()
+            .get_or_create_session(client)
+            .unwrap();
+        let handler = StampMibHandler::new(state);
+        let index = oids::stamp_refl_session_entry(1, 0);
+        assert!(matches!(
+            handler.get(&index).value,
+            VarBindValue::NoSuchObject
+        ));
+        // A walk never returns a cell of column 1.
+        let end = Oid(vec![]);
+        let mut cur = oids::stamp_refl_session_table_prefix();
+        loop {
+            let vb = handler.get_next(&cur, &end);
+            if matches!(vb.value, VarBindValue::EndOfMibView)
+                || !vb.oid.starts_with(&oids::stamp_refl_session_table_prefix())
+            {
+                break;
+            }
+            assert_ne!(vb.oid.0[oids::stamp_refl_session_table_prefix().len()], 1);
+            cur = vb.oid;
+        }
     }
 
     #[test]
@@ -584,8 +615,8 @@ mod tests {
         }
 
         let handler = StampMibHandler::new(state);
-        let target = oids::stamp_refl_session_entry(1, 1004);
-        let before = oids::stamp_refl_session_entry(1, 1003);
+        let target = oids::stamp_refl_session_entry(2, 1004);
+        let before = oids::stamp_refl_session_entry(2, 1003);
         let end = Oid(vec![]);
 
         let vb = handler.get_next(&before, &end);
