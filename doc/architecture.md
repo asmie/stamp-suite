@@ -6,16 +6,17 @@ For options, see [usage](usage.md); for protocol coverage, see
 
 ## Module structure
 
-Both receiver backends feed the same packet pipeline. On the sender, state
-machines track the session and synchronous observers report events as they
-happen. RAII guards hand back reply capacity and other resources. Each packet
-layout and each set of session admission rules is defined in one place. What
-the code supports is subject to the
-[profile limits](conformance/README.md#known-limits).
+Both receiver backends feed one packet pipeline. The sender tracks each
+session in a state machine and reports events to synchronous observers. RAII
+guards return reply capacity and other resources. Each packet layout and each
+set of session admission rules is defined once. The
+[profile limits](conformance/README.md#known-limits) apply to everything
+below.
 
-Paths below are relative to `src/`. The library modules are public so that
-tests, benchmarks and fuzz targets can use them. They are not covered by the
-compatibility promise for the CLI, the configuration or the wire format.
+Paths are relative to `src/`. Most modules are public (and hidden from
+rustdoc) so that tests, benchmarks and fuzz targets can use them; `net_policy`
+and `net_scope` are private. None of them is covered by the compatibility
+promise for the CLI, the configuration or the wire format.
 
 ### Entry points and configuration
 
@@ -33,7 +34,10 @@ compatibility promise for the CLI, the configuration or the wire format.
 | `packets.rs` | Base packet layouts (44-byte open, 112-byte authenticated), each declared once with `wire_packet!`, which generates the big-endian `to_bytes`/`from_bytes` and checks field offsets at compile time. `Extended<B>` is a base packet followed by TLVs. |
 | `tlv/core.rs` | `TlvError`, `TlvFlags`, `TlvType`, `RawTlv` and size constants. |
 | `tlv/experimental.rs` | Experimental TLV and sub-TLV codepoints (240 to 251), kept in one place for renumbering. |
-| `tlv/list/` | `TlvList`: parsing, ownership, HMAC placement and serialization; `processing.rs` holds the in-place reflector updates. |
+| `tlv/framing.rs` | Allocation-free framing inspection shared by the sender, the reflector and `--validate-tlv-framing`. |
+| `tlv/list/` | `TlvList`: parsing, ownership, HMAC placement and serialization; `processing.rs` holds the in-place reflector updates and `diagnostics.rs` the `peer_c_preserved` count. |
+| `tlv/diagnostics.rs` | `TlvConformanceReason`: the fixed reasons for C flags the reflector sets on Type 12, header, CoS and nested control TLVs. |
+| `tlv/residual_ber.rs` | Value codec for the Residual BER TLV and its pattern sub-TLV (draft-ietf-bpm-stamp-ber-01 §4). |
 | `tlv/traits.rs` | `TypedTlv` trait for conversion between `RawTlv` and typed values. |
 | `tlv/typed/` | One file per TLV type with its value layout. |
 | `crypto.rs` | HMAC-SHA-256 keys, key files and directories, base and TLV HMAC computation and verification. |
@@ -52,10 +56,12 @@ compatibility promise for the CLI, the configuration or the wire format.
 | `sender/schedule.rs` | Probe spacing: periodic or Poisson. |
 | `sender/pending.rs` | `PendingTable`: probes awaiting a reply, retired by age under `--max-pending-probes` or expired after `--timeout`, with indexes kept in step on every removal. |
 | `sender/packet.rs` | Test packet and request TLV construction. |
-| `sender/socket.rs` | Sender socket options: egress TOS, attached IPv6 extension headers, route MTU and reply TOS reception. |
+| `sender/socket.rs` | Sender socket options: egress TOS, attached IPv6 extension headers, route MTU and reply TOS reception; `socket/windows.rs` reads the connected route MTU from Winsock. |
+| `sender/timer.rs` | Windows only: holds 1 ms timer resolution while a run is active. |
 | `sender/validate.rs` | Validation of reflected TLVs before any value is used. |
 | `sender/telemetry.rs` | Typed results of validation (HMAC status, Access Report, CE, Micro-session ID). |
 | `sender/measurements.rs` | Reply-copy accounting and the optional counter and Follow-Up measurements. |
+| `sender/ecn.rs` | ECN report for `--cos`: forward and reverse transitions, bleaching, remarking and CE counts from distinct reply copies. |
 | `sender/access_report.rs` | Access Report retransmission state (RFC 8972 §4.6). |
 | `sender/congestion.rs`, `rate_control.rs` | Response to CE-marked replies (AIMD, draft-ietf-bpm-stamp-cos-ecn-00 §3.4). |
 | `sender/session_state.rs` | Session state notifications (draft-ietf-ippm-stamp-ext-hdr-26 §9.2). |
@@ -67,15 +73,19 @@ compatibility promise for the CLI, the configuration or the wire format.
 | --- | --- |
 | `receiver/mod.rs` | Backend selection, shared admission, authentication and processing (`process_stamp_packet`). |
 | `receiver/ingest.rs` | Startup settings and the per-packet ingest path shared by both backends. |
+| `receiver/base_validation.rs` | `--validate-base-fields` checks (Error Estimate multiplier, PTP nanoseconds), run before any session state changes. |
 | `receiver/nix.rs` | UDP socket backend (`recvmsg` with ancillary data). |
 | `receiver/pnet.rs` | Raw capture backend (pnet datalink) with a separate send worker. |
 | `receiver/assemble.rs` | Reply packet assembly with TLV handling. |
+| `receiver/cos.rs` | `CosReplyPolicy`: the destination DSCP policy kept across routing and marking retries. |
 | `receiver/transmit.rs` | `Transmission`: the per-copy send loop with its routing, CoS and MTU fallbacks. |
 | `receiver/transmit/shape.rs` | Fitting a reply to its payload budget, send-time telemetry refresh and TLV signing. |
 | `receiver/transmit/queue.rs` | Reply budget, burst scheduling queue and shutdown drain. |
-| `receiver/transmit/datagram.rs` | `DatagramSender`: the one socket owner that applies per-reply options and sends, with the per-OS code. |
+| `receiver/transmit/datagram.rs` | `DatagramSender`: the one socket owner that applies per-reply options and sends. |
 | `receiver/transmit/errors.rs` | Marker errors (`ReplyTooLarge`, `LocalSendError`, `CosApplyError`) and EMSGSIZE detection that steer the send loop. |
-| `receiver/mtu.rs` | Route MTU lookup. Linux keeps a cache that route notifications invalidate; Windows queries IP Helper for the path and interface on every attempt; macOS estimates IPv6 MTU from a connected native socket. |
+| `receiver/transmit/windows.rs`, `send_buffer.rs` | Per-OS send details: the Windows fragmentation policy, and the macOS send buffer, which must hold the whole datagram. |
+| `receiver/mtu.rs`, `mtu/` | Route MTU lookup. Linux keeps a cache that route notifications invalidate; `mtu/windows.rs` queries IP Helper on every attempt; `mtu/macos.rs` estimates native IPv6 MTU without sending probes. |
+| `receiver/cleanup.rs` | The idle-session cleanup worker, one per reflector. |
 | `receiver/shared.rs` | `ReceiverSharedState` (counters, sessions, keys, caps, shutdown token) and `reload_keys`. |
 | `receiver/limits.rs` | Reflector counters, the per-source rate limiter and runtime Type 12 caps. |
 | `receiver/keys.rs` | Per-packet HMAC key selection. |
@@ -94,11 +104,11 @@ compatibility promise for the CLI, the configuration or the wire format.
 | `session.rs` | Session table, counters, replay windows, Follow-Up state and lifetime. |
 | `session/inventory.rs` | Optional ordered index and size-limited session pages for the control plane. |
 | `session_identity.rs` | Session identity and static reflector admission (RFC 8972 §3). |
-| `net_policy.rs` | Outgoing TTL/Hop Limit 255, interface binding (`--interface`) and sender port selection (draft-ietf-ippm-stamp-ext-hdr-26 §3.1). |
+| `net_policy.rs` | Outgoing TTL/Hop Limit 255, interface binding (`--interface`) and sender port selection (draft-ietf-ippm-stamp-ext-hdr-26 §3.1); `macos_mtu.rs` and `windows_mtu.rs` hold the platform MTU code that both roles share. |
 | `net_scope.rs` | Interface zones for IPv6 link-local endpoints. |
 | `hwtstamp.rs` | Kernel and NIC timestamping with per-packet provenance. |
 | `stats.rs`, `stats/` | Statistics collection and text/JSON/CSV output; `stats/quantiles.rs` holds the fixed-memory quantiles and `stats/clock_quality.rs` the declared clock quality. |
-| `ber.rs` | Residual bit error measurement (draft-ietf-bpm-stamp-ber-01). |
+| `ber.rs`, `ber/diagnostics.rs` | Residual bit error measurement (draft-ietf-bpm-stamp-ber-01) and the seven fixed reasons for BER C flags the reflector sets. |
 | `log_throttle.rs` | Throttled logging for events a remote peer can trigger on every packet. |
 
 ### Monitoring and control (optional features)
@@ -138,28 +148,32 @@ stop it. Pnet captures without promiscuous mode and answers only datagrams
 addressed to this host, as a UDP socket would: the bound address in its own
 family, or any local address otherwise. That keeps it from answering probes
 routed through the host to someone else. The address list is read at startup
-and again, at most once a second, when an unknown destination arrives. Pnet sends replies from UDP sockets bound to the STAMP port, so
-senders using connected sockets accept the replies' source port. Pnet captures
-on one interface. It needs a concrete local address, or a wildcard address
-together with `--interface`.
-A capture API can list an unspecified address for an adapter, but that address
-does not identify the interface. A wildcard without an interface name is
-therefore a startup error, and pnet does not open capture on that adapter. A
-concrete address must belong to the selected interface. If you also give an
-interface name or an IPv6 scope, they must match as well.
+and again, at most once a second, when an unknown destination arrives. Pnet
+sends replies from UDP sockets bound to the STAMP port, so senders using
+connected sockets accept the replies' source port.
 
-Pnet binds the configured address family first. With port zero the kernel
-picks a port, and pnet uses it for readiness, the capture filter, received
-endpoint metadata and both reply sockets. The other family binds the same port
-if it is free. If it is not, the configured family keeps running. A bind
+Pnet captures on one interface. It needs a concrete local address, or a
+wildcard address together with `--interface`. A capture API can list an
+unspecified address for an adapter, but that address does not identify the
+interface, so a wildcard without an interface name is a startup error. A
+concrete address must belong to the selected interface, and an interface name
+or IPv6 scope, if given, must match it.
+
+Pnet binds the configured address family first. With `--local-port 0` the
+kernel picks a port, and pnet uses it for readiness, the capture filter,
+received endpoint metadata and both reply sockets. The other family binds the
+same port if it is free; otherwise only the configured family runs. A bind
 failure in the configured family stops startup before capture begins. IPv6
 reply sockets are IPv6-only, so IPv4 and IPv6 wildcard sockets can coexist
 without handing a port from one to the other.
 
 Nix `recvmsg` calls run inside `UdpSocket::try_io`, which clears the cached
-readiness on `WouldBlock`. Calling `recvmsg` outside that wrapper can leave an
-idle loop spinning. The sender uses the same pattern for ECN and kernel
-timestamps.
+readiness on `WouldBlock`. Called outside that wrapper, `recvmsg` can leave an
+idle loop spinning. The sender reads ECN and kernel timestamps the same way.
+
+A nix reflector bound to `::` on Linux also asks for IPv4 TTL metadata, so it
+answers IPv4 clients on the dual-stack socket. A datagram that arrives without
+TTL metadata is counted as received and dropped (`processing_rejected`).
 
 The nix embedding API `receiver::run_receiver_with_socket` takes ownership of
 a UDP socket that is already bound and not connected. Its endpoint must match
@@ -172,8 +186,6 @@ handed over. See [startup fixtures](testing-startup.md).
 ## Reflector packet path
 
 ### Ingest
-
-`receiver/ingest.rs` is the shared path between a backend and the reply queue.
 
 At startup, `ReflectorSettings::from_config` resolves the configuration once.
 Startup stops if authenticated mode has no key, or if a CoS policy, location
@@ -206,8 +218,10 @@ and sending, until every copy has been sent or discarded.
 ### Processing and transmission
 
 1. Extract the full session identity and check static provisioning.
-2. Parse the base packet and verify configured authentication. A rejected base
-   cannot create or refresh a session.
+2. Parse the base packet and verify configured authentication. With
+   `--validate-base-fields` or `--validate-tlv-framing`, reject bad base fields
+   or incomplete TLV frames here. A rejected packet cannot create or refresh a
+   session.
 3. Acquire the session under the current cap and drain rules. Update receive
    state and classify replay without advancing the replay window yet.
 4. Parse and verify TLVs, apply flag rules, resolve routing and CoS requests,
@@ -233,6 +247,12 @@ including malformed chains and Extra Padding after HMAC. Changes go to the
 stored entry, and serialization follows the indices. Duplicate HMAC entries
 are moved to the end with linear swaps.
 
+In open mode a keyed reflector signs a reply only when the request carried an
+HMAC TLV; `--tlv-hmac on` signs every reply that has TLVs (RFC 8972 §4.8).
+Authenticated replies are always signed, unless Extra Padding is the only TLV.
+TWAMP Light padding in an open-mode request is sent back as an Extra Padding
+TLV, never as raw zeros after the HMAC.
+
 Verification hashes the sequence number and the covered prefix as received.
 Only Extra Padding may follow HMAC, and the HMAC does not cover it. New
 signatures use the outgoing order, with BER padding after HMAC. Failure echoes
@@ -241,7 +261,10 @@ TLV regeneration does not re-sign malformed lists. The final signing step at
 send time works on the reply buffer. It walks complete frames, even past a
 semantic M, to find a generated HMAC that sits before nonzero BER padding. An
 ownership flag stops this step from changing digests copied into I-marked
-failure echoes.
+failure echoes. For the same reason, a copied outer HMAC that the reflector did
+not generate stops telemetry from being refreshed at send time, so a signed
+error keeps the values copied during assembly. Normally processed replies are
+refreshed and signed on every send.
 
 ### Short packets and `--strict-packets`
 
@@ -285,10 +308,6 @@ reserved Access Report and Follow-Up fields only on valid values that can be
 processed. When Follow-Up zeroes a malformed sequence or timestamp field, it
 also honors the parser's M instead of treating the bytes that happen to be
 present as a valid declared size.
-At send time, a copied outer HMAC stops telemetry from being refreshed unless
-the reflector generated that HMAC. This keeps the decision made during
-assembly to copy the values of a signed error, while normally processed
-replies are still refreshed and signed on every send.
 
 `sender/run.rs` runs one session. `run_senders` (in `sender.rs`) opens one
 `SenderRun` per `--remote-addr` before sending any probe, so a startup error in
@@ -296,11 +315,14 @@ one target stops them all. It then runs them concurrently and labels each
 report with its target when there is more than one. See
 [Several reflectors](usage.md#several-reflectors) for the operator view.
 
-`SenderRun::open` loads the key before touching the network, binds the socket
-(`net_policy::bind_sender`, which picks a random port from 49152 to 65535 when
-the local port is 0), applies `--interface`, socket options and timestamping,
-and builds the static request TLVs. An open-mode run also signs the TLV HMAC
-when a key is given.
+`SenderRun::open` calls the steps in `sender/run/setup.rs`. It loads the key
+before touching the network, then binds the socket with
+`net_policy::bind_sender`. Without `--local-addr` the bind address is `::` for
+an IPv6 target and `0.0.0.0` for an IPv4 one, per target. With local port 0 it
+picks a random port from 49152 to 65535 and skips the peer's port. It then
+applies `--interface`, socket options and timestamping, builds the static
+request TLVs and fits BER padding and header requests to the route MTU. In open
+mode the sender adds a TLV HMAC when a key is given, unless `--tlv-hmac off`.
 
 `SenderRun::run` then works in three phases:
 
@@ -312,17 +334,22 @@ when a key is given.
    schedule restarts from now instead of bursting. Between probes the loop
    receives replies. Tokio timers fire on whole milliseconds, so gaps under
    1 ms are busy-waited, which keeps one CPU core busy above 1000 probes per
-   second. The loop ends at `--count` successful sends (`0` means no limit), at the end
-   of `--duration`, on a zero-SSID stop, or on shutdown.
+   second. The loop ends at `--count` successful sends (`0` means no limit),
+   at the end of `--duration`, on a zero-SSID stop, or on shutdown. After the
+   last probe it goes straight to the drain without waiting out another gap.
 
-   On Windows, each sender run requests 1 ms timer resolution through
-   [WinMM](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod).
-   A scoped guard releases each successful request when the run returns or is
-   dropped, including on cancellation and errors. Without the 1 ms request,
-   coarser Windows waits would stretch short probe intervals past the 2 ms catch-up budget.
+   If the route MTU becomes unreadable or too small during a run, the probe is
+   skipped. Eight consecutive skips or send errors end the run. On Linux the
+   sender reconnects to refresh a dropped route.
+
+   On Windows, `sender/timer.rs` requests 1 ms timer resolution through
+   [WinMM](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod)
+   for each run. A scoped guard releases it when the run returns or is
+   dropped, including on cancellation and errors. Without it, coarser Windows
+   waits would stretch short probe intervals past the 2 ms catch-up budget.
    The request can increase CPU wakeups and power use while it is active, and
-   it does not guarantee real-time scheduling. If the request fails, the
-   sender logs a warning and carries on with the timer resolution it has.
+   it does not guarantee real-time scheduling. If it fails, the sender logs a
+   warning and keeps the current resolution.
 
    Each probe is built in two steps. `build_probe` writes the TLVs straight
    into the packet buffer behind a zeroed base packet (`write_probe_tlvs`, no
@@ -334,7 +361,8 @@ when a key is given.
    copies. Shutdown ends the wait at once.
 3. **Access Report retries.** An Access Report exchange that started during
    the probe loop continues until acknowledged or out of retries (RFC 8972
-   §4.6), with identical report bytes.
+   §4.6), with identical report bytes. A failed retransmission waits one
+   report timer before the next attempt.
 
 Probes still unanswered at the end count as lost. The run returns a
 `StatsSnapshot`.
@@ -617,6 +645,9 @@ the source. This is separate from session admission.
   and clears the SRH again before ordinary replies. Paths that cannot do this,
   including pnet, fall back with U set.
 - SR-MPLS label stack forwarding is unsupported and gets U set.
+- A failed local socket setting (fragmentation policy, send buffer) or an
+  unreadable route-table reply is not a return-path failure. The reply is
+  dropped, without U and without retargeting it to the sender.
 
 The first Return Path TLV decides routing. The reflector validates the framing
 of every child before it changes any of them. A Control Code takes precedence,
@@ -643,7 +674,10 @@ learned ID is committed only for a validated reply to a pending probe. With a
 key, valid TLV integrity is also required. A rejected reply leaves the probe and
 the learned ID unchanged.
 
-The reflector validates and fills configured numeric IDs. Neither endpoint maps
+The reflector validates the sender ID and fills in its own ID from
+`--reflector-member-link-id`. Without that option it sends Reflector ID 0 and
+logs a warning, and the sender rejects the reply, naming the missing option.
+Neither endpoint maps
 these IDs to physical LAG members, selects egress members, or verifies ingress
 members. See [RFC 9534 gaps](conformance/rfc9534.md).
 
@@ -653,9 +687,12 @@ Type 12 requests a reply count, length and interval. It is disabled by default:
 with `--reflected-control-max-count 0` the reflector treats the TLV as
 unsupported and sends one reply with U set. When enabled, a request that
 exceeds the count, interval, byte rate (`--reflected-control-max-rate`), byte
-volume (`--reflected-control-max-volume`) or burst duration
-(`--reflected-control-max-duration-ms`) limit gets one C-flagged reply rather
-than a reduced burst. L2 and L3 Address Groups each require a local match;
+volume (`--reflected-control-max-volume`) or burst duration limit gets one
+C-flagged reply rather than a reduced burst. The duration is
+(count - 1) × interval, capped by `--reflected-control-max-duration-ms`
+(default 1000). A burst holds its reply-queue slot until the last copy, so
+without that cap a few long bursts could fill the queue and refuse every
+other request (RFC 10052 §5). L2 and L3 Address Groups each require a local match;
 either mismatch drops the packet, also when Type 12 is disabled, because the
 group checks run before the disabled check. Malformed groups are skipped. An L2
 group with two- or eight-byte halves is well formed but never matches an
@@ -676,9 +713,14 @@ generated HMACs, and failed sends do not use up sequence or counter state.
 Earlier burst copies keep the original template, and the last copy takes over
 its buffer.
 
-On Linux the reflector looks up the route of each reply and subtracts the IP,
-UDP and SRH overhead. Netlink notifications, a 250 ms expiry and a refresh on
-`EMSGSIZE` keep the cache current. The cache holds at most 256 entries. When
+On Linux, Windows and macOS (native unicast IPv6) the reflector looks up the
+route MTU of each size-controlled reply (Type 12, reflected headers or BER,
+burst copies included) and subtracts the IP, UDP and SRH
+overhead. The lookup follows `--interface`. Windows and macOS query the kernel
+on every attempt; macOS has no estimate for interface-pinned sockets and drops
+size-controlled replies there. On Linux, netlink notifications, a 250 ms
+expiry and a refresh on `EMSGSIZE` keep a cache current. The cache holds at
+most 256 entries. When
 it is full, a second-chance queue replaces one route instead of clearing the
 whole working set. A hit marks an entry for another chance but does not extend
 its expiry. Expired entries are rejected on lookup or replaced. A notification,
@@ -710,8 +752,10 @@ are echoed with U.
 BER padding goes after the HMAC, outside the bytes it covers, so corruption in
 the padding can be measured without touching the signed metadata. Parent and
 nested flags and integrity decide whether the sender records an observation.
-After a U, the sender stops requesting BER, and delay and loss measurement
-carries on. A count with a zero burst can mean the burst is unavailable, and
+A U on the BER TLV, wherever it sits in the reply, makes the sender log one
+warning and stop requesting BER; delay and loss measurement carries on. This
+includes a reflector in `--tlv-mode ignore`, which also returns Extra Padding
+with U. A count with a zero burst can mean the burst is unavailable, and
 it is not recorded as a clean burst sample. Legacy Types 240–242 get U, and
 `--ber-omit-burst` is a migration error. See
 [migration and peer compatibility](ber-migration.md).
@@ -722,8 +766,9 @@ a completed interval that goes above a threshold raises an alarm. Empty
 windows are left out, and the current partial window never raises alarms. See
 [retention](statistics.md#memory-and-ber-history).
 
-On Linux the sender shrinks its padding by whole pattern repetitions to fit the
-route MTU. When the reflector fits a reply to the route budget for Type 12 or
+On Linux, Windows and macOS (native IPv6) the sender shrinks its padding by
+whole pattern repetitions to fit the connected route MTU, and refits it when
+the MTU changes. When the reflector fits a reply to the route budget for Type 12 or
 the MTU, it fills the exact budget with the validated BER pattern, even if
 semantic resizing has already set C on the parent. A controlled reply can then
 end with a partial repetition, and C on the BER TLV marks the resized sample
@@ -856,8 +901,7 @@ lengths before it allocates or indexes. EOF ends the connection. If the first
 connection attempt fails, the sub-agent logs a warning and STAMP keeps
 running without SNMP; it never retries that first connection. Later failures
 trigger reconnection and re-registration with exponential backoff from 1 to
-30 s. A supervisor logs panics in the event
-loop.
+30 s. A supervisor logs panics in the event loop.
 
 The Open and Register handshakes check the eight-byte Response prefix, the
 error status, the packet ID and, after Open, the session ID. Net-SNMP may

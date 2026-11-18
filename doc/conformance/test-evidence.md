@@ -36,7 +36,7 @@ The checker recognizes:
 
 Comments, string literals, helper names containing "test", ordinary production
 files and fixture data do not count on their own. For example,
-`src/receiver/transmit.rs::fit_reply` identifies implementation, not a test of
+`src/receiver/transmit/shape.rs::fit_reply` identifies implementation, not a test of
 its caller. Qualified Python references are also checked for stale files and
 functions, including outside normative Compliant rows.
 
@@ -472,8 +472,11 @@ cargo test --locked --all-features --test sender_measurement_test --test tlv_ext
 
 ## CoS/ECN wire review
 
-Commit `06c4848` adds Linux packet and marking evidence for the selected
-draft-02 profile. The new reflector test runs seven policy cases in both
+Commit `06c4848` adds Linux packet and marking evidence for the
+draft-02 profile. BPM -00 later replaced draft-02 with the same wire layout; see
+[successor changes](draft-stamp-cos-ecn.md#bpm-00-successor-changes).
+
+The new reflector test runs seven policy cases in both
 families and open/keyed-open/authenticated modes: 42 profile combinations,
 each with three burst replies and an interleaved ordinary reply, for 168
 replies in all. It sets ingress IP TOS/Traffic Class separately from the CoS
@@ -484,7 +487,7 @@ destination-scoped policy. The ordinary reply keeps its own marking, with no
 burst CoS leaking into it.
 
 `tests/cos_ecn_wire_test.rs::reflector_cos_bytes_and_wire_markings_follow_ingress_and_admission_policy`
-includes all ECN codepoints and a genuine legacy zero-reserved CoS request.
+includes all ECN codepoints and a legacy CoS request with a zero Reserved field.
 `tests/sender_measurement_test.rs::sender_cos_fields_and_automatic_ect_response_reach_the_wire`
 covers 30 combinations. It checks the actual Type/Length/RPD/RPE/Reserved
 origination and that the automatic congestion controller is present for CoS
@@ -621,7 +624,7 @@ now also checks actual TOML loading and empty CLI values before sender startup.
 The original matrix left out the sub-TLV flag procedures that RFC 9503
 Section 4.1 inherits. A separate Linux wire control saw a recognized, used
 Control Code child keep U=1 while the successful parent had U=0, so the
-control failed. The new `9503-4.1-flags` row is **Partial**. Known and unknown
+control failed. The new `9503-4.1-flags` row is Partial. Known and unknown
 child flags, framing, failed-integrity copying and Control Code ignore
 precedence needed a repair before a broader claim; see the next section and
 [the concrete request/reply](rfc9503.md#nested-flags). The RFC publication
@@ -696,7 +699,7 @@ and Windows harnesses compile the same test source with the real default
 libraries; they do not replace native runtime or full platform dependency
 builds.
 
-The inherited child-flag row stays **Partial**: integrity-failed copies,
+The inherited child-flag row stays Partial: integrity-failed copies,
 malformed signed outer lists and already-skipped copies keep child flags and
 reserved value bits as received. The test-reference inventory did not change.
 
@@ -854,8 +857,8 @@ checks IPv4 replies and early IPv6 bind failure after disabling IPv6 addresses
 only inside the verified private namespace. A guard restores the sysctl. The
 three endpoint cases run one at a time even under a parallel test runner,
 require the recorded parent namespace to differ and reject missing
-prerequisites. Together they produce **63 replies, 27 expected startup
-failures and 39 graceful SIGTERM shutdowns**, each limited to four seconds. CI
+prerequisites. Together they produce 63 replies, 27 expected startup
+failures and 39 graceful SIGTERM shutdowns, each limited to four seconds. CI
 requires all three ignored cases with the actual pnet backend, so a zero-test
 or gated suite cannot pass.
 
@@ -922,7 +925,7 @@ A separate live control runs a pnet reflector on `127.0.0.1:56620` while the
 public sender sends from `127.0.0.2:56620` to a retained peer on another port.
 The peer sees the same numeric port and the reflector keeps running. So the
 same-endpoint argument did not cover the whole local-role-port requirement.
-The row stays MUST NOT but becomes **Partial**: operators must provision
+The row stays MUST NOT but becomes Partial: operators must provision
 separate numeric role ports across addresses. This is a failed conformance
 control, not a passing test that freezes the limit. Its observed values and
 scope are recorded here and in the matrix.
@@ -932,7 +935,7 @@ checks default unlimited policing with 1,024 immediate accepts per address
 family, real TOML loading, CLI precedence and the resulting runtime rate and
 burst values. This verifies the reflector's configuration path. It cannot show
 that deployed limits accommodate aggregate offered traffic, other sessions,
-bursts and changing capacity, so that MUST NOT row also becomes **Partial**.
+bursts and changing capacity, so that MUST NOT row also becomes Partial.
 Operator provisioning and resource-protection drops remain documented. There
 is no aggregate-capacity validator or local role-port inventory. Either could
 be a future provisioning feature, but it would need session and capacity input
@@ -956,15 +959,16 @@ reference is missing, because the upload step keeps its `if: always()`
 condition. Calls without the strict flag still only report. Checker defaults
 and Rust and protocol behavior did not change.
 
-The configured CI command passed on the tree with **318 applicable, 318
-referenced, zero missing**. On a temporary copy of the source and matrices, the
+The configured CI command passed on the tree with 318 applicable, 318
+referenced and zero missing rows. On a temporary copy of the source and
+matrices, the
 ext-hdr-6.2-5 test citation was then replaced with only the (valid) production
-implementation. Strict mode returned **exit 1**, with **317 referenced, one
-missing** and exactly one `missing-test-evidence` diagnostic for that clause.
+implementation. Strict mode returned exit 1, with 317 referenced, one
+missing and exactly one `missing-test-evidence` diagnostic for that clause.
 The failure output was valid detailed JSON with `required: true` and
 `execution_checked: false`. The same copy without the strict flag returned
-**exit 0** and reported the same missing reference. Restoring the row returned
-strict mode to **exit 0** and 318/318 references. The repository matrix and
+exit 0 and reported the same missing reference. Restoring the row returned
+strict mode to exit 0 and 318/318 references. The repository matrix and
 status counts were not touched.
 
 This guard checks source references. It does not certify execution or

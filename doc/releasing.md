@@ -1,26 +1,40 @@
 # Releasing
 
-What the release workflow checks, and how to run the same checks yourself.
-The [conformance matrices](conformance/README.md) cover the frozen
-specifications, and the [supported profiles and limits](conformance/README.md#known-limits)
-apply to release claims too: a passing build or job says nothing about a
-capability it does not exercise, such as physical LAG, NIC timestamps, a
-capture driver or PMTU discovery.
+This page lists what the release workflow checks and how to run the same
+checks locally. The [conformance matrices](conformance/README.md) cover the
+frozen specifications, and the
+[supported profiles and limits](conformance/README.md#known-limits) apply to
+release claims too. A passing job says nothing about a capability it does not
+exercise, such as physical LAG, NIC timestamps, a capture driver or PMTU
+discovery.
 
 ## Release gate boundary
 
-The tag workflow calls `rust.yml` and `conformance.yml` as reusable workflows.
-Nothing is published until both have passed, along with the source, Linux,
-macOS and Windows package jobs. As a result, the backend, native-platform,
-MSRV, evidence and privileged checks all run on the tagged commit. Platform
-exclusions still apply: the Windows tests that run without a capture driver
-say nothing about capture with a driver.
+A `v*` tag starts `release.yml`. Its `release-preflight` job runs first and
+every other job depends on it: it checks that the tag matches every version
+source (`scripts/check_release_metadata.py --version`), validates the notice
+profiles and dry-runs `cargo publish`. The workflow then calls `rust.yml` and
+`conformance.yml` as reusable workflows. Nothing is published until both have
+passed, along with the source, Linux, macOS and Windows package jobs, so the
+backend, native-platform, MSRV, evidence and privileged checks all run on the
+tagged commit. Platform exclusions still apply: the Windows tests that run
+without a capture driver say nothing about capture with a driver.
 
-The independent UDP gates run the
+CodeQL is not part of the release gate. `codeql.yml` is an advanced-setup
+workflow that analyzes Actions, Python and Rust without a build
+(`build-mode: none`) on pushes and pull requests to `master` and every Monday.
+Its configuration, `.github/codeql/codeql-config.yml`, leaves out test code
+(`tests/`, `benches/`, `fuzz/` and the test files under `src/`), which uses
+fixed keys on purpose and does not ship. GitHub's default CodeQL setup must be
+turned off in the repository's code security settings, because both cannot
+upload results.
+
+The `independent-wire` jobs in `conformance.yml` run the protocol-combination
+fixtures (`scripts/interop_stamp.py`) and the
 [successor BER profile](testing-interop.md#independent-successor-ber-profile)
-with stamp-suite in both roles: 60 required cases for the default build and 60
-for the all-features build, on top of the existing protocol-combination
-fixtures. Both reports are uploaded even when cases fail.
+(`scripts/interop_ber.py`) with stamp-suite in both roles: 60 required BER
+cases for the default build and 60 for the all-features build. Both reports
+are uploaded even when cases fail.
 
 Cargo builds in the release jobs and in the container must match the
 lockfile. Debian builds run offline: before running `debian/rules`,
@@ -75,33 +89,31 @@ python3 scripts/check_packaged_notices.py 'target/x86_64-unknown-linux-gnu/debia
 The archive check compares the text inside each package byte for byte with the
 generated bundle, and accepts a copy the packager compressed with gzip. It
 fails if an archive or its notices are missing, or if the text was changed.
-To read RPMs it needs `rpm2archive` (from the `rpm` package), which, unlike
-`rpm2cpio` in RPM 4.18, can read packages that lack the archive-size tag. To
-read DEBs it needs `dpkg-deb`. Tar and ZIP files are read with Python's
-standard library. These checks run before any release artifact is uploaded.
+RPMs need `rpm2archive` (from the `rpm` package), which, unlike `rpm2cpio` in
+RPM 4.18, reads packages that lack the archive-size tag. DEBs need
+`dpkg-deb`. Tar and ZIP files are read with Python's standard library. These
+checks run before any release artifact is uploaded.
 
 Building RPMs needs the RPM tools, including `/usr/lib/rpm/find-requires`.
 Build the binary and generate its notices first, then run
 `cargo generate-rpm --auto-req find-requires`. CI and the release jobs name
-that scanner directly so that packaging fails when the tools are missing.
-Otherwise the packager falls back to its automatic mode, which on some hosts
-adds invalid weak-symbol dependencies and produces an RPM that cannot be
-installed.
+that scanner so that packaging fails when the tools are missing. Without it the
+packager falls back to its automatic mode, which on some hosts adds invalid
+weak-symbol dependencies and produces an RPM that cannot be installed.
 
 The Debian, RPM, Gentoo, OpenWrt, Nix and container recipes install the bundle
 under `/usr/share/doc/stamp-suite/` (or the platform's documentation prefix).
 Source archives ship the generator and the reviewed policy, and vendor
-archives keep the upstream files as they are.
-There is no combined bundle to commit. For a custom build, pass `--features`
-with the exact features you built with (`all` means all features); without
-it, the generator uses the target's release profile. `--check` compares an
-existing generated bundle with what the same target and features would
-produce.
-If your custom build disables default features, also pass
-`--no-default-features`.
-To generate offline, the locked metadata dependencies must already be
-downloaded or vendored, including the ones Cargo needs to resolve development
-targets.
+archives keep the upstream files as they are. There is no combined bundle to
+commit.
+
+For a custom build, pass `--features` with the exact features you built with
+(`all` means all features), and `--no-default-features` if you disabled the
+defaults. Without `--features`, the generator uses the target's release
+profile. `--check` compares an existing generated bundle with what the same
+target and features would produce. To generate offline, the locked metadata
+dependencies must already be downloaded or vendored, including the ones Cargo
+needs to resolve development targets.
 
 The extra Apache-2.0 text in `scripts/licenses/Apache-2.0.txt` comes from the
 [Apache Software Foundation](https://www.apache.org/licenses/LICENSE-2.0.txt).
@@ -118,11 +130,11 @@ someone reviews the policy.
 
 ### Linux package installation
 
-The CI packaging job and both Linux release package jobs run
-`scripts/check_package_install.py` on the DEB and RPM files they built. Linux
-packages are built on Ubuntu 24.04 runners so that they keep that glibc
-baseline. The checks need Docker running native Linux containers, and Python
-3.10 or later:
+The CI `package` job and both Linux release package jobs (x86_64 and aarch64)
+run `scripts/check_package_install.py` on the DEB and RPM files they built.
+Linux packages are built on Ubuntu 24.04 runners to keep that glibc baseline.
+The checks need Docker running native Linux containers, and Python 3.10 or
+later:
 
 ```sh
 python3 scripts/check_package_install.py --package target/debian/stamp-suite_VERSION-1_amd64.deb --report /tmp/package-install-deb.json
@@ -132,9 +144,9 @@ python3 scripts/check_package_install.py --package target/generate-rpm/stamp-sui
 Replace the paths and versions with the ones your build produced. The script
 builds its test images from `dist/package-check/`: Ubuntu 24.04 for DEB and
 Fedora 45 for RPM. Both are pinned so that a new upstream release cannot change
-the gate; move them forward deliberately. Building the images needs network access.
-The installation and service checks run with networking turned off, apart
-from the container's own loopback. `--image NAME` reuses a test image you have
+the gate; update them on purpose. Building the images needs network access.
+The installation and service checks run with networking off, apart from the
+container's own loopback. `--image NAME` reuses a test image you have
 already built. The report records the image ID, architecture, OS release,
 package hash, the native package manager's output and the wire exchanges. CI
 uploads whatever reports exist, even when a check fails.
@@ -145,16 +157,16 @@ account is still non-root and still has the same UID and GID. It validates the
 packaged unit with `systemd-analyze verify`. It then reads the account,
 capabilities and `NoNewPrivileges` setting from that installed unit, runs the
 reflector under exactly that sandbox, and checks in `/proc` that the process
-got it. It checks open and authenticated reflection on port 862
-over IPv4 and IPv6. It checks that replies carry the right identity and valid
-HMACs, and that the reflector shuts down cleanly. As a negative control, the
-bind must fail without that capability. Removing the package must remove the
-binary. On DEB, removal keeps the account and purging must delete it. Nothing
-on the host, accounts or services, is changed.
+got it. It checks open and authenticated reflection on port 862 over IPv4 and
+IPv6, that replies carry the right identity and valid HMACs, and that the
+reflector shuts down cleanly. As a negative control, the bind must fail
+without that capability. Removing the package must remove the binary. On DEB,
+removal keeps the account and purging must delete it. Nothing on the host
+(accounts or services) is changed.
 
-For the locally built RPM, which is unsigned, the check skips signature
-verification but keeps dependency and payload digest checks. So it says
-nothing about whether a distribution's signing keys are trusted. The service
+The locally built RPM is unsigned, so the check skips signature verification
+but keeps dependency and payload digest checks. It says nothing about whether
+a distribution's signing keys are trusted. The service
 checks cover the unit's syntax and the process privileges listed above. They
 do not boot systemd or test every sandbox directive. Booting a full service
 manager is a separate deployment check.
@@ -206,11 +218,12 @@ read-only community can only see the STAMP enterprise subtree. It does not
 read the system's daemon configuration or touch a running service. The real
 stamp-suite sub-agent registers with this master. Net-SNMP clients, which
 share no code with stamp-suite, then check the counters at startup and while
-traffic flows, two session rows across the six readable columns, the order of
-non-repeaters and repeaters in GetBulk, and the end-of-MIB boundary. Next, the
-case stops its master, checks that authenticated STAMP is still reflected,
-starts the master again, and checks that the sub-agent registers again with
-its counters and session state intact.
+traffic flows, two session rows in the six readable columns (the
+not-accessible `stampReflSessIndex` appears only in each cell's OID), the
+order of non-repeaters and repeaters in GetBulk, and the end-of-MIB boundary.
+The case then stops its master, checks that authenticated STAMP is still
+reflected, starts the master again, and checks that the sub-agent registers
+again with its counters and session state intact.
 
 The master is configured as described in the Net-SNMP
 [AgentX guide](https://www.net-snmp.org/docs/README.agentx.html) and the
@@ -221,15 +234,17 @@ cover every SNMP version, context or byte order, or a writable MIB. Record
 both the Net-SNMP package version and the version string the daemon reports.
 
 The `release-integration` job in `conformance.yml` runs all five cases on
-Ubuntu. It downloads the Net-SNMP packages and unpacks them into `/tmp`
-without installing them or starting a system service. Tools installed locally
-work as well.
+Ubuntu with an all-features debug build. It downloads the Net-SNMP packages
+and unpacks them into `/tmp` without installing them or starting a system
+service. Locally installed tools work too.
 
 ### macOS runtime gate
 
-`rust.yml` runs native macOS jobs for the default and all-features profiles.
-Each one calls `scripts/run_native_tests.py --expected-platform darwin` and
-uploads its JSON report and the raw Cargo log, also when the job fails. The
+The `test-macos` job in `rust.yml` runs the default and all-features profiles
+natively. Each one runs Clippy with `-D warnings` (the Linux Clippy jobs do not
+compile macOS-only code), then calls
+`scripts/run_native_tests.py --expected-platform darwin` and uploads its JSON
+report and the raw Cargo log, also when the job fails. The
 report records the platform and toolchain, the commit and patch hash, the
 command, its exit status, the logs, and how many tests ran and how many were
 ignored. The gate fails on a platform mismatch, on test summaries that are
@@ -248,8 +263,8 @@ excluded on the platform do not count as executed.
 
 ### Windows runtime gate
 
-On Windows, `rust.yml` requires the library unit tests and thirteen
-integration test targets to pass: configuration files, malformed input, TLV
+The `test-windows` job in `rust.yml` requires the library unit tests and
+thirteen integration test targets to pass: configuration files, malformed input, TLV
 properties, mixed clocks, required Micro-session validation, SSID validation,
 sender measurement summaries, startup error reporting, base-protocol sender
 bytes, Return Path sender bytes, header-request controls, TLV flag semantics
@@ -260,12 +275,13 @@ sender peers without starting the pnet capture receiver. The scheduler tests
 use a fixed MTU. A separate test checks that when the route MTU is unknown, a
 size-controlled burst is dropped and an ordinary reply still goes out.
 
-The job builds with `ttl-pnet,metrics,control`. Windows executables reserve
-4 MiB for the main thread's stack, and release builds read that value back
-from the PE header to check it. The job downloads pinned Npcap SDK and runtime
-files and checks that the staged DLLs are x64. It fails if a DLL is missing or
-a required test fails. It then runs the mixed-clock suite 20 times and stops
-at the first failed run. A last step runs the full suite for information only
+The job builds with `ttl-pnet,metrics,control` and runs Clippy on that
+profile first, since the Linux Clippy jobs do not compile Windows-only code.
+Windows executables reserve 4 MiB for the main thread's stack (`build.rs`),
+and release builds read that value back from the PE header to check it. The
+job downloads pinned Npcap SDK and runtime files and checks that the staged
+DLLs are x64. It fails if a DLL is missing or a required test fails. It then
+runs the mixed-clock suite 20 times and stops at the first failed run. A last step runs the full suite for information only
 (`continue-on-error`), because no capture driver is installed. All logs are
 uploaded.
 
@@ -345,7 +361,7 @@ python3 scripts/check_standards.py --offline /tmp/standards-source \
   --as-of 2026-09-11 --report /tmp/standards-replay.json
 ```
 
-Exit codes: **0** current, **1** specification review needed, **2** incomplete
+Exit codes: `0` current, `1` specification review needed, `2` incomplete
 check. Offline mode replays saved responses, so it cannot show the latest
 revision. When you compare replay results, use the `as_of` date from the live
 report. Reports use schema version 2 and include a `sources` list with the

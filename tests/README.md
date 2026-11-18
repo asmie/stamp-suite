@@ -1,15 +1,14 @@
 # Integration tests
 
-Integration test inventory, feature/platform requirements and commands for
-ignored tests. General build and lint commands are in
-[CONTRIBUTING.md](../CONTRIBUTING.md#tests).
+This page lists the integration tests in `tests/`, the platform and features
+each one needs, and how to run the ignored ones. General build and lint
+commands are in [CONTRIBUTING.md](../CONTRIBUTING.md#tests). The
+[profile limits](../doc/conformance/README.md#known-limits) say which results
+come from software fixtures or a single backend, and what still needs a
+physical testbed.
 
-Regression tests cover rendered
-statistics, process metrics, AgentX lifetime, sender size limits, source churn
-and blocked output. Keep helper-based scenarios and no-panic properties;
-consolidation must preserve their boundary inputs and independent checks.
-The [profile limits](../doc/conformance/README.md#known-limits) distinguish
-software fixtures, backend coverage and missing physical testbed evidence.
+When you merge or move tests, keep their boundary inputs and their independent
+checks.
 
 ## Running the default suite
 
@@ -17,8 +16,8 @@ software fixtures, backend coverage and missing physical testbed evidence.
 cargo test --all-features
 ```
 
-This runs every test that needs no special privileges. Tests are excluded in
-two ways:
+This runs every test that needs no special privileges. Two things exclude a
+test:
 
 - **Build gates (`cfg`).** Some files compile only on certain platforms, with
   certain features, or with one receiver backend. "nix" in the table below
@@ -30,9 +29,9 @@ two ways:
   Each also checks its own environment variable before doing anything. See
   [Tests that need privileges or namespaces](#tests-that-need-privileges-or-namespaces).
 
-To exercise the pnet backend's library tests (the send worker uses ordinary UDP
-sockets and needs no capture capability). This also checks Ethernet source MAC
-propagation through ingest and transmission for IPv4 and IPv6:
+The pnet backend's library tests need no capture capability, because its send
+worker uses ordinary UDP sockets. They also check that the Ethernet source MAC
+is carried through ingest and transmission for IPv4 and IPv6:
 
 ```bash
 cargo test --locked --no-default-features --features ttl-pnet --lib
@@ -50,8 +49,9 @@ in [release procedures](../doc/releasing.md#procedures).
 | `ber_regression_test.rs` | BER counts and bit error bursts through packet processing. | always |
 | `burst_transmission_test.rs` | Live interleaved burst replies: IPv4/IPv6, open/authenticated, NTP/PTP, stateless/stateful, CoS, Direct Measurement, Follow-Up, HMAC and kernel TX correlation. | Linux, nix |
 | `clock_metadata_test.rs` | Clock discipline, timestamp encoding and TX provenance on the wire, for IPv4/IPv6, open/authenticated and stateless/stateful. | Linux, nix |
-| `config_file_test.rs` | TOML configuration file: CLI precedence, parse errors that name the path, unknown keys. | always |
+| `config_file_test.rs` | TOML configuration file: CLI precedence, parse errors that name the path, unknown keys, and the logged warning for a config file writable by group or other. | always; the warning test needs Unix |
 | `control_api_test.rs` | Control API end to end over raw HTTP/1.1. | `control` |
+| `dual_stack_test.rs` | A reflector bound to `::` answers an IPv4 client through the dual-stack socket and reports its real TTL and DSCP. Returns early when `net.ipv6.bindv6only` is set. | Linux, nix |
 | `ext_hdr_nix_test.rs` | Type 246 reflection from ancillary data on the nix backend. | Linux, nix; ignored, see [User-namespace tests](#user-namespace-tests) |
 | `ext_hdr_revision13_test.rs` | draft-ietf-ippm-stamp-ext-hdr-26 sender rules: random source ports, TTL/Hop Limit 255 (including IPv4-mapped), session state notifications and their deadlines. | Linux, macOS |
 | `idle_cpu_test.rs` | A real reflector process returns to idle after traffic and still receives the next packet; IPv4, IPv6 and kernel timestamps. Reads child CPU time from `/proc`. | Linux, nix |
@@ -66,7 +66,7 @@ in [release procedures](../doc/releasing.md#procedures).
 | `multi_key_hmac_test.rs` | Per-SSID HMAC verification and signing: single-key fallback, key selection, rejection without a key. | always |
 | `multi_target_test.rs` | One sender measuring several reflectors, each in its own session. | Linux, nix |
 | `netns_conformance.rs` | Wire behavior across network namespaces (CoS, SRv6, header reflection, Address Groups, BER, Type 12, TTL). | Linux; ignored, see [Namespace conformance tier](#namespace-conformance-tier) |
-| `output_stream_test.rs` | CLI stdout stays parseable with logs, packet details, periodic reports, BER and measurement CSV, reflector shutdown, schema output, validation errors, blocked stdout and broken pipes. | Linux, nix |
+| `output_stream_test.rs` | CLI stdout stays parseable with logs, packet details, periodic reports, BER and measurement CSV, reflector shutdown, schema output, validation errors, blocked stdout and broken pipes. Sender reply diagnostics are JSON log records under `--log-format json`. | Linux, nix |
 | `pnet_loopback_test.rs` | Real pnet capture on `lo`: open, authenticated and TLV round trips, and that bad UDP checksums get no reply. | Linux, `ttl-pnet` without `ttl-nix`; ignored, see [Raw capture (pnet)](#raw-capture-pnet) |
 | `pnet_endpoint_test.rs` | Assigned and explicit ports across configured families/wildcards, both reply families, Location metadata, signatures, retained bind conflicts, unavailable counterpart, disabled IPv6, large packets through maximum UDP payloads, counted fragmented requests and graceful shutdown. | Linux, `ttl-pnet` without `ttl-nix`; five ignored namespace tests |
 | `pnet_nested_headers_test.rs` | Actual mixed IPv4/IPv6 tunnel capture: exact outer-to-inner fixed-header replies, innermost identity/hops, independent signatures, corrupt UDP checksums and excessive depth rejection with valid follow-ups. | Linux, `ttl-pnet` without `ttl-nix`; one ignored namespace test |
@@ -93,14 +93,14 @@ in [release procedures](../doc/releasing.md#procedures).
 | `pending_probe_limit_test.rs` | Independent sender peers: bounded retention, silent loss, late/duplicate replies, cancellation, Access Report retries and per-target budgets; IPv4/IPv6 and open/authenticated modes. | always; multi-target case Linux only |
 | `reflector_launcher_test.rs` | Continuously held port contention, kernel-selected ports, metadata setup before first send without readiness traffic, clean receiver exit, startup stderr/status bounds, timeout cleanup and child reaping. Linux also checks original socket closure and retained duplicates independently of endpoint occupancy. | Unix, nix; kernel socket-identity checks on Linux only |
 | `tlv_extension_wire_test.rs` | RFC 8972 echo order, U/M/I flags and integrity gates through a real reflector, checked against independently built bytes and HMACs. | Linux, nix |
-| `type12_policy_test.rs` | Type 12 policy decisions (rate, volume, count, Address Groups, protected admission) through real UDP dispatch and independent bytes. | Linux, nix |
+| `type12_policy_test.rs` | Type 12 policy decisions (rate, volume, count, burst duration, Address Groups, protected admission) through real UDP dispatch and independent bytes. A burst over the duration limit gets one C-flagged reply and does not hold the reply queue. | Linux, nix |
 | `cos_ecn_wire_test.rs` | Actual ingress/reply IP markings, raw CoS fields, global/scoped admission, ECN refusal, burst/ordinary isolation and independent signatures. | Linux, nix |
 | `ecn_path_test.rs` | Real sender/reflector diagnostics under independent forward/reverse kernel ECN rewrites, raw IP/TLV capture, signatures, policy refusals and matching report matrices. | Linux, nix; one ignored namespace test |
 | `session_ssid_validation_test.rs` | Sender SSID checks and zero-SSID policies against an independent peer; IPv4/IPv6, open/authenticated. | always |
 | `sender_zero_checksum_test.rs` | Actual CLI sender capture, zero/nonzero checksum fields, NTP/PTP, default/five-byte BER patterns, independent base/TLV digests and samples, plus kernel rejection of invalid-checksum signed replies. | Linux, any backend profile; one ignored namespace test |
 | `zero_checksum_test.rs` | Captured IPv4 checksum-zero ingress, kernel checksum-drop controls, BER padding repair and signatures, strict/provisioned admission and authenticated base corruption. | Linux, nix; five ignored namespace tests |
 | `snmp_lifecycle_test.rs` | CLI exits after finite sends, startup failures, signals and silent initial/reconnect handshakes. | Unix, `snmp`; reflector needs nix |
-| `startup_failure_test.rs` | Startup failures (bind, key file, missing key, bad BER pattern, missing interface) return errors; total loss and shutdown do not. Retained silent peers and automatic sender ports avoid released-port races; IPv4/IPv6 total loss verifies the probe and distinct source port. | always; some cases Linux only |
+| `startup_failure_test.rs` | Startup failures (bind, key file, missing key, bad BER pattern, missing interface, oversized combined TLVs) return errors; total loss and shutdown do not, and a permanent send failure ends a finite run. Retained silent peers and automatic sender ports avoid released-port races; IPv4/IPv6 total loss verifies the probe and distinct source port. | always; some cases Linux only |
 | `tlv_flag_semantics.rs` | U, M, I and C flag rules (RFC 8972, RFC 10052, draft-ietf-ippm-stamp-ext-hdr-26) through `process_stamp_packet`. | always |
 
 Shared helpers and data:
@@ -108,6 +108,9 @@ Shared helpers and data:
 | Path | Purpose |
 | --- | --- |
 | `common/wire_hmac.rs` | HMAC-SHA-256 computed directly with `hmac` and `sha2`, so wire tests do not use the production HMAC or coverage code. |
+| `common/wire_mode.rs` | Open, keyed-open and authenticated request layouts, with offsets taken from RFC 8762 and RFC 8972 rather than from the crate. |
+| `common/case.rs` | Guard that prints the current matrix combination when an assertion inside a loop fails. |
+| `common/ipv6_headers.rs` | Linux ancillary-data capture of IPv6 headers for independent UDP peers. |
 | `common/reflector.rs` | Child reflector lifecycle: port 0, JSON readiness, bounded stderr draining and kill/wait cleanup. |
 | `common/receiver.rs` | In-process fixtures retain a bound socket and shared state on a dedicated current-thread runtime; cancel and join on teardown. |
 | `common/child.rs` | A spawned sender or other child with stdout and stderr drained on threads, a bounded `finish` that kills and reports the stderr tail, and kill/wait on drop. |
@@ -115,8 +118,10 @@ Shared helpers and data:
 | `common/context.rs` | Default `ProcessingContext` for tests that call `process_stamp_packet`; tests override only the fields they exercise. |
 | `common/hops.rs` | Independent reception of IPv4 TTL and IPv6 Hop Limit metadata on Linux and macOS. |
 | `netns/mod.rs` | Namespace fixture for `netns_conformance.rs`: namespaces, veth links, tcpdump capture and pcap parsing. |
+| `ecn_path_test/evidence.rs` | Optional pcap and report output for `ecn_path_test.rs`, written when `STAMP_ECN_CAPTURE_DIR` is set. |
 | `privileged/mod.rs` | Shared skip policy: with `STAMP_REQUIRE_PRIVILEGED=1` an unavailable prerequisite fails instead of skipping. |
 | `fixtures/interop/` | Request and reply bytes for the Python wire fixtures; see [testing-interop.md](../doc/testing-interop.md). |
+| `fixtures/residual-ber/` | BER field values, request vectors and frozen replies for `scripts/interop_ber.py`, and Teaparty captures; see [BER migration](../doc/ber-migration.md#interoperability). |
 | `proptest_tlv.proptest-regressions` | Saved proptest failure seeds, replayed on every run. |
 
 ## Reflector startup
@@ -124,15 +129,15 @@ Shared helpers and data:
 The live suites share the lifecycle helpers above. Child reflectors bind port
 zero and report their assigned address; in-process fixtures pass an owned
 socket to the nix backend. Neither releases a reserved UDP port before binding.
-Startup failures include status/PID and the last 64 KiB of stderr; stderr is
-continuously drained. A timeout kills and reaps the child. There are no automatic
-startup retries or warmup send loops. Tests that need a first packet send it
-once after obtaining the bound endpoint.
+Stderr is drained continuously, and a startup failure reports the exit status,
+the PID and the last 64 KiB of stderr. A timeout kills and reaps the child.
+There are no startup retries or warm-up send loops: a test that needs a first
+packet sends it once, after it has the bound endpoint.
 
-Child fixtures explicitly use two Tokio workers. This bounds test resources
-independently of host CPU count; it does not establish resource pressure as the
-cause of a past failure. See [startup diagnosis and reproduction](../doc/testing-startup.md).
-The tests run in the existing Linux default/all-features and native macOS gates.
+Child fixtures run two Tokio workers, so test resource use does not depend on
+the host's CPU count. See
+[startup diagnosis and reproduction](../doc/testing-startup.md). These tests
+run in the Linux default and all-features jobs and in the native macOS jobs.
 
 ## Tests that need privileges or namespaces
 
@@ -143,11 +148,18 @@ missing.
 | Test | Gate | Needs | Without the gate or a prerequisite |
 | --- | --- | --- | --- |
 | `pnet_loopback_test` | `ttl-pnet` build | `CAP_NET_RAW` | Skips, or fails in required mode |
+| `pnet_endpoint_test` | `ttl-pnet` build, `STAMP_PNET_ENDPOINT_TESTS=1`, `STAMP_PARENT_NETNS` | Private network namespace, `CAP_NET_RAW` | Fails |
+| `pnet_nested_headers_test` | `ttl-pnet` build, `STAMP_PNET_HEADER_TESTS=1`, `STAMP_PARENT_NETNS` | Private network namespace, `CAP_NET_RAW` | Fails |
 | `netns_conformance` | `STAMP_NETNS_TESTS=1` | Root or mapped root, `ip`, `tcpdump`, `ethtool` | Skips, or fails in required mode |
 | `ecn_path_test` | `STAMP_ECN_NETNS_TESTS=1`, `STAMP_PARENT_NETNS` | Private network namespace, `ip`, `nft`, CAP_NET_RAW/NET_ADMIN | Fails |
+| `zero_checksum_test`, `sender_zero_checksum_test` | `STAMP_ZERO_UDP_TESTS=1`, `STAMP_PARENT_NETNS` | Private network namespace, `CAP_NET_RAW` | Fails |
+| `header_request_wire_test`, `header_reflection_wire_test` | `STAMP_HEADER_NETNS_TESTS=1` | Root or mapped root in a network namespace | Fails |
 | `route_mtu_test` | `STAMP_MTU_NETNS_TESTS=1` | User namespaces, `ip`, `unshare`, `nsenter` | Fails |
 | `scoped_ipv6_test` | `STAMP_SCOPE_NETNS_TESTS=1` | User namespaces, `ip`, `unshare`, `nsenter` | Fails |
 | `ext_hdr_nix_test` | `STAMP_EXTHDR_NETNS_TESTS=1` | User namespaces, `ip` | Skips without the variable |
+
+`reflector_launcher_test` also has one ignored test, `launcher_fixture`. It is
+not a privileged test: the other launcher tests start it as a child process.
 
 Required mode is `STAMP_REQUIRE_PRIVILEGED=1`. It applies to
 `pnet_loopback_test` and `netns_conformance` and turns every skip into a
@@ -309,13 +321,16 @@ namespace before bringing up that namespace's loopback interface; absent raw
 socket capability fails the test. It reserves source/destination UDP ports
 throughout each case and stops/joins every reflector.
 
-The `privileged` job in `.github/workflows/conformance.yml` builds each backend
-without root, then uses `scripts/run_privileged_test.py` to require the three
-pnet checksum/round-trip tests, four pnet endpoint cases, sender and reflector
-header cases, nine namespace scenarios, two route MTU cases and five IPv4
-zero-checksum cases in each of the default and all-features profiles.
-It also requires the sender case in all three profiles and the directional
-ECN rewrite fixture in default and all-feature nix profiles.
+The `privileged` job in `.github/workflows/conformance.yml` builds each profile
+without root, then uses `scripts/run_privileged_test.py` to require an exact
+number of ignored tests per target:
+
+| Profile | Required targets (ignored tests) |
+| --- | --- |
+| pnet only (`ttl-pnet`) | `pnet_loopback_test` (3), `pnet_endpoint_test` (5), `pnet_nested_headers_test` (1), `header_request_wire_test` (1), `header_reflection_wire_test` (1), `sender_zero_checksum_test` (1) |
+| default | `zero_checksum_test` (5), `sender_zero_checksum_test` (1), `ecn_path_test` (1) |
+| all-features (nix) | `zero_checksum_test` (5), `sender_zero_checksum_test` (1), `ecn_path_test` (1), `header_request_wire_test` (1), `header_reflection_wire_test` (1), `netns_conformance` (9), `route_mtu_test` (2) |
+
 The script rejects an executable whose ignored-test count is wrong or zero, so
 a build with the wrong backend cannot pass with an empty suite.
 `scoped_ipv6_test` and `ext_hdr_nix_test` are not run in CI.
@@ -327,7 +342,7 @@ live loop and `src/sender/schedule/timeline_tests.rs`. Tests supply synthetic
 instants and send costs, so exact deadline, 2 ms catch-up and 1 ms spin boundaries
 do not depend on wall-clock scheduling. They also cover count zero, counter
 width, final waits and changing intervals. Seeded exponential-gap tests and the
-unchanged live sender rate/pacing suites provide separate evidence.
+live sender rate and pacing suites cover the rest.
 
 The allocation-free TLV framing checker has directed and property tests in
 `src/tlv/framing/tests.rs`: exact offsets and parent ownership, parent bounds,
@@ -337,8 +352,7 @@ unknown values and child type numbers never trigger recursive inspection.
 Framing success is tested separately from semantic M and integrity policy.
 The `tlv_list_parse` fuzz target also exercises this checker.
 
-Many protocol details are covered by unit tests inside `src/` rather than by
-files in this directory.
+Unit tests inside `src/` cover many protocol details:
 
 - **TLV lists** (`src/tlv/list/`): ownership, mutation and removal, truncated
   tails, interleaved duplicate HMACs, padding on both sides of HMAC, and
@@ -397,8 +411,8 @@ files in this directory.
   times; its subprocess helpers keep stdout, stderr and exit status when a peer
   receives nothing or a sender does not exit. None of this exercises the
   capture driver.
-  Sender scheduling tests retain their rate assertions; each active sender
-  requests 1 ms Windows timer resolution and releases it when the run ends.
+  Sender scheduling tests keep their rate assertions on Windows; each running
+  sender requests 1 ms timer resolution and releases it when the run ends.
 
 ## Other test suites
 

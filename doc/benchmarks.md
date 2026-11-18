@@ -1,12 +1,9 @@
 # Measuring reflector performance
 
-Measure reflector throughput and CPU cost with Criterion and with live UDP
-tests.
-
-You need both. The in-process Criterion benchmarks isolate parsing,
-authentication, TLV processing and reply assembly. The live UDP benchmark adds
-the receive and send syscalls, session locks and the scheduler, and it checks
-that the reflector goes back to sleep once traffic stops.
+The in-process Criterion benchmarks isolate parsing, authentication, TLV
+processing and reply assembly. The live UDP benchmark adds the receive and send
+syscalls, session locks and the scheduler, and checks that the reflector goes
+back to sleep once traffic stops. Use both.
 
 ## Live UDP on Linux
 
@@ -60,11 +57,11 @@ Options (`live_udp_bench --help` lists limits and defaults):
 | `--inventory MODE` | Needs `--sessions` and the `control` build feature. Runs the control API next to the UDP load: idle (`idle`), full reads (`full`) or cursor walks (`page100`, `page500`). |
 
 Each reflector binds UDP port zero and, with an inventory workload, control
-port zero. The benchmark reads the assigned ports from the reflector's JSON
-startup log, so no port is released and then bound again. That log is copied
-to stderr, filtered to errors plus the startup lines. If the reflector exits
-or does not report its endpoint within ten seconds, the trial fails; it is not
-retried.
+port zero. The benchmark starts it with `--log-format json` and reads the
+assigned ports from its startup log lines, so no port is released and then
+bound again. The reflector log is copied to stderr, filtered to errors plus the
+startup lines. If the reflector exits or does not report its UDP endpoint
+within ten seconds, the trial fails; it is not retried.
 
 The generator sends in 1 ms batches, skips pacing slots it has missed, and
 reads replies on a separate thread. Its bookkeeping holds at most
@@ -77,8 +74,8 @@ A reply must come from the connected source and match the packet length, the
 echoed fields, the sequence range and the HMAC. Duplicates and invalid replies
 are counted separately. Loss is reported even when the process exits
 successfully. Save the stderr diagnostics together with the JSON from stdout.
-These checks make sure the benchmark counts correctly. They are not a
-conformance test. BER replies must also have the exact counter and burst
+These checks keep the benchmark's counts honest; they are not a conformance
+test. BER replies must also have the exact counter and burst
 values, repaired padding, processed flags, the expected TLV layout, and valid
 base and TLV HMACs where those apply. In authenticated mode the BER padding is
 not covered by the TLV HMAC, so the injected corruption tests a successful
@@ -174,8 +171,7 @@ expiry, queue saturation, or packet arrivals that do not depend on the
 generator. The offered and answered identities are not a direct snapshot of
 the reflector's session table. Before you blame a difference on the reflector's
 session cost, compare repeated runs of matched builds and record the
-generator's CPU use and any pacing shortfall. Without `--sessions`, the default
-workload and its warm-up behave as before.
+generator's CPU use and any pacing shortfall.
 
 ### Concurrent session inventory
 
@@ -195,8 +191,8 @@ created can end below the final table size. `--sessions` keeps expiry
 disabled.
 
 The child reflector binds its control API to TCP port zero on IPv4 loopback,
-even when the UDP traffic uses IPv6. A random bearer token is kept in
-a temporary mode-0600 file, which is removed when the trial ends. A status
+even when the UDP traffic uses IPv6. A random bearer token is kept in a
+temporary mode-0600 file, which is removed when the trial ends. A status
 request checks that the server is ready before load starts. The benchmark
 never uses an existing server or changes its configuration.
 
@@ -263,7 +259,7 @@ requests then expect C and unchanged values, while the sockets still attach the
 same options. Every reply must have the exact TLV order, values, flags and
 length, the right base identity, and valid base and TLV HMACs where they apply.
 A failed attachment or missing expected data fails the run with an error. The
-JSON records `header_profile`, which is null for the older workload profiles.
+JSON records `header_profile`, which is null for the other workload profiles.
 These cases measure real socket-option, capture and reflection work on
 loopback. They make no claim about physical capture, verification by a
 separate raw capture, attaching IP headers in the reverse direction, or pnet
@@ -296,8 +292,8 @@ stored in fixed-size flat arrays (about 5 MB at most, plus reserved slots),
 separate from the normal per-probe accounting and the optional latency
 storage.
 
-`sent`, `achieved_send_pps`, unique replies and ordinary loss count **probes**.
-The `burst` object reports expected, unique and missing **copies**, the copy
+`sent`, `achieved_send_pps`, unique replies and ordinary loss count probes.
+The `burst` object reports expected, unique and missing copies, the copy
 counts during load and drain, and the number of probes that were fully,
 partially or never replied to. Its denominator is the number of successful
 probe sends times the requested copies. `unique_reply_copy_pps_during_load`

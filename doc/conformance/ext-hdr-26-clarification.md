@@ -19,9 +19,9 @@ requests instead return A and B in order. A zero request followed by S also
 succeeds because only B remains eligible.
 
 Should complete ordered groups of identical nonzero selectors override the
-ambiguity rule? If so, how should incomplete groups be handled? Alternatively,
-should the all-header example explicitly require all-zero Requested fields?
+ambiguity rule? If so, how should incomplete groups be handled? Or should the
+all-header example require all-zero Requested fields?
 
-stamp-suite currently applies numbered rule 1 and records the repeated-nonzero
-example as Partial pending clarification. The same question applies to both
-Type TBA1 and Type TBA2.
+stamp-suite applies numbered rule 1 and scores the repeated-nonzero example
+as Partial until this is clarified. The question applies to both Type TBA1 and
+Type TBA2 (stamp-suite uses experimental Types 246 and 247).

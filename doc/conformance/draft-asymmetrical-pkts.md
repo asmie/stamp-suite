@@ -30,16 +30,16 @@ trimmed with `...`.
 | ID | Clause | Level | Role | Status | Evidence |
 |---|---|---|---|---|---|
 | asym-3-01 | "Length ... MUST NOT be smaller than 12 octets." | MUST NOT | Both | Compliant | `src/tlv/core.rs::REFLECTED_CONTROL_TLV_MIN_VALUE_SIZE` (12); `src/tlv/typed/reflected_control.rs` rejects shorter values and pads to 12. Tests: `test_reflected_control_wire_format_pads_to_min_12_bytes`, `test_reflected_control_invalid_length_rejected`, `a1_reflected_control_min_length_12_pre_14_rejected`. |
-| asym-3-02 | "A Session-Sender MUST zero this flag [C] on transmission" | MUST | Sender | Compliant | `src/tlv/core.rs::TlvFlags::for_sender` leaves C clear, and `src/sender/packet.rs::build_reflected_control_tlv` never sets it. No sender code path sets C. Test: `tests/type12_policy_test.rs::sender_control_defaults_and_static_or_scaled_requests_clear_c` checks the actual sender in both families/authentication modes and static/AIMD-scaled Type 12 paths. |
+| asym-3-02 | "A Session-Sender MUST zero this flag [C] on transmission" | MUST | Sender | Compliant | `src/tlv/core.rs::TlvFlags::for_sender` leaves C clear, and `src/sender/packet.rs::build_reflected_control_tlv` never sets it. No sender code path sets C. Test: `tests/type12_policy_test.rs::sender_control_defaults_and_static_or_scaled_requests_clear_c` checks the sender in both families/authentication modes and static/AIMD-scaled Type 12 paths. |
 | asym-3-03 | "the Session-Reflector MUST ignore its value on the receipt of a STAMP test packet" [C flag] | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` uses `src/tlv/list/processing.rs::get_reflected_control_request` and never reads the received C flag. Test: `tests/tlv_flag_semantics.rs::incoming_c_flag_on_request_is_ignored`. Wire test: `tests/type12_policy_test.rs::exact_rate_volume_and_zero_count_decisions_reach_the_wire` sends C in the request and checks independently determined output flags. |
 | asym-3-04 | "A Session-Sender MAY include the Reflected Test Packet Control TLV in a STAMP test packet." | MAY | Sender | Compliant | `src/configuration.rs::Configuration::reflected_control_count`; `src/sender/packet.rs::build_reflected_control_tlv` adds the TLV when count > 1 or `--reflected-control-no-ext-hdr` is set. Test: `build_reflected_control_tlv_only_when_requested`. |
-| asym-3-05 | "the Session-Reflector MUST transmit a sequence of reflected test packets according to the following rules" | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` yields a `ReflectedControlBehavior`; both backends send it through `src/receiver/transmit.rs::ReplyQueue`. Test: `tests/burst_transmission_test.rs`. See [decision order](#type-12-decision-order). |
+| asym-3-05 | "the Session-Reflector MUST transmit a sequence of reflected test packets according to the following rules" | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` yields a `ReflectedControlBehavior`; both backends send it through `src/receiver/transmit/queue.rs::ReplyQueue`. Test: `tests/burst_transmission_test.rs`. See [decision order](#type-12-decision-order). |
 | asym-3-06 | "The length of the reflected test packet MUST be the largest of" [base packet without Extra Padding, or the request aligned to four octets] | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` drops echoed Extra Padding, rounds the request up to four octets and pads if larger. Tests: `reflected_control_strips_echoed_extra_padding`, `reflected_control_pads_to_four_octet_aligned_length`. |
 | asym-3-07 | "the Session-Reflector MUST use the Extra Padding TLV ... to increase the length of the reflected test packet" | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` adds `src/tlv/typed/extra_padding.rs::new_zeros`. Tests: `a1_reflected_control_length_padding_within_cap`, `tests/netns_conformance.rs::scenario_6_type12_multi_reply`. |
-| asym-3-08 | "If the calculated length ... exceeds the MTU ..., the Session-Reflector MUST set the C flag ... and MUST transmit a single reflected packet of the length equal to MTU" | MUST | Reflector | Partial | `src/receiver/mtu.rs`, `src/receiver/transmit.rs::fit_reply`; Linux, Windows and supported macOS IPv6 adapters; see [route MTU](#reply-size-and-route-mtu). Tests: `tests/route_mtu_test.rs`, `a1_reflected_control_length_request_exceeds_cap_sets_c_flag`, [namespace test](../testing-netns.md#reply-route-mtu-regression). |
+| asym-3-08 | "If the calculated length ... exceeds the MTU ..., the Session-Reflector MUST set the C flag ... and MUST transmit a single reflected packet of the length equal to MTU" | MUST | Reflector | Partial | `src/receiver/mtu.rs`, `src/receiver/transmit/shape.rs::fit_reply`; Linux, Windows and supported macOS IPv6 adapters; see [route MTU](#reply-size-and-route-mtu). Tests: `tests/route_mtu_test.rs`, `a1_reflected_control_length_request_exceeds_cap_sets_c_flag`, [namespace test](../testing-netns.md#reply-route-mtu-regression). |
 | asym-3-09 | "Otherwise, the Session-Reflector MUST set the C flag to 0 in each reflected test packet" [MTU context] | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` sets C only on the non-conformant branch. Tests in `tests/tlv_flag_semantics.rs`: `a1_reflected_control_length_padding_within_cap`, `c_flag_clear_when_reflected_control_request_within_caps`. |
-| asym-3-10 | "The number of reflected test packets in the sequence MUST equal the value of the Number of the Reflected Packets field." | MUST | Reflector | Compliant | `Transmission::send_next` and `ReplyQueue::schedule_next` (`src/receiver/transmit.rs`) send the first reply plus the admitted copies. Test: `tests/burst_transmission_test.rs`. A send failure ends a burst early. |
-| asym-3-11 | "the interval between the transmission of two consecutive reflected packets ... MUST be equal to the value in the Interval Between the Reflected Packets field" | MUST | Reflector | Partial | `src/receiver/transmit.rs::ReplyQueue::schedule_next` schedules each copy one configured interval after the preceding successful send completes; OS scheduling and finalization can extend the wire gap. `tests/burst_transmission_test.rs` exercises actual burst dispatch, without proving nanosecond equality. See [Burst timing](#burst-timing). |
+| asym-3-10 | "The number of reflected test packets in the sequence MUST equal the value of the Number of the Reflected Packets field." | MUST | Reflector | Compliant | `Transmission::send_next` (`src/receiver/transmit.rs`) and `ReplyQueue::schedule_next` (`src/receiver/transmit/queue.rs`) send the first reply plus the admitted copies. Test: `tests/burst_transmission_test.rs`. A send failure ends a burst early. |
+| asym-3-11 | "the interval between the transmission of two consecutive reflected packets ... MUST be equal to the value in the Interval Between the Reflected Packets field" | MUST | Reflector | Partial | `src/receiver/transmit/queue.rs::ReplyQueue::schedule_next` schedules each copy one configured interval after the preceding successful send completes; OS scheduling and finalization can extend the wire gap. `tests/burst_transmission_test.rs` exercises burst dispatch, without proving nanosecond equality. See [Burst timing](#burst-timing). |
 | asym-3-12 | "a Session-Reflector that supports the Reflected Test Control TLV MUST enforce limits on both the data rate (bytes per second) and the total data volume (bytes) of the STAMP payload it generates ..." | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing`; see [Type 12 limits](#type-12-limits). Test: `reflected_control_rate_and_volume_limits_set_c`. Exact-boundary tests: `tests/tlv_flag_semantics.rs::reflected_control_rate_boundary_does_not_round_down_excess_traffic`, `tests/type12_policy_test.rs::exact_rate_volume_and_zero_count_decisions_reach_the_wire` cover equality and fractional excess without truncation. |
 | asym-3-13 | "If a test packet ... would generate traffic that exceeds either of these limits, the Session-Reflector MUST set the C flag to 1, and MUST transmit a single reflected packet" | MUST | Reflector | Compliant | `src/receiver/mod.rs::apply_semantic_tlv_processing` sends one padded reply with C. Tests: `reflected_control_rate_and_volume_limits_set_c`, `reflected_control_count_above_cap_collapses_to_single_reply`, `reflected_control_interval_below_floor_collapses_to_single_reply`, `reflected_control_duration_limit_sets_c`. Wire test: `tests/type12_policy_test.rs::exact_rate_volume_and_zero_count_decisions_reach_the_wire` checks one 500-byte C reply for fractional rate excess and volume excess, including final signatures. |
 | asym-3-14 | "Otherwise, the Session-Reflector MUST set the C flag to 0 in each reflected test packet." [rate/volume context] | MUST | Reflector | Compliant | Same branch as asym-3-09: one non-conformant flag covers the MTU and rate/volume triggers. Test: `tests/tlv_flag_semantics.rs::c_flag_clear_when_reflected_control_request_within_caps`. Wire test: `tests/type12_policy_test.rs::exact_rate_volume_and_zero_count_decisions_reach_the_wire` checks clear C at exact rate/volume equality in all six family/key profiles. |
@@ -92,66 +92,76 @@ in this order, after identity, TLV integrity and Address Group checks:
    normal reply, as a reflector without Type 12 support (RFC 8972 §4). A
    group mismatch has already dropped the packet, so it gets no U reply.
 4. Count zero: no reply; the request is discarded (asym-3-15, asym-3-16).
-5. A count, interval, rate, volume or duration limit exceeded: one padded
-   reply with C set (asym-3-13).
+5. A count, interval, size, rate, volume or duration limit exceeded, or
+   padding that cannot be encoded: one padded reply with C set (asym-3-13).
+   Every limit is checked, and each one exceeded is counted.
 6. Otherwise: the first reply plus the requested copies, with C clear.
 
 ### Type 12 limits
 
-Each request is checked against `--reflected-control-max-count` (default 0,
-disabled), `--reflected-control-max-size` (default 1500 bytes),
-`--reflected-control-min-interval-ns` (default 1000 ns),
-`--reflected-control-max-rate` (bytes per second, reply size x 10^9 / interval),
-`--reflected-control-max-volume` (bytes, reply size x count) and
-`--reflected-control-max-duration-ms` (default 1000 ms, (count - 1) x
-interval). A burst holds one `--reflector-queue-capacity` slot until its last
-copy is sent, so the duration limit bounds how long one request can keep that
-slot (RFC 10052 §5). Without it, 1024 requests for 16 copies 4.29 s apart
-would fill the default queue for about 64 s. Fractional
-rate excess is rejected too: 500 bytes every 99,999,999 ns exceeds 5,000 B/s.
-The implementation compares wide integer products instead of flooring a
-bytes-per-second quotient. The control
-API can change these at run time through `RuntimeCaps`
-(`src/receiver/limits.rs`). `--max-pps` limits replies per source address and
-counts every copy.
+Each request is checked against these limits:
+
+| Option | Default | Checks |
+|---|---|---|
+| `--reflected-control-max-count` | 0 (Type 12 disabled) | requested count |
+| `--reflected-control-min-interval-ns` | 1000 ns | interval, when count > 1 |
+| `--reflected-control-max-size` | 1500 bytes | requested length, rounded up to four octets |
+| `--reflected-control-max-rate` | 12,500,000 B/s | reply size x 10^9 / interval, in bytes per second |
+| `--reflected-control-max-volume` | 1,500,000 bytes | reply size x count, in bytes |
+| `--reflected-control-max-duration-ms` | 1000 ms | (count - 1) x interval |
+
+A burst holds one `--reflector-queue-capacity` slot until its last copy is
+sent, so the duration limit bounds how long one request keeps that slot
+(RFC 10052 §5). Without it, 1024 requests for 16 copies 4.29 s apart would
+fill the default queue for about 64 s. A duration exactly at the limit is
+admitted (`src/receiver/mod.rs::burst_exceeds_duration`).
+
+The rate check compares wide integer products instead of a rounded
+bytes-per-second quotient, so fractional excess is rejected: 500 bytes every
+99,999,999 ns exceeds 5,000 B/s. The control API (`PATCH /v1/caps`) and the
+TOML file can set every limit; `RuntimeCaps` (`src/receiver/limits.rs`) holds
+the live values. `--max-pps` limits replies per source address and counts
+every copy.
 
 ### Reply size and route MTU
 
-On Linux the reflector looks up the route MTU for the actual reply destination,
-through the `--interface` device or VRF when one is bound, before each copy (`src/receiver/mtu.rs`), subtracts IP, UDP and SRH overhead,
-and trims padding in `fit_reply` (`src/receiver/transmit.rs`) without cutting
-mandatory fields. Route and link notifications plus a 250 ms cache expiry track
-changes; Don't Fragment prevents fragmentation if the route changes between
-lookup and send. A trimmed reply is sent once with C set.
+On Linux the reflector looks up the route MTU for the reply destination before
+each copy (`src/receiver/mtu.rs`), through the `--interface` device or VRF when
+one is bound. It subtracts IP, UDP and SRH overhead and trims padding in
+`fit_reply` (`src/receiver/transmit/shape.rs`) without cutting mandatory
+fields. Route and link notifications and a 250 ms cache expiry track changes;
+Don't Fragment prevents fragmentation if the route changes between lookup and
+send. A trimmed reply is sent once with C set.
 
-Windows queries path/interface estimates on each attempt. macOS queries native
-unicast IPv6 destinations using temporary connected sockets, without sending
-UDP probes or changing the live reflector's connection. These adapters do not
-reuse cached estimates. macOS excludes IPv4, mapped peers, interface pinning
-(including `--interface`) and SRv6; its temporary local port does not reproduce port-specific routing policy.
-See [reply route MTU](../usage.md#reply-size-and-route-mtu) for platform limits.
+Windows queries the path or interface estimate on each attempt. macOS queries
+native unicast IPv6 destinations through a temporary connected socket, without
+sending UDP probes or touching the reflector's own socket. Neither caches the
+result. macOS does not cover IPv4, mapped peers, interface pinning (including
+`--interface`) or SRv6, and its temporary local port does not reproduce
+port-specific routing policy. See
+[reply route MTU](../usage.md#reply-size-and-route-mtu) for platform limits.
 
 Limits behind the Partial score of asym-3-08:
 
 - When the budget leaves a remainder of 1 to 3 bytes, no TLV header fits, so the
   reply stays slightly short of the MTU.
-- If the route MTU cannot be determined, the reply is dropped. Unsupported
-  platforms and address profiles drop replies to admitted Type 12 requests.
+- If the route MTU cannot be determined, the reply is dropped. On unsupported
+  platforms and address profiles, every reply to an admitted Type 12 request
+  is dropped.
 - This is route MTU lookup, not active path MTU probing.
 
 ### Burst timing
 
-`ReplyQueue::schedule_next` (`src/receiver/transmit.rs`) schedules each copy
-one interval after the previous successful send, on both backends; the pnet
-capture loop does not sleep between copies. OS scheduling and reply
-finalization can lengthen the gap on the wire. Neither the implementation nor
-the loopback tests establish exact nanosecond equality, so asym-3-11 is
-Partial: the scheduler honors the requested delay as a software target,
-while exact nanosecond wire equality remains unverified.
+`ReplyQueue::schedule_next` (`src/receiver/transmit/queue.rs`) schedules each
+copy one interval after the previous successful send, on both backends; the
+pnet capture loop does not sleep between copies. OS scheduling and reply
+finalization can lengthen the gap on the wire. The interval is a software
+target, and neither the code nor the loopback tests show nanosecond equality
+on the wire, so asym-3-11 is Partial.
 
 ### Replay handling
 
-Replay state is kept per session, scoped by both UDP endpoints, the SSID and
+Replay state is kept per session, keyed by both UDP endpoints, the SSID and
 the optional sender Micro-session ID. `ProcessingContext::replay_verdict`
 carries the verdict into Type 12 processing. Both backends send the single
 U-flagged reply through the normal finalization and signing path.
@@ -163,16 +173,16 @@ policies over IPv4 and IPv6.
 ### Identity protection
 
 The protected profile scored in asym-5-01 combines authenticated base packets
-with `--verify-tlv-hmac` and a configured key source. Failed base integrity
-produces no reply; a missing or failed extension HMAC prevents Type 12 execution
-and returns a single normal I-marked failure echo. Valid protected requests
-can produce their admitted burst. Keeping a key and verifying optional HMACs
-in open mode still permits a request with no HMAC TLV, so that configuration
-is outside this protected-profile claim.
+with `--verify-tlv-hmac` and a configured key source. A request that fails base
+integrity gets no reply. A missing or failed extension HMAC stops Type 12
+processing; the request gets one I-flagged echo. A valid request gets its
+admitted burst. In open mode, a keyed reflector that verifies optional HMACs
+still accepts a request with no HMAC TLV, so that configuration is outside
+this claim.
 
-The independent wire tests run Linux nix/software loopback, verify the final
-base/TLV signatures and show that clear C means policy admission. They do not
-establish exact timing, a real multicast tree, native-platform or pnet capture
-behavior. All well-formed Address Group filters must match a local address; a
-later match cannot override an earlier mismatch. Malformed L3 shapes are
-skipped without hiding valid later filters.
+The wire tests run on Linux with the nix backend over software loopback. They
+verify the final base and TLV signatures and show that a clear C means the
+request was admitted. They do not establish exact timing, a multicast tree,
+native platforms or pnet capture. Every well-formed Address Group filter must
+match a local address, and a later match cannot override an earlier mismatch.
+Malformed L3 filters are skipped without hiding valid later ones.

@@ -17,8 +17,8 @@ cannot measure BER against each other.
 3. Choose a padding size that holds whole repetitions of the pattern: a
    multiple of four for four-byte patterns, of five for five-byte patterns.
 4. Remove `--ber-omit-burst` and `ber_omit_burst`. The new format always
-   carries the burst field, and the option is now a startup error, even when
-   BER is disabled.
+   carries the burst field. Setting either one stops startup with an error,
+   even when BER is disabled.
 
 ## Wire format
 
@@ -47,7 +47,9 @@ retired Types 240–242 with U. A peer that does not support Type 243 should
 answer with U too, and the sender then disables BER while delay and loss
 measurements continue. A reflector without TLV support, such as
 `--tlv-mode ignore`, returns the request's U flags unchanged and has the same
-effect. Tests cover these cases.
+effect. `tests/ber_measurement_test.rs` covers both cases
+(`unsupported_peer_disables_ber_only`,
+`tlv_unaware_reflector_disables_ber_with_one_warning`).
 
 ## Reflector behavior
 
@@ -84,9 +86,8 @@ a changed padding size. U on the BER TLV or one of its sub-TLVs, wherever it
 sits in the reply, disables BER for the rest of the run: the sender logs one
 warning and reports `disabled_by_peer`. U or C on the Extra Padding TLV alone
 only drops that reply's sample, because the draft ties the fallback to the BER
-TLV (§5.1). Padding
-is sized in whole pattern repetitions after the BER TLV itself is counted, and
-follows the route MTU when it changes.
+TLV (§5.1). Padding is sized in whole pattern repetitions after the BER TLV
+itself is counted, and follows the route MTU when it changes.
 
 ## Zero-checksum ingress boundary
 
@@ -123,7 +124,7 @@ must reject, both before a session exists and after. Requests that are complete
 but semantically invalid, and TLVs that fail their HMAC, still get the normal
 M and I replies of RFC 8972 §4 and §4.8.
 
-This conformance row (`ber-3-zero-udp`) stays **Partial**. The BER draft wants
+This conformance row (`ber-3-zero-udp`) stays Partial. The BER draft wants
 failed open-mode checks discarded, but nothing here validates freshness or
 session-specific timestamp rules, and a normal UDP socket cannot see the
 incoming UDP checksum. Changes that still look valid, such as sequence gaps,
@@ -198,5 +199,6 @@ other implementation the draft names, was not available for testing.
   both build profiles in both roles: 60 cases each. Its first run found a
   signing defect in stateful BER error replies, since fixed.
 - The [BER conformance matrix](conformance/draft-stamp-ber.md), which lists the
-  remaining Partial rows: zero-checksum validation, MTU on other platforms and
-  physical LAG.
+  four Partial rows: zero-checksum validation, MTU fitting on platforms without
+  route-MTU lookup, physical LAG members, and automatic padding to the link
+  MTU.

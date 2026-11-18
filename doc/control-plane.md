@@ -1,26 +1,23 @@
 # Runtime control API
 
-The reflector's HTTP API: how to turn it on and secure it, its endpoints, and
-the request and response formats.
-
-The API is only available in a binary built with the `control` feature, and
-only in reflector mode. Through it you can manage HMAC keys and sessions,
-change the rate and session limits, and drain or stop the reflector.
+The reflector's HTTP API manages HMAC keys and sessions, changes rate, session
+and Type 12 limits, and drains or stops the reflector. It needs a binary built
+with the `control` feature and runs only in reflector mode.
 
 ```sh
 stamp-suite --is-reflector --control --control-token-file /etc/stamp/control.token
 ```
 
-By default the API listens on `127.0.0.1:9091` (`--control-addr`). If you set
-a token file, send the token as `Authorization: Bearer <token>`:
+The API listens on `127.0.0.1:9091` by default (`--control-addr`). With a
+token file, send the token as `Authorization: Bearer <token>`:
 
 ```sh
 curl -H "Authorization: Bearer $(sudo cat /etc/stamp/control.token)" \
   http://127.0.0.1:9091/v1/status
 ```
 
-Changes made through the API are lost when the process exits. Put settings you
-want to keep on the command line or in the
+API changes are lost when the process exits. Put settings you want to keep on
+the command line or in the
 [configuration file](usage.md#configuration-file). The API cannot change
 session provisioning, the idle timeout or the queue capacity. Installing a key
 does not provision a session; see
@@ -54,16 +51,17 @@ send a body, also send `Content-Type: application/json`.
 | 400 | Invalid key (bad hex or shorter than 16 bytes) | `{"error": "invalid key: ..."}` |
 | 400 | Invalid session page query, limit or cursor | `{"error": "..."}` |
 | 400 | `PATCH /v1/caps` would set `reflected_control_max_rate`, `reflected_control_max_volume` or `reflected_control_max_duration_ms` to 0 | `{"error": "..."}` |
-| 410 | Session page cursor from another manager or process lifetime | `{"error": "..."}` |
 | 400 | Body is not valid JSON, or the SSID in the path is not a number from 0 to 65535 | Plain text |
 | 401 | Token configured and the header is missing or wrong | `{"error": "missing or invalid bearer token"}` |
 | 404 | No matching session, no key for that SSID, or no default key | `{"error": "..."}` |
 | 409 | Expiry request matches more than one session | `{"error": "multiple sessions for client; specify session_id"}` |
+| 410 | Session page cursor from another manager or process lifetime | `{"error": "..."}` |
 | 415 | Body sent without `Content-Type: application/json` | Plain text |
 | 422 | Unknown field, missing field or wrong type in the body | Plain text |
+| 500 | The session expiry task failed | `{"error": "session expiry failed"}` |
 
 Request bodies reject unknown fields, so a misspelled limit name gets a 422
-rather than being silently ignored.
+instead of being ignored.
 
 ### Status
 
@@ -146,7 +144,7 @@ always present, even when they are zero. See
 limits, header reflection, nested control children, CoS marking that the
 backend cannot apply, the third-DSCP fallback, and C flags preserved from the
 peer. A reason counts at most once per datagram, and only when the datagram is
-sent. All 20 keys are always present, even when they are zero. Prometheus
+sent. All 21 keys are always present, even when they are zero. Prometheus
 exports each reason only after its first count, so a reason listed here as 0
 can be missing from `/metrics`. The Type 12 reasons are:
 
@@ -223,7 +221,7 @@ these diagnostics apply to a reflector with TLV processing enabled.
 | --- | --- |
 | `packets_received` | Packets that passed the rate limit check, including ones dropped later. Packets dropped by `--max-pps` are not counted here. |
 | `packets_reflected` | Replies sent. |
-| `packets_dropped` | Packets not answered, for any reason. |
+| `packets_dropped` | Packets not answered, for any reason, including fragmented requests that the pnet backend cannot reassemble. Prometheus splits this total by reason; see [Observability](usage.md#observability). |
 | `reply_queue_rejected` | Requests dropped because the reply queue was full. Also counted in `packets_dropped`. |
 | `queued_replies_cancelled` | Queued reply copies that were never sent because their work was cancelled, for example at shutdown. Each affected request adds one to `packets_dropped`. |
 | `packets_rate_limited` | Packets dropped by `--max-pps`. Also counted in `packets_dropped`. |
@@ -302,10 +300,11 @@ switch to paging, change the path, read `items`, and repeat with
 several, the call returns 409 and removes nothing. On success it returns 200
 with an empty body, also when the idle-session cleanup happened to finish
 removing the same session first. It returns 404 only if no session matched.
-The call can wait briefly for a reply that is being sent. Expiry does not remove provisioning, so later traffic from
-the same client can create the session again, with fresh counters and a new
-`session_id`. Once the call returns, no queued reply from the old session is
-sent.
+The call can wait briefly for a reply that is being sent; the wait runs off the
+async workers. Once the call returns, no queued reply from the old session is
+sent. Expiry does not remove provisioning, so later traffic from the same
+client can create the session again, with fresh counters and a new
+`session_id`.
 
 Session counters and the idle time only change for packets that pass parsing
 and authentication. A packet with an invalid HMAC, or for an SSID that has no
@@ -375,11 +374,13 @@ curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/js
   unlimited copies. `reflected_control_max_rate` (bytes per second) and
   `reflected_control_max_volume` (bytes) cap what a single request can
   generate, and `reflected_control_max_duration_ms` caps how long its burst
-  lasts. Each must be at least 1, as on the command line; a request that sets
-  one to 0 gets a 400 and changes no cap.
+  lasts, (count - 1) × interval. Each must be at least 1, as on the command
+  line and in the configuration file; a request that sets one to 0 gets a 400
+  and changes no cap.
 - `reflected_control_max_size` is an administrative limit on payload size. On
-  Linux and Windows, each reply copy is also checked against the route MTU
-  before it is sent, and PATCH cannot turn that check off.
+  Linux, Windows and macOS (native IPv6), each reply copy is also checked
+  against the route MTU before it is sent, and PATCH cannot turn that check
+  off.
 
 `max_pps` and `rate_burst` are stored, read and updated as a pair. Two PATCH
 requests that arrive at the same time and each change one of them do not undo
@@ -389,9 +390,9 @@ new rate. To reset the burst size to the rate in the same update, send
 `rate_burst: 0`. Existing buckets keep their tokens and use the new limits the
 next time they admit a packet.
 
-The other fields are set one by one. PATCH does not check whether the values
-make sense together, and a request with several fields is not applied as a
-single transaction. Requests that are already queued keep the
+The other fields are set one by one. Apart from the zero checks above, PATCH
+does not check whether the values make sense together, and a request with
+several fields is not applied as a single transaction. Requests that are already queued keep the
 `reflected_control_max_size` that was in force when they were accepted.
 
 ### Drain and shutdown
@@ -401,7 +402,7 @@ new sessions. Existing sessions and their queued replies carry on.
 `{"draining": false}` starts admitting again. The response repeats the new
 state.
 
-`POST /v1/shutdown` stops the reflector just as SIGINT or SIGTERM would. It
+`POST /v1/shutdown` stops the reflector the same way SIGINT or SIGTERM does. It
 returns 202 before the process exits, and calling it again does nothing.
 [Capacity, drain and shutdown](usage.md#capacity-drain-and-shutdown) explains
 how queued replies are finished or cancelled, and which options control that.

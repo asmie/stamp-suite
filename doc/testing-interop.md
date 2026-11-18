@@ -1,10 +1,12 @@
 # Independent protocol-combination fixtures
 
-[`scripts/interop_apps.py`](../scripts/interop_apps.py) can compare separately
-built applications that run in compatible roles and modes. The October report
-this page used to cite is no longer available, so the page makes no claim about
-that run's case totals or results. For a new run, record the peer revisions,
-the profiles and the wire reports.
+[`scripts/interop_apps.py`](../scripts/interop_apps.py) runs stamp-suite
+against separately built peers (Teaparty, and the TWAMP-Light tools twampy and
+cujo) in the roles and modes they share, through a loopback relay that records
+payloads and traffic class. `--suite` selects `smoke`, `core`, `subsets`,
+`pairs`, `other` or `full`. The exit status reports that the run completed, not
+that the peers interoperate. No report from it is checked in; for a new run,
+record the peer revisions, the suite and the wire reports.
 
 The fixtures below are written separately from the Rust code. They test a
 reflector and provide STAMP payloads that other tools can reuse. Read the
@@ -42,9 +44,9 @@ timestamp format, and stateful/stateless sequencing. In every configuration the
 sender uses a different timestamp format from the reflector. Each configuration
 then exercises SSIDs 42 and 43, each with its own key from the key directory,
 and SSID 99 with the default key. A complete successful run makes
-**48 exchanges and 192 validated replies**. Both base modes include a keyed
-HMAC TLV. The authenticated configurations also send **24 bases signed with
-the wrong directory entry's key**. They expect no reply to these. They then
+48 exchanges and 192 validated replies. Both base modes include a keyed HMAC
+TLV. The authenticated configurations also send 24 bases signed with the wrong
+directory entry's key and expect no reply to them. They then
 check that the next valid request still starts its session's sequence number
 and counters at their initial values.
 
@@ -72,7 +74,7 @@ transit need their own tests.
 
 [`requests.json`](../tests/fixtures/interop/requests.json) holds 24 named
 parameter sets, each with `burst_hex` and `ordinary_hex`. That gives
-**48 fixed UDP payloads**, with no IP or UDP header and no host-dependent
+48 fixed UDP payloads, with no IP or UDP header and no host-dependent
 field. Timestamps are fixed, valid wire values, so repeated requests are
 identical byte for byte. The keys are public test values: `ab` repeated 16
 times for SSID 42, `cd` for 43 and `ef` for the default key. Another
@@ -130,7 +132,7 @@ the other live suites:
 python3 scripts/interop_ber.py --binary target/debug/stamp-suite --report /tmp/ber-interop.json
 ```
 
-The `successor-ber-v1` profile requires **60 cases**: both address families ×
+The `successor-ber-v1` profile requires 60 cases: both address families ×
 three integrity profiles (open, keyed open, authenticated) × ten
 configurations. Each group of ten has the stateful and stateless reflector
 tests and eight sender tests (default or explicit five-byte pattern × baseline,
@@ -219,4 +221,4 @@ prints the combination it failed in.
 | Scoped IPv6, real routing/MTU and SRH | `scoped_ipv6_test`, `route_mtu_test`, `netns_conformance`; separate ignored tiers, see [tests that need privileges](../tests/README.md#tests-that-need-privileges-or-namespaces) and the [namespace guide](testing-netns.md). Compare the SRH capture with the reported fallback. Neither a skip nor a fallback counts as successful SRH evidence. These suites still use some production packet and TLV helpers. |
 
 Malformed-input properties, fuzzing, telemetry and session-identity tests cover
-more cases. This fixture does not cover every combination.
+combinations that these fixtures do not.

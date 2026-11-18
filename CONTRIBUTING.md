@@ -1,7 +1,5 @@
 # Contributing to stamp-suite
 
-Build, test and lint commands, and requirements for submitting changes.
-
 Discuss large changes in an issue first. Report security problems privately;
 see [SECURITY.md](SECURITY.md).
 
@@ -66,22 +64,21 @@ After changing documentation or linked evidence, run:
 ```sh
 python3 scripts/check_doc_links.py
 python3 scripts/check_conformance_counts.py
-python3 scripts/check_conformance_citations.py
+python3 scripts/check_conformance_citations.py --require-test-evidence
 ```
 
-The offline link check scans Git-visible Markdown, including new untracked
-documents and excluding ignored build/planning outputs. It checks local paths,
-Markdown heading fragments and explicit HTML anchors, including inline/reference
-links and images. Code examples and comments are ignored. Non-Markdown fragments
-are reported as unverified; external URLs are classified without fetching them.
-This checker supports the repository's Markdown conventions, not every extension
-of Markdown. Keep checked-in evidence with the change that links to it: a local
-untracked file can pass here but will be missing from a clean CI checkout.
+`check_doc_links.py` works offline. It reads every Markdown file Git can see,
+including untracked files that are not ignored, and checks local paths, heading
+fragments and HTML anchors in inline links, reference links and images. It
+skips code blocks and comments, reports fragments into non-Markdown files as
+unverified, and does not fetch external URLs. An untracked file passes locally
+but is missing from a clean CI checkout, so commit linked evidence with the
+change that links to it.
 
-Link release-only assets using their external release URL; write generated local
-paths as code when documenting a command. Missing relative artifacts are errors,
-with no blanket exemption for generated or historical evidence. A passing link
-check establishes reachability in the checkout, not the truth of a linked claim.
+A missing relative target is an error, with no exemption for generated or
+historical files. Link release-only assets by their release URL, and write
+generated local paths as code. The check proves that a link resolves, not that
+the linked claim is true.
 
 ### Privileged and namespace tests
 
@@ -105,45 +102,46 @@ cargo clippy --locked --no-default-features --features ttl-pnet --all-targets --
 
 The third command is the only one that compiles the pnet receiver on Linux.
 
-Format with `cargo fmt --all` and check with `cargo fmt --all -- --check`.
-`.rustfmt.toml` sets `imports_granularity = "Crate"` and
-`group_imports = "StdExternalCrate"`. Both options require nightly rustfmt.
-Stable rustfmt, which CI uses, prints a warning and ignores them. Group imports
-by hand in that style (standard library, external crates, then `crate::`).
+Format with stable `cargo fmt --all` and check with
+`cargo fmt --all -- --check`, as CI does. `.rustfmt.toml` sets
+`imports_granularity = "Crate"` and `group_imports = "StdExternalCrate"`, but
+both options need nightly rustfmt and stable rustfmt ignores them. The tree is
+not formatted with them, so do not run `cargo +nightly fmt`: it would rewrite
+imports across much of the tree.
 
 CI also runs `cargo doc --no-deps --all-features` with `RUSTDOCFLAGS=-D warnings`,
-`cargo check --all-features --all-targets` on the 1.87 toolchain, and
-`cargo deny check` for advisories, licenses and sources.
+`cargo check --all-features --all-targets` on the 1.87 toolchain,
+`cargo deny check` for advisories, bans, licenses and sources, the RustSec
+audit, and CodeQL for the Rust, Python and workflow code (`codeql.yml`).
 
 ## Conformance tooling
 
 The [conformance matrices](doc/conformance/README.md) record evidence for each
-RFC and draft clause. Two scripts check them, and CI runs both:
+RFC and draft clause. Two scripts check them. CI (`conformance.yml`) runs:
 
 ```sh
 python3 scripts/check_conformance_counts.py --json
-python3 scripts/check_conformance_citations.py --json --details
+python3 scripts/check_conformance_citations.py --require-test-evidence --json --details
 ```
 
-`check_conformance_counts.py` checks that each matrix's summary and the
-README totals match its clause rows. `check_conformance_citations.py` checks
-that every cited file, item and line range still exists in the source. It also
-reports normative Compliant rows lacking explicit test references. That backlog
-is advisory while it is reviewed; stale references still fail. Run
-both after renaming or moving code that a matrix cites, and after changing a
-clause row.
+`check_conformance_counts.py` checks that each matrix's summary line and the
+totals in `doc/conformance/README.md` match its clause rows.
+`check_conformance_citations.py` checks that every cited file, item and line
+range still exists. With `--require-test-evidence` it also fails on a
+normative Compliant row without a test reference; without the flag it only
+reports such rows. Run both after renaming or moving code that a matrix cites,
+and after changing a clause row.
 
-Use a named annotated test or a dedicated test suite, and identify wire drivers
-with `Wire test:` followed by their qualified Python function. A helper or data
-file alone is not test evidence. Source recognition does not prove execution,
-correct assertions or the claimed production path; review those separately.
-See [test-evidence policy and rollout](doc/conformance/test-evidence.md).
-`--require-test-evidence` enables whole-backlog enforcement for an audit; CI
-will enable it only after the remaining rows have been reviewed and resolved.
+Cite a named test or a dedicated test suite, and cite a Python wire driver as
+`Wire test:` followed by its qualified function name. A helper or data file
+alone is not test evidence. The script only checks that the reference exists:
+review separately that the test runs, asserts the right thing and exercises the
+production path. See [test-evidence policy](doc/conformance/test-evidence.md).
 
 `scripts/check_standards.py` compares the frozen RFC and draft revisions with
-the published ones. [doc/releasing.md](doc/releasing.md)
-describes it and the other release checks.
+the published ones; see
+[standards revision monitor](doc/releasing.md#standards-revision-monitor).
+[doc/releasing.md](doc/releasing.md) describes the other release checks.
 
 ## Man page
 
@@ -176,7 +174,7 @@ Changes to experimental codepoints follow the policy in
 stamp-suite is MIT-licensed. Contribute only code you wrote or code under a
 license compatible with MIT, and say where any third-party code comes from.
 
-Other STAMP and TWAMP implementations, such as TeaParty (GPL-3.0), are used
+Other STAMP and TWAMP implementations, such as Teaparty (GPL-3.0), are used
 only as black-box interoperability peers. Do not copy or translate their
 source, tests or comments into this repository, whether by hand or with a
 code-generation tool. Work from the RFCs and drafts, and use packet captures
@@ -189,12 +187,11 @@ runtime graphs and their legal inputs (Python 3.9+ and Cargo are required):
 python3 scripts/third_party_notices.py --validate-release-profiles
 ```
 
-The notice bundle is generated during packaging and excluded from Git and the
-crates.io source package. The generator selects one offered alternative license,
-preserves mandatory combinations and additional attribution, and shares repeated
-terms. Missing license text and changes to inputs in
-`scripts/licenses/notice-policy.json` require review; do not replace missing
-attribution with a license identifier. Keep
-`RELEASE_PROFILES` in the generator aligned with the release workflow's targets
-and features. See [release procedures](doc/releasing.md#third-party-notices)
+The notice bundle is generated during packaging and is not in Git or the
+crates.io source package. For an `OR` license the generator picks one of the
+offered licenses; it keeps every license an `AND` requires, keeps extra
+attribution, and lists shared license texts once. Missing license text and
+changes to `scripts/licenses/notice-policy.json` need review; do not replace
+missing attribution with a license identifier. Keep `RELEASE_PROFILES` in the
+generator aligned with the release workflow's targets and features. See [release procedures](doc/releasing.md#third-party-notices)
 for distribution checks.

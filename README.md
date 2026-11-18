@@ -35,8 +35,8 @@ stamp-suite --is-reflector --local-port 8620
 stamp-suite --remote-addr 192.0.2.20 --remote-port 8620
 ```
 
-The sender prints a summary when it finishes or when you press Ctrl-C. A few
-more examples:
+The sender prints a summary when it finishes or when you press Ctrl-C. More
+examples:
 
 ```sh
 # Measure two reflectors at once; each report carries a target label
@@ -48,9 +48,9 @@ stamp-suite --remote-addr 192.0.2.20 --send-delay 250us --send-schedule poisson 
 ```
 
 With `--timeout 0` the sender never gives up on a probe, so on a long run every
-lost probe stays in memory. Add `--max-pending-probes 4096` to cap that: once
-the cap is reached, the oldest unanswered probe is counted as lost. Reports list
-these separately. The default, 0, means no cap. See
+lost probe stays in memory. `--max-pending-probes 4096` caps that: at the cap,
+the oldest unanswered probe is counted as lost, and reports list these
+evictions separately. The default, 0, means no cap. See
 [pending-probe retention](doc/usage.md#pending-probe-retention).
 
 For repeated runs, use a TOML file and override individual values on the CLI.
@@ -72,10 +72,9 @@ The reflector starts in open mode and answers anyone who can reach it. On an
 untrusted network, restrict access and turn on
 [authenticated mode](doc/security.md#enabling-authenticated-mode-on-the-packaged-unit).
 
-Two reflector options make it stricter about what it accepts. Both drop the
-packet before it can create or update a session.
-`--validate-base-fields` drops packets with an incomplete base, a zero Error
-Estimate multiplier or an invalid PTP nanoseconds value; see
+Two reflector options drop bad packets before they can create or update a
+session. `--validate-base-fields` drops packets with an incomplete base, a zero
+Error Estimate multiplier or an invalid PTP nanoseconds value; see
 [base-field validation](doc/usage.md#base-field-validation).
 `--validate-tlv-framing` drops packets whose TLVs are cut short; see
 [TLV framing admission](doc/usage.md#tlv-framing-admission).
@@ -89,21 +88,22 @@ Estimate multiplier or an invalid PTP nanoseconds value; see
 - RFC 9503 return-path control, numeric RFC 9534 Micro-session IDs, and
   RFC 10052 reflected test packet control. Physical LAG member association
   and steering are not implemented; SR-MPLS return paths receive U.
-- Draft extensions for reflected IP headers, CoS/ECN response and residual bit
-  error rate. Header and BER experimental codepoints need peer agreement.
-  Linux IPv4 authenticated BER can send checksum-zero requests with
+- Three IETF drafts: reflected IP headers (draft-ietf-ippm-stamp-ext-hdr-26,
+  Types 246/247), CoS and ECN (draft-ietf-bpm-stamp-cos-ecn-00) and residual
+  bit error rate (draft-ietf-bpm-stamp-ber-01). The header and BER TLVs use
+  experimental codepoints, so both peers must agree on them. On Linux, an
+  authenticated IPv4 BER sender can send checksum-zero requests with
   [`--zero-udp-checksum`](doc/usage.md#zero-checksum-ber-transmission).
 - Text, JSON lines and CSV output. Optional Prometheus metrics, SNMP AgentX
   sub-agent and reflector control API.
 
-Each of these features has limits, listed under
-[supported profiles and limits](doc/conformance/README.md#known-limits). For
-example, RFC admission rules apply only with provisioned sessions, header
-reflection depends on the receiver backend, route-MTU sizing needs Linux,
-Windows or (for IPv6) macOS, and
-the AgentX sub-agent is read-only. The conformance matrices link each frozen
-requirement to the code and tests that implement it. A listed feature does not
-mean that every requirement or every platform is covered.
+[Supported profiles and limits](doc/conformance/README.md#known-limits) lists
+what each feature leaves out. For example, the RFC admission rules apply only
+to provisioned sessions, header reflection depends on the receiver backend,
+route-MTU sizing needs Linux, Windows or (for IPv6) macOS, and the AgentX
+sub-agent is read-only. The conformance matrices link each requirement of the
+frozen revisions to the code and tests that implement it, including the rows
+that are only Partial.
 
 ## Installation
 

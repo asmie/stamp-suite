@@ -1,10 +1,9 @@
 # Hardware timestamp verification on a two-host testbed
 
-This procedure checks that NIC hardware timestamps are actually delivered. You
-need two Linux hosts with timestamp-capable NICs and synchronized clocks.
-
-Check the timestamps that arrive, not just what the NIC reports it can do.
-Loopback and virtual NICs cannot show delivery from a physical NIC. See the
+This procedure checks that a NIC delivers hardware timestamps to stamp-suite.
+It needs two Linux hosts with timestamp-capable NICs and synchronized clocks.
+Judge the timestamps that arrive, not what the NIC reports it can do. Loopback
+and virtual NICs cannot show delivery from a physical NIC. See the
 Linux [timestamping interfaces](https://docs.kernel.org/networking/timestamping.html)
 for the kernel side and
 [Hardware-assisted timestamping](architecture.md#hardware-assisted-timestamping)
@@ -54,9 +53,9 @@ for how stamp-suite uses them.
      > sender.jsonl 2> sender.stderr
    ```
 
-   These are documentation addresses and must be replaced. Declare
-   synchronized clocks only if you have established synchronization by other
-   means. The commands keep the defaults, which do not claim synchronization.
+   The commands keep the defaults, which do not claim synchronized clocks. Add
+   `--clock-synchronized` only if you have established synchronization by
+   other means.
    Repeat with `--clock-source PTP`, and repeat in open mode if you want to
    claim it too. Use IPv6 addresses to collect separate IPv6 evidence.
 5. Verify the base and TLV HMAC of every accepted reply with your own tool, not
