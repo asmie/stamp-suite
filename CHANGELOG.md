@@ -36,7 +36,8 @@ Upgrade both peers together when they use BER or reflected headers.
   the only TLV is Extra Padding, which §4.8 exempts.
 - **Minimum Rust version** is 1.87.
 - **Library API.** `StampResponse` has new `cos_reply_policy` and
-  `tlv_processed` fields. The retired BER types `BerPatternTlv`,
+  `tlv_processed` fields, and `ProcessingContext` has new
+  `always_sign_tlv_replies` and `reflected_control_max_duration_ms` fields. The retired BER types `BerPatternTlv`,
   `BerCountTlv`, `BerBurstTlv`, their `TlvType` variants and constants are
   removed; Types 240–242 now parse as `TlvType::Unknown`.
 
@@ -85,6 +86,13 @@ Upgrade both peers together when they use BER or reflected headers.
 ### Fixed
 
 - Reflector:
+  - Type 12 bursts are limited in duration. `--reflected-control-max-duration-ms`
+    (default 1000, also a TOML key and a `PATCH /v1/caps` field) caps
+    (count - 1) × interval; a longer request gets one C-flagged reply, counted
+    as `type12_duration_limit` (RFC 10052 §5). A burst holds a reply queue
+    slot until its last copy, so about 1,100 requests for 16 copies
+    4.29 s apart filled the default queue and refused all other requests for
+    about a minute.
   - `--allowed-dscp none` (or an empty `--allowed-dscp-for` rule) answers CoS
     requests on DSCP 0 with RPD=01 and C, as RFC 8972 §4.4 and
     draft-ietf-bpm-stamp-cos-ecn-00 §3.2 require. It sent no reply at all.

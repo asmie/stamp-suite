@@ -731,6 +731,7 @@ async fn caps_patch_rejects_zero_type12_limits_without_partial_updates() {
     for body in [
         r#"{"max_pps":500,"reflected_control_max_rate":0}"#,
         r#"{"reflected_control_max_count":8,"reflected_control_max_volume":0}"#,
+        r#"{"reflected_control_max_rate":7,"reflected_control_max_duration_ms":0}"#,
     ] {
         let res = app
             .clone()
@@ -745,6 +746,39 @@ async fn caps_patch_rejects_zero_type12_limits_without_partial_updates() {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(get_json(&app, "/v1/caps").await, before, "{body}");
     }
+}
+
+/// The Type 12 burst-duration limit is reported and changed like the others.
+#[tokio::test]
+async fn caps_patch_updates_type12_duration_limit() {
+    let state = test_state();
+    let app = router(state.clone()).unwrap();
+    assert_eq!(
+        get_json(&app, "/v1/caps").await["reflected_control_max_duration_ms"],
+        1000
+    );
+    let res = app
+        .clone()
+        .oneshot(
+            Request::patch("/v1/caps")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"reflected_control_max_duration_ms":250}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .caps
+            .reflected_control_max_duration_ms
+            .load(Ordering::Relaxed),
+        250
+    );
+    assert_eq!(
+        get_json(&app, "/v1/caps").await["reflected_control_max_duration_ms"],
+        250
+    );
 }
 
 /// PATCH stores the administrative cap; the send path enforces route MTU.

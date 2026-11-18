@@ -358,6 +358,8 @@ pub struct RuntimeCaps {
     pub reflected_control_max_rate: std::sync::atomic::AtomicU64,
     /// Type 12 data-volume limit per request, bytes.
     pub reflected_control_max_volume: AtomicU32,
+    /// Type 12 burst-duration limit per request, milliseconds.
+    pub reflected_control_max_duration_ms: AtomicU32,
 }
 
 impl RuntimeCaps {
@@ -378,6 +380,9 @@ impl RuntimeCaps {
                 conf.reflected_control_max_rate,
             ),
             reflected_control_max_volume: AtomicU32::new(conf.reflected_control_max_volume),
+            reflected_control_max_duration_ms: AtomicU32::new(
+                conf.reflected_control_max_duration_ms,
+            ),
         }
     }
 
@@ -395,6 +400,7 @@ impl RuntimeCaps {
                 REFLECTED_CONTROL_MAX_RATE,
             ),
             reflected_control_max_volume: AtomicU32::new(REFLECTED_CONTROL_MAX_VOLUME),
+            reflected_control_max_duration_ms: AtomicU32::new(REFLECTED_CONTROL_MAX_DURATION_MS),
         }
     }
 }
@@ -424,6 +430,13 @@ pub const REFLECTED_CONTROL_MAX_RATE: u64 = 12_500_000;
 /// Default Type 12 data-volume limit in bytes per request (1000 replies of
 /// 1500 bytes). See [`REFLECTED_CONTROL_MAX_RATE`].
 pub const REFLECTED_CONTROL_MAX_VOLUME: u32 = 1_500_000;
+
+/// Default Type 12 burst-duration limit in milliseconds: the longest
+/// (count - 1) x interval a request may ask for. A burst holds one reply-queue
+/// slot until its last copy is sent, so this bounds how long a single request
+/// keeps that slot (RFC 10052 §5). One second covers 1000 copies at the
+/// sender's default 1 ms interval.
+pub const REFLECTED_CONTROL_MAX_DURATION_MS: u32 = 1_000;
 
 #[cfg(test)]
 mod tests {

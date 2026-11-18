@@ -258,11 +258,12 @@ fn reflector_utc_offset_file_default_and_signed_cli_override() {
     }
 }
 #[test]
-fn toml_cannot_set_zero_type12_rate_or_volume_limits() {
+fn toml_cannot_set_zero_type12_rate_volume_or_duration_limits() {
     // The CLI rejects zero with range(1..); a configuration file must too.
     for line in [
         "reflected_control_max_rate = 0",
         "reflected_control_max_volume = 0",
+        "reflected_control_max_duration_ms = 0",
     ] {
         let args = ["stamp-suite", "--is-reflector"];
         let matches = <Configuration as clap::CommandFactory>::command().get_matches_from(args);
@@ -1275,6 +1276,39 @@ fn test_hwtstamp_default_auto() {
     let args = vec!["test"];
     let conf = Configuration::parse_from(args);
     assert_eq!(conf.hwtstamp, HwTsMode::Auto);
+}
+
+/// The burst-duration limit defaults to 1000 ms; the CLI and a configuration
+/// file set it, and the CLI rejects zero.
+#[test]
+fn reflected_control_max_duration_defaults_and_overrides() {
+    let conf = Configuration::try_parse_from(["test", "--is-reflector"]).unwrap();
+    assert_eq!(conf.reflected_control_max_duration_ms, 1_000);
+    let conf = Configuration::try_parse_from([
+        "test",
+        "--is-reflector",
+        "--reflected-control-max-duration-ms",
+        "250",
+    ])
+    .unwrap();
+    assert_eq!(conf.reflected_control_max_duration_ms, 250);
+    assert!(Configuration::try_parse_from([
+        "test",
+        "--is-reflector",
+        "--reflected-control-max-duration-ms",
+        "0",
+    ])
+    .is_err());
+
+    let args = ["stamp-suite", "--is-reflector"];
+    let matches = <Configuration as clap::CommandFactory>::command().get_matches_from(args);
+    let mut conf = <Configuration as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
+    conf.merge_file(
+        toml::from_str("reflected_control_max_duration_ms = 5000").unwrap(),
+        &matches,
+    );
+    conf.validate().unwrap();
+    assert_eq!(conf.reflected_control_max_duration_ms, 5_000);
 }
 
 #[test]

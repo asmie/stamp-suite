@@ -157,6 +157,61 @@ fn exact_rate_volume_and_zero_count_decisions_reach_the_wire() {
     }
 }
 
+/// RFC 10052 §5: a request whose burst would outlast
+/// `--reflected-control-max-duration-ms` gets one C-flagged reply and frees
+/// its reply-queue slot at once. With a single slot, the next request is
+/// answered in full instead of being refused for the length of the burst.
+#[test]
+fn long_burst_gets_one_c_reply_and_does_not_hold_the_reply_queue() {
+    for ip in ["127.0.0.1", "::1"] {
+        for mode in Mode::ALL {
+            let mut command = Reflector::command(ip);
+            command.args([
+                "--hwtstamp",
+                "off",
+                "--reflector-queue-capacity",
+                "1",
+                "--reflected-control-max-count",
+                "16",
+                "--reflected-control-max-duration-ms",
+                "1000",
+            ]);
+            command.args(mode.key_args());
+            if mode.keyed() {
+                command.arg("--verify-tlv-hmac");
+            }
+            let reflector = Reflector::spawn(command).unwrap();
+            let socket = UdpSocket::bind((ip, 0)).unwrap();
+            for (sequence, count, interval, replies, flags) in [
+                (1u32, 2u16, u32::MAX, 1, 0x10), // ~4.3 s burst: one C reply
+                (2, 16, u32::MAX, 1, 0x10),      // ~64 s burst: one C reply
+                (3, 2, 1_000_000, 2, 0),         // 1 ms burst: both copies, C clear
+            ] {
+                let _case = Case::new(format!("{ip} {mode:?} sequence={sequence}"));
+                socket
+                    .send_to(
+                        &request(mode, sequence, count, interval, mode.keyed()),
+                        reflector.address,
+                    )
+                    .unwrap();
+                for _ in 0..replies {
+                    let bytes = receive(&socket, reflector.address, mode, sequence);
+                    assert_eq!(bytes.len(), 500);
+                    assert_eq!(bytes[mode.base() + 1], 12);
+                    assert_eq!(
+                        bytes[mode.base()],
+                        flags,
+                        "count={count} interval={interval}"
+                    );
+                    verify_signatures(&bytes, mode, false);
+                }
+                // Also gives the reflector time to release the slot.
+                quiet(&socket);
+            }
+        }
+    }
+}
+
 #[test]
 fn protected_type12_profile_rejects_unverified_amplification() {
     for ip in ["127.0.0.1", "::1"] {

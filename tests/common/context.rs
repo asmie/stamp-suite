@@ -3,7 +3,10 @@
 
 use stamp_suite::{
     configuration::{ClockFormat, TlvHandlingMode},
-    receiver::{ProcessingContext, REFLECTED_CONTROL_MAX_RATE, REFLECTED_CONTROL_MAX_VOLUME},
+    receiver::{
+        ProcessingContext, REFLECTED_CONTROL_MAX_DURATION_MS, REFLECTED_CONTROL_MAX_RATE,
+        REFLECTED_CONTROL_MAX_VOLUME,
+    },
     session::ReplayVerdict,
     tlv::{SyncSource, TimestampMethod},
 };
@@ -54,6 +57,7 @@ pub fn reflector_context<'a>() -> ProcessingContext<'a> {
         reflected_control_min_interval_ns: 1_000,
         reflected_control_max_rate: REFLECTED_CONTROL_MAX_RATE,
         reflected_control_max_volume: REFLECTED_CONTROL_MAX_VOLUME,
+        reflected_control_max_duration_ms: REFLECTED_CONTROL_MAX_DURATION_MS,
         rx_timestamp: None,
         rx_method: TimestampMethod::SwLocal,
         last_reflection_method: TimestampMethod::SwLocal,

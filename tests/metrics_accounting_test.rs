@@ -174,7 +174,13 @@ fn malformed_request_counts_once_without_a_reflection() {
 
 #[test]
 fn queue_rejection_is_visible_in_scrape() {
-    let (server, baseline) = Reflector::start(&["--reflector-queue-capacity", "1"]);
+    // The 4 s burst must hold the only slot; admit its duration.
+    let (server, baseline) = Reflector::start(&[
+        "--reflector-queue-capacity",
+        "1",
+        "--reflected-control-max-duration-ms",
+        "10000",
+    ]);
     let client = client("127.0.0.1");
     client
         .send_to(&burst(2_000_000_000), ("127.0.0.1", server.udp))

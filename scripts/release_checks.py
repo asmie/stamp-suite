@@ -276,9 +276,11 @@ def snmp_case(binary, tools, directory, events):
         table = ROOT_OID + ".1.1.3.1"
         walk = query("snmpwalk", [table])
         oids = re.findall(r"^(\.[0-9.]+) =", walk, re.MULTILINE)
-        require(len(oids) == 14, "expected two sessions in seven columns")
+        # Column 1, stampReflSessIndex, is not-accessible; six columns remain.
+        require(len(oids) == 12, "expected two sessions in six readable columns")
+        require(not any(oid.startswith(table + ".1.") for oid in oids), "index column must not be served")
         require(oids == sorted(set(oids), key=lambda s: tuple(map(int, s[1:].split('.')))), "unordered/duplicate table walk")
-        bulk = query("snmpbulkget", [stats[0], table + ".1", table + ".2"], ["-Cn1", "-Cr3"])
+        bulk = query("snmpbulkget", [stats[0], table + ".2", table + ".3"], ["-Cn1", "-Cr3"])
         bulk_oids = re.findall(r"^(\.[0-9.]+) =", bulk, re.MULTILINE)
         require(bulk_oids == [stats[1], oids[0], oids[2], oids[1], oids[3], oids[2], oids[4]],
                 "unexpected non-repeater/repeater order")

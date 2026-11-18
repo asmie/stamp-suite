@@ -53,7 +53,7 @@ send a body, also send `Content-Type: application/json`.
 | --- | --- | --- |
 | 400 | Invalid key (bad hex or shorter than 16 bytes) | `{"error": "invalid key: ..."}` |
 | 400 | Invalid session page query, limit or cursor | `{"error": "..."}` |
-| 400 | `PATCH /v1/caps` would set `reflected_control_max_rate` or `reflected_control_max_volume` to 0 | `{"error": "..."}` |
+| 400 | `PATCH /v1/caps` would set `reflected_control_max_rate`, `reflected_control_max_volume` or `reflected_control_max_duration_ms` to 0 | `{"error": "..."}` |
 | 410 | Session page cursor from another manager or process lifetime | `{"error": "..."}` |
 | 400 | Body is not valid JSON, or the SSID in the path is not a number from 0 to 65535 | Plain text |
 | 401 | Token configured and the header is missing or wrong | `{"error": "missing or invalid bearer token"}` |
@@ -101,6 +101,7 @@ rather than being silently ignored.
       "type12_size_limit": 0,
       "type12_rate_limit": 0,
       "type12_volume_limit": 0,
+      "type12_duration_limit": 0,
       "type12_route_mtu": 0,
       "type12_padding_unencodable": 0,
       "header_order": 0,
@@ -156,6 +157,7 @@ can be missing from `/metrics`. The Type 12 reasons are:
 | `type12_size_limit` | The rounded requested size is above the configured cap, or the cap is the limiting factor when the reply is shaped at send time. |
 | `type12_rate_limit` | The requested byte rate for several copies is above the configured maximum. |
 | `type12_volume_limit` | The requested total bytes are above the configured maximum. |
+| `type12_duration_limit` | The requested burst, (count - 1) × interval, lasts longer than the configured maximum. |
 | `type12_route_mtu` | The route's payload budget is the limiting factor when a processed Type 12 reply is shaped. |
 | `type12_padding_unencodable` | The requested size leaves a gap too small to hold a padding TLV header. |
 
@@ -350,7 +352,8 @@ files and how to rotate keys.
   "reflected_control_max_size": 1500,
   "reflected_control_min_interval_ns": 1000,
   "reflected_control_max_rate": 12500000,
-  "reflected_control_max_volume": 1500000
+  "reflected_control_max_volume": 1500000,
+  "reflected_control_max_duration_ms": 1000
 }
 ```
 
@@ -371,8 +374,9 @@ curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/js
 - `reflected_control_max_count` 0 disables Type 12 requests. It does not mean
   unlimited copies. `reflected_control_max_rate` (bytes per second) and
   `reflected_control_max_volume` (bytes) cap what a single request can
-  generate. Both must be at least 1, as on the command line; a request that
-  sets either to 0 gets a 400 and changes no cap.
+  generate, and `reflected_control_max_duration_ms` caps how long its burst
+  lasts. Each must be at least 1, as on the command line; a request that sets
+  one to 0 gets a 400 and changes no cap.
 - `reflected_control_max_size` is an administrative limit on payload size. On
   Linux and Windows, each reply copy is also checked against the route MTU
   before it is sent, and PATCH cannot turn that check off.

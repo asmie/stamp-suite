@@ -347,6 +347,10 @@ pub struct ProcessingContext<'a> {
     pub reflected_control_max_rate: u64,
     /// Type 12 data-volume limit, bytes (RFC 10052 §3).
     pub reflected_control_max_volume: u32,
+    /// Type 12 burst-duration limit, milliseconds: the longest
+    /// (count - 1) x interval a request may ask for (RFC 10052 §5). A burst
+    /// holds a reply-queue slot until its last copy is sent.
+    pub reflected_control_max_duration_ms: u32,
     /// Kernel-provided receive timestamp for this packet (STAMP wire
     /// format), filled by backends with `SO_TIMESTAMPING` enabled
     /// (feature "hwtstamp"). `None` → T2 is generated in userspace.
@@ -1177,6 +1181,17 @@ fn apply_semantic_tlv_processing(
                         tlv_conformance.insert(crate::tlv::TlvConformanceReason::Type12RateLimit);
                     }
                 }
+                // RFC 10052 §5: also bound how long one request keeps the
+                // reflector busy. A burst holds a reply-queue slot until its
+                // last copy, (count - 1) x interval after the first reply.
+                if burst_exceeds_duration(
+                    requested_count,
+                    req.interval_nanoseconds,
+                    ctx.reflected_control_max_duration_ms,
+                ) {
+                    non_conformant = true;
+                    tlv_conformance.insert(crate::tlv::TlvConformanceReason::Type12DurationLimit);
+                }
 
                 if non_conformant {
                     tlvs.set_reflected_control_c_flag();
@@ -1219,6 +1234,15 @@ fn apply_semantic_tlv_processing(
         reply_source,
         tlv_hmac_generated,
     })
+}
+
+/// Whether a Type 12 burst of `count` replies spaced `interval_ns` apart lasts
+/// longer than `max_duration_ms` from the first reply to the last. A duration
+/// exactly equal to the limit is admitted. The product is computed in `u64`:
+/// 65534 x `u32::MAX` ns is below 2^48, so it cannot overflow.
+pub(crate) fn burst_exceeds_duration(count: u16, interval_ns: u32, max_duration_ms: u32) -> bool {
+    let duration_ns = u64::from(count.saturating_sub(1)) * u64::from(interval_ns);
+    duration_ns > u64::from(max_duration_ms) * 1_000_000
 }
 
 #[cfg(test)]

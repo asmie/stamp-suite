@@ -40,7 +40,9 @@ The defaults keep extra amplification low:
   first: a request whose L2 or L3 group does not match a local address is
   dropped with no reply. If you enable Type 12,
   `--reflected-control-max-rate` and `--reflected-control-max-volume` cap the
-  bytes a single request can generate.
+  bytes a single request can generate, and
+  `--reflected-control-max-duration-ms` (default 1000) caps how long its burst
+  can hold a reply queue slot.
 
 Only enable these features inside a measurement domain you control.
 Authenticated mode rejects a packet with an invalid base HMAC before it
@@ -59,7 +61,9 @@ keep working. Space frees up when a session idles out or is expired by hand.
 charged before validation and session admission, and each extra Type 12 reply
 copy costs one more. The default is 0 (no limit). `--reflector-queue-capacity`
 (default 1024) is a separate cap on accepted requests that are waiting for
-their replies, bursts included. It counts requests, not bytes. See
+their replies, bursts included. It counts requests, not bytes. A burst keeps
+its slot until the last copy is sent, at most
+`--reflected-control-max-duration-ms` after the first. See
 [Capacity, drain and shutdown](usage.md#capacity-drain-and-shutdown).
 
 The rate limiter keeps at most 16,384 source-IP buckets, whatever

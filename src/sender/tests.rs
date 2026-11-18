@@ -2768,6 +2768,7 @@ fn test_access_report_loopback_acked_on_first_reply() {
         reflected_control_min_interval_ns: crate::receiver::REFLECTED_CONTROL_MIN_INTERVAL_NS,
         reflected_control_max_rate: crate::receiver::REFLECTED_CONTROL_MAX_RATE,
         reflected_control_max_volume: crate::receiver::REFLECTED_CONTROL_MAX_VOLUME,
+        reflected_control_max_duration_ms: crate::receiver::REFLECTED_CONTROL_MAX_DURATION_MS,
         rx_timestamp: None,
         rx_method: crate::tlv::TimestampMethod::SwLocal,
         last_reflection_method: crate::tlv::TimestampMethod::SwLocal,
@@ -3190,6 +3191,8 @@ async fn ack_nth_then_watch_for_more(
                     crate::receiver::REFLECTED_CONTROL_MIN_INTERVAL_NS,
                 reflected_control_max_rate: crate::receiver::REFLECTED_CONTROL_MAX_RATE,
                 reflected_control_max_volume: crate::receiver::REFLECTED_CONTROL_MAX_VOLUME,
+                reflected_control_max_duration_ms:
+                    crate::receiver::REFLECTED_CONTROL_MAX_DURATION_MS,
                 rx_timestamp: None,
                 rx_method: crate::tlv::TimestampMethod::SwLocal,
                 last_reflection_method: crate::tlv::TimestampMethod::SwLocal,

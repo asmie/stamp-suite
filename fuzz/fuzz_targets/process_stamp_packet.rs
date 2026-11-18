@@ -85,6 +85,7 @@ fuzz_target!(|data: &[u8]| {
         reflected_control_min_interval_ns: 1_000,
         reflected_control_max_rate: stamp_suite::receiver::REFLECTED_CONTROL_MAX_RATE,
         reflected_control_max_volume: stamp_suite::receiver::REFLECTED_CONTROL_MAX_VOLUME,
+        reflected_control_max_duration_ms: stamp_suite::receiver::REFLECTED_CONTROL_MAX_DURATION_MS,
     };
 
     // Run both the unauthenticated and authenticated assembly paths.

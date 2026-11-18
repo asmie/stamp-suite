@@ -322,6 +322,9 @@ impl<'a> ProcessingContext<'a> {
                 .load(Ordering::Relaxed),
             reflected_control_max_rate: caps.reflected_control_max_rate.load(Ordering::Relaxed),
             reflected_control_max_volume: caps.reflected_control_max_volume.load(Ordering::Relaxed),
+            reflected_control_max_duration_ms: caps
+                .reflected_control_max_duration_ms
+                .load(Ordering::Relaxed),
             rx_timestamp: packet.rx_timestamp,
             rx_method: packet.rx_method,
             last_reflection_method: TimestampMethod::SwLocal,

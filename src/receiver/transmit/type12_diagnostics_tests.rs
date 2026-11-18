@@ -69,6 +69,7 @@ fn type12_semantic_reasons_match_signed_c_flags_and_successful_sends() {
                 Reason::Type12SizeLimit,
                 Reason::Type12RateLimit,
                 Reason::Type12VolumeLimit,
+                Reason::Type12DurationLimit,
                 Reason::Type12PaddingUnencodable,
             ] {
                 let count = if matches!(
@@ -76,6 +77,7 @@ fn type12_semantic_reasons_match_signed_c_flags_and_successful_sends() {
                     Reason::Type12CountLimit
                         | Reason::Type12IntervalLimit
                         | Reason::Type12RateLimit
+                        | Reason::Type12DurationLimit
                 ) {
                     2
                 } else {
@@ -88,6 +90,9 @@ fn type12_semantic_reasons_match_signed_c_flags_and_successful_sends() {
                         control(if auth { 156 } else { 88 }, count, 1000),
                         tlv(239, &[0]),
                     ])
+                } else if reason == Reason::Type12DurationLimit {
+                    // 1 ms and 1 ns between two copies, over a 1 ms limit.
+                    control(200, count, 1_000_001)
                 } else {
                     control(200, count, 1000)
                 };
@@ -97,6 +102,7 @@ fn type12_semantic_reasons_match_signed_c_flags_and_successful_sends() {
                     Reason::Type12SizeLimit => ctx.reflected_control_max_size = 180,
                     Reason::Type12RateLimit => ctx.reflected_control_max_rate = 199_999_999,
                     Reason::Type12VolumeLimit => ctx.reflected_control_max_volume = 199,
+                    Reason::Type12DurationLimit => ctx.reflected_control_max_duration_ms = 1,
                     _ => {}
                 })
                 .unwrap();

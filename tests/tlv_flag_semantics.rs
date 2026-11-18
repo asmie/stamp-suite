@@ -1234,6 +1234,63 @@ fn reflected_control_rate_boundary_does_not_round_down_excess_traffic() {
     }
 }
 
+/// RFC 10052 §5: a burst that would last longer than the duration limit,
+/// (count - 1) x interval, gets one C-flagged reply. Equality is admitted, and
+/// the largest count and interval do not overflow the comparison.
+#[test]
+fn reflected_control_duration_limit_sets_c() {
+    let request = |count: u16, interval_ns: u32| {
+        let mut value = Vec::with_capacity(12);
+        value.extend_from_slice(&0u16.to_be_bytes());
+        value.extend_from_slice(&count.to_be_bytes());
+        value.extend_from_slice(&interval_ns.to_be_bytes());
+        value.extend_from_slice(&[0u8; 4]);
+        build_unauth_packet(&tlv_to_chain(&RawTlv::new(
+            TlvType::ReflectedControl,
+            value,
+        )))
+    };
+    let mut ctx = make_ctx(None);
+    ctx.reflected_control_max_count = u16::MAX;
+    ctx.reflected_control_max_rate = u64::MAX;
+    ctx.reflected_control_max_volume = u32::MAX;
+    assert_eq!(ctx.reflected_control_max_duration_ms, 1_000, "default");
+    for (count, interval, limit_ms, excessive) in [
+        (16u16, 1_000_000u32, 1_000u32, false), // ordinary request: 15 ms
+        (2, 1_000_000_000, 1_000, false),       // exactly 1 s
+        (3, 500_000_000, 1_000, false),         // exactly 1 s
+        (2, 1_000_000_001, 1_000, true),        // 1 ns over
+        (16, u32::MAX, 1_000, true),            // about 64 s
+        (1, u32::MAX, 1, false),                // one reply has no duration
+        (u16::MAX, u32::MAX, 281_466_386, true), // largest product, over
+        (u16::MAX, u32::MAX, 281_466_387, false), // largest product, under
+    ] {
+        ctx.reflected_control_max_duration_ms = limit_ms;
+        let response =
+            process_stamp_packet(&request(count, interval), src(), 64, false, &ctx).unwrap();
+        let echoed = TlvList::parse(&response.data[UNAUTH_BASE_SIZE..]).unwrap();
+        let control = echoed
+            .non_hmac_tlvs()
+            .iter()
+            .find(|t| t.tlv_type == TlvType::ReflectedControl)
+            .unwrap();
+        let case = format!("count={count} interval={interval} limit={limit_ms}");
+        assert_eq!(control.flags.to_byte() & 0x10 != 0, excessive, "{case}");
+        assert_eq!(
+            response
+                .tlv_conformance
+                .contains(stamp_suite::tlv::TlvConformanceReason::Type12DurationLimit),
+            excessive,
+            "{case}"
+        );
+        assert_eq!(
+            response.reflected_control.unwrap().extra_copies,
+            if excessive { 0 } else { count - 1 },
+            "{case}"
+        );
+    }
+}
+
 #[test]
 fn reflected_control_malformed_l3_lengths_do_not_filter_or_hide_later_groups() {
     // Each invalid shape contains a nonmatching prefix if misinterpreted.

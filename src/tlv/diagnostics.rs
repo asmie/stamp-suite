@@ -9,6 +9,7 @@ pub enum TlvConformanceReason {
     Type12SizeLimit,
     Type12RateLimit,
     Type12VolumeLimit,
+    Type12DurationLimit,
     Type12RouteMtu,
     Type12PaddingUnencodable,
     HeaderOrder,
@@ -27,12 +28,13 @@ pub enum TlvConformanceReason {
 }
 
 impl TlvConformanceReason {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Type12CountLimit,
         Self::Type12IntervalLimit,
         Self::Type12SizeLimit,
         Self::Type12RateLimit,
         Self::Type12VolumeLimit,
+        Self::Type12DurationLimit,
         Self::Type12RouteMtu,
         Self::Type12PaddingUnencodable,
         Self::HeaderOrder,
@@ -58,6 +60,7 @@ impl TlvConformanceReason {
             Self::Type12SizeLimit => "type12_size_limit",
             Self::Type12RateLimit => "type12_rate_limit",
             Self::Type12VolumeLimit => "type12_volume_limit",
+            Self::Type12DurationLimit => "type12_duration_limit",
             Self::Type12RouteMtu => "type12_route_mtu",
             Self::Type12PaddingUnencodable => "type12_padding_unencodable",
             Self::HeaderOrder => "header_order",

@@ -83,6 +83,9 @@ fn start(ip: &str, auth: bool, grace: u32) -> (Reflector, UdpSocket) {
         "json",
         "--reflected-control-max-count",
         "16",
+        // The 2 s bursts below must stay in the queue; admit them.
+        "--reflected-control-max-duration-ms",
+        "5000",
         "--reflector-queue-capacity",
         "1",
         "--reflector-shutdown-grace-ms",

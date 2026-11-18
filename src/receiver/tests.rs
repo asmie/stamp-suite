@@ -725,6 +725,7 @@ pub(super) fn test_ctx(received_dscp: u8, received_ecn: u8) -> ProcessingContext
         reflected_control_min_interval_ns: REFLECTED_CONTROL_MIN_INTERVAL_NS,
         reflected_control_max_rate: REFLECTED_CONTROL_MAX_RATE,
         reflected_control_max_volume: REFLECTED_CONTROL_MAX_VOLUME,
+        reflected_control_max_duration_ms: REFLECTED_CONTROL_MAX_DURATION_MS,
         rx_timestamp: None,
         rx_method: TimestampMethod::SwLocal,
         last_reflection_method: TimestampMethod::SwLocal,
@@ -3696,4 +3697,24 @@ fn strict_packets_nonzero_mbz_accepted_per_rfc_8762() {
             "strict={strict} must ignore non-zero MBZ per RFC 8762 §4.2.1"
         );
     }
+}
+
+/// RFC 10052 §5: the burst-duration limit admits (count - 1) x interval up to
+/// and including the ceiling, and the product cannot overflow.
+#[test]
+fn burst_duration_limit_boundaries_and_overflow() {
+    // Exactly at the 1000 ms ceiling, then 1 ns over it.
+    assert!(!burst_exceeds_duration(2, 1_000_000_000, 1_000));
+    assert!(burst_exceeds_duration(2, 1_000_000_001, 1_000));
+    assert!(!burst_exceeds_duration(3, 500_000_000, 1_000));
+    assert!(burst_exceeds_duration(3, 500_000_001, 1_000));
+    // One reply, or none, has no spacing to bound.
+    assert!(!burst_exceeds_duration(1, u32::MAX, 1));
+    assert!(!burst_exceeds_duration(0, u32::MAX, 1));
+    // The fuzzing case: 16 copies 0xFFFFFFFF ns apart last about 64 s.
+    assert!(burst_exceeds_duration(16, u32::MAX, 1_000));
+    // Largest product: 65534 x (2^32 - 1) ns = 281,466,386.71053 ms.
+    assert!(burst_exceeds_duration(u16::MAX, u32::MAX, 281_466_386));
+    assert!(!burst_exceeds_duration(u16::MAX, u32::MAX, 281_466_387));
+    assert!(!burst_exceeds_duration(u16::MAX, u32::MAX, u32::MAX));
 }

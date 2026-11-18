@@ -1260,6 +1260,18 @@ pub struct Configuration {
     )]
     pub reflected_control_max_volume: u32,
 
+    /// Type 12 burst-duration limit per request, in milliseconds (RFC 10052 §5):
+    /// (count - 1) × interval. A request above it gets one C-flagged reply.
+    /// A burst holds one reply-queue slot until its last copy is sent.
+    #[clap(
+        long,
+        default_value_t = crate::receiver::REFLECTED_CONTROL_MAX_DURATION_MS,
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Reflected Test Packet Control",
+        hide_short_help = true
+    )]
+    pub reflected_control_max_duration_ms: u32,
+
     /// Permit fixed IP header reflection (Type 247) to this sender IP.
     /// Repeat for each permitted sender. Default: deny all header reflection.
     #[clap(long, value_name = "IP", action = clap::ArgAction::Append, help_heading = "Header reflection", hide_short_help = true)]
@@ -1648,6 +1660,7 @@ impl Configuration {
         check_reflected_control_limits(
             self.reflected_control_max_rate,
             self.reflected_control_max_volume,
+            self.reflected_control_max_duration_ms,
         )
         .map_err(invalid)?;
         if self.validate_tlv_framing && !self.is_reflector {
@@ -2468,6 +2481,7 @@ impl Configuration {
             reflected_control_min_interval_ns,
             reflected_control_max_rate,
             reflected_control_max_volume,
+            reflected_control_max_duration_ms,
             reflect_fixed_header_from,
             reflect_ipv6_ext_header_from,
             reflected_fixed_hdr,
@@ -2599,6 +2613,7 @@ impl Configuration {
         merge!(reflected_control_min_interval_ns);
         merge!(reflected_control_max_rate);
         merge!(reflected_control_max_volume);
+        merge!(reflected_control_max_duration_ms);
         merge!(reflect_fixed_header_from);
         merge!(reflect_ipv6_ext_header_from);
         merge!(reflected_fixed_hdr);
@@ -2622,17 +2637,22 @@ pub enum ConfigurationError {
 
 /// An [`ConfigurationError::InvalidConfiguration`] with `msg`.
 /// Type 12 rate and volume ceilings must admit at least one byte (RFC 10052
-/// §3); zero would refuse every request while looking like a limit. The CLI
-/// parser, TOML validation and the control API share this check.
+/// §3), and the duration ceiling at least one millisecond; zero would refuse
+/// every burst while looking like a limit. The CLI parser, TOML validation and
+/// the control API share this check.
 pub(crate) fn check_reflected_control_limits(
     max_rate: u64,
     max_volume: u32,
+    max_duration_ms: u32,
 ) -> Result<(), &'static str> {
     if max_rate == 0 {
         return Err("reflected_control_max_rate must be at least 1");
     }
     if max_volume == 0 {
         return Err("reflected_control_max_volume must be at least 1");
+    }
+    if max_duration_ms == 0 {
+        return Err("reflected_control_max_duration_ms must be at least 1");
     }
     Ok(())
 }
@@ -2772,6 +2792,7 @@ pub struct FileConfiguration {
     pub reflected_control_min_interval_ns: Option<u32>,
     pub reflected_control_max_rate: Option<u64>,
     pub reflected_control_max_volume: Option<u32>,
+    pub reflected_control_max_duration_ms: Option<u32>,
     pub reflect_fixed_header_from: Option<Vec<std::net::IpAddr>>,
     pub reflect_ipv6_ext_header_from: Option<Vec<std::net::IpAddr>>,
     pub reflected_fixed_hdr: Option<Vec<String>>,
@@ -2904,6 +2925,7 @@ pub const CONFIG_JSON_SCHEMA: &str = r##"{
     "reflected_control_min_interval_ns": { "type": "integer", "minimum": 0 },
     "reflected_control_max_rate": { "type": "integer", "minimum": 1 },
     "reflected_control_max_volume": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "reflected_control_max_duration_ms": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
     "reflect_fixed_header_from": { "type": "array", "items": { "type": "string", "anyOf": [{ "format": "ipv4" }, { "format": "ipv6" }] } },
     "reflect_ipv6_ext_header_from": { "type": "array", "items": { "type": "string", "anyOf": [{ "format": "ipv4" }, { "format": "ipv6" }] } },
     "reflected_fixed_hdr":    { "type": "array", "items": { "type": "string" } },

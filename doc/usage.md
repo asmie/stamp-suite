@@ -546,8 +546,9 @@ Revision 02 allows a fixed traffic pattern despite CE only in a controlled
 environment agreed with the operators of every network under test. This tool
 has no option to turn its response off. Limit runs with `--duration` or
 `--count`, choose a conservative `--send-delay`, and cap reflected traffic
-with `--reflected-control-max-count`, `--reflected-control-max-rate` and
-`--reflected-control-max-volume`. Keep tests away from traffic outside the
+with `--reflected-control-max-count`, `--reflected-control-max-rate`,
+`--reflected-control-max-volume` and `--reflected-control-max-duration-ms`.
+Keep tests away from traffic outside the
 agreed scope, and include Access Report retries in your time budget.
 
 See [ECN security](security.md#ecn-measurement-integrity) for TLV protection
@@ -704,7 +705,8 @@ sender alone does not reset a reflector session that is still active.
 **Reply queue.** `--reflector-queue-capacity` (default 1024, must be positive)
 limits the number of requests in progress, from packet processing to the last
 burst copy. Each request holds one slot until every copy is sent or the
-request is discarded. When the queue is full, new requests are dropped before
+request is discarded; `--reflected-control-max-duration-ms` bounds how long a
+burst can take. When the queue is full, new requests are dropped before
 authentication or any session change; accepted work keeps its slots. The limit
 counts requests, not bytes.
 
@@ -770,8 +772,14 @@ first, so a request whose filter does not match is dropped without a reply,
 even with Type 12 disabled. Set a positive cap (for example 16) to turn it on,
 and pair it with `--max-pps` to limit amplification. Requests above
 `--reflected-control-max-count`, `--reflected-control-max-rate`,
-`--reflected-control-max-volume` or below `--reflected-control-min-interval-ns`
-get one reply with the C flag set.
+`--reflected-control-max-volume` or `--reflected-control-max-duration-ms`, or
+below `--reflected-control-min-interval-ns`, get one reply with the C flag set.
+
+`--reflected-control-max-duration-ms` (default 1000) caps (count - 1) ×
+interval, the time from the first copy to the last. A burst holds one reply
+queue slot for that long, so without the cap a few hundred requests with long
+intervals could fill the queue for minutes. A burst of exactly the limit is
+admitted.
 
 Fractional rate excess also gets C: a 500-byte reply every 99,999,999 ns exceeds
 a 5,000 B/s ceiling. A rate or volume exactly equal to its ceiling is admitted.

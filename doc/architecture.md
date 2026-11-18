@@ -651,8 +651,9 @@ members. See [RFC 9534 gaps](conformance/rfc9534.md).
 Type 12 requests a reply count, length and interval. It is disabled by default:
 with `--reflected-control-max-count 0` the reflector treats the TLV as
 unsupported and sends one reply with U set. When enabled, a request that
-exceeds the count, interval, byte rate (`--reflected-control-max-rate`) or byte
-volume (`--reflected-control-max-volume`) limit gets one C-flagged reply rather
+exceeds the count, interval, byte rate (`--reflected-control-max-rate`), byte
+volume (`--reflected-control-max-volume`) or burst duration
+(`--reflected-control-max-duration-ms`) limit gets one C-flagged reply rather
 than a reduced burst. L2 and L3 Address Groups each require a local match;
 either mismatch drops the packet, also when Type 12 is disabled, because the
 group checks run before the disabled check. Malformed groups are skipped. An L2

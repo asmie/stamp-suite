@@ -305,6 +305,8 @@ fn caps_json(s: &ControlState) -> serde_json::Value {
             s.caps.reflected_control_max_rate.load(Ordering::Relaxed),
         "reflected_control_max_volume":
             s.caps.reflected_control_max_volume.load(Ordering::Relaxed),
+        "reflected_control_max_duration_ms":
+            s.caps.reflected_control_max_duration_ms.load(Ordering::Relaxed),
     })
 }
 
@@ -323,6 +325,7 @@ struct CapsPatch {
     reflected_control_min_interval_ns: Option<u32>,
     reflected_control_max_rate: Option<u64>,
     reflected_control_max_volume: Option<u32>,
+    reflected_control_max_duration_ms: Option<u32>,
 }
 
 async fn patch_caps(State(s): State<ControlState>, Json(p): Json<CapsPatch>) -> Response {
@@ -334,7 +337,13 @@ async fn patch_caps(State(s): State<ControlState>, Json(p): Json<CapsPatch>) -> 
     let max_volume = p
         .reflected_control_max_volume
         .unwrap_or_else(|| s.caps.reflected_control_max_volume.load(Ordering::Relaxed));
-    if let Err(message) = crate::configuration::check_reflected_control_limits(max_rate, max_volume)
+    let max_duration_ms = p.reflected_control_max_duration_ms.unwrap_or_else(|| {
+        s.caps
+            .reflected_control_max_duration_ms
+            .load(Ordering::Relaxed)
+    });
+    if let Err(message) =
+        crate::configuration::check_reflected_control_limits(max_rate, max_volume, max_duration_ms)
     {
         return err(StatusCode::BAD_REQUEST, message);
     }
@@ -366,6 +375,11 @@ async fn patch_caps(State(s): State<ControlState>, Json(p): Json<CapsPatch>) -> 
     if let Some(v) = p.reflected_control_max_volume {
         s.caps
             .reflected_control_max_volume
+            .store(v, Ordering::Relaxed);
+    }
+    if let Some(v) = p.reflected_control_max_duration_ms {
+        s.caps
+            .reflected_control_max_duration_ms
             .store(v, Ordering::Relaxed);
     }
     let effective = caps_json(&s);
