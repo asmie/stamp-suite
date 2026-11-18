@@ -383,3 +383,57 @@ fn pnet_large_packets_preserve_payload_and_signatures() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires STAMP_PNET_ENDPOINT_TESTS=1 inside unshare -Urn"]
+fn pnet_counts_and_logs_fragmented_requests() {
+    let _namespace = namespace();
+    struct Mtu;
+    impl Mtu {
+        fn set(mtu: &str) {
+            assert!(std::process::Command::new("ip")
+                .args(["link", "set", "lo", "mtu", mtu])
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+    impl Drop for Mtu {
+        fn drop(&mut self) {
+            Mtu::set("65536");
+        }
+    }
+    // The sending kernel fragments a 3000-byte request on a 1500-byte link.
+    // namespace() verifies isolation before changing this test-only interface.
+    Mtu::set("1500");
+    let _restore = Mtu;
+    for ip in ["127.0.0.1", "::1"] {
+        let _case = Case::new(ip.to_string());
+        let mode = Mode::Open;
+        let mut command = command(ip, 0, mode);
+        command
+            .args(["--output-format", "json"])
+            .stdout(std::process::Stdio::piped());
+        let mut child = reflector::Reflector::spawn(command).unwrap();
+        let mut stdout = child.child.stdout.take().unwrap();
+        let peer = std::net::UdpSocket::bind((ip, 0)).unwrap();
+        let mut request = mode.request(1);
+        request.resize(3000, 0);
+        assert_eq!(peer.send_to(&request, child.address).unwrap(), 3000);
+        // Capture handles frames in order, so the fragment is accounted for
+        // before this reply; the reflector keeps serving.
+        exchange(&child, ip, mode, 2);
+        let diagnostics = child.diagnostics();
+        finish(child);
+        let mut summary = String::new();
+        std::io::Read::read_to_string(&mut stdout, &mut summary).unwrap();
+        let summary: serde_json::Value = serde_json::from_str(summary.trim()).unwrap();
+        assert_eq!(summary["total_packets_received"], 2, "{summary}");
+        assert_eq!(summary["total_packets_reflected"], 1, "{summary}");
+        assert_eq!(summary["total_packets_dropped"], 1, "{summary}");
+        assert!(
+            diagnostics.contains("does not reassemble IP fragments"),
+            "{diagnostics}"
+        );
+    }
+}

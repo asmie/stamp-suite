@@ -30,7 +30,7 @@ pub(crate) fn record_packet_reflected() {
 ///
 /// `reason` labels the rejection boundary: rate_limited, queue_full,
 /// processing_rejected, session_expired, suppressed, cos_policy, mtu_exceeded,
-/// send_failed or cancelled.
+/// send_failed, cancelled or fragmented (pnet only).
 pub(crate) fn record_packet_dropped(reason: &'static str) {
     counter!("stamp_reflector_packets_dropped_total", "reason" => reason).increment(1);
 }

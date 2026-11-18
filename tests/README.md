@@ -68,7 +68,7 @@ in [release verification](../doc/release-evidence.md#procedures).
 | `netns_conformance.rs` | Wire behavior across network namespaces (CoS, SRv6, header reflection, Address Groups, BER, Type 12, TTL). | Linux; ignored, see [Namespace conformance tier](#namespace-conformance-tier) |
 | `output_stream_test.rs` | CLI stdout stays parseable with logs, packet details, periodic reports, BER and measurement CSV, reflector shutdown, schema output, validation errors, blocked stdout and broken pipes. | Linux, nix |
 | `pnet_loopback_test.rs` | Real pnet capture on `lo`: open, authenticated and TLV round trips, and that bad UDP checksums get no reply. | Linux, `ttl-pnet` without `ttl-nix`; ignored, see [Raw capture (pnet)](#raw-capture-pnet) |
-| `pnet_endpoint_test.rs` | Assigned and explicit ports across configured families/wildcards, both reply families, Location metadata, signatures, retained bind conflicts, unavailable counterpart, disabled IPv6, large packets through maximum UDP payloads and graceful shutdown. | Linux, `ttl-pnet` without `ttl-nix`; four ignored namespace tests |
+| `pnet_endpoint_test.rs` | Assigned and explicit ports across configured families/wildcards, both reply families, Location metadata, signatures, retained bind conflicts, unavailable counterpart, disabled IPv6, large packets through maximum UDP payloads, counted fragmented requests and graceful shutdown. | Linux, `ttl-pnet` without `ttl-nix`; five ignored namespace tests |
 | `pnet_nested_headers_test.rs` | Actual mixed IPv4/IPv6 tunnel capture: exact outer-to-inner fixed-header replies, innermost identity/hops, independent signatures, corrupt UDP checksums and excessive depth rejection with valid follow-ups. | Linux, `ttl-pnet` without `ttl-nix`; one ignored namespace test |
 | `proptest_tlv.rs` | Property tests: typed TLV and wire round trips, and no panics in TLV, packet and AgentX decoders on arbitrary bytes. | always; AgentX properties need `snmp` |
 | `ptp_e2e_test.rs` | PTP/NTP encoding and the reflector's declared clock metadata in Type 3. | always |
@@ -243,9 +243,11 @@ STAMP_PARENT_NETNS="$(readlink /proc/self/ns/net)" STAMP_PNET_HEADER_TESTS=1 uns
   checks matching reply headers are absent. This is software loopback evidence;
   nested raw capture and physical interfaces remain separate.
 - `pnet_endpoint_test` rejects execution in the recorded parent network
-  namespace. Its four cases serialize to protect private ports and IPv6
-  sysctls, including when Rust's test runner uses multiple threads. The
-  IPv6-disabled case restores its namespace setting. Raw probes carry complete
+  namespace. Its five cases serialize to protect private ports, IPv6 sysctls
+  and the `lo` MTU, including when Rust's test runner uses multiple threads.
+  The IPv6-disabled case restores its namespace setting. The fragment case
+  sends a 3000-byte request over a 1500-byte `lo` MTU and checks the
+  drop count in the shutdown summary and the warning. Raw probes carry complete
   checksums, and contenders retain their sockets throughout startup attempts.
   Every successful reflector must exit cleanly on SIGTERM within four seconds.
 - `pnet_nested_headers_test` injects complete-checksum raw IP envelopes into

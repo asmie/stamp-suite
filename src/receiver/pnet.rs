@@ -536,15 +536,17 @@ fn handle_ip_packet(
     config: &CaptureConfig,
     transmitter: &std::sync::mpsc::SyncSender<QueuedTransmission>,
 ) {
-    let Some((udp, mut pkt)) = checked_udp(ip, version) else {
-        return;
+    let (udp, mut pkt) = match checked_udp(ip, version) {
+        Some(Captured::Udp(udp, pkt)) => (udp, pkt),
+        Some(Captured::FirstFragment { src, dst, dst_port }) => {
+            if addressed_to_reflector(config, dst_port, dst) {
+                record_fragment_drop(config, src);
+            }
+            return;
+        }
+        None => return,
     };
-    if udp.get_destination() != config.local_port
-        || !config
-            .destinations
-            .borrow_mut()
-            .accepts(pkt.dst_addr, Instant::now())
-    {
+    if !addressed_to_reflector(config, udp.get_destination(), pkt.dst_addr) {
         return;
     }
     pkt.src =
@@ -553,10 +555,69 @@ fn handle_ip_packet(
     handle_stamp_packet(udp.payload(), &pkt, config, transmitter);
 }
 
+/// Whether a datagram to `port` at `dst` is for this reflector: its UDP port
+/// and a local destination, as a UDP socket would accept.
+fn addressed_to_reflector(config: &CaptureConfig, port: u16, dst: IpAddr) -> bool {
+    port == config.local_port
+        && config
+            .destinations
+            .borrow_mut()
+            .accepts(dst, Instant::now())
+}
+
+/// Count a fragmented request as dropped. Capture sees each IP fragment
+/// separately and does not reassemble them, so the datagram cannot be
+/// answered. It is counted once, on its first fragment, the only one that
+/// carries the UDP header.
+fn record_fragment_drop(config: &CaptureConfig, src: IpAddr) {
+    let counters = &config.core.counters;
+    counters.record_received();
+    counters.record_drop("fragmented");
+    crate::warn_throttled!(
+        "Dropped a fragmented request from {src}: the pnet backend does not reassemble IP fragments. Lower the probe size to fit the path MTU."
+    );
+}
+
+/// What the capture parser found in one IP packet.
+enum Captured<'a> {
+    /// A complete UDP datagram with valid framing and checksum.
+    Udp(UdpPacket<'a>, PacketMeta),
+    /// The first fragment (offset 0, More Fragments set) of a UDP datagram.
+    /// Its UDP checksum covers the whole datagram and is not checked.
+    FirstFragment {
+        src: IpAddr,
+        dst: IpAddr,
+        dst_port: u16,
+    },
+}
+
+/// The destination port of a first fragment whose upper-layer protocol is
+/// UDP. Later fragments carry no UDP header and give `None`, as does a
+/// first fragment too short to hold the destination port.
+fn first_udp_fragment<'a>(
+    first: bool,
+    proto: u8,
+    upper: &[u8],
+    src: IpAddr,
+    dst: IpAddr,
+) -> Option<Captured<'a>> {
+    if !first || proto != IpNextHeaderProtocols::Udp.0 {
+        return None;
+    }
+    let port = upper.get(2..4)?;
+    Some(Captured::FirstFragment {
+        src,
+        dst,
+        dst_port: u16::from_be_bytes([port[0], port[1]]),
+    })
+}
+
 /// Validate IP framing and the innermost UDP checksum before STAMP admission.
 /// Capture sockets bypass kernel UDP validation. Zero checksums are deliberately
 /// unsupported in both families; no checksum-offload bypass is inferred here.
-fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, PacketMeta)> {
+/// Fragments are never answered; a first UDP fragment is reported so the
+/// caller can count it.
+fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<Captured<'_>> {
     let mut captured = super::CapturedHeaders {
         fixed_headers: Vec::new(),
         ipv6_ext_headers: Vec::new(),
@@ -565,19 +626,27 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
         let (src, dst, ttl, tos, proto, offset, end) = if version == 4 {
             let ip = Ipv4Packet::new(bytes)?;
             // IHL counts 32-bit words; 20 bytes is the minimum IPv4 header.
-            // Fragments are rejected: a nonzero offset or the More Fragments
-            // bit (bit 0 of pnet's 3-bit flags field).
             let ihl = usize::from(ip.get_header_length()) * 4;
             let end = usize::from(ip.get_total_length());
             if ip.get_version() != 4
                 || ihl < IPV4_FIXED_HEADER_SIZE
                 || end < ihl
                 || end > bytes.len()
-                || ip.get_fragment_offset() != 0
-                || ip.get_flags() & 1 != 0
                 || pnet::packet::ipv4::checksum(&ip) != ip.get_checksum()
             {
                 return None;
+            }
+            // A fragment has a nonzero offset or the More Fragments bit
+            // (bit 0 of pnet's 3-bit flags field).
+            let fragment_offset = ip.get_fragment_offset();
+            if fragment_offset != 0 || ip.get_flags() & 1 != 0 {
+                return first_udp_fragment(
+                    fragment_offset == 0,
+                    ip.get_next_level_protocol().0,
+                    &bytes[ihl..end],
+                    IpAddr::V4(ip.get_source()),
+                    IpAddr::V4(ip.get_destination()),
+                );
             }
             captured.fixed_headers.push(bytes[..ihl].to_vec());
             (
@@ -604,6 +673,22 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
             let (ext, next, offset) = extract_ipv6_ext_headers(&ip);
             if offset > end {
                 return None;
+            }
+            // The walk passes atomic fragments, so a Fragment header here
+            // belongs to a real fragment (or is truncated).
+            if next.0 == FRAGMENT {
+                let fragment = bytes.get(offset..end).filter(|f| f.len() >= 8)?;
+                // Fragment Offset is the high 13 bits of octets 2..4.
+                let first = fragment[2] == 0 && fragment[3] & 0xf8 == 0;
+                // Headers may precede UDP in the fragmentable part.
+                let (_, proto, walked) = walk_ipv6_ext_header_chain(&fragment[8..], fragment[0]);
+                return first_udp_fragment(
+                    first,
+                    proto,
+                    &fragment[8 + walked..],
+                    IpAddr::V6(ip.get_source()),
+                    IpAddr::V6(ip.get_destination()),
+                );
             }
             captured.ipv6_ext_headers.extend_from_slice(&ext);
             (
@@ -653,7 +738,7 @@ fn checked_udp(mut bytes: &[u8], mut version: u8) -> Option<(UdpPacket<'_>, Pack
                 captured,
                 src_mac: None,
             };
-            return Some((udp, pkt));
+            return Some(Captured::Udp(udp, pkt));
         }
         version = match proto {
             PROTO_IPV4_IN_IP => 4,
@@ -1660,7 +1745,7 @@ mod revision13_tests {
             let version = if v6 { 6 } else { 4 };
             let offset = if v6 { 40 } else { 20 };
             let bytes = packet(v6);
-            let (_, meta) = checked_udp(&bytes, version).unwrap();
+            let meta = udp_meta(checked_udp(&bytes, version));
             assert_eq!(meta.ttl, 254); // Lower received hop counts are admitted.
             for index in [offset + 6, offset + 8, if v6 { 23 } else { 12 }] {
                 let mut corrupt = bytes.clone();
@@ -1671,18 +1756,138 @@ mod revision13_tests {
             zero[offset + 6..offset + 8].fill(0);
             assert!(checked_udp(&zero, version).is_none());
             assert!(checked_udp(&bytes[..bytes.len() - 1], version).is_none());
-            let mut fragment = bytes.clone();
-            if v6 {
-                fragment[6] = 44;
-                fragment[5] += 8;
-                fragment.splice(40..40, [17, 0, 0, 1, 0, 0, 0, 1]);
+            // A fragment is never answered, even when it holds the whole
+            // datagram; only its UDP destination is reported.
+            let first = fragment(v6, 0, true, 17, 862, 2);
+            assert!(matches!(
+                checked_udp(&first, version),
+                Some(Captured::FirstFragment { dst_port: 862, .. })
+            ));
+        }
+    }
+
+    /// `packet(v6)` as a fragment: Fragment Offset in 8-octet units, the More
+    /// Fragments flag, the upper-layer protocol, the UDP destination port and
+    /// the destination's last octet. IPv6 gets a Fragment header.
+    fn fragment(v6: bool, offset: u16, more: bool, proto: u8, port: u16, last: u8) -> Vec<u8> {
+        let mut ip = packet(v6);
+        if v6 {
+            ip[6] = FRAGMENT;
+            ip[5] += 8;
+            ip[39] = last;
+            let field = (offset << 3) | u16::from(more);
+            let [high, low] = field.to_be_bytes();
+            ip.splice(40..40, [proto, 0, high, low, 0, 0, 0, 1]);
+            ip[50..52].copy_from_slice(&port.to_be_bytes());
+        } else {
+            let field = (u16::from(more) << 13) | offset;
+            ip[6..8].copy_from_slice(&field.to_be_bytes());
+            ip[9] = proto;
+            ip[19] = last;
+            ip[22..24].copy_from_slice(&port.to_be_bytes());
+            ip[10..12].fill(0);
+            let sum = checksum(&ip[..20]);
+            ip[10..12].copy_from_slice(&sum.to_be_bytes());
+        }
+        ip
+    }
+
+    fn udp_meta(captured: Option<Captured<'_>>) -> PacketMeta {
+        match captured {
+            Some(Captured::Udp(_, meta)) => meta,
+            Some(Captured::FirstFragment { .. }) => panic!("unexpected fragment"),
+            None => panic!("rejected"),
+        }
+    }
+
+    #[test]
+    fn capture_reports_only_first_udp_fragments() {
+        for v6 in [false, true] {
+            let version = if v6 { 6 } else { 4 };
+            let (src, dst): (IpAddr, IpAddr) = if v6 {
+                ("::1".parse().unwrap(), "::2".parse().unwrap())
             } else {
-                fragment[6] = 0x20;
-                fragment[10..12].fill(0);
-                let sum = checksum(&fragment[..20]);
-                fragment[10..12].copy_from_slice(&sum.to_be_bytes());
+                ("127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap())
+            };
+            let first = fragment(v6, 0, true, 17, 862, 2);
+            match checked_udp(&first, version) {
+                Some(Captured::FirstFragment {
+                    src: s,
+                    dst: d,
+                    dst_port,
+                }) => {
+                    assert_eq!((s, d, dst_port), (src, dst, 862), "v6={v6}");
+                }
+                _ => panic!("first fragment not reported, v6={v6}"),
             }
-            assert!(checked_udp(&fragment, version).is_none());
+            // Middle and last fragments carry no UDP header.
+            for more in [true, false] {
+                let later = fragment(v6, 185, more, 17, 862, 2);
+                assert!(checked_udp(&later, version).is_none(), "v6={v6}");
+            }
+            // Other upper-layer protocols are not counted.
+            let tcp = fragment(v6, 0, true, 6, 862, 2);
+            assert!(checked_udp(&tcp, version).is_none(), "v6={v6}");
+            if v6 {
+                // Destination Options before UDP in the fragmentable part.
+                let mut options = fragment(true, 0, true, DESTINATION_OPTS, 0, 2);
+                options[5] += 8;
+                options.splice(48..48, [17, 0, 1, 4, 0, 0, 0, 0]);
+                options[58..60].copy_from_slice(&862u16.to_be_bytes());
+                assert!(matches!(
+                    checked_udp(&options, 6),
+                    Some(Captured::FirstFragment { dst_port: 862, .. })
+                ));
+                // A truncated Fragment header is rejected.
+                let mut short = packet(true)[..40].to_vec();
+                short[4..6].copy_from_slice(&4u16.to_be_bytes());
+                short[6] = FRAGMENT;
+                short.extend([17, 0, 0, 1]);
+                assert!(checked_udp(&short, 6).is_none());
+            } else {
+                // The IPv4 header checksum is still checked.
+                let mut corrupt = first.clone();
+                corrupt[10] ^= 1;
+                assert!(checked_udp(&corrupt, 4).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn fragmented_requests_are_counted_once_and_only_for_this_reflector() {
+        for v6 in [false, true] {
+            let conf = Configuration::parse_from([
+                "stamp-suite",
+                "--is-reflector",
+                "--local-addr",
+                if v6 { "::2" } else { "127.0.0.2" },
+            ]);
+            let (config, shared) = capture_config(&conf, Vec::new);
+            let (send, receive) = std::sync::mpsc::sync_channel(8);
+            let deliver = |ip: Vec<u8>| {
+                let mut frame = vec![0; 6];
+                frame.extend([2, 0, 0, 0, 0, 1]);
+                frame.extend(if v6 { [0x86, 0xdd] } else { [0x08, 0x00] });
+                frame.extend(ip);
+                handle_packet(&EthernetPacket::new(&frame).unwrap(), &config, &send);
+            };
+            // One datagram: its first fragment is counted, the rest are not.
+            deliver(fragment(v6, 0, true, 17, 862, 2));
+            deliver(fragment(v6, 185, true, 17, 862, 2));
+            deliver(fragment(v6, 370, false, 17, 862, 2));
+            // Another port, another host, another protocol.
+            deliver(fragment(v6, 0, true, 17, 863, 2));
+            deliver(fragment(v6, 0, true, 17, 862, 3));
+            deliver(fragment(v6, 0, true, 6, 862, 2));
+            assert!(receive.try_recv().is_err(), "a fragment was queued");
+            let counters = &shared.counters;
+            assert_eq!(counters.packets_received.load(AtomicOrdering::Relaxed), 1);
+            assert_eq!(counters.packets_dropped.load(AtomicOrdering::Relaxed), 1);
+            assert_eq!(counters.packets_reflected.load(AtomicOrdering::Relaxed), 0);
+            // A whole datagram is still answered.
+            let whole = location_frame(v6, [2, 0, 0, 0, 0, 1], 2);
+            handle_packet(&EthernetPacket::new(&whole).unwrap(), &config, &send);
+            assert!(receive.try_recv().is_ok(), "v6={v6}");
         }
     }
     #[test]
@@ -1696,7 +1901,7 @@ mod revision13_tests {
         let sum = checksum(&outer);
         outer[10..12].copy_from_slice(&sum.to_be_bytes());
         outer.extend(inner);
-        let (_, meta) = checked_udp(&outer, 4).unwrap();
+        let meta = udp_meta(checked_udp(&outer, 4));
         assert_eq!(meta.src.ip(), "::1".parse::<IpAddr>().unwrap());
         assert_eq!(meta.dst_addr, "::2".parse::<IpAddr>().unwrap());
         assert_eq!(meta.captured.fixed_headers.len(), 2);

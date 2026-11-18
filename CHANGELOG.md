@@ -96,6 +96,9 @@ Upgrade both peers together when they use BER or reflected headers.
   - `--allowed-dscp none` (or an empty `--allowed-dscp-for` rule) answers CoS
     requests on DSCP 0 with RPD=01 and C, as RFC 8972 §4.4 and
     draft-ietf-bpm-stamp-cos-ecn-00 §3.2 require. It sent no reply at all.
+  - A pnet reflector counts a fragmented request as dropped (`fragmented`)
+    and logs a throttled warning suggesting a smaller probe. It cannot
+    reassemble IP fragments and dropped them without counting or logging.
   - Trimming reflected-header TLVs (Types 246/247) to the reply size limit
     takes linear time. It removed and re-measured one TLV at a time, so a
     datagram with 4000 such TLVs took about 100 ms to answer.

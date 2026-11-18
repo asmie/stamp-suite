@@ -1063,6 +1063,13 @@ Their TTL and DSCP/ECN are read as for an IPv4 bind. A datagram that arrives
 without TTL metadata is counted as dropped (`processing_rejected`) rather than
 skipped silently.
 
+The pnet backend does not reassemble IP fragments, so a request larger than
+the path MTU, which the sending kernel fragments, gets no reply. It is counted
+as received and dropped (`fragmented`) once, on its first fragment, which is
+the only one that carries the UDP port, and a throttled warning names the
+sender. Keep probes within the path MTU, or use the nix backend, which gets
+reassembled datagrams from the kernel.
+
 Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-26
 requires. `--ttl` accepts only 255. Received packets with a lower hop count are
 accepted.
@@ -1247,7 +1254,9 @@ consecutive failures. Any successful send resets that retry budget.
 
 Prometheus counts each successful reply copy at transmission. Drop reasons
 are `rate_limited`, `queue_full`, `processing_rejected`, `session_expired`,
-`suppressed`, `cos_policy`, `mtu_exceeded`, `send_failed` and `cancelled`.
+`suppressed`, `cos_policy`, `mtu_exceeded`, `send_failed`, `cancelled` and
+`fragmented`. `fragmented` is a request the pnet backend received as IP
+fragments, which it does not reassemble.
 `cos_policy` is a reply whose restricted DSCP policy cannot be enforced at send time,
 `mtu_exceeded` one whose mandatory fields do not fit the route MTU, and
 `send_failed` a socket error. Processing rejection includes

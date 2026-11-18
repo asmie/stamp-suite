@@ -119,6 +119,7 @@ transmission code (see [Reflector packet path](#reflector-packet-path)).
 | Default platform | Linux, macOS | Windows |
 | Input | UDP socket and `recvmsg` ancillary data | Datalink frames parsed as Ethernet/IP/UDP |
 | Filtering and checksums | Kernel UDP stack | The capture parser validates framing and checksums |
+| IP fragments | Reassembled by the kernel | Not reassembled. A first UDP fragment to the reflector counts as a `fragmented` drop; later fragments are ignored |
 | Metadata | TTL/Hop Limit, DSCP/ECN, destination address and interface | Raw IP headers, source MAC and the same metadata |
 | Header reflection | Linux: Type 246 from ancillary data, C on Type 247. macOS: C on both. | Types 246 and 247 |
 | Requirements | Ordinary UDP socket permissions | Linux `CAP_NET_RAW`; Windows Npcap |
