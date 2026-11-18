@@ -448,7 +448,12 @@ loop.
 
 An acknowledgement must contain exactly one usable Access Report with the
 original Access ID and Return Code. Wrong values or duplicate reports leave the
-retry timer running. Reserved bits and bytes are ignored. Such replies can
+retry timer running. Reserved bits and bytes are ignored. An echo with the U
+flag set is not an acknowledgement either: it means the reflector did not
+process the report. RFC 8972 §4.6 disarms the timer on a reply that "includes
+the Access Report TLV", but §4 says to skip TLVs with U set, and the sender
+follows §4. Against a reflector without Access Report support, the sender
+therefore retransmits until the retry budget runs out. Such replies can
 still give valid RTT and loss measurements from the base packet.
 
 The CoS support follows draft-ietf-bpm-stamp-cos-ecn-00: the EC1/RPE extension
@@ -760,7 +765,9 @@ A Reflected Test Packet Control TLV (Type 12,
 [RFC 10052 §3](https://www.rfc-editor.org/rfc/rfc10052.html#section-3)) asks
 the reflector for several reply copies. Type-12 reflection is off by default:
 `--reflected-control-max-count 0` treats the TLV as unsupported and answers
-with one U-flagged reply. Set a positive cap (for example 16) to turn it on,
+with one U-flagged reply. The Address Group filters below are still checked
+first, so a request whose filter does not match is dropped without a reply,
+even with Type 12 disabled. Set a positive cap (for example 16) to turn it on,
 and pair it with `--max-pps` to limit amplification. Requests above
 `--reflected-control-max-count`, `--reflected-control-max-rate`,
 `--reflected-control-max-volume` or below `--reflected-control-min-interval-ns`
@@ -769,7 +776,9 @@ get one reply with the C flag set.
 Fractional rate excess also gets C: a 500-byte reply every 99,999,999 ns exceeds
 a 5,000 B/s ceiling. A rate or volume exactly equal to its ceiling is admitted.
 Each well-formed Address Group filter must match a local address; any mismatch
-suppresses the reply even if a later filter matches.
+suppresses the reply even if a later filter matches. Local MAC addresses are
+six bytes, so an L2 group with a two- or eight-byte mask (Sub-TLV Length 4 or
+16) never matches and always drops the request.
 
 To protect Type 12 with authentication, configure a key source,
 `--auth-mode A` and `--verify-tlv-hmac` on the reflector before you enable it.
@@ -906,7 +915,10 @@ mode and key. With a key configured, the sender also adds an HMAC TLV that
 protects its TLVs (RFC 8972 §4.8; see `--tlv-hmac`), and a reflector checks it
 with `--verify-tlv-hmac`. A keyed reflector signs an open-mode reply only when
 the request carried an HMAC TLV, unless it runs with `--tlv-hmac on`, so
-replies to unsigned and TWAMP Light probes keep the request's size. In open mode this TLV HMAC does not authenticate the
+replies to unsigned and TWAMP Light probes keep the request's size. With
+`--tlv-hmac on`, a reply to an unsigned request that carries TLVs is 20 bytes
+larger than the request, and a sender without the key cannot verify it and
+ignores the values in the reply's TLVs. In open mode this TLV HMAC does not authenticate the
 base packet and does not give authenticated-mode admission.
 
 ```bash
@@ -1196,13 +1208,22 @@ Every build accepts these flags and TOML keys. Requesting an unbuilt service
 fails startup and names the option. For metrics and MIB contents, see
 [architecture](architecture.md).
 
+A Prometheus series appears only after its first event, and each labeled
+series (one drop reason, one conformance reason) after its own first event. A
+scrape before any traffic can return an empty page. This includes the BER and
+TLV conformance counters, which `/v1/status` always lists with zeros. Treat a
+missing series as zero, not as an error, in alerts and dashboards.
+
 ### Failure semantics
 
 A requested metrics or control endpoint that cannot bind stops startup, and the
 error names the service, the address and the OS error. A failed initial AgentX
-connection logs a warning and STAMP keeps running. If an established AgentX
-connection drops, the sub-agent reconnects. Systemd ordering can start `snmpd`
-first, but it does not check that AgentX is ready.
+connection logs a warning and STAMP keeps running without SNMP: the sub-agent
+does not retry, and the MIB subtree stays unregistered until stamp-suite
+restarts. Only an established AgentX connection that drops is reconnected,
+with backoff from 1 to 30 s. Start `snmpd` with AgentX enabled before
+stamp-suite, or restart stamp-suite once it is up. Systemd ordering can start
+`snmpd` first, but it does not check that AgentX is ready.
 
 SNMP stops on role shutdown and when its owner exits, including a finite
 sender run or failed startup. A silent initial or reconnect handshake is

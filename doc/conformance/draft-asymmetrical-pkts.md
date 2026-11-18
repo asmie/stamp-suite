@@ -89,7 +89,8 @@ in this order, after identity, TLV integrity and Address Group checks:
 2. Replayed, reordered or out-of-window sequence number: U on Type 12, one
    reply, request fields ignored (asym-5-08).
 3. Type 12 disabled (`--reflected-control-max-count 0`): U on Type 12, one
-   normal reply, as a reflector without Type 12 support (RFC 8972 §4).
+   normal reply, as a reflector without Type 12 support (RFC 8972 §4). A
+   group mismatch has already dropped the packet, so it gets no U reply.
 4. Count zero: no reply; the request is discarded (asym-3-15, asym-3-16).
 5. A count, interval, rate or volume limit exceeded: one padded reply with C
    set (asym-3-13).

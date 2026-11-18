@@ -145,8 +145,9 @@ always present, even when they are zero. See
 limits, header reflection, nested control children, CoS marking that the
 backend cannot apply, the third-DSCP fallback, and C flags preserved from the
 peer. A reason counts at most once per datagram, and only when the datagram is
-sent. All 20 keys are always present, even when they are zero. The Type 12
-reasons are:
+sent. All 20 keys are always present, even when they are zero. Prometheus
+exports each reason only after its first count, so a reason listed here as 0
+can be missing from `/metrics`. The Type 12 reasons are:
 
 | Reason | Meaning |
 | --- | --- |
@@ -418,7 +419,8 @@ how queued replies are finished or cancelled, and which options control that.
   access, use TLS or an SSH tunnel. A loopback listener does not authenticate
   local users and does not rate-limit calls.
 - Token files go through the same
-  [permission checks](security.md#file-permissions) as key files.
+  [permission checks](security.md#file-permissions) as key files. The TLS
+  private key file is not checked, so restrict it to its owner yourself.
 
 There is no separate audit log. Each key, limit, drain and shutdown call logs
 one `info` line. Session expiry is not logged.

@@ -36,7 +36,9 @@ The defaults keep extra amplification low:
   not support get the U flag.
 - `--reflected-control-max-count` defaults to 0, which disables Type 12. A
   Type 12 request then gets one normal reply with the U flag, without the
-  requested padding or extra copies. If you enable Type 12,
+  requested padding or extra copies. Address Group filters are still checked
+  first: a request whose L2 or L3 group does not match a local address is
+  dropped with no reply. If you enable Type 12,
   `--reflected-control-max-rate` and `--reflected-control-max-volume` cap the
   bytes a single request can generate.
 
@@ -171,6 +173,10 @@ On Unix, stamp-suite checks permissions when it opens these files:
 | TOML configuration | Warns if group or other can write it (`0o022`). |
 | HMAC key file or control token file | Rejects any group or other permission (`0o077`). |
 | Key directory | Rejects group or other write permission. |
+| Control TLS private key (`--control-tls-key`) and certificate | Not checked; a 0644 key is accepted. |
+
+Give the TLS private key owner-only permissions yourself (for example 0400,
+owned by the service account), because stamp-suite does not enforce them.
 
 Key and token files are checked through the file descriptor that is then read,
 so nobody can swap the file between the check and the read. Symlinks are

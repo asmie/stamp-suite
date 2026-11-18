@@ -95,7 +95,9 @@ network-loss estimate.** Extra replies to one probe cannot make up for
 another probe's missing ones. With bursts, the final receive phase keeps
 running after the first reply until every requested copy has arrived or the
 final `--timeout` expires. An Access Report acknowledgement confirms that the
-report was delivered, not that the reply burst it asked for is complete. Once
+report was delivered, not that the reply burst it asked for is complete. An
+echo with the U flag set is not an acknowledgement, so a reflector that does
+not process the report receives every retry. Once
 delivery is acknowledged or abandoned, replies to the remaining retries are
 collected for up to `--timeout` after the last successful retry. An
 acknowledgement, or running out of retries, does not restart that window. The

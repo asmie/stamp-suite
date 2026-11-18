@@ -595,7 +595,8 @@ software T2 and the current T3 use the system source. See
 
 Valid IDs 1 (3GPP) and 2 (Non-3GPP) are echoed; other IDs get U set. The
 sender retransmits until a usable echo arrives or the retry budget runs out,
-including after its main send loop ends.
+including after its main send loop ends. A U-flagged echo is skipped
+(RFC 8972 §4) and does not count as an acknowledgement.
 
 ### Destination Node Address TLV (RFC 9503 §3)
 
@@ -653,7 +654,10 @@ unsupported and sends one reply with U set. When enabled, a request that
 exceeds the count, interval, byte rate (`--reflected-control-max-rate`) or byte
 volume (`--reflected-control-max-volume`) limit gets one C-flagged reply rather
 than a reduced burst. L2 and L3 Address Groups each require a local match;
-either mismatch drops the packet. Malformed groups are skipped.
+either mismatch drops the packet, also when Type 12 is disabled, because the
+group checks run before the disabled check. Malformed groups are skipped. An L2
+group with two- or eight-byte halves is well formed but never matches an
+EUI-48 address.
 
 Enabled bursts use deadline queues. Each request takes one budget slot and
 gets a fixed transport plan, so a fallback on one copy cannot change the
@@ -807,7 +811,8 @@ bind `127.0.0.1:9090`). The Prometheus exporter is built without its own HTTP
 listener: `metrics/mod.rs` installs the recorder and serves `/metrics` from an
 axum server. A bind failure stops startup. A non-loopback bind logs a warning
 because the endpoint has no authentication. Series are defined in
-`src/metrics/`. See [Observability](usage.md#observability).
+`src/metrics/` and are not registered in advance, so each one appears only
+after its first event. See [Observability](usage.md#observability).
 
 ## SNMP AgentX sub-agent
 
@@ -847,8 +852,9 @@ The sub-agent is read-only and implements the sub-agent side of
 `PduReader` keeps partial frames across 200 ms read timeouts and checks
 lengths before it allocates or indexes. EOF ends the connection. If the first
 connection attempt fails, the sub-agent logs a warning and STAMP keeps
-running. Later failures trigger reconnection and re-registration with
-exponential backoff from 1 to 30 s. A supervisor logs panics in the event
+running without SNMP; it never retries that first connection. Later failures
+trigger reconnection and re-registration with exponential backoff from 1 to
+30 s. A supervisor logs panics in the event
 loop.
 
 The Open and Register handshakes check the eight-byte Response prefix, the
