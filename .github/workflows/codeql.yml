@@ -1,0 +1,40 @@
+name: CodeQL
+
+# Replaces GitHub's default CodeQL setup so test code can be excluded
+# (.github/codeql/codeql-config.yml). Disable default setup in the repository's
+# code security settings when this workflow is enabled; both cannot upload.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '41 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # The languages default setup analyzed; none needs a build.
+        language: [actions, python, rust]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: github/codeql-action/init@v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+      - uses: github/codeql-action/analyze@v4.39.3
+        with:
+          # Same category as default setup, so existing alerts carry over.
+          category: /language:${{ matrix.language }}

@@ -164,7 +164,9 @@ impl SessionManager {
         // An empty manager has upper == after == 0; BTreeMap accepts that
         // empty (Excluded, Included) range.
         let mut range = index.entries.range((Excluded(after), Included(upper)));
-        let mut items = Vec::with_capacity(limit);
+        // `limit` is at most MAX_SESSION_PAGE_SIZE (checked above); a page never
+        // holds more rows than the index has.
+        let mut items = Vec::with_capacity(limit.min(index.entries.len()));
         let mut last = after;
         for (id, key) in range.by_ref().take(limit) {
             let entry = sessions.get(key).expect("inventory entry in session table");

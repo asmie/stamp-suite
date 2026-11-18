@@ -1,0 +1,10 @@
+# CodeQL advanced setup (.github/workflows/codeql.yml). Test code uses fixed
+# keys and fixture values on purpose, and nothing under these paths ships.
+name: stamp-suite CodeQL config
+paths-ignore:
+  - tests/**
+  - benches/**
+  - fuzz/**
+  - src/**/tests.rs
+  - src/**/*_tests.rs
+  - src/**/tests/**
