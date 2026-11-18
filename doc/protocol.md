@@ -1,8 +1,8 @@
 # STAMP protocol overview
 
-A short introduction to STAMP and how stamp-suite uses it. For the exact
-requirements and what stamp-suite covers, see the RFCs and the
-[conformance matrices](conformance/README.md).
+An introduction to STAMP and how stamp-suite uses it. The RFCs and the
+[conformance matrices](conformance/README.md) have the exact requirements and
+what stamp-suite covers.
 
 ## What STAMP measures
 
@@ -23,8 +23,8 @@ stamp-suite --remote-addr 192.0.2.20 --count 10 --send-delay 100
 ```
 
 A **STAMP session** is the stream of test packets between one sender and one
-reflector. STAMP has no protocol for setting up or tearing down sessions. You
-configure both ends some other way, such as command-line options or a
+reflector. STAMP has no protocol for setting up or tearing down sessions; both
+ends are configured out of band, for example with command-line options or a
 configuration file.
 
 ## Test packets and timestamps

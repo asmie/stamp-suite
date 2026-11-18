@@ -1,8 +1,7 @@
 # Security
 
-How to run stamp-suite safely: what it trusts, how HMAC keys are loaded and
-rotated, which file permissions it checks, and how the packaged service is
-locked down.
+What stamp-suite trusts, how it loads and rotates HMAC keys, which file
+permissions it checks, and how the packaged service is restricted.
 
 ## Threat model
 
@@ -28,7 +27,7 @@ that controls amplification. An open reflector that verifies optional HMACs
 still accepts a request with no HMAC TLV at all. The conformance matrix's
 protected-profile claim does not cover that setup.
 
-The defaults keep extra amplification low:
+The defaults limit amplification:
 
 - `--return-path-allow-alternate` is off. Return Address requests get the U
   flag, and replies go to the packet's source address.
@@ -44,7 +43,7 @@ The defaults keep extra amplification low:
   `--reflected-control-max-duration-ms` (default 1000) caps how long its burst
   can hold a reply queue slot.
 
-Only enable these features inside a measurement domain you control.
+Enable these features only inside a measurement domain you control.
 Authenticated mode rejects a packet with an invalid base HMAC before it
 touches session state or builds a reply. In open mode, a valid TLV HMAC does
 not authenticate the base packet.
@@ -76,8 +75,8 @@ this.
 Replay detection keeps a window of 31 sequence numbers per session. A Type 12
 request with a sequence number the session has already seen gets one reply
 with the U flag. With `--drop-replayed`, ordinary duplicates are dropped too.
-Keep in mind that reordering and sender restarts also produce sequence
-numbers that are not new. See [Reflector](usage.md#reflector).
+Reordering and sender restarts also produce sequence numbers that are not
+new. See [Reflector](usage.md#reflector).
 
 ## HMAC authentication
 
@@ -86,7 +85,7 @@ Both mechanisms use HMAC-SHA-256 truncated to 16 bytes:
 | Mechanism | Coverage and behavior |
 | --- | --- |
 | Base authentication (`--auth-mode A`) | Covers the fixed packet fields (RFC 8762 §4.4). Without a key the process does not start. Packets with an invalid HMAC are dropped. |
-| TLV HMAC (RFC 8972 §4.8, Type 8) | Covers the sequence number and every TLV before the HMAC TLV. Only Extra Padding may come after it, and that padding is not covered. The reflector checks it only with `--verify-tlv-hmac`. If the check fails, the reply has the I flag set. |
+| TLV HMAC (RFC 8972 §4.8, Type 8) | Covers the sequence number and every TLV before the HMAC TLV. Only Extra Padding may come after it, and that padding is not covered. When a signed reply echoes a request's trailing zero padding (TWAMP Light style), the reflector frames it as an Extra Padding TLV after the HMAC TLV; a tail shorter than the 4-byte TLV header is dropped. The reflector checks the HMAC only with `--verify-tlv-hmac`. If the check fails, the reply has the I flag set. |
 
 On the sender, `--tlv-hmac auto` (the default) adds an HMAC TLV whenever a key
 is configured. `on` fails without a key. `off` stops the sender from adding
@@ -162,8 +161,8 @@ extension is ignored), and `default.key` holds the fallback key:
 
 A packet is checked with the key for its SSID, or with the default key if its
 SSID has none. In authenticated mode, a packet whose SSID has no key and no
-default to fall back on is dropped. This means that deleting a per-SSID key
-does not lock that SSID out while a default key exists.
+default to fall back on is dropped. Deleting a per-SSID key therefore does not
+lock that SSID out while a default key exists.
 
 Invalid key files, and files with names that do not fit the scheme, are
 logged and skipped. If no usable key is left in the directory, startup fails.
@@ -175,7 +174,7 @@ On Unix, stamp-suite checks permissions when it opens these files:
 | File | Check |
 | --- | --- |
 | TOML configuration | Warns if group or other can write it (`0o022`). |
-| HMAC key file or control token file | Rejects any group or other permission (`0o077`). |
+| HMAC key file or control token file | Rejects any group or other permission (`0o077`). An empty or whitespace-only token file also stops startup. |
 | Key directory | Rejects group or other write permission. |
 | Control TLS private key (`--control-tls-key`) and certificate | Not checked; a 0644 key is accepted. |
 
@@ -201,9 +200,9 @@ configuration file can be 0640 because only write access is checked for it.
 
 ### Rotation
 
-You can change a reflector's keys without restarting it, in two ways:
+Two mechanisms change a reflector's keys without a restart:
 
-- **SIGHUP** (Unix, reflector only) rereads the key file or key directory and
+- SIGHUP (Unix, reflector only) rereads the key file or key directory and
   replaces the whole keyset, including any keys added through the control
   API. If the reload fails, the reflector logs a warning and keeps the keys
   it had. A reload fails when the key file is unreadable, invalid or has
@@ -217,7 +216,7 @@ You can change a reflector's keys without restarting it, in two ways:
   sudo systemctl kill --signal=HUP stamp-suite
   ```
 
-- **The control API** (`control` feature) adds, replaces and removes keys
+- The control API (`control` feature) adds, replaces and removes keys
   with `PUT` and `DELETE` on `/v1/keys/{ssid}` and `/v1/keys/default`. These
   changes last until the process exits or the next SIGHUP, so put keys you
   want to keep in the key file or directory. See
@@ -255,8 +254,8 @@ ambient capability and as the entire bounding set. It also sets:
 | `RestrictNamespaces`, `RestrictRealtime`, `LockPersonality`, `MemoryDenyWriteExecute` | The service cannot create namespaces, use realtime scheduling, change its personality or map memory that is both writable and executable. |
 | `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK` | Netlink is allowed because Linux uses it to look up route MTUs and list interface addresses. |
 
-Reading files is still governed by normal Unix ownership and permissions.
-Some options need more than the unit allows:
+Normal Unix ownership and permissions still decide which files the service can
+read. Some options need more than the unit allows:
 
 - The pnet backend needs `CAP_NET_RAW` and the `AF_PACKET` address family.
 - `--hwtstamp on` needs `CAP_NET_ADMIN` to configure NIC timestamping.
@@ -304,11 +303,11 @@ To change the key later, see [Rotation](#rotation).
 
 On Linux, binding to a port below `net.ipv4.ip_unprivileged_port_start` (1024
 by default) needs `CAP_NET_BIND_SERVICE`. The reflector listens on port 862 by
-default; pick a port of 1024 or higher and you do not need the capability.
+default; a port of 1024 or higher does not need the capability.
 The nix backend needs no raw-socket capability, while the pnet backend needs
 `CAP_NET_RAW`. `--hwtstamp on` needs `CAP_NET_ADMIN` and a NIC that supports
-it. Whatever you need, the service manager or container runtime has to allow
-it as well.
+it. The service manager or container runtime must also grant whatever the
+configuration needs.
 
 ## Reporting vulnerabilities
 

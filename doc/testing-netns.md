@@ -1,8 +1,5 @@
 # Privileged network-namespace conformance tests
 
-How to run the Linux network-namespace tests and check what they captured on
-the wire.
-
 `tests/netns_conformance.rs` starts real reflectors and senders in Linux
 network namespaces joined by veth links, and records the traffic with tcpdump.
 It covers CoS marking, TTL/Hop Limit, SRv6, header reflection, Address Groups,
@@ -14,10 +11,10 @@ are listed in [tests/README.md](../tests/README.md#tests-that-need-privileges-or
 ## Running
 
 Set `STAMP_REQUIRE_PRIVILEGED=1` whenever the results count as conformance or
-CI evidence. With it set, every place where the harness would skip fails
-instead: a missing tool, SRv6 not available, a capture timeout, a missing pnet
-binary. Without it the scenarios are optional local probes, and a printed
-`SKIP` followed by Cargo's `ok` does not mean the scenario ran.
+CI evidence. With it set, every condition that would make the harness skip
+fails the test instead: a missing tool, no SRv6 support, a capture timeout or a
+missing pnet binary. Without it the scenarios are optional local probes, and a
+printed `SKIP` followed by Cargo's `ok` does not mean the scenario ran.
 
 Build as a normal user, then run the selected test executable with namespace
 privileges. Build the pnet reflector first (see
@@ -37,9 +34,10 @@ the wrong features from passing with an empty suite. Effective root can be
 real host root, or a mapped root that has the capabilities the namespace
 operations need.
 
-The `privileged` job in `.github/workflows/conformance.yml` runs this tier, the
-three raw pnet tests and the two route MTU tests this way, inside private mount
-and network namespaces.
+The `privileged` job in `.github/workflows/conformance.yml` runs this tier
+through the same script inside private mount and network namespaces. The same
+job runs the other privileged suites from `tests/README.md`, including the two
+route MTU tests and the ECN rewrite test described below.
 
 ### Running without sudo (user namespaces)
 
@@ -113,8 +111,8 @@ cargo build --locked --no-default-features --features ttl-pnet --target-dir targ
 export STAMP_NETNS_PNET_BIN="$PWD/target/pnet/debug/stamp-suite"
 ```
 
-Keep this binary in its own target directory (or copy it somewhere) so that a
-later nix build does not overwrite it. Without `STAMP_NETNS_PNET_BIN`, 4b fails
+Keep this binary in its own target directory (or copy it elsewhere) so a later
+nix build does not overwrite it. Without `STAMP_NETNS_PNET_BIN`, 4b fails
 in required mode and skips otherwise. The scenario injects the Destination
 Options header through a sticky `IPV6_DSTOPTS` socket option. If the kernel or
 the namespace refuses the option, the scenario fails in required mode and skips
@@ -126,25 +124,25 @@ not touched.
 
 ## Troubleshooting
 
-- **`tcpdump: Couldn't change ownership of savefile`**: the harness passes
+- `tcpdump: Couldn't change ownership of savefile`: the harness passes
   `-Z root` so that tcpdump does not drop privileges and chown the file, which
   fails under mapped root. Add `-Z root` when you run tcpdump yourself.
-- **Scenario 3 always skips**: the kernel has SRv6 disabled
+- Scenario 3 always skips: the kernel has SRv6 disabled
   (`sysctl net.ipv6.conf.all.seg6_enabled`). This is common on WSL2. Enable it
   with `sysctl -w net.ipv6.conf.all.seg6_enabled=1` on a kernel with `seg6`, or
   run on a host with SRv6.
-- **A scenario fails instead of skipping**: read the assertion and the captured
+- A scenario fails instead of skipping: read the assertion and the captured
   traffic. Rule out a failed prerequisite, a timeout or a byte mismatch in the
-  setup before you blame the implementation.
-- **Namespaces left over after a hard kill** (`SIGKILL` skips cleanup): list
+  setup before suspecting the implementation.
+- Namespaces left over after a hard kill (`SIGKILL` skips cleanup): list
   them with `ip netns list` and remove the `stnsr*` and `stnss*` ones with
   `ip netns del <name>`.
-- **`no packets captured`**: this fails in required mode. The fixture waits for
+- `no packets captured`: this fails in required mode. The fixture waits for
   tcpdump to say it is ready, checks its exit status and keeps its startup
   output. It starts capturing right away with an IP/IPv6 filter, so a plain UDP
   filter cannot hide traffic with extension headers. Check the interface state
   and whether any traffic flowed.
-- **SRv6 fallback**: a U-flag fallback fails scenario 3, which requires SRH
+- SRv6 fallback: a U-flag fallback fails scenario 3, which requires SRH
   traffic captured through the transit router.
 
 ## Reply-route MTU regression
@@ -174,7 +172,7 @@ before MTU fitting. The transmit unit tests cover successful header data and
 the paths where the send is refused or returns EMSGSIZE. Cleanup removes the
 veth and the child processes even after an assertion fails. These tests use
 real UDP and real kernel routes. They are not packet captures or SRv6 transit
-tests. Report the result of this separate run. An ignored test in an ordinary
+tests. Report the result of this separate run; an ignored test in an ordinary
 run is not a pass.
 
 The sender test runs the public sender loop against a UDP peer written in the
@@ -214,8 +212,8 @@ or alter either endpoint's packet payload.
 
 Build as a normal user, then enter a fresh user and network namespace. Install
 `iproute2`, `nftables` and `util-linux`. The kernel must support nftables ECN
-rewriting and packet sockets, and this form of the command needs user
-namespaces to be allowed:
+rewriting and packet sockets, and this command needs unprivileged user
+namespaces:
 
 ```sh
 cargo test --locked --test ecn_path_test --no-run --message-format=json > /tmp/ecn-artifacts.json
@@ -232,8 +230,7 @@ the same command. Builds with only pnet do not contain this fixture. The runner
 requires exactly one ignored test.
 
 The 72-case matrix covers 12 scenarios in both IP families and three key modes
-(open, keyed open and authenticated). Each case sends only three probes, to
-keep the traffic small. A separate AF_PACKET socket captures both directions.
+(open, keyed open and authenticated). Each case sends three probes. A separate AF_PACKET socket captures both directions.
 The test validates the IP and CoS fields and the base and TLV signatures, and
 compares the sender's actual JSON output with the rewrites seen in the capture.
 When a reflector refuses with an RPE=2 policy, the result must stay unknown even

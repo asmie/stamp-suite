@@ -15,7 +15,7 @@ RTT, forward OWD and reverse OWD each keep exact samples for the first 4096
 observations. For percentile `p`, the sender picks the zero-based rank
 `round(p / 100 * (n - 1))`. With an even number of samples the median is
 therefore the upper of the two middle values. Percentiles outside 0 to 100 are
-clamped, and NaN selects the minimum. One snapshot sorts a single copy of the
+clamped, and NaN selects the minimum. A snapshot sorts a single copy of the
 RTT samples and uses it for the median, p95 and p99. Each OWD median sorts its
 own series once.
 
@@ -33,7 +33,7 @@ and rounds toward zero, so the same delay with a negative sign reports
 −999,424 ns.
 
 For an exact order statistic `x != 0`, the histogram value is off by less than
-`abs(x) / 128` (**0.78125%**). The rank itself does not change. Zero and the
+`abs(x) / 128` (0.78125%). The rank itself does not change. Zero and the
 extreme ranks stay exact. Reported values are clamped to the observed minimum
 and maximum, so a constant series is reported exactly. This limit covers
 bucket quantization only. It says nothing about timestamp accuracy or
@@ -47,7 +47,7 @@ before the BER, measurements and OWD columns. Each series switches to the
 histogram on its own, so a short series is always exact.
 
 [Clock-quality metadata](measurements.md#clock-quality-accompanying-delay)
-has nothing to do with quantile precision.
+is separate from quantile precision.
 
 ## Cumulative moments
 
@@ -68,7 +68,7 @@ RTT-variation metric is calculated separately.
 
 Each exact delay series holds at most 4096 eight-byte values. The RTT
 histogram has 7424 eight-byte counters, and each signed OWD histogram has
-14593. Together the histograms take **292,880 bytes** (about 286 KiB) however
+14593. Together the histograms take 292,880 bytes (about 286 KiB) however
 long the run lasts. During conversion the old 32 KiB series is still held
 while its histogram is allocated. Exact snapshots use one scratch array of at
 most 32 KiB at a time. Scalar collector state and allocator bookkeeping come
@@ -76,7 +76,7 @@ on top. These figures cover the delay collectors only, not the whole process
 or the tables of pending packets and sessions.
 
 BER keeps lifetime totals for each direction apart from its history. The
-history holds up to **1024 completed nonempty intervals** and **1024 alarms**,
+history holds up to 1024 completed nonempty intervals and 1024 alarms,
 and drops the oldest record when full. `intervals_omitted` and
 `alarms_omitted` count those drops. A snapshot can also include the current
 partial interval if it is not empty, so it holds at most 1025 interval
@@ -112,7 +112,7 @@ go through the same queue. In JSON and CSV mode they go to stderr. The final
 summary still contains the cumulative measurements when interim reports were
 skipped, within the BER history limits above.
 
-Pending probes are kept for a separate length of time. `--timeout 0` turns off
+Pending probes have their own retention. `--timeout 0` turns off
 timed expiry, and with the default `--max-pending-probes 0` every lost reply
 then stays in the pending table, which can grow without limit. Set
 `--max-pending-probes N` to keep at most N unanswered records per target.

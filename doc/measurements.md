@@ -29,13 +29,13 @@ unanswered when the run ends. If a probe has already been counted as lost, a
 late first reply does not undo the loss or add a top-level delay sample.
 Prometheus and SNMP counters and `-R` details count probes the same way.
 
-Limiting the number of pending records is optional (`--max-pending-probes`,
-default 0, meaning no limit). The `measurements` fields `pending_limit`,
-`pending_probes`, `pending_high_watermark` and `pending_evictions` show how
-hard the sender pushed against that local limit. Reusing a sequence number
-also retires the old unanswered generation and counts it, instead of quietly
-overwriting it. These retirements say nothing about loss on the network. They
-do not change send timing or the reply denominators. See
+`--max-pending-probes` limits the number of pending records (default 0, no
+limit). The `measurements` fields `pending_limit`, `pending_probes`,
+`pending_high_watermark` and `pending_evictions` show how close the sender
+came to that local limit. Reusing a sequence number also retires the old
+unanswered generation and counts it, instead of overwriting it. These
+retirements say nothing about loss on the network, and they do not change send
+timing or the reply denominators. See
 [retention policy](usage.md#pending-probe-retention).
 
 The reply collector runs after base authentication, TLV validation and session
@@ -87,28 +87,31 @@ arriving at the reflector follow a separate parsing policy. TLV diagnostics
 are counted before this identity check, so a stale reply that is rejected can
 still add diagnostic counts. When a Micro-session ID is required, a reply is
 accepted only as the first reply to a live pending probe or as an additional
-copy for a retained probe that was already answered.
+copy for a retained probe that was already answered. A reply with Reflector
+Micro-session ID 0 (the reflector has no `--reflector-member-link-id`) or with
+U set on the Micro-session ID TLV is rejected, and the log record names that
+cause.
 
 Requested replies can go unobserved because of policy caps, unsupported
-requests, validation rejection, timeouts or network loss. **They are not a
-network-loss estimate.** Extra replies to one probe cannot make up for
+requests, validation rejection, timeouts or network loss, so they are not a
+network-loss estimate. Extra replies to one probe cannot make up for
 another probe's missing ones. With bursts, the final receive phase keeps
 running after the first reply until every requested copy has arrived or the
 final `--timeout` expires. An Access Report acknowledgement confirms that the
 report was delivered, not that the reply burst it asked for is complete. An
 echo with the U flag set is not an acknowledgement, so a reflector that does
-not process the report receives every retry. Once
-delivery is acknowledged or abandoned, replies to the remaining retries are
-collected for up to `--timeout` after the last successful retry. An
+not process the report receives every retry. Once delivery is acknowledged
+or abandoned, replies to the remaining retries are collected for up to
+`--timeout` after the last successful retry. An
 acknowledgement, or running out of retries, does not restart that window. The
 same rule covers retries sent near the end of the initial reply drain.
 `--on-zero-ssid stop` ends reception early. A run without bursts finishes as
 soon as every probe has its first accepted reply. Packets that arrive after
 that are unobserved.
 
-The histories of recent probes and of reply identities each keep at most
-**4096** entries. `history_limit`, `probes_evicted` and `replies_evicted`
-report the limit and how many entries were evicted. A probe that is still
+The histories of recent probes and of reply identities each keep at most 4096
+entries. `history_limit`, `probes_evicted` and `replies_evicted` report the
+limit and how many entries were evicted. A probe that is still
 pending can supply timing after it leaves the history, but its original
 Direct Measurement ordinal is lost. Replies outside the retained histories
 cannot be correlated or deduplicated. After an eviction, an old duplicate can
@@ -252,10 +255,10 @@ Active BER uses the combined successor TLV (experimental Type 243) with an
 optional pattern sub-TLV (Type 241). The default pattern is the four bytes
 FF00FF00. The U, M, I and C checks on the parent and nested TLVs run before
 anything is recorded. U on the BER TLV or a sub-TLV, in any TLV order, sets
-`disabled_by_peer`; U on the Extra Padding TLV alone only drops that sample.
-A nonzero error count with a maximum burst of zero still
-records its bit and packet error sample but no burst sample. Burst maxima and
-averages that are unavailable stay null. Legacy outer Types 240–242 are not
+`disabled_by_peer` and logs one warning. U or C on the Extra Padding TLV alone
+only drops that sample. A nonzero error count with a maximum burst of zero
+still records its bit and packet error sample but no burst sample. Burst
+maxima and averages that are unavailable stay null. Legacy outer Types 240–242 are not
 interpreted. See [migration guidance](ber-migration.md).
 
 DM and Follow-Up need exactly one usable TLV of their type. U skips a value, M
@@ -295,8 +298,8 @@ references and duplicates add no quality samples.
 
 The four categories do not overlap and add up to `samples`. An invalid error
 is reported as null, never as zero uncertainty. The maximum also includes
-usable estimates from unsynchronized clocks, so it is **not a bound on actual
-OWD accuracy**. A later unknown sample clears `last_sender` and
+usable estimates from unsynchronized clocks, so it is not a bound on actual
+OWD accuracy. A later unknown sample clears `last_sender` and
 `last_reflector`, but the cumulative counts and the maximum from earlier
 usable estimates are kept.
 
@@ -457,6 +460,5 @@ The [controlled ECN rewrite fixture](testing-netns.md#directional-ecn-rewrites)
 checks these reports with real sender and reflector processes, separate
 kernel rewrites in each direction, packet captures and policy-refusal
 controls. It runs on loopback, so it cannot show where a change happened on an
-external path. Use the captured IP fields and the matching report to check
-your reading of the counters before you apply the same analysis to a
-deployment.
+external path. Its captures and matching reports are useful for checking how
+you read the counters before you analyze a deployment.

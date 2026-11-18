@@ -2,15 +2,15 @@
 
 This overlay provides `net-analyzer/stamp-suite`, `acct-user/stamp` and
 `acct-group/stamp` for the systemd and OpenRC services. Its categories,
-eclasses and layout follow the main tree and can be copied into
+eclasses and layout follow the main tree, so the packages can be copied into
 [GURU](https://wiki.gentoo.org/wiki/Project:GURU) or `::gentoo`.
 
 ## Regenerating after a release
 
 1. Copy the previous ebuild to the new version. Do not edit an ebuild that
    was already released: it must keep the crate list of its own tag.
-   `SRC_URI` uses the release's source archive, which must be published
-   before step 4.
+   `SRC_URI` points at the release's source archive, which must be published
+   before step 4 can compute its checksum.
 
 2. `CRATES=` and the dependent-crate `LICENSE+=` line are generated from
    `Cargo.lock` by [pycargoebuild](https://github.com/projg2/pycargoebuild):
@@ -25,8 +25,8 @@ eclasses and layout follow the main tree and can be copied into
    python3 scripts/check_release_metadata.py --version <ver>
    ```
 
-   The tag workflow runs the same check. CI on ordinary pushes only checks
-   that the version numbers agree.
+   The release workflow runs the same check on the tag. CI on ordinary pushes
+   only checks that the version numbers agree.
 
 4. Generate `Manifest` (needs a Gentoo host or container with the
    overlay registered):
@@ -35,9 +35,6 @@ eclasses and layout follow the main tree and can be copied into
    pkgdev manifest          # or: ebuild stamp-suite-<ver>.ebuild manifest
    pkgcheck scan            # QA lint expected by GURU reviewers
    ```
-
-Generate `Manifest` from the published archive; its checksum is unavailable
-before publication.
 
 ## USE flags
 
@@ -53,10 +50,10 @@ backend. The DEB and RPM packages use the same backend.
 
 ## Submitting
 
-- **GURU**: fork `gentoo/guru` on GitHub, copy the three package
+- GURU: fork `gentoo/guru` on GitHub, copy the three package
   directories in, add `Manifest` files and open a pull request. Reviewers
   there mainly expect a clean `pkgcheck scan`.
-- **::gentoo**: after the package has users in GURU, file a bug at
+- `::gentoo`: after the package has users in GURU, file a bug at
   bugs.gentoo.org with the ebuild attached (or a PR to `gentoo/gentoo`) and
   request fixed `ACCT_USER_ID`/`ACCT_GROUP_ID` values from `uid-gid.txt`;
   `-1` (dynamic allocation) is only acceptable in overlays.

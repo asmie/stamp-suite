@@ -1,7 +1,7 @@
 # Reflector startup fixtures
 
-How the live test suites start reflectors, and the startup failures that
-shaped those fixtures.
+How the live test suites start reflectors, and the startup failures behind
+the current fixtures.
 
 ## Why fixtures bind port zero
 
@@ -14,7 +14,7 @@ A diagnosis on 9 November 2026 confirmed the race. Binding a competing socket
 into the gap made the reflector exit with `Cannot bind to address`
 (OS error 98) every time, over IPv4 and IPv6. In 64 runs without the forced
 competitor the race never fired on its own, so it may not explain every past
-failure. The fixtures now report enough to catch any other cause.
+failure. The fixtures now report enough to diagnose other causes.
 
 The control test in [`reflector_launcher_test.rs`](../tests/reflector_launcher_test.rs)
 holds a competing endpoint for the whole test. It checks that a child started
@@ -42,16 +42,17 @@ Child fixtures run with two Tokio workers regardless of the CPU count, which
 leaves room for the test harness's own parallelism.
 
 [`tests/common/receiver.rs`](../tests/common/receiver.rs) runs an in-process
-receiver for the session-identity, keyset-fallback and session-auth-admission
-tests, which need exact provisioned endpoints or direct access to counters and
-keys. The fixture keeps its bound socket open while it builds the
+receiver for the session-identity, keyset-fallback, session-auth-admission and
+zero-checksum tests, which need exact provisioned endpoints or direct access to
+counters and keys. The fixture keeps its bound socket open while it builds the
 configuration, then hands it to `receiver::run_receiver_with_socket` on the
 nix backend. That function checks that the socket is unconnected and matches
 the configured endpoint, then runs the same setup and packet processing as the
 CLI; nothing is closed and bound again. Each receiver runs on its own
 current-thread runtime. `stop()` cancels the receiver, gives it up to two
-seconds to drain, joins its thread and returns its result or panic, so a
-startup failure reaches the test instead of a bare "task finished" assertion.
+seconds to drain, joins its thread and returns its result or panic. A startup
+failure therefore reaches the test instead of a bare "task finished"
+assertion.
 
 Admission fixtures send each invalid input once and wait for both the receive
 and the drop counters, so the test never sees a packet arrive before it was
@@ -75,15 +76,16 @@ the inode of the receiver's socket and, after shutdown, checks every descriptor
 of the test process for it (see
 [proc_pid_fd(5)](https://man7.org/linux/man-pages/man5/proc_pid_fd.5.html)).
 That tells the original socket apart from another socket on the same endpoint.
-It says nothing about whether the port is free system-wide. A related control,
-`released_reservation_can_be_taken_but_port_zero_startup_is_unaffected`, had
-the same reserve-drop-rebind problem and now keeps its competing socket bound
-throughout. `explicit_receiver_stop_reports_startup_failure` checks that a
-receiver's startup error reaches the caller.
+It says nothing about whether the port is free system-wide. A related control
+had the same reserve-drop-rebind problem. The fix renamed it to
+`occupied_port_rejects_fixed_bind_but_port_zero_startup_is_unaffected` and made
+it keep its competing socket bound throughout.
+`explicit_receiver_stop_reports_startup_failure` checks that a receiver's
+startup error reaches the caller.
 
-The suite then had nine launcher tests on Linux and eight on other Unix systems; the
-kernel identity checks need Linux procfs. The fix passed 20 consecutive
-all-features rounds with eight test threads, with no retries.
+The suite then had nine launcher tests on Linux and eight on other Unix
+systems; the kernel identity checks need Linux procfs. The fix passed 20
+consecutive all-features rounds with eight test threads, with no retries.
 
 ### CI follow-up (10 November 2026)
 
@@ -110,7 +112,8 @@ receiver thread, so a test could send before the receiver enabled
 it is queued
 ([UDP input](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet/udp_usrreq.c),
 [IPv4 control data](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet/ip_input.c)),
-so an early packet has no TTL, and the nix receiver drops packets without one.
+so an early packet has no TTL, and the nix receiver drops (and now counts)
+packets without one.
 
 The fixture now waits, for up to five seconds, until the receiver acknowledges
 its first poll; the nix backend finishes socket setup before that. A startup

@@ -2,9 +2,9 @@
 
 libFuzzer targets for packet paths and parsers exposed to network input.
 
-`fuzz` is excluded from the main workspace, so normal Cargo builds/tests
-need neither libfuzzer-sys nor nightly. It enables only `snmp` in stamp-suite
-to expose AgentX decoders.
+`fuzz` is excluded from the main workspace, so normal Cargo builds and tests
+need neither libfuzzer-sys nor nightly. It builds stamp-suite with default
+features off and only `snmp` on, which exposes the AgentX decoders.
 
 ## Setup
 
@@ -44,14 +44,14 @@ These are the `[[bin]]` entries in `fuzz/Cargo.toml`.
 | `packet_auth_parse` | `PacketAuthenticated::from_bytes` (round trip) and `from_bytes_lenient_with_canonical`. |
 | `agentx_decode_header` | AgentX PDU header decoding (RFC 2741 §6). |
 | `agentx_decode_oid` | AgentX OID and SearchRange decoding. |
-| `process_stamp_packet` | Reflector processing from parsing to the reply. The first input byte selects an HMAC key, required and verified HMACs, strict parsing, ignore mode and captured headers. It calls the processing entry point without the live path's panic guard, so a panic reaches libFuzzer. |
+| `process_stamp_packet` | Reflector processing from parsing to the reply. The bits of the first input byte select an HMAC key, required HMACs with signing of every reply, TLV HMAC verification, strict parsing, ignore mode, captured headers, base-field validation and TLV-framing validation. It calls the processing entry point without the live path's panic guard, so a panic reaches libFuzzer. |
 | `sender_reply` | The sender's reply processing (`sender::fuzz_reply`) with measurements, BER, an Access Report exchange and congestion state active. The first byte selects authenticated mode, TLV parsing, a key and a required Micro-session ID. |
 
 ## Seed corpus
 
 `cargo fuzz` creates an empty corpus under `fuzz/corpus/<target>/` on the first
-run. For better coverage, add known-interesting inputs there. The integration
-tests contain hand-built boundary inputs that make good seeds:
+run. Adding known-interesting inputs there improves coverage. These test files
+contain hand-built boundary inputs that make good seeds:
 
 - `tests/malformed_input_test.rs`: short and oversized base packets, broken TLV
   layouts, HMAC ordering and Return Path sub-TLVs.
