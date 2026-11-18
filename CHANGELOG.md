@@ -144,6 +144,9 @@ Upgrade both peers together when they use BER or reflected headers.
     unreadable route-table reply drops the reply. It no longer sets the
     Return Path U flag or retargets the reply to the sender.
 - Sender:
+  - Without `--local-addr` the sender binds `::` for an IPv6 target and
+    `0.0.0.0` for an IPv4 one, also per target in a mixed run. It always bound
+    `0.0.0.0`, so `-r ::1` failed with "Address family not supported".
   - Send and receive errors, rejected replies, zero-SSID notices and the
     burst-pacing advisory are log records. They were printed as plain text,
     which broke `--log-format json` output and ignored `RUST_LOG`.

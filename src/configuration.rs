@@ -374,6 +374,9 @@ pub struct Configuration {
     )]
     pub remote_addr: Vec<std::net::IpAddr>,
     /// Local address to bind to.
+    ///
+    /// A sender without one binds `0.0.0.0` for an IPv4 target and `::` for
+    /// an IPv6 target.
     #[clap(
         short = 'S',
         long,
@@ -381,6 +384,10 @@ pub struct Configuration {
         help_heading = "Endpoints"
     )]
     pub local_addr: std::net::IpAddr,
+    /// Set by [`Self::load_with_warnings`] for a sender with no configured
+    /// local address: [`Self::per_target`] then binds each target's family.
+    #[clap(skip)]
+    pub(crate) local_addr_follows_target: bool,
     /// Numeric IPv6 interface zone for the local bind address (0 = default).
     #[clap(
         long,
@@ -1494,9 +1501,26 @@ impl Configuration {
             .iter()
             .map(|addr| Configuration {
                 remote_addr: vec![*addr],
+                local_addr: if self.local_addr_follows_target {
+                    unspecified_like(*addr)
+                } else {
+                    self.local_addr
+                },
                 ..self.clone()
             })
             .collect()
+    }
+
+    /// Without a configured local address, a sender binds the unspecified
+    /// address of its targets' family; with targets of both families each
+    /// session picks its own in [`Self::per_target`].
+    fn default_local_addr_to_target_family(&mut self) {
+        self.local_addr_follows_target = true;
+        if let [first, rest @ ..] = self.remote_addr.as_slice() {
+            if rest.iter().all(|addr| addr.is_ipv4() == first.is_ipv4()) {
+                self.local_addr = unspecified_like(*first);
+            }
+        }
     }
     fn socket_addr(ip: std::net::IpAddr, port: u16, scope: u32) -> std::net::SocketAddr {
         match ip {
@@ -2321,6 +2345,8 @@ impl Configuration {
 
         let mut local_port_configured =
             matches.value_source("local_port") == Some(clap::parser::ValueSource::CommandLine);
+        let mut local_addr_configured =
+            matches.value_source("local_addr") == Some(clap::parser::ValueSource::CommandLine);
         if let Some(path) = conf.config.clone() {
             let contents = std::fs::read_to_string(&path).map_err(|e| {
                 ConfigurationError::ConfigFileError(format!(
@@ -2351,11 +2377,15 @@ impl Configuration {
                 ))
             })?;
             local_port_configured |= file.local_port.is_some();
+            local_addr_configured |= file.local_addr.is_some();
             conf.merge_file(file, &matches);
         }
 
         if !local_port_configured {
             conf.local_port = if conf.is_reflector { 862 } else { 0 };
+        }
+        if !local_addr_configured && !conf.is_reflector {
+            conf.default_local_addr_to_target_family();
         }
         conf.validate()?;
         Ok((conf, warnings))
@@ -2655,6 +2685,14 @@ pub(crate) fn check_reflected_control_limits(
         return Err("reflected_control_max_duration_ms must be at least 1");
     }
     Ok(())
+}
+
+/// The unspecified address (`0.0.0.0` or `::`) of `addr`'s family.
+fn unspecified_like(addr: std::net::IpAddr) -> std::net::IpAddr {
+    match addr {
+        std::net::IpAddr::V4(_) => std::net::Ipv4Addr::UNSPECIFIED.into(),
+        std::net::IpAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
+    }
 }
 
 fn invalid(msg: impl Into<String>) -> ConfigurationError {

@@ -3128,6 +3128,48 @@ fn several_remote_addresses() {
 }
 
 #[test]
+fn sender_without_local_addr_binds_each_target_family() {
+    let locals = |conf: &Configuration| -> Vec<String> {
+        let mut locals = vec![conf.local_socket_addr().to_string()];
+        locals.extend(
+            conf.per_target()
+                .iter()
+                .map(|c| c.local_socket_addr().to_string()),
+        );
+        locals
+    };
+    let conf = load_from_args(&["test", "-r", "192.0.2.1"]).unwrap();
+    assert_eq!(locals(&conf), ["0.0.0.0:0", "0.0.0.0:0"]);
+    let conf = load_from_args(&["test", "-r", "2001:db8::1"]).unwrap();
+    assert_eq!(locals(&conf), ["[::]:0", "[::]:0"]);
+    // Mixed families: the top level keeps the IPv4 default, each session
+    // binds its own target's family.
+    let conf = load_from_args(&["test", "-r", "192.0.2.1,2001:db8::1"]).unwrap();
+    assert_eq!(locals(&conf), ["0.0.0.0:0", "0.0.0.0:0", "[::]:0"]);
+
+    // A configured address is kept, even one of the other family.
+    let conf = load_from_args(&["test", "-r", "2001:db8::1", "-S", "0.0.0.0"]).unwrap();
+    assert_eq!(locals(&conf), ["0.0.0.0:0", "0.0.0.0:0"]);
+    let conf = load_from_args(&["test", "-r", "192.0.2.1,2001:db8::1", "-S", "::"]).unwrap();
+    assert_eq!(locals(&conf), ["[::]:0", "[::]:0", "[::]:0"]);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("local.toml");
+    std::fs::write(&file, "local_addr = \"0.0.0.0\"\nremote_addr = \"::1\"\n").unwrap();
+    let conf = load_from_args(&["test", "--config", file.to_str().unwrap()]).unwrap();
+    assert_eq!(locals(&conf), ["0.0.0.0:0", "0.0.0.0:0"]);
+    std::fs::write(&file, "remote_addr = \"::1\"\n").unwrap();
+    let conf = load_from_args(&["test", "--config", file.to_str().unwrap()]).unwrap();
+    assert_eq!(locals(&conf), ["[::]:0", "[::]:0"]);
+
+    // The reflector default bind is unchanged.
+    let conf = load_from_args(&["test", "-i", "-r", "2001:db8::1"]).unwrap();
+    assert_eq!(conf.local_socket_addr().to_string(), "0.0.0.0:862");
+    // Library callers that parse without loading keep the configured value.
+    let conf = Configuration::parse_from(["test", "-r", "2001:db8::1"]);
+    assert_eq!(locals(&conf), ["0.0.0.0:0", "0.0.0.0:0"]);
+}
+
+#[test]
 fn empty_return_segment_lists_from_a_file_are_rejected() {
     for toml in ["return_srv6_sids = []", "return_sr_mpls_labels = []"] {
         let file: FileConfiguration = toml::from_str(toml).unwrap();

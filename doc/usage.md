@@ -264,8 +264,10 @@ Repeat `--remote-addr`, or separate addresses with commas, to measure several
 reflectors from one process. Each address gets its own session, socket and
 statistics. All sessions share the other options, including `--remote-port`.
 Several addresses need `--local-port 0` so that each session gets its own
-port, and the same address cannot be listed twice. Every session is set up
-before any probe is sent, and a startup error in one session stops the run.
+port, and the same address cannot be listed twice. Targets can mix IPv4 and
+IPv6; without `--local-addr` each session binds its target's family (see
+[Local address](#local-address)). Every session is set up before any probe
+is sent, and a startup error in one session stops the run.
 
 Reports name their target: a `Target:` line in text, a `target` field in
 JSON, and a leading `target` column in CSV. These labels appear only when the
@@ -274,7 +276,7 @@ sessions, and the SNMP configuration objects describe the first target.
 
 ```bash
 stamp-suite --remote-addr 192.0.2.10,192.0.2.11 --remote-addr 2001:db8::20 \
-  --local-addr :: --count 0 --report-interval 60 --output-format json
+  --count 0 --report-interval 60 --output-format json
 ```
 
 ### Output streams
@@ -1035,6 +1037,15 @@ hardware timestamps where the build and platform support them. See the
 [hardware timestamp testing](testing-hardware-timestamps.md).
 
 ## Networking
+
+### Local address
+
+Without `--local-addr` (or `local_addr` in TOML) the sender binds `0.0.0.0`
+for an IPv4 target and `::` for an IPv6 target, so `--remote-addr ::1` needs
+no other option. With several targets each session picks its own. A local
+address you set is used as given for every target. An IPv4 address cannot
+reach an IPv6 target, while `::` also reaches IPv4 targets unless
+`net.ipv6.bindv6only` is set. The reflector binds `0.0.0.0` by default.
 
 ### Ports and TTL
 
