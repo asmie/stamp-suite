@@ -1112,9 +1112,9 @@ skipped silently.
 
 The pnet backend does not reassemble IP fragments, so a request larger than
 the path MTU, which the sending kernel fragments, gets no reply. It is counted
-as received and dropped (`fragmented`) once, on its first fragment, which is
-the only one that carries the UDP port, and a throttled warning names the
-sender. Keep probes within the path MTU, or use the nix backend, which gets
+as dropped (`fragmented`) once, on its first fragment, which is the only one
+that carries the UDP port, and a throttled warning names the sender. Like a
+rate-limited packet it is not counted as received. Keep probes within the path MTU, or use the nix backend, which gets
 reassembled datagrams from the kernel.
 
 Outgoing packets use TTL/Hop Limit 255, as draft-ietf-ippm-stamp-ext-hdr-26

@@ -428,7 +428,9 @@ fn pnet_counts_and_logs_fragmented_requests() {
         let mut summary = String::new();
         std::io::Read::read_to_string(&mut stdout, &mut summary).unwrap();
         let summary: serde_json::Value = serde_json::from_str(summary.trim()).unwrap();
-        assert_eq!(summary["total_packets_received"], 2, "{summary}");
+        // The fragmented request is dropped before the rate limit, so only
+        // the whole probe counts as received.
+        assert_eq!(summary["total_packets_received"], 1, "{summary}");
         assert_eq!(summary["total_packets_reflected"], 1, "{summary}");
         assert_eq!(summary["total_packets_dropped"], 1, "{summary}");
         assert!(

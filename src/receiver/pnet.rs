@@ -568,10 +568,10 @@ fn addressed_to_reflector(config: &CaptureConfig, port: u16, dst: IpAddr) -> boo
 /// Count a fragmented request as dropped. Capture sees each IP fragment
 /// separately and does not reassemble them, so the datagram cannot be
 /// answered. It is counted once, on its first fragment, the only one that
-/// carries the UDP header.
+/// carries the UDP header. Like a rate-limited packet it never reaches the
+/// rate limit, so it is not counted as received.
 fn record_fragment_drop(config: &CaptureConfig, src: IpAddr) {
     let counters = &config.core.counters;
-    counters.record_received();
     counters.record_drop("fragmented");
     crate::warn_throttled!(
         "Dropped a fragmented request from {src}: the pnet backend does not reassemble IP fragments. Lower the probe size to fit the path MTU."
@@ -1881,7 +1881,7 @@ mod revision13_tests {
             deliver(fragment(v6, 0, true, 6, 862, 2));
             assert!(receive.try_recv().is_err(), "a fragment was queued");
             let counters = &shared.counters;
-            assert_eq!(counters.packets_received.load(AtomicOrdering::Relaxed), 1);
+            assert_eq!(counters.packets_received.load(AtomicOrdering::Relaxed), 0);
             assert_eq!(counters.packets_dropped.load(AtomicOrdering::Relaxed), 1);
             assert_eq!(counters.packets_reflected.load(AtomicOrdering::Relaxed), 0);
             // A whole datagram is still answered.

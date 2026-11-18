@@ -529,8 +529,9 @@ pub async fn run_receiver_with_socket(
                         Some(t) => t,
                         None => {
                             // Count it, so a missing TTL never drops traffic
-                            // silently.
-                            counters.record_received();
+                            // silently. It never reaches the rate limit, so
+                            // like a rate-limited packet it is not counted
+                            // as received.
                             counters.record_drop("processing_rejected");
                             crate::warn_throttled!("Failed to extract TTL from packet, skipping");
                             continue;
