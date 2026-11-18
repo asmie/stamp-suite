@@ -31,6 +31,8 @@ pub enum MetricsError {
 pub struct MetricsServer {
     /// Cancellation token to stop the server.
     cancel: CancellationToken,
+    /// The bound address, with the port the kernel chose for port zero.
+    local_addr: SocketAddr,
 }
 
 impl MetricsServer {
@@ -38,12 +40,21 @@ impl MetricsServer {
     pub fn shutdown(&self) {
         self.cancel.cancel();
     }
+
+    /// The address the endpoint listens on. With port zero in the requested
+    /// address this is the port the kernel assigned.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
 }
 
 /// Installs the Prometheus recorder and starts the HTTP server at `addr`.
 /// Returns a shutdown handle.
 pub async fn init(addr: SocketAddr) -> Result<MetricsServer, MetricsError> {
     let listener = TcpListener::bind(addr).await?;
+    // Report the bound address: with port zero the requested one says 0.
+    let addr = listener.local_addr()?;
     // Histogram buckets cover ten microseconds through one second.
     let handle = PrometheusBuilder::new()
         .set_buckets_for_metric(
@@ -94,7 +105,10 @@ pub async fn init(addr: SocketAddr) -> Result<MetricsServer, MetricsError> {
             .ok();
     });
 
-    Ok(MetricsServer { cancel })
+    Ok(MetricsServer {
+        cancel,
+        local_addr: addr,
+    })
 }
 
 /// HTTP handler that renders Prometheus metrics.

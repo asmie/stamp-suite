@@ -120,7 +120,6 @@ async fn run(conf: &Configuration) -> Result<(), StartupError> {
                     e,
                 )
             })?;
-        info!("Metrics server started on {}", conf.metrics_addr);
         Some(server)
     } else {
         None

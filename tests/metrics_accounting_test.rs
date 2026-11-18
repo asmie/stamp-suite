@@ -4,62 +4,47 @@
     feature = "metrics",
     any(feature = "ttl-nix", not(feature = "ttl-pnet"))
 ))]
+#[path = "common/reflector.rs"]
+mod reflector;
 use std::{
     io::{Read, Write},
-    net::{TcpListener, TcpStream, UdpSocket},
-    process::{Child, Command, Stdio},
+    net::{TcpStream, UdpSocket},
     time::{Duration, Instant},
 };
+/// Both the UDP and the metrics port are bound at zero and read from the
+/// startup log, so no port is released before the reflector takes it.
 struct Reflector {
-    child: Child,
+    process: reflector::Reflector,
     udp: u16,
     metrics: u16,
 }
-impl Drop for Reflector {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 impl Reflector {
     fn start(extra: &[&str]) -> (Self, f64) {
-        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let port = udp.local_addr().unwrap().port();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let metrics = listener.local_addr().unwrap().port();
-        drop((udp, listener));
-        let child = Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
+        let mut command = reflector::Reflector::command("127.0.0.1");
+        command
             .args([
-                "-i",
-                "--local-addr",
-                "127.0.0.1",
-                "--local-port",
-                &port.to_string(),
                 "--hwtstamp",
                 "off",
                 "--metrics",
                 "--metrics-addr",
-                &format!("127.0.0.1:{metrics}"),
+                "127.0.0.1:0",
                 "--reflected-control-max-count",
                 "3",
             ])
-            .args(extra)
-            .env("RUST_LOG", "off")
-            .env("TOKIO_WORKER_THREADS", "2")
-            .env_remove("STAMP_HMAC_KEY")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .args(extra);
+        let process = reflector::Reflector::spawn(command).unwrap();
+        let metrics = process.metrics_address();
+        assert_ne!(metrics.port(), 0, "the log must name the bound port");
+        let port = process.address.port();
         let mut server = Self {
-            child,
             udp: port,
-            metrics,
+            metrics: metrics.port(),
+            process,
         };
         let probe = client("127.0.0.9");
         let until = Instant::now() + Duration::from_secs(5);
         loop {
-            assert!(server.child.try_wait().unwrap().is_none());
+            assert!(server.process.child.try_wait().unwrap().is_none());
             probe.send_to(&[0; 44], ("127.0.0.1", port)).unwrap();
             if probe.recv(&mut [0; 256]).is_ok() {
                 break;

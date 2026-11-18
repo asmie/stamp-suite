@@ -177,6 +177,16 @@ impl Reflector {
     /// The control server announces its assigned endpoint before the UDP
     /// receiver starts. Keep its test-side TCP port selection race-free too.
     pub fn control_address(&self) -> SocketAddr {
+        self.announced("control-plane API listening on http://", "control")
+    }
+
+    /// The metrics endpoint, which also starts before the UDP receiver.
+    pub fn metrics_address(&self) -> SocketAddr {
+        self.announced("Metrics server listening on http://", "metrics")
+    }
+
+    /// The `http://ADDR/...` endpoint from the startup line with `prefix`.
+    fn announced(&self, prefix: &str, what: &str) -> SocketAddr {
         let diagnostics = self.diagnostics();
         diagnostics
             .lines()
@@ -186,14 +196,14 @@ impl Reflector {
                     .get("fields")?
                     .get("message")?
                     .as_str()?
-                    .strip_prefix("control-plane API listening on http://")?
+                    .strip_prefix(prefix)?
                     .split('/')
                     .next()?
                     .parse()
                     .ok()
             })
             .unwrap_or_else(|| {
-                panic!("control endpoint missing from startup diagnostics:\n{diagnostics}")
+                panic!("{what} endpoint missing from startup diagnostics:\n{diagnostics}")
             })
     }
 
