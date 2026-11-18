@@ -48,6 +48,11 @@ pub(crate) enum Observation {
 ///
 /// `integrity_ok` is the sender's verdict on the reply's TLV HMAC: true only
 /// when the HMAC verified or no key is configured and none was sent.
+///
+/// U on the BER TLV or on one of its sub-TLVs means the peer does not support
+/// BER (draft-ietf-bpm-stamp-ber-01 §5.1), whatever the TLV order. U or C on
+/// the Extra Padding TLV alone makes the reply unusable but is not that
+/// signal: the draft attaches the fallback only to the BER TLV.
 pub(crate) fn observation(
     tlvs: &TlvList,
     integrity_ok: bool,
@@ -59,29 +64,32 @@ pub(crate) fn observation(
     }
     let mut padding = None;
     let mut metadata = None;
+    let (mut padding_unusable, mut ber_unusable) = (false, false);
     for tlv in tlvs.non_hmac_tlvs() {
         if tlv.is_malformed() {
             break;
         }
-        if !is_ber(tlv.tlv_type) && tlv.tlv_type != TlvType::ExtraPadding {
-            continue;
-        }
-        if is_ber(tlv.tlv_type) && tlv.is_unrecognized() {
-            return Some(Observation::Unsupported);
-        }
-        if tlv.is_unrecognized() || tlv.flags.conformant_reflected {
-            return None;
-        }
         if is_ber(tlv.tlv_type) {
-            if metadata
-                .replace(ResidualBerValue::decode_value(&tlv.value).ok()?)
-                .is_some()
-            {
-                return None;
+            if tlv.is_unrecognized() {
+                return Some(Observation::Unsupported);
             }
-        } else if padding.replace(tlv.value.as_slice()).is_some() {
-            return None;
+            // Keep scanning after an unusable BER TLV: a later U still counts.
+            if tlv.flags.conformant_reflected || metadata.is_some() {
+                ber_unusable = true;
+            } else {
+                match ResidualBerValue::decode_value(&tlv.value) {
+                    Ok(value) => metadata = Some(value),
+                    Err(_) => ber_unusable = true,
+                }
+            }
+        } else if tlv.tlv_type == TlvType::ExtraPadding {
+            padding_unusable |= tlv.is_unrecognized()
+                || tlv.flags.conformant_reflected
+                || padding.replace(tlv.value.as_slice()).is_some();
         }
+    }
+    if ber_unusable {
+        return None;
     }
     let value = metadata?;
     // U on any nested TLV disables BER; malformed/integrity/nonconformant
@@ -95,6 +103,9 @@ pub(crate) fn observation(
     }
     if value.sub_tlvs.iter().any(|s| s.flags & TlvFlags::U != 0) {
         return Some(Observation::Unsupported);
+    }
+    if padding_unusable {
+        return None;
     }
     if value
         .sub_tlvs
@@ -691,6 +702,131 @@ mod tests {
         assert!(observation(&flagged, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4).is_some());
         flagged.mark_all_integrity_failed();
         assert!(observation(&flagged, true, &RESIDUAL_BER_DEFAULT_PATTERN, 4).is_none());
+    }
+
+    /// Builds a reply from `(flags, raw)` entries in wire order.
+    fn ordered(entries: Vec<(u8, RawTlv)>) -> TlvList {
+        let mut list = TlvList::new();
+        for (flags, mut raw) in entries {
+            raw.flags = TlvFlags::from_byte(flags);
+            list.push(raw).unwrap();
+        }
+        list
+    }
+
+    #[test]
+    fn ber_u_disables_in_either_order_but_padding_u_alone_does_not() {
+        let (ber, pad) = {
+            let entries: Vec<_> = reply(0, 4, 2, vec![0xfe, 0, 0xff, 0])
+                .iter()
+                .cloned()
+                .collect();
+            (entries[0].clone(), entries[1].clone())
+        };
+        let nested_u = {
+            let mut raw = ber.clone();
+            raw.value[8] = TlvFlags::U;
+            raw
+        };
+        let other = RawTlv::new(TlvType::Location, vec![0; 4]);
+        let run = |entries: Vec<(u8, RawTlv)>, integrity_ok: bool| {
+            observation(
+                &ordered(entries),
+                integrity_ok,
+                &RESIDUAL_BER_DEFAULT_PATTERN,
+                4,
+            )
+        };
+        let (u, c, m) = (TlvFlags::U, TlvFlags::C, TlvFlags::M);
+        for padding_first in [false, true] {
+            let order = |b: (u8, RawTlv), p: (u8, RawTlv)| {
+                if padding_first {
+                    vec![p, b]
+                } else {
+                    vec![b, p]
+                }
+            };
+            // A TLV-unaware reflector echoes the sender's U on every TLV.
+            for padding_flags in [u, 0, c, u | c] {
+                assert!(
+                    matches!(
+                        run(order((u, ber.clone()), (padding_flags, pad.clone())), true),
+                        Some(Observation::Unsupported)
+                    ),
+                    "padding_first={padding_first} padding_flags={padding_flags:#x}"
+                );
+            }
+            // Nested U is the same signal even when the padding is unusable.
+            for padding_flags in [0, u, c] {
+                assert!(matches!(
+                    run(
+                        order((0, nested_u.clone()), (padding_flags, pad.clone())),
+                        true
+                    ),
+                    Some(Observation::Unsupported)
+                ));
+            }
+            // U or C on the padding alone, or U on an unrelated TLV, is not.
+            for padding_flags in [u, c] {
+                assert!(run(order((0, ber.clone()), (padding_flags, pad.clone())), true).is_none());
+            }
+            let mut with_other = order((0, ber.clone()), (0, pad.clone()));
+            with_other.insert(usize::from(padding_first), (u, other.clone()));
+            assert!(matches!(
+                run(with_other, true),
+                Some(Observation::Sample {
+                    forward_errors: 4,
+                    ..
+                })
+            ));
+            // Integrity failures and an earlier M still hide the U.
+            assert!(run(order((u, ber.clone()), (u, pad.clone())), false).is_none());
+            assert!(run(
+                order((u | TlvFlags::I, ber.clone()), (u, pad.clone())),
+                true
+            )
+            .is_none());
+            let mut after_m = order((u, ber.clone()), (u, pad.clone()));
+            after_m.insert(0, (m, other.clone()));
+            assert!(run(after_m, true).is_none());
+            // A C on the BER TLV keeps it unusable, even with nested U, but a
+            // later duplicate BER TLV with U still reports no support.
+            assert!(run(order((c, nested_u.clone()), (0, pad.clone())), true).is_none());
+            let mut duplicate = order((c, ber.clone()), (0, pad.clone()));
+            duplicate.push((u, ber.clone()));
+            assert!(matches!(
+                run(duplicate, true),
+                Some(Observation::Unsupported)
+            ));
+        }
+    }
+
+    #[test]
+    fn unsupported_is_recorded_once_and_stops_ber_requests() {
+        let start = Instant::now();
+        let mut c = BerCollector::new(vec![0xff, 0], 2, Duration::from_secs(1), start, [None; 2]);
+        c.record(Observation::Unsupported, start);
+        c.record(Observation::Unsupported, start);
+        c.record(
+            Observation::Sample {
+                bits: 16,
+                forward_errors: 1,
+                forward_burst: Some(1),
+                reverse_errors: 0,
+                reverse_burst: 0,
+            },
+            start,
+        );
+        let s = c.snapshot(start);
+        assert!(s.disabled_by_peer);
+        assert_eq!(s.forward.packets_received, 0);
+        let mut tlvs = reply(0, 0, 0, RESIDUAL_BER_DEFAULT_PATTERN.to_vec())
+            .iter()
+            .cloned()
+            .collect();
+        c.filter_requests(&mut tlvs);
+        assert!(tlvs.iter().all(|t| !is_ber(t.tlv_type)));
+        assert_eq!(tlvs.len(), 1);
     }
     #[test]
     fn padding_budget_preserves_whole_pattern_and_mandatory_fields() {

@@ -251,7 +251,9 @@ OWD summary.
 Active BER uses the combined successor TLV (experimental Type 243) with an
 optional pattern sub-TLV (Type 241). The default pattern is the four bytes
 FF00FF00. The U, M, I and C checks on the parent and nested TLVs run before
-anything is recorded. A nonzero error count with a maximum burst of zero still
+anything is recorded. U on the BER TLV or a sub-TLV, in any TLV order, sets
+`disabled_by_peer`; U on the Extra Padding TLV alone only drops that sample.
+A nonzero error count with a maximum burst of zero still
 records its bit and packet error sample but no burst sample. Burst maxima and
 averages that are unavailable stay null. Legacy outer Types 240–242 are not
 interpreted. See [migration guidance](ber-migration.md).

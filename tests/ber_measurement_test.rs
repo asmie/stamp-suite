@@ -1,5 +1,11 @@
 //! End-to-end BER measurement (draft-ietf-bpm-stamp-ber-01): padding repair and
 //! peer compatibility.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "ttl-nix", not(feature = "ttl-pnet"))
+))]
+#[path = "common/child.rs"]
+mod child;
 #[path = "common/context.rs"]
 mod context;
 #[cfg(all(
@@ -165,6 +171,70 @@ async fn ipv6_auth_measurement() {
 #[tokio::test]
 async fn unsupported_peer_disables_ber_only() {
     measurement("127.0.0.1", false, true).await;
+}
+
+/// A reflector without TLV support (`--tlv-mode ignore`) returns every TLV
+/// with the sender's U flag, Extra Padding included. The sender must take U on
+/// the BER TLV as "unsupported" (draft-ietf-bpm-stamp-ber-01 §5.1) whatever
+/// the TLV order, warn once and keep measuring delay and loss.
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "ttl-nix", not(feature = "ttl-pnet"))
+))]
+fn tlv_unaware_reflector_disables_ber_with_one_warning() {
+    use std::process::Command;
+    for ip in ["127.0.0.1", "::1"] {
+        let mut command = reflector::Reflector::command(ip);
+        command.args(["--tlv-mode", "ignore", "--hwtstamp", "off"]);
+        let reflector = reflector::Reflector::spawn(command).unwrap();
+        let output = child::ChildProcess::spawn(
+            Command::new(env!("CARGO_BIN_EXE_stamp-suite"))
+                .args([
+                    "--remote-addr",
+                    ip,
+                    "--remote-port",
+                    &reflector.address.port().to_string(),
+                    "--local-addr",
+                    ip,
+                    "--local-port",
+                    "0",
+                    "--ber",
+                    "--ber-padding-size",
+                    "16",
+                    "--count",
+                    "4",
+                    "--send-delay",
+                    "20",
+                    "--timeout",
+                    "1",
+                    "--hwtstamp",
+                    "off",
+                    "--output-format",
+                    "json",
+                ])
+                .env("RUST_LOG", "info")
+                .env("TOKIO_WORKER_THREADS", "2")
+                .env_remove("STAMP_HMAC_KEY"),
+        )
+        .finish(Duration::from_secs(15));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{ip}: {stderr}");
+        assert_eq!(
+            stderr
+                .matches("Peer reports BER unsupported; disabling BER and continuing STAMP")
+                .count(),
+            1,
+            "{ip}: {stderr}\nreflector:\n{}",
+            reflector.diagnostics()
+        );
+        let stats: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(stats["packets_received"], 4, "{ip}: {stats}");
+        let ber = &stats["ber"];
+        assert_eq!(ber["disabled_by_peer"], true, "{ip}: {stats}");
+        assert_eq!(ber["forward"]["packets_received"], 0, "{ip}: {stats}");
+        assert_eq!(ber["reverse"]["packets_received"], 0, "{ip}: {stats}");
+    }
 }
 
 #[test]

@@ -158,6 +158,10 @@ Upgrade both peers together when they use BER or reflected headers.
     which broke `--log-format json` output and ignored `RUST_LOG`.
   - After its last probe the sender goes straight to the reply drain. It
     waited out one more `--send-delay` gap first, so `-c 1 -d 3600s` took an hour.
+  - U on the reflected BER TLV disables BER with one warning wherever the TLV
+    sits in the reply. A reflector without TLV support (`--tlv-mode ignore`)
+    also returns the Extra Padding TLV with U; the sender stopped there and
+    kept BER enabled with empty statistics.
   - Replies must echo the full sender timestamp; mismatches are counted in
     `measurements.mismatched_replies` instead of matching a pending probe.
   - Every received TLV length is validated before reflected values are used.

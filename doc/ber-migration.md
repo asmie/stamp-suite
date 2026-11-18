@@ -45,7 +45,9 @@ burst sample count.
 Nothing guesses the format from a TLV's length. A 1.1.0 endpoint answers the
 retired Types 240–242 with U. A peer that does not support Type 243 should
 answer with U too, and the sender then disables BER while delay and loss
-measurements continue. Tests cover both cases.
+measurements continue. A reflector without TLV support, such as
+`--tlv-mode ignore`, returns the request's U flags unchanged and has the same
+effect. Tests cover these cases.
 
 ## Reflector behavior
 
@@ -78,7 +80,11 @@ end-to-end path-MTU probing.
 
 The sender checks the reflected BER TLV and its sub-TLVs for U, M and I after
 integrity and session checks. It rejects duplicate or mismatched patterns and
-a changed padding size. A U reply disables BER for the rest of the run. Padding
+a changed padding size. U on the BER TLV or one of its sub-TLVs, wherever it
+sits in the reply, disables BER for the rest of the run: the sender logs one
+warning and reports `disabled_by_peer`. U or C on the Extra Padding TLV alone
+only drops that reply's sample, because the draft ties the fallback to the BER
+TLV (§5.1). Padding
 is sized in whole pattern repetitions after the BER TLV itself is counted, and
 follows the route MTU when it changes.
 
