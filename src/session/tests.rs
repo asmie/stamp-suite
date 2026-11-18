@@ -323,8 +323,18 @@ fn expire_succeeds_when_cleanup_removes_the_retiring_session_first() {
             let cleanup = scope.spawn(|| manager.cleanup_stale_sessions());
             wait_for_retirement(&[&session]);
             let expire = scope.spawn(|| manager.expire_matching(addr, None));
-            // Both removers now wait for the in-flight send.
-            thread::sleep(Duration::from_millis(1));
+            // The table, this test and cleanup hold the session; expire takes
+            // a fourth reference once it has found the entry and committed to
+            // retiring it. Only then may the in-flight send finish: a fixed
+            // sleep let cleanup remove the entry first on a loaded machine.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Arc::strong_count(&session) < 4 {
+                assert!(
+                    Instant::now() < deadline,
+                    "expire did not reach the session"
+                );
+                thread::yield_now();
+            }
             drop(guard);
             assert_eq!(expire.join().unwrap(), Ok(true));
             cleanup.join().unwrap();
